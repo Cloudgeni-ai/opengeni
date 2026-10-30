@@ -32,16 +32,21 @@ Database migrations need unique numbers, and two PRs can add the same number
 without a Git conflict. When `main` already uses the number of a migration a
 queued PR adds, the batcher fixes it on the PR's branch instead of failing a
 whole batch: it merges `main` into the branch and moves the migration to the
-next free number above `main` and every number other queued PRs add, renaming
-its companion tests and rewriting references in the PR's changed files, as
-`scripts/renumber-migration.ts --next` does. It does this through GitHub's API
-with the planner from `main`, so it never runs PR code. The PR stays queued, a
-comment says what moved, and it is batched once PR CI passes on the new head.
+next free number above `main` and every number other queued PRs add (or were
+moved to earlier in the same pass), renaming its companion tests and rewriting
+references in the PR's changed files, as `scripts/renumber-migration.ts
+--next` does. The PR's later migrations move with it, so they keep their
+order. It does this through GitHub's API with the planner from `main`, so it
+never runs PR code, and it only fast-forwards the branch. The PR stays queued,
+a comment says what moved, and it is batched once PR CI passes on the new head.
 If the move needs judgment (a Git conflict, a changed file that names the
-number without naming the migration, or a file it cannot read), the PR leaves
-the queue with the `scripts/renumber-migration.ts` command instead. Two queued
-PRs that add the same number never share a batch. The numbered directories are
-listed in `NUMBERED_FILES` (`scripts/batcher/model.ts`).
+number without naming the migration, a changed text file it cannot read, a
+branch GitHub will not update, or any other failure), the PR leaves the queue
+with the `scripts/renumber-migration.ts` command instead; a GitHub outage only
+postpones the move to the next pass. Migrations on the `production` and
+release branches are never moved. Two queued PRs that add the same number
+never share a batch. The numbered directories are listed in `NUMBERED_FILES`
+(`scripts/batcher/model.ts`).
 
 ## How a batch lands
 

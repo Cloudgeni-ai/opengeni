@@ -4,6 +4,8 @@
 export const QUEUE_LABEL = "queue-ready";
 export const PRIORITY_LABEL = "queue-priority";
 export const VERSION_BRANCH = "changeset-release/main";
+/** Deployed history: its migrations may already have run, so they never move. */
+export const PRODUCTION_BRANCH = "production";
 export const BATCH_PREFIX = "batch/";
 export const BUILD_PREFIX = "batch-build/";
 export const CI_WORKFLOW = ".github/workflows/ci.yml";

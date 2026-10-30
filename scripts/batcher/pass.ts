@@ -6,6 +6,7 @@ import {
   BUILD_PREFIX,
   DEFAULT_SETTINGS,
   PRIORITY_LABEL,
+  PRODUCTION_BRANCH,
   QUEUE_LABEL,
   VERSION_BRANCH,
   decide,
@@ -117,11 +118,13 @@ async function observe(ctx: Context): Promise<Observation> {
     )) {
       const main = await onMain(directory);
       const taken = takenNumbers(added, main);
-      // A Git conflict needs a person anyway; otherwise the batcher moves what it can.
+      // A Git conflict needs a person anyway; otherwise the batcher moves what
+      // it can, never on a release or production branch.
       if (
         pull.mergeable !== "CONFLICTING" &&
         changed !== null &&
         pull.headRef !== VERSION_BRANCH &&
+        pull.headRef !== PRODUCTION_BRANCH &&
         taken.every(({ file }) => renumberable(file))
       )
         renumber.push(...taken.map(({ file }) => file.path));
@@ -258,24 +261,45 @@ async function abandon(ctx: Context, batch: Batch, reason: string) {
 }
 
 const fileName = (path: string) => path.slice(path.lastIndexOf("/") + 1);
+const slotOf = (path: string) => numberedFiles([path])[0]?.slot ?? path;
 
 /**
  * Main took the number of a migration a queued PR adds. Merge main into the
- * PR's branch and move the migration to the next free number with its
- * companion tests and references, as `scripts/renumber-migration.ts --next`
- * would, all through GitHub's API: the pass never runs PR code. The PR stays
- * queued and is batched once PR CI passes on its new head. Anything the move
- * cannot settle on its own ejects the PR with the manual command, as before.
+ * PR's branch and move the migration, and every later one the PR adds so they
+ * keep their order, to the next free numbers with their companion tests and
+ * references, as `scripts/renumber-migration.ts --next` would, all through
+ * GitHub's API: the pass never runs PR code. The PR stays queued and is
+ * batched once PR CI passes on its new head. Anything the move cannot settle
+ * on its own ejects the PR with the manual command, as before; a GitHub
+ * outage only postpones the move to the next pass.
  */
 async function moveMigrations(ctx: Context, number: number, paths: string[]) {
-  const { gh } = ctx;
-  const pull = ctx.renumbering.get(number);
   const manual = (reason: string) =>
     eject(
       ctx,
       number,
       `main already uses the number of ${paths.map((p) => `\`${fileName(p)}\``).join(", ")} and the batcher could not move it: ${reason} Merge main into the branch and move it to the next free number: \`bun scripts/renumber-migration.ts ${fileName(paths[0]!).replace(/\.sql$/, "")} --next\`.`,
     );
+  try {
+    await tryMoveMigrations(ctx, number, paths, manual);
+  } catch (error) {
+    if (error instanceof GitHubError && (error.status >= 500 || error.status === 429)) {
+      ctx.log(`Not moving #${number}'s migration this pass: GitHub answered ${error.status}`);
+      return;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    await manual(`moving it failed (${detail.slice(0, 300)}).`);
+  }
+}
+
+async function tryMoveMigrations(
+  ctx: Context,
+  number: number,
+  paths: string[],
+  manual: (reason: string) => Promise<void>,
+) {
+  const { gh } = ctx;
+  const pull = ctx.renumbering.get(number);
   if (!pull) return manual("its changed files could not be listed.");
   const mainSha = await gh.mainSha();
   const scratch = `${BUILD_PREFIX}renumber-${number}-${ctx.randomId()}`;
@@ -288,6 +312,9 @@ async function moveMigrations(ctx: Context, number: number, paths: string[]) {
       base = merged;
     }
     const changed = pull.files.filter((f) => f.status !== "removed").map((f) => f.path);
+    const added = pull.files
+      .filter((f) => ADDED.has(f.status) && f.path.startsWith(`${MIGRATIONS_DIR}/`))
+      .map((f) => f.path);
     const reserved = [...ctx.queuedSlots]
       .filter(([other]) => other !== number)
       .flatMap(([, slots]) => slots)
@@ -295,8 +322,10 @@ async function moveMigrations(ctx: Context, number: number, paths: string[]) {
       .map((slot) => Number(slot.slice(MIGRATIONS_DIR.length + 1)));
     const plan = planMigrationMoves({
       paths,
+      added,
       ledger: (await gh.listDirectory(MIGRATIONS_DIR, base.sha)).map(fileName),
       reserved,
+      changed,
       files: await gh.readFiles(base.sha, changed),
     });
     if (plan.kind === "manual") return await manual(plan.reason);
@@ -311,12 +340,23 @@ async function moveMigrations(ctx: Context, number: number, paths: string[]) {
       // Fast-forward only: if the PR moved meanwhile, the next pass looks again.
       await gh.updateBranch(pull.headRef, commit);
     } catch (error) {
-      if (error instanceof GitHubError && error.status === 422) {
+      if (!(error instanceof GitHubError && error.status === 422)) throw error;
+      const head = (await gh.branches(pull.headRef)).find((b) => b.name === pull.headRef)?.sha;
+      if (head !== undefined && head !== pull.headSha) {
         ctx.log(`Not moving #${number}'s migration: its branch moved meanwhile`);
         return;
       }
-      throw error;
+      // Refused while the branch stayed put (a ruleset, a protected branch):
+      // retrying would fail the same way every pass.
+      return await manual("GitHub refused to update its branch.");
     }
+    // Later moves this pass go above the new numbers too.
+    ctx.queuedSlots.set(number, [
+      ...(ctx.queuedSlots.get(number) ?? []).filter(
+        (slot) => !plan.moves.some((move) => slotOf(move.from) === slot),
+      ),
+      ...plan.moves.map((move) => slotOf(move.to)),
+    ]);
     ctx.log(`Moved #${number}'s migration ${moved.join(", ")} as ${commit}`);
     await gh.comment(
       number,

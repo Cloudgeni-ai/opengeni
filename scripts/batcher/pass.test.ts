@@ -25,6 +25,7 @@ interface FakePull {
   green: boolean;
   mergeable?: "MERGEABLE" | "CONFLICTING";
   merged?: string;
+  headRef?: string;
 }
 
 /**
@@ -48,6 +49,12 @@ class FakeGitHub implements GitHub {
   texts = new Map<string, string>();
   trees = new Map<string, { base: string; entries: TreeEntry[] }>();
   branchUpdates: { name: string; sha: string }[] = [];
+  /** Commits that files and directory listings were read at, after observing. */
+  reads: string[] = [];
+  /** How GitHub answers a branch update: refuse it, or refuse it because the branch just moved. */
+  updateRefusal: "refused" | "moved" | null = null;
+  /** Thrown by readFiles, to stand for GitHub or the planner failing. */
+  readFailure: Error | null = null;
 
   constructor() {
     this.root = this.store([], [], "root");
@@ -106,7 +113,7 @@ class FakeGitHub implements GitHub {
         number: p.number,
         title: p.title,
         headSha: p.head,
-        headRef: p.title === "Version" ? "changeset-release/main" : `branch-${p.number}`,
+        headRef: this.headRef(p),
         sameRepository: true,
         draft: false,
         mergeable: p.mergeable ?? ("MERGEABLE" as const),
@@ -114,6 +121,10 @@ class FakeGitHub implements GitHub {
         labeledAt: NOW - 3_600_000 + p.number,
         autoMergeAt: null,
       }));
+  }
+
+  headRef(p: FakePull) {
+    return p.headRef ?? (p.title === "Version" ? "changeset-release/main" : `branch-${p.number}`);
   }
 
   async check(headSha: string): Promise<CheckSummary | null> {
@@ -134,6 +145,7 @@ class FakeGitHub implements GitHub {
 
   /** The files of every PR applied in that commit, directly in the directory. */
   async listDirectory(path: string, ref: string) {
+    if (ref !== this.refs.get("main")) this.reads.push(ref);
     const applied = new Set(this.commits.get(ref)!.applied);
     return [...this.pulls.values()]
       .filter((p) => applied.has(p.head))
@@ -141,7 +153,9 @@ class FakeGitHub implements GitHub {
       .filter((file) => file.slice(0, file.lastIndexOf("/")) === path);
   }
 
-  async readFiles(_ref: string, paths: string[]) {
+  async readFiles(ref: string, paths: string[]) {
+    this.reads.push(ref);
+    if (this.readFailure) throw this.readFailure;
     const files = new Map<string, RepoFile>();
     for (const path of paths) {
       const text = this.texts.get(path);
@@ -159,7 +173,8 @@ class FakeGitHub implements GitHub {
   }
 
   async branches(prefix: string) {
-    return [...this.refs]
+    const pullBranches = [...this.pulls.values()].map((p) => [this.headRef(p), p.head] as const);
+    return [...this.refs, ...pullBranches]
       .filter(([name]) => name.startsWith(prefix))
       .map(([name, sha]) => ({ name, sha }));
   }
@@ -215,7 +230,9 @@ class FakeGitHub implements GitHub {
   }
 
   async updateBranch(name: string, sha: string) {
-    const pull = [...this.pulls.values()].find((p) => `branch-${p.number}` === name)!;
+    const pull = [...this.pulls.values()].find((p) => this.headRef(p) === name)!;
+    if (this.updateRefusal === "moved") pull.head = hash(`pushed meanwhile:${pull.head}`);
+    if (this.updateRefusal) throw new GitHubError(422, `git/refs/heads/${name}`, "refused");
     const ancestors = new Set<string>();
     for (const queue = [sha]; queue.length;) {
       const next = queue.pop()!;
@@ -460,6 +477,82 @@ describe("a batcher pass", () => {
         ),
       },
     ]);
+  });
+
+  /** Main lands 0007_a. */
+  async function mainTakes0007(gh: FakeGitHub) {
+    gh.addPull(1, { files: ["packages/db/drizzle/0007_a.sql"], labels: [] });
+    const landed = gh.store([gh.pulls.get(1)!.head], [await gh.mainSha()], "Change 1 (#1)");
+    gh.refs.set("main", landed);
+    gh.pulls.get(1)!.merged = landed;
+  }
+  /** A queued PR that adds 0007_<slug>. */
+  function addsMigration0007(gh: FakeGitHub, number: number, slug: string, extra = {}) {
+    const path = `packages/db/drizzle/0007_${slug}.sql`;
+    gh.addPull(number, { files: [path], ...extra });
+    gh.headCommit(number);
+    gh.texts.set(path, `create table ${slug} ();\n`);
+  }
+
+  test("PRs moved in one pass get different numbers, planned at the merged commit", async () => {
+    const gh = new FakeGitHub();
+    await mainTakes0007(gh);
+    addsMigration0007(gh, 2, "b");
+    addsMigration0007(gh, 3, "c");
+    await run(gh, options());
+    expect(gh.branchUpdates).toHaveLength(2);
+    expect(gh.comments.map((c) => /to `(\d+)_/.exec(c.body)?.[1])).toEqual(["0008", "0009"]);
+    // Files and the migration list are read where main is merged in, never at the PR head.
+    const merges = gh.branchUpdates.map((update) => gh.commits.get(update.sha)!.parents[0]!);
+    expect(gh.reads.length).toBeGreaterThan(0);
+    for (const ref of gh.reads) expect(merges).toContain(ref);
+  });
+
+  test("a branch GitHub will not update ejects the PR; one that just moved waits", async () => {
+    for (const refusal of ["refused", "moved"] as const) {
+      const gh = new FakeGitHub();
+      await mainTakes0007(gh);
+      addsMigration0007(gh, 2, "b");
+      gh.updateRefusal = refusal;
+      await run(gh, options());
+      expect(gh.branchUpdates).toEqual([]);
+      expect(gh.pulls.get(2)!.labels.includes(QUEUE_LABEL)).toBe(refusal === "moved");
+      if (refusal === "refused")
+        expect(gh.comments[0]!.body).toContain("GitHub refused to update its branch.");
+      else expect(gh.comments).toEqual([]);
+      expect([...gh.refs.keys()].some((name) => name.startsWith("batch-build/"))).toBe(false);
+    }
+  });
+
+  test("an outage postpones a move, any other failure ejects that PR, and the queue goes on", async () => {
+    for (const [failure, ejected] of [
+      [new GitHubError(502, "graphql", "bad gateway"), false],
+      [new Error("10000 does not fit a four-digit migration number"), true],
+    ] as const) {
+      const gh = new FakeGitHub();
+      await mainTakes0007(gh);
+      addsMigration0007(gh, 2, "b");
+      gh.addPull(5);
+      gh.readFailure = failure;
+      await run(gh, options());
+      expect(gh.branchUpdates).toEqual([]);
+      expect(gh.pulls.get(2)!.labels.includes(QUEUE_LABEL)).toBe(!ejected);
+      if (ejected) expect(gh.comments[0]!.body).toContain("moving it failed (10000 does not fit");
+      else expect(gh.comments).toEqual([]);
+      expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([5]);
+    }
+  });
+
+  test("never moves a migration on a production or release branch", async () => {
+    for (const extra of [{ headRef: "production" }, { title: "Version" }]) {
+      const gh = new FakeGitHub();
+      await mainTakes0007(gh);
+      addsMigration0007(gh, 2, "b", extra);
+      await run(gh, options());
+      expect(gh.branchUpdates).toEqual([]);
+      expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+      expect(gh.comments[0]!.body).toContain("bun scripts/renumber-migration.ts 0007_b --next");
+    }
   });
 
   test("a Git conflict still ejects a PR whose migration number main already uses", async () => {

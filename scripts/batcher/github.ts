@@ -103,6 +103,11 @@ const time = (value: unknown) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+/** GraphQL gives a tree entry's mode as a number, like 33188; Git writes it in octal, "100644". */
+export function gitFileMode(mode: number): string {
+  return mode.toString(8);
+}
+
 export class RestGitHub implements GitHub {
   private readonly api: string;
   constructor(
@@ -344,7 +349,7 @@ export class RestGitHub implements GitHub {
         const tree = data.repository[`d${index}`] as Tree | null;
         for (const entry of tree?.entries ?? [])
           if (entry.type === "blob")
-            modes.set(path ? `${path}/${entry.name}` : entry.name, entry.mode.toString(8));
+            modes.set(path ? `${path}/${entry.name}` : entry.name, gitFileMode(entry.mode));
       });
       chunk.forEach((path, index) => {
         const blob = data.repository[`f${index}`] as Blob | null;
