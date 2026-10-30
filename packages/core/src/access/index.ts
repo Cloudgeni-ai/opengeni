@@ -36,6 +36,8 @@ import {
   StatedExternalMembershipLastAdminError,
   USER_ISOLATION_WORKSPACE_SOURCE_PREFIX,
   lockExternalWorkspaceMembershipLifecycle,
+  lockExternalWorkspaceMembershipLifecycleShared,
+  readExternalIdentity,
   resolveExternalIdentityLink,
   managedPersonalWorkspacePermissions,
   nestedPostgresSqlState,
@@ -2091,26 +2093,41 @@ async function apiKeyAccessContext(
     let identity: ExternalIdentity;
     let revocationWatermark: string | null = null;
     try {
-      ({ identity, revocationWatermark } = await withAccountRls(
-        deps.db,
-        apiKey.accountId,
-        async (tx) => {
-          // Provisioning locks the live membership after its identity lock.
-          // Claim the lifecycle prefix first so a membership-fenced session
-          // writer can recheck that identity without a lock inversion.
+      // A known user reads its identity under the membership fence held
+      // shared: ordered against every lifecycle writer and revoke (they hold
+      // it exclusively), but not against the organization's other requests,
+      // which would otherwise authenticate one at a time.
+      const known = await withAccountRls(deps.db, apiKey.accountId, async (tx) => {
+        await lockExternalWorkspaceMembershipLifecycleShared(tx, apiKey.accountId);
+        const existing = await readExternalIdentity(tx, {
+          accountId: apiKey.accountId,
+          ...selection.identity,
+        });
+        if (!existing) return null;
+        // Under the same fence as every revoke: a revoke stamped above this
+        // watermark happened after this request authenticated.
+        return {
+          identity: existing,
+          revocationWatermark: admits ? await readExternalWorkspaceRevocationWatermark(tx) : null,
+        };
+      });
+      ({ identity, revocationWatermark } =
+        known ??
+        (await withAccountRls(deps.db, apiKey.accountId, async (tx) => {
+          // First use provisions the identity. Provisioning locks the live
+          // membership after its identity lock. Claim the lifecycle prefix
+          // first so a membership-fenced session writer can recheck that
+          // identity without a lock inversion.
           await lockExternalWorkspaceMembershipLifecycle(tx, apiKey.accountId);
           const ensured = await ensureExternalIdentity(tx, {
             accountId: apiKey.accountId,
             ...selection.identity,
           });
-          // Under the same fence as every revoke: a revoke stamped above this
-          // watermark happened after this request authenticated.
           return {
             identity: ensured,
             revocationWatermark: admits ? await readExternalWorkspaceRevocationWatermark(tx) : null,
           };
-        },
-      ));
+        })));
     } catch (error) {
       if (nestedPostgresSqlState(error) === "42501") {
         throw new HTTPException(403, { message: "external identity is unavailable" });

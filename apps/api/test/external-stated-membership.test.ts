@@ -638,3 +638,68 @@ describe("stated membership", () => {
     expect(linked.status).toBe(400);
   });
 });
+
+describe("authenticating a known external user", () => {
+  test("does not queue behind the organization's other requests", async () => {
+    const org = await organization();
+    const externalId = `parallel-${crypto.randomUUID()}`;
+    // First use provisions the identity under the exclusive fence.
+    expect((await org.request(externalId, CHAT)).status).toBe(200);
+    const fence = `organization-membership:${org.accountId}`;
+    // Every authenticating request of the organization holds the fence
+    // shared. One held open here must not hold up the next request.
+    await shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock_shared(hashtextextended(${fence}, 0))`;
+      const response = await Promise.race([
+        org.request(externalId, CHAT),
+        Bun.sleep(5_000).then(() => null),
+      ]);
+      expect(response?.status).toBe(200);
+    });
+    // Many parallel requests of one user all authenticate.
+    const statuses = await Promise.all(
+      Array.from({ length: 12 }, async () => (await org.request(externalId, CHAT)).status),
+    );
+    expect(statuses.every((status) => status === 200)).toBe(true);
+  });
+
+  test("still waits for a membership lifecycle writer", async () => {
+    const org = await organization();
+    const externalId = `ordered-${crypto.randomUUID()}`;
+    expect((await org.request(externalId, CHAT)).status).toBe(200);
+    const fence = `organization-membership:${org.accountId}`;
+    let locked!: () => void;
+    const lockHeld = new Promise<void>((resolve) => (locked = resolve));
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    // A revoke or member removal holds the fence exclusively until it commits.
+    const writer = shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${fence}, 0))`;
+      locked();
+      await released;
+    });
+    await lockHeld;
+    let settled = false;
+    const pending = org.request(externalId, CHAT).then((response) => {
+      settled = true;
+      return response;
+    });
+    await Bun.sleep(300);
+    expect(settled).toBe(false);
+    release();
+    await writer;
+    expect((await pending).status).toBe(200);
+  });
+
+  test("a removed identity is refused without being provisioned again", async () => {
+    const org = await organization();
+    const externalId = `removed-${crypto.randomUUID()}`;
+    expect((await org.request(externalId, CHAT)).status).toBe(200);
+    const identity = await org.identity(externalId);
+    await shared.admin`update external_identities set status = 'disabled' where id = ${identity.id}`;
+    expect((await org.request(externalId, CHAT)).status).toBe(403);
+    const rows =
+      await shared.admin`select count(*)::int as count from external_identities where account_id = ${org.accountId} and external_id = ${externalId}`;
+    expect(rows[0]!.count).toBe(1);
+  });
+});

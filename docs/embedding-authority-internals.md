@@ -86,7 +86,13 @@ workspace permissions intersect the live key ceiling with membership.
 `OpenGeniClient.asUser` returns an isolated server-side client; it never changes
 a shared client's actor. Explicit host onboarding lives in
 `packages/core/src/application/external-workspace-members.ts` and reauthorizes
-under the organization membership fence. First-use membership
+under the organization membership fence. Request authentication reads a known
+identity with `readExternalIdentity` (no row locks, no writes) and the
+revocation watermark while holding that fence **shared**, so it orders against
+every lifecycle writer and revoke (they hold it exclusively) without making an
+organization's concurrent requests authenticate one at a time. Only a first
+request for an unknown identity provisions it through `ensureExternalIdentity`
+under the exclusive fence. First-use membership
 (`provisionExternalMemberOnFirstUse`, request entry only, never a fresh
 re-check) creates a missing shared-workspace row with the conversation defaults
 through `ensureExternalWorkspaceMemberOnFirstUse` in

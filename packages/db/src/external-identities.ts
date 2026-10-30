@@ -110,6 +110,54 @@ export async function lockExternalWorkspaceMembershipLifecycle(
   );
 }
 
+/** The same fence in shared mode: ordered against every lifecycle writer
+ * (they take it exclusively) but not against other readers, so concurrent
+ * requests of one organization do not queue behind each other. Take it before
+ * any other lock in the transaction, never after holding it shared and then
+ * wanting it exclusively. Caller must pass an open transaction. */
+export async function lockExternalWorkspaceMembershipLifecycleShared(
+  tx: Database,
+  accountId: string,
+): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock_shared(hashtextextended(${`organization-membership:${accountId}`}, 0))`,
+  );
+}
+
+/** An existing external identity, read without locking or changing it, or
+ * null when it does not exist yet (provision it with ensureExternalIdentity
+ * under the exclusive fence). An inactive identity is refused with 42501, as
+ * ensureExternalIdentity refuses it. Caller holds the membership fence, at
+ * least shared, in the same transaction and the account's RLS scope. */
+export async function readExternalIdentity(
+  tx: Database,
+  input: {
+    accountId: string;
+    externalId: string;
+    source?: string;
+  },
+): Promise<ExternalIdentity | null> {
+  const reference = ExternalIdentityReference.parse({
+    externalId: input.externalId,
+    source: input.source,
+  });
+  const [row] = await rawRows<{ result: unknown }>(
+    tx,
+    sql`select read_external_identity(
+    ${input.accountId}::uuid, ${reference.source}, ${reference.externalId}) as result`,
+  );
+  if (row?.result === null || row?.result === undefined) return null;
+  const result = ExternalIdentity.parse(row.result);
+  if (
+    result.accountId !== input.accountId ||
+    result.source !== reference.source ||
+    result.externalId !== reference.externalId
+  ) {
+    throw new Error("External identity scope mismatch");
+  }
+  return result;
+}
+
 /** Internal lifecycle seam. Caller must authenticate an organization key and
  * establish its exact account before invoking; this does not admit HTTP users.
  * It never creates shared-workspace membership or reactivates removed users. */
