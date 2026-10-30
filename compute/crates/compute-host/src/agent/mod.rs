@@ -664,6 +664,9 @@ struct Exit {
     id: Id,
     incarnation: u64,
     end: End,
+    /// When the agent took the VM process on, on the boot clock the guard
+    /// records its kills by: a kill before then was of an earlier VM.
+    owned: compute_core::At,
 }
 
 /// How a sandbox's VM was lost: it went without the agent ending it, or

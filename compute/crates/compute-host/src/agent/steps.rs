@@ -93,7 +93,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     self.input(Input::Busy { sandbox: id.0 });
                 }
             }
-            Event::Exited(exit) => self.exited(exit.id, exit.incarnation, exit.end),
+            Event::Exited(exit) => self.on_exit(&exit),
             Event::Checked(done) => self.checked(done),
             Event::Asked {
                 id,
@@ -836,6 +836,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn own(&mut self, id: Id, vm: E::Vm, memory: LiveMemory) -> Live<E::Vm> {
         let incarnation = self.next_incarnation;
         self.next_incarnation += 1;
+        let owned = crate::fleet::boot_now();
         let stopping = Arc::new(AtomicBool::new(false));
         let exited = self.engine.exited(&vm);
         let events = self.events_tx.clone();
@@ -854,6 +855,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     id,
                     incarnation,
                     end,
+                    owned,
                 }));
             }
         });
@@ -949,8 +951,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
+    /// A watched VM process went without the agent ending it.
+    fn on_exit(&mut self, exit: &Exit) {
+        let end = self.why_ended(exit.id, exit.end, exit.owned);
+        self.exited(exit.id, exit.incarnation, end);
+    }
+
+    /// Ends the sandbox's VM process `incarnation`, which went as `end`
+    /// says (already told apart from a guard's kill).
     pub(super) fn exited(&mut self, id: Id, incarnation: u64, end: End) {
-        let end = self.why_ended(id, end);
         if self.ready_exited(id, incarnation, end) {
             return;
         }
@@ -981,21 +990,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// How the VM of sandbox `id` ended, which its process alone said was
     /// `end`: [`End::Fenced`] for one that ended on its own, or whose
     /// memory could no longer be served, as a killed VM's pager can tell
-    /// first, when the guard recorded ending it shortly before. The guard
-    /// names a VM by its group, which is named after the sandbox the host
-    /// made it for, a ready VM's own id for one a create claimed.
-    fn why_ended(&self, id: Id, end: End) -> End {
+    /// first, when the guard recorded ending it shortly before, and since
+    /// the agent took this VM process on at `owned`: a kill before then was
+    /// of an earlier VM of the same sandbox. The guard names a VM by its
+    /// group, which is named after the sandbox the host made it for, a
+    /// ready VM's own id for one a create claimed.
+    fn why_ended(&self, id: Id, end: End, owned: compute_core::At) -> End {
         if !matches!(end, End::Exited | End::MemoryLost) {
             return end;
         }
         let Some(freezes) = &self.guard_freezes else {
             return end;
         };
-        let since = compute_core::At::from_duration(
+        let since = owned.max(compute_core::At::from_duration(
             crate::fleet::boot_now()
                 .since_origin()
                 .saturating_sub(FENCED_WITHIN),
-        );
+        ));
         let name = self.records.get(id).map_or(id, |record| record.host());
         if freezes.fenced().ended(&name.to_string(), since) {
             End::Fenced

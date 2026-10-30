@@ -128,8 +128,8 @@ struct Running {
     reading: Option<At>,
     /// Whether the reading under way was warned of as slow.
     slow: bool,
-    /// Whether the process was asked to stop for a stuck agent.
-    restarting: bool,
+    /// When the process asked itself to stop for a stuck agent, if it did.
+    restart_asked: Option<At>,
     /// What the host can take on, as the agent's latest status said;
     /// renewals carry it while the agent serves.
     capacity: Option<Capacity>,
@@ -159,7 +159,7 @@ impl Renewer {
             readings,
             reading: None,
             slow: false,
-            restarting: false,
+            restart_asked: None,
             capacity: None,
             attempt: None,
             not_before: At::ZERO,
@@ -464,19 +464,26 @@ impl Running {
     /// to start it again.
     fn read(&mut self) {
         let now = boot_now();
-        if let Some(since) = self.reading {
-            let taken = now.since_origin().saturating_sub(since.since_origin());
-            // Asked to stop, the process has not: nothing else would end it,
-            // since systemd did not ask.
-            if self.restarting && taken > STUCK_AFTER * 2 {
+        // Asked to stop, the process has not in a minute: nothing else would
+        // end it, since systemd did not ask. Whether the stuck reading has
+        // answered since does not matter; the stop is what hangs.
+        if let Some(asked) = self.restart_asked {
+            let stopping = now.since_origin().saturating_sub(asked.since_origin());
+            if stopping > STUCK_AFTER {
                 tracing::error!(
-                    waited_ms = ms(taken),
+                    waited_ms = ms(stopping),
                     "the stuck agent's process has not stopped in a minute: it ends now, for systemd to start it again"
                 );
                 std::process::exit(1);
             }
-            if taken > STUCK_AFTER && !self.restarting && self.renewer.agent.handle().is_some() {
-                self.restarting = true;
+        }
+        if let Some(since) = self.reading {
+            let taken = now.since_origin().saturating_sub(since.since_origin());
+            if taken > STUCK_AFTER
+                && self.restart_asked.is_none()
+                && self.renewer.agent.handle().is_some()
+            {
+                self.restart_asked = Some(now);
                 tracing::error!(
                     waited_ms = ms(taken),
                     "the agent has not said what the host can take on for a minute: it is stuck, so its process stops for systemd to start it again; the VMs run on and the lease is renewed meanwhile"
