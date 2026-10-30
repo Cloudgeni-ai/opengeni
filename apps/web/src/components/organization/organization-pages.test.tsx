@@ -726,6 +726,10 @@ describe("People page", () => {
     expect(confirm.textContent).toContain(
       "Their access to Platform engineering is removed. Restoring doesn't bring it back.",
     );
+    // The admin learns before confirming that the person's schedules stop.
+    expect(confirm.textContent).toContain(
+      "Schedules they own stop running and pause themselves. Each one says why on its Automations page.",
+    );
     await act(async () => button(confirm, "Suspend").click());
     await flush();
     const call = client.updateOrganizationMember.mock.calls[0] as unknown as [
