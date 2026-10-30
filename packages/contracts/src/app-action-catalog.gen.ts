@@ -452,10 +452,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/browse",
     "request": [],
-    "query": [
-      "pageToken",
-      "parentId"
-    ],
     "response": [
       "GoogleDriveBrowseResponse"
     ],
@@ -2515,10 +2511,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/browse",
     "request": [],
-    "query": [
-      "pageToken",
-      "parentId"
-    ],
     "response": [],
     "permission": "connections:read"
   },

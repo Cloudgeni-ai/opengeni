@@ -462,8 +462,7 @@ export async function createValidatedScheduledTask(input: {
   });
   if (learning) {
     const destination =
-      target?.tenancy?.visibility === "private" ||
-      target?.memoryScope === "user"
+      target?.tenancy?.visibility === "private" || target?.memoryScope === "user"
         ? "personal"
         : "workspace";
     if (learning.scope !== destination)
@@ -549,7 +548,11 @@ export async function createValidatedScheduledTask(input: {
       authoritySelections: requestedPins ?? [],
     });
   }
-  const storedAgentConfig = withScheduledTaskPins(agentConfig, requestedPins, requestedPinsRequired);
+  const storedAgentConfig = withScheduledTaskPins(
+    agentConfig,
+    requestedPins,
+    requestedPinsRequired,
+  );
   const creationInitiator = scheduledTaskInitiatorForGrant(input.grant);
   const creatorLocked = "creatorLocked" in input.payload && input.payload.creatorLocked === true;
   if (creatorLocked && creationInitiator.actor)
