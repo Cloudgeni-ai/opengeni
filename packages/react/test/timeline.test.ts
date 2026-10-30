@@ -2748,6 +2748,32 @@ describe("buildTimeline", () => {
     );
   });
 
+  test("settles an idle checkpoint dropped for capacity as postponed, not failed", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("session.context.compaction.requested", { trigger: "proactive" }),
+      event("session.context.compaction.skipped", {
+        reason: "capacity_unavailable",
+        trigger: "proactive",
+      }),
+    ]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "context-compaction",
+        phase: "skipped",
+        trigger: "proactive",
+        skipReason: "capacity_unavailable",
+      }),
+    ]);
+    const projected = items[0];
+    if (projected?.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(compactionSkipTitle(englishText, projected.skipReason)).toBe("Compaction postponed");
+    expect(compactionSkipSubtitle(englishText, projected.skipReason)).toBe(
+      "No subscription capacity right now. It runs with your next message if still needed.",
+    );
+    expect(compactionFailureDetails(englishText, projected)).toBeNull();
+  });
+
   test("shows a terminal compaction-summary failure without claiming history changed", () => {
     reset();
     const items = buildTimeline(englishText, [
