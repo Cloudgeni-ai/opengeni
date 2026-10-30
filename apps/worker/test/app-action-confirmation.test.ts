@@ -56,7 +56,7 @@ function wrapped(kind: AppActionAuthorityKind) {
     sessionId: "chat-1",
     authority: async () => {
       checks += 1;
-      return kind;
+      return { kind, subjectId: "user:anna", permissions: [] };
     },
   });
   return { seen, hooks, checks: () => checks };
@@ -168,7 +168,7 @@ test("turning on video paid with credits asks once, with the price on the card a
     workspaceId: "ws-1",
     sessionId: "chat-1",
     settings,
-    authority: async () => "confirm",
+    authority: async () => ({ kind: "confirm", subjectId: "user:bendik", permissions: [] }),
   });
   await hooks.prepare(appCall("call-video", turnOn));
   expect(seen[0]!.call).toMatchObject({ defaultDecision: "ask", reviewContext: { title } });
@@ -206,9 +206,11 @@ test("each parallel removal's card names its own connection, read by the server,
   const hooks = withAppActionConfirmation(policy, {
     workspaceId: "ws-1",
     sessionId: "chat-1",
-    authority: async () => "confirm",
-    targets: async (args) => {
+    authority: async () => ({ kind: "confirm", subjectId: "user:bendik", permissions: [] }),
+    targets: async (args, reader) => {
       looked.push(args);
+      // Read as the person the live check found, never a shared guess.
+      expect(reader).toEqual({ subjectId: "user:bendik", permissions: [] });
       const id = (args as { pathParameters: { connectionId: keyof typeof found } }).pathParameters
         .connectionId;
       const hit = found[id];
@@ -257,10 +259,35 @@ test("each parallel removal's card names its own connection, read by the server,
   expect(
     withAppActionApprovalTitle(approval, { workspaceId: "ws-1", sessionId: "chat-1", cards }),
   ).toMatchObject({
-    display: {
-      title: "Remove the Gmail connection for bendik@cloudgeni.ai?",
-      facts: [{ label: "Added", value: "14 Oct 2026, 07:41 UTC" }],
+    display: { title: "Remove the Gmail connection for bendik@cloudgeni.ai?" },
+    // Beside the display, which older clients parse strictly.
+    targetFacts: [{ label: "Added", value: "14 Oct 2026, 07:41 UTC" }],
+  });
+  expect(
+    (
+      withAppActionApprovalTitle(approval, { workspaceId: "ws-1", sessionId: "chat-1", cards }) as {
+        display: Record<string, unknown>;
+      }
+    ).display,
+  ).not.toHaveProperty("facts");
+});
+
+test("without a person to read as, nothing is looked up and the card keeps its plain question", async () => {
+  const { seen, policy } = recording();
+  let looked = 0;
+  const hooks = withAppActionConfirmation(policy, {
+    workspaceId: "ws-1",
+    sessionId: "chat-1",
+    authority: async () => ({ kind: "confirm" }),
+    targets: async () => {
+      looked += 1;
+      return { connectionId: { kind: "connection", name: "Gmail" } };
     },
+  });
+  await hooks.prepare(appCall("call-1", removal("c-gmail")));
+  expect(looked).toBe(0);
+  expect(seen[0]!.call).toMatchObject({
+    reviewContext: { title: "Delete connection in this workspace?" },
   });
 });
 
@@ -269,7 +296,7 @@ test("a failed lookup keeps the plain question; the card still asks", async () =
   const hooks = withAppActionConfirmation(policy, {
     workspaceId: "ws-1",
     sessionId: "chat-1",
-    authority: async () => "confirm",
+    authority: async () => ({ kind: "confirm", subjectId: "user:bendik", permissions: [] }),
     targets: async () => {
       throw new Error("database unavailable");
     },

@@ -47,11 +47,7 @@ function scene(callId: string, args: Record<string, unknown>, targets: AppAction
     id: callId,
     name: "opengeni__admin_action_call",
     arguments: JSON.stringify(args),
-    display: {
-      toolName: "admin_action_call",
-      title,
-      ...(context.targetFacts?.length ? { facts: context.targetFacts } : {}),
-    },
+    display: { toolName: "admin_action_call", title },
   };
   const { fields, moreFields } = toolReviewFields(args, context, "admin_action_call");
   const review = {
@@ -254,6 +250,7 @@ const asked = (scenes: Scene[]) =>
     approvals: scenes.map((entry) => ({
       ...entry.approval,
       rawItem: { callId: entry.approval.id },
+      ...(entry.context.targetFacts?.length ? { targetFacts: entry.context.targetFacts } : {}),
     })),
   });
 const decided = (entry: Scene, decision: "approve" | "reject") =>

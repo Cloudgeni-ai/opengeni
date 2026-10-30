@@ -6,7 +6,6 @@ import {
   findAppAction,
   type AppActionTargets,
 } from "../src/app-actions";
-import { ToolDisplayMetadata } from "../src/tool-catalog";
 import { toolReviewDetails, toolReviewFields } from "../src/tool-review-presentation";
 
 const here = { workspaceId: "ws-1", sessionId: "chat-1" };
@@ -174,20 +173,54 @@ test("the card lists the server's facts, and Details reads as plain labelled val
   ]);
   const details = toolReviewDetails(removeGmail, context, "", 0, 25, "admin_action_call");
   expect(details.items.map((item) => [item.label, item.value])).toEqual([
+    ["Action", "Delete connection"],
     ["Who can use it", "Only you"],
     ["Added", "14 Oct 2026, 07:41 UTC"],
-    ["Action", "Delete connection"],
+    // What the agent sent is set apart, so it never passes for a server fact.
+    ["Sent by the agent", "The values below, as written"],
     ["Workspace ID", "ws-1"],
     ["Connection ID", gmailId],
     ["Expected version", "2"],
   ]);
 });
 
-test("a pending approval's display may carry the server's facts", () => {
-  const display = {
-    toolName: "admin_action_call",
-    title: "Remove the Linear connection for Bendik?",
-    facts: [{ label: "Added", value: "2 Oct 2026, 10:12 UTC" }],
+test("an action the catalog names by its route reads in words, not as a request line", () => {
+  const site = { kind: "Site", name: "Layoff plan Q4" };
+  const unpublish = {
+    id: "DELETE /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    pathParameters: { workspaceId: "ws-1", artifactId: "a-1" },
   };
-  expect(ToolDisplayMetadata.parse(display)).toEqual(display);
+  expect(appActionConfirmationTitle(unpublish, here, { artifactId: site })).toBe(
+    "Delete the publication of Site “Layoff plan Q4”?",
+  );
+  const restore = {
+    id: "POST /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/restore",
+    pathParameters: { workspaceId: "ws-1", vaultId: "v-1", itemId: "i-1" },
+  };
+  expect(
+    appActionConfirmationTitle(restore, here, {
+      itemId: { kind: "vault item", name: "Stripe key" },
+    }),
+  ).toBe("Restore vault item “Stripe key”?");
+});
+
+test("a name counts as said only as a whole name", () => {
+  const removeA = {
+    ...removeGmail,
+    pathParameters: { workspaceId: "ws-1", connectionId: gmailId },
+  };
+  const targets: AppActionTargets = {
+    connectionId: { kind: "connection", name: "Gmail", account: "a" },
+  };
+  // "a" appears inside "Gmail" and "connection", but the account is said whole.
+  expect(appActionConfirmationTitle(removeA, here, targets)).toBe(
+    "Remove the Gmail connection for a?",
+  );
+  expect(appActionTargetFacts(removeA, here, targets)).toEqual([]);
+  const unnamed: AppActionTargets = {
+    connectionId: { kind: "connection", name: "Gmail", account: "mail" },
+  };
+  expect(appActionConfirmationTitle(removeA, here, unnamed)).toBe(
+    "Remove the Gmail connection for mail?",
+  );
 });

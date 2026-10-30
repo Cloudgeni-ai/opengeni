@@ -163,14 +163,12 @@ describe("an answered approval", () => {
     const removal = (callId: string, title: string, added: string) => ({
       id: callId,
       name: "opengeni__admin_action_call",
-      display: {
-        toolName: "admin_action_call",
-        title,
-        facts: [
-          { label: "Who can use it", value: "Only you" },
-          { label: "Added", value: added },
-        ],
-      },
+      display: { toolName: "admin_action_call", title },
+      // Beside the display, as the worker sends them.
+      targetFacts: [
+        { label: "Who can use it", value: "Only you" },
+        { label: "Added", value: added },
+      ],
       rawItem: { callId },
     });
     const gmail = removal("c-1", "Remove the Gmail connection for bendik@cloudgeni.ai?", "14 Oct");
@@ -204,6 +202,29 @@ describe("an answered approval", () => {
     expect(noticeDisplayText(englishText, notice(resumed))).toBe(
       "You approved “Remove the Gmail connection for bendik@cloudgeni.ai”.",
     );
+    // Asked again about the ones still open, without a display of its own: the
+    // history keeps each one's first wording.
+    const bare = (entry: { id: string; name: string }) => ({
+      id: entry.id,
+      name: entry.name,
+      rawItem: { callId: entry.id },
+    });
+    const reasked = buildTimeline(englishText, [
+      ...asking([gmail, linearA, linearB]),
+      decide(4, "c-1", "approve"),
+      event(5, "session.status.changed", { status: "running" }),
+      event(6, "session.requiresAction", { approvals: [bare(linearA), bare(linearB)] }),
+      event(7, "session.status.changed", { status: "requires_action" }),
+      decide(8, "c-3", "approve"),
+      decide(9, "c-4", "reject"),
+    ]);
+    const notices = reasked.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(noticeDisplayText(englishText, notices.at(-1)!).split("\n")).toEqual([
+      "You approved “Remove the Linear connection for Bendik · Cloudgeni” (Added: 2 Oct).",
+      "You declined “Remove the Linear connection for Bendik · Cloudgeni” (Added: 9 Oct).",
+    ]);
   });
 
   test("history keeps a quoted name's own question mark", () => {

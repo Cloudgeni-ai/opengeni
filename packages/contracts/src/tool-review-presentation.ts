@@ -1101,23 +1101,25 @@ export function toolReviewDetails(
   let total: number;
   let items: DetailItem[];
   if (toolName === APP_ACTION_REVIEW_TOOL && path === "" && args) {
-    // An app action's Details read as what it changes, then each value it
-    // was called with under a plain label, rather than its call envelope.
-    const all: DetailItem[] = (context?.targetFacts ?? []).map((fact) => ({
-      label: fact.label,
-      value: fact.value,
-      truncated: false,
-    }));
+    // An app action's Details read as the action and what it changes, as
+    // the server found it, then each value the agent sent under a plain
+    // label, set apart so a sent value never passes for a server fact.
+    const all: DetailItem[] = [];
+    const action = typeof args.id === "string" ? args.id : undefined;
+    if (action)
+      all.push({
+        label: "Action",
+        value: bound(
+          /^[a-z][A-Za-z0-9]*$/.test(action) ? toolReviewFieldLabel(action) : action,
+          4000,
+        ),
+        truncated: false,
+      });
+    for (const fact of context?.targetFacts ?? [])
+      all.push({ label: fact.label, value: fact.value, truncated: false });
+    const sentFrom = all.length;
     Object.entries(args).forEach(([key, entry], index) => {
-      if (key === "id" && typeof entry === "string") {
-        const name = /^[a-z][A-Za-z0-9]*$/.test(entry) ? toolReviewFieldLabel(entry) : entry;
-        all.push({
-          label: "Action",
-          value: bound(name, 4000),
-          truncated: false,
-        });
-        return;
-      }
+      if (key === "id" && typeof entry === "string") return;
       const parentPath = fieldPointer(key, index);
       if (
         ["pathParameters", "query", "body"].includes(key) &&
@@ -1138,6 +1140,12 @@ export function toolReviewDetails(
         ...preview(entry, key, parentPath),
       });
     });
+    if (all.length > sentFrom)
+      all.splice(sentFrom, 0, {
+        label: "Sent by the agent",
+        value: "The values below, as written",
+        truncated: false,
+      });
     total = all.length;
     items = all.slice(offset, offset + limit);
   } else if (Array.isArray(value)) {

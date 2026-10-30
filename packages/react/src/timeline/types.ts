@@ -475,7 +475,7 @@ export type NoticeItem = {
     id: string;
     title: string | null;
     /**
-     * Server-read facts about what it changes (`display.facts`), in card
+     * Server-read facts about what it changes (the approval's `targetFacts`), in card
      * order; history uses them only to tell two alike lines apart.
      */
     facts?: Array<{ label: string; value: string }>;

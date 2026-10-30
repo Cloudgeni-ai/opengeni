@@ -292,6 +292,12 @@ export function buildTimeline(
   // Open approval waits by the approval ids they ask about, so the person's
   // answer is on the wait the moment it is recorded, before work resumes.
   const approvalWaitsById = new Map<string, { notice: NoticeItem; turnId: string | null }>();
+  // How each approval was first worded: a later wait that asks again about
+  // the ones still open may carry no display of its own.
+  const approvalWordingById = new Map<
+    string,
+    Pick<NonNullable<NoticeItem["approvalActions"]>[number], "title" | "facts">
+  >();
   // Live model-capacity waits. Later lifecycle evidence that the turn is no
   // longer blocked (resume, a non-waiting status, its settlement) resolves
   // them, so a recovered wait never lingers as a warning.
@@ -1401,7 +1407,21 @@ export function buildTimeline(
             call.awaitingApproval = true;
           }
         }
-        const approvalActions = approvalActionsOf(payload);
+        const approvalActions = approvalActionsOf(payload).map((action) => {
+          const earlier = approvalWordingById.get(action.id);
+          const facts = action.facts ?? earlier?.facts;
+          const worded = {
+            ...action,
+            title: action.title ?? earlier?.title ?? null,
+            ...(facts ? { facts } : {}),
+          };
+          if (worded.title)
+            approvalWordingById.set(action.id, {
+              title: worded.title,
+              ...(facts ? { facts } : {}),
+            });
+          return worded;
+        });
         const notice: NoticeItem = {
           kind: "notice",
           id: event.id,
@@ -3606,7 +3626,8 @@ function approvalActionsOf(
     if (!id) continue;
     const display = asRecord(record.display);
     const title = stringValue(display.title).trim();
-    const facts = (Array.isArray(display.facts) ? display.facts : [])
+    // Beside the display, which stays the strict shape every client parses.
+    const facts = (Array.isArray(record.targetFacts) ? record.targetFacts : [])
       .slice(0, 12)
       .map((fact) => ({
         label: stringValue(asRecord(fact).label).trim(),

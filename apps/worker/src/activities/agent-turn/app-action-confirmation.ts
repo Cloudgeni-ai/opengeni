@@ -17,6 +17,18 @@ import { videoPolicyCardPrice } from "../video-generation-availability";
 /** As whom this turn's app actions run; see resolveSessionAppActionAuthority. */
 export type AppActionAuthorityKind = "full_access" | "confirm" | "read_only" | "unavailable";
 
+/** The live check's answer: how changes run, and for whom when a person asks. */
+export type AppActionAuthority = {
+  kind: AppActionAuthorityKind;
+  /** The person the chat acts for, when there is one. */
+  subjectId?: string;
+  /** Their permissions in the chat's workspace. */
+  permissions?: readonly string[];
+};
+
+/** The person a card's targets are read as. */
+export type AppActionReader = { subjectId: string; permissions: readonly string[] };
+
 const APP_ACTION_CALL_MODEL_NAME = prefixedMcpToolName("opengeni", APP_ACTION_CALL_TOOL_NAME);
 
 /** The chat asking, and the deployment settings that price what it asks. */
@@ -69,8 +81,9 @@ export function withAppActionApprovalTitle(
       ...display,
       toolName: APP_ACTION_CALL_TOOL_NAME,
       title: saved?.title ?? confirmationTitle(item.arguments ?? raw.arguments, chat),
-      ...(saved && saved.targetFacts.length > 0 ? { facts: saved.targetFacts } : {}),
     },
+    // Beside the display, which older clients parse strictly.
+    ...(saved && saved.targetFacts.length > 0 ? { targetFacts: saved.targetFacts } : {}),
   };
 }
 
@@ -92,9 +105,9 @@ export function withAppActionApprovalTitle(
 export function withAppActionConfirmation(
   policy: ConnectorActionPolicyHooks,
   chat: AppActionChat & {
-    authority: () => Promise<AppActionAuthorityKind>;
+    authority: () => Promise<AppActionAuthority>;
     /** What the call's ids name, read as the person the chat acts for. */
-    targets?: (args: unknown) => Promise<AppActionTargets>;
+    targets?: (args: unknown, reader: AppActionReader) => Promise<AppActionTargets>;
     cards?: Map<string, AppActionApprovalCard>;
   },
 ): ConnectorActionPolicyHooks {
@@ -103,11 +116,12 @@ export function withAppActionConfirmation(
     if (call.serverId !== "opengeni" || call.toolName !== APP_ACTION_CALL_TOOL_NAME) return call;
     let card = decided.get(call.approvalId);
     if (card === undefined) {
-      const confirm =
+      const authority =
         appActionCallNeedsConfirmation(call.arguments) &&
-        !appActionCallHandlesSecrets(call.arguments) &&
-        (await chat.authority()) === "confirm";
-      card = confirm ? await cardFor(call.arguments) : null;
+        !appActionCallHandlesSecrets(call.arguments)
+          ? await chat.authority()
+          : null;
+      card = authority?.kind === "confirm" ? await cardFor(call.arguments, authority) : null;
       decided.set(call.approvalId, card);
       if (card) chat.cards?.set(call.approvalId, card);
     }
@@ -127,9 +141,21 @@ export function withAppActionConfirmation(
     const { approvalMode: _approvalMode, ...rest } = call;
     return { ...rest, defaultDecision: "allow" };
   };
-  const cardFor = async (args: unknown): Promise<AppActionApprovalCard> => {
-    // A lookup that fails keeps the plain wording; the card still asks.
-    const targets = chat.targets ? await chat.targets(args).catch(() => undefined) : undefined;
+  const cardFor = async (
+    args: unknown,
+    authority: AppActionAuthority,
+  ): Promise<AppActionApprovalCard> => {
+    // Targets are read only as the person asked; a lookup that fails keeps
+    // the plain wording, and the card still asks.
+    const targets =
+      chat.targets && authority.subjectId
+        ? await chat
+            .targets(args, {
+              subjectId: authority.subjectId,
+              permissions: authority.permissions ?? [],
+            })
+            .catch(() => undefined)
+        : undefined;
     return {
       title: confirmationTitle(args, chat, targets),
       targetFacts: appActionTargetFacts(args, chat, targets),

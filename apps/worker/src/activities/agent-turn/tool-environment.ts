@@ -545,8 +545,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
   const attemptConnectorActionBindings = [...githubRestMcp.connectorBindings];
-  // The person this chat's app actions ask, as the live check last found them.
-  let appActionSubjectId: string | null = null;
   const connectorActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
     {
       preview: async (call) =>
@@ -575,14 +573,27 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           sessionId: input.sessionId,
           turnId: turn.id,
         });
-        appActionSubjectId = "subjectId" in authority ? authority.subjectId : null;
-        return authority.kind;
+        return {
+          kind: authority.kind,
+          ...("subjectId" in authority ? { subjectId: authority.subjectId } : {}),
+          ...("permissions" in authority ? { permissions: authority.permissions } : {}),
+        };
       },
-      // Names what a confirmed change touches, read as that person.
-      targets: async (args) =>
+      // Names what a confirmed change touches, read as the person it asks.
+      targets: async (args, reader) =>
         await resolveAppActionTargets(
           db,
-          { accountId: input.accountId, subjectId: appActionSubjectId },
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: reader.subjectId,
+            organizationAdmin: reader.permissions.includes("account:admin"),
+            onLookupError: (error, parameter) =>
+              console.warn("app action target lookup failed", {
+                parameter,
+                error: error instanceof Error ? error.message : String(error),
+              }),
+          },
           args,
         ),
       cards: eventing.appActionApprovalCards,

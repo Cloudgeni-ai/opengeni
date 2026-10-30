@@ -322,9 +322,12 @@ export function appActionTargetFacts(
   const parameter = appActionTargetParameter(call.entry);
   // What the question already says isn't said again.
   const title = appActionConfirmationTitle(args, here, targets);
+  // Said as a whole name, not as part of another word.
   const said = (text: string | undefined) => {
     const plain = plainName(text);
-    return plain !== undefined && title.includes(plain);
+    if (plain === undefined) return false;
+    const escaped = plain.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[\\s“·])${escaped}($|[\\s”·?])`, "u").test(title);
   };
   const facts: Array<{ label: string; value: string }> = [];
   const add = (label: string, value: string | undefined) => {
@@ -455,9 +458,32 @@ export function appActionConfirmationTitle(
         const account = plainName(target!.account);
         return `Remove the ${name} connection${account && account !== name ? ` for ${account}` : ""}${elsewhere}?`;
       }
-      return `${action} “${label}”${elsewhere}?`;
+      return `${routeAction(entry, parameter!, target!) ?? action} “${label}”${elsewhere}?`;
     }
   }
+}
+
+/**
+ * "Delete Site", "Restore vault item", "Change the approval of vault item":
+ * an action the catalog names only by its route, in words from that route
+ * and the kind of what it found, never "Run DELETE /v1/…".
+ */
+function routeAction(
+  entry: ActionCatalogEntry,
+  parameter: string,
+  target: AppActionTarget,
+): string | undefined {
+  if (/^[a-z][A-Za-z0-9]*$/.test(entry.id)) return undefined;
+  const segments = entry.path.split("/");
+  const after = segments.slice(segments.indexOf(`:${parameter}`) + 1);
+  if (after.some((segment) => segment.startsWith(":") || !/^[a-z][a-z-]*$/.test(segment)))
+    return undefined;
+  const verb = entry.method === "DELETE" ? "Delete" : "Change";
+  const kind = target.kind;
+  if (after.length === 0) return `${verb} ${kind}`;
+  if (after.length === 1 && entry.method === "POST")
+    return `${capitalized(after[0]!.replaceAll("-", " "))} ${kind}`;
+  return `${verb} the ${after.join(" ").replaceAll("-", " ")} of ${kind}`;
 }
 
 /**
