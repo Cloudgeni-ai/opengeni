@@ -169,6 +169,13 @@ export function SubscriptionPlansPreview() {
                   upgrade={seatUpgradeFor(seatPreviewPlan("pro", 2), seatPreviewPlans)}
                   onUpgrade={() => undefined}
                 />
+                <p className="text-xs text-fg-muted">A full Max plan:</p>
+                <PlanSeats plan={seatPreviewPlan("max", 10)} />
+                <SeatLimitNotice
+                  canManage
+                  upgrade={seatUpgradeFor(seatPreviewPlan("max", 10), seatPreviewPlans)}
+                  onUpgrade={() => undefined}
+                />
               </>
             ) : (
               <>

@@ -336,10 +336,11 @@ when the verified plan's seat usage is at its limit. The invite page shows the
 notice "Your plan's seat limit is reached" as soon as the plan is full and after
 a refusal. The plan named has room for everyone in the form (the server's plan
 is the fallback without a catalog). People who manage billing get one button
-that names it ("Upgrade to Pro"); everyone else is told to ask an organization
+that names it ("Upgrade to Pro", or "Talk to us about Enterprise"); everyone else is told to ask an organization
 owner to upgrade to it, also when restoring someone is refused. Other failures
 in the same batch are shown beside the notice. The seat count is re-read from
-the server whenever members or invitations change.
+the server whenever members or invitations change, keeping the previous plan
+until the read answers.
 
 ## Billing/UI contract
 

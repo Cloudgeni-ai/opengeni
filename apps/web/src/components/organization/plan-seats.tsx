@@ -39,7 +39,7 @@ export function SeatLimitNotice({
       action={
         canManage ? (
           <RowButton variant="default" onClick={onUpgrade}>
-            {!upgrade ? "View upgrade options" : enterprise ? `View ${upgrade.label}` : fix}
+            {fix ?? "View upgrade options"}
           </RowButton>
         ) : undefined
       }
@@ -47,9 +47,7 @@ export function SeatLimitNotice({
       {canManage
         ? !upgrade
           ? "Upgrade your plan to invite more people."
-          : enterprise
-            ? `${fix} to add more people.`
-            : null
+          : null
         : !upgrade
           ? "Ask an organization owner to upgrade the plan before inviting more people."
           : enterprise

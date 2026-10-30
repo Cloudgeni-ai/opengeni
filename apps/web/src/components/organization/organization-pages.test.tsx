@@ -904,15 +904,32 @@ describe("People page", () => {
     await flush();
   }
 
-  test("after invites, the seat count is the server's, not a local guess", async () => {
-    // Someone else freed a seat meanwhile: the server says 1 of 2 after one invitation.
+  test("while the plan is re-read after invites, the seat notice stays and then shows the server's count", async () => {
     let seatsUsed = 1;
+    let release: (() => void) | null = null;
+    let hold = false;
     const create = mock(async (_org: string, request: { email: string }) => {
-      if (request.email !== "a@example.test") throw new Error("Request failed.");
-      return { ...invitation("member"), id: "created-a", targetEmail: request.email };
+      hold = true;
+      if (request.email === "a@example.test") {
+        seatsUsed = 2;
+        return { ...invitation("member"), id: "created-a", targetEmail: request.email };
+      }
+      throw seatRefusal();
     });
     const client = makeClient({
-      getBilling: mock(async () => ({ balance: { plan: seatPlan("pro", seatsUsed) } })),
+      // Reads after the invitations wait until the test releases them.
+      getBilling: mock(async () => {
+        if (hold) {
+          const previous = release;
+          await new Promise<void>((resolve) => {
+            release = () => {
+              previous?.();
+              resolve();
+            };
+          });
+        }
+        return { balance: { plan: seatPlan("pro", seatsUsed) } };
+      }),
       getBillingSubscriptionPlans: mock(async () => ({
         plan: seatPlan("pro", seatsUsed),
         plans: seatCatalog,
@@ -928,13 +945,17 @@ describe("People page", () => {
     await flush();
     try {
       expect(view.container.textContent).toContain("1 / 2 seats used");
-      seatsUsed = 1;
       await submitEmails(view.container, "a@example.test, b@example.test,");
-      await flush();
       expect(create).toHaveBeenCalledTimes(2);
-      expect(view.container.textContent).toContain("1 / 2 seats used");
-      expect(view.container.textContent).not.toContain("seat limit is reached");
-      expect(view.container.textContent).toContain("Couldn't invite b@example.test");
+      // The re-read is in flight: the previous plan keeps the one notice up.
+      expect(release).not.toBeNull();
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(view.container.textContent).not.toContain("Couldn't send the invitation");
+      expect(button(view.container, "Upgrade to Max")).toBeDefined();
+      await act(async () => release!());
+      await flush();
+      expect(view.container.textContent).toContain("2 / 2 seats used");
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
     } finally {
       await view.unmount();
     }

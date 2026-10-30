@@ -474,6 +474,20 @@ test("a seat refusal names one plan with one button, and members are told to ask
   expect(member.textContent).not.toContain("to add more people");
   expect(member.textContent).toContain("Ask an organization owner to upgrade to Max.");
   expect(document.querySelectorAll("button").length).toBe(0);
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  // Enterprise is named once, on the button.
+  const enterprise = await mount(
+    <SeatLimitNotice
+      canManage
+      upgrade={{ key: "enterprise", label: "Enterprise" }}
+      onUpgrade={upgrade}
+    />,
+  );
+  expect(enterprise.textContent).toBe(
+    "Your plan's seat limit is reachedTalk to us about Enterprise",
+  );
 });
 
 test("status-only seat fallback needs a full finite plan and never masks another typed refusal", () => {

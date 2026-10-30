@@ -229,19 +229,33 @@ export function OrganizationDirectoryProvider({
     plans: readonly CatalogPlan[];
   }>({ ownerKey: "", plan: null, plans: [] });
   // Both reads are necessary: existing plan rows can remain while the feature is off.
+  // A re-read keeps the previous plan until it answers, so the seat notice
+  // doesn't flicker after invitations change; another identity starts empty.
   useEffect(() => {
     let active = true;
-    setPlanState({ ownerKey: identityKey, plan: null, plans: [] });
-    if (!peopleEnabled) return;
+    const empty = { ownerKey: identityKey, plan: null, plans: [] };
+    if (!peopleEnabled) {
+      setPlanState(empty);
+      return;
+    }
+    setPlanState((current) => (current.ownerKey === identityKey ? current : empty));
     void (async () => {
       try {
         const billing = await client.getBilling({ accountId: identity.organizationId });
-        if (!active || !billing.balance.plan) return;
+        if (!active) return;
+        if (!billing.balance.plan) {
+          setPlanState(empty);
+          return;
+        }
         const catalog = await client.getBillingSubscriptionPlans({
           accountId: identity.organizationId,
         });
-        if (active && catalog.plan)
-          setPlanState({ ownerKey: identityKey, plan: catalog.plan, plans: catalog.plans });
+        if (active)
+          setPlanState(
+            catalog.plan
+              ? { ownerKey: identityKey, plan: catalog.plan, plans: catalog.plans }
+              : empty,
+          );
       } catch {
         /* Billing details are optional for people administrators. */
       }
