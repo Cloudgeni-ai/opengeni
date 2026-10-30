@@ -90,6 +90,7 @@ export async function resolveAppActionTargets(
             workspacePermissions,
             ids: call.ids,
             id,
+            segments,
             organization: segments[2] === "organizations",
           }),
           new Promise<never>((_, reject) => {
@@ -182,6 +183,8 @@ type LookupContext = {
   ids: Record<string, string>;
   /** The id this lookup resolves. */
   id: string;
+  /** The call's route, split at "/" ("", "v1", "workspaces", ":workspaceId", …). */
+  segments: readonly string[];
   /** The route lives under /v1/organizations/:organizationId. */
   organization: boolean;
 };
@@ -217,30 +220,67 @@ function missing(kind: string): AppActionTarget {
   return { kind };
 }
 
-/** The workspace the call names, read as the person the chat acts for. */
-async function inWorkspace<T>(
+/**
+ * The person may read this workspace's rows as the route does: it belongs to
+ * the chat's organization and their membership holds the route's permission.
+ * Checked before any row is read, so "not found" never stands in for "not yours".
+ */
+async function workspaceAccess(
   where: LookupContext,
-  run: (db: Database, workspaceId: string) => Promise<T | null>,
-): Promise<T | null> {
-  const workspaceId = where.ids.workspaceId;
-  if (!workspaceId) unresolved();
-  if (!UUID.test(workspaceId)) unresolved();
+  workspaceId: string | undefined,
+  permission: string,
+): Promise<string> {
+  if (!workspaceId || !UUID.test(workspaceId)) unresolved();
   // Outside the organization, or not theirs to act in: it may well exist.
   if (!(await ownsWorkspace(where, workspaceId))) unresolved();
-  if (!(await actsIn(where, workspaceId))) unresolved();
-  return await withWorkspaceSubjectRls(where.db, workspaceId, where.subjectId, (db) =>
-    run(db, workspaceId),
+  if (!(await mayIn(where, workspaceId, permission))) unresolved();
+  return workspaceId;
+}
+
+/** The workspace the call names, read as the person the chat acts for, for a route needing `permission`. */
+async function inWorkspace<T>(
+  where: LookupContext,
+  permission: string,
+  run: (db: Database, workspaceId: string) => Promise<T | null>,
+): Promise<T | null> {
+  return await asPersonIn(
+    where,
+    await workspaceAccess(where, where.ids.workspaceId, permission),
+    run,
+  );
+}
+
+/** Reads a workspace already checked with workspaceAccess, as the person the chat acts for. */
+async function asPersonIn<T>(
+  where: LookupContext,
+  workspaceId: string,
+  run: (db: Database, workspaceId: string) => Promise<T | null>,
+): Promise<T | null> {
+  // A read-only lookup that may be abandoned on timeout takes no tenancy lock.
+  return await withWorkspaceSubjectRls(
+    where.db,
+    workspaceId,
+    where.subjectId,
+    (db) => run(db, workspaceId),
+    undefined,
+    "none",
   );
 }
 
 /**
- * The person reads this workspace: it's the chat's own (their access was
- * checked for this turn), or their membership grants workspace:read. An
- * organization role reaches no further into workspaces, as in the API.
+ * The person's membership holds `permission` here, as hasPermission reads it.
+ * In the chat's own workspace someone without a membership row (a personal
+ * workspace's owner) had their access checked for this turn. An organization
+ * role reaches no further into workspaces, as in the API.
  */
-async function actsIn(where: LookupContext, workspaceId: string): Promise<boolean> {
-  if (workspaceId === where.chatWorkspaceId) return true;
-  return holds(await where.workspacePermissions(workspaceId), "workspace:read");
+async function mayIn(
+  where: LookupContext,
+  workspaceId: string,
+  permission: string,
+): Promise<boolean> {
+  const held = await where.workspacePermissions(workspaceId);
+  if (held === null) return workspaceId === where.chatWorkspaceId;
+  return holds(held, permission);
 }
 
 /** Organization records are read only by someone whose role holds one of these, as its route requires. */
@@ -294,9 +334,10 @@ async function ownsWorkspace(where: LookupContext, workspaceId: string): Promise
   });
 }
 
-/** A row of a workspace table by uuid, or not found. */
+/** A row of a workspace table by uuid, for a route needing `permission`, or not found. */
 function workspaceRow<T>(
   kind: string,
+  permission: string,
   read: (
     db: Database,
     workspaceId: string,
@@ -306,10 +347,12 @@ function workspaceRow<T>(
   target: (row: T, where: LookupContext) => AppActionTarget,
 ): Lookup {
   return async (where) => {
+    const workspaceId = await workspaceAccess(where, where.ids.workspaceId, permission);
     if (!UUID.test(where.id)) return missing(kind);
-    const row = await inWorkspace(
+    const row = await asPersonIn(
       where,
-      async (db, workspaceId) => (await read(db, workspaceId, where.id, where)) ?? null,
+      workspaceId,
+      async (db, id) => (await read(db, id, where.id, where)) ?? null,
     );
     return row ? target(row, where) : missing(kind);
   };
@@ -337,7 +380,7 @@ const workspaceLookup: Lookup = async (where) => {
   if (!UUID.test(where.id)) return missing("workspace");
   if (!(await ownsWorkspace(where, where.id))) unresolved();
   // Its name is a member's to see, or an organization admin's, whose pages list workspaces.
-  if (!(await actsIn(where, where.id)))
+  if (!(await mayIn(where, where.id, "workspace:read")))
     await organizationMay(where, "members:manage", "account:admin");
   const row = await withAccountRls(where.db, where.accountId, async (db) => {
     const [found] = await db
@@ -367,6 +410,7 @@ const organizationLookup: Lookup = async (where) => {
 
 const sessionLookup = workspaceRow(
   "chat",
+  "sessions:read",
   async (db, workspaceId, id, where) =>
     (
       await db
@@ -412,6 +456,7 @@ async function integrationName(db: Database, providerDomain: string): Promise<st
 
 const connectionLookup = workspaceRow(
   "connection",
+  "connections:read",
   async (db, workspaceId, id, where) => {
     const [row] = await db
       .select({
@@ -461,7 +506,8 @@ const connectionLookup = workspaceRow(
 const SOCIAL_NAMES: Record<string, string> = { x: "X", reddit: "Reddit", linkedin: "LinkedIn" };
 const socialConnectionLookup = workspaceRow(
   "connection",
-  async (db, workspaceId, id) =>
+  "connections:read",
+  async (db, workspaceId, id, where) =>
     (
       await db
         .select({
@@ -475,6 +521,11 @@ const socialConnectionLookup = workspaceRow(
           and(
             eq(schema.socialConnections.id, id),
             eq(schema.socialConnections.workspaceId, workspaceId),
+            // A colleague's personal one is theirs alone (also its row policy).
+            or(
+              isNull(schema.socialConnections.subjectId),
+              eq(schema.socialConnections.subjectId, where.subjectId),
+            ),
           ),
         )
         .limit(1)
@@ -512,6 +563,7 @@ const organizationMcpConnectionLookup: Lookup = async (where) => {
 
 const siteLookup = workspaceRow(
   "Site",
+  "artifacts:read",
   async (db, workspaceId, id, where) =>
     (
       await db
@@ -596,6 +648,7 @@ export function scheduleSummary(schedule: unknown): string | undefined {
 
 const scheduledTaskLookup = workspaceRow(
   "scheduled task",
+  "scheduled_tasks:run",
   async (db, workspaceId, id, where) =>
     (
       await db
@@ -627,40 +680,54 @@ const scheduledTaskLookup = workspaceRow(
   }),
 );
 
+/**
+ * Each key route touches one kind of key, as the API's do: an organization's
+ * own keys (no workspace), personal keys, or one workspace's keys.
+ */
 const apiKeyLookup: Lookup = async (where) => {
-  if (!UUID.test(where.id)) return missing("API key");
-  const read = async (db: Database) =>
-    (
-      await db
-        .select({
-          name: schema.apiKeys.name,
-          prefix: schema.apiKeys.prefix,
-          workspaceId: schema.apiKeys.workspaceId,
-          lastUsedAt: schema.apiKeys.lastUsedAt,
-          expiresAt: schema.apiKeys.expiresAt,
-          revokedAt: schema.apiKeys.revokedAt,
-          credentialKind: schema.apiKeys.credentialKind,
-          ownerSubjectId: schema.apiKeys.ownerSubjectId,
-        })
-        .from(schema.apiKeys)
-        .where(and(eq(schema.apiKeys.id, where.id), eq(schema.apiKeys.accountId, where.accountId)))
-        .limit(1)
-    )[0];
-  if (where.organization) ownOrganization(where);
-  const row = where.organization
-    ? await withAccountRls(where.db, where.accountId, read)
-    : ((await inWorkspace(where, async (db, workspaceId) => {
-        const found = await read(db);
-        return found && found.workspaceId === workspaceId ? found : null;
-      })) ?? undefined);
-  // As the API reads them: a personal key is its owner's and an organization
-  // admin's to see, an organization's keys are an admin's, and a workspace's
-  // keys are for whoever manages them there.
-  const ownKey = row?.credentialKind === "personal" && row.ownerSubjectId === where.subjectId;
-  if (!ownKey) {
-    if (row?.credentialKind === "personal") await organizationMay(where, "account:admin");
-    else if (where.organization) await organizationMay(where, "api_keys:manage", "account:admin");
-    else await managesWorkspace(where, where.ids.workspaceId, "api_keys:manage");
+  const keys = schema.apiKeys;
+  const read = (db: Database, scope: ReturnType<typeof and>) =>
+    db
+      .select({
+        name: keys.name,
+        prefix: keys.prefix,
+        lastUsedAt: keys.lastUsedAt,
+        expiresAt: keys.expiresAt,
+        revokedAt: keys.revokedAt,
+        ownerSubjectId: keys.ownerSubjectId,
+      })
+      .from(keys)
+      .where(and(eq(keys.id, where.id), eq(keys.accountId, where.accountId), scope))
+      .limit(1)
+      .then((rows) => rows[0]);
+  let row: Awaited<ReturnType<typeof read>>;
+  if (where.segments.includes("personal-api-keys")) {
+    ownOrganization(where);
+    // Someone's own key is theirs to see; anyone else's only an account admin's.
+    row = UUID.test(where.id)
+      ? await withAccountRls(where.db, where.accountId, (db) =>
+          read(db, and(eq(keys.credentialKind, "personal"))),
+        )
+      : undefined;
+    if (row?.ownerSubjectId !== where.subjectId) await organizationMay(where, "account:admin");
+  } else if (where.organization) {
+    ownOrganization(where);
+    await organizationMay(where, "api_keys:manage", "account:admin");
+    if (!UUID.test(where.id)) return missing("API key");
+    row = await withAccountRls(where.db, where.accountId, (db) =>
+      read(db, and(eq(keys.credentialKind, "organization"), isNull(keys.workspaceId))),
+    );
+  } else {
+    // A workspace's keys are for whoever manages them there.
+    await managesWorkspace(where, where.ids.workspaceId, "api_keys:manage");
+    const workspaceId = await workspaceAccess(where, where.ids.workspaceId, "api_keys:manage");
+    if (!UUID.test(where.id)) return missing("API key");
+    row =
+      (await asPersonIn(
+        where,
+        workspaceId,
+        async (db, id) => (await read(db, and(eq(keys.workspaceId, id)))) ?? null,
+      )) ?? undefined;
   }
   return row
     ? {
@@ -687,7 +754,7 @@ const roleName = (role: unknown) =>
   typeof role === "string" ? (ROLE_NAMES[role] ?? role) : undefined;
 
 const workspaceMemberLookup: Lookup = async (where) => {
-  const row = await inWorkspace(where, async (db, workspaceId) => {
+  const row = await inWorkspace(where, "workspace:read", async (db, workspaceId) => {
     const [found] = await db
       .select({
         label: schema.workspaceMemberships.subjectLabel,
@@ -778,7 +845,6 @@ const invitationLookup = organizationRoutine(
 
 /** A vault, read through the vault routines as the person the chat acts for. */
 const vaultLookup: Lookup = async (where) => {
-  if (!UUID.test(where.id)) return missing("vault");
   const vault = await asVaultReader(where, (context) =>
     getVault(where.db, context, { vaultId: where.id }),
   );
@@ -788,7 +854,6 @@ const vaultLookup: Lookup = async (where) => {
 };
 
 const vaultItemLookup: Lookup = async (where) => {
-  if (!UUID.test(where.id)) return missing("vault item");
   const item = await asVaultReader(where, (context) =>
     getVaultItem(where.db, context, { itemId: where.id }),
   );
@@ -805,10 +870,8 @@ async function asVaultReader<T>(
   where: LookupContext,
   read: (context: VaultDbContext) => Promise<T>,
 ): Promise<T | undefined> {
-  const workspaceId = where.ids.workspaceId;
-  if (!workspaceId || !UUID.test(workspaceId)) unresolved();
-  if (!(await ownsWorkspace(where, workspaceId)) || !(await actsIn(where, workspaceId)))
-    unresolved();
+  const workspaceId = await workspaceAccess(where, where.ids.workspaceId, "secrets:list");
+  if (!UUID.test(where.id)) return undefined;
   try {
     return await read({
       kind: "subject",
@@ -849,14 +912,16 @@ function webhookHost(url: string): string {
 }
 
 const webhookLookup: Lookup = async (where) => {
-  if (!UUID.test(where.id)) return missing("webhook");
+  let workspaceId: string | undefined;
   if (where.organization) {
     ownOrganization(where);
     await organizationMay(where, "account:admin");
   } else {
     await managesWorkspace(where, where.ids.workspaceId, "workspace:admin");
+    workspaceId = await workspaceAccess(where, where.ids.workspaceId, "workspace:admin");
   }
-  const row = where.organization
+  if (!UUID.test(where.id)) return missing("webhook");
+  const row = !workspaceId
     ? await withAccountRls(
         where.db,
         where.accountId,
@@ -878,7 +943,7 @@ const webhookLookup: Lookup = async (where) => {
               .limit(1)
           )[0],
       )
-    : ((await inWorkspace(where, async (db, workspaceId) => {
+    : ((await asPersonIn(where, workspaceId, async (db) => {
         const [found] = await db
           .select({
             url: schema.workspaceWebhooks.url,
@@ -907,9 +972,10 @@ const webhookLookup: Lookup = async (where) => {
   };
 };
 
-/** A workspace table with a name column, looked up by uuid. */
+/** A workspace table with a name column, looked up by uuid, for a route needing `permission`. */
 function named(
   kind: string,
+  permission: string,
   table:
     | typeof schema.rigs
     | typeof schema.channels
@@ -919,6 +985,7 @@ function named(
 ): Lookup {
   return workspaceRow(
     kind,
+    permission,
     async (db, workspaceId, id, where) =>
       (
         await db
@@ -945,6 +1012,7 @@ function named(
 
 const documentLookup = workspaceRow(
   "document",
+  "documents:search",
   async (db, workspaceId, id, where) =>
     (
       await db
@@ -982,6 +1050,7 @@ const documentLookup = workspaceRow(
 
 const eventSourceLookup = workspaceRow(
   "event source",
+  "scheduled_tasks:run",
   async (db, workspaceId, id, where) =>
     (
       await db
@@ -1037,6 +1106,7 @@ const serviceAccountLookup = organizationRow(
 
 const workspaceCustomModelLookup = workspaceRow(
   "custom model",
+  "workspace:read",
   async (db, workspaceId, id) =>
     (
       await db
@@ -1098,16 +1168,18 @@ const SUBSCRIPTION_NAMES: Record<string, string> = {
 };
 
 const subscriptionAccountLookup: Lookup = async (where) => {
-  if (!UUID.test(where.id)) return missing("account");
+  let workspaceId: string | undefined;
   if (where.organization) ownOrganization(where);
+  else workspaceId = await workspaceAccess(where, where.ids.workspaceId, "workspace:read");
+  if (!UUID.test(where.id)) return missing("account");
   // Subscription accounts are visible only to a person, in a workspace for workspace routes.
   const asPerson = <T>(run: (db: Database) => Promise<T>) =>
-    where.organization
+    !workspaceId
       ? withRlsContext(where.db, { accountId: where.accountId, workspaceId: null }, async (db) => {
           await setSubjectRlsContext(db, where.subjectId);
           return await run(db);
         })
-      : inWorkspace(where, async (db) => (await run(db)) ?? null);
+      : asPersonIn(where, workspaceId, async (db) => (await run(db)) ?? null);
   const row = await asPerson(async (db) => {
     const [core] = await db
       .select({
@@ -1138,8 +1210,9 @@ const subscriptionAccountLookup: Lookup = async (where) => {
 };
 
 const githubInstallationLookup: Lookup = async (where) => {
+  const workspaceId = await workspaceAccess(where, where.ids.workspaceId, "github:use");
   if (!/^[1-9][0-9]{0,15}$/.test(where.id)) return missing("GitHub installation");
-  const row = await inWorkspace(where, async (db, workspaceId) => {
+  const row = await asPersonIn(where, workspaceId, async (db) => {
     const [found] = await db
       .select({
         login: schema.githubInstallations.accountLogin,
@@ -1168,7 +1241,7 @@ const githubInstallationLookup: Lookup = async (where) => {
 /** A capability (integration or Skill) by its catalog id, as the workspace sees it. */
 function capabilityLookup(kind: string): Lookup {
   return async (where) => {
-    const row = await inWorkspace(where, async (db, workspaceId) => {
+    const row = await inWorkspace(where, "workspace:read", async (db, workspaceId) => {
       const rows = await db
         .select({
           name: schema.capabilityCatalogItems.name,
@@ -1205,7 +1278,7 @@ function capabilityLookup(kind: string): Lookup {
 }
 
 const pluginLookup: Lookup = async (where) => {
-  const row = await inWorkspace(where, async (db, workspaceId) => {
+  const row = await inWorkspace(where, "workspace:read", async (db, workspaceId) => {
     const rows = await db
       .select({
         name: schema.capabilityPlugins.name,
@@ -1233,34 +1306,15 @@ const pluginLookup: Lookup = async (where) => {
   return row ? { kind: "plugin", name: row.name } : missing("plugin");
 };
 
-function interactiveSession(
-  kind: string,
-  table: typeof schema.browserSessions | typeof schema.computerSessions,
-): Lookup {
-  return workspaceRow(
-    kind,
-    async (db, workspaceId, id) =>
-      (
-        await db
-          .select({ name: table.name, createdAt: table.createdAt })
-          .from(table)
-          .where(and(eq(table.id, id), eq(table.workspaceId, workspaceId)))
-          .limit(1)
-      )[0],
-    (row) => ({
-      kind,
-      name: row.name?.trim() || `Unnamed ${kind}`,
-      facts: facts(["Opened", targetMoment(row.createdAt)]),
-    }),
-  );
-}
-
 /**
  * Lookups by the route words before an id ("connections/:connectionId"), so
  * an id is read only from the table its route names; the route's root comes
  * first where those words mean different tables ("workspaces/members" and
  * "organizations/members"). Ids named the same in every route (workspace,
- * chat, organization) resolve by their parameter.
+ * chat, organization) resolve by their parameter. Browser and computer
+ * sessions and admins' private-task summaries have none: their routes read
+ * through rules (the source chat's visibility, the organization's privacy
+ * setting) a lookup would only approximate, so they stay unresolved.
  */
 const LOOKUPS: Record<string, Lookup> = {
   ":workspaceId": workspaceLookup,
@@ -1275,22 +1329,25 @@ const LOOKUPS: Record<string, Lookup> = {
   "published-artifacts/:artifactId": siteLookup,
   "published-artifacts/:siteId": siteLookup,
   "scheduled-tasks/:taskId": scheduledTaskLookup,
-  "scheduled-tasks/private-summaries/:taskId": scheduledTaskLookup,
   "api-keys/:apiKeyId": apiKeyLookup,
   "personal-api-keys/:apiKeyId": apiKeyLookup,
   "workspaces/members/:subjectId": workspaceMemberLookup,
   "organizations/members/:membershipId": organizationMemberLookup,
   "organizations/invitations/:invitationId": invitationLookup,
   "webhooks/:webhookId": webhookLookup,
-  "rigs/:rigId": named("rig", schema.rigs),
+  "rigs/:rigId": named("rig", "rigs:use", schema.rigs),
   "vaults/:vaultId": vaultLookup,
   "items/:itemId": vaultItemLookup,
-  "channels/:channelId": named("channel", schema.channels),
-  "document-bases/:baseId": named("document collection", schema.documentBases),
+  "channels/:channelId": named("channel", "workspace:read", schema.channels),
+  "document-bases/:baseId": named("document collection", "documents:search", schema.documentBases),
   "documents/:documentId": documentLookup,
   "event-sources/:sourceId": eventSourceLookup,
-  "bot-templates/:templateId": named("bot template", schema.botTemplates),
-  "automation-templates/:templateId": named("automation template", schema.automationTemplates),
+  "bot-templates/:templateId": named("bot template", "workspace:read", schema.botTemplates),
+  "automation-templates/:templateId": named(
+    "automation template",
+    "scheduled_tasks:run",
+    schema.automationTemplates,
+  ),
   "service-accounts/:serviceAccountId": serviceAccountLookup,
   "workspaces/custom-models/:customModelId": workspaceCustomModelLookup,
   "gateway-custom-models/:customModelId": workspaceCustomModelLookup,
@@ -1305,8 +1362,6 @@ const LOOKUPS: Record<string, Lookup> = {
   "capabilities/:capabilityId": capabilityLookup("integration"),
   "skills/:capabilityId": capabilityLookup("Skill"),
   "plugins/:pluginKey": pluginLookup,
-  "browser-sessions/:browserSessionId": interactiveSession("browser", schema.browserSessions),
-  "computer-sessions/:computerSessionId": interactiveSession("computer", schema.computerSessions),
 };
 
 const KNOWN_PARENTS = new Set([

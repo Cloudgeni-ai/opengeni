@@ -97,7 +97,10 @@ const removal = (workspaceId: string, connectionId: string) => ({
 test("a connection resolves to its integration, account and telling facts", async () => {
   if (!client) return;
   const org = await organization("Cloudgeni");
-  const person = await member(org.accountId, org.workspaceId);
+  const person = await member(org.accountId, org.workspaceId, "member", [
+    "workspace:read",
+    "connections:read",
+  ]);
   await shared!.admin`
     insert into capability_catalog_items (id, kind, name, provider_domain)
     values (${`gmail-${org.accountId}`}, 'mcp', 'Gmail', ${`gmail-${org.accountId}.example`})`;
@@ -147,7 +150,10 @@ test("what the person can't see reads as not found; another organization's stays
   if (!client) return;
   const org = await organization("Cloudgeni");
   const other = await organization("Someone else");
-  const person = await member(org.accountId, org.workspaceId);
+  const person = await member(org.accountId, org.workspaceId, "member", [
+    "workspace:read",
+    "connections:read",
+  ]);
   const theirs = await connection({
     ...org,
     providerDomain: "gmail.example",
@@ -175,6 +181,19 @@ test("what the person can't see reads as not found; another organization's stays
   );
   expect(stranger).toEqual({});
   expect(JSON.stringify(stranger)).not.toContain("stranger");
+  // Nor is an id that isn't one, there: the workspace is checked first.
+  expect(
+    await resolveAppActionTargets(client.db, scope, removal(other.workspaceId, "Gmail")),
+  ).toEqual({});
+  // Someone whose role can't read connections sees none named, nor "not found".
+  const viewer = await member(org.accountId, org.workspaceId);
+  expect(
+    await resolveAppActionTargets(
+      client.db,
+      { ...scope, subjectId: viewer },
+      removal(org.workspaceId, theirs),
+    ),
+  ).toEqual({});
   // An id that isn't one, or a route without a lookup, names nothing either.
   expect(
     await resolveAppActionTargets(client.db, scope, removal(org.workspaceId, "Gmail")),
@@ -235,7 +254,11 @@ test("another workspace is named only for someone who acts in it", async () => {
 test("a colleague's Only me Site or schedule is never named; shared ones and your own are", async () => {
   if (!client) return;
   const org = await organization("Cloudgeni");
-  const person = await member(org.accountId, org.workspaceId);
+  const person = await member(org.accountId, org.workspaceId, "member", [
+    "workspace:read",
+    "artifacts:read",
+    "scheduled_tasks:run",
+  ]);
   const colleague = await member(org.accountId, org.workspaceId);
   const site = async (title: string, owner: string | null) => {
     const [row] = await shared!.admin<{ id: string }[]>`
@@ -291,6 +314,28 @@ test("a colleague's Only me Site or schedule is never named; shared ones and you
   expect(
     await named(removeSchedule(await schedule("Their reminders", colleague)), "taskId"),
   ).toEqual({ kind: "scheduled task" });
+  // A viewer, whose role can't use schedules, sees even a shared one unnamed.
+  const viewer = await member(org.accountId, org.workspaceId);
+  expect(
+    (
+      await resolveAppActionTargets(
+        client.db,
+        { ...scope, subjectId: viewer },
+        removeSchedule(await schedule("Payroll run", null)),
+      )
+    ).taskId,
+  ).toBeUndefined();
+  // An admin's pause of a colleague's private task reads through rules a
+  // lookup can't copy: unresolved, never a false "not found".
+  expect(
+    await resolveAppActionTargets(client.db, scope, {
+      id: "pausePrivateScheduledTask",
+      pathParameters: {
+        workspaceId: org.workspaceId,
+        taskId: await schedule("Their reminders", colleague),
+      },
+    }),
+  ).toEqual({});
 });
 
 test("organization keys, others' keys and webhooks need the role their routes need; webhooks show only their host", async () => {
@@ -311,6 +356,11 @@ test("organization keys, others' keys and webhooks need the role their routes ne
   const orgKey = await key("organization", null, "CI deploy key");
   const mine = await key("personal", person, "My laptop");
   const theirs = await key("personal", colleague, "Their laptop");
+  const [workspaceKey] = await shared!.admin<{ id: string }[]>`
+    insert into api_keys (account_id, workspace_id, name, prefix, key_hash, credential_kind)
+    values (${org.accountId}, ${org.workspaceId}, 'Workspace deploy key', 'og_ww12',
+      ${crypto.randomUUID()}, 'workspace')
+    returning id`;
   const [hook] = await shared!.admin<{ id: string }[]>`
     insert into organization_webhooks (account_id, url, secret_encrypted, event_types)
     values (${org.accountId}, 'https://hooks.slack.com/services/T000/B000/s3cretpath', 'sealed',
@@ -344,6 +394,19 @@ test("organization keys, others' keys and webhooks need the role their routes ne
   expect(await read(member_, revokeMine, "apiKeyId")).toMatchObject({ name: "My laptop" });
   expect(await read(member_, revokeTheirs, "apiKeyId")).toBeUndefined();
   expect(await read(member_, deleteHook, "webhookId")).toBeUndefined();
+  // Each route reads only its own kind of key, as the API's do: their own
+  // key on the organization-key route is not theirs to name there.
+  expect(
+    await read(member_, call("deleteOrganizationApiKey", "apiKeyId", mine), "apiKeyId"),
+  ).toBeUndefined();
+  for (const id of ["deleteOrganizationApiKey", "revokePersonalApiKey"]) {
+    const other = call(id, "apiKeyId", workspaceKey!.id);
+    expect(await read(admin, other, "apiKeyId")).toEqual({ kind: "API key" });
+    expect(await read(member_, other, "apiKeyId")).toBeUndefined();
+  }
+  expect(await read(admin, call("revokePersonalApiKey", "apiKeyId", orgKey), "apiKeyId")).toEqual({
+    kind: "API key",
+  });
   for (const value of [deleteOrgKey, revokeTheirs]) {
     expect(await read(workspaceAdmin, value, "apiKeyId")).toBeUndefined();
   }
@@ -364,6 +427,19 @@ test("organization keys, others' keys and webhooks need the role their routes ne
       "apiKeyId",
     ),
   ).toBeUndefined();
+  // Even with an id that isn't one: the organization is checked first.
+  for (const [value, parameter] of [
+    [deleteOrgKey, "apiKeyId"],
+    [deleteHook, "webhookId"],
+  ] as const) {
+    expect(
+      await read(
+        admin,
+        { ...value, pathParameters: { organizationId: crypto.randomUUID(), [parameter]: "nope" } },
+        parameter,
+      ),
+    ).toBeUndefined();
+  }
   // An admin sees what the API shows them.
   expect(await read(admin, deleteOrgKey, "apiKeyId")).toMatchObject({ name: "CI deploy key" });
   expect(await read(admin, revokeTheirs, "apiKeyId")).toMatchObject({ name: "Their laptop" });
@@ -389,6 +465,16 @@ test("routes whose ids belong to something else get no lookup", async () => {
   expect(
     appActionTargetLookupKey("/v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId", "itemId"),
   ).toBe("items/:itemId");
+  // Browser and computer sessions read through their source chat's
+  // visibility, and private-task summaries through an organization setting:
+  // no lookup approximates those.
+  for (const [path, parameter] of [
+    ["/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId", "browserSessionId"],
+    ["/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/end", "computerSessionId"],
+    ["/v1/workspaces/:workspaceId/scheduled-tasks/private-summaries/:taskId/pause", "taskId"],
+  ] as const) {
+    expect(appActionTargetLookupKey(path, parameter)).toBeUndefined();
+  }
 });
 
 test("schedules read as plain words", () => {
@@ -462,8 +548,10 @@ test("every confirmed action's lookup runs against the real schema and says not 
 test("a member never sees a colleague's private rows or the workspace's keys and webhooks", async () => {
   if (!client) return;
   const org = await organization("Cloudgeni");
-  const person = await member(org.accountId, org.workspaceId);
-  const colleague = await member(org.accountId, org.workspaceId);
+  // Both may use automations, so only the rows' privacy tells them apart.
+  const automations = ["workspace:read", "scheduled_tasks:run"];
+  const person = await member(org.accountId, org.workspaceId, "member", automations);
+  const colleague = await member(org.accountId, org.workspaceId, "member", automations);
   const workspaceAdmin = await member(org.accountId, org.workspaceId, "member", [
     "workspace:admin",
   ]);

@@ -19,16 +19,17 @@ export function noticeIsResolvedApproval(
  */
 export function approvalHistoryTitle(title: string): string {
   let quoted = 0;
+  let end = -1;
   for (let index = 0; index < title.length; index += 1) {
     const char = title[index];
     if (char === "“") quoted += 1;
     else if (char === "”") quoted = Math.max(0, quoted - 1);
-    // The question ends at a "?" that ends the title or starts another
-    // sentence, so a "?" inside an account name doesn't cut it short.
+    // The question ends at the last "?" that ends the title or starts
+    // another sentence, so a "?" inside a name doesn't cut it short.
     else if (char === "?" && quoted === 0 && /^(\s+\p{Lu}|\s*$)/u.test(title.slice(index + 1)))
-      return title.slice(0, index).trim();
+      end = index;
   }
-  return title.trim();
+  return (end < 0 ? title : title.slice(0, end)).trim();
 }
 
 type ApprovalAction = NonNullable<NoticeItem["approvalActions"]>[number];

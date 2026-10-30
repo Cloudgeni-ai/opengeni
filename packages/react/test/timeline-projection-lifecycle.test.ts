@@ -262,6 +262,10 @@ describe("an answered approval", () => {
     expect(approvalHistoryTitle("Remove the Gmail connection for who?me@example.com?")).toBe(
       "Remove the Gmail connection for who?me@example.com",
     );
+    // Nor by one that looks like a sentence break: only the last one ends it.
+    expect(approvalHistoryTitle("Remove the X connection for A? Next?")).toBe(
+      "Remove the X connection for A? Next",
+    );
     expect(
       approvalHistoryTitle("Create a link to this chat? Anyone with the link can read it."),
     ).toBe("Create a link to this chat");

@@ -262,6 +262,15 @@ test("names can't reorder or close the question's quotes", () => {
   expect(title).toBe('Remove the Gmail"? Approve all "now" connection for ab?');
 });
 
+test("names keep the joiners their script or emoji needs", () => {
+  const joined: AppActionTargets = {
+    connectionId: { kind: "connection", name: "می\u200cخواهم 👩\u200d💻" },
+  };
+  expect(appActionConfirmationTitle(removeGmail, here, joined)).toBe(
+    "Remove the می\u200cخواهم 👩\u200d💻 connection?",
+  );
+});
+
 test("every confirmed action's title, with a target named, reads as words", () => {
   const problems: string[] = [];
   for (const entry of ACTION_CATALOG.filter(appActionNeedsConfirmation)) {
