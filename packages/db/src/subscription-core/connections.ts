@@ -29,12 +29,13 @@
  * capability decides whether a removal audits cleared Apps designations.
  */
 import { sql } from "drizzle-orm";
-import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "../database";
+import { rawRows, withRlsContext, type Database } from "../database";
 import {
   insertDisconnectAuditEventInScope,
   SUBSCRIPTION_CONNECTION_DISCONNECTED_AUDIT_ACTION,
   type DisconnectAuditActor,
 } from "../disconnect-audit";
+import { setSubscriptionAdministrationSubject } from "./account-administrator";
 import { withLosslessContentWriteVersion } from "../lossless-json";
 import * as schema from "../schema";
 import { resolveSubscriptionConnectionId } from "../subscription-core-repository";
@@ -213,7 +214,7 @@ export async function connectSubscriptionCoreConnection(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (tx) => {
-        await setSubjectRlsContext(tx, input.subjectId);
+        await setSubscriptionAdministrationSubject(tx, input);
         if (
           input.workspaceId !== null &&
           (input.personal === true ||
@@ -729,7 +730,7 @@ export async function resolveSubscriptionCoreRouteConnectionId(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
+      await setSubscriptionAdministrationSubject(tx, input);
       return await resolveRouteConnectionIdInTransaction(tx, provider, input, input.connectionId);
     },
   );
@@ -749,7 +750,7 @@ export async function disconnectSubscriptionCoreConnection(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
+      await setSubscriptionAdministrationSubject(tx, input);
       const target = await disconnectTarget(tx, provider, input, input.connectionId);
       if (!target) {
         return {
@@ -819,7 +820,7 @@ export async function disconnectAllSubscriptionCoreConnections(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (tx) => {
-        await setSubjectRlsContext(tx, input.subjectId);
+        await setSubscriptionAdministrationSubject(tx, input);
         const personalWorkspace =
           (await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal";
         const ids = personalWorkspace

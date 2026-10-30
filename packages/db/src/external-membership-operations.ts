@@ -176,10 +176,13 @@ export const USER_ISOLATION_WORKSPACE_SOURCE_PREFIX = "opengeni-sdk:user-isolati
  * organization membership and requires both active), and the same receipt and
  * lifecycle event attributed to the key. It only inserts a missing row (insert
  * ... on conflict do nothing): an existing membership is returned unchanged.
- * There is no tombstone: a member removed from a shared workspace is created
- * again on their next request, because the host owns its users. Personal and
- * SDK per-user (`opengeni-sdk:user-isolation:*`) workspaces are refused.
- * Concurrent first requests serialize on the organization fence.
+ * A removal stamped after `revocationWatermark` (read under the same fence
+ * when the request authenticated) wins exactly as for a stated membership:
+ * the request is `superseded` and creates nothing. A request that
+ * authenticates after the removal creates the member again, because the host
+ * owns its users. Personal and SDK per-user (`opengeni-sdk:user-isolation:*`)
+ * workspaces are refused. Concurrent first requests serialize on the
+ * organization fence.
  */
 export async function ensureExternalWorkspaceMemberOnFirstUse(
   db: Database,
@@ -188,8 +191,9 @@ export async function ensureExternalWorkspaceMemberOnFirstUse(
     subjectId: string;
     identity: { source: string; externalId: string };
     permissions: readonly Permission[];
+    revocationWatermark: string;
   },
-): Promise<"created" | "existing"> {
+): Promise<"created" | "existing" | "superseded"> {
   const permissions = [...new Set(input.permissions)].sort();
   const refuse = (message: string): never => {
     throw Object.assign(new Error(message), { code: "42501" });
@@ -216,6 +220,15 @@ export async function ensureExternalWorkspaceMemberOnFirstUse(
       (member) => member.subjectId === input.subjectId,
     );
     if (existing) return "existing";
+    if (
+      await revokedAfter(tx, {
+        organizationId: scope.organizationId,
+        workspaceId: scope.workspaceId,
+        subjectId: input.subjectId,
+        revocationWatermark: input.revocationWatermark,
+      })
+    )
+      return "superseded";
     const command = {
       ...scope,
       action: "grant",
@@ -359,6 +372,27 @@ export async function readExternalWorkspaceRevocationWatermark(tx: Database): Pr
   return row.watermark;
 }
 
+/** Whether a removal of this member was stamped after the watermark a request
+ * read when it authenticated. Call under the organization membership fence. */
+async function revokedAfter(
+  tx: Database,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    subjectId: string;
+    revocationWatermark: string;
+  },
+): Promise<boolean> {
+  const [revocation] = await rawRows<{ newer: boolean }>(
+    tx,
+    sql`select revocation_sequence > ${input.revocationWatermark}::bigint as newer
+      from external_workspace_member_revocations
+      where account_id = ${input.organizationId}::uuid
+        and workspace_id = ${input.workspaceId}::uuid and subject_id = ${input.subjectId}`,
+  );
+  return revocation?.newer === true;
+}
+
 /** The audit reason recorded on receipts written for a stated membership. */
 export const STATED_EXTERNAL_MEMBERSHIP_REASON = "membership stated by request";
 
@@ -448,14 +482,15 @@ export async function applyStatedExternalWorkspaceMembership(
       existing.every((permission) => permissions.includes(permission))
     )
       return "unchanged";
-    const [revocation] = await rawRows<{ newer: boolean }>(
-      tx,
-      sql`select revocation_sequence > ${input.revocationWatermark}::bigint as newer
-        from external_workspace_member_revocations
-        where account_id = ${scope.organizationId}::uuid
-          and workspace_id = ${scope.workspaceId}::uuid and subject_id = ${subjectId}`,
-    );
-    if (revocation?.newer) return "superseded";
+    if (
+      await revokedAfter(tx, {
+        organizationId: scope.organizationId,
+        workspaceId: scope.workspaceId,
+        subjectId,
+        revocationWatermark: input.revocationWatermark,
+      })
+    )
+      return "superseded";
     if (!existing) {
       const command = {
         ...scope,

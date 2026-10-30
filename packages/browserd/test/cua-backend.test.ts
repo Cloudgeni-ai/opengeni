@@ -2342,6 +2342,16 @@ describe("CUA desktop boundary", () => {
         message:
           "Keys reach only the focused window of a background app, and the app did not say which of its windows has focus, so none were sent: observe this window and try again, or use its controls instead",
       });
+      // An app's shortcuts go to its main window, and this window could not
+      // be made main (its app is the one in front): no other window is named,
+      // and the caller is not sent to a foreground delivery it does not have.
+      fixture.mutation = refused("window_not_main");
+      await expect(keys("text", await backend.observe("cua:window:42:1"))).rejects.toMatchObject({
+        code: "invalid_action",
+        dispatched: false,
+        message:
+          "Keys to this window could reach another of its app's windows, since an app's shortcuts go to its main window and this window could not be made main (when its app is the one in front, that would move the window the person is using), so none were sent: use this window's controls instead (set_value on a field, invoke on a button)",
+      });
       // An element CUA places in another window of the app that is a target
       // here: point at that target.
       fixture.mutation = result(

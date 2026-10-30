@@ -30,7 +30,8 @@ an agent reliably, without a second execution engine beside scheduled tasks.
     reads changes from (Gmail, through the owner's Gmail connection);
   - an **MCP connection** whose server offers the events extension;
   - **this workspace** itself: things that happen in Opengeni, such as a
-    meeting's transcript becoming ready.
+    meeting's transcript becoming ready, a chat finishing or failing, or a
+    usage limit being reached.
 
   Sources a person can only own themselves (an MCP server they are signed in
   to that offers events, a Gmail account they connected, this workspace) need
@@ -97,8 +98,10 @@ MCP source the trigger also holds the subscription arguments the server's
 6. **Loop protection.** Adapters mark events made by Opengeni's own identities
    (the GitHub App bot, the Slack bot). Triggers ignore them unless they opt in,
    as GitHub Actions ignores events made by a workflow's own token. Every event
-   run records its trigger and events, so chains are visible. A hop limit waits
-   for internal events, where causation is fully visible.
+   run records its trigger and events, so chains are visible. For Opengeni's
+   own events, where causation is fully visible, a chain limit stops
+   automations that wake each other after three levels
+   ([Opengeni's own events as triggers](opengeni-events-as-triggers.md#chain-limit)).
 7. **MCP Events follows SEP-3415.** Details below. Opengeni is the client and
    the webhook receiver, like a gateway in the spec's forward-proxy topology.
 8. **Ownership and visibility.** A webhook endpoint belongs to the person who
@@ -285,10 +288,10 @@ has.
 
 ### This workspace
 
-Things that happen in Opengeni itself are events too. Today these are meeting
-recordings (`recording_events`, the facts workspace webhooks already send);
-the general internal event spine comes later and adds its types to the same
-source.
+Things that happen in Opengeni itself are events too: meeting recordings
+(`recording_events`), and chats and usage (`workspace_activity_events`,
+[Opengeni's own events as triggers](opengeni-events-as-triggers.md)). Both
+are the facts workspace webhooks already send, by the same type names.
 
 - **One source per person.** A "This workspace" source shows its owner the
   workspace's events that person may see, so it is private to them like a
@@ -296,18 +299,28 @@ source.
   again returns the existing one, so clients add it on first use without a
   setup step. A workspace-level caller (an API key alone) gets 422.
 - **A feed read as the owner.** It has no route and is read like Gmail's
-  feed, but every 15 seconds and from the database: the owner's own
-  recordings and those shared with the workspace, under the owner's row
-  security, so a trigger only ever sees what its owner may see. Recording
-  events are stamped when written, not when committed, so each read looks
+  feed, but every 15 seconds and from the database: both fact tables, under
+  the owner's row security, so a trigger only ever sees what its owner may
+  see (their own recordings and chats and those shared with the workspace;
+  workspace usage for administrators, a member's usage for that member).
+  Facts are stamped when written, not when committed, so each read looks
   back 10 minutes and skips events the source already stored; the first read
   only learns where "now" is.
-- **Types** are the recording event types: `recording.started`,
+- **Types** are the outbound workspace webhook types
+  (`WORKSPACE_WEBHOOK_EVENT_TYPES`) less an explicit exclusion list
+  (`session.status.changed`, `session.notification.withdrawn`), so a new
+  webhook type is offered or excluded on purpose: the chat types
+  (`turn.completed`, `turn.failed`, `turn.cancelled`,
+  `session.requiresAction`, `session.humanInput.requested`,
+  `session.notification.posted`), the usage types
+  (`usage.threshold_reached`, `usage.exhausted`, `usage.period_reset`) and
+  the recording types (`recording.started`,
   `recording.finished`, `recording.transcript.ready`,
   `recording.transcript.failed`, `recording.transcript.current_changed`,
   `recording.speakers.updated`, `recording.notes.updated` and
-  `recording.deleted`; the catalog is keyed by the contract's list, so a new
-  recording type can't be left out. Data carries the
+  `recording.deleted`). What chat and usage events carry is in the
+  [design](opengeni-events-as-triggers.md#what-an-automation-receives). For
+  recordings, data carries the
   recording id, its title (the owner may see it, unlike a webhook receiver),
   purpose, state, visibility and external reference, so an agent reads the
   meeting with its meeting tools, and `recordedByYou`: whether the source's
@@ -316,8 +329,10 @@ source.
   notes an agent saved (`data.sessionId` names its chat), count as
   Opengeni's own events, so an automation that writes a meeting's notes
   doesn't wake one listening for saved notes unless that trigger opts in.
+  Chat events an automation run caused are Opengeni's own in the same way.
 - **Delivery log.** Each read with new events is one delivery whose body is
-  the events read, so it replays the same.
+  the facts read (`{ recordingEvents, activityEvents }`, with what the owner
+  saw of each chat), so it replays the same, chain depth included.
 
 ### MCP Events
 
@@ -595,6 +610,10 @@ the owner explicitly narrows them.
   is not active.
 - **UI.** Schedules become Automations. The editor has a "When" section with a
   schedule and event triggers; each run shows the events that caused it.
+  The event type picker groups "This workspace" types under Chats, Usage and
+  Meetings, and the "Also run for what Opengeni does" switch is offered for
+  "This workspace" as well as GitHub and Slack. A run the chain limit left
+  out shows as skipped with reason "chain limit".
   Event sources have a page with their endpoint, status and delivery log. Chats
   show what they are waiting for: the chat row's mark and hover card, the
   command menu and the chat header name the event and its source ("Waiting
@@ -657,6 +676,15 @@ linked as `speaker:` and `person:` mentions. It saves them with
 `meeting_notes_save` unless the meeting already has notes, and replies with
 them. While a person's own automation like this one is active, the built-in
 summary steps aside for their meetings.
+
+The built-in **When an automation fails** template listens on "This
+workspace" for `turn.failed` with Opengeni's own events included, where
+`data.automationRunId` exists (a chat an automation ran) and
+`data.startedByYou` is true (the person's own automations). It asks the agent
+to read the end of the failed chat with `session_events`, then tell the
+owner with `notify_user`, in two plain sentences, what failed and what would
+fix it, without retrying the work. Its own failures are bounded by the chain
+limit.
 
 **Where they show.** The web app has a Templates page (Automations, then
 Templates) with the built-in templates and the workspace's saved ones; New
@@ -734,3 +762,6 @@ later contract migration.
 7. PR Review on automations; old substrate deprecated.
 8. Templates (built-in, embedder and workspace) and the "This workspace"
    source with meeting events, with the built-in Meeting notes template.
+9. Opengeni's own chat and usage events on "This workspace", causation and
+   the chain limit, and the When an automation fails template
+   ([design](opengeni-events-as-triggers.md)).

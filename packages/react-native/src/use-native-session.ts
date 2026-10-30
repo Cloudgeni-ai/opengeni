@@ -66,6 +66,7 @@ export interface OpenGeniNativeSessionController {
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
   sessionStatus: SessionStatus | null;
   initialLoading: boolean;
+  initialHistoryReady?: boolean | undefined;
   hasOlder: boolean;
   loadingOlder: boolean;
   loadOlder(): Promise<boolean>;
@@ -269,6 +270,7 @@ export function useOpenGeniNativeSession(input: {
     admissionBlocked,
     displayStatus: admissionBlocked ? "blocked" : sessionStatus,
     initialLoading: events.initialLoading || session.loading,
+    initialHistoryReady: events.initialHistoryReady,
     hasOlder: events.hasOlder,
     loadingOlder: events.loadingOlder,
     loadOlder: events.loadOlder,
