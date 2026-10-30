@@ -22,8 +22,10 @@ describe("Site page size warnings", () => {
     expect(rest).toEqual([]);
     expect(warning?.code).toBe("page_heavy");
     expect(warning?.message).toContain("62 MB");
-    expect(warning?.suggestion).toContain("site_files_upload");
-    expect(warning?.suggestion).toContain("site.files.url");
+    expect(warning?.suggestion).toContain("compress images");
+    expect(warning?.suggestion).toContain("link video");
+    // Site files are not for anonymous visitors: the advice says so.
+    expect(warning?.suggestion).toContain("anonymous visitors can't read them");
     expect(sitePageSizeWarnings(SITE_PAGE_HEAVY_BYTES + 1)[0]?.message).toContain("5.0 MB");
   });
 

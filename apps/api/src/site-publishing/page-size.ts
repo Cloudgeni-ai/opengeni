@@ -1,7 +1,7 @@
 /**
  * A heavy Site page: a warning for the agent that published it, never a
- * refusal. Pages this large almost always embed images or video as data
- * URLs, which every visitor downloads before anything shows.
+ * refusal. Pages this large usually embed images or video as data URLs,
+ * which every visitor downloads before anything shows.
  */
 
 /** Above this, a published page gets a warning (the page itself, not its separate files). */
@@ -21,7 +21,7 @@ function megabytes(bytes: number): string {
 }
 
 const SUGGESTION =
-  "Move images and video out of the HTML: upload each to the Site's files (site_files_upload, shared scope) and load it with site.files.url(id) in the page, or link it where it is already hosted. Keep the page itself under 5 MB.";
+  "Shrink or move the media: resize and compress images to the size they are shown (WebP or JPEG), and link video or large images from where they are hosted instead of embedding them. For a Site only signed-in people open, Site files can hold them too (at most 10 MB each; anonymous visitors can't read them). Keep the page itself under 5 MB.";
 
 /** The warnings for a published page of this size (empty for an ordinary page). */
 export function sitePageSizeWarnings(sizeBytes: number): SitePageSizeWarning[] {
@@ -37,7 +37,7 @@ export function sitePageSizeWarnings(sizeBytes: number): SitePageSizeWarning[] {
     return [
       {
         code: "page_heavy",
-        message: `This Site's page is ${megabytes(sizeBytes)}, so it loads slowly, and visitors download all of it before anything shows. Pages this large usually embed images or video as data URLs.`,
+        message: `This Site's page is ${megabytes(sizeBytes)}, so it loads slowly: visitors download all of it before anything shows. Images or video embedded as data URLs are the usual cause.`,
         suggestion: SUGGESTION,
       },
     ];

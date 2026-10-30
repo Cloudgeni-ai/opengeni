@@ -176,11 +176,12 @@ immutable versions and retained source. There is no hard-delete workflow.
 
 ### Keep the page small
 
-Visitors download all of the HTML before anything shows, and a page over
-256 MB can't be shown. Keep it under 5 MB: put photos and video in Site files
-(`references/site-data.md`) or link them where they are hosted. A create
-or publish result with `warnings` means the page is too heavy: move the media
-out and publish again.
+Visitors download all of the HTML before anything shows, and the Sites gateway
+can't serve a page over 256 MB. Keep it under 5 MB: resize and compress images
+to their shown size (WebP or JPEG), and link video or large images from where
+they are hosted. Site files (`references/site-data.md`) also hold media for
+Sites only signed-in people open. A create or publish result with `warnings`
+means the page is too heavy: shrink or move the media and publish again.
 
 ## Publish to the web
 

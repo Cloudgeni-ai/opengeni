@@ -1231,6 +1231,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!replayText || replayText.type !== "text") throw new Error("missing MCP replay result");
       const replayed = WorkspaceArtifactMutationResponse.parse(JSON.parse(replayText.text));
       expect(replayed.replayed).toBe(true);
+      expect(
+        JSON.parse(replayText.text).warnings.map((warning: { code: string }) => warning.code),
+      ).toEqual(["page_heavy"]);
       expect(replayed.artifact.id).toBe(created.artifact.id);
       expect(objectPutCount).toBe(putsAfterCreate);
 
