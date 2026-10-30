@@ -1724,7 +1724,7 @@ describe("the personal-workspace exception stays owner-only", () => {
     expect(list.status).toBe(401);
   }, 180_000);
 
-  // Migration 1094 lets the owner's own row exist in their Personal workspace.
+  // Migration 1107 lets the owner's own row exist in their Personal workspace.
   // The row must not let anyone who merely names the owner in: only verified
   // owning-user proof reaches Personal, with or without the row.
   test("the owner's own membership row gives a delegated bearer naming the owner nothing", async () => {
