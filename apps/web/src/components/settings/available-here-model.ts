@@ -37,7 +37,8 @@ export type AvailableLocation =
   | { page: "plugins"; section?: "skills" | undefined }
   | { page: "machines" }
   | { page: "rig"; rigId: string }
-  | { page: "vault"; vaultId: string }
+  /** In the workspace the page is anchored on, or in `workspaceId` when it works only elsewhere. */
+  | { page: "vault"; vaultId: string; workspaceId?: string | undefined }
   /** No scope: every scope's Knowledge (a Personal workspace's own and yours). */
   | { page: "knowledge"; scope?: "organization" | "workspace" | "personal" | undefined };
 
@@ -76,7 +77,7 @@ const MACHINE_STATES: Partial<Record<MachineState, string>> = {
   enrolling: "Setting up",
 };
 
-function vaultState(vault: VaultSummary): string | null {
+export function vaultState(vault: VaultSummary): string | null {
   if (vault.syncStatus === "auth_expired") return "Sign-in expired";
   if (vault.syncStatus === "error") return "Sync failed";
   return null;
@@ -210,10 +211,15 @@ async function skills(client: AvailableHereClient, workspaceId: string) {
 }
 
 const KNOWLEDGE_SCOPES = ["workspace", "organization", "personal"] as const;
+type KnowledgeScope = (typeof KNOWLEDGE_SCOPES)[number];
 
-async function knowledge(client: AvailableHereClient, workspaceId: string) {
+async function knowledge(
+  client: AvailableHereClient,
+  workspaceId: string,
+  scopes: readonly KnowledgeScope[] = KNOWLEDGE_SCOPES,
+) {
   const found = await Promise.all(
-    KNOWLEDGE_SCOPES.map(async (scope) => {
+    scopes.map(async (scope) => {
       const listed = await client.listKnowledgeEntries(workspaceId, {
         scope,
         mode: "keyword",
@@ -223,7 +229,7 @@ async function knowledge(client: AvailableHereClient, workspaceId: string) {
     }),
   );
   return found
-    .filter((scope): scope is (typeof KNOWLEDGE_SCOPES)[number] => scope !== null)
+    .filter((scope): scope is KnowledgeScope => scope !== null)
     .map(
       (scope): AvailableThing => ({
         key: `knowledge:${scope}`,
@@ -238,12 +244,23 @@ async function knowledge(client: AvailableHereClient, workspaceId: string) {
     );
 }
 
-const LOADERS: Readonly<
+/**
+ * Each kind's loader. Organization settings › Shared reuses them for the
+ * organization's own things, which reach every workspace, so one workspace's
+ * lists hold them all.
+ */
+export const AVAILABLE_LOADERS: Readonly<
   Record<
     AvailableKind,
     (client: AvailableHereClient, workspaceId: string) => Promise<AvailableThing[]>
   >
-> = {
+> & {
+  knowledge: (
+    client: AvailableHereClient,
+    workspaceId: string,
+    scopes?: readonly KnowledgeScope[],
+  ) => Promise<AvailableThing[]>;
+} = {
   connector: connectors,
   machine: machines,
   rig: rigs,
@@ -266,7 +283,7 @@ export async function loadAvailableHere(
   workspaceId: string,
 ): Promise<AvailableHereResult> {
   const settled = await Promise.allSettled(
-    AVAILABLE_KINDS.map((kind) => LOADERS[kind](client, workspaceId)),
+    AVAILABLE_KINDS.map((kind) => AVAILABLE_LOADERS[kind](client, workspaceId)),
   );
   const things: AvailableThing[] = [];
   const failed: AvailableKind[] = [];
@@ -303,7 +320,7 @@ export type AvailableNames = {
 
 const KIND_ORDER = new Map(AVAILABLE_KINDS.map((kind, index) => [kind, index]));
 
-const KIND_LABELS: Readonly<Record<AvailableKind, string>> = {
+export const KIND_LABELS: Readonly<Record<AvailableKind, string>> = {
   connector: "Connector",
   machine: "Machine",
   rig: "Rig",
@@ -342,7 +359,7 @@ export function availableDescription(thing: AvailableThing, names: AvailableName
   return parts.join(" ");
 }
 
-function sortThings(things: AvailableThing[]): AvailableThing[] {
+export function sortThings(things: AvailableThing[]): AvailableThing[] {
   return [...things].sort(
     (a, b) =>
       (KIND_ORDER.get(a.kind) ?? 0) - (KIND_ORDER.get(b.kind) ?? 0) ||

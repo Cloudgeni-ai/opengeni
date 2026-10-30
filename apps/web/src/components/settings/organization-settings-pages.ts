@@ -5,6 +5,7 @@ import {
   CodeIcon,
   CreditCardIcon,
   FingerprintIcon,
+  LayersIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
@@ -24,14 +25,16 @@ type OrganizationSettingsItem = {
 /**
  * The organization's settings pages: one name and one icon each, in rail order.
  * A page that exists at both scopes wears the same icon in the workspace rail
- * (`settings-rail.tsx`): General, People/Access, Developer, Security. Models lives
- * here only: every model setting, a workspace's included, is on that one page.
+ * (`settings-rail.tsx`): General, People/Access, Shared/Available here,
+ * Developer, Security. Models lives here only: every model setting, a
+ * workspace's included, is on that one page.
  */
 export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = [
   { id: "general", label: "General", icon: SlidersHorizontalIcon },
   { id: "people", label: "People", icon: UsersIcon },
   { id: "workspaces", label: "Workspaces", icon: SquareStackIcon },
   { id: "identity", label: "Organization identity", icon: FingerprintIcon },
+  { id: "shared", label: "Shared", icon: LayersIcon },
   { id: "models", label: "Models", icon: SparklesIcon },
   { id: "integrations", label: "Integrations", icon: BlocksIcon },
   { id: "agents", label: "Connected agents", icon: BotIcon },
@@ -43,11 +46,11 @@ export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = 
 
 /**
  * The rail's two unlabeled groups: the organization and its people, then what
- * it provides, pays for and protects.
+ * it provides (Shared first: all of it at a glance), pays for and protects.
  */
 export const ORGANIZATION_SETTINGS_GROUPS: readonly (readonly OrganizationAdminSection[])[] = [
   ["general", "people", "workspaces", "identity"],
-  ["models", "integrations", "agents", "insights", "billing", "developer", "security"],
+  ["shared", "models", "integrations", "agents", "insights", "billing", "developer", "security"],
 ];
 
 export function organizationSettingsLabel(section: OrganizationAdminSection): string {
@@ -67,6 +70,8 @@ export function organizationSettingsDescription(
       return `Everyone in ${organizationName}, with one role each and a private Personal workspace.`;
     case "workspaces":
       return `Shared workspaces in ${organizationName}. Everyone also has a private Personal workspace.`;
+    case "shared":
+      return `Everything ${organizationName} shares with its workspaces, and where each works.`;
     case "models":
       return `The models people in ${organizationName} can use, and the subscriptions and keys that pay for them.`;
     case "integrations":

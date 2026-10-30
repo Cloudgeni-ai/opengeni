@@ -4036,7 +4036,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 withheld; 0978's, 0984's, 0988's, 1002's, 1060's, 1091's and 1107's stay deferred", () => {
+describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 withheld; 0978's, 0984's, 0988's, 1002's, 1060's, 1091's, 1107's and 1172's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4094,6 +4094,8 @@ describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 w
     "task_note_write_capabilities",
     "auth_sessions",
     "agent_calls",
+    "vaults",
+    "vault_items",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = ["native_push_devices", "native_push_deliveries"];
@@ -4160,6 +4162,7 @@ describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 w
       "agent_call_device_count_v1(text, boolean)",
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
+      "list_organization_vaults_v1(uuid, jsonb)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4173,6 +4176,7 @@ describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 w
       "agent_call_device_count_v1(text, boolean)",
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
+      "list_organization_vaults_v1(uuid, jsonb)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4233,6 +4237,7 @@ describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 w
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "claim_native_push_deliveries_v2(uuid, integer, integer)",
       "ring_agent_call_v1(uuid, boolean)",
+      "list_organization_vaults_v1(uuid, jsonb)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

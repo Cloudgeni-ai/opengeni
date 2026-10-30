@@ -185,6 +185,16 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
     }),
   );
 
+  // Every organization vault, wherever it works: the people who manage them
+  // see them all, not only the ones that reach this workspace.
+  app.get(`${PREFIX}/organization-vaults`, (c) =>
+    vaultRoute(c, async () => {
+      const { workspaceId, actor } = await authorize(c, "secrets:list");
+      if (!actor.accountAdmin) throw new MissingPermissionRefusal("account:admin");
+      return c.json(await vaults().listOrganization(actor, workspaceId));
+    }),
+  );
+
   app.post(`${PREFIX}/vaults`, (c) =>
     vaultRoute(c, async () => {
       const { workspaceId, actor } = await authorize(c, "secrets:write");

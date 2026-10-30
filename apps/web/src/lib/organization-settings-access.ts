@@ -95,6 +95,7 @@ export function organizationSettingsAccess(input: {
     visible.add("general");
     if (managedHumanSession && !singleUser) visible.add("people");
     visible.add("workspaces");
+    visible.add("shared");
     visible.add("integrations");
   }
   // Every model setting lives on Organization > Models: owners and admins manage

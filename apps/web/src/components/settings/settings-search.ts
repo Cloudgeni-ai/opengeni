@@ -101,6 +101,17 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "about",
     "documents",
   ],
+  "organization:shared": [
+    "shared",
+    "available",
+    "where it works",
+    "organization vaults",
+    "organization machines",
+    "rigs",
+    "skills",
+    "knowledge",
+    "reach",
+  ],
   "organization:models": [
     "default model",
     "providers",
