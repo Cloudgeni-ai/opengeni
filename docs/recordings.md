@@ -388,11 +388,22 @@ measured between them so a pause never counts:
   time counts only within an hour of the latest session's start, and the
   recorder asks for no new session while paused: a long pause counts at most
   what is left of that hour, however long it lasts.
+- A session counts all it could run (its hour) up front against the
+  person's day. Each report, or the next request, swaps that for the time
+  the session actually left unaccounted plus what it could still run, so a
+  session nobody reports on, or one abandoned with a new recording, costs its
+  whole hour; a refusal leaves it counted, and a session the provider never
+  started gives it back. When a meeting ends, what its sessions could still
+  run stays counted, as the server can't tell a stopped recorder from one
+  still streaming.
 - The rest of the time between reports, which no reported audio accounts
   for (pauses, and sessions never reported on), adds up per person and
   workspace, by the hour: once the person has 4 hours of it in the last 24
-  hours, none of their tracks gets another session until older hours drop
-  out of the day. New recordings don't reset it. The person is the human
+  hours, plus as much as the live audio charged in credits in those hours,
+  none of their tracks gets another session until older hours drop out of
+  the day. The charged audio keeps an honest day of meetings going: a
+  half-hour meeting on two tracks leaves about an hour of its sessions
+  counted and adds about an hour of charged audio. New recordings don't reset it. The person is the human
   behind the request; a personal API key or a delegated session acts as
   them. Organization and workspace API keys record no person, so all of a
   workspace's keys share one bound and a new key doesn't reset it (an
@@ -436,6 +447,12 @@ recorder reports.
   each running up to the provider's hour, counted only until the next
   request, so parallel sessions are bounded only by a track's session limits
   (20, plus one per 5 minutes reported).
+- The day grows by the audio charged in credits, so a client that pays for
+  some audio gets as much again unaccounted: free provider time is at most
+  4 hours plus what was charged. Meetings shorter than half an hour leave
+  more of their sessions counted than they charge (a 10-minute meeting on
+  two tracks nets about 80 minutes), so a day of many very short live
+  meetings can still lose the live preview.
 - Only time of tracks charged in credits is stored per hour. Hours older than
   two days are removed on the person's next write in that workspace, not
   otherwise; they no longer count after a day either way.

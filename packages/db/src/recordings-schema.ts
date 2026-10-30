@@ -143,6 +143,10 @@ export const recordingTracks = pgTable(
     liveCoveredMilliseconds: bigint("live_covered_milliseconds", { mode: "number" }),
     liveUnbackedMilliseconds: bigint("live_unbacked_milliseconds", { mode: "number" }),
     liveUnreportedGrants: integer("live_unreported_grants"),
+    // Migration 1103. What the track's open session could still stream,
+    // counted up front against the person's day, and the hour it was counted in.
+    liveProvisionalMilliseconds: bigint("live_provisional_milliseconds", { mode: "number" }),
+    liveProvisionalHour: timestamp("live_provisional_hour", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -155,9 +159,10 @@ export const recordingTracks = pgTable(
   ],
 );
 
-// Migration 1103. Live transcript time no reported audio accounts for, per
-// person (`api_key` for every API key of the workspace together) and hour,
-// for the daily bound on it (see recording-live.ts). RLS: own rows only.
+// Migration 1103. Live transcript time no reported audio accounts for
+// (provisional time of open sessions included), and live audio charged in
+// credits, per person (`api_key` for every API key of the workspace together)
+// and hour, for the daily bound (see recording-live.ts). RLS: own rows only.
 export const recordingLiveUnbackedHours = pgTable(
   "recording_live_unbacked_hours",
   {
@@ -166,6 +171,7 @@ export const recordingLiveUnbackedHours = pgTable(
     boundSubjectId: text("bound_subject_id").notNull(),
     hourStart: timestamp("hour_start", { withTimezone: true }).notNull(),
     unbackedMilliseconds: bigint("unbacked_milliseconds", { mode: "number" }).notNull(),
+    chargedMilliseconds: bigint("charged_milliseconds", { mode: "number" }).notNull().default(0),
   },
   (table) => [primaryKey({ columns: [table.workspaceId, table.boundSubjectId, table.hourStart] })],
 );

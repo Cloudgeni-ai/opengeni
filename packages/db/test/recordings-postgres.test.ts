@@ -61,6 +61,7 @@ import {
   updateWorkspaceSettings,
   workspaceMemberDisplayName,
   LIVE_GRANT_REFUSED_MESSAGE,
+  LIVE_SESSION_MAX_MILLISECONDS,
   LIVE_UNBACKED_DAILY_MAX_MILLISECONDS,
   withWorkspaceSubjectRls,
   type Database,
@@ -2164,6 +2165,10 @@ describe("recordings and usage allowances", () => {
             set hour_start = hour_start - make_interval(secs => ${by})
             where workspace_id = ${scope.workspaceId}`;
         }
+        await shared!.admin`
+          update recording_tracks
+          set live_provisional_hour = live_provisional_hour - make_interval(secs => ${minutes * 60})
+          where workspace_id = ${scope.workspaceId}`;
       },
     };
   }
@@ -2390,7 +2395,87 @@ describe("recordings and usage allowances", () => {
       scope.owner,
       async (tx) => await tx.select().from(schema.recordingLiveUnbackedHours),
     );
-    expect(visible).toEqual([]);
+    expect(visible.map((row) => row.boundSubjectId)).toEqual([scope.owner]);
+  });
+
+  test("a recorder that never reports pays each session's hour against the day, a new recording at a time", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    // A session on each of two tracks, an hour, another asked for (refused,
+    // as the tracks are behind), then a new recording.
+    const codes: string[] = [];
+    for (let index = 0; index < 4; index++) {
+      const meeting = await liveMeeting(scope);
+      for (const track of [0, 1]) {
+        try {
+          await meeting.start(track);
+        } catch (error) {
+          codes.push((error as { code: string }).code);
+        }
+      }
+      await meeting.elapse(60);
+      await expect(meeting.start(0)).rejects.toMatchObject({ message: LIVE_GRANT_REFUSED_MESSAGE });
+    }
+    // Two recordings' four sessions are the day's four hours: the next
+    // ones are refused.
+    expect(codes).toEqual([
+      "live_grant_limit",
+      "live_grant_limit",
+      "live_grant_limit",
+      "live_grant_limit",
+    ]);
+    const day = await shared.admin<{ unbacked: string }[]>`
+      select coalesce(sum(unbacked_milliseconds), 0)::text as unbacked
+      from recording_live_unbacked_hours where workspace_id = ${scope.workspaceId}`;
+    expect(Number(day[0]!.unbacked)).toBe(4 * LIVE_SESSION_MAX_MILLISECONDS);
+  });
+
+  test("a session counts its hour up front, given back as audio is reported or the provider never starts it", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    const day = async () => {
+      const [row] = await shared!.admin<{ unbacked: string; charged: string }[]>`
+        select coalesce(sum(h.unbacked_milliseconds), 0)::text as unbacked,
+          coalesce(sum(h.charged_milliseconds), 0)::text as charged
+        from recording_live_unbacked_hours h
+        join recordings r on r.workspace_id = h.workspace_id
+        where r.id = ${meeting.recordingId}`;
+      return { unbacked: Number(row!.unbacked), charged: Number(row!.charged) };
+    };
+    await meeting.start(0);
+    expect((await day()).unbacked).toBe(LIVE_SESSION_MAX_MILLISECONDS);
+    // Ten minutes streamed and reported: ten minutes of the hour are used.
+    for (let minute = 0; minute < 10; minute++) {
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+    }
+    const after = await day();
+    expect(after.unbacked).toBeLessThanOrEqual(50 * 60_000);
+    expect(after.unbacked).toBeGreaterThan(50 * 60_000 - 10_000);
+    expect(after.charged).toBe(10 * 60_000);
+    // A session the provider never started gives its hour back.
+    await meeting.start(1);
+    await meeting.release(1);
+    expect((await day()).unbacked).toBe(after.unbacked);
+  });
+
+  test("an honest day of half-hour meetings on two tracks is never refused", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    // Each meeting's sessions end with what they could still run counted,
+    // and its charged audio adds as much to the day.
+    for (let index = 0; index < 10; index++) {
+      const meeting = await liveMeeting(scope);
+      await meeting.start(0);
+      await meeting.start(1);
+      for (let report = 0; report < 10; report++) {
+        await meeting.elapse(3);
+        await meeting.report(180_000, 0);
+        await meeting.report(180_000, 1);
+      }
+      await meeting.elapse(15);
+    }
+    await (await liveMeeting(scope)).start(0);
   });
 
   test("live time not charged in credits (billing off, a legacy account) isn't counted toward the day", async () => {

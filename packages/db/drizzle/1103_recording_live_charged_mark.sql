@@ -27,11 +27,19 @@
 -- never reported on. Time counts only within the latest session's longest
 -- possible run (an hour from its grant), so a long pause counts at most that.
 --
--- recording_live_unbacked_hours adds up the unbacked time per person (every
--- API key of a workspace together, since no key records who made it) and
--- workspace, per hour, so a person's live sessions are bounded per day across
--- recordings. Each row is private to its own person (or to the workspace's
--- API keys): it holds no recording, only time.
+-- A session granted to a track charged in credits counts all it could run
+-- (an hour) up front, as provisional time (live_provisional_milliseconds, in
+-- the hour live_provisional_hour); each report or new request swaps it for
+-- the time it actually left unaccounted plus what it could still run, so a
+-- session nobody reports on costs its whole hour.
+--
+-- recording_live_unbacked_hours adds up that unbacked time, and the live
+-- audio charged in credits, per person (every API key of a workspace
+-- together, since no key records who made it) and workspace, per hour, so a
+-- person's live sessions are bounded per day across recordings: at most 4
+-- hours of unbacked time plus as much as was charged. Each row is private to
+-- its own person (or to the workspace's API keys): it holds no recording,
+-- only time.
 --
 -- Rolling: nullable columns without default or check are catalog-only, and
 -- the previous release never reads or writes them; null means none charged
@@ -49,7 +57,9 @@ ALTER TABLE recording_tracks
   ADD COLUMN IF NOT EXISTS live_counted_at timestamp with time zone,
   ADD COLUMN IF NOT EXISTS live_covered_milliseconds bigint,
   ADD COLUMN IF NOT EXISTS live_unbacked_milliseconds bigint,
-  ADD COLUMN IF NOT EXISTS live_unreported_grants integer;
+  ADD COLUMN IF NOT EXISTS live_unreported_grants integer,
+  ADD COLUMN IF NOT EXISTS live_provisional_milliseconds bigint,
+  ADD COLUMN IF NOT EXISTS live_provisional_hour timestamp with time zone;
 COMMENT ON COLUMN recording_tracks.live_charged_milliseconds IS
   'Streamed live transcript audio already paid for (charged in credits, or counted at list price once charging began), in milliseconds. Null when none was charged.';
 COMMENT ON COLUMN recording_tracks.live_charged_cost_usd_micros IS
@@ -68,6 +78,10 @@ COMMENT ON COLUMN recording_tracks.live_unbacked_milliseconds IS
   'Time between this track''s live reports that no reported audio accounts for (a pause, or audio nobody reported), within each session''s longest possible run.';
 COMMENT ON COLUMN recording_tracks.live_unreported_grants IS
   'Live transcript sessions of this track the recorder never reported on before asking for another.';
+COMMENT ON COLUMN recording_tracks.live_provisional_milliseconds IS
+  'What this track''s open live session could still stream, counted up front against the person''s day in recording_live_unbacked_hours; null when nothing is.';
+COMMENT ON COLUMN recording_tracks.live_provisional_hour IS
+  'The hour of recording_live_unbacked_hours that live_provisional_milliseconds was counted in.';
 
 CREATE TABLE IF NOT EXISTS recording_live_unbacked_hours (
   account_id uuid NOT NULL,
@@ -76,6 +90,8 @@ CREATE TABLE IF NOT EXISTS recording_live_unbacked_hours (
   bound_subject_id text NOT NULL CHECK (length(bound_subject_id) BETWEEN 1 AND 1024),
   hour_start timestamp with time zone NOT NULL,
   unbacked_milliseconds bigint NOT NULL CHECK (unbacked_milliseconds >= 0),
+  -- Live audio charged in credits; the day's bound grows by it.
+  charged_milliseconds bigint NOT NULL DEFAULT 0 CHECK (charged_milliseconds >= 0),
   PRIMARY KEY (workspace_id, bound_subject_id, hour_start),
   FOREIGN KEY (workspace_id, account_id) REFERENCES workspaces(id, account_id) ON DELETE CASCADE
 );
