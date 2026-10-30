@@ -5,6 +5,7 @@ import {
   type ModelPickerBillingClass,
   type ModelLabelGeography,
 } from "@opengeni/sdk/model-picker-order";
+import { isDirectModelProviderId } from "@opengeni/contracts";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { type OpenGeniText } from "./messages/runtime";
@@ -69,11 +70,7 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
   ) {
     return "organization_byok";
   }
-  if (
-    model.provider?.startsWith("workspace-openai-") ||
-    model.provider?.startsWith("workspace-azure-openai-")
-  )
-    return "byok";
+  if (isDirectModelProviderId(model.provider)) return "byok";
   if (
     model.provider === "workspace-gateway" ||
     model.provider === "workspace-openrouter" ||

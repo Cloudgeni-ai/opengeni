@@ -1431,7 +1431,7 @@ export function WorkspaceModelsPageBody({
               <>
                 {workspacePage ? (
                   <Section
-                    title="OpenAI and Azure OpenAI"
+                    title="OpenAI, Azure OpenAI and compatible endpoints"
                     description="Use your own API key for models in this workspace."
                   >
                     <DirectModelProviderConnections
