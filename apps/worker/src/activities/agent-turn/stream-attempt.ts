@@ -46,6 +46,7 @@ import {
   extractOpenSuffixFromRunState,
   assertOpenSuffixResumable,
   interruptionKindForCallItem,
+  mcpInputRequestOf,
   releaseMcpResultCustomDataFromSdkEvent,
   findCompactionNeededError,
   compactionThresholdTokens,
@@ -136,6 +137,7 @@ import {
 import {
   modelCallProcessingResidency,
   OPEN_SUFFIX_RUN_STATE_BLOB,
+  approvalIdentifier,
   resolveWorkspaceAgentHumanInputEnabled,
   withPublicApprovalFields,
   type RetainedArtifactMetadata,
@@ -2263,6 +2265,14 @@ export async function runTurnStreamAttempt(
       });
       assertOpenSuffixResumable(suffixMembers, interruptionCallIds);
       const suffixByCallId = new Map(suffixMembers.map((member) => [member.callId, member]));
+      // A call its MCP server paused with a question keeps that question
+      // (with the server's state) so a later attempt can retry it answered.
+      const mcpInputRequests = new Map<string, Record<string, unknown>>();
+      for (const interruption of eventing.stream.interruptions) {
+        const request = mcpInputRequestOf(interruption);
+        const callId = approvalIdentifier(interruption);
+        if (request && callId) mcpInputRequests.set(callId, request);
+      }
       const attached =
         interruptionCallIds.length === 0
           ? { accepted: true }
@@ -2281,6 +2291,9 @@ export async function runTurnStreamAttempt(
                     member.callItem as Record<string, unknown>,
                   ),
                   reasoningItems: member.reasoningItems as Array<Record<string, unknown>>,
+                  ...(mcpInputRequests.has(callId)
+                    ? { mcpInputRequest: mcpInputRequests.get(callId)! }
+                    : {}),
                 };
               }),
             });
