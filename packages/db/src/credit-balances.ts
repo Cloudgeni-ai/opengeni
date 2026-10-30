@@ -14,6 +14,7 @@ import {
   NEVER_UNPAID_TYPES,
   PAID_INFLOW_TYPES,
   PAID_REVERSAL_TYPES,
+  needsLatestMarkUnpaid,
   paidCreditMark,
   paidCreditState,
   topUpPaidMicros,
@@ -44,6 +45,14 @@ export async function getBillingBalance(
   return includePaidCredits ? { ...balance, paidCreditsMicros: paid.paidCreditsMicros } : balance;
 }
 
+/** The receipt-row sums behind paid credit, fee debt and this month's fees. */
+type ReceiptTotals = Omit<PaidCreditTotals, "paidFunding" | "feeDebt"> & {
+  unfunded: string;
+  repaid: string;
+  paidPart: string;
+  feesThisMonth: string;
+};
+
 /** SQL list of text literals. */
 const textList = (values: readonly string[]) =>
   sql.join(
@@ -52,8 +61,41 @@ const textList = (values: readonly string[]) =>
   );
 
 /**
- * The balance and the paid-credit state behind it (see paid-credit.ts), from
- * one pass over the account's ledger.
+ * Rows that can carry a paid-credit receipt: credit added, Stripe refunds and
+ * dispute holds, and own-key fees. Ordinary debits never do, so the read
+ * never touches their metadata. Spelled as the predicate of
+ * credit_ledger_receipt_rows_idx, so the paid-credit figures are read from
+ * that index.
+ */
+const carriesReceiptSql = sql.raw(
+  `(entry.amount_micros > 0 or entry.type in (${[...PAID_REVERSAL_TYPES, BYOK_PLATFORM_FEE_TYPE]
+    .map((type) => `'${type}'`)
+    .join(", ")}))`,
+);
+const markedSql = sql.raw(`(entry.metadata->'paidFundingBeforeMicros') is not null`);
+const atMicrosSql = sql.raw(`floor(extract(epoch from entry.created_at) * 1000000)::bigint`);
+const feeDebtRepaidSql = sql.raw(`(entry.metadata->>'feeDebtRepaidMicros')::bigint`);
+/** The paid credit a receipt-carrying row adds or takes back, before fee debt repaid. */
+const paidPartSql = sql.raw(`case
+  when (entry.metadata->'paidCreditMicros') is not null then (entry.metadata->>'paidCreditMicros')::bigint
+  when entry.type = 'credit_topup' then case
+    when jsonb_typeof(entry.metadata->'stripeDiscountCents') = 'number'
+      and jsonb_typeof(entry.metadata->'stripeAmountTotalCents') = 'number'
+      and (entry.metadata->>'stripeDiscountCents')::numeric > 0
+    then floor(entry.amount_micros::numeric * greatest(0, (entry.metadata->>'stripeAmountTotalCents')::numeric)
+      / (greatest(0, (entry.metadata->>'stripeAmountTotalCents')::numeric)
+        + (entry.metadata->>'stripeDiscountCents')::numeric))::bigint
+    else entry.amount_micros end
+  when entry.type in (${[...PAID_INFLOW_TYPES, ...PAID_REVERSAL_TYPES].map((type) => `'${type}'`).join(", ")}) then entry.amount_micros
+  when entry.type = '${BYOK_PLATFORM_FEE_TYPE}' then -coalesce((entry.metadata->>'creditPaidMicros')::bigint, 0)
+  else 0 end`);
+
+/**
+ * The balance and the paid-credit state behind it (see paid-credit.ts). One
+ * pass over the account's ledger sums the balance and API spending, exactly
+ * as without own-key fees; the paid-credit figures come from the rows that
+ * can carry a receipt only, through credit_ledger_receipt_rows_idx, so their
+ * cost scales with top-ups, grants, refunds and fees, not with spending.
  */
 export async function readBillingBalance(
   db: Database,
@@ -63,18 +105,16 @@ export async function readBillingBalance(
   includeHeldForSettlement = false,
 ): Promise<{ balance: CreditBalanceSnapshot; paid: PaidCreditState }> {
   return await withAccountRls(db, accountId, async (tx) => {
-    const [row] = await rawRows<
-      {
-        balance: string;
-        grants: PromotionalCreditBalance[];
-        revision: number;
-        plan: BillingPlanBalance | null;
-        decision: NonNullable<BillingBalance["promotionDecision"]>;
-        enforcement: boolean;
-        debtCap: string;
-        feesThisMonth: string;
-      } & PaidCreditTotals
-    >(
+    const [row] = await rawRows<{
+      balance: string;
+      grants: PromotionalCreditBalance[];
+      revision: number;
+      plan: BillingPlanBalance | null;
+      decision: NonNullable<BillingBalance["promotionDecision"]>;
+      enforcement: boolean;
+      apiSpent: string;
+      receipts: ReceiptTotals | null;
+    }>(
       tx,
       sql`
       with current_policy as (
@@ -82,51 +122,40 @@ export async function readBillingBalance(
         where (${policyRevision ?? null}::bigint is null or revision <= ${policyRevision ?? null}::bigint)
         order by revision desc limit 1
       ), totals as (
-        -- One pass over the ledger: the balance; the debt plan credit never
-        -- repays, up to what API work and own-key fees charged to credits
-        -- have spent (as opengeni_private.plan_app_general_balance); this
-        -- calendar month's (UTC) own-key fees; and paid credit's receipts
-        -- (paid-credit.ts).
+        -- One pass over the ledger: the balance, and what API work (other
+        -- than own-key fees) has spent.
         select coalesce(sum(entry.amount_micros), 0)::text as balance,
-          greatest(0, coalesce(sum(case when entry.type = ${BYOK_PLATFORM_FEE_TYPE}
-              then -entry.amount_micros - coalesce((entry.metadata->>'planPaidMicros')::bigint, 0)
-              else -entry.amount_micros end)
-            filter (where entry.usage_origin = 'api' or entry.type = ${BYOK_PLATFORM_FEE_TYPE}), 0))::text as "debtCap",
+          coalesce(sum(-entry.amount_micros) filter (where entry.usage_origin = 'api'
+            and entry.type <> ${BYOK_PLATFORM_FEE_TYPE}), 0)::text as "apiSpent"
+        from ${schema.creditLedgerEntries} entry
+        where entry.account_id = ${accountId}
+      ), receipts as (
+        -- Rows that can carry a receipt only: own-key fee debt (fees'
+        -- unfunded shares, less what paid-for credit repaid), this calendar
+        -- month's (UTC) own-key fees, and paid credit's receipts.
+        select
+          coalesce(sum((entry.metadata->>'unfundedMicros')::bigint)
+            filter (where entry.type = ${BYOK_PLATFORM_FEE_TYPE}), 0)::text as unfunded,
+          coalesce(sum(${feeDebtRepaidSql}), 0)::text as repaid,
           coalesce(sum(-entry.amount_micros) filter (where entry.type = ${BYOK_PLATFORM_FEE_TYPE}
-            and entry.created_at >= date_trunc('month', statement_timestamp() at time zone 'UTC') at time zone 'UTC'),
+            and entry.created_at >= (select date_trunc('month', statement_timestamp() at time zone 'UTC') at time zone 'UTC')),
             0)::text as "feesThisMonth",
-          (coalesce(sum(receipt.paid), 0)
-            - coalesce(sum((entry.metadata->>'feeDebtRepaidMicros')::bigint), 0))::text as "paidFunding",
-          (coalesce(sum((entry.metadata->>'unfundedMicros')::bigint) filter (where entry.type = ${BYOK_PLATFORM_FEE_TYPE}), 0)
-            - coalesce(sum((entry.metadata->>'feeDebtRepaidMicros')::bigint), 0))::text as "feeDebt",
+          coalesce(sum(${paidPartSql}), 0)::text as "paidPart",
           min((entry.metadata->>'paidCreditsBeforeMicros')::bigint
             + coalesce((entry.metadata->>'paidRestoredMicros')::bigint, 0)
-            - (entry.metadata->>'paidFundingBeforeMicros')::bigint) filter (where receipt.marked)::text as "markFloor",
-          max(receipt.at) filter (where receipt.marked)::text as "latestMarkAt",
-          jsonb_agg(jsonb_build_array(receipt.at, receipt.paid, receipt.marked))
-            filter (where entry.type in (${textList(PAID_INFLOW_TYPES)}) and receipt.paid > 0) as "paidInflows",
-          jsonb_agg(jsonb_build_array(receipt.at, entry.amount_micros - receipt.paid))
-            filter (where not receipt.marked and entry.eligible_model_ids is null
-              and entry.amount_micros > receipt.paid
-              and (entry.type = 'credit_topup' or entry.type not in (${textList(NEVER_UNPAID_TYPES)}))) as "unpaidInflows"
+            - (entry.metadata->>'paidFundingBeforeMicros')::bigint)
+            filter (where ${markedSql})::text as "markFloor",
+          floor(extract(epoch from max(entry.created_at) filter (where ${markedSql}))
+            * 1000000)::bigint::text as "latestMarkAt",
+          jsonb_agg(jsonb_build_array(${atMicrosSql}, ${paidPartSql}, ${markedSql}))
+            filter (where entry.amount_micros > 0 and entry.type in (${textList(PAID_INFLOW_TYPES)})
+              and ${paidPartSql} > 0) as "paidInflows",
+          jsonb_agg(jsonb_build_array(${atMicrosSql}, entry.amount_micros - ${paidPartSql}))
+            filter (where entry.amount_micros > 0 and entry.eligible_model_ids is null
+              and (entry.type = 'credit_topup' or entry.type not in (${textList(NEVER_UNPAID_TYPES)}))
+              and not ${markedSql} and entry.amount_micros > ${paidPartSql}) as "unpaidInflows"
         from ${schema.creditLedgerEntries} entry
-        cross join lateral (select
-          (entry.metadata->'paidFundingBeforeMicros') is not null as marked,
-          floor(extract(epoch from entry.created_at) * 1000000)::bigint as at,
-          -- The paid credit a row adds or takes back, before fee debt repaid.
-          case when (entry.metadata->'paidCreditMicros') is not null then (entry.metadata->>'paidCreditMicros')::bigint
-            when entry.type = 'credit_topup' then case
-              when jsonb_typeof(entry.metadata->'stripeDiscountCents') = 'number'
-                and jsonb_typeof(entry.metadata->'stripeAmountTotalCents') = 'number'
-                and (entry.metadata->>'stripeDiscountCents')::numeric > 0
-              then floor(entry.amount_micros::numeric * greatest(0, (entry.metadata->>'stripeAmountTotalCents')::numeric)
-                / (greatest(0, (entry.metadata->>'stripeAmountTotalCents')::numeric)
-                  + (entry.metadata->>'stripeDiscountCents')::numeric))::bigint
-              else entry.amount_micros end
-            when entry.type in (${textList([...PAID_INFLOW_TYPES, ...PAID_REVERSAL_TYPES])}) then entry.amount_micros
-            when entry.type = ${BYOK_PLATFORM_FEE_TYPE} then -coalesce((entry.metadata->>'creditPaidMicros')::bigint, 0)
-            else 0 end as paid) receipt
-        where entry.account_id = ${accountId}
+        where entry.account_id = ${accountId} and ${carriesReceiptSql}
       )
       select
         coalesce((select decision from promotion_decisions where account_id=${accountId}::uuid), 'eligible') as decision,
@@ -134,14 +163,8 @@ export async function readBillingBalance(
         coalesce((select revision from current_policy), 0)::int as revision,
         read_organization_plan_balance(${accountId}::uuid, coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp())) as plan,
         (select balance from totals) as balance,
-        (select "debtCap" from totals) as "debtCap",
-        (select "feesThisMonth" from totals) as "feesThisMonth",
-        (select "paidFunding" from totals) as "paidFunding",
-        (select "feeDebt" from totals) as "feeDebt",
-        (select "markFloor" from totals) as "markFloor",
-        (select "latestMarkAt" from totals) as "latestMarkAt",
-        (select "paidInflows" from totals) as "paidInflows",
-        (select "unpaidInflows" from totals) as "unpaidInflows",
+        (select "apiSpent" from totals) as "apiSpent",
+        (select to_jsonb(receipts) from receipts) as receipts,
         coalesce((select jsonb_agg(jsonb_build_object(
           'grantId', g.id,
           'label', coalesce(g.metadata->>'creditOfferLabel', 'Promotional credits'),
@@ -193,16 +216,25 @@ export async function readBillingBalance(
         : 0;
     const plan = row?.plan ?? null;
     const creditsMicros = creditsOutsidePlan(generalBalanceMicros, plan);
+    const receipts = row?.receipts;
+    const repaid = Number(receipts?.repaid ?? 0);
+    const totals: PaidCreditTotals = {
+      paidFunding: String(Number(receipts?.paidPart ?? 0) - repaid),
+      feeDebt: String(Number(receipts?.unfunded ?? 0) - repaid),
+      markFloor: receipts?.markFloor ?? null,
+      latestMarkAt: receipts?.latestMarkAt ?? null,
+      paidInflows: receipts?.paidInflows ?? null,
+      unpaidInflows: receipts?.unpaidInflows ?? null,
+    };
+    // The debt plan credit never repays (as
+    // opengeni_private.plan_app_general_balance, term for term): what API
+    // work has spent plus own-key fee debt still owed.
+    const debtCap = Math.max(0, Number(row?.apiSpent ?? 0) + Number(totals.feeDebt));
+    const feesThisMonth = Number(receipts?.feesThisMonth ?? 0);
     const paid = paidCreditState(
-      {
-        paidFunding: row?.paidFunding ?? "0",
-        feeDebt: row?.feeDebt ?? "0",
-        markFloor: row?.markFloor ?? null,
-        latestMarkAt: row?.latestMarkAt ?? null,
-        paidInflows: row?.paidInflows ?? null,
-        unpaidInflows: row?.unpaidInflows ?? null,
-      },
+      totals,
       creditsMicros,
+      needsLatestMarkUnpaid(totals) ? await latestMarkUnpaidMicros(tx, accountId, totals) : null,
     );
     return {
       paid,
@@ -212,11 +244,9 @@ export async function readBillingBalance(
         balanceMicros,
         generalBalanceMicros,
         creditsMicros,
-        ...debts(creditsMicros, Number(row?.debtCap ?? 0), paid.feeDebtMicros),
+        ...debts(creditsMicros, debtCap, paid.feeDebtMicros),
         paidPlanCreditMicros: paidPlanCreditMicros(plan),
-        ...(Number(row?.feesThisMonth ?? 0) > 0
-          ? { byokPlatformFeeMonthMicros: Number(row?.feesThisMonth) }
-          : {}),
+        ...(feesThisMonth > 0 ? { byokPlatformFeeMonthMicros: feesThisMonth } : {}),
         heldGeneralCreditMicros,
         heldCreditMicros:
           heldGeneralCreditMicros +
@@ -235,6 +265,27 @@ export async function readBillingBalance(
 }
 
 /**
+ * The unpaid credit the latest receipt left (`unpaidCreditsAfterMicros`):
+ * read only after rows without a receipt, through the account/created_at
+ * index.
+ */
+async function latestMarkUnpaidMicros(
+  tx: Database,
+  accountId: string,
+  totals: PaidCreditTotals,
+): Promise<number | null> {
+  const [mark] = await rawRows<{ unpaid: string | null }>(
+    tx,
+    sql`select max((metadata->>'unpaidCreditsAfterMicros')::bigint)::text as unpaid
+      from ${schema.creditLedgerEntries}
+      where account_id = ${accountId}
+        and created_at = timestamptz 'epoch' + ${totals.latestMarkAt}::bigint * interval '1 microsecond'
+        and (metadata->'paidFundingBeforeMicros') is not null`,
+  );
+  return mark?.unpaid == null ? null : Number(mark.unpaid);
+}
+
+/**
  * Credits: general credit that is not this month's unrestricted plan
  * allowance (top-ups, operator grants, unrestricted legacy grants). A scoped
  * plan allowance is a promotional grant and never part of general credit.
@@ -248,11 +299,12 @@ function creditsOutsidePlan(generalBalanceMicros: number, plan: BillingPlanBalan
  * Two debts plan and promotional credit never repay. Own-key fee debt: fee
  * shares that found no paid credit when they settled, less what paid-for
  * credit repaid since (the next top-up repays it first; see paid-credit.ts).
- * Negative credits up to what API work and own-key fees charged to credits
- * have spent are never repaid from plan credit either: the database's
- * plan_app_general_balance applies the same cap at period expiry and to a
- * new period's opening debt. API debt is the part of that not owed as fee
- * debt.
+ * Negative credits up to what API work has spent plus the fee debt still
+ * owed are never repaid from plan credit either: the database's
+ * plan_app_general_balance applies the same cap, term for term, at period
+ * expiry and to a new period's opening debt. Fees paid in full never raise
+ * it, so an app overdraft is still netted from the next period. API debt is
+ * the part of that not owed as fee debt.
  */
 function debts(creditsMicros: number, debtCapMicros: number, feeDebt: number) {
   const apiDebt = Math.max(
@@ -354,7 +406,11 @@ export async function paidCreditReceipt(
           : input.amountMicros;
     // A coupon's discount (or a release beyond what its hold took from paid
     // credit) is unpaid credit, arriving here.
-    return { paidCreditMicros: part, ...paidCreditMark(paid), ...feeDebtRepaid(paid, part) };
+    return {
+      paidCreditMicros: part,
+      ...paidCreditMark(paid, 0, input.amountMicros - part),
+      ...feeDebtRepaid(paid, part),
+    };
   }
   if (reversal) {
     // Money given back takes paid credit first; the rest takes credits like spending.
@@ -370,7 +426,10 @@ export async function paidCreditReceipt(
     input.type === "video_generation_refund"
       ? Math.min(input.amountMicros, await refundedDebitPaidMicros(tx, input))
       : 0;
-  return { ...paidCreditMark(paid, restored), ...feeDebtRepaid(paid, restored) };
+  return {
+    ...paidCreditMark(paid, restored, input.amountMicros - restored),
+    ...feeDebtRepaid(paid, restored),
+  };
 }
 
 /** A won dispute returns as paid credit what its hold took from paid credit. */

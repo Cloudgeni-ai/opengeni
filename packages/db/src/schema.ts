@@ -13661,6 +13661,13 @@ export const creditLedgerEntries = pgTable(
     scopedGrants: index("credit_ledger_scoped_grants_idx")
       .on(table.accountId, table.createdAt, table.id)
       .where(sql`${table.eligibleModelIds} is not null`),
+    // Rows that can carry a paid-credit receipt (credit-balances.ts reads
+    // paid credit and own-key fee debt from these alone).
+    receiptRows: index("credit_ledger_receipt_rows_idx")
+      .on(table.accountId, table.createdAt)
+      .where(
+        sql`${table.amountMicros} > 0 or ${table.type} in ('credit_refund', 'credit_dispute_hold', 'byok_platform_fee')`,
+      ),
     scopeValid: check(
       "credit_ledger_scope_valid",
       sql`${table.eligibleModelIds} is null or (

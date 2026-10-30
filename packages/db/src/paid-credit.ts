@@ -15,24 +15,28 @@ import { BYOK_PLATFORM_FEE_TYPE } from "@opengeni/contracts";
    part it adds or removes (`paidCreditMicros`), fee debt it repays
    (`feeDebtRepaidMicros`), and a mark: paid credits and paid funding just
    before it (`paidCreditsBeforeMicros`, `paidFundingBeforeMicros`, plus the
-   paid credit a usage refund returns, `paidRestoredMicros`). Paid credit is
+   paid credit a usage refund returns, `paidRestoredMicros`) and the unpaid
+   credit just after it (`unpaidCreditsAfterMicros`). Paid credit is
 
      min(paid funding + min(0, every mark), credits + fee debt)
 
    where a mark is paid credits before it (plus what it returns) less paid
    funding before it. Paid funding only changes through receipts, and
    between receipts plain spending only lowers credits, so the lowest point
-   is either now or a mark. One pass over the ledger reads it: a few sums,
-   plus the paid inflows and the unpaid inflows without a receipt (they scale
-   with top-ups and grants, not with usage).
+   is either now or a mark. The balance read takes it from the rows that can
+   carry a receipt alone (credit added, Stripe refunds and dispute holds,
+   fees; credit_ledger_receipt_rows_idx): a few sums, plus the paid inflows
+   and the unpaid inflows without a receipt. Its cost scales with top-ups,
+   grants, refunds and fees; ordinary debits' metadata is never read.
 
    Rows with no receipt (written before receipts existed, or by an older
-   release while one rolls out) are bounded conservatively: an unrecorded
-   unpaid inflow after the latest mark is taken to arrive when paid credit
-   was zero; with no mark at all, paid credit is also at most credits less
-   every unrecorded unpaid inflow, and the larger bound holds. Neither ever
-   overstates paid credit, and the next receipt pins the result. A top-up
-   without a receipt after the latest mark repays fee debt first.
+   release while one rolls out) are bounded conservatively. Unpaid credit
+   only grows through unpaid inflows, so after unrecorded ones paid credit is
+   at least credits less the unpaid credit the latest receipt left (none
+   before the first) less those inflows. Each such inflow is also taken to
+   arrive when paid credit was zero, and the larger bound holds. Neither
+   ever overstates paid credit, and the next receipt pins the result. A
+   top-up without a receipt after the latest mark repays fee debt first.
    -------------------------------------------------------------------------- */
 
 /** Paid-for credit: top-ups (net of a coupon discount), operator credit grants, won disputes. */
@@ -100,10 +104,30 @@ export type PaidCreditState = {
   feeDebtMicros: number;
   /** Fee debt that top-ups written without a receipt repaid; the next receipt records it. */
   unrecordedFeeDebtRepaidMicros: number;
+  /** Unpaid credit: credits (with fee debt added back) that are not paid credit. */
+  unpaidCreditsMicros: number;
 };
 
-/** Paid credit from the read's totals and the account's credits (`creditsMicros`). */
-export function paidCreditState(totals: PaidCreditTotals, creditsMicros: number): PaidCreditState {
+/**
+ * Whether paid credit needs the unpaid credit the latest receipt left
+ * (`unpaidCreditsAfterMicros`): only after unpaid inflows without a receipt.
+ */
+export function needsLatestMarkUnpaid(totals: PaidCreditTotals): boolean {
+  if (totals.latestMarkAt === null) return false;
+  const latestMark = Number(totals.latestMarkAt);
+  return (totals.unpaidInflows ?? []).some(([at]) => at > latestMark);
+}
+
+/**
+ * Paid credit from the read's totals and the account's credits
+ * (`creditsMicros`). `latestMarkUnpaidMicros` is the latest receipt's
+ * `unpaidCreditsAfterMicros` when {@link needsLatestMarkUnpaid}.
+ */
+export function paidCreditState(
+  totals: PaidCreditTotals,
+  creditsMicros: number,
+  latestMarkUnpaidMicros?: number | null,
+): PaidCreditState {
   const latestMark = totals.latestMarkAt === null ? null : Number(totals.latestMarkAt);
   const unpinned = (at: number) => latestMark === null || at > latestMark;
   const paidInflows = [...(totals.paidInflows ?? [])].sort((a, b) => a[0] - b[0]);
@@ -121,7 +145,8 @@ export function paidCreditState(totals: PaidCreditTotals, creditsMicros: number)
   const paidFundingMicros = Number(totals.paidFunding) - repaid;
   // Credits ordinary spending may use: fee debt is owed from paid credit only.
   const credits = creditsMicros + feeDebtMicros;
-  let floor = Math.min(0, totals.markFloor === null ? 0 : Number(totals.markFloor));
+  const recordedFloor = Math.min(0, totals.markFloor === null ? 0 : Number(totals.markFloor));
+  let floor = recordedFloor;
   let unrecordedUnpaid = 0;
   let paidBefore = 0;
   let next = 0;
@@ -138,11 +163,14 @@ export function paidCreditState(totals: PaidCreditTotals, creditsMicros: number)
     unrecordedUnpaid += amount;
   }
   let paidCreditsMicros = Math.max(0, Math.min(paidFundingMicros + floor, credits));
-  if (latestMark === null) {
-    // The unpaid credit left is at most what those inflows added.
+  const unpaidBefore = latestMark === null ? 0 : latestMarkUnpaidMicros;
+  if (unrecordedUnpaid > 0 && typeof unpaidBefore === "number") {
+    // Unpaid credit is at most what the latest receipt left plus those
+    // inflows; never more than the receipts alone allow.
+    const upper = Math.max(0, Math.min(paidFundingMicros + recordedFloor, credits));
     paidCreditsMicros = Math.max(
       paidCreditsMicros,
-      Math.min(paidFundingMicros, credits - unrecordedUnpaid),
+      Math.min(upper, credits - Math.max(0, unpaidBefore) - unrecordedUnpaid),
     );
   }
   return {
@@ -150,15 +178,21 @@ export function paidCreditState(totals: PaidCreditTotals, creditsMicros: number)
     paidFundingMicros,
     feeDebtMicros,
     unrecordedFeeDebtRepaidMicros: repaid,
+    unpaidCreditsMicros: Math.max(0, credits - paidCreditsMicros),
   };
 }
 
-/** A receipt's mark: paid credits and paid funding just before its row. */
-export function paidCreditMark(state: PaidCreditState, restoredMicros = 0) {
+/**
+ * A receipt's mark: paid credits and paid funding just before its row, and
+ * the unpaid credit just after it (at most what was there plus the unpaid
+ * credit the row adds, `unpaidAddedMicros`).
+ */
+export function paidCreditMark(state: PaidCreditState, restoredMicros = 0, unpaidAddedMicros = 0) {
   return {
     paidCreditsBeforeMicros: state.paidCreditsMicros,
     paidFundingBeforeMicros: state.paidFundingMicros,
     ...(restoredMicros > 0 ? { paidRestoredMicros: restoredMicros } : {}),
+    unpaidCreditsAfterMicros: state.unpaidCreditsMicros + Math.max(0, unpaidAddedMicros),
   };
 }
 
