@@ -344,17 +344,6 @@ async function seedResources(
   });
   resources.push({ family: "session event", table: "session_events", id: event!.id });
 
-  const [variableSet] = await db.admin<{ id: string }[]>`
-    insert into workspace_variable_sets (account_id, workspace_id, name)
-    values (${accountId}, ${workspaceId}, ${`evidence-variable-set-${suffix}`})
-    returning id
-  `;
-  resources.push({
-    family: "variable set",
-    table: "workspace_variable_sets",
-    id: variableSet!.id,
-  });
-
   const [rig] = await db.admin<{ id: string }[]>`
     insert into rigs (account_id, workspace_id, name)
     values (${accountId}, ${workspaceId}, ${`evidence-rig-${suffix}`})
@@ -579,10 +568,8 @@ describe("organization tenancy isolation evidence", () => {
     // POSITIVE CONTROL. Every "zero rows" assertion below is only meaningful
     // because this exact query shape reaches every seeded family here.
     //
-    // `workspace_variable_sets` is deliberately `denied`, not `hidden`: scoped
-    // Variable Sets are a capability-only surface with zero direct runtime
-    // table privileges (migration 0254). Pinning the whole map means a future
-    // GRANT that turns `denied` into `hidden` fails this test on purpose.
+    // Pin the complete current resource map; retired Variable Set relations
+    // have no reachable rows at all, as the direct-query checks below prove.
     expect(
       await probeResources(
         { accountId: fixture.orgA.accountId, workspaceId: fixture.orgA.workspaceId },
@@ -591,7 +578,6 @@ describe("organization tenancy isolation evidence", () => {
     ).toEqual({
       session: "visible",
       "session event": "visible",
-      "variable set": "denied",
       rig: "visible",
       enrollment: "visible",
       "connected machine": "visible",
@@ -603,9 +589,8 @@ describe("organization tenancy isolation evidence", () => {
       "api key": "visible",
     });
 
-    // The `denied` classification above is a catalog reading; prove the same
-    // absence by executing against the capability-only table under the owning
-    // organization's own honest context.
+    // The retired capability-only table is now absent even under its former
+    // organization's honest context, rather than merely hidden by RLS.
     for (const statement of [
       `select * from "workspace_variable_sets" limit 1`,
       `insert into "workspace_variable_sets" default values`,
@@ -618,7 +603,7 @@ describe("organization tenancy isolation evidence", () => {
             { accountId: fixture!.orgA.accountId, workspaceId: fixture!.orgA.workspaceId },
             async (tx) => await tx.unsafe(statement),
           ),
-        "42501",
+        "42P01",
       );
     }
   });

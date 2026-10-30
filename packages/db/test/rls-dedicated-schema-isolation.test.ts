@@ -601,6 +601,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       },
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.filter(
         (name) =>
+          !name.includes("variable_set") &&
           name !== "resolve_workspace_codex_subscription_source(uuid, uuid)" &&
           name !== "capture_legacy_codex_turn_sources(uuid, uuid)",
       ).map((name) => ({
@@ -754,7 +755,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         delete: false,
       });
     }
-    for (const tableName of PROTECTED_NO_DIRECT_DML_TABLES) {
+    for (const tableName of expectedPresent(PROTECTED_NO_DIRECT_DML_TABLES)) {
       expect(posture.tables.find((table) => table.name === tableName)).toMatchObject({
         rlsEnabled: true,
         rlsForced: true,

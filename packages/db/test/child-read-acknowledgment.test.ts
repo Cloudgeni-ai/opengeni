@@ -1,5 +1,3 @@
-import { attachLegacyVariableSets, createLegacyVariableSet } from "./helpers/legacy-variable-sets";
-
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
@@ -23,6 +21,7 @@ import {
   claimSessionWorkForAttempt,
   configureChildLifecycleNotices,
   createDb,
+  createRig,
   createSession,
   enqueueSessionTurn,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -64,9 +63,9 @@ afterAll(async () => {
 
 type Grant = { accountId: string; workspaceId: string; subjectId: string };
 
-async function managedWorkspaceWithPersonalVariableSet(): Promise<{
+async function managedWorkspaceWithPersonalRig(): Promise<{
   grant: Grant;
-  variableSetId: string;
+  rigId: string;
 }> {
   const userId = `child-read-personal-${crypto.randomUUID()}`;
   const subjectId = `user:${userId}`;
@@ -94,13 +93,13 @@ async function managedWorkspaceWithPersonalVariableSet(): Promise<{
       ${membership.organizationId}, 1, ${"e".repeat(64)}, ${"f".repeat(64)},
       'child-read-acknowledgment'
     ) on conflict (account_id) do nothing`;
-  const variableSet = await createLegacyVariableSet(client.db, {
+  const rig = await createRig(client.db, {
     accountId: membership.organizationId,
     workspaceId: membership.personalWorkspaceId,
     scope: "user",
     subjectId,
     name: `child-read-personal-${crypto.randomUUID()}`,
-    variables: [{ name: "PERSONAL_TOKEN", valueEncrypted: "ciphertext:test" }],
+    initialVersion: { setupScript: "echo personal-resource-test" },
   });
   return {
     grant: {
@@ -108,7 +107,7 @@ async function managedWorkspaceWithPersonalVariableSet(): Promise<{
       workspaceId: sharedGrant.workspaceId,
       subjectId,
     },
-    variableSetId: variableSet.id,
+    rigId: rig.id,
   };
 }
 
@@ -149,10 +148,17 @@ async function startSession(
     parent?: Started;
     goal?: boolean;
     message: string;
-    personalVariableSetId?: string;
+    personalRigId?: string;
     personalMode?: "once" | "session" | "always";
   },
 ) {
+  const [personalRigVersion] = input.personalRigId
+    ? await shared.admin<Array<{ id: string }>>`
+        select id from rig_versions where account_id = ${grant.accountId}
+          and rig_id = ${input.personalRigId} and active`
+    : [];
+  if (input.personalRigId && !personalRigVersion)
+    throw new Error("personal Rig has no active version");
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -177,9 +183,11 @@ async function startSession(
     reasoningEffort: "medium" as const,
     latencyMode: "standard" as const,
     sandboxBackend: "none",
-    ...(input.personalVariableSetId
+    ...(input.personalRigId
       ? {
           subjectId: grant.subjectId,
+          rigId: input.personalRigId,
+          rigVersionId: personalRigVersion!.id,
           initialPersonalResourceAttachmentIntent: {
             mode: input.personalMode ?? ("session" as const),
             workspaceSharedAcknowledged: true,
@@ -188,13 +196,6 @@ async function startSession(
         }
       : {}),
   });
-  if (input.personalVariableSetId) {
-    await attachLegacyVariableSets(client.db, {
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      variableSetIds: [input.personalVariableSetId],
-    });
-  }
   await initializeSessionStartAtomically(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -1002,10 +1003,10 @@ describe("child read acknowledgment on parent consumption", () => {
   });
 
   test("a child result inherits its exact parent-turn human and admits session personal resources", async () => {
-    const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+    const { grant, rigId } = await managedWorkspaceWithPersonalRig();
     const parent = await startSession(grant, {
       message: "orchestrate",
-      personalVariableSetId: variableSetId,
+      personalRigId: rigId,
     });
     const child = await startSession(grant, { parent, message: "work" });
     await settleIdle(grant, child);
@@ -1559,10 +1560,10 @@ describe("child read acknowledgment on parent consumption", () => {
 test.each(["legacy", "current", "legacy-replay"] as const)(
   "a %s retained command result preserves exact causal human for personal resources",
   async (version) => {
-    const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+    const { grant, rigId } = await managedWorkspaceWithPersonalRig();
     const parent = await startSession(grant, {
       message: "run background work",
-      personalVariableSetId: variableSetId,
+      personalRigId: rigId,
     });
     const { accountId, workspaceId } = grant;
     const sessionId = parent.session.id,
@@ -1656,10 +1657,10 @@ test.each(["legacy", "current", "legacy-replay"] as const)(
 );
 
 test("an input wait timeout preserves exact waiting human for personal resources", async () => {
-  const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+  const { grant, rigId } = await managedWorkspaceWithPersonalRig();
   const parent = await startSession(grant, {
     message: "wait for work",
-    personalVariableSetId: variableSetId,
+    personalRigId: rigId,
   });
   await waitForSessionInputWithEvent(client.db, grant.workspaceId, parent.session.id, {
     reason: "waiting for CI",
@@ -1726,10 +1727,10 @@ async function connectedCommand(grant: Grant, parent: Started) {
 test.each(["session", "always"] as const)(
   "a Connected Machine result inherits only its %s personal grant",
   async (mode) => {
-    const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+    const { grant, rigId } = await managedWorkspaceWithPersonalRig();
     const parent = await startSession(grant, {
       message: "start command",
-      personalVariableSetId: variableSetId,
+      personalRigId: rigId,
       personalMode: mode,
     });
     const command = await connectedCommand(grant, parent);
@@ -1770,10 +1771,10 @@ test.each(["session", "always"] as const)(
 );
 
 test("a command successor cannot extend a once personal grant", async () => {
-  const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+  const { grant, rigId } = await managedWorkspaceWithPersonalRig();
   const parent = await startSession(grant, {
     message: "start command",
-    personalVariableSetId: variableSetId,
+    personalRigId: rigId,
     personalMode: "once",
   });
   const command = await connectedCommand(grant, parent);
@@ -1935,10 +1936,10 @@ async function recoverLegacyCausalUpdate(grant: Grant, parent: Started, sourceId
 }
 
 test("a command successor cannot revive a revoked personal grant", async () => {
-  const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+  const { grant, rigId } = await managedWorkspaceWithPersonalRig();
   const parent = await startSession(grant, {
     message: "start command",
-    personalVariableSetId: variableSetId,
+    personalRigId: rigId,
   });
   const command = await connectedCommand(grant, parent);
   await waitForCommands(grant, parent);
