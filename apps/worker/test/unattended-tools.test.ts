@@ -3,7 +3,10 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   SESSION_UNATTENDED_METADATA_KEY,
 } from "@opengeni/contracts";
+import { UNATTENDED_SESSION_GUIDANCE } from "@opengeni/runtime";
 import {
+  ATTENDED_AGAIN_NOTE,
+  attendanceChangeNote,
   firstPartyToolsForAttendance,
   sessionForAttempt,
   sessionStartedUnattended,
@@ -11,6 +14,26 @@ import {
 } from "../src/activities/agent-turn/unattended";
 
 describe("unattended turn tools", () => {
+  test("a turn whose attendance differs from how the chat started says so in its input", () => {
+    const startedUnattended = { [SESSION_UNATTENDED_METADATA_KEY]: true };
+    // Interactive chats, and chats whose setting matches how they started, get nothing.
+    expect(attendanceChangeNote({ metadata: {} })).toBeUndefined();
+    expect(attendanceChangeNote({ metadata: {}, unattended: false })).toBeUndefined();
+    expect(attendanceChangeNote({ metadata: startedUnattended, unattended: true })).toBeUndefined();
+    // Switched to work without a person after an attended start.
+    expect(attendanceChangeNote({ metadata: {}, unattended: true })).toBe(
+      `[Opengeni attendance]\n${UNATTENDED_SESSION_GUIDANCE}`,
+    );
+    // Started unattended, and a person is now present.
+    expect(attendanceChangeNote({ metadata: startedUnattended, unattended: false })).toBe(
+      `[Opengeni attendance]\n${ATTENDED_AGAIN_NOTE}`,
+    );
+    // A person's answer resuming a turn runs it attended.
+    expect(attendanceChangeNote(sessionForAttempt({ metadata: {}, unattended: true }, true))).toBe(
+      undefined,
+    );
+  });
+
   test("what the model is told follows how the chat started, not its current setting", () => {
     const started = { metadata: { [SESSION_UNATTENDED_METADATA_KEY]: true } };
     expect(sessionStartedUnattended({ metadata: {} })).toBe(false);

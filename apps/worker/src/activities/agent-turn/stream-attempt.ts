@@ -314,6 +314,8 @@ export type TurnStreamAttemptDeps = {
   unavailableSandboxFilesNote: string | undefined;
   runCredentialsNote: string | undefined;
   mcpAvailabilityNote: string | undefined;
+  /** Turn-scoped note when the chat's attendance differs from how it started. */
+  attendanceNote?: string | undefined;
   knowledgeSourcePreparationNote?: string | undefined;
   fileAuthoritySubjectId: string | null;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
@@ -469,6 +471,7 @@ export async function runTurnStreamAttempt(
     unavailableSandboxFilesNote,
     runCredentialsNote,
     mcpAvailabilityNote,
+    attendanceNote,
     knowledgeSourcePreparationNote,
     fileAuthoritySubjectId,
     activeSandboxBackend,
@@ -656,6 +659,7 @@ export async function runTurnStreamAttempt(
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
         ...(runCredentialsNote ? { runCredentialsNote } : {}),
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
+        ...(attendanceNote ? { attendanceNote } : {}),
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
         mountedFileResources: turn.resources.filter((resource) => resource.kind === "file"),
         providerApi,

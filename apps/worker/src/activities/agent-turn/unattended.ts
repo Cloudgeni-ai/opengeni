@@ -3,6 +3,7 @@ import {
   type FirstPartyMcpToolName,
   type Session,
 } from "@opengeni/contracts";
+import { UNATTENDED_SESSION_GUIDANCE } from "@opengeni/runtime";
 
 /**
  * First-party tools that pause the turn until a person acts. An unattended
@@ -32,6 +33,29 @@ export function sessionStartedUnattended(session: Pick<Session, "metadata">): bo
  */
 export function sessionUnattendedNow(session: Pick<Session, "unattended">): boolean {
   return session.unattended === true;
+}
+
+/**
+ * Said to the model with a turn whose attendance differs from how the chat
+ * started: the "Work without me" switch was turned on in a chat that started
+ * attended, or a chat that started unattended now has a person (the switch
+ * turned off, or someone wrote in an automation's chat). The system prompt
+ * and tools keep following how the chat started, so earlier requests stay
+ * byte-identical; this turn-scoped note carries the change instead. A chat
+ * whose setting matches how it started gets none.
+ */
+export const ATTENDED_AGAIN_NOTE =
+  "A person is now present in this chat and will see and can answer questions, so the unattended-session guidance no longer applies. Follow the ordinary guidance on when to ask, asking in your reply.";
+
+export function attendanceChangeNote(
+  session: Pick<Session, "metadata" | "unattended">,
+): string | undefined {
+  const started = sessionStartedUnattended(session);
+  const now = sessionUnattendedNow(session);
+  if (started === now) return undefined;
+  return ["[Opengeni attendance]", now ? UNATTENDED_SESSION_GUIDANCE : ATTENDED_AGAIN_NOTE].join(
+    "\n",
+  );
 }
 
 /**

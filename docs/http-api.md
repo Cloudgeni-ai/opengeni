@@ -91,11 +91,16 @@ chat's **Work without me** switch in the Agent tab uses the same call; SDK
 `updateSessionUnattended`). The switch changes only whether a person is waited
 for: while it is on, a call that needs approval is refused as above, and a
 question or hand-off to a person returns at once with a result saying no one
-will answer. What the agent is told and which tools it has follow how the chat
+will answer. The system instructions and tool list follow how the chat
 started and never change mid-chat, so earlier requests stay cacheable: a chat
 that started unattended (the create option, or a scheduled or event-triggered
 chat that started unattended) keeps the unattended instructions and has no tool
-that waits for a person, and a chat that started attended keeps both tools. A
+that waits for a person, and a chat that started attended keeps both tools.
+Each turn whose setting differs from how the chat started carries a short note
+in that turn's input instead: the unattended guidance when the chat was
+switched to work without a person, or that a person is now present and can
+answer when a chat that started unattended is attended again (the agent then
+asks in its reply). A
 turn already waiting for a person's answer resumes attended when that answer
 arrives. It needs `sessions:control`, returns the session, and returns 409
 `SESSION_ARCHIVED_READ_ONLY` for an archived session. A fork keeps this switch.

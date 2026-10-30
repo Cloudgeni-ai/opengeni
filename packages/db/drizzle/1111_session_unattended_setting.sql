@@ -21,6 +21,9 @@ SET LOCAL lock_timeout = '5s';
 -- every new write without scanning the table under its lock.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS unattended_setting text;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS started_unattended boolean;
+-- A test or preview database that ran an earlier, unreleased numbering of this
+-- migration already has the constraint; replace it so this file applies.
+ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_unattended_setting_values;
 ALTER TABLE sessions ADD CONSTRAINT sessions_unattended_setting_values
   CHECK (unattended_setting IS NULL
     OR unattended_setting IN ('unattended', 'attended', 'unattended_by_default'))
