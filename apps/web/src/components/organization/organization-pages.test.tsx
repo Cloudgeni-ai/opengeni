@@ -949,6 +949,8 @@ describe("People page", () => {
       expect(create).toHaveBeenCalledTimes(2);
       // The re-read is in flight: the previous plan keeps the one notice up.
       expect(release).not.toBeNull();
+      // No local guess at the count: it only changes once the server answers.
+      expect(view.container.textContent).toContain("1 / 2 seats used");
       expect(view.container.textContent).toContain("Your plan's seat limit is reached");
       expect(view.container.textContent).not.toContain("Couldn't send the invitation");
       expect(button(view.container, "Upgrade to Max")).toBeDefined();
