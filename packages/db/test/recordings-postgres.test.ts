@@ -2128,8 +2128,11 @@ describe("recordings and usage allowances", () => {
         await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber, ...live, bounded }),
       release: async (trackNumber = 0) =>
         await releaseRecordingLiveGrant(db, { ...actor, recordingId, trackNumber }),
-      /** Report the track's total, `more` milliseconds past its last report. */
-      report: async (more: number, trackNumber = 0) => {
+      /**
+       * Report the track's total, `more` milliseconds past its last report;
+       * charged in credits (the charge itself left out) unless `billed` is false.
+       */
+      report: async (more: number, trackNumber = 0, billed = true) => {
         const total = (streamed.get(trackNumber) ?? 0) + more;
         streamed.set(trackNumber, total);
         await appendRecordingLiveSegments(db, {
@@ -2137,7 +2140,9 @@ describe("recordings and usage allowances", () => {
           recordingId,
           trackNumber,
           streamedMilliseconds: total,
-          pricing: unbilled,
+          pricing: billed
+            ? () => ({ listPriceMicros: listPrice, charge: async () => undefined })
+            : unbilled,
           segments: [],
         });
       },
@@ -2386,6 +2391,27 @@ describe("recordings and usage allowances", () => {
       async (tx) => await tx.select().from(schema.recordingLiveUnbackedHours),
     );
     expect(visible).toEqual([]);
+  });
+
+  test("live time not charged in credits (billing off, a legacy account) isn't counted toward the day", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // A session ended by a report of no new audio, and one never reported on.
+    await meeting.start(0, false);
+    await meeting.elapse(30);
+    await meeting.report(0, 0, false);
+    await meeting.start(0, false);
+    await meeting.elapse(30);
+    await meeting.start(0, false);
+    const [track] = await shared.admin<{ unbacked: string }[]>`
+      select live_unbacked_milliseconds::text as unbacked from recording_tracks
+      where recording_id = ${meeting.recordingId} and track_number = 0`;
+    expect(Number(track!.unbacked)).toBeGreaterThanOrEqual(60 * 60_000);
+    const rows = await shared.admin`
+      select 1 from recording_live_unbacked_hours h
+      join recordings r on r.workspace_id = h.workspace_id
+      where r.id = ${meeting.recordingId}`;
+    expect(rows.length).toBe(0);
   });
 
   test("an honest heavy day, eight hours of audio across recordings with pauses, is never refused", async () => {

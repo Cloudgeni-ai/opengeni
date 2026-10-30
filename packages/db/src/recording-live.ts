@@ -277,7 +277,8 @@ export async function startRecordingLiveTrack(
       });
       if (refusal) throw new RecordingConflictError(LIVE_GRANT_REFUSED_MESSAGE, refusal);
     }
-    await addBoundUnbacked(tx, recording, input, unbackedAdded);
+    // Only time of tracks charged in credits counts toward the person's day.
+    if (input.bounded) await addBoundUnbacked(tx, recording, input, unbackedAdded);
     const [track] = await tx
       .update(schema.recordingTracks)
       .set({
@@ -435,7 +436,8 @@ export async function appendRecordingLiveSegments(
             LIVE_REPORT_GAP_MAX_MILLISECONDS,
           )
         : 0;
-    if (gap !== null) await addBoundUnbacked(tx, recording, input, gap - gapCovered);
+    // Only time of audio charged in credits counts toward the person's day.
+    if (gap !== null && charge) await addBoundUnbacked(tx, recording, input, gap - gapCovered);
     // Nothing charged yet: charging starts at what had streamed before it
     // (an older release's or a time credits weren't billed).
     const chargedUpTo = before.charged ?? streamedBefore;

@@ -412,27 +412,41 @@ silence, pauses (up to the daily bound) or quick pause and resume cycles.
 Accounts on legacy billing, and workspaces with credit billing off, aren't
 bounded.
 
-Residual risk: each grant still opens one provider session (up to the
-provider's session limit) whose audio is only as metered as the recorder
-reports. A modified client that reports its audio as paused (no more audio)
-while it streams streams about 4 hours of unpaid audio a day per person and
-workspace (at most an hour more in its last session) before the daily bound
-stops it. One that asks for a new session while its earlier ones still run
-keeps each running up to the provider's hour, counted only until the next
-request, so parallel sessions are bounded only by a track's session limits
-(20, plus one per 5 minutes reported). The bound is per person and workspace, not per billing account: the
-person's hours are stored per workspace, so other people of the account, and
-the same person's other workspaces, each have their own 4 hours (about $1.44
-a day per extra workspace at 6000 µ$ a minute). This is accepted for now; an
-account-wide sum needs a SECURITY DEFINER database function, which a later
-release can add (granting a new definer function to the runtime takes two
-releases). Telling an honest pause from a fake one needs a meter the client
-doesn't control, for example the server holding each provider session (and
-hanging it up on a pause or a new request) or reading the provider's own
-usage; that is also follow-up work. A modified client that reports invented
-audio is charged for it. A save whose receipt never commits, after the
-recorder's last retries, leaves that last stretch unpaid, and a debit not
-reconciled within 3 days stays a receipt without a ledger entry.
+Residual risk, accepted for now: each grant still opens one provider
+session (up to the provider's hour) whose audio is only as metered as the
+recorder reports.
+
+- A modified client that reports its audio as paused (no more audio) while it
+  streams gets about 4 hours of unpaid audio a day per person and workspace
+  (at most an hour more in its last session) before the daily bound stops it.
+- The bound is per person and workspace, not per billing account: other
+  people of the account (including each external user an organization key
+  acts as), and the same person's other workspaces, each have their own 4
+  hours, about $1.44 a day each at 6000 µ$ a minute. An account-wide sum
+  needs a SECURITY DEFINER database function, which a later release can add
+  (granting a new definer function to the runtime takes two releases).
+- Pauses inside an open session (shorter than its hour) count, as the server
+  can't tell them from audio nobody reported: a day with more than about 4
+  hours of them, for example a dozen 20-minute pauses, loses the live
+  preview; the recordings and their transcripts are unaffected.
+- Sessions asked for at the same moment on different tracks each check the
+  bound before the other's time is added, so the day can run over by at most
+  one session per concurrent request.
+- A client that asks for a new session while its earlier ones still run keeps
+  each running up to the provider's hour, counted only until the next
+  request, so parallel sessions are bounded only by a track's session limits
+  (20, plus one per 5 minutes reported).
+- Only time of tracks charged in credits is stored per hour. Hours older than
+  two days are removed on the person's next write in that workspace, not
+  otherwise; they no longer count after a day either way.
+
+Telling an honest pause from a fake one needs a meter the client doesn't
+control, for example the server holding each provider session (and hanging
+it up on a pause or a new request) or reading the provider's own usage; that
+is follow-up work. A modified client that reports invented audio is charged
+for it. A save whose receipt never commits, after the recorder's last
+retries, leaves that last stretch unpaid, and a debit not reconciled within
+3 days stays a receipt without a ledger entry.
 
 Rollout: while pods of the previous release still serve during a deploy,
 a live save they handle stores the track's list-price total without moving
