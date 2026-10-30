@@ -324,10 +324,12 @@ describe("paused new account sign-ups", () => {
             : "EMAIL_PASSWORD_SIGN_UP_DISABLED",
         );
         const context = await auth.$context;
-        const created = await context.internalAdapter.createUser({ name: "Hook", email }).then(
-          (user) => user,
-          () => null,
-        );
+        const created = await context.internalAdapter
+          .createUser({ name: "Hook", email }, { method: "admin" })
+          .then(
+            (user) => user,
+            () => null,
+          );
         expect(created).toBeNull();
         expect(await authUserCount(email)).toBe(0);
       }, 120_000);

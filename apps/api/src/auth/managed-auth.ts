@@ -437,6 +437,13 @@ export function createManagedAuth(
         ipAddressHeaders: [TRUSTED_CLIENT_ADDRESS_HEADER],
       },
       useSecureCookies: settings.publicBaseUrl?.startsWith("https://") ?? false,
+      // A dynamic base URL (allowed hosts configured) reads the public host
+      // from x-forwarded-host, which the bundled web server and ingress set;
+      // the host must still match an allowed host. Better Auth 1.6 trusted
+      // these headers by default for dynamic base URLs; 1.7 requires opting in.
+      ...(splitCsv(settings.betterAuthAllowedHosts).length > 0
+        ? { trustedProxyHeaders: true }
+        : {}),
       ...(settings.betterAuthCookieDomain
         ? {
             crossSubDomainCookies: {
