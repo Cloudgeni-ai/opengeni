@@ -451,7 +451,10 @@ impl DiskWatch {
     }
 
     /// A new descriptor for the watch's open file description, for the
-    /// engine to keep; `None` if the watch has none.
+    /// engine to keep; `None` if the watch has none. Nothing may sync
+    /// through it or any other copy of the description but
+    /// [`DiskWatch::sync`]: the check marker covers that sync alone, so
+    /// any other would take errors from the watch unseen.
     pub(super) fn description(&self) -> io::Result<Option<OwnedFd>> {
         self.file
             .as_ref()
