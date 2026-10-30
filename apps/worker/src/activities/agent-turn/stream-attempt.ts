@@ -2430,7 +2430,8 @@ export async function runTurnStreamAttempt(
     );
     // A copied web-search record is not a reply: treat it as empty so the
     // turn asks for a real answer instead of publishing the copy.
-    const finalOutput = isHostedSearchEvidenceEchoText(streamFinalOutput) ? "" : streamFinalOutput;
+    const suppressedEcho = isHostedSearchEvidenceEchoText(streamFinalOutput);
+    const finalOutput = suppressedEcho ? "" : streamFinalOutput;
     const durableReplyFacts =
       !inputWaitYielded && finalOutput.trim().length === 0
         ? await sessionTurnFinalReplyFacts(db, input.workspaceId, input.sessionId, activeTurnId)
@@ -2445,6 +2446,7 @@ export async function runTurnStreamAttempt(
         maintenance: turn.source === "compaction",
         toolsExecuted: toolsExecuted || finalReplyNudged || durableReplyFacts.toolsExecuted,
         completedGoal: durableReplyFacts.completedGoal,
+        suppressedEcho,
       })
     ) {
       await historySink.reconcileConversationTruth({ requireDurable: true });

@@ -126,7 +126,16 @@ explanation, one evidence JSON object, nothing else) into a short note with the
 same item identity. The worker's stream filter (`HostedSearchEvidenceEchoGuard`)
 keeps such a copy out of the visible transcript; text that quotes, mentions or
 continues after a record is shown in full. A final output that is only a copy
-counts as an empty reply.
+counts as an empty reply, so the turn asks once for a real answer.
+
+Trust tradeoff: web titles and snippets now reach the model in the user role.
+The alternatives were worse: the assistant role caused the imitation above, a
+synthetic tool call/result pair invites calls to an undefined tool, and a
+developer or system message would raise web text above the user. The record is
+therefore labelled as untrusted web content and carries the web text only as
+escaped JSON values. On Azure Responses (stateless, encrypted reasoning), a
+mid-turn user-role record was probed against the assistant-role record: earlier
+reasoning still counted in input tokens and the cached prefix was unchanged.
 
 This does not reconstruct evidence absent from older responses, perform another
 search, or guarantee native citation annotations. Sources-only includes supply URLs,
