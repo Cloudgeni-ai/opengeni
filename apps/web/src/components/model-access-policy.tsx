@@ -457,7 +457,7 @@ export function allowedModelsSource(
   if (state.scope !== "workspace" || !saved?.originalPolicy.source || !organizationName) {
     return null;
   }
-  return saved.follow ? "Uses the default." : "Narrowed for this workspace.";
+  return saved.follow ? "Uses the default." : "Changed for this workspace.";
 }
 
 /** The Allowed models row on the Models page: opens its page. */
@@ -886,8 +886,8 @@ export function AllowedModelsFormPage({
             {creditsOff
               ? "New chats and automations won't start until you allow a model paid by a subscription or API key, connect one, or turn Opengeni credits back on."
               : organizationScope
-                ? "No workspace can start new chats or automations until this list allows at least one model."
-                : "New chats and automations won't start until you allow at least one model."}
+                ? "None of the models this list allows can run with the accounts connected now, so new chats and automations won't start. Allow one that can."
+                : "None of the allowed models can run now, so new chats and automations won't start. Allow one that can."}
           </Notice>
         ) : null}
         {draft.mode === "selected" ? (
