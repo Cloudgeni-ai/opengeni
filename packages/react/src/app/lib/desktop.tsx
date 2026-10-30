@@ -113,21 +113,21 @@ declare global {
 }
 
 /**
- * The height of the macOS app's window bar, where the shell centres the
- * traffic lights, in CSS pixels at the page's zoom, or null for other
- * platforms (and without the bridge, where the page keeps the current shell's
- * 44px bar). The sidebar toggle and a chat's header are centred on the bar, so
- * they line up with the lights. Shells that don't report it (0.1.33 and older)
- * centre the lights on a 56px row.
+ * How far down the macOS window the traffic lights' centre is, in CSS pixels
+ * at the page's zoom, or null for other platforms (and without the bridge,
+ * where the page keeps the current shell's 22px). The sidebar toggle and a
+ * chat's header are centred on this line, so they line up with the lights.
+ * The shell centres the lights on its window bar (`windowBarHeight`); shells
+ * that don't report it (0.1.33 and older) centre them on a 56px row.
  */
-export function desktopWindowBarHeight(bridge: DesktopBridge | null): number | null {
+export function desktopWindowControlsCentre(bridge: DesktopBridge | null): number | null {
   if (bridge?.platform !== "macos") return null;
   const reported = bridge.windowBarHeight;
   const height =
     typeof reported === "number" && Number.isFinite(reported) && reported > 0
       ? reported
       : DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT;
-  return height / desktopZoom(bridge);
+  return height / 2 / desktopZoom(bridge);
 }
 
 /** The page's zoom factor in the desktop app (1 at 100%, and in shells that don't report it). */
@@ -142,16 +142,17 @@ function desktopZoom(bridge: DesktopBridge | null): number {
 }
 
 /**
- * Sizes the window bar (`--og-window-bar-height`) to the shell's and tells the
- * page its zoom (`--og-window-zoom`), so the bar's controls keep their place
- * in the window beside the traffic lights; kept up to date when the page zooms
- * (which resizes its viewport). See `desktopWindowBarHeight`.
+ * Tells the page where the traffic lights' centre line is
+ * (`--og-window-controls-center`) and its zoom (`--og-window-zoom`), so the
+ * window bar's controls keep their place in the window beside the lights;
+ * kept up to date when the page zooms (which resizes its viewport). See
+ * `desktopWindowControlsCentre`.
  */
 export function applyDesktopWindowBar(root: HTMLElement, bridge: DesktopBridge | null): void {
   const apply = () => {
-    const height = desktopWindowBarHeight(bridge);
-    if (height == null) return;
-    root.style.setProperty("--og-window-bar-height", `${height}px`);
+    const centre = desktopWindowControlsCentre(bridge);
+    if (centre == null) return;
+    root.style.setProperty("--og-window-controls-center", `${centre}px`);
     root.style.setProperty("--og-window-zoom", String(desktopZoom(bridge)));
   };
   apply();

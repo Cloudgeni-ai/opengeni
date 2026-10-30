@@ -65,13 +65,22 @@ html[data-desktop] [data-window-drag] :is(a, button, input, select, textarea, la
    system title bar.
 
    macOS: as tall as the badge with even space above and below it, and the
-   traffic lights centred on it. The app sets the height the shell reports
-   (`applyDesktopWindowBar`), so the lights and the page's own bar controls
-   share one centre line with any shell.
+   traffic lights centred on it. The page's own bar controls (the sidebar
+   toggle, a chat's header) are centred on the lights' line,
+   --og-window-controls-center, which the app sets from the shell's bar and
+   the page zoom (`applyDesktopWindowBar`), so they line up with any shell.
+   The bar is never shorter than its tallest row (--og-window-bar-min-height,
+   a sub-chat's header), so nothing is cut off at a large page zoom; a row
+   too tall to centre on the line starts at the top instead.
    Windows: as tall as the caption buttons, which the browser reports (the
    window controls overlay); in full screen there are none, and no bar. */
 html[data-desktop="macos"] {
-  --og-window-bar-height: 44px;
+  --og-window-controls-center: 22px;
+  --og-window-bar-min-height: 44px;
+  --og-window-bar-height: max(
+    calc(2 * var(--og-window-controls-center)),
+    var(--og-window-bar-min-height)
+  );
 }
 
 html[data-desktop="windows"] {
@@ -85,8 +94,8 @@ html:is([data-desktop="macos"], [data-desktop="windows"])::before {
   /* Above the page, below full-window layers and dialogs (z-index 50), whose
      backdrops dim it like the rest of the window. The macOS app's own bar
      controls (`[data-window-bar-controls]`, the sidebar toggle) sit one above
-     it at 46, from 84px: clear of the traffic lights and of the wider badge
-     macOS shows while the window is shared or recorded. */
+     it at 46, 84 window points from the left: clear of the traffic lights and
+     of the wider badge macOS shows while the window is shared or recorded. */
   z-index: 45;
   height: var(--og-window-bar-height);
   background-color: var(--og-color-bg);
@@ -188,7 +197,7 @@ html[data-desktop="macos"] [data-shell-rail] + [data-canvas] {
    the toggle nor the traffic lights are ever under it (beside the collapsed
    rail, or with no rail). Its two lines for a sub-chat (16px + 28px) fit the
    bar. The toggle starts 84 window points from the left at any page zoom
-   (`--og-window-zoom`, set with the bar's height), as the traffic lights
+   (`--og-window-zoom`, set with the lights' line), as the traffic lights
    don't zoom. */
 html[data-desktop="macos"] {
   --og-window-bar-controls-left: calc(84px / var(--og-window-zoom, 1));
@@ -201,8 +210,9 @@ html[data-desktop="macos"] [data-window-bar-row] > [data-titlebar] {
   left: max(var(--og-window-bar-row-left, 0px), var(--og-window-bar-row-start));
   right: var(--og-window-panel-gap);
   z-index: 46;
-  height: var(--og-window-bar-height);
-  min-height: 0;
+  /* Centred on the traffic lights' line, or from the top when taller. */
+  height: calc(2 * var(--og-window-controls-center));
+  min-height: min-content;
   padding-top: 0;
   padding-bottom: 0;
   border-bottom-width: 0;

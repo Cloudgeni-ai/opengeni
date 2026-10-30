@@ -1597,9 +1597,6 @@
 :where(.og-root).\!h-auto,:where(.og-root) .\!h-auto {
     height: auto !important;
   }
-:where(.og-root).h-\(--og-window-bar-height\),:where(.og-root) .h-\(--og-window-bar-height\) {
-    height: var(--og-window-bar-height);
-  }
 :where(.og-root).h-0,:where(.og-root) .h-0 {
     height: calc(var(--spacing) * 0);
   }
@@ -1695,6 +1692,9 @@
   }
 :where(.og-root).h-\[400px\],:where(.og-root) .h-\[400px\] {
     height: 400px;
+  }
+:where(.og-root).h-\[calc\(2\*var\(--og-window-controls-center\,22px\)\)\],:where(.og-root) .h-\[calc\(2\*var\(--og-window-controls-center\,22px\)\)\] {
+    height: calc(2 * var(--og-window-controls-center,22px));
   }
 :where(.og-root).h-\[calc\(100\%-1px\)\],:where(.og-root) .h-\[calc\(100\%-1px\)\] {
     height: calc(100% - 1px);
@@ -1917,6 +1917,9 @@
   }
 :where(.og-root).min-h-full,:where(.og-root) .min-h-full {
     min-height: 100%;
+  }
+:where(.og-root).min-h-min,:where(.og-root) .min-h-min {
+    min-height: min-content;
   }
 :where(.og-root).w-0,:where(.og-root) .w-0 {
     width: calc(var(--spacing) * 0);

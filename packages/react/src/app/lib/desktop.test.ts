@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   desktopAppVersionFromUserAgent,
-  desktopWindowBarHeight,
+  desktopWindowControlsCentre,
   desktopPlatformFromUserAgent,
   desktopPlatformIn,
   OPENED_WINDOW_NAME,
@@ -75,21 +75,21 @@ test("only the app's own top-level window takes the platform from the user agent
   expect(desktopPlatformIn(bridge, view({ name: OPENED_WINDOW_NAME }))).toBe("windows");
 });
 
-test("the macOS window bar follows the shell's traffic lights and the page zoom", () => {
+test("the macOS window controls' centre line follows the shell's traffic lights and the page zoom", () => {
   const bridge = (fields: Record<string, unknown>) => ({ version: 1, ...fields }) as never;
-  // The current shell reports its bar; the page zoom shrinks or grows it in
-  // page pixels so it stays the same height in the window.
-  expect(desktopWindowBarHeight(bridge({ platform: "macos", windowBarHeight: 44 }))).toBe(44);
+  // The current shell reports its bar, and centres the lights on it; the page
+  // zoom moves the line in page pixels so it stays put in the window.
+  expect(desktopWindowControlsCentre(bridge({ platform: "macos", windowBarHeight: 44 }))).toBe(22);
   expect(
-    desktopWindowBarHeight(
+    desktopWindowControlsCentre(
       bridge({ platform: "macos", windowBarHeight: 44, zoomFactor: () => 1.25 }),
     ),
-  ).toBeCloseTo(35.2);
+  ).toBeCloseTo(17.6);
   // Shells from before the bar (0.1.33 and older) centre the lights on 56px.
-  expect(desktopWindowBarHeight(bridge({ platform: "macos" }))).toBe(56);
+  expect(desktopWindowControlsCentre(bridge({ platform: "macos" }))).toBe(28);
   // A broken report or zoom falls back instead of breaking the layout.
   expect(
-    desktopWindowBarHeight(
+    desktopWindowControlsCentre(
       bridge({
         platform: "macos",
         windowBarHeight: Number.NaN,
@@ -98,8 +98,10 @@ test("the macOS window bar follows the shell's traffic lights and the page zoom"
         },
       }),
     ),
-  ).toBe(56);
+  ).toBe(28);
   // Only the macOS app has traffic lights; without the bridge the CSS default stays.
-  expect(desktopWindowBarHeight(bridge({ platform: "windows", windowBarHeight: 44 }))).toBeNull();
-  expect(desktopWindowBarHeight(null)).toBeNull();
+  expect(
+    desktopWindowControlsCentre(bridge({ platform: "windows", windowBarHeight: 44 })),
+  ).toBeNull();
+  expect(desktopWindowControlsCentre(null)).toBeNull();
 });

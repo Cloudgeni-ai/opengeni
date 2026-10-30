@@ -285,34 +285,42 @@ test("the macOS sidebar toggle is centred on the traffic lights", async () => {
   const shells = [
     { bar: "44", zoom: 1, lights: MAC_TRAFFIC_LIGHT_POSITION },
     { bar: "44", zoom: 1.25, lights: MAC_TRAFFIC_LIGHT_POSITION },
+    { bar: "44", zoom: 1.5, lights: MAC_TRAFFIC_LIGHT_POSITION },
     { bar: "44", zoom: 0.8, lights: MAC_TRAFFIC_LIGHT_POSITION },
     { bar: "none", zoom: 1, lights: LEGACY_MAC_TRAFFIC_LIGHT_POSITION },
   ];
   const layouts = [
-    { width: 1280, view: "rail", rail: "open" },
-    { width: 1280, view: "rail", rail: "collapsed" },
-    { width: 800, view: "rail", rail: "collapsed" },
-    { width: 1280, view: "chat", rail: "open" },
-    { width: 1280, view: "chat", rail: "none" },
-    { width: 800, view: "chat", rail: "collapsed" },
+    { width: 1280, view: "rail", rail: "open", subchat: false },
+    { width: 1280, view: "rail", rail: "collapsed", subchat: false },
+    { width: 800, view: "rail", rail: "collapsed", subchat: false },
+    { width: 1280, view: "chat", rail: "open", subchat: false },
+    { width: 1280, view: "chat", rail: "none", subchat: false },
+    { width: 800, view: "chat", rail: "collapsed", subchat: false },
+    { width: 1280, view: "chat", rail: "open", subchat: true },
+    { width: 800, view: "chat", rail: "none", subchat: true },
   ] as const;
   for (const { bar, zoom, lights } of shells) {
-    const centre = trafficLightCentre(lights);
-    for (const { width, view, rail } of layouts) {
+    // The lights' centre line, in page pixels.
+    const line = trafficLightCentre(lights) / zoom;
+    // Centred on the line when it fits above and below it, else from the top.
+    const top = (height: number) => Math.max(0, line - height / 2);
+    for (const { width, view, rail, subchat } of layouts) {
       const page = await browser.newPage({ viewport: { width, height: 420 } });
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
       await page.goto(
-        `${url}?platform=macos&bar=${bar}&zoom=${zoom}${view === "chat" ? "&view=chat" : ""}${rail === "none" ? "&rail=none" : ""}`,
+        `${url}?platform=macos&bar=${bar}&zoom=${zoom}${view === "chat" ? "&view=chat" : ""}${rail === "none" ? "&rail=none" : ""}${subchat ? "&subchat=1" : ""}`,
       );
-      const where = `bar=${bar} zoom=${zoom} ${view} ${rail} ${width}px`;
-      // The bar is the lights' row: centred on them, top to bottom.
+      const where = `bar=${bar} zoom=${zoom} ${view} ${rail} ${width}px${subchat ? " sub-chat" : ""}`;
       const ready =
         view === "chat"
           ? page.locator("[data-titlebar]").getByText("Ship the window bar")
           : page.locator("[data-session-row]").first();
       await ready.waitFor({ timeout: 90_000 });
-      expect((await windowBar(page))!.height * zoom, where).toBeCloseTo(centre * 2, 1);
+      // The bar is the lights' row, centred on them, and holds its tallest
+      // row (a sub-chat's header) whole at any zoom.
+      const barHeight = (await windowBar(page))!.height;
+      expect(barHeight, where).toBeCloseTo(Math.max(2 * line, 44), 1);
       // With no rail there is no sidebar toggle; the chat's header has the line.
       let toggleRight = 0;
       if (rail !== "none") {
@@ -325,26 +333,62 @@ test("the macOS sidebar toggle is centred on the traffic lights", async () => {
         });
         await toggle.waitFor();
         const box = (await toggle.boundingBox())!;
-        const toggleCentre = (box.y + box.height / 2) * zoom;
-        expect(Math.abs(toggleCentre - centre), where).toBeLessThanOrEqual(0.5);
+        // On the lights' line, to half a window point, whenever it fits.
+        expect(Math.abs(box.y - top(box.height)) * zoom, where).toBeLessThanOrEqual(0.5);
+        if (line >= box.height / 2) {
+          expect(
+            Math.abs((box.y + box.height / 2) * zoom - trafficLightCentre(lights)),
+            where,
+          ).toBeLessThanOrEqual(0.5);
+        }
+        expect(box.y + box.height, where).toBeLessThanOrEqual(barHeight + 0.01);
         // Clear of the traffic lights and the sharing badge at any zoom.
         expect(box.x * zoom, where).toBeCloseTo(MACOS_BAR_CONTROLS_LEFT, 1);
         toggleRight = box.x + box.width;
       }
       if (view === "chat") {
-        // The chat's header shares the line, after the toggle.
+        // The chat's header shares the line, after the toggle, whole in the bar.
         const row = (await windowBarRow(page))!;
         expect(row.left, where).toBeGreaterThanOrEqual(toggleRight);
-        const actions = row.buttons.find(({ label }) => label === "More session actions")!;
+        const header = await page
+          .locator("[data-window-bar-row] > [data-titlebar]")
+          .evaluate((element) => {
+            const box = element.getBoundingClientRect();
+            // Its contents' own height, without the stretch to the line.
+            const contents = [...element.children].reduce(
+              (height, child) => Math.max(height, child.getBoundingClientRect().height),
+              0,
+            );
+            return { top: box.top, height: box.height, contents };
+          });
+        if (subchat) expect(header.contents, where).toBeCloseTo(44, 0);
         expect(
-          Math.abs(((actions.top + actions.bottom) / 2) * zoom - centre),
+          Math.abs(header.top + header.height / 2 - (top(header.contents) + header.contents / 2)) *
+            zoom,
           where,
         ).toBeLessThanOrEqual(0.5);
+        expect(header.top, where).toBeGreaterThanOrEqual(0);
+        expect(header.top + header.height, where).toBeLessThanOrEqual(barHeight + 0.01);
+        const actions = row.buttons.find(({ label }) => label === "More session actions")!;
+        if (line >= header.contents / 2) {
+          expect(
+            Math.abs(((actions.top + actions.bottom) / 2) * zoom - trafficLightCentre(lights)),
+            where,
+          ).toBeLessThanOrEqual(0.5);
+        }
+        expect(actions.top, where).toBeGreaterThanOrEqual(0);
         expect(actions.clickable, where).toBe(true);
+        if (subchat) {
+          // The way back to the parent is whole, below the top of the window.
+          const back = (await page
+            .getByRole("link", { name: /^Back to parent session/ })
+            .boundingBox())!;
+          expect(back.y, where).toBeGreaterThanOrEqual(0);
+        }
       }
       if (output) {
         await page.screenshot({
-          path: `${output}/centre-${bar}-${zoom}-${view}-${rail}-${width}.png`,
+          path: `${output}/centre-${bar}-${zoom}-${view}-${rail}-${width}${subchat ? "-subchat" : ""}.png`,
           clip: { x: 0, y: 0, width: 400, height: 80 },
         });
       }
@@ -352,4 +396,4 @@ test("the macOS sidebar toggle is centred on the traffic lights", async () => {
       await page.close();
     }
   }
-}, 240_000);
+}, 360_000);
