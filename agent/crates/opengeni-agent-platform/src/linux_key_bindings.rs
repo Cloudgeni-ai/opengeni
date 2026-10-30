@@ -500,8 +500,7 @@ fn settle_on(
 
 fn window_exists(conn: &RustConnection, window: Window) -> bool {
     conn.get_window_attributes(window)
-        .ok()
-        .is_some_and(|cookie| cookie.reply().is_ok())
+        .is_ok_and(|cookie| cookie.reply().is_ok())
 }
 
 fn read_claims(conn: &RustConnection, root: Window, atom: Atom) -> PlatformResult<Vec<Claim>> {

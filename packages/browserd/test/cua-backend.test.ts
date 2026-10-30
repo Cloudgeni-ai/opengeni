@@ -4068,7 +4068,12 @@ describe("CUA desktop boundary", () => {
 
     test("a CUA whose run_steps cannot stop at a stale token runs batches one action at a time", async () => {
       for (const listToolsJson of [
-        async () => JSON.stringify({ tools: CUA_WINDOWS_DESKTOP_TOOLS }),
+        async () => {
+          const tools = structuredClone(CUA_WINDOWS_DESKTOP_TOOLS);
+          const batchTool = tools.find((tool) => tool.name === "run_steps")!;
+          delete (batchTool.inputSchema.properties as Record<string, unknown>).refind_stale;
+          return JSON.stringify({ tools });
+        },
         undefined,
       ]) {
         const fixture = new BatchFixture();
@@ -4080,6 +4085,18 @@ describe("CUA desktop boundary", () => {
         } finally {
           await backend.close();
         }
+      }
+    });
+
+    test("the pinned Windows worker supports stale-fenced native batches", async () => {
+      const fixture = new BatchFixture();
+      fixture.listToolsJson = async () => JSON.stringify({ tools: CUA_WINDOWS_DESKTOP_TOOLS });
+      const backend = await CuaComputerBackend.open(fixture, "windows");
+      try {
+        expect(backend.initialCapabilities.actionBatches).toBe(true);
+        expect((await backend.capabilities()).actionBatches).toBe(true);
+      } finally {
+        await backend.close();
       }
     });
 
