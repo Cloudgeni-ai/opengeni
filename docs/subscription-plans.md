@@ -275,8 +275,10 @@ still return it, and existing periods stay spendable until their normal expiry.
 A `NULL` cutoff or no revision means no cutoff.
 
 Set the cutoff **before** re-enabling Free in the catalog. To roll back, turn
-Free off in the catalog or clear the cutoff; neither removes issued periods. If the
-signup challenge is disabled, the cutoff alone no longer implies a CAPTCHA.
+Free off in the catalog; that does not remove issued periods. Clearing the cutoff is
+not a rollback: while Free is on it funds every older eligible owner on the next
+sweep. If the signup challenge is disabled, the cutoff alone no longer implies a
+CAPTCHA.
 
 The old `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` environment flag and
 `set_verified_signup_trial_credits_enabled` runtime switch no longer gate this

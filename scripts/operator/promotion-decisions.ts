@@ -55,21 +55,29 @@ try {
     console.log(JSON.stringify(result, null, 2));
   } else if (values["free-credit-cutoff"]) {
     // Owner-only, revision-fenced (0 before the first write). "none" clears it.
+    // The database validates the reason (6-1000 bytes) and operator.
     if (
       !values.operator?.trim() ||
       !values.reason ||
-      values.reason.trim().length < 6 ||
       !values.revision ||
       !/^\d+$/.test(values.revision)
     )
       throw new Error(
-        "Provide --operator, --reason (six characters), and --revision <current cutoff revision, 0 for none>",
+        "Provide --operator, --reason, and --revision <current cutoff revision, 0 for none>",
       );
-    const cutoff = values["free-credit-cutoff"];
+    const cutoff = values["free-credit-cutoff"].trim();
+    // A zoneless timestamp would be read in the session time zone.
+    if (
+      cutoff !== "none" &&
+      !/\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(cutoff)
+    )
+      throw new Error(
+        "--free-credit-cutoff needs an explicit zone, for example 2026-10-29T15:08:00Z",
+      );
     const notBefore = cutoff === "none" ? null : cutoff;
     const result = await client.db
       .execute(sql`select opengeni_private.set_free_credit_signup_cutoff(
-      ${notBefore}::timestamptz, ${values.operator.trim()}, ${values.reason.trim()}, ${values.revision}::bigint) as cutoff`);
+      ${notBefore}::timestamptz, ${`operator:${values.operator.trim()}`}, ${values.reason.trim()}, ${values.revision}::bigint) as cutoff`);
     console.log(JSON.stringify(result, null, 2));
   } else if (values["free-credit-cutoff-history"]) {
     const result = await client.db

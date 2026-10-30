@@ -146,9 +146,10 @@ new organization does not qualify. With no cutoff (no revision, or a `NULL`
 cutoff) nothing changes.
 
 The cutoff is meant to be the time the signup challenge became enforced, so that
-only owners who passed it receive Free credit. That holds only while the
-challenge stays enabled: if the signup challenge is ever disabled, a later signup
-still passes the cutoff without having passed a CAPTCHA.
+only owners who passed it receive Free credit. Use the moment every API replica was
+enforcing the challenge (rollout complete), not the merge time. That holds only
+while the challenge stays enabled: if the signup challenge is ever disabled, a later
+signup still passes the cutoff without having passed a CAPTCHA.
 
 It never removes, expires or changes what an already-issued period can spend.
 `getSpendableCreditBalance` calls `free_plan_credit_eligible` only for its abuse
@@ -180,8 +181,10 @@ fund every older eligible owner before the cutoff exists. Owners who signed up a
 the cutoff while Free was off are funded on the next sweep once it is on.
 
 Rollback: turn Free off in the catalog (`freeCredit=false`, `monthlyCreditMicros=0`)
-to stop all new Free periods, or clear the cutoff (`--free-credit-cutoff none`) to
-return to the previous eligibility. Neither removes periods that were already issued.
+to stop all new Free periods. It does not remove periods that were already issued.
+Clearing the cutoff (`--free-credit-cutoff none`) is not a rollback: while Free is on,
+it widens funding, and the next sweep pays every older eligible owner. Clear it only
+as a deliberate decision to fund them, normally after turning Free off.
 
 ## Rollout and rollback
 

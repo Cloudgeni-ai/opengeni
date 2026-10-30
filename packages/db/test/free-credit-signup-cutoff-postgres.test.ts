@@ -46,10 +46,10 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-/** A verified owner whose user row was created `ageMs` ago; the organization is created now. */
-async function owner(ageMs = 0) {
+/** A verified owner whose user row was created `age` ago (or at a Date); the organization is created now. */
+async function owner(age: number | Date = 0) {
   const userId = crypto.randomUUID();
-  const createdAt = new Date(Date.now() - ageMs);
+  const createdAt = age instanceof Date ? age : new Date(Date.now() - age);
   await shared!.admin`insert into auth_users(id,name,email,email_verified,created_at,updated_at)
     values (${userId},'Signup owner',${`${userId}@example.test`},true,${createdAt},${createdAt})`;
   const setup = await completeSelfServiceOrganizationSetup(client!.db, {
@@ -155,6 +155,25 @@ test("pre-cutoff owners get no new Free period and are not listed; post-cutoff o
   expect(await listSubscriptionPlanMaintenanceAccounts(client.db, 100)).toContain(old);
   await maintainSubscriptionPlans(client.db);
   expect(await freePeriods(old)).toHaveLength(1);
+}, 180_000);
+
+test("an owner created exactly at the cutoff is eligible; one created just before is not", async () => {
+  if (!shared || !client) return;
+  const cutoff = new Date(Date.now() - DAY);
+  await setCutoff(cutoff);
+  try {
+    const atCutoff = await owner(cutoff);
+    const justBefore = await owner(new Date(cutoff.getTime() - 1));
+    expect(await freePlanCreditEligible(client.db, atCutoff)).toBe(true);
+    expect(await freePlanCreditEligible(client.db, justBefore)).toBe(false);
+    // The sweep enrolls both (seat-cap row) but funds only the owner at the cutoff.
+    await maintainSubscriptionPlans(client.db);
+    expect(await freePeriods(atCutoff)).toHaveLength(1);
+    expect(await freePeriods(justBefore)).toHaveLength(0);
+    expect(await listSubscriptionPlanMaintenanceAccounts(client.db, 100)).not.toContain(justBefore);
+  } finally {
+    await setCutoff(null);
+  }
 }, 180_000);
 
 test("a post-cutoff owner who got nothing while Free was off is granted once Free is back on", async () => {
