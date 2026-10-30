@@ -469,7 +469,8 @@ test("a seat refusal names one plan with one button, and members are told to ask
       onUpgrade={upgrade}
     />,
   );
-  expect(member.textContent).toContain("Upgrade to Max to add more people");
+  expect(member.textContent).toContain("Your plan's seat limit is reached");
+  expect(member.textContent).not.toContain("to add more people");
   expect(member.textContent).toContain("Ask an organization owner to upgrade to Max.");
   expect(document.querySelectorAll("button").length).toBe(0);
 });

@@ -121,6 +121,10 @@ describe("brand-neutral error presentation", () => {
     expect(refusal({ upgradePlanLabel: " " })).toBe(
       "Your organization has reached its seat limit. Upgrade the plan to add people. Reference: seat-refusal.",
     );
+    // An invitee can't upgrade someone else's organization.
+    expect(refusal({ askOwner: true })).toBe(
+      "This organization is full. Ask an organization owner to upgrade. Reference: seat-refusal.",
+    );
   });
 
   test("Site refusals are friendly before a conversation exists too", () => {

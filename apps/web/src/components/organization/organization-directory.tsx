@@ -726,6 +726,15 @@ export function OrganizationDirectoryProvider({
         }
       }
       if (sent.length > 0 && owns(operation)) {
+        // Each sent invitation reserves a seat, so the plan reads full without a reload.
+        setPlanState((current) =>
+          current.ownerKey === identityKey && current.plan
+            ? {
+                ...current,
+                plan: { ...current.plan, seatsUsed: current.plan.seatsUsed + sent.length },
+              }
+            : current,
+        );
         setInvitations((current) => ({
           ...current,
           ownerKey: identityKey,

@@ -777,7 +777,8 @@ describe("People page", () => {
   test("people without billing access are told to ask an owner, with no upgrade button", async () => {
     const view = await invitePage(seatPlan("free", 1), false);
     try {
-      expect(view.container.textContent).toContain("Upgrade to Pro to add more people");
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(view.container.textContent).not.toContain("to add more people");
       expect(view.container.textContent).toContain("Ask an organization owner to upgrade to Pro.");
       expect(
         [...view.container.querySelectorAll("button")].some((each) =>
@@ -832,6 +833,92 @@ describe("People page", () => {
       expect(view.container.textContent).toContain("Upgrade to Max to add more people");
       expect(button(view.container, "Upgrade to Max")).toBeDefined();
       expect(view.container.textContent).toContain("new@example.test");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("several refused people get the plan with room for all of them, not the server's one-seat pick", async () => {
+    const create = mock(async () => {
+      throw new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            status: 402,
+            code: "seat_limit_reached",
+            message: "Upgrade to Pro to add more people.",
+            retryable: false,
+            details: { upgradePlan: "pro", upgradePlanLabel: "Pro" },
+          },
+        }),
+        { mutation: true },
+      );
+    });
+    // One seat used of Free's one; three more people need four seats, which only Max has.
+    const view = await invitePage(seatPlan("free", 1), true, create);
+    try {
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { getData: () => "a@example.test, b@example.test, c@example.test," },
+      });
+      await act(async () =>
+        view.container.querySelector("input[type=email]")!.dispatchEvent(paste),
+      );
+      await act(async () =>
+        view.container
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      await flush();
+      expect(create).toHaveBeenCalledTimes(3);
+      expect(view.container.textContent).toContain("Upgrade to Max to add more people");
+      expect(view.container.textContent).not.toContain("Upgrade to Pro");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a refused restore tells people without billing access to ask an owner", async () => {
+    const plan = seatPlan("pro", 2);
+    const suspended = person("member-x", "Xena Example", "member", { status: "suspended" });
+    const client = makeClient({
+      getBilling: mock(async () => ({ balance: { plan } })),
+      getBillingSubscriptionPlans: mock(async () => ({ plan, plans: seatCatalog })),
+      listOrganizationAdministrationMembers: mock(async () => ({ members: [owner, suspended] })),
+      updateOrganizationMember: mock(async () => {
+        throw new OpenGeniApiError(
+          402,
+          JSON.stringify({
+            error: {
+              status: 402,
+              code: "seat_limit_reached",
+              message: "Upgrade to Max to add more people.",
+              retryable: false,
+              details: { upgradePlan: "max", upgradePlanLabel: "Max" },
+            },
+          }),
+          { mutation: true },
+        );
+      }),
+    });
+    const view = mount(null);
+    try {
+      await view.render(
+        <Provider client={client}>
+          <OrganizationPeoplePage
+            workspaceId="workspace-a"
+            person="member-x"
+            canManageBilling={false}
+          />
+        </Provider>,
+      );
+      await flush();
+      await act(async () => button(view.container, "Restore access").click());
+      await flush();
+      expect(toastError).toHaveBeenCalledWith(
+        "Couldn't restore Xena Example",
+        expect.objectContaining({ description: "Ask an organization owner to upgrade to Max." }),
+      );
     } finally {
       await view.unmount();
     }

@@ -5,6 +5,9 @@ import { ApiHttpError } from "./http/api-error";
 
 export const SEAT_LIMIT_FALLBACK_MESSAGE =
   "Organization seat limit reached. Upgrade your plan to add people.";
+/** An invitee can't change the organization's plan. */
+export const SEAT_LIMIT_INVITEE_MESSAGE =
+  "This organization is full. Ask an organization owner to upgrade.";
 
 export type SeatLimitFacts = { seatLimit: number; seatsUsed: number; planKey: string | null };
 
@@ -57,5 +60,16 @@ export function seatLimitHttpError(
       ...(target ? { upgradePlan: target.key, upgradePlanLabel: target.label } : {}),
       action: { type: "upgrade", href: "/billing" },
     },
+  });
+}
+
+/** The refusal an invitee sees: the organization is full and only an owner can fix it. */
+export function seatLimitInviteeHttpError(): ApiHttpError {
+  return new ApiHttpError(402, {
+    code: "seat_limit_reached",
+    message: SEAT_LIMIT_INVITEE_MESSAGE,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { askOwner: true },
   });
 }

@@ -33,7 +33,7 @@ export function SeatLimitNotice({
   return (
     <Notice
       tone="waiting"
-      title={fix ? `${fix} to add more people` : "Your plan's seat limit is reached"}
+      title={canManage && fix ? `${fix} to add more people` : "Your plan's seat limit is reached"}
       live="assertive"
       actionLayout="responsive"
       action={
@@ -49,7 +49,7 @@ export function SeatLimitNotice({
           ? null
           : "Upgrade your plan to invite more people."
         : !upgrade
-          ? "Ask an organization owner to upgrade the plan."
+          ? "Ask an organization owner to upgrade the plan before inviting more people."
           : enterprise
             ? `Ask an organization owner about ${upgrade.label}.`
             : `Ask an organization owner to upgrade to ${upgrade.label}.`}

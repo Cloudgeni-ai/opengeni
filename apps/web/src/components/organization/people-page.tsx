@@ -55,8 +55,10 @@ import {
 } from "@opengeni/react/ui/api-error";
 import { cn } from "@opengeni/react/app/lib/utils";
 import {
+  isSeatLimitError,
   planSeatsFull,
   seatUpgradeFor,
+  seatUpgradeFromError,
   type SeatUpgrade,
 } from "@opengeni/react/app/lib/subscription-plans";
 import { PlanSeats, SeatLimitNotice } from "./plan-seats";
@@ -123,16 +125,12 @@ export function OrganizationPeoplePage({
   const directory = useOrganizationDirectory();
   const nav = useOrganizationNavigation(workspaceId);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
-  const actions = usePeopleActions(directory, setConfirm);
+  const billing = canManageBilling ?? directory.actorRole === "owner";
+  const actions = usePeopleActions(directory, setConfirm, billing);
 
   let page;
   if (view === "invite") {
-    page = (
-      <InvitePage
-        nav={nav}
-        canManageBilling={canManageBilling ?? directory.actorRole === "owner"}
-      />
-    );
+    page = <InvitePage nav={nav} canManageBilling={billing} />;
   } else if (person) page = <PersonPage key={person} id={person} nav={nav} actions={actions} />;
   else if (invitation) {
     page = <InvitationPage key={invitation} id={invitation} nav={nav} actions={actions} />;
@@ -165,6 +163,7 @@ interface PeopleActions {
 function usePeopleActions(
   directory: OrganizationDirectory,
   setConfirm: (confirm: Confirm) => void,
+  canManageBilling: boolean,
 ): PeopleActions {
   return useMemo(
     () => ({
@@ -179,7 +178,7 @@ function usePeopleActions(
           });
         } catch (error) {
           toast.error(`Couldn't restore ${memberName(member)}`, {
-            description: userErrorText(error),
+            description: seatRefusalText(error, directory, canManageBilling),
           });
         }
       },
@@ -198,8 +197,25 @@ function usePeopleActions(
         }
       },
     }),
-    [directory, setConfirm],
+    [directory, setConfirm, canManageBilling],
   );
+}
+
+/** A seat refusal tells people who can't change the plan to ask an owner. */
+function seatRefusalText(
+  error: unknown,
+  directory: OrganizationDirectory,
+  canManageBilling: boolean,
+): string {
+  // Directory actions wrap the API error; the refusal is its cause.
+  const refusal = error instanceof Error && error.cause !== undefined ? error.cause : error;
+  if (canManageBilling || !isSeatLimitError(refusal, directory.plan)) return userErrorText(error);
+  const upgrade = seatUpgradeFor(directory.plan, directory.plans) ?? seatUpgradeFromError(refusal);
+  return upgrade?.key === "enterprise"
+    ? `Ask an organization owner about ${upgrade.label}.`
+    : upgrade
+      ? `Ask an organization owner to upgrade to ${upgrade.label}.`
+      : "Ask an organization owner to upgrade the plan.";
 }
 
 function activeOwnerCount(members: readonly OrganizationMember[]): number {
@@ -1096,11 +1112,12 @@ function InvitePage({
   } | null>(null);
   const organizationName = directory.overview.value?.organization.name ?? "the organization";
   const workspaces = directory.overview.value?.workspaces ?? [];
-  // A refusal names the plan the server chose; otherwise the catalog picks the
-  // plan with room for everyone still waiting. A full plan says so up front.
+  // The catalog picks the plan with room for everyone still waiting (the
+  // server names a plan for one more person); the server's plan is the
+  // fallback without a catalog. A full plan says so up front.
   const seatUpgrade = seatLimitError
-    ? (seatLimitError.upgrade ??
-      seatUpgradeFor(directory.plan, directory.plans, seatLimitError.seats))
+    ? (seatUpgradeFor(directory.plan, directory.plans, seatLimitError.seats) ??
+      seatLimitError.upgrade)
     : seatUpgradeFor(directory.plan, directory.plans);
   const seatsFull = seatLimitError !== null || planSeatsFull(directory.plan);
 

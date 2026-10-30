@@ -310,20 +310,28 @@ organizations are uncapped.
 SQLSTATE `P0S01` maps through `rethrowMembershipError` and the common error
 middleware to HTTP 402 using `ErrorEnvelope`:
 `{ error: { status: 402, code: "seat_limit_reached", message, retryable: false,
-requestId, details: { seatLimit, seatsUsed, upgradePlan?, upgradePlanLabel?,
-action: { type: "upgrade", href: "/billing" } } } }`.
+requestId, details: { seatLimit?, seatsUsed?, upgradePlan?, upgradePlanLabel?,
+action: { type: "upgrade", href: "/billing" } } } }`. `seatLimit` and `seatsUsed`
+come from the trigger's DETAIL when it parses.
 The refusal names one fix: the cheapest self-service plan above the current one
 with room for one more person, else Enterprise (`seatUpgradePlan` in
 `@opengeni/contracts/seat-upgrade`). The message is "Upgrade to Pro to add more
-people." (or Max), "Talk to us about Enterprise to add more people.", or, when
-subscription plans are off or no plan adds the seat, "Organization seat limit
-reached. Upgrade your plan to add people."
+people." (or Max) or "Talk to us about Enterprise to add more people.". It is
+"Organization seat limit reached. Upgrade your plan to add people." when
+subscription plans are off, billing is not Stripe, the catalog read fails, the
+DETAIL is missing or malformed, or no plan adds the seat.
+Accepting an invitation never needs a new seat; if it is ever refused, the
+invitee gets "This organization is full. Ask an organization owner to upgrade."
+with `details.askOwner: true`.
 The SDK exposes `code`, `details.action` and the request reference on
 `OpenGeniApiError`; this is a known, non-retryable refusal, not an unknown outcome.
 The people UI also recognizes the historical flat refusal and a generic 402
 when the verified plan's seat usage is at its limit. The invite page shows the
-same named plan as soon as the plan is full, with one Upgrade button for people
-who manage billing; everyone else is told to ask an organization owner.
+notice as soon as the plan is full and after a refusal, naming the plan with room
+for everyone still waiting (the server's plan is the fallback without a
+catalog). People who manage billing get one Upgrade button; everyone else sees
+"Your plan's seat limit is reached" and is told to ask an organization owner,
+also when restoring someone is refused.
 
 ## Billing/UI contract
 

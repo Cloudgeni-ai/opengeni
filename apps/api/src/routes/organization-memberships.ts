@@ -112,7 +112,11 @@ import {
 } from "../http/acting-person";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { hasRecentManagedSignIn } from "./managed-sign-in-methods";
-import { seatLimitFacts, seatLimitHttpError } from "../seat-limit-refusal";
+import {
+  seatLimitFacts,
+  seatLimitHttpError,
+  seatLimitInviteeHttpError,
+} from "../seat-limit-refusal";
 
 import {
   assertOrganizationUserSetupDeliveryConfigured,
@@ -383,7 +387,7 @@ async function rethrowMembershipErrorWithPlans(
   resourceLimitMessage?: string,
 ): Promise<never> {
   if (nestedPostgresSqlState(error) === "P0S01") {
-    const facts = seatLimitFacts(nestedPostgresDetail(error));
+    const facts = seatLimitFacts(nestedPostgresDetail(error, "P0S01"));
     const plans =
       facts && deps.settings.subscriptionPlansEnabled && deps.settings.billingMode === "stripe"
         ? await readSubscriptionPlanCatalog(deps.db).then(
@@ -399,7 +403,7 @@ async function rethrowMembershipErrorWithPlans(
 function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): never {
   const sqlState = nestedPostgresSqlState(error);
   if (sqlState === "P0S01") {
-    throw seatLimitHttpError(seatLimitFacts(nestedPostgresDetail(error)), null);
+    throw seatLimitHttpError(seatLimitFacts(nestedPostgresDetail(error, "P0S01")), null);
   }
   if (sqlState === "54000" && resourceLimitMessage) {
     throw new HTTPException(409, {
@@ -1165,6 +1169,8 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       });
     } catch (error) {
       if (error instanceof HTTPException) throw error;
+      // An accepted invitation already holds its seat, so this is a safety net.
+      if (nestedPostgresSqlState(error) === "P0S01") throw seatLimitInviteeHttpError();
       return await rethrowMembershipErrorWithPlans(deps, error);
     }
   });
