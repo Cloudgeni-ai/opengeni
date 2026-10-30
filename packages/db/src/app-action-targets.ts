@@ -4,7 +4,7 @@ import {
   type AppActionTargets,
 } from "@opengeni/contracts/app-actions";
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
-import { and, eq, isNull, ne, or, sql, type AnyColumn } from "drizzle-orm";
+import { and, eq, isNull, or, sql, type AnyColumn } from "drizzle-orm";
 import {
   setSubjectRlsContext,
   withAccountRls,
@@ -13,6 +13,7 @@ import {
   type Database,
 } from "./database";
 import { connectionSubjectVisibility } from "./connection-metadata";
+import { getRig } from "./index";
 import { listOrganizationMcpConnections } from "./mcp-oauth";
 import {
   getOrganizationInvitationForAdministration,
@@ -55,14 +56,12 @@ export async function resolveAppActionTargets(
   const segments = call.entry.path.split("/");
   // Read live, once per call, as the API's routes read them: a turn's frozen
   // permissions can imply account:admin for a workspace admin.
-  let role: Promise<readonly string[]> | undefined;
-  const organizationPermissions = () =>
-    (role ??= liveOrganizationPermissions(db, scope.accountId, subjectId).catch(
-      (error: unknown) => {
-        scope.onLookupError?.(error, "organizationRole");
-        return [];
-      },
-    ));
+  let role: Promise<LiveMembership> | undefined;
+  const organizationMembership = () =>
+    (role ??= liveOrganizationMembership(db, scope.accountId, subjectId).catch((error: unknown) => {
+      scope.onLookupError?.(error, "organizationRole");
+      return { permissions: [], personalWorkspaceId: null };
+    }));
   const memberships = new Map<string, Promise<readonly string[] | null>>();
   const workspacePermissions = (workspaceId: string) => {
     let read = memberships.get(workspaceId);
@@ -86,7 +85,7 @@ export async function resolveAppActionTargets(
             accountId: scope.accountId,
             chatWorkspaceId: scope.workspaceId,
             subjectId,
-            organizationPermissions,
+            organizationMembership,
             workspacePermissions,
             ids: call.ids,
             id,
@@ -114,16 +113,28 @@ export async function resolveAppActionTargets(
 
 const LOOKUP_TIMEOUT_MS = 3_000;
 
-/** The account permissions the person's active role in the chat's organization holds, right now. */
-async function liveOrganizationPermissions(
+type LiveMembership = {
+  /** The account permissions their active role holds, right now. */
+  permissions: readonly string[];
+  /** Their own Personal workspace in this organization. */
+  personalWorkspaceId: string | null;
+};
+
+/** The person's active membership in the chat's organization, right now. */
+async function liveOrganizationMembership(
   db: Database,
   accountId: string,
   subjectId: string,
-): Promise<readonly string[]> {
+): Promise<LiveMembership> {
   const membership = (await listSelfOrganizationMemberships(db, subjectId)).find(
     (candidate) => candidate.organizationId === accountId && candidate.status === "active",
   );
-  return membership ? accountPermissionsForOrganizationRole(membership.role) : [];
+  return membership
+    ? {
+        permissions: accountPermissionsForOrganizationRole(membership.role),
+        personalWorkspaceId: membership.personalWorkspaceId ?? null,
+      }
+    : { permissions: [], personalWorkspaceId: null };
 }
 
 /**
@@ -175,8 +186,8 @@ type LookupContext = {
   /** The chat's own workspace. */
   chatWorkspaceId: string;
   subjectId: string;
-  /** Their account permissions in the chat's organization, from their live role. */
-  organizationPermissions: () => Promise<readonly string[]>;
+  /** Their membership in the chat's organization, from their live role. */
+  organizationMembership: () => Promise<LiveMembership>;
   /** Their permissions in a workspace, from its membership; null when they aren't a member. */
   workspacePermissions: (workspaceId: string) => Promise<readonly string[] | null>;
   /** Every path id of the call, by parameter. */
@@ -269,9 +280,9 @@ async function asPersonIn<T>(
 
 /**
  * The person's membership holds `permission` here, as hasPermission reads it.
- * In the chat's own workspace someone without a membership row (a personal
- * workspace's owner) had their access checked for this turn. An organization
- * role reaches no further into workspaces, as in the API.
+ * Without a membership row only their own Personal workspace counts, as the
+ * API's workspace grant reads it. An organization role reaches no further
+ * into workspaces.
  */
 async function mayIn(
   where: LookupContext,
@@ -279,13 +290,17 @@ async function mayIn(
   permission: string,
 ): Promise<boolean> {
   const held = await where.workspacePermissions(workspaceId);
-  if (held === null) return workspaceId === where.chatWorkspaceId;
+  if (held === null)
+    return (
+      workspaceId === where.chatWorkspaceId &&
+      (await where.organizationMembership()).personalWorkspaceId === workspaceId
+    );
   return holds(held, permission);
 }
 
 /** Organization records are read only by someone whose role holds one of these, as its route requires. */
 async function organizationMay(where: LookupContext, ...permissions: string[]): Promise<void> {
-  const held = await where.organizationPermissions();
+  const held = (await where.organizationMembership()).permissions;
   if (!permissions.some((permission) => held.includes(permission))) unresolved();
 }
 
@@ -421,6 +436,16 @@ const sessionLookup = workspaceRow(
             eq(schema.sessions.id, id),
             eq(schema.sessions.workspaceId, workspaceId),
             visibleTo(schema.sessions, where.subjectId),
+            // As getSessionForSubject: a chat started in someone else's
+            // private Slack thread is theirs alone.
+            sql`not exists (
+              select 1
+              from ${schema.slackInteractions} private_slack_interaction
+              where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+                and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
+                and private_slack_interaction.visibility = 'private'
+                and private_slack_interaction.owning_subject_id <> ${where.subjectId}
+            )`,
           ),
         )
         .limit(1)
@@ -706,7 +731,8 @@ const apiKeyLookup: Lookup = async (where) => {
     // Someone's own key is theirs to see; anyone else's only an account admin's.
     row = UUID.test(where.id)
       ? await withAccountRls(where.db, where.accountId, (db) =>
-          read(db, and(eq(keys.credentialKind, "personal"))),
+          // A revoked one is gone from the route, as listPersonalApiKeys reads them.
+          read(db, and(eq(keys.credentialKind, "personal"), isNull(keys.revokedAt))),
         )
       : undefined;
     if (row?.ownerSubjectId !== where.subjectId) await organizationMay(where, "account:admin");
@@ -977,7 +1003,6 @@ function named(
   kind: string,
   permission: string,
   table:
-    | typeof schema.rigs
     | typeof schema.channels
     | typeof schema.documentBases
     | typeof schema.botTemplates
@@ -1010,6 +1035,20 @@ function named(
   );
 }
 
+/** A rig through the rig routes' own read, which applies its scope and status. */
+const rigLookup: Lookup = async (where) => {
+  const workspaceId = await workspaceAccess(where, where.ids.workspaceId, "rigs:use");
+  if (!UUID.test(where.id)) return missing("rig");
+  const rig = await getRig(
+    where.db,
+    { accountId: where.accountId, workspaceId, subjectId: where.subjectId },
+    where.id,
+  );
+  return rig
+    ? { kind: "rig", name: rig.name, facts: facts(["Created", targetDay(rig.createdAt)]) }
+    : missing("rig");
+};
+
 const documentLookup = workspaceRow(
   "document",
   "documents:search",
@@ -1028,12 +1067,31 @@ const documentLookup = workspaceRow(
         .where(
           and(
             eq(schema.documents.id, id),
-            eq(schema.documents.workspaceId, workspaceId),
-            // A private document is its creator's alone.
+            eq(schema.documents.accountId, where.accountId),
+            // As the document routes' access (documentAccessConditions): the
+            // organization's, this workspace's, or the person's own, and a
+            // Drive file only for someone Drive lets read it.
             or(
-              ne(schema.documents.visibility, "private"),
-              eq(schema.documents.createdBy, where.subjectId),
+              eq(schema.documents.authorityKind, "organization"),
+              and(
+                eq(schema.documents.authorityKind, "workspace"),
+                eq(schema.documents.authorityWorkspaceId, workspaceId),
+              ),
+              and(
+                eq(schema.documents.authorityKind, "personal"),
+                eq(schema.documents.authoritySubjectId, where.subjectId),
+                or(
+                  eq(schema.documents.authorityWorkspaceId, workspaceId),
+                  isNull(schema.documents.authorityWorkspaceId),
+                ),
+              ),
             ),
+            sql`google_drive_file_authorized(
+              ${schema.documents.accountId},
+              ${workspaceId}::uuid,
+              ${where.subjectId},
+              ${schema.documents.fileId}
+            )`,
           ),
         )
         .limit(1)
@@ -1169,8 +1227,11 @@ const SUBSCRIPTION_NAMES: Record<string, string> = {
 
 const subscriptionAccountLookup: Lookup = async (where) => {
   let workspaceId: string | undefined;
-  if (where.organization) ownOrganization(where);
-  else workspaceId = await workspaceAccess(where, where.ids.workspaceId, "workspace:read");
+  if (where.organization) {
+    ownOrganization(where);
+    // The organization's accounts are an owner's or admin's to manage.
+    await organizationMay(where, "members:manage", "account:admin");
+  } else workspaceId = await workspaceAccess(where, where.ids.workspaceId, "workspace:read");
   if (!UUID.test(where.id)) return missing("account");
   // Subscription accounts are visible only to a person, in a workspace for workspace routes.
   const asPerson = <T>(run: (db: Database) => Promise<T>) =>
@@ -1335,14 +1396,14 @@ const LOOKUPS: Record<string, Lookup> = {
   "organizations/members/:membershipId": organizationMemberLookup,
   "organizations/invitations/:invitationId": invitationLookup,
   "webhooks/:webhookId": webhookLookup,
-  "rigs/:rigId": named("rig", "rigs:use", schema.rigs),
+  "rigs/:rigId": rigLookup,
   "vaults/:vaultId": vaultLookup,
   "items/:itemId": vaultItemLookup,
-  "channels/:channelId": named("channel", "workspace:read", schema.channels),
+  "channels/:channelId": named("channel", "sessions:read", schema.channels),
   "document-bases/:baseId": named("document collection", "documents:search", schema.documentBases),
   "documents/:documentId": documentLookup,
   "event-sources/:sourceId": eventSourceLookup,
-  "bot-templates/:templateId": named("bot template", "workspace:read", schema.botTemplates),
+  "bot-templates/:templateId": named("bot template", "sessions:read", schema.botTemplates),
   "automation-templates/:templateId": named(
     "automation template",
     "scheduled_tasks:run",

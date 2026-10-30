@@ -266,6 +266,10 @@ describe("an answered approval", () => {
     expect(approvalHistoryTitle("Remove the X connection for A? Next?")).toBe(
       "Remove the X connection for A? Next",
     );
+    // A question cut short has lost its own "?", so nothing is cut.
+    expect(approvalHistoryTitle("Remove the X connection for Foo? Bar…")).toBe(
+      "Remove the X connection for Foo? Bar…",
+    );
     expect(
       approvalHistoryTitle("Create a link to this chat? Anyone with the link can read it."),
     ).toBe("Create a link to this chat");

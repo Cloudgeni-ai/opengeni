@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
-import { createDb, createWorkspace, type DbClient } from "../src";
+import { createDb, createRig, createWorkspace, type DbClient } from "../src";
 import {
   resolveAppActionTargets,
   savedAppActionApprovalCard,
@@ -548,8 +548,8 @@ test("every confirmed action's lookup runs against the real schema and says not 
 test("a member never sees a colleague's private rows or the workspace's keys and webhooks", async () => {
   if (!client) return;
   const org = await organization("Cloudgeni");
-  // Both may use automations, so only the rows' privacy tells them apart.
-  const automations = ["workspace:read", "scheduled_tasks:run"];
+  // Both may use automations and chats, so only the rows' privacy tells them apart.
+  const automations = ["workspace:read", "scheduled_tasks:run", "sessions:read"];
   const person = await member(org.accountId, org.workspaceId, "member", automations);
   const colleague = await member(org.accountId, org.workspaceId, "member", automations);
   const workspaceAdmin = await member(org.accountId, org.workspaceId, "member", [
@@ -704,4 +704,210 @@ test("an organization owner sees nothing inside a workspace they aren't a member
     expect(targets.workspaceId).toEqual({ kind: "workspace", name: "Secret team" });
     expect(JSON.stringify(targets)).not.toMatch(/Secret key|secret\.example|secret@/u);
   }
+});
+
+test("rigs are read through the rig routes' own scope and status", async () => {
+  if (!client) return;
+  const org = await organization("Cloudgeni");
+  const marketing = await org.workspace("Marketing");
+  const riggers = ["workspace:read", "rigs:use"];
+  const person = await member(org.accountId, org.workspaceId, "member", riggers);
+  const colleague = await member(org.accountId, org.workspaceId, "member", riggers);
+  const rig = async (input: { name: string } & Partial<Parameters<typeof createRig>[1]>) =>
+    (
+      await createRig(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        ...input,
+      })
+    ).id;
+  const team = await rig({ name: "Team rig" });
+  const theirs = await rig({ name: "Bob's secret rig", scope: "user", subjectId: colleague });
+  const organizationRig = await rig({
+    name: "Org rig",
+    workspaceId: marketing,
+    scope: "organization",
+    allowOrganization: true,
+  });
+  const old = await rig({ name: "Old rig" });
+  await shared!.admin`update rigs set status = 'revoked', revoked_at = now() where id = ${old}`;
+  const named = async (rigId: string, subjectId = person) =>
+    (
+      await resolveAppActionTargets(
+        client!.db,
+        { accountId: org.accountId, workspaceId: org.workspaceId, subjectId },
+        { id: "deleteRig", pathParameters: { workspaceId: org.workspaceId, rigId } },
+      )
+    ).rigId;
+  expect((await named(team))?.name).toBe("Team rig");
+  // The organization's rig, made in another workspace, as the rig routes show it.
+  expect((await named(organizationRig))?.name).toBe("Org rig");
+  // A colleague's own rig and a revoked one are gone from the routes.
+  expect((await named(theirs))?.name).toBeUndefined();
+  expect((await named(old))?.name).toBeUndefined();
+  expect((await named(theirs, colleague))?.name).toBe("Bob's secret rig");
+  // Without rigs:use, none is named, nor called not found.
+  expect(await named(team, await member(org.accountId, org.workspaceId))).toBeUndefined();
+});
+
+test("each route's own permission, and no membership counts only in a Personal workspace", async () => {
+  if (!client) return;
+  const org = await organization("Cloudgeni");
+  const reader = await member(org.accountId, org.workspaceId);
+  const chatter = await member(org.accountId, org.workspaceId, "member", [
+    "workspace:read",
+    "sessions:read",
+  ]);
+  const owner = await member(org.accountId, org.workspaceId, "owner");
+  const scope = (subjectId: string, workspaceId = org.workspaceId) => ({
+    accountId: org.accountId,
+    workspaceId,
+    subjectId,
+  });
+  const id = crypto.randomUUID();
+  // Channels and bot templates are read with sessions:read.
+  for (const [action, parameter] of [
+    ["deleteChannel", "channelId"],
+    ["deleteBotTemplate", "templateId"],
+  ] as const) {
+    const call = { id: action, pathParameters: { workspaceId: org.workspaceId, [parameter]: id } };
+    expect((await resolveAppActionTargets(client.db, scope(reader), call))[parameter]).toBe(
+      undefined,
+    );
+    expect(
+      (await resolveAppActionTargets(client.db, scope(chatter), call))[parameter],
+    ).toMatchObject({ kind: expect.any(String) });
+  }
+  // The organization's subscription accounts are an owner's or admin's.
+  const subscription = {
+    id: "DELETE /v1/organizations/:organizationId/codex/accounts/:accountId",
+    pathParameters: { organizationId: org.accountId, accountId: id },
+  };
+  expect(
+    (await resolveAppActionTargets(client.db, scope(reader), subscription)).accountId,
+  ).toBeUndefined();
+  expect((await resolveAppActionTargets(client.db, scope(owner), subscription)).accountId).toEqual({
+    kind: "account",
+  });
+  // Without a membership row, only the person's own Personal workspace counts.
+  const [{ personal_workspace_id: personal } = { personal_workspace_id: "" }] = await shared!.admin<
+    { personal_workspace_id: string }[]
+  >`
+    select personal_workspace_id from organization_memberships
+    where account_id = ${org.accountId} and subject_id = ${reader}`;
+  expect(
+    (await resolveAppActionTargets(client.db, scope(reader, personal), removal(personal, id)))
+      .connectionId,
+  ).toEqual({ kind: "connection" });
+  // An owner whose chat runs in a workspace they aren't a member of reads nothing in it.
+  const team = await org.workspace("Team");
+  expect(await resolveAppActionTargets(client.db, scope(owner, team), removal(team, id))).toEqual(
+    {},
+  );
+});
+
+test("a chat started in someone else's private Slack thread is never named", async () => {
+  if (!client) return;
+  const org = await organization("Cloudgeni");
+  const workspace = await createWorkspace(client.db, { accountId: org.accountId, name: "Ops" });
+  const person = await member(org.accountId, workspace.id, "member", [
+    "workspace:read",
+    "sessions:read",
+  ]);
+  const colleague = `user:${crypto.randomUUID()}`;
+  const chat = async (title: string, slackOwner?: string) => {
+    const id = crypto.randomUUID();
+    await shared!.admin.begin(async (tx) => {
+      await tx`
+        insert into sessions(id, account_id, workspace_id, title, initial_message, model,
+          reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, tool_policy,
+          root_session_id, status, created_by_kind, created_by_subject_id)
+        values (${id}, ${org.accountId}, ${workspace.id}, ${title}, 'Hi', 'test-model',
+          'medium', 'standard', 'none', ${id},
+          ${tx.json({ mode: "explicit", inheritedFromSessionId: null })}, ${id},
+          'idle', 'subject', ${slackOwner ?? person})`;
+      // A title the person gave it, which the automatic-title guard keeps.
+      await tx`update sessions set title = ${title}, title_source = 'user' where id = ${id}`;
+      if (!slackOwner) return;
+      // Only the interaction's privacy matters here, not its Slack connection.
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        insert into slack_interactions (account_id, workspace_id, connection_id, slack_team_id,
+          slack_channel_id, slack_thread_ts, route_key, triggering_provider_event_id,
+          owning_subject_id, visibility, session_reservation_id, session_id)
+        values (${org.accountId}, ${workspace.id}, ${crypto.randomUUID()}, 'T1', 'D1', '1.0',
+          ${`route-${id}`}, ${`event-${id}`}, ${slackOwner}, 'private', ${id}, ${id})`;
+    });
+    return id;
+  };
+  const named = async (sessionId: string) =>
+    (
+      await resolveAppActionTargets(
+        client!.db,
+        { accountId: org.accountId, workspaceId: workspace.id, subjectId: person },
+        { id: "deleteSession", pathParameters: { workspaceId: workspace.id, sessionId } },
+      )
+    ).sessionId;
+  expect((await named(await chat("Release plan")))?.name).toBe("Release plan");
+  const theirs = await named(await chat("Colleague's DM with the bot", colleague));
+  expect(theirs).toEqual({ kind: "chat" });
+});
+
+test("documents follow the document routes' authority, wherever they were added", async () => {
+  if (!client) return;
+  const org = await organization("Cloudgeni");
+  const marketing = await org.workspace("Marketing");
+  const readers = ["workspace:read", "documents:search"];
+  const person = await member(org.accountId, org.workspaceId, "member", readers);
+  const colleague = await member(org.accountId, org.workspaceId, "member", readers);
+  const baseId = crypto.randomUUID();
+  const document = async (
+    title: string,
+    authority: { kind: string; workspaceId?: string; subjectId?: string },
+    workspaceId = org.workspaceId,
+  ) =>
+    await shared!.admin.begin(async (tx) => {
+      const [file] = await tx<{ id: string }[]>`
+        insert into files (account_id, workspace_id, status, filename, safe_filename,
+          content_type, size_bytes, bucket, object_key)
+        values (${org.accountId}, ${workspaceId}, 'ready', 'notes.txt', 'notes.txt',
+          'text/plain', 1, 'test', ${`documents/${crypto.randomUUID()}`})
+        returning id`;
+      // Only the document's authority matters here, not its collection.
+      await tx`set local session_replication_role = replica`;
+      const [row] = await tx<{ id: string }[]>`
+        insert into documents (account_id, workspace_id, origin_workspace_id, base_id, file_id,
+          title, authority_kind, authority_workspace_id, authority_subject_id, visibility,
+          created_by)
+        values (${org.accountId}, ${workspaceId}, ${workspaceId}, ${baseId}, ${file!.id},
+          ${title}, ${authority.kind}, ${authority.workspaceId ?? null},
+          ${authority.subjectId ?? null}, ${authority.kind === "personal" ? "private" : "workspace"},
+          ${authority.subjectId ?? null})
+        returning id`;
+      return row!.id;
+    });
+  const handbook = await document("Handbook", { kind: "organization" }, marketing);
+  const mine = await document("My notes", { kind: "personal", subjectId: person });
+  const theirs = await document("Colleague notes", { kind: "personal", subjectId: colleague });
+  const elsewhere = await document(
+    "Marketing plan",
+    { kind: "workspace", workspaceId: marketing },
+    marketing,
+  );
+  const named = async (documentId: string) =>
+    (
+      await resolveAppActionTargets(
+        client!.db,
+        { accountId: org.accountId, workspaceId: org.workspaceId, subjectId: person },
+        {
+          id: "deleteDocument",
+          pathParameters: { workspaceId: org.workspaceId, baseId, documentId },
+        },
+      )
+    ).documentId;
+  // The organization's document reads from every workspace, as the routes read it.
+  expect((await named(handbook))?.name).toBe("Handbook");
+  expect((await named(mine))?.name).toBe("My notes");
+  expect((await named(theirs))?.name).toBeUndefined();
+  expect((await named(elsewhere))?.name).toBeUndefined();
 });

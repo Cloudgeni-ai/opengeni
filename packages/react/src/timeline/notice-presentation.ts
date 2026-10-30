@@ -18,6 +18,8 @@ export function noticeIsResolvedApproval(
  * (“…”) keeps its own punctuation.
  */
 export function approvalHistoryTitle(title: string): string {
+  // A question cut short lost its own "?": an earlier one is a name's.
+  if (title.trimEnd().endsWith("…")) return title.trim();
   let quoted = 0;
   let end = -1;
   for (let index = 0; index < title.length; index += 1) {
