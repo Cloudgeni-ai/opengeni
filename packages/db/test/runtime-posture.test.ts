@@ -592,6 +592,17 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
       },
+      // 1103: created without runtime EXECUTE until its follow-up release.
+      {
+        name: "grant_subscription_account_administrator(jsonb)",
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        triggerCallable: false,
+        hasDependents: false,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      },
       ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES.map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -832,12 +843,26 @@ describe("runtime database posture evaluator", () => {
         ...SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
         ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
         ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+        // The fixture includes 1103's grant, so its administration context is required.
+        ...runtimePosture.SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES,
         ...names,
       ].map(ownerRoutine);
       return posture;
     };
     // Before 0717 none is required; after it all four are, safely.
     expect(evaluateRuntimeDatabasePosture(withOwnerRoutines([]), options)).toEqual([]);
+    // 1103's administration context is required once its grant exists.
+    const withoutAdministration = withOwnerRoutines([]);
+    withoutAdministration.subscriptionOwnerRoutines =
+      withoutAdministration.subscriptionOwnerRoutines!.filter(
+        (routine) =>
+          !(
+            runtimePosture.SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES as readonly string[]
+          ).includes(routine.name),
+      );
+    expect(evaluateRuntimeDatabasePosture(withoutAdministration, options)).toEqual([
+      "subscription owner implementation subscription_core_administration_context(text, uuid, uuid, text) is missing or unsafe",
+    ]);
     expect(
       evaluateRuntimeDatabasePosture(
         withOwnerRoutines(SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES),
@@ -1815,6 +1840,13 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1105 workspace activity facts: read and insert, FORCE RLS; written
+          // by invoker-rights triggers on chat events and usage notices.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -1973,6 +2005,7 @@ describe("runtime database posture evaluator", () => {
         1 + // 1061 credential profiles: full-DML, FORCE-RLS.
         1 + // 1071 shared Site project placements: full-DML, FORCE-RLS.
         1 + // 1090 personal default machines: full-DML, FORCE-RLS.
+        1 + // 1105 workspace activity facts: read and insert, FORCE-RLS.
         1; // 1107 agent calls: read, insert and update, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
@@ -4046,7 +4079,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       /event_ingress_routes|runtime definer/.test(violation),
     );
 
-  test("every runtime definer is known, and runtime EXECUTE is required", () => {
+  test("every runtime definer is known, and runtime EXECUTE is required unless deferred", () => {
     const pinnedPaths = [
       'search_path="opengeni_tenant", opengeni_private, public',
       "search_path=pg_catalog, public, pg_temp",
@@ -4072,6 +4105,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
+      "grant_subscription_account_administrator(jsonb)",
       "native_push_device_v2(text)",
       "register_native_push_device_v2(text, text, text, text, text, text[], text)",
       "claim_native_push_deliveries_v2(uuid, integer, integer)",
@@ -4085,6 +4119,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
+      "grant_subscription_account_administrator(jsonb)",
       "native_push_device_v2(text)",
       "register_native_push_device_v2(text, text, text, text, text, text[], text)",
       "claim_native_push_deliveries_v2(uuid, integer, integer)",

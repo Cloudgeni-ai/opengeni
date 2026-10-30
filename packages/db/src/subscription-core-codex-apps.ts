@@ -24,7 +24,8 @@ import {
   refreshCodexToken,
 } from "@opengeni/codex";
 import { withCodexTokenDeadline } from "./codex-token-resolver";
-import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
+import { rawRows, withRlsContext, type Database } from "./database";
+import { setSubscriptionAdministrationSubject } from "./subscription-core/account-administrator";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
@@ -141,7 +142,7 @@ async function withAppsAdministration<T>(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
+      await setSubscriptionAdministrationSubject(tx, input);
       // The same key the Apps request recheck holds, so a clear cannot commit
       // between that recheck and the request it authorizes.
       await tx.execute(

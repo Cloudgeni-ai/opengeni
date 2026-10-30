@@ -1127,9 +1127,15 @@ impl<P: Platform + 'static> Supervisor<P> {
         move || {
             let admission = engine.admission_snapshot();
             let accepted = drain.snapshot().map_or(0, |snapshot| snapshot.uploads);
+            // A running command counts while it started or wrote output
+            // within the silence limit. Busy but silent work (a long compile)
+            // is kept awake by the host, which sees its CPU and IO.
+            let heavy_running = admission
+                .heavy_running
+                .saturating_sub(engine.quiet_running(silence));
             admission.light_running
                 + admission.light_queued
-                + admission.heavy_running
+                + heavy_running
                 + admission.heavy_queued
                 + uploads.in_use_at(Instant::now(), accepted, silence)
                 + update_steps.load(std::sync::atomic::Ordering::Relaxed)
@@ -3607,6 +3613,60 @@ mod tests {
         assert_eq!(silent(), 0, "a silent upload is not in use");
         drop(accepted);
         assert_eq!(work(), 0, "a settled upload is not in use");
+    }
+
+    /// A running command is work in progress while it writes output within
+    /// the silence, and stops being so once it has been quiet for longer:
+    /// a dev server left running must not keep its sandbox awake forever.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_quiet_running_command_stops_being_work_in_progress() {
+        use opengeni_agent_platform::NativePlatform;
+
+        use crate::engine::StartOutcome;
+
+        let definition = SupervisorLink::new(
+            "quiet-command",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            it::test_credentials("nats://127.0.0.1:9"),
+        );
+        let supervisor = Supervisor::new_links(&[definition], "0.0.0");
+        let silence = Duration::from_millis(300);
+        let work = supervisor.work_in_progress(silence);
+        let engine = supervisor.engine.clone();
+        let operation = opengeni_agent_engine::OpId::from("quiet-server");
+        let ticket = engine
+            .admit(&operation, JobClass::Heavy, "quiet-command")
+            .await
+            .expect("admitted");
+        let outcome = engine.start_job(
+            &operation,
+            ticket,
+            Vec::new(),
+            None,
+            0,
+            || {
+                let mut command = tokio::process::Command::new("/bin/sh");
+                command.arg("-c").arg("printf listening; sleep 30");
+                opengeni_agent_platform::spawn_contained(command, None)
+            },
+            |_| {},
+            |exit| format!("{exit:?}").into_bytes(),
+            |_, _| {},
+        );
+        let StartOutcome::Started(started) = outcome else {
+            panic!("fresh command must start");
+        };
+        assert_eq!(work(), 1, "a command that just started is in use");
+
+        tokio::time::sleep(silence * 2).await;
+        assert_eq!(work(), 0, "a command quiet for the silence is not in use");
+        assert_eq!(
+            engine.admission_snapshot().heavy_running,
+            1,
+            "it still runs"
+        );
+        let _ = started.mailbox.send(crate::job::JobCommand::Cancel).await;
     }
 
     /// A real async-nats client over TCP with its actual writer backpressured.
