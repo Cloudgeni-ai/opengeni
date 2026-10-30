@@ -605,5 +605,56 @@ describe("catalog connected accounts", () => {
       ] as CapabilityCatalogItem[])
         expect(catalogAddAccountOwnership(blocked, false)).toBeNull();
     });
+
+    test("your own login has a switch for your messages here; nobody else's does", async () => {
+      const off = account({
+        metadata: { email: "off@example.test", resource: item.mcpUrl },
+        turnedOnHere: false,
+        turnedOnHereGrantId: null,
+      });
+      const on = account({
+        metadata: { email: "on@example.test", resource: item.mcpUrl },
+        turnedOnHere: true,
+        turnedOnHereGrantId: "grant-on",
+      });
+      // In the owner's Personal workspace every own login works: no grant, no switch.
+      const personal = account({
+        metadata: { email: "personal@example.test", resource: item.mcpUrl },
+        turnedOnHere: true,
+        turnedOnHereGrantId: null,
+      });
+      const someoneElse = account({
+        subjectId: "teammate",
+        metadata: { email: "teammate@example.test", resource: item.mcpUrl },
+        turnedOnHere: false,
+      });
+      const shared = account({
+        subjectId: null,
+        metadata: { email: "team@example.test", resource: item.mcpUrl },
+      });
+      const onTurnOnHere = mock(async () => {});
+      const view = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[off, on, personal, someoneElse, shared]}
+          management={management()}
+          onTurnOnHere={onTurnOnHere}
+        />,
+      );
+      const switches = [...view.container.querySelectorAll('[role="switch"]')];
+      expect(switches.map((entry) => entry.getAttribute("aria-label"))).toEqual([
+        "Use off@example.test for my messages here",
+        "Use on@example.test for my messages here",
+      ]);
+      expect(switches.map((entry) => entry.getAttribute("aria-checked"))).toEqual([
+        "false",
+        "true",
+      ]);
+      await act(async () => (switches[0] as HTMLButtonElement).click());
+      expect(onTurnOnHere).toHaveBeenCalledWith(off, true);
+      await act(async () => (switches[1] as HTMLButtonElement).click());
+      expect(onTurnOnHere).toHaveBeenCalledWith(on, false);
+      await view.unmount();
+    });
   });
 });

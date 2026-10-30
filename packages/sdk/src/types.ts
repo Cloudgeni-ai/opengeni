@@ -1097,6 +1097,18 @@ export type ConnectionMetadata = {
   updatedBySubjectId: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Your own login only: whether it works for your messages in the workspace
+   * this list was read from. It does in your Personal workspace and in each
+   * shared workspace where it is turned on; it starts on where it was added.
+   */
+  turnedOnHere?: boolean | undefined;
+  /**
+   * The standing grant that turns your own login on here; revoke it with
+   * `revokeUserResourceGrant` to stop using the login here. Null in your
+   * Personal workspace, which needs none.
+   */
+  turnedOnHereGrantId?: string | null | undefined;
 };
 
 /** Where a brokered credential is written on each outbound provider request. */
@@ -6030,7 +6042,9 @@ export type IssueUserResourceGrantRequest =
     }
   | {
       scope: "user";
-      resourceKind: Exclude<UserResourceKind, "connection">;
+      /** `connection` turns your own login on for your messages in this
+       * workspace (its `authorityId` from `listOwnConnectionAccounts`). */
+      resourceKind: UserResourceKind;
       mode: "always";
       context: "user_private" | "workspace_shared";
       sessionId?: null | undefined;

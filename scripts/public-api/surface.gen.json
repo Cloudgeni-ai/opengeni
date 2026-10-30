@@ -14615,6 +14615,8 @@
         "$.providerDomain": "string!",
         "$.status": "ref(ConnectionStatus)!",
         "$.subjectId": "string! null",
+        "$.turnedOnHere": "boolean?",
+        "$.turnedOnHereGrantId": "string? null",
         "$.updatedAt": "string!",
         "$.updatedBySubjectId": "string! null",
         "$.verifiedInstallAt": "string? null",
@@ -19632,7 +19634,7 @@
         "$.context": "ref(SessionTenancyVisibility)!",
         "$.expectedAuthorityEpoch": "integer? null",
         "$.mode": "ref(ManagedUserResourceGrantMode)!",
-        "$.resourceKind": "enum!=[\"\\\"connected_machine\\\"\",\"\\\"document\\\"\",\"\\\"rig\\\"\",\"\\\"subscription_connection\\\"\",\"\\\"variable_set\\\"\"]",
+        "$.resourceKind": "ref(UserResourceKind)!",
         "$.scope": "const!=[\"\\\"user\\\"\"]",
         "$.sessionId": "string? null",
         "$.workspaceSharedAcknowledged": "boolean?"
@@ -30723,6 +30725,7 @@
     },
     "UserResourceKind": {
       "io": [
+        "input",
         "output"
       ],
       "shape": {

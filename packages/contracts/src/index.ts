@@ -1637,7 +1637,9 @@ export const IssueUserResourceGrantRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       scope: UserResourceAuthorityScope,
-      resourceKind: UserResourceKind.exclude(["connection"]),
+      /** `connection` turns your own login on for your messages in this
+       * workspace; it takes only `always` (D-54). */
+      resourceKind: UserResourceKind,
       mode: ManagedUserResourceGrantMode,
       context: SessionTenancyVisibility,
       sessionId: z.string().uuid().nullable().optional(),
@@ -1645,6 +1647,13 @@ export const IssueUserResourceGrantRequest = /* @__PURE__ */ defineSchema(() =>
       workspaceSharedAcknowledged: primitives.boolean.default(false),
     })
     .superRefine((value, context) => {
+      if (value.resourceKind === "connection" && value.mode !== "always") {
+        context.addIssue({
+          code: "custom",
+          path: ["mode"],
+          message: "an own login is turned on for a workspace with always",
+        });
+      }
       if (value.context === "workspace_shared" && !value.workspaceSharedAcknowledged) {
         context.addIssue({
           code: "custom",
@@ -14247,6 +14256,17 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
     updatedBySubjectId: primitives.nullableString,
     createdAt: primitives.string,
     updatedAt: primitives.string,
+    /**
+     * Your own login only: whether it works for your messages in the workspace
+     * this list was read from. It does in your Personal workspace and in each
+     * shared workspace where it is turned on; it starts on where it was added.
+     */
+    turnedOnHere: z.boolean().optional(),
+    /**
+     * The standing grant that turns your own login on here; revoke it to stop
+     * using the login here. Null in your Personal workspace, which needs none.
+     */
+    turnedOnHereGrantId: primitives.uuid.nullable().optional(),
   }),
 );
 export type ConnectionMetadata = z.infer<typeof ConnectionMetadata>;
