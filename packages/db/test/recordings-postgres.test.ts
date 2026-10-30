@@ -61,6 +61,7 @@ import {
   updateWorkspaceSettings,
   workspaceMemberDisplayName,
   LIVE_GRANT_REFUSED_MESSAGE,
+  LIVE_UNBACKED_DAILY_MAX_MILLISECONDS,
   type Database,
   type DbClient,
   type RecordingLiveModel,
@@ -2103,9 +2104,9 @@ describe("recordings and usage allowances", () => {
   });
 
   /** A meeting with two tracks streaming live, and its recorder's moves. */
-  async function liveMeeting() {
+  async function liveMeeting(existing?: Awaited<ReturnType<typeof workspace>>) {
     const db = client!.db;
-    const scope = await workspace();
+    const scope = existing ?? (await workspace());
     const recordingId = crypto.randomUUID();
     const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
     await createRecording(db, {
@@ -2140,16 +2141,12 @@ describe("recordings and usage allowances", () => {
       },
       /** Let `minutes` pass: every live timestamp of the recording's tracks moves back. */
       elapse: async (minutes: number) => {
-        const columns = await shared!.admin<{ column_name: string }[]>`
-          select column_name from information_schema.columns
-          where table_name = 'recording_tracks' and column_name like 'live%at'`;
-        for (const { column_name } of columns) {
-          await shared!.admin.unsafe(
-            `update recording_tracks set "${column_name}" = "${column_name}" - make_interval(secs => $1)
-             where recording_id = $2`,
-            [minutes * 60, recordingId],
-          );
-        }
+        await shared!.admin`
+          update recording_tracks set
+            live_granted_at = live_granted_at - make_interval(secs => ${minutes * 60}),
+            live_reported_at = live_reported_at - make_interval(secs => ${minutes * 60}),
+            live_counted_at = live_counted_at - make_interval(secs => ${minutes * 60})
+          where recording_id = ${recordingId}`;
       },
     };
   }
@@ -2171,8 +2168,10 @@ describe("recordings and usage allowances", () => {
   test("an honest silent track reconnecting after 14 minutes is never refused", async () => {
     if (!client || !shared) return;
     const meeting = await liveMeeting();
-    // Silence streams too, and the recorder reports it every minute (the SDK
-    // test covers that it does), then before asking again.
+    // Silence streams too, and the recorder reports it every minute, then
+    // before asking again. That the SDK does is its regression test ("a
+    // silent track reports its audio every minute ..." in the SDK's
+    // recording-live tests); here, the server accepts it.
     await meeting.start(0);
     for (let minute = 0; minute < 14; minute++) {
       await meeting.elapse(1);
@@ -2180,6 +2179,11 @@ describe("recordings and usage allowances", () => {
     }
     await meeting.report(0);
     await meeting.start(0);
+    // The same track without the reports, as an SDK that reports only
+    // finished lines would leave it, is refused.
+    await meeting.start(1);
+    await meeting.elapse(14);
+    await expect(meeting.start(1)).rejects.toMatchObject(refused("live_streamed_behind"));
   });
 
   test("an honest recorder resuming after a long pause is never refused", async () => {
@@ -2199,6 +2203,31 @@ describe("recordings and usage allowances", () => {
     await meeting.start(0);
   });
 
+  test("long pauses after a little speech, not reported as pauses, are never refused", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // Five minutes of speech, then cycles of 20 seconds of speech, a 20
+    // minute pause the recorder doesn't report (as the mobile recorder
+    // didn't), and 2 minutes of speech after a new session. The report on
+    // resuming has 20 seconds more audio after over 20 minutes: only that
+    // audio and a minute count against it.
+    await meeting.start(0);
+    for (let minute = 0; minute < 5; minute++) {
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+    }
+    for (let cycle = 0; cycle < 10; cycle++) {
+      await meeting.elapse(20 / 60);
+      await meeting.elapse(20);
+      await meeting.report(20_000);
+      await meeting.start(0);
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+    }
+  });
+
   test("a recorder that doesn't report the audio its live sessions stream is refused more", async () => {
     if (!client || !shared) return;
     // Sessions never reported on: four, then no more until it reports.
@@ -2215,18 +2244,19 @@ describe("recordings and usage allowances", () => {
     // Audio not charged in credits is counted, never refused.
     await silent.start(1, false);
 
-    // Reporting far less audio than the time between reports.
+    // Reporting far less audio than the time between reports: a second each
+    // minute.
     const under = await liveMeeting();
     await under.start(0);
-    for (let report = 0; report < 4; report++) {
-      await under.elapse(3);
+    for (let report = 0; report < 8; report++) {
+      await under.elapse(1);
       await under.report(1_000);
     }
     await under.start(0);
-    await under.elapse(3);
-    await under.report(1_000);
-    await under.elapse(3);
-    await under.report(1_000);
+    for (let report = 0; report < 6; report++) {
+      await under.elapse(1);
+      await under.report(1_000);
+    }
     await expect(under.start(0)).rejects.toMatchObject(refused("live_streamed_behind"));
     // Each track is bounded on its own.
     await under.start(1);
@@ -2248,6 +2278,73 @@ describe("recordings and usage allowances", () => {
       select live_grants, live_unreported_grants from recording_tracks
       where recording_id = ${many.recordingId} and track_number = 0`;
     expect([...rows]).toEqual([{ live_grants: 21, live_unreported_grants: 0 }]);
+  });
+
+  test("a person's live time no reported audio accounts for is bounded across recordings, for a day", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    // Each session streams half an hour, ended by a report of no new audio:
+    // per track that is far from its own limits, but each new recording
+    // adds to the person's day, and at four hours no more sessions start.
+    const recordings = [];
+    for (let index = 0; index < 3; index++) {
+      const meeting = await liveMeeting(scope);
+      recordings.push(meeting);
+      for (let session = 0; session < 3; session++) {
+        if (index === 2 && session === 2) {
+          await expect(meeting.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+          // Another track of the same recording is refused too.
+          await expect(meeting.start(1)).rejects.toMatchObject(refused("live_grant_limit"));
+          // Audio not charged in credits (a legacy account, billing off) is
+          // never refused.
+          await meeting.start(0, false);
+          break;
+        }
+        await meeting.start(0);
+        await meeting.elapse(30);
+        await meeting.report(0);
+      }
+      // A last session the provider never started is taken back; the
+      // recording's time still counts for the day.
+      if (index < 2) {
+        await meeting.start(0);
+        await meeting.release(0);
+      }
+    }
+    const rows = await shared.admin<{ unbacked: string }[]>`
+      select coalesce(sum(live_unbacked_milliseconds), 0)::text as unbacked from recording_tracks
+      where recording_id in ${shared.admin(recordings.map((meeting) => meeting.recordingId))}`;
+    expect(Number(rows[0]!.unbacked)).toBeGreaterThanOrEqual(LIVE_UNBACKED_DAILY_MAX_MILLISECONDS);
+    // Another person in another workspace isn't affected.
+    await (await liveMeeting()).start(0);
+    // A day later, the earlier recordings no longer count.
+    for (const meeting of recordings.slice(0, 2)) await meeting.elapse(24 * 60);
+    await recordings[2]!.start(0);
+  });
+
+  test("an honest heavy day, eight hours of audio across recordings with pauses, is never refused", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    for (let index = 0; index < 4; index++) {
+      const meeting = await liveMeeting(scope);
+      // Two hours each, in half-hour sessions reported every three minutes,
+      // with a quarter-hour pause (reported on pausing and resuming) in the
+      // middle of the first and third sessions.
+      for (let session = 0; session < 4; session++) {
+        // The recorder reports before asking for another session.
+        if (session > 0) await meeting.report(0);
+        await meeting.start(0);
+        for (let report = 0; report < 10; report++) {
+          await meeting.elapse(3);
+          await meeting.report(180_000);
+          if (report === 4 && session % 2 === 0) {
+            await meeting.elapse(15);
+            await meeting.report(0);
+          }
+        }
+      }
+      await meeting.report(0);
+    }
   });
 
   test("an allowance that ignores unbilled usage doesn't count recordings", async () => {

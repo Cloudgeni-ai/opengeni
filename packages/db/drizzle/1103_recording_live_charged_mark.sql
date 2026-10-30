@@ -20,9 +20,11 @@
 -- never counts: live_grants counts the sessions granted; live_granted_at is
 -- when the latest began; live_reported_at is the recorder's latest save of
 -- the track's total; live_counted_at is how far live_covered_milliseconds
--- counts, the time that ended in a report of more audio (or, for a session
--- never reported on, the time up to the next request); and
--- live_unreported_grants counts sessions never reported on.
+-- counts, the time that ended in a report of more audio, at most that audio
+-- plus a minute (or, for a session never reported on, the time up to the next
+-- request); live_unbacked_milliseconds is the rest of that time, which no
+-- reported audio accounts for; and live_unreported_grants counts sessions
+-- never reported on.
 --
 -- Rolling: nullable columns without default or check are catalog-only, and
 -- the previous release never reads or writes them; null means none charged
@@ -38,6 +40,7 @@ ALTER TABLE recording_tracks
   ADD COLUMN IF NOT EXISTS live_reported_at timestamp with time zone,
   ADD COLUMN IF NOT EXISTS live_counted_at timestamp with time zone,
   ADD COLUMN IF NOT EXISTS live_covered_milliseconds bigint,
+  ADD COLUMN IF NOT EXISTS live_unbacked_milliseconds bigint,
   ADD COLUMN IF NOT EXISTS live_unreported_grants integer;
 COMMENT ON COLUMN recording_tracks.live_charged_milliseconds IS
   'Streamed live transcript audio already paid for (charged in credits, or counted at list price once charging began), in milliseconds. Null when none was charged.';
@@ -53,6 +56,8 @@ COMMENT ON COLUMN recording_tracks.live_counted_at IS
   'How far live_covered_milliseconds counts: the latest grant or report of this track''s live transcript.';
 COMMENT ON COLUMN recording_tracks.live_covered_milliseconds IS
   'Time by the server''s clock that ended in a report of more streamed audio for this track, or in a request after a session never reported on.';
+COMMENT ON COLUMN recording_tracks.live_unbacked_milliseconds IS
+  'Time between this track''s live reports that no reported audio accounts for (a pause, or audio nobody reported); a person''s tracks may have only so much of it a day.';
 COMMENT ON COLUMN recording_tracks.live_unreported_grants IS
   'Live transcript sessions of this track the recorder never reported on before asking for another.';
 

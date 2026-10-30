@@ -141,6 +141,7 @@ export const recordingTracks = pgTable(
     liveReportedAt: timestamp("live_reported_at", { withTimezone: true }),
     liveCountedAt: timestamp("live_counted_at", { withTimezone: true }),
     liveCoveredMilliseconds: bigint("live_covered_milliseconds", { mode: "number" }),
+    liveUnbackedMilliseconds: bigint("live_unbacked_milliseconds", { mode: "number" }),
     liveUnreportedGrants: integer("live_unreported_grants"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -151,6 +152,12 @@ export const recordingTracks = pgTable(
       table.recordingId,
       table.trackNumber,
     ),
+    // Migration 1104. A person's tracks that streamed live in the last day,
+    // for the daily bound on live time no reported audio accounts for (see
+    // recording-live.ts); only tracks that streamed live are in it.
+    index("recording_tracks_live_counted")
+      .on(table.workspaceId, table.liveCountedAt)
+      .where(sql`live_counted_at IS NOT NULL`),
   ],
 );
 

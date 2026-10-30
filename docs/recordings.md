@@ -375,31 +375,45 @@ twice. The recorder reports its total about every minute while streaming
 session. A track charged in credits is bounded by those reports, with time
 measured between them so a pause never counts:
 
-- The time up to a report of more audio counts (at most 3 minutes of it), the
-  time up to a report of no more audio (a pause, or a session that never
-  connected) doesn't, and a session never reported on before the next
-  request counts all its time up to that request.
+- Of the time up to a report of more audio, at most that audio plus a minute
+  counts (and at most 3 minutes), so a pause the recorder didn't report
+  doesn't count either; the time up to a report of no more audio (a pause, or
+  a session that never connected) doesn't, and a session never reported on
+  before the next request counts all its time up to that request.
 - A track gets no more sessions once that time is ahead of its reported
   audio by more than 10 minutes plus a quarter of it, once 4 of its sessions
   went unreported, or after 20 sessions plus one for every 5 minutes it
   reported (at most 100).
+- The rest of the time between reports, which no reported audio accounts
+  for (pauses, and sessions never reported on), adds up per person: once the
+  person's tracks in the workspace that streamed live in the last 24 hours
+  have 4 hours of it, none of their tracks gets another session until older
+  ones drop out of the day. New recordings don't reset it. Pauses count, as
+  the server can't tell a pause from audio nobody reported, so a day with
+  more than 4 hours of pauses in live meetings loses the live preview for the
+  rest of it; the recordings and their transcripts are unaffected.
 
 A refused grant is a 409 (`live_grant_limit` or `live_streamed_behind`, "The
 live transcript stopped for this track. The recording continues and is
 transcribed when it ends."); the recording carries on. A session the
 provider fails to start isn't counted. An honest recorder isn't refused for
-silence, long pauses or quick pause and resume cycles.
+silence, pauses (up to the daily bound) or quick pause and resume cycles.
+Accounts on legacy billing, and workspaces with credit billing off, aren't
+bounded.
 
 Residual risk: each grant still opens one provider session (up to the
 provider's session limit) whose audio is only as metered as the recorder
 reports. A modified client that reports its audio as paused (no more audio)
-while it streams, or holds several sessions at once, streams unpaid audio
-until the session limits above stop it, and the bounds are per track, not
-per recording or account. If the recorder's pause or resume report is lost,
-up to 3 minutes per report counts as streamed time, within the slack. A save
-whose receipt never commits, after the recorder's last retries, leaves that
-last stretch unpaid, and a debit not reconciled within 3 days stays a
-receipt without a ledger entry.
+while it streams, or holds several sessions at once, streams up to 4 hours
+of unpaid audio a day per person and workspace before the daily bound stops
+it. The bound is per person and workspace, not per billing account: row
+security lets the API read only the person's own recordings in a workspace,
+so other people of the account, and the same person's other workspaces,
+each have their own 4 hours; an account-wide sum needs a database function
+that a later release can add. A modified client that reports invented
+audio is charged for it. A save whose receipt never commits, after the
+recorder's last retries, leaves that last stretch unpaid, and a debit not
+reconciled within 3 days stays a receipt without a ledger entry.
 
 Rollout: while pods of the previous release still serve during a deploy,
 a live save they handle stores the track's list-price total without moving
