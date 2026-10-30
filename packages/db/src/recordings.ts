@@ -2235,7 +2235,7 @@ const NOTE_SPEAKER_LINK = /\[((?:\\.|[^\]\\])*)\]\(speaker:([^)\s]+)\)/gu;
  * counterpart now names it, and any other becomes its plain link text, so a
  * link never shows a voice it wasn't written about.
  */
-export function relinkNoteSpeakers(body: string, labels: ReadonlyMap<string, string>): string {
+function relinkNoteSpeakers(body: string, labels: ReadonlyMap<string, string>): string {
   return body.replace(NOTE_SPEAKER_LINK, (link, text: string, written: string) => {
     let label = written;
     try {
