@@ -319,7 +319,11 @@ slightly behind). The balance read sums the balance and API spending in one pass
 over the ledger, exactly as without the fee, and takes the paid-credit
 figures from the latest receipt (through the partial index
 `credit_ledger_receipt_rows_idx`) plus any rows that can carry a receipt
-written after it, which is normally none. Ordinary debits' metadata is never
+written after it, which is normally none. The latest receipt is found by one
+step back through that index to the newest row that can carry one (normally
+the receipt itself), never by sorting every receipt, whatever the table's
+statistics; only when that row is an older release's does the read walk back
+to the latest receipt. Ordinary debits' metadata is never
 read, and the read does not grow with the number of fees, top-ups or grants:
 an account that only uses its own keys, where every row is a fee, reads its
 balance as fast as an account without fees. Fee admission and settlement

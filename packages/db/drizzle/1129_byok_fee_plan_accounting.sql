@@ -86,12 +86,37 @@ BEGIN
               - coalesce((latest.chain->>'repaid')::bigint, 0)
               + coalesce(after.unfunded, 0) - coalesce(after.repaid, 0)
             FROM (SELECT 1) seed
-            LEFT JOIN LATERAL (SELECT created_at, metadata->'paidCreditTotals' AS chain
-              FROM credit_ledger_entries WHERE account_id = p_account_id
-                AND (amount_micros > 0
-                  OR type IN ('credit_refund', 'credit_dispute_hold', 'byok_platform_fee'))
-                AND jsonb_typeof(metadata->'paidCreditTotals') = 'object'
-              ORDER BY created_at DESC, metadata->'paidCreditTotals'->'n' DESC LIMIT 1) latest ON true
+            -- The latest receipt: the newest row that can carry one, found
+            -- by one step back through the index (no receipt filter the
+            -- planner can't estimate), then the receipt at its time; only
+            -- when that row is an older release's, a walk back to the
+            -- latest receipt. The app's balance read uses the same steps.
+            LEFT JOIN LATERAL (
+              WITH newest AS (
+                SELECT created_at FROM credit_ledger_entries
+                WHERE account_id = p_account_id
+                  AND (amount_micros > 0
+                    OR type IN ('credit_refund', 'credit_dispute_hold', 'byok_platform_fee'))
+                ORDER BY created_at DESC LIMIT 1
+              ), newest_receipt AS (
+                SELECT created_at, metadata->'paidCreditTotals' AS chain
+                FROM credit_ledger_entries WHERE account_id = p_account_id
+                  AND (amount_micros > 0
+                    OR type IN ('credit_refund', 'credit_dispute_hold', 'byok_platform_fee'))
+                  AND jsonb_typeof(metadata->'paidCreditTotals') = 'object'
+                  AND created_at = (SELECT created_at FROM newest)
+                ORDER BY metadata->'paidCreditTotals'->'n' DESC LIMIT 1
+              )
+              SELECT created_at, chain FROM newest_receipt
+              UNION ALL
+              (SELECT created_at, metadata->'paidCreditTotals' AS chain
+                FROM credit_ledger_entries WHERE account_id = p_account_id
+                  AND (amount_micros > 0
+                    OR type IN ('credit_refund', 'credit_dispute_hold', 'byok_platform_fee'))
+                  AND jsonb_typeof(metadata->'paidCreditTotals') = 'object'
+                  AND NOT EXISTS (SELECT 1 FROM newest_receipt)
+                ORDER BY created_at DESC, metadata->'paidCreditTotals'->'n' DESC LIMIT 1)
+            ) latest ON true
             CROSS JOIN LATERAL (SELECT coalesce(latest.created_at, '-infinity'::timestamptz) AS since OFFSET 0) bound
             CROSS JOIN LATERAL (SELECT sum((metadata->>'unfundedMicros')::bigint)
                 FILTER (WHERE type = 'byok_platform_fee') AS unfunded,

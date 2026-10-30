@@ -194,15 +194,39 @@ export async function readBillingBalance(
       ), fee_month as (
         -- This calendar month (UTC) at the read's settlement time.
         select date_trunc('month', coalesce(${settlementAt ?? null}::timestamptz, statement_timestamp()) at time zone 'UTC') as utc
-      ), latest as (
-        -- The latest receipt and the running totals it carries (paid-credit.ts).
+      ), newest as (
+        -- The newest row that can carry a receipt: one step back through the
+        -- index. No receipt filter here, whose selectivity the planner can't
+        -- estimate and which would make it read and sort every receipt.
+        select entry.created_at from ${schema.creditLedgerEntries} entry
+        where entry.account_id = ${accountId} and ${carriesReceiptSql}
+        order by entry.created_at desc
+        limit 1
+      ), newest_receipt as (
+        -- Normally the latest receipt: every row this release writes that can
+        -- carry one does, stamped after the rows before it.
         select entry.created_at, entry.created_at::text as at, ${atMicrosSql}::text as "atMicros",
           entry.metadata->'paidCreditTotals' as chain,
           (entry.metadata->>'unpaidCreditsAfterMicros')::text as unpaid
         from ${schema.creditLedgerEntries} entry
         where entry.account_id = ${accountId} and ${carriesReceiptSql} and ${chainedSql}
-        order by entry.created_at desc, entry.metadata->'paidCreditTotals'->'n' desc
+          and entry.created_at = (select created_at from newest)
+        order by entry.metadata->'paidCreditTotals'->'n' desc
         limit 1
+      ), latest as (
+        -- The latest receipt and the running totals it carries (paid-credit.ts).
+        select * from newest_receipt
+        union all
+        -- Only when the newest such row is an older release's (no receipt at
+        -- its time, during the rollout): walk back to the latest receipt.
+        (select entry.created_at, entry.created_at::text as at, ${atMicrosSql}::text as "atMicros",
+          entry.metadata->'paidCreditTotals' as chain,
+          (entry.metadata->>'unpaidCreditsAfterMicros')::text as unpaid
+        from ${schema.creditLedgerEntries} entry
+        where entry.account_id = ${accountId} and ${carriesReceiptSql} and ${chainedSql}
+          and not exists (select 1 from newest_receipt)
+        order by entry.created_at desc, entry.metadata->'paidCreditTotals'->'n' desc
+        limit 1)
       ), receipts as (
         -- Rows that can carry a receipt written after it (normally none):
         -- fees' unfunded shares, fee debt repaid, this month's fees, paid
