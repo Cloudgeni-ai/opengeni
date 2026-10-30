@@ -709,9 +709,15 @@ topic with nested bullets, then `## Decisions` and `## Action items`
 ### Built-in summary
 
 When a meeting's shown transcript first becomes ready, Opengeni starts one
-ordinary chat that writes its notes. A re-run of the transcript starts
-another only while the meeting still has no notes, and one transcript
-version never starts two (the chat is keyed by the version).
+ordinary chat that writes its notes. One transcript version never starts two
+(the chat is keyed by the version). A re-run of the transcript starts another
+while the meeting has no notes, and also to write again notes an earlier
+summary wrote that nobody has touched: notes last saved by a summary chat of
+this meeting in which every turn was the service's (none a person's). Those
+notes describe the transcript the re-run replaced, so the new chat is told
+the notes' revision and saves over exactly that one; if anyone saved since,
+it keeps theirs. Notes a person edited, an automation wrote, or someone
+talked to the notes chat about are never replaced.
 
 - **Whose chat.** The meeting owner's: an Only me chat owned by them for an
   Only me meeting, or a workspace chat for a meeting shared with the
