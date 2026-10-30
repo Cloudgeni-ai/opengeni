@@ -1180,6 +1180,10 @@ impl Engine for Firecracker {
         Ok(())
     }
 
+    fn bringing_down(&self, vm: &FirecrackerVm) -> bool {
+        vm.bounds.descending()
+    }
+
     fn set_memory_limit(&self, vm: &FirecrackerVm, bytes: Option<u64>) -> Result<(), EngineError> {
         vm.cgroup
             .set_memory_max(bytes)

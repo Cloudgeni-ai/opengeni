@@ -943,6 +943,7 @@ fn visit_gauges(gauges: &Gauges, each: &mut impl Visitor) {
         each.gauge("compute.memory.shortfall", &[], levels.shortfall);
         each.gauge("compute.memory.relief", &[], levels.relief);
         each.gauge("compute.memory.over_bound", &[], levels.over_bound);
+        each.gauge("compute.memory.bringing_down", &[], levels.bringing_down);
     }
     for (resource, kinds) in PRESSURE_RESOURCES.iter().zip(&gauges.pressure) {
         for (kind, total) in PRESSURES.iter().zip(kinds) {

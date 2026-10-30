@@ -408,6 +408,16 @@ pub trait Engine: Send + Sync + 'static {
         ))
     }
 
+    /// Whether the engine is still bringing `vm` down toward the high of
+    /// the latest [`Engine::bound_memory`]: the kernel is at work on it and
+    /// has not shown that it can take no more. A VM whose pages the kernel
+    /// must first age may come down only after many seconds. `false` for
+    /// an engine that applies a bound at once or cannot bound a VM.
+    fn bringing_down(&self, vm: &Self::Vm) -> bool {
+        let _ = vm;
+        false
+    }
+
     /// Tells the guest of `vm`, started from `spec`, how long each of its
     /// writable drives is now: their files grew since it last learned
     /// that, at its boot or in the state it was restored from. A paused
