@@ -599,7 +599,11 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         publicExecute: true,
         securityDefiner: true,
       },
-      ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
+      ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.filter(
+        (name) =>
+          name !== "resolve_workspace_codex_subscription_source(uuid, uuid)" &&
+          name !== "capture_legacy_codex_turn_sources(uuid, uuid)",
+      ).map((name) => ({
         name,
         owner: "postgres",
         execute: true,

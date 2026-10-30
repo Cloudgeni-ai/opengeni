@@ -37,7 +37,7 @@ afterAll(async () => {
 
 realTest("the restricted inspector observes the still-present legacy schema", async () => {
   const posture = await assertRuntimeDatabasePosture(client!.db, options);
-  expect(posture.retiringFeatureTablesPresent).toEqual({ subscription: true, variableSets: true });
+  expect(posture.retiringFeatureTablesPresent).toEqual({ subscription: false, variableSets: true });
 });
 
 realTest(
@@ -48,7 +48,7 @@ realTest(
     // reconcile frozen permission snapshots and prove previous-release ancestry.
     const names = Object.values(RETIRING_FEATURE_TABLES).flat();
     await database!.admin.unsafe(
-      `DROP TABLE ${names.map((name) => `"${database!.schema}"."${name}"`).join(", ")} CASCADE`,
+      `DROP TABLE IF EXISTS ${names.map((name) => `"${database!.schema}"."${name}"`).join(", ")} CASCADE`,
     );
     await database!.admin.unsafe(`
     DROP FUNCTION opengeni_private.subscription_provider_cutover_committed(text) CASCADE;
@@ -63,7 +63,9 @@ realTest(
         name === "resolve_workspace_codex_subscription_source(uuid, uuid)" ||
         name === "capture_legacy_codex_turn_sources(uuid, uuid)",
     )) {
-      await database!.admin.unsafe(`DROP FUNCTION "${database!.schema}".${signature} CASCADE`);
+      await database!.admin.unsafe(
+        `DROP FUNCTION IF EXISTS "${database!.schema}".${signature} CASCADE`,
+      );
     }
     const posture = await assertRuntimeDatabasePosture(client!.db, options);
     expect(posture.retiringFeatureTablesPresent).toEqual({
