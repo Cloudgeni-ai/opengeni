@@ -4,13 +4,15 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use compute_core::SandboxId;
-use compute_engine::{Found, SnapshotFiles};
+use compute_engine::{Found, MemoryProfile, Readable, RestoreFiles, SnapshotFiles};
 use tokio::task::JoinHandle;
 
 use crate::layout::tests::FAILPOINTS;
 use crate::layout::vm_spec;
+#[cfg(target_os = "linux")]
+use crate::paging::Paging;
 use crate::protocol::{SandboxConfig, SleepConfig};
-use crate::state::Allocation;
+use crate::state::{Allocation, Disk};
 use crate::store::{Directory, NoStore};
 
 /// A VMM with one VM, which counts what it is asked to do.
@@ -582,7 +584,7 @@ async fn only_an_image_no_vmm_here_reads_is_given_up() {
             "it was made on another processor".into(),
         ))
     };
-    let last = super::REFUSALS_FROM_ELSEWHERE - 1;
+    let last = super::restore::REFUSALS_FROM_ELSEWHERE - 1;
     for (made_under, runtime, reads, failures, kept) in [
         (NOW, NOW, None, last, true),
         (OLD, NOW, unreadable(), 0, false),
