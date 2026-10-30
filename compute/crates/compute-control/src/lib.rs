@@ -144,7 +144,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         .validate()
         .map_err(|error| anyhow::anyhow!("lease terms: {error}"))?;
     let give_up_after = config.settings.give_up_after;
-    let view = Arc::new(View::new(config.seed, terms.term));
+    let view = Arc::new(View::new(config.seed, terms.silent_after()));
     // The fleet's pointers are kept in the store once they are moved in
     // from the archive, whose own pointers the import reads.
     let pointers = config
