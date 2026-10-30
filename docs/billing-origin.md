@@ -49,9 +49,18 @@ inherit the origin of the chat they run in, never the credential's.
   (a standard webhook's generated secret is in the create response), rotated
   it, or pasted one with `PATCH`. A custom webhook's `format`, which says how
   deliveries are verified and read, counts the same: an API caller creating
-  or changing it marks the source. It is written in the same statement as the
-  secret or format, and never turned back, even when a person later rotates
-  or pastes a secret. Whoever holds the secret can sign deliveries to the public URL,
+  or changing it marks the source, and so does an API caller creating a
+  Linear, Sentry or Tailscale preset source before its secret is pasted. The
+  agent tools `event_sources_create_webhook` and `event_sources_update` resolve
+  the caller's origin like the routes: an outside agent, or one in an API
+  chat, marks the source; an agent in a chat started in the app doesn't. Every
+  signature scheme's secret is set this way, including a `url_token` secret
+  (the one the app puts in the address as `?token=<secret>`) and an `ed25519`
+  app's public key. A public key can't sign, but whoever pastes it chooses
+  which signer the source trusts, so it counts as a secret write. The mark is
+  written in the same statement as the secret or format, and never turned
+  back, even when a person later rotates or pastes a secret. Whoever holds the
+  secret can sign deliveries to the public URL,
   so the intake records every delivery it verifies for such a source as API
   (`receiveEventWebhook`), which marks the automations it fires API use in
   the delivery's own transaction, exactly as an API caller's test event or
@@ -64,6 +73,14 @@ inherit the origin of the chat they run in, never the credential's.
   put the signature, or a `token` scheme's secret itself, into events and the
   delivery log; create and `PATCH` refuse such a format, and intake reads that
   header as absent for one stored before the refusal.
+  A `url_token` secret travels in the address, which no format reads and
+  intake never keeps. So that it can't be read back from what is kept either,
+  intake drops any header whose value contains the secret (a proxy's copy of
+  the address, for example) before the format reads ids from it, replaces
+  each copy of the secret in the kept body with `[secret]` (an app echoing
+  the address it posts to), and never uses an id holding the secret as the
+  delivery's dedupe key. The kept size and digest describe the kept body.
+  This holds for every scheme's secret.
 - `credit_ledger_entries.usage_origin` records the origin each usage debit was
   charged under. The debit writers resolve it from the explicit input, the
   attribution metadata, the turn, then the ambient request scope.

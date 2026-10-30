@@ -53,6 +53,22 @@ describe("webhook formats never read the signature header", () => {
       format: { signature: { scheme: "standard_webhooks" }, type: { header: "Webhook-Signature" } },
       path: ["format", "type", "header"],
     },
+    {
+      // An event type joined from parts.
+      format: {
+        signature: token,
+        type: { parts: [{ path: "object_kind" }, { header: "x-gitlab-TOKEN" }] },
+      },
+      path: ["format", "type", "parts", 1, "header"],
+    },
+    {
+      format: {
+        signature: { scheme: "ed25519", header: "X-Signature-Ed25519" },
+        type: { path: "type" },
+        deliveryId: { header: "x-signature-ed25519" },
+      },
+      path: ["format", "deliveryId", "header"],
+    },
   ];
 
   test("create and change refuse them, whatever the header's case", () => {
@@ -78,5 +94,22 @@ describe("webhook formats never read the signature header", () => {
     };
     expect(UpdateEventSourceRequest.safeParse({ format: svix }).success).toBe(true);
     expect(webhookFormatSignatureHeaderReads(WebhookFormat.parse(fine))).toEqual([]);
+  });
+
+  test("a url_token secret is in the address, which no format reads, so any header is allowed", () => {
+    const urlToken = {
+      signature: { scheme: "url_token" },
+      type: { header: "X-Event" },
+      deliveryId: { header: "X-Delivery" },
+      eventId: ["id"],
+    };
+    expect(webhookFormatSignatureHeaderReads(WebhookFormat.parse(urlToken))).toEqual([]);
+    expect(
+      CreateEventSourceRequest.safeParse({
+        ...custom(urlToken),
+        signingSecret: "0123456789abcdefghijklmnop",
+      }).success,
+    ).toBe(true);
+    expect(UpdateEventSourceRequest.safeParse({ format: urlToken }).success).toBe(true);
   });
 });

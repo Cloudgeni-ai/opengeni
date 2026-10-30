@@ -352,6 +352,7 @@ async function eventSourceHarness(options: { legacy?: boolean } = {}) {
       })
     ).status;
   return {
+    app,
     api,
     send,
     tokenFormat,
@@ -546,4 +547,90 @@ test("a webhook format can't read its event type or ids from the header the secr
     select row_to_json(event)::text from inbound_events event where source_id = ${source.id}::uuid`;
   expect(stored.length).toBeGreaterThan(0);
   for (const row of stored) expect(row.text).not.toContain(secret);
+}, 180_000);
+
+/** An app that can't sign posts to the address with `?token=<secret>`. */
+function urlTokenSource(h: Awaited<ReturnType<typeof eventSourceHarness>>) {
+  const format = {
+    signature: { scheme: "url_token" },
+    type: { path: "event" },
+    // What a proxy in front of the app may add: its copy of the address.
+    deliveryId: { header: "X-Original-Uri" },
+    eventId: ["id"],
+  };
+  const create = async (secret: string, authorization?: string) =>
+    (
+      (await h.send(
+        "POST",
+        "/event-sources",
+        { kind: "webhook", adapter: "custom", name: "Page watcher", format, signingSecret: secret },
+        authorization,
+      )) as { source: { id: string; webhookUrl: string } }
+    ).source;
+  const deliver = async (
+    webhookUrl: string,
+    secret: string,
+    body: Record<string, unknown> = { event: "page.changed", id: crypto.randomUUID() },
+  ) => {
+    const path = `${new URL(webhookUrl).pathname}?token=${secret}`;
+    return await h.app.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-original-uri": path },
+      body: JSON.stringify(body),
+    });
+  };
+  return { create, deliver };
+}
+
+test("a url_token webhook an API caller creates fires a person's automations as API use", async () => {
+  if (!client || !shared) return;
+  const h = await eventSourceHarness();
+  const pages = urlTokenSource(h);
+  const secret = randomBytes(24).toString("hex");
+  const source = await pages.create(secret, h.api);
+  expect(await h.sourceHolder(source.id)).toBe("api");
+  const taskId = await h.automation(source.id, "page.changed");
+  expect(await h.origin(taskId)).toBe("app");
+  expect((await pages.deliver(source.webhookUrl, secret)).status).toBe(200);
+  expect(await h.origin(taskId)).toBe("api");
+  // A person's own url_token source stays app.
+  const own = await pages.create(randomBytes(24).toString("hex"));
+  expect(await h.sourceHolder(own.id)).toBeNull();
+}, 180_000);
+
+test("a url_token secret never reaches stored deliveries or events, even when the app or a proxy echoes it", async () => {
+  if (!client || !shared) return;
+  const h = await eventSourceHarness();
+  const pages = urlTokenSource(h);
+  const secret = randomBytes(24).toString("hex");
+  const source = await pages.create(secret);
+  // The body names the address it was sent to, and its id is the secret.
+  const response = await pages.deliver(source.webhookUrl, secret, {
+    event: "page.changed",
+    id: secret,
+    callback: `${source.webhookUrl}?token=${secret}`,
+  });
+  expect(response.status).toBe(200);
+  expect(await response.text()).not.toContain(secret);
+  const deliveries = await shared.admin<
+    { body: string; dedupeKey: string; headers: string; row: string }[]
+  >`
+    select convert_from(body, 'UTF8') as body, dedupe_key as "dedupeKey",
+      headers::text as headers, row_to_json(delivery)::text as row
+    from event_deliveries delivery where source_id = ${source.id}::uuid`;
+  expect(deliveries).toHaveLength(1);
+  for (const delivery of deliveries) {
+    expect(delivery.body).toContain("page.changed");
+    expect(delivery.body).toContain("[secret]");
+    for (const text of Object.values(delivery)) expect(text).not.toContain(secret);
+  }
+  const events = await shared.admin<{ row: string }[]>`
+    select row_to_json(event)::text as row from inbound_events event
+    where source_id = ${source.id}::uuid`;
+  expect(events).toHaveLength(1);
+  expect(events[0]!.row).toContain("page.changed");
+  expect(events[0]!.row).not.toContain(secret);
+  // Agents and API callers read deliveries and events through the API.
+  const listed = await h.send("GET", `/event-sources/${source.id}/deliveries`);
+  expect(JSON.stringify(listed)).not.toContain(secret);
 }, 180_000);

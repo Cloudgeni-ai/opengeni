@@ -245,7 +245,11 @@ async function checkCreditBalance(
     return { allowed: true };
   }
   if (origin === "api") {
-    return { allowed: false, code: API_CREDITS_REQUIRED_CODE, message: API_CREDITS_REQUIRED_MESSAGE };
+    return {
+      allowed: false,
+      code: API_CREDITS_REQUIRED_CODE,
+      message: API_CREDITS_REQUIRED_MESSAGE,
+    };
   }
   return {
     allowed: false,

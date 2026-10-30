@@ -27,6 +27,7 @@ import {
   webhookEventTypeCatalog,
   webhookAdapterFor,
   WebhookBodyError,
+  withoutSecretHeaders,
   type MatchableEvent,
 } from "../src/domain/event-triggers";
 
@@ -805,6 +806,34 @@ describe("webhook adapters", () => {
         externalId: "run_1",
         summary: "Price drops",
       });
+    });
+
+    test("a header carrying a url_token secret is never read or kept", () => {
+      // A proxy in front of the app may copy the address, query and all, into
+      // a header; a format reading that header must not get the secret.
+      const secret = "u3T9kq2LxP0wZ7vN4bC8yR1d";
+      const adapter = custom({
+        signature: { scheme: "url_token" },
+        type: { path: "event" },
+        deliveryId: { header: "X-Original-Uri" },
+      });
+      const headers = headersOf({
+        "x-original-uri": `/hooks/abc?token=${secret}`,
+        "x-request-id": "req_1",
+      });
+      const readable = withoutSecretHeaders(headers, secret);
+      expect([...readable.keys()]).toEqual(["x-request-id"]);
+      expect(headers.get("x-original-uri")).toContain(secret);
+      expect(withoutSecretHeaders(headers, null)).toBe(headers);
+      const body = encoder.encode(JSON.stringify({ event: "page.changed" }));
+      expect(
+        adapter.verify({
+          secret,
+          headers,
+          body,
+          query: new URLSearchParams(`token=${secret}`),
+        }),
+      ).toEqual({ ok: true, deliveryKey: null });
     });
 
     test("a type joined from parts, fallback paths, a body send time and the actor's kind", () => {

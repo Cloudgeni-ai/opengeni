@@ -679,6 +679,9 @@ export async function receiveEventWebhook(input: {
   // an app's echo of it in the body, not an id read from either.
   const headers = withoutSecretHeaders(input.headers, secret);
   const body = withoutSecret(input.body, secret);
+  // The size and digest describe the body as kept.
+  const keptBody =
+    body === input.body ? {} : { bodyBytes: body.byteLength, bodySha256: sha256Hex(body) };
   const outcome = readDelivery({
     source,
     settings: input.settings,
@@ -689,11 +692,12 @@ export async function receiveEventWebhook(input: {
   });
   const recorded = await recordEventDelivery(input.db, {
     ...base,
+    ...keptBody,
     ...outcome,
     dedupeKey:
       verification.deliveryKey && !(secret && verification.deliveryKey.includes(secret))
         ? verification.deliveryKey
-        : `sha256:${bodySha256}`,
+        : `sha256:${keptBody.bodySha256 ?? bodySha256}`,
     body,
     headers: retainedSourceHeaders(source, headers),
     // The secret and its holder come from the same row: a delivery verified
@@ -710,13 +714,29 @@ export async function receiveEventWebhook(input: {
   };
 }
 
-/** The body with every copy of the secret replaced, for an app that echoes its address. */
+/**
+ * The body with every copy of the secret replaced by `[secret]`, for an app
+ * that echoes the address it posts to. Byte for byte, so a body that isn't
+ * UTF-8 is otherwise kept exactly.
+ */
 function withoutSecret(body: Uint8Array, secret: string | null): Uint8Array {
   if (!secret) return body;
-  const text = new TextDecoder().decode(body);
-  if (!text.includes(secret)) return body;
-  return new TextEncoder().encode(text.split(secret).join("[secret]"));
+  const bytes = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+  const needle = Buffer.from(secret, "utf8");
+  let found = bytes.indexOf(needle);
+  if (found < 0) return body;
+  const parts: Buffer[] = [];
+  let from = 0;
+  while (found >= 0) {
+    parts.push(bytes.subarray(from, found), SECRET_MARK);
+    from = found + needle.length;
+    found = bytes.indexOf(needle, from);
+  }
+  parts.push(bytes.subarray(from));
+  return new Uint8Array(Buffer.concat(parts));
 }
+
+const SECRET_MARK = Buffer.from("[secret]", "utf8");
 
 /** Sources whose stored deliveries can be read again. */
 const REPLAYABLE_SOURCE_KINDS: ReadonlySet<EventSourceRecord["kind"]> = new Set([
