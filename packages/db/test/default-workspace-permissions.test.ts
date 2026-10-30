@@ -6,6 +6,7 @@ import {
   bootstrapWorkspace,
   createDb,
   ensureManagedAccessForUser,
+  managedPersonalWorkspacePermissions,
   type DbClient,
 } from "../src";
 
@@ -33,23 +34,26 @@ function expectCanonical(permissions: readonly string[]) {
   }
 }
 
-test("default workspace grants issue only canonical permissions and retain secret use", () => {
-  expectCanonical(allWorkspacePermissions);
-  // Before retirement the six names below were present alongside list/read/
-  // write. Only attach/use added authority not already granted canonically.
-  const previous = [
-    ...allWorkspacePermissions.filter((permission) => permission !== "secrets:use"),
-    "variable-sets:list",
-    "variable-sets:read",
-    "variable-sets:write",
-    "variable-sets:manage",
-    "variable-sets:attach",
-    "variable-sets:use",
-  ];
-  expect([...new Set(previous.map(normalizePermission))].sort()).toEqual(
-    [...allWorkspacePermissions].sort(),
-  );
-});
+for (const [name, permissions] of [
+  ["default workspace", allWorkspacePermissions],
+  ["managed personal workspace", managedPersonalWorkspacePermissions],
+] as const) {
+  test(`${name} grants issue only canonical permissions and retain secret use`, () => {
+    expectCanonical(permissions);
+    // Before retirement the six names below were present alongside list/read/
+    // write. Only attach/use added authority not already granted canonically.
+    const previous = [
+      ...permissions.filter((permission) => permission !== "secrets:use"),
+      "variable-sets:list",
+      "variable-sets:read",
+      "variable-sets:write",
+      "variable-sets:manage",
+      "variable-sets:attach",
+      "variable-sets:use",
+    ];
+    expect([...new Set(previous.map(normalizePermission))].sort()).toEqual([...permissions].sort());
+  });
+}
 
 describe.skipIf(!realDatabase)("persisted default grants", () => {
   test("bootstrap stores the canonical defaults without rewriting caller-supplied authority", async () => {
@@ -87,6 +91,14 @@ describe.skipIf(!realDatabase)("persisted default grants", () => {
     const userId = crypto.randomUUID();
     const input = { userId, email: `${userId}@example.test`, name: "Default grant owner" };
     const access = await ensureManagedAccessForUser(client!.db, input);
+    const personal = access.workspaceGrants.find(
+      (grant) => grant.workspaceId !== access.defaultWorkspaceId,
+    );
+    expect(personal).toBeDefined();
+    expectCanonical(personal!.permissions);
+    for (const permission of ["workspace:admin", "members:manage", "api_keys:manage"]) {
+      expect(personal!.permissions).not.toContain(permission);
+    }
     const subjectId = `user:${userId}`;
     const [stored] = await shared!.admin<{ id: string; permissions: Permission[] }[]>`
       select id, permissions from workspace_memberships
