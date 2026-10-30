@@ -24,7 +24,7 @@ import type { AnalyticsAction } from "./analytics-actions";
 import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "./api-error";
 import { cn } from "../lib/cn";
 import { containedPortal } from "./portal-container";
-import { useWindowBarTitle } from "./page-header";
+import { useWindowBarTitle, WindowBarTitleBoundary } from "./page-header";
 
 const DialogContainedPortal = containedPortal(DialogPrimitive.Portal);
 
@@ -717,12 +717,14 @@ export function FormDialog({
         >
           <FormChromeContext.Provider value={DIALOG_CHROME}>
             <SectionFrameReset>
-              <FormFrame
-                variant="dialog"
-                {...frame}
-                {...overlay.frameProps}
-                className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
-              />
+              <WindowBarTitleBoundary>
+                <FormFrame
+                  variant="dialog"
+                  {...frame}
+                  {...overlay.frameProps}
+                  className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
+                />
+              </WindowBarTitleBoundary>
             </SectionFrameReset>
           </FormChromeContext.Provider>
         </DialogPrimitive.Content>

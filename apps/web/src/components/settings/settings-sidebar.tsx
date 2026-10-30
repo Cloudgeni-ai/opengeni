@@ -544,7 +544,12 @@ export function SettingsShell({
       {toggleInWindowBar ? (
         <WindowBarControls>
           <TooltipProvider>
-            <SidebarToggleButton collapsed={collapsed} onToggle={toggleCollapsed} inWindowBar />
+            <SidebarToggleButton
+              collapsed={collapsed}
+              onToggle={toggleCollapsed}
+              inWindowBar
+              shortcut={rail != null}
+            />
           </TooltipProvider>
         </WindowBarControls>
       ) : null}

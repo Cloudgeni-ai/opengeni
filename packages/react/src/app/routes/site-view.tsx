@@ -190,7 +190,8 @@ export function SiteViewRoute({
   const live = useSiteLiveVersion(client, workspaceId, siteId);
   const artifact = live.detail?.artifact;
   // In the macOS app the Site's name is the window bar's title, as a page's
-  // is, instead of in its toolbar.
+  // is, instead of in its toolbar (which shows it again in full screen, where
+  // the bar's row is hidden).
   const titleInWindowBar = useWindowBarTitle(artifact?.title ?? null);
   // The publish form, open for this Site; another Site starts without it.
   const siteKey = `${workspaceId}/${siteId}`;
@@ -298,7 +299,7 @@ export function SiteViewRoute({
               siteLocation={page ?? "/"}
               onSiteLocationChange={onSiteLocationChange}
               toolbarStart={backControl}
-              showTitle={!titleInWindowBar}
+              showTitle={!titleInWindowBar || fullScreen}
               // The one publication control. The Site view never says "Live":
               // it stays current, and says so only while Updating or Reconnecting.
               liveStatus={

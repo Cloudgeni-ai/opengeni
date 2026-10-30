@@ -75,12 +75,16 @@ export function SidebarToggleButton({
   collapsed,
   onToggle,
   inWindowBar,
+  shortcut = true,
 }: {
   collapsed: boolean;
   onToggle: () => void;
   inWindowBar: boolean;
+  /** Whether the app's sidebar shortcut toggles this sidebar (it doesn't outside a workspace). */
+  shortcut?: boolean;
 }) {
-  const sidebarKeys = useActionShortcut("view.sidebar");
+  const appSidebarKeys = useActionShortcut("view.sidebar");
+  const sidebarKeys = shortcut ? appSidebarKeys : null;
   const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
   return (
     <Tooltip>
