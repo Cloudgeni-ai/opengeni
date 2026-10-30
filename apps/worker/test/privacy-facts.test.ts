@@ -309,6 +309,21 @@ describe("renderPrivacyFacts", () => {
     );
     expect(text).toContain("Improve the model for everyone");
   });
+
+  test("never shows upstream model ids or endpoint URLs", () => {
+    const text = renderPrivacyFacts({
+      route: route({
+        baseUrl: AZURE_NEU,
+        wireProfile: "openai",
+        upstreamModelId: "FW-GLM-5.3-Flash",
+      }),
+      live: LIVE_OFF,
+      deployment: DEPLOYMENT,
+    });
+    expect(text).toContain("Fireworks AI");
+    expect(text).not.toContain("FW-GLM-5.3-Flash");
+    expect(text).not.toContain("openai-production-neu");
+  });
 });
 
 describe("loadPrivacyFactsLive", () => {

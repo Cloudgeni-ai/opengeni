@@ -237,9 +237,8 @@ export function renderPrivacyFacts(input: {
     "Privacy facts for this chat, from this Opengeni deployment's configuration. Answer only from these facts, say plainly what is unknown, and link the policies below.",
     "",
     `Model: ${modelName}`,
-    `Provider route: ${oneLine(route.provider?.label ?? "unknown")}${
-      route.upstreamModelId ? `, upstream model ${oneLine(route.upstreamModelId)}` : ""
-    }`,
+    // Like list_models, never upstream ids or URLs: they can name internal deployments.
+    `Provider route: ${oneLine(route.provider?.label ?? "unknown")}`,
     `Paid through: ${credentialSourceText(route)}`,
     `Where this route runs: ${residencyText(route.residency)}`,
     live.euOnly === null

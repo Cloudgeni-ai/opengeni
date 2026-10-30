@@ -14,7 +14,8 @@ arguments, owned by the `runtime` class (no agent configuration turns it off).
 It is built in `apps/worker/src/activities/agent-turn/privacy-facts.ts` and
 returns one text block for the turn's chat model:
 
-- the model, provider route and upstream model id, as the worker resolved them;
+- the model and provider route as the worker resolved them (never upstream ids,
+  URLs or keys, as with `list_models`);
 - how the route is paid for (the deployment, a workspace or organization key, or
   a connected subscription, whose own account terms then apply);
 - where the route runs, from its residency record
