@@ -39,6 +39,8 @@ class FakeGitHub implements GitHub {
   log: string[] = [];
   /** Lets a test corrupt what GitHub lands. */
   landedExtra: string[] = [];
+  /** A head that applies exactly what another head applies, like main merged in again. */
+  sameContent = new Map<string, string>();
 
   constructor() {
     this.refs.set("main", this.store([], [], "root"));
@@ -50,6 +52,10 @@ class FakeGitHub implements GitHub {
     const sha = hash(`commit:${tree}:${parents.join(",")}:${message}`);
     this.commits.set(sha, { sha, tree, message, date: NOW, applied: sorted, parents });
     return sha;
+  }
+
+  content(head: string) {
+    return this.sameContent.get(head) ?? head;
   }
 
   addPull(number: number, extra: Partial<FakePull> = {}) {
@@ -150,7 +156,7 @@ class FakeGitHub implements GitHub {
       )
     )
       return { kind: "conflict" };
-    const sha = this.store([...base.applied, head], [base.sha, head], message);
+    const sha = this.store([...base.applied, this.content(head)], [base.sha, head], message);
     this.refs.set(branch, sha);
     return { kind: "merged", sha, tree: this.commits.get(sha)!.tree };
   }
@@ -170,7 +176,11 @@ class FakeGitHub implements GitHub {
     const main = this.commits.get(this.refs.get("main")!)!;
     const parents = input.method === "merge" ? [main.sha, pull.head] : [main.sha];
     const message = `${input.title ?? `Merge pull request #${number}`}\n\n${input.message}`;
-    const sha = this.store([...main.applied, pull.head, ...this.landedExtra], parents, message);
+    const sha = this.store(
+      [...main.applied, this.content(pull.head), ...this.landedExtra],
+      parents,
+      message,
+    );
     this.refs.set("main", sha);
     pull.merged = sha;
     this.log.push(`merge #${number} ${input.method} ${input.title ?? ""}`.trim());
@@ -341,6 +351,48 @@ describe("a batcher pass", () => {
     gh.finishCi(gh.batch().sha, "success");
     gh.landedExtra = ["unexpected"];
     await expect(run(gh, options())).rejects.toBeInstanceOf(LandingMismatch);
+  });
+
+  test("a member's new head with the tested tree keeps its batch and lands that head", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    await run(gh, options());
+    const built = gh.batch();
+
+    // Main merged into #2 again: a new head, the same content.
+    const old = gh.pulls.get(2)!.head;
+    const fresh = hash("head:2 with main merged again");
+    gh.sameContent.set(fresh, old);
+    gh.pulls.get(2)!.head = fresh;
+    await run(gh, options());
+    expect(gh.batch().sha).toBe(built.sha);
+    expect([...gh.refs.keys()].some((name) => name.startsWith("batch-build/"))).toBe(false);
+
+    gh.finishCi(built.sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeDefined();
+    expect(gh.pulls.get(2)!.merged).toBeDefined();
+    expect(gh.commits.get(await gh.mainSha())!.tree).toBe(built.manifest.members[1]!.tree);
+  });
+
+  test("a member's new head with other content restarts its batch", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    await run(gh, options());
+    const built = gh.batch();
+
+    const fresh = hash("head:1 with a fix");
+    gh.pulls.get(1)!.head = fresh;
+    await run(gh, options());
+    const rebuilt = gh.batch();
+    expect(rebuilt.manifest.id).not.toBe(built.manifest.id);
+    expect(rebuilt.manifest.members.map((m) => [m.number, m.head])).toEqual([
+      [1, fresh],
+      [2, gh.pulls.get(2)!.head],
+    ]);
+    expect([...gh.refs.keys()].some((name) => name.startsWith("batch-build/"))).toBe(false);
   });
 
   test("dry run only plans", async () => {

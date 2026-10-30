@@ -57,6 +57,8 @@ export interface CommitSummary {
   tree: string;
   message: string;
   date: number;
+  /** Parent commit SHAs, first parent first. */
+  parents: string[];
 }
 
 export type MergeResult = { kind: "merged"; sha: string; tree: string } | { kind: "conflict" };
@@ -308,12 +310,14 @@ export class RestGitHub implements GitHub {
       tree: { sha: string };
       message: string;
       committer: { date: string };
+      parents: { sha: string }[];
     }>(`git/commits/${sha}`);
     return {
       sha: data.sha,
       tree: data.tree.sha,
       message: data.message,
       date: time(data.committer.date) ?? 0,
+      parents: data.parents.map((parent) => parent.sha),
     };
   }
 

@@ -130,6 +130,11 @@ export interface Batch {
   manifest: Manifest;
   createdAt: number;
   runs: BatchRun[];
+  /**
+   * Members that pushed a new head whose merge at their place in the candidate
+   * gives exactly the tree this batch tests: PR number to that new head.
+   */
+  sameTree?: Record<number, string>;
 }
 
 export interface Observation {
@@ -278,7 +283,11 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     const numbers = manifest.members.map((m) => m.number);
     // An interrupted batch is tested again first, keeping any bisection.
     pending = [numbers, ...manifest.pending];
-    const left = manifest.members.find((m) => byNumber.get(m.number)?.headSha !== m.head);
+    // A new head that tests to the same tree (main merged in again, a rebase)
+    // changes nothing this batch tests, so it does not restart it.
+    const left = manifest.members.find(
+      (m) => byNumber.get(m.number)?.headSha !== (batch.sameTree?.[m.number] ?? m.head),
+    );
     // A priority PR goes into the next batch; it never cancels a running one.
     let reason: string | null = null;
     if (manifest.base !== mainSha) reason = "main moved since the batch was built";

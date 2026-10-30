@@ -24,7 +24,9 @@ deterministic Version check.
 
 A PR leaves the queue with a comment saying why when it conflicts with `main`
 or fails CI on its own on top of `main`. Fix it and add the label again.
-Pushing a new head while queued simply restarts its batch.
+Pushing a new head while queued restarts its batch, unless the new head tests
+exactly the same: merging the same `main` into the branch again, or rebasing
+it, leaves the batch running, and it lands the new head.
 
 Database migrations need unique numbers, and two PRs can add the same number
 without a Git conflict. A queued PR that adds a migration whose number `main`
@@ -63,8 +65,12 @@ The numbered directories are listed in `NUMBERED_FILES`
 5. **Failures.** A failed batch is split in half and each half is tested in
    turn until the failing PR is found and removed from the queue.
 
-A batch is rebuilt from scratch whenever `main` moves under it, a member gets a
-new head or leaves the queue.
+A batch is rebuilt from scratch whenever `main` moves under it, a member leaves
+the queue, or a member gets a new head that changes what the batch tests. For a
+member's new head, the batcher merges it on a scratch branch at the member's
+place in the candidate; when that gives exactly the tree CI is testing there,
+the batch carries on and lands the new head (the landed-tree check still
+applies). Version PRs always restart.
 
 ## Main CI records the batch result
 

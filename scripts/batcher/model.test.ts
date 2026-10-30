@@ -233,6 +233,10 @@ describe("decide", () => {
     expect(moved[1]?.kind).toBe("build");
     const changed = decide(observe([pull(1, { headSha: sha(77) })], [batch([1])]));
     expect(changed[0]).toMatchObject({ kind: "abandon", reason: "#1 has a new head" });
+    const sameTree = decide(
+      observe([pull(1, { headSha: sha(77) })], [batch([1], { sameTree: { 1: sha(77) } })]),
+    );
+    expect(sameTree.some((a) => a.kind === "abandon")).toBe(false);
     const left = decide(observe([pull(2)], [batch([1, 2])]));
     expect(left[0]).toMatchObject({ kind: "abandon", reason: "#1 left the queue" });
   });

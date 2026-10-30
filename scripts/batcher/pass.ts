@@ -1,4 +1,4 @@
-import type { GitHub } from "./github";
+import type { CommitSummary, GitHub } from "./github";
 import {
   BATCH_PREFIX,
   BUILD_PREFIX,
@@ -52,9 +52,11 @@ interface Context {
   randomId: () => string;
   /** GraphQL node IDs of queued PRs with auto-merge on, for ejection. */
   autoMerge: Map<number, string>;
+  /** Plan only: create no branches, not even scratch ones. */
+  dryRun: boolean;
 }
 
-function context(gh: GitHub, options: PassOptions): Context {
+function context(gh: GitHub, options: PassOptions & { dryRun?: boolean }): Context {
   return {
     gh,
     settings: options.settings ?? DEFAULT_SETTINGS,
@@ -62,6 +64,7 @@ function context(gh: GitHub, options: PassOptions): Context {
     log: options.log ?? ((line) => console.log(line)),
     randomId: options.randomId ?? (() => crypto.randomUUID().replaceAll("-", "").slice(0, 12)),
     autoMerge: new Map(),
+    dryRun: options.dryRun ?? false,
   };
 }
 
@@ -123,15 +126,75 @@ async function observe(ctx: Context): Promise<Observation> {
       await gh.deleteBranch(branch.name);
       continue;
     }
-    batches.push({
+    const batch: Batch = {
       branch: branch.name,
       tip: branch.sha,
       manifest,
       createdAt: commit.date,
       runs: await gh.runs(branch.name, branch.sha),
-    });
+    };
+    if (manifest.base === mainSha) batch.sameTree = await sameTree(ctx, batch, commit, pulls);
+    batches.push(batch);
   }
   return { now, mainSha, pulls, batches };
+}
+
+/**
+ * Members that pushed a new head while their batch runs, whose new head merged
+ * at the member's place in the candidate gives exactly the tree CI is testing
+ * there. Merging the same main into a branch again or rebasing it does that, so
+ * the batch carries on and lands the new head instead of starting over. Each
+ * check merges on a scratch branch; anything unexpected keeps the old rule.
+ */
+async function sameTree(
+  ctx: Context,
+  batch: Batch,
+  tip: CommitSummary,
+  pulls: QueuedPull[],
+): Promise<Record<number, string>> {
+  const { gh } = ctx;
+  const { manifest } = batch;
+  const same: Record<number, string> = {};
+  const heads = new Map(pulls.map((p) => [p.number, p.headSha]));
+  const moved = manifest.members.flatMap((member, index) => {
+    const head = heads.get(member.number);
+    return head !== undefined && head !== member.head && !member.version
+      ? [{ member, index, head }]
+      : [];
+  });
+  if (!moved.length || ctx.dryRun) return same;
+  // The candidate each member was merged into: walk the tip's first parents
+  // back through the members' merge commits to the base.
+  const before: string[] = [];
+  let sha = tip.parents[0];
+  for (let index = manifest.members.length - 1; index >= 0; index--) {
+    if (sha === undefined) return same;
+    const merge = await gh.commit(sha);
+    if (merge.tree !== manifest.members[index]!.tree) return same;
+    sha = merge.parents[0];
+    before[index] = sha!;
+  }
+  if (sha !== manifest.base) return same;
+  for (const { member, index, head } of moved) {
+    const scratch = `${BUILD_PREFIX}${manifest.id}-recheck-${member.number}`;
+    await gh.createBranch(scratch, before[index]!);
+    try {
+      const result = await gh.mergeInto(
+        scratch,
+        head,
+        `Batch ${manifest.id}: recheck #${member.number}`,
+      );
+      if (result.kind === "merged" && result.tree === member.tree) {
+        ctx.log(`#${member.number} has a new head with the tree batch ${manifest.id} tests`);
+        same[member.number] = head;
+      }
+    } catch (error) {
+      ctx.log(`Could not recheck #${member.number}'s new head: ${String(error)}`);
+    } finally {
+      await gh.deleteBranch(scratch);
+    }
+  }
+  return same;
 }
 
 async function eject(ctx: Context, number: number, reason: string) {
@@ -167,7 +230,7 @@ async function land(ctx: Context, batch: Batch) {
   if ((await gh.mainSha()) !== manifest.base) return;
   for (const member of manifest.members) {
     const sha = await gh.mergePull(member.number, {
-      sha: member.head,
+      sha: batch.sameTree?.[member.number] ?? member.head,
       method: member.version ? "merge" : "squash",
       ...(member.version ? {} : { title: squashTitle(member) }),
       message: `Batch: ${manifest.id}`,
