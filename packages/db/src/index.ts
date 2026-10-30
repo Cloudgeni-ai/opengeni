@@ -90828,7 +90828,13 @@ export async function acceptSessionApprovalDecision(
               : [];
           const lost = trigger !== undefined && prior.event.sequence <= trigger.sequence;
           if (!lost) {
-            if (prior.payload.decision !== payload.decision) {
+            // A repeat that carries credentials to store is a different
+            // response: the recorded one already decided, so refuse it
+            // rather than report its credentials as stored.
+            if (
+              prior.payload.decision !== payload.decision ||
+              (input.mcpCredentialUpdates?.length ?? 0) > 0
+            ) {
               return approvalConflict(sessionStatus, "already_decided", prior.payload.decision);
             }
             const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
