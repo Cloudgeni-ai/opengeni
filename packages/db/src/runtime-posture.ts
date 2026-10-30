@@ -94,10 +94,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1060 withholds the EU-only change function; until it is granted the setting
  * cannot be changed and stays off. 1091 withholds the secret history scrub's
  * reader and cell writer; until they are granted, a scrub reports the cells
- * only they reach as pending. 1103 withholds the subscription
- * account-administrator grant; until it is granted, only organization
- * membership administrators administer the organization's subscription
- * accounts.
+ * only they reach as pending. 1103 withheld the subscription
+ * account-administrator grant and 1149 granted it.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -105,7 +103,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
-  "grant_subscription_account_administrator(jsonb)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
