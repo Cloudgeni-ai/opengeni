@@ -61,7 +61,9 @@ The numbered directories are listed in `NUMBERED_FILES`
    that the new `main` tree is exactly the tree CI tested at that point, and
    stops with a comment on the PR if not.
 5. **Failures.** A failed batch is split in half and each half is tested in
-   turn until the failing PR is found and removed from the queue.
+   turn until the failing PR is found and removed from the queue. Priority PRs
+   in those halves keep their place in them, so a failed batch of priority PRs
+   is split too; a priority PR queued since goes first.
 
 A batch is rebuilt from scratch whenever `main` moves under it, a member gets a
 new head or leaves the queue.

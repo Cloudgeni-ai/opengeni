@@ -211,6 +211,33 @@ describe("decide", () => {
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([1, 2]);
   });
 
+  test("splits a failed batch of priority PRs instead of building it again whole", () => {
+    const urgent = { priority: true };
+    const failed = batch([1, 2, 3, 4], { runs: [run({ conclusion: "failure", attempt: 2 })] });
+    const pulls = [pull(1, urgent), pull(2, urgent), pull(3, urgent), pull(4, urgent)];
+    const actions = decide(observe(pulls, [failed]));
+    expect(actions[0]).toMatchObject({ kind: "abandon", reason: "its CI failed" });
+    expect(actions[1]).toMatchObject({ kind: "build", pending: [[3, 4]] });
+    expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([1, 2]);
+  });
+
+  test("a new priority PR goes before the halves of a failed priority batch", () => {
+    const urgent = { priority: true };
+    const failed = batch([1, 2, 3, 4], { runs: [run({ conclusion: "failure", attempt: 2 })] });
+    // Queued after the batch's members, and a CI change, so it runs alone.
+    const fix = pull(5, { priority: true, controlPlane: true, queuedAt: NOW });
+    const pulls = [pull(1, urgent), pull(2, urgent), pull(3, urgent), pull(4, urgent), fix];
+    const actions = decide(observe(pulls, [failed]));
+    expect(actions[1]).toMatchObject({
+      kind: "build",
+      pending: [
+        [1, 2],
+        [3, 4],
+      ],
+    });
+    expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([5]);
+  });
+
   test("ejects a PR that fails alone, keeping the rest of the bisection", () => {
     const failed = batch([3], { runs: [run({ conclusion: "failure", attempt: 2 })] }, [[4]]);
     const actions = decide(observe([pull(3), pull(4), pull(5)], [failed]));
