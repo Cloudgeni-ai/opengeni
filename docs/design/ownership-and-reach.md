@@ -42,10 +42,16 @@ stop deciding ownership questions one at a time.
    has no person.
 8. **A turn uses** what reaches its workspace, plus its person's own things
    turned on there, and nobody else's. Using your own things on your own
-   turn needs no per-chat grant. In a shared chat the first use of each of
-   them shows everyone a notice ("Using Ada's laptop (Only me)") with a way
-   for the owner to stop using it there. If one of your things is not on in
-   this workspace yet, the agent asks once per item per workspace.
+   turn needs no per-chat grant and no Allow card. In a shared chat, the
+   owner sees one line above the message box while their own login or
+   machine works for their messages there ("This chat runs on your personal
+   machine "Laptop". People in this workspace see what the agent does on
+   it."), with a way to stop or move off it. Only the owner sees it, and it
+   never blocks. Other own things get no line: a plan, secrets and Skills
+   show others nothing of the owner's, a browser is used only when asked for
+   in that chat, and Knowledge, files and meetings reach only where their
+   own setting puts them. If one of your things is not on in this workspace
+   yet, the agent asks once per item per workspace, never per chat.
 9. **Schedules run as their owner**, shared schedules included. A schedule
    uses a personal machine only when that machine was picked on it, never
    through a workspace default.
@@ -70,6 +76,12 @@ stop deciding ownership questions one at a time.
 | OR-2 | A workspace's thing shared with other workspaces stays that workspace's. Its admins and organization admins manage it; other workspaces can use it or remove it from themselves, but not edit it. Sharing needs admin rights in both workspaces. Supersedes the "making it serve more workspaces makes it the organization's" clause of D-50 in `docs/subscription-accounts.md` once built. | One team depends on a thing another team controls. |
 | OR-3 | A turn its person starts in a shared chat uses that person's own subscription first, in workspaces where they turned it on, without picking it per chat. | Shared work uses up the person's own limits; alternating senders switch accounts and miss the prompt cache. |
 | OR-4 | Cross-provider failover between subscriptions of the same tier is on for new organizations, never into credits (answers Q-02). Q-04: same tier only. Q-06: use the pin. | The model changes mid-chat and the prompt cache is lost. |
+| OR-5 | Organization credential providers get a per-provider "Personal workspaces" switch, off by default. Organization webhooks never reach Personal workspaces. | A webhook sends each workspace's events, with their content, to an outside address; letting it into Personal workspaces would expose private work, so people who want that wire their own. |
+| OR-6 | An optional monthly cap per person for Personal-workspace spending, off by default. | One more limit for administrators to understand. |
+| OR-7 | "Who may add" stays with existing controls: workspace roles and custom permissions, the organization integration policy, and the organization switches. One new organization switch, "Members connect their own machines", on by default. Embedding products need none, because people added through an app's API act only inside their own workspace. | No per-kind "who may add" matrix. |
+| OR-8 | Documents, spreadsheets, presentations and projects can be Only me, like chats. An Only me project holds only its owner's Only me chats and Sites and can be shared with the workspace later, never the other way. | Two visibilities to explain on more kinds. |
+| OR-9 | Three overviews: My things (account menu and Settings under Your account), Available here (workspace settings) and Shared (organization settings), built in that order. | Three more pages to keep consistent with each kind's own page. |
+| OR-10 | Skills and Knowledge shared with selected workspaces separate "use" from "manage", and follow the organization admin permissions (OR-1). Organization-level integrations are designed first and built after the overviews. Only me saved browser logins belong to the browser area and follow rule 5 there. | These wait behind other work. |
 
 ## Changes from the tree on 2026-10-30
 
@@ -86,9 +98,10 @@ stop deciding ownership questions one at a time.
   Knowledge, Only me documents and projects, merging duplicate personal
   logins made before reuse existed, and approvals that follow the login
   are missing.
-- Organization credential providers and webhooks skip Personal workspaces.
+- Organization credential providers skip Personal workspaces (OR-5).
 - A workspace model allowlist replaces the organization's instead of
-  narrowing it, and "who may add" is not configurable per kind.
+  narrowing it, and members can't be kept from connecting their own
+  machines (OR-7).
 
 ## Build order
 
@@ -99,10 +112,11 @@ stop deciding ownership questions one at a time.
    schedules with a picked machine, the one-time "use it here too".
 4. The "Who can use this?" control on every kind, with owner and manager
    shown, organization-level integrations, merged duplicate logins,
-   approvals that follow the login, Only me documents and projects.
-5. Personal-workspace reach for organization credential providers and
-   webhooks; an optional per-person cap on Personal-workspace spending.
-6. Lockable model ceilings and "who may add" per kind.
+   approvals that follow the login, Only me documents and projects, and the
+   overviews (OR-9).
+5. Personal-workspace reach for organization credential providers (OR-5);
+   an optional per-person cap on Personal-workspace spending (OR-6).
+6. Lockable model ceilings and the machines switch (OR-7).
 7. Failover default (OR-4).
 8. Documentation that contradicts the code.
 
