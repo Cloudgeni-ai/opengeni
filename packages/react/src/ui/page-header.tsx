@@ -1,6 +1,8 @@
 import {
   createContext,
   useContext,
+  useId,
+  useLayoutEffect,
   useMemo,
   type ReactNode,
   forwardRef,
@@ -37,6 +39,39 @@ interface PageHeaderStyle {
 }
 
 const PageHeaderStyleContext = createContext<PageHeaderStyle>({});
+
+/**
+ * The desktop window bar's title line, when the page's shell draws one (the
+ * macOS app): the first page header below claims it with its title, which is
+ * then shown in the bar, and keeps its heading only for assistive tech, so the
+ * title isn't shown twice. Provided by the shells (`useWindowBarRow`).
+ */
+export const PageHeaderWindowBarContext = createContext<{
+  set(id: string, title: string): void;
+  release(id: string): void;
+  /** The header whose title the bar shows. */
+  owner: string | null;
+} | null>(null);
+
+export function useWindowBarTitle(title: ReactNode): boolean {
+  const windowBar = useContext(PageHeaderWindowBarContext);
+  const id = useId();
+  const text = typeof title === "string" ? title : null;
+  const set = windowBar?.set;
+  const release = windowBar?.release;
+  useIsomorphicLayoutEffect(() => {
+    if (!set || !release) return;
+    if (text) set(id, text);
+    else release(id);
+  }, [id, release, set, text]);
+  useIsomorphicLayoutEffect(() => () => release?.(id), [id, release]);
+  return windowBar?.owner === id;
+}
+
+const useIsomorphicLayoutEffect =
+  typeof window === "undefined"
+    ? (_effect: () => unknown, _deps: unknown[]) => {}
+    : useLayoutEffect;
 
 /** Sets the header style for every PageHeader below it (props still win). */
 export function PageHeaderStyleProvider({
@@ -107,15 +142,20 @@ export const PageHeader = /* @__PURE__ */ forwardRef<HTMLElement, PageHeaderProp
     const large = variant === "large";
     const iconVisible = Boolean(icon) && !large && (showIcon ?? style.icon !== "hide");
     const ruled = divider && !tabs;
+    // In the macOS app the window bar shows the page's title instead.
+    const titleInWindowBar = useWindowBarTitle(title);
+    // With only a title, nothing of it is left to show here.
+    const titleOnly = titleInWindowBar && !description && !context && !meta && !actions && !tabs;
 
     return (
       <header
         data-slot="page-header"
         data-variant={variant}
+        data-title-in-window-bar={titleInWindowBar ? "" : undefined}
         // In the desktop app a page's title area moves the window, like a
         // native title bar; its controls stay clickable.
         data-window-drag
-        className={cn("@container/page-header min-w-0", className)}
+        className={cn("@container/page-header min-w-0", className, titleOnly && "sr-only")}
         ref={ref}
         {...props}
       >
@@ -138,8 +178,14 @@ export const PageHeader = /* @__PURE__ */ forwardRef<HTMLElement, PageHeaderProp
                 {context}
               </div>
             ) : null}
-            <div className="flex min-w-0 items-start gap-2">
-              {iconVisible ? (
+            <div
+              className={cn(
+                "flex min-w-0 items-start gap-2",
+                // Kept for assistive tech; the bar shows it. Its meta stays.
+                titleInWindowBar && !meta && "sr-only",
+              )}
+            >
+              {iconVisible && !titleInWindowBar ? (
                 <span
                   aria-hidden="true"
                   className="flex h-7 shrink-0 items-center text-brand [&_svg]:size-4 [&_svg]:shrink-0"
@@ -151,6 +197,7 @@ export const PageHeader = /* @__PURE__ */ forwardRef<HTMLElement, PageHeaderProp
                 className={cn(
                   "min-w-0 font-semibold tracking-[-0.5px] break-words text-fg",
                   large ? "text-2xl leading-8" : "text-xl leading-7",
+                  titleInWindowBar && "sr-only",
                 )}
               >
                 {title}

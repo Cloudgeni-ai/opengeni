@@ -26,6 +26,16 @@ import {
   SheetTrigger,
 } from "@opengeni/react/ui/sheet";
 import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+import { useOptionalRail } from "@opengeni/react/app/components/rail/rail-context";
+import {
+  SIDEBAR_TOGGLE_IN_WINDOW_BAR,
+  SidebarToggleButton,
+  useWindowBarRow,
+  WindowBarControls,
+  WindowBarPageTitle,
+  windowBarRowActive,
+} from "@opengeni/react/app/components/window-bar";
 import { desktopPlatform } from "@opengeni/react/app/lib/desktop";
 import { cn } from "@opengeni/react/app/lib/utils";
 import { SettingsActionsSlotContext } from "./settings-header-actions";
@@ -437,6 +447,15 @@ export function SettingsShell({
   useEffect(() => setMenuOpen(false), [activeId, currentPage]);
 
   const railProps = { label, back, home, scope, sections, activeId };
+  // In the macOS app the window bar is the same as on every other page: the
+  // sidebar toggle beside the traffic lights (it hides the settings rail, with
+  // the app's one sidebar state) and the page's title as the bar's row.
+  const rail = useOptionalRail();
+  const toggleInWindowBar = SIDEBAR_TOGGLE_IN_WINDOW_BAR && !narrow && rail != null;
+  const railHidden = toggleInWindowBar && rail.collapsed;
+  const canvasRef = useRef<HTMLElement | null>(null);
+  const titleInWindowBar = windowBarRowActive({ platform: desktopPlatform, mobile: narrow });
+  const windowBarRow = useWindowBarRow(canvasRef, titleInWindowBar);
 
   const navigation = narrow ? (
     <header className="flex min-w-0 items-center gap-2 border-b border-border bg-bg px-2 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))]">
@@ -474,15 +493,26 @@ export function SettingsShell({
         </SheetContent>
       </Sheet>
     </header>
-  ) : (
+  ) : railHidden ? null : (
     <div data-shell-rail className="min-h-0 min-w-0 border-r border-border">
       <SettingsRail {...railProps} className="border-r-0" />
     </div>
   );
 
+  // With the title in the window bar, a page with nothing else in its header
+  // starts with its content; actions a page sends to the header's slot still
+  // get a row.
+  const titleOnly = titleInWindowBar && page != null && !page.description && !page.actions;
   const body = (
     <>
-      {page ? (
+      {page && titleOnly ? (
+        <>
+          <h1 className="sr-only">{page.title}</h1>
+          <div className="mb-4 hidden flex-wrap items-center justify-end gap-2 has-[>span>*]:flex">
+            <span ref={setActionsSlot} className="contents" />
+          </div>
+        </>
+      ) : page ? (
         <PageHeader
           title={page.title}
           description={page.description}
@@ -494,43 +524,65 @@ export function SettingsShell({
           }
         />
       ) : null}
-      <div className={page ? "mt-8" : undefined}>{children}</div>
+      <div className={page && !titleOnly ? "mt-8" : undefined}>{children}</div>
     </>
   );
 
   return (
-    <div data-window-frame className={SETTINGS_SHELL_CLASS}>
+    <div
+      data-window-frame
+      data-rail-collapsed={railHidden ? "true" : undefined}
+      className={cn(
+        SETTINGS_SHELL_CLASS,
+        railHidden && "lg:grid-cols-[minmax(0,1fr)] desktop-wide:grid-cols-[minmax(0,1fr)]",
+      )}
+    >
+      {toggleInWindowBar ? (
+        <WindowBarControls>
+          <TooltipProvider>
+            <SidebarToggleButton
+              collapsed={rail.collapsed}
+              onToggle={rail.toggleCollapsed}
+              inWindowBar
+            />
+          </TooltipProvider>
+        </WindowBarControls>
+      ) : null}
       {navigation}
       {/* A labelled region: the app shell already provides the one <main>. */}
       <section
+        ref={canvasRef}
         aria-label={page?.title ?? currentPage}
         data-canvas
+        {...windowBarRow}
         className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       >
-        {notice}
-        <SettingsActionsSlotContext.Provider value={actionsSlot}>
-          <PageHeaderStyleProvider icon="hide">
-            {/* Settings sections are grouped cards: heading above, rows in one card. */}
-            <SectionVariantProvider variant="group">
-              {layout === "page" ? (
-                // A full page keeps its own scroller but starts its title at the
-                // same height as every other settings page.
-                <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8 desktop-wide:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8">
-                  {children}
-                </div>
-              ) : (
-                <ContentPage
-                  width="standard"
-                  // Pages that bring their own ContentPage (a detail page) join this
-                  // scroller instead of nesting a second scroller and gutter.
-                  className="pb-16 lg:pt-8 desktop-wide:pt-8 [&_[data-slot=content-page]]:overflow-visible [&_[data-slot=content-page-inner]]:max-w-none [&_[data-slot=content-page-inner]]:p-0"
-                >
-                  {body}
-                </ContentPage>
-              )}
-            </SectionVariantProvider>
-          </PageHeaderStyleProvider>
-        </SettingsActionsSlotContext.Provider>
+        <WindowBarPageTitle enabled={titleInWindowBar} fallbackTitle={page?.title ?? currentPage}>
+          {notice}
+          <SettingsActionsSlotContext.Provider value={actionsSlot}>
+            <PageHeaderStyleProvider icon="hide">
+              {/* Settings sections are grouped cards: heading above, rows in one card. */}
+              <SectionVariantProvider variant="group">
+                {layout === "page" ? (
+                  // A full page keeps its own scroller but starts its title at the
+                  // same height as every other settings page.
+                  <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8 desktop-wide:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8">
+                    {children}
+                  </div>
+                ) : (
+                  <ContentPage
+                    width="standard"
+                    // Pages that bring their own ContentPage (a detail page) join this
+                    // scroller instead of nesting a second scroller and gutter.
+                    className="pb-16 lg:pt-8 desktop-wide:pt-8 [&_[data-slot=content-page]]:overflow-visible [&_[data-slot=content-page-inner]]:max-w-none [&_[data-slot=content-page-inner]]:p-0"
+                  >
+                    {body}
+                  </ContentPage>
+                )}
+              </SectionVariantProvider>
+            </PageHeaderStyleProvider>
+          </SettingsActionsSlotContext.Provider>
+        </WindowBarPageTitle>
       </section>
     </div>
   );

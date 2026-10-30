@@ -225,6 +225,7 @@ import { useUiEventTarget } from "../lib/ui-events";
 import { BotLaunchStrip, type BotLaunchState } from "../components/bots/bot-launch-strip";
 import { BotTemplateShortcuts } from "../components/bots/bot-template-shortcuts";
 import { useBotTemplates } from "../lib/bot-templates";
+import { useWindowBarTitle } from "../../ui/page-header";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -268,6 +269,8 @@ function SessionsIndexRouteContent({
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
+  // The macOS window bar names the page; the hero keeps its greeting.
+  useWindowBarTitle("New session");
   const starters = useSessionUiFeature("starters");
   const hostStarters = useAppHost().starters;
   const addCredits = useSessionUiFeature("addCredits");

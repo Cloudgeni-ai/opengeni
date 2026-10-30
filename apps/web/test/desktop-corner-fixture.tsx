@@ -1,9 +1,11 @@
 // The top-left corner of desktop layouts as the app draws them. By default the
 // production SettingsShell and workspace picker, with sample sections;
 // `?view=content` a content page (ContentPage and PageHeader) beside the real
-// rail, inside a shell marked as SessionShell marks it. `?platform=` picks the
-// desktop platform (or `browser`), `?theme=light` the light theme.
+// rail, inside a canvas wired to the window bar as SessionShell wires it.
+// `?platform=` picks the desktop platform (or `browser`), `?theme=light` the
+// light theme; `?bar=` and `?zoom=` are the macOS shell's report (see the html).
 import { createRoot } from "react-dom/client";
+import { useRef } from "react";
 import { OpenGeniProvider } from "@opengeni/react";
 import {
   createRootRoute,
@@ -33,6 +35,12 @@ import {
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { PageHeader } from "@opengeni/react/ui/page-header";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+import {
+  useWindowBarRow,
+  WindowBarPageTitle,
+  windowBarRowActive,
+} from "@opengeni/react/app/components/window-bar";
+import { applyDesktopWindowBar, desktopBridge } from "@opengeni/react/app/lib/desktop";
 import { RailBody } from "../src/components/rail/rail-shell";
 import { WorkspaceSwitcherMenu } from "../src/components/rail/workspace-switcher";
 import {
@@ -46,6 +54,7 @@ import "../src/styles.css";
 const params = new URLSearchParams(location.search);
 const platform = params.get("platform") ?? "macos";
 if (platform !== "browser") document.documentElement.dataset.desktop = platform;
+applyDesktopWindowBar(document.documentElement, desktopBridge);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 document.documentElement.classList.toggle("dark", theme === "dark");
 document.documentElement.dataset.ogTheme = theme;
@@ -111,6 +120,9 @@ const sections: SettingsRailSection[] = [
 
 function ContentPreview() {
   const rail = useRail();
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const titleInWindowBar = windowBarRowActive({ platform, mobile: rail.isMobile });
+  const windowBarRow = useWindowBarRow(canvasRef, titleInWindowBar);
   return (
     <div
       className="flex h-full min-h-0 w-full flex-1 overflow-hidden"
@@ -124,18 +136,25 @@ function ContentPreview() {
       >
         <RailBody />
       </nav>
-      <div data-canvas className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <ContentPage width="standard" className="pt-6">
-          <PageHeader
-            title="Automations"
-            description="Scheduled and triggered work for this workspace."
-          />
-          {Array.from({ length: 30 }, (_, index) => (
-            <p key={index} className="mt-4 text-sm text-fg-muted">
-              Automation {index + 1} · Real content page components · Sample workspace data
-            </p>
-          ))}
-        </ContentPage>
+      <div
+        ref={canvasRef}
+        data-canvas
+        {...windowBarRow}
+        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+      >
+        <WindowBarPageTitle enabled={titleInWindowBar}>
+          <ContentPage width="standard" className="pt-6">
+            <PageHeader
+              title="Automations"
+              description="Scheduled and triggered work for this workspace."
+            />
+            {Array.from({ length: 30 }, (_, index) => (
+              <p key={index} className="mt-4 text-sm text-fg-muted">
+                Automation {index + 1} · Real content page components · Sample workspace data
+              </p>
+            ))}
+          </ContentPage>
+        </WindowBarPageTitle>
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 import { Children, isValidElement, type ReactNode } from "react";
 
 import { LogoTileSizeProvider } from "./logo-tile";
+import { useWindowBarTitle } from "./page-header";
 import { cn } from "../lib/cn";
 
 export { BackLink, DetailPage, type DetailBackLink } from "./detail-sheet";
@@ -83,6 +84,8 @@ export function DetailPageHeader({
   className,
 }: DetailPageHeaderProps) {
   const metaLine = Array.isArray(meta) ? <DetailMeta>{meta}</DetailMeta> : meta;
+  // In the macOS app the window bar shows a plain-text title instead.
+  const titleInWindowBar = useWindowBarTitle(title);
   return (
     <header data-slot="detail-page-header" className={cn("min-w-0", className)}>
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-6 gap-y-4">
@@ -98,7 +101,10 @@ export function DetailPageHeader({
               <h1
                 tabIndex={-1}
                 data-slot="detail-page-title"
-                className="min-w-0 text-xl leading-7 font-semibold tracking-[-0.5px] break-words text-fg outline-hidden"
+                className={cn(
+                  "min-w-0 text-xl leading-7 font-semibold tracking-[-0.5px] break-words text-fg outline-hidden",
+                  titleInWindowBar && "sr-only",
+                )}
               >
                 {title}
               </h1>
