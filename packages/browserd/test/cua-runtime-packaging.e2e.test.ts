@@ -13,10 +13,17 @@ test.skipIf(
   "compiled CUA loads only its adjacent release-contained assets",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "opengeni-cua-package-"));
-    // Windows runs the published native runtime in process: no worker files.
     const windows = process.platform === "win32";
+    const workerName = windows ? "cua-driver.exe" : "cua-driver";
     try {
       const staged = dirname(await stageCuaRuntime(process.arch));
+      if (windows) {
+        const bytes = await Bun.file(join(staged, workerName)).arrayBuffer();
+        const view = new DataView(bytes);
+        const pe = view.getUint32(0x3c, true);
+        // IMAGE_OPTIONAL_HEADER.Subsystem: 2 is GUI, 3 would open a console.
+        expect(view.getUint16(pe + 24 + 68, true)).toBe(2);
+      }
       if (process.platform === "darwin") {
         const native = join(staged, "node_modules", `@trycua/cua-driver-darwin-${process.arch}`);
         for (const file of await readdir(native)) {
@@ -27,9 +34,7 @@ test.skipIf(
           expect(architectures).toBe(process.arch === "arm64" ? "arm64" : "x86_64");
         }
       }
-      for (const directory of windows
-        ? ["cua-sdk", "node_modules"]
-        : ["cua-sdk", "node_modules", "cua-driver", "cua-source.json"])
+      for (const directory of ["cua-sdk", "node_modules", workerName, "cua-source.json"])
         await cp(join(staged, directory), join(root, directory), { recursive: true });
       const binary = join(root, windows ? "probe.exe" : "probe");
       const run = async (args: string[]) => {
@@ -74,8 +79,8 @@ test.skipIf(
         cursorAvailable: true,
         workerStopped: true,
       });
-      if (!windows) {
-        await rm(join(root, "cua-driver"));
+      {
+        await rm(join(root, workerName));
         const missingWorker = await run([binary]);
         expect(missingWorker.exitCode).not.toBe(0);
         expect(missingWorker.stderr).toContain("does not contain the CUA worker");

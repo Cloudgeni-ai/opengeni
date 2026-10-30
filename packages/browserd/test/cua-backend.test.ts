@@ -125,6 +125,22 @@ class Fixture implements CuaDesktopRuntime {
   }
 }
 
+test("friendly cursor metadata never replaces the private control-session keys", async () => {
+  const runtime = new Fixture();
+  const first = await CuaComputerBackend.open(runtime, "macos", {
+    cursorIdentity: { label: "Research", avatarPng: "aWNvbg==" },
+  });
+  const second = await CuaComputerBackend.open(runtime, "macos", {
+    cursorIdentity: { label: "Research" },
+  });
+  const starts = runtime.calls.filter((call) => call.name === "start_session");
+  expect(starts[0]!.args.cursor_identity).toEqual({ label: "Research", avatar_png: "aWNvbg==" });
+  expect(starts[1]!.args.cursor_identity).toEqual({ label: "Research" });
+  expect(starts[0]!.args.session).not.toBe(starts[1]!.args.session);
+  await first.close();
+  await second.close();
+});
+
 class LinuxPermissionsFixture extends Fixture {
   async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
     if (name === "check_permissions") return result({ atspi: true, x11: true });

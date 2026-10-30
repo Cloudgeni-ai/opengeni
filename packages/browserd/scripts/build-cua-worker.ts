@@ -6,16 +6,16 @@ import { join, resolve } from "node:path";
 // regenerated (scripts/generate-cua-desktop-tools.ts) and their byte and sha256
 // pins in scripts/check-public-repo-hygiene.ts updated: native calls are refused
 // when the worker's schema differs from the bundled one.
-export const cuaSourceRevision = "473b859de3e2b1c313d8764acc22e610605cb407";
+export const cuaSourceRevision = "32822e7d9eea65c943e019269f2506d23ebc022a";
 const repository = "https://github.com/Cloudgeni-ai/cua.git";
 
 export async function buildCuaWorker(architecture: string): Promise<string> {
   if (
-    !["darwin", "linux"].includes(process.platform) ||
+    !["darwin", "linux", "win32"].includes(process.platform) ||
     !["x64", "arm64"].includes(architecture) ||
-    (process.platform === "linux" && architecture !== process.arch)
+    (process.platform !== "darwin" && architecture !== process.arch)
   )
-    throw new Error("CUA worker packaging requires macOS x64/arm64 or native Linux");
+    throw new Error("CUA worker packaging requires macOS x64/arm64 or native Linux or Windows");
   const source = resolve(
     process.env.OPENGENI_CUA_SOURCE_DIR ??
       join(import.meta.dir, "../dist/cua-source", cuaSourceRevision),
@@ -35,7 +35,10 @@ export async function buildCuaWorker(architecture: string): Promise<string> {
     if ((await child.exited) !== 0) throw new Error(`CUA build failed: ${args[0]}`);
     return output.trim();
   };
-  if (!(await Bun.file(join(source, ".git/HEAD")).exists())) {
+  if (
+    !process.env.OPENGENI_CUA_SOURCE_DIR &&
+    !(await Bun.file(join(source, ".git/HEAD")).exists())
+  ) {
     await run(["git", "init"]);
     await run(["git", "remote", "add", "origin", repository]);
     await run([
@@ -67,11 +70,18 @@ export async function buildCuaWorker(architecture: string): Promise<string> {
       "--release",
       "-p",
       "cua-driver",
+      ...(process.platform === "win32" ? ["--features", "windowless-worker"] : []),
       ...(cross ? ["--target", target] : []),
     ],
     rust,
   );
-  const path = join(rust, "target", ...(cross ? [target] : []), "release/cua-driver");
+  const path = join(
+    rust,
+    "target",
+    ...(cross ? [target] : []),
+    "release",
+    process.platform === "win32" ? "cua-driver.exe" : "cua-driver",
+  );
   await readFile(path); // Require the complete executable before staging anything.
   return path;
 }
