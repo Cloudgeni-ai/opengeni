@@ -1,10 +1,11 @@
-import type {
-  InsightsCallsQuery,
-  InsightsCallsResponse,
-  InsightsUsageQuery,
-  InsightsUsageRange,
-  InsightsUsageResponse,
-  InsightsSiteUsageQuery,
+import {
+  resolveInsightsUsageWindow,
+  type InsightsCallsQuery,
+  type InsightsCallsResponse,
+  type InsightsUsageQuery,
+  type InsightsUsageRange,
+  type InsightsUsageResponse,
+  type InsightsSiteUsageQuery,
 } from "@opengeni/contracts/insights-usage";
 import {
   readInsightsCalls,
@@ -51,36 +52,10 @@ export async function listInsightsCalls(
 }
 
 /** UTC windows retain the actual request timestamp, including empty midnight windows. */
-export function insightsUsageWindow(range: InsightsUsageRange, now = new Date()) {
+export function insightsUsageWindow(
+  range: Exclude<InsightsUsageRange, "custom">,
+  now = new Date(),
+) {
   if (!Number.isFinite(now.getTime())) throw new Error("Invalid Insights request time");
-  const until = new Date(now);
-  const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  switch (range) {
-    case "today":
-      break;
-    case "week":
-      since.setUTCDate(since.getUTCDate() - 6);
-      break;
-    case "month":
-      since.setUTCDate(1);
-      break;
-    case "30d":
-      since.setUTCDate(since.getUTCDate() - 29);
-      break;
-    case "90d":
-      since.setUTCDate(since.getUTCDate() - 89);
-      break;
-    case "ytd":
-      since.setUTCMonth(0, 1);
-      break;
-  }
-  const priorUntil = new Date(since);
-  const priorSince = new Date(priorUntil.getTime() - (until.getTime() - since.getTime()));
-  return {
-    since,
-    until,
-    priorSince,
-    priorUntil,
-    bucket: range === "today" ? ("hour" as const) : ("day" as const),
-  };
+  return resolveInsightsUsageWindow({ range }, now);
 }

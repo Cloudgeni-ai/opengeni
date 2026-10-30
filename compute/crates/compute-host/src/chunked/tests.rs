@@ -11,6 +11,12 @@ use crate::image::overlaps;
 use crate::protocol::Id;
 use futures::TryStreamExt as _;
 
+/// The key `chunk` is stored under by an archive of `store` today.
+fn stored_key(store: &Chunked, chunk: &EncodedChunk) -> String {
+    let today = compute_storage::fresh::day_of(store.chunks.now());
+    chunk.reference.on_day(today).key()
+}
+
 fn id(value: &str) -> Id {
     value.parse().unwrap()
 }
@@ -861,7 +867,7 @@ async fn a_copy_missing_a_chunk_fails_verification_until_archived_again() {
         ZSTD_LEVEL,
     )
     .unwrap();
-    let key = ObjectPath::from(format!("t/{}", memory_chunk.object_key()));
+    let key = ObjectPath::from(format!("t/{}", stored_key(&store, &memory_chunk)));
     backend.delete(&key).await.unwrap();
     assert!(!store.verify(sandbox, &first).await.unwrap());
 
@@ -918,7 +924,9 @@ async fn a_sweep_keeps_what_stored_copies_name() {
         .unwrap()
         .unwrap();
     let pack = parse_head("test", &pointer).unwrap().pack.unwrap();
-    let parts = working_set::parts(&chunks, &pack).await.unwrap();
+    let parts = compute_storage::copy::pack_parts(&chunks, &pack)
+        .await
+        .unwrap();
     let named = store.names(&pointer).await.unwrap();
     assert_ne!(parts.len(), 0);
     for kept in parts.iter().chain([&pack]) {
@@ -976,7 +984,8 @@ async fn a_sweep_keeps_what_stored_copies_name() {
     assert_eq!((none.named, none.unnamed), (0, none.stored));
 }
 
-/// A host reads only the current stored-copy format: a copy of any other
+/// A host reads the current stored-copy format and the one before it,
+/// whose manifests are named by their digest alone: a copy of any other
 /// version is refused, both by a wake and by a sweep's accounting.
 #[tokio::test]
 async fn a_stored_copy_of_another_version_is_refused() {
@@ -992,11 +1001,10 @@ async fn a_stored_copy_of_another_version_is_refused() {
         }))
         .unwrap()
     };
-    assert_eq!(
-        parse_head("test", &head(HEAD_VERSION)).unwrap().version,
-        HEAD_VERSION
-    );
-    for version in [0, 1, HEAD_VERSION - 1, HEAD_VERSION + 1] {
+    for version in [copy::VERSION_DIGESTS, copy::VERSION] {
+        assert_eq!(parse_head("test", &head(version)).unwrap().version, version);
+    }
+    for version in [0, 1, 2, copy::VERSION + 1] {
         assert!(
             parse_head("test", &head(version)).is_err(),
             "version {version}"
@@ -1239,9 +1247,9 @@ async fn reused_chunks_are_asked_about_again_after_a_day_or_a_failed_verificatio
         ],
     );
     let later = Arc::new(AtomicU64::new(0));
+    let start = SystemTime::now();
     let clock = {
         let later = Arc::clone(&later);
-        let start = SystemTime::now();
         compute_storage::fresh::Clock::from_fn(move || {
             start + Duration::from_secs(later.load(Ordering::SeqCst))
         })
@@ -1273,9 +1281,14 @@ async fn reused_chunks_are_asked_about_again_after_a_day_or_a_failed_verificatio
         ZSTD_LEVEL,
     )
     .unwrap();
+    // Stored by the first archive, on the first day.
+    let first_day = compute_storage::fresh::day_of(start);
     backend
         .inner
-        .delete(&ObjectPath::from(format!("t/{}", lost.object_key())))
+        .delete(&ObjectPath::from(format!(
+            "t/{}",
+            lost.reference.on_day(first_day).key()
+        )))
         .await
         .unwrap();
     let blind = archived(&store, sandbox, &saved).await;
@@ -1308,7 +1321,7 @@ async fn a_chunk_an_image_lost_is_stored_again_once_a_verification_finds_it() {
         ZSTD_LEVEL,
     )
     .unwrap();
-    let key = ObjectPath::from(format!("t/{}", boot.object_key()));
+    let key = ObjectPath::from(format!("t/{}", stored_key(&store, &boot)));
     backend.inner.delete(&key).await.unwrap();
     assert!(!store.verify(a, &first).await.unwrap());
     backend.take();

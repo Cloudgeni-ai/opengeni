@@ -151,7 +151,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyActivationResponse"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "actOnMemorySlackPublication",
@@ -1414,7 +1414,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyRevision"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "createWorkspaceInstructionPolicyOnboardingProposal",
@@ -1426,7 +1426,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyOnboardingProposal"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "createWorkspaceOpenRouterCustomModel",
@@ -4591,7 +4591,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyRevision"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "importSiteData",
@@ -8199,7 +8199,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyActivationResponse"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "rotateEventSourceSecret",
@@ -8425,6 +8425,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "cursor",
       "groupBy",
       "limit",
+      "order",
       "query",
       "sessionId"
     ],
@@ -9732,6 +9733,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/tool-policy",
     "request": [
       "UpdateSessionToolPolicyRequest"
+    ],
+    "response": [
+      "Session"
+    ],
+    "permission": "sessions:control"
+  },
+  {
+    "id": "updateSessionUnattended",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/unattended",
+    "request": [
+      "UpdateSessionUnattendedRequest"
     ],
     "response": [
       "Session"

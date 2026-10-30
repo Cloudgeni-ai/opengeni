@@ -24,7 +24,7 @@ import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import {
-  canManageWorkspaceSettings,
+  canContributeWorkspaceContent,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
 import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
@@ -96,7 +96,7 @@ export function KnowledgePage({
     clientConfig: context.clientConfig,
     accountId: workspace?.accountId,
   });
-  const canEditInstructions = canManageWorkspaceSettings(
+  const canEditInstructions = canContributeWorkspaceContent(
     context.accessContext,
     workspace,
     context.managedSelfContext,

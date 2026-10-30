@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "8a3bb2e1dc147463e8b6c79485ca842baf8e7f8213e87a8c85b79de26ce4d777"
+      "sha256": "9e5c37391a4b5d799ef6d3a3fb371bcc07c4d76913ce39e30397ce1a3c9817d6"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -38,7 +38,7 @@
     },
     {
       "path": ".github/workflows/compute-release.yml",
-      "sha256": "bb110865c8785d3d906761b6f5be4168c814bb0886de9eb83b0dfd2af589f3cb"
+      "sha256": "11eb439a5bf2e7b1bc9e5de5c5d0aeddfc7c391f4bc25668b79016d5a0175643"
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
@@ -981,7 +981,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "fbab7e8a5fdaf68c2d4f93db3459471d662614f035a05c751b7dceecba760600"
+      "sha256": "483d2bbf44d5824ac9d50ca1d2d2835c70ee89eea116097eff8fa90511e8fba7"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1137,7 +1137,7 @@
       "workflow": ".github/workflows/compute-release.yml",
       "job": "control-image",
       "step": "Check the pushed image runs",
-      "sha256": "9aedd531227f13ae825a84c0ed1d9b07ed93a44ef80bc4b2c0beb9f75c57d6e9"
+      "sha256": "b64b0385386f5cd47e6f28e904f1fc09b3b789e5e78864868b62ef82351ef586"
     },
     {
       "workflow": ".github/workflows/compute-release.yml",

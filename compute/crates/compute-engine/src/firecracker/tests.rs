@@ -1,4 +1,4 @@
-use super::runtime::{Format, cpu_model, runtime_of};
+use super::runtime::{Format, cpu_model, host_label, runtime_of};
 use super::*;
 use crate::spec::{Drive, Network};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +24,11 @@ fn the_runtime_names_the_processor_model() {
     assert_eq!(cpu_model(cpuinfo), "AMD EPYC 9B14");
     assert_eq!(cpu_model("processor : 0\n"), "an unknown processor");
     assert!(runtime_of(Path::new("/nonexistent/firecracker")).is_err());
+    assert_eq!(
+        host_label("AMD EPYC 9B14", "6.12.106"),
+        " on AMD EPYC 9B14 under Linux 6.12.106"
+    );
+    assert_eq!(host_label("AMD EPYC 9B14", ""), " on AMD EPYC 9B14");
 }
 
 fn binary(runtime: &str) -> Binary {
@@ -53,6 +58,12 @@ fn snapshot_formats_parse_and_read_like_firecracker() {
         Some(format("v8.0.0"))
     );
     assert_eq!(
+        Format::of_runtime(
+            "Firecracker snapshot format v8.0.0 on AMD EPYC 9B14 under Linux 6.18.4"
+        ),
+        Some(format("v8.0.0"))
+    );
+    assert_eq!(
         Format::of_runtime("Firecracker v1.13.1 on AMD EPYC 9B14"),
         None
     );
@@ -60,9 +71,10 @@ fn snapshot_formats_parse_and_read_like_firecracker() {
 }
 
 /// Only proof gives an image up: a format every kept binary names and
-/// none reads. Another processor, an unnamed format, or a binary too old
-/// to name its own leaves the question open, and an image goes to the
-/// binary that made it, else to one that reads its format.
+/// none reads. An unnamed format, or a binary too old to name its own,
+/// leaves the question open, and one made on another processor is read but
+/// made elsewhere. An image goes to the binary that made it, else to one
+/// that reads its format.
 #[test]
 fn an_image_is_unreadable_only_when_no_binary_reads_its_format() {
     let new = binary("Firecracker snapshot format v12.1.0 on Intel Xeon");
@@ -74,7 +86,10 @@ fn an_image_is_unreadable_only_when_no_binary_reads_its_format() {
 
     assert_eq!(readable(&current, &new.runtime), Readable::Yes);
     let elsewhere = "Firecracker snapshot format v12.0.0 on AMD EPYC";
-    assert_eq!(readable(&current, elsewhere), Readable::Yes);
+    assert!(matches!(
+        readable(&current, elsewhere),
+        Readable::Elsewhere(why) if why.contains("AMD EPYC") && why.contains("Intel Xeon")
+    ));
     assert_eq!(
         chosen(&current, elsewhere).map(|binary| &binary.runtime),
         Some(&new.runtime)
@@ -97,6 +112,44 @@ fn an_image_is_unreadable_only_when_no_binary_reads_its_format() {
     assert_eq!(readable(&current, ""), Readable::Unknown);
     assert_eq!(readable(&with_legacy, &old.runtime), Readable::Unknown);
     assert_eq!(chosen(&current, &legacy.runtime).map(|_| ()), None);
+}
+
+/// The processor state KVM saves depends on the host kernel, and an image
+/// made under a newer one can hold registers an older one refuses. So an
+/// image made under another kernel is read but made elsewhere, while the
+/// binary that made it still restores it; so may be an image labelled
+/// before labels named the kernel.
+#[test]
+fn an_image_made_under_another_kernel_is_made_elsewhere() {
+    let new = binary("Firecracker snapshot format v12.1.0 on Intel Xeon under Linux 6.12.106");
+    let old = binary("Firecracker snapshot format v8.0.0 on Intel Xeon under Linux 6.12.106");
+    let both = [&new, &old];
+
+    assert_eq!(readable(&both, &new.runtime), Readable::Yes);
+    let newer_kernel = "Firecracker snapshot format v8.0.0 on Intel Xeon under Linux 6.18.47";
+    assert!(matches!(
+        readable(&both, newer_kernel),
+        Readable::Elsewhere(why) if why.contains("6.18.47") && why.contains("6.12.106")
+    ));
+    assert_eq!(
+        chosen(&both, newer_kernel).map(|binary| &binary.runtime),
+        Some(&old.runtime),
+        "the binary that made it, whatever the kernel"
+    );
+    let unlabelled = "Firecracker snapshot format v8.0.0 on Intel Xeon";
+    assert!(matches!(
+        readable(&both, unlabelled),
+        Readable::Elsewhere(why) if why.contains("6.12.106")
+    ));
+    assert_eq!(
+        chosen(&both, unlabelled).map(|binary| &binary.runtime),
+        Some(&old.runtime)
+    );
+    let both_differ = "Firecracker snapshot format v12.0.0 on AMD EPYC under Linux 6.18.47";
+    assert!(matches!(
+        readable(&both, both_differ),
+        Readable::Elsewhere(why) if why.contains("AMD EPYC")
+    ));
 }
 
 /// Only a VMM that answered, or died loading, has judged the image; a lost
@@ -377,21 +430,17 @@ async fn a_busy_executor_does_not_spend_a_frozen_vmms_time() {
 /// Makes a group's `memory.pressure` report its processes waiting for
 /// memory all the time, as when the kernel slows them, until dropped.
 /// It reports them far ahead of the clock, so that any one report between
-/// two looks covers all the time between them: a writer the test machine
-/// holds up for a while, or a write the disk is slow to take, still shows
-/// the group waiting all along. The first report is there before it
+/// two looks covers all the time between them. It writes from a task on
+/// the test's own clock, which the tests using it pause: a writer of its
+/// own on a busy machine was held up past a whole look, and that look
+/// then rightly counted the time. The first report is there before it
 /// returns.
-struct Waiting {
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    writer: Option<std::thread::JoinHandle<()>>,
-}
+struct Waiting(tokio::task::JoinHandle<()>);
 
 impl Waiting {
     fn start(group: &Path) -> Self {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let (group, stopped) = (group.to_owned(), std::sync::Arc::clone(&stop));
-        let started = std::time::Instant::now();
+        let group = group.to_owned();
+        let started = tokio::time::Instant::now();
         let report = move |group: &Path| {
             // A thousand times the time passed.
             let total = started.elapsed().as_micros() * 1_000;
@@ -407,25 +456,18 @@ impl Waiting {
             fs::rename(&next, group.join("memory.pressure")).unwrap();
         };
         report(&group);
-        let writer = std::thread::spawn(move || {
-            while !stopped.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(5));
+        Self(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(5)).await;
                 report(&group);
             }
-        });
-        Self {
-            stop,
-            writer: Some(writer),
-        }
+        }))
     }
 }
 
 impl Drop for Waiting {
     fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(writer) = self.writer.take() {
-            let _ = writer.join();
-        }
+        self.0.abort();
     }
 }
 
@@ -433,14 +475,14 @@ impl Drop for Waiting {
 /// slows every VMM thread that takes more, and a VMM it slows answers
 /// late: its request waits that out instead of failing, then has its own
 /// time again.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn time_a_vmm_waits_for_memory_does_not_count_toward_its_deadline() {
     let dir = tempfile::tempdir().unwrap();
     let (_vms, own) = vms_group(dir.path());
     let waiting = Waiting::start(own.path());
     let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
     let api = api.held_by(own);
-    let started = std::time::Instant::now();
+    let started = tokio::time::Instant::now();
     let call = tokio::spawn(async move { api.call("GET", "/", None).await });
     // Many times its 200 ms deadline.
     tokio::time::sleep(Duration::from_millis(1_000)).await;
@@ -448,9 +490,11 @@ async fn time_a_vmm_waits_for_memory_does_not_count_toward_its_deadline() {
     drop(waiting);
     let error = call.await.unwrap().unwrap_err();
     assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+    // Its 200 ms counted from the first or second look (100 ms apart)
+    // after the last report, depending on which came first at 1 s.
     let took = started.elapsed();
     assert!(
-        took >= Duration::from_millis(1_150) && took < Duration::from_secs(3),
+        took >= Duration::from_millis(1_200) && took < Duration::from_millis(1_400),
         "once no longer slowed it had its own time, then failed: {took:?}"
     );
 }
@@ -458,7 +502,7 @@ async fn time_a_vmm_waits_for_memory_does_not_count_toward_its_deadline() {
 /// A VMM stuck while its group waits for memory for good, as under a limit
 /// of its own its guest keeps pushing against, still fails in the end: of
 /// time it waits, only so much a request goes uncounted.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_vmm_that_never_stops_waiting_for_memory_fails_in_the_end() {
     let dir = tempfile::tempdir().unwrap();
     let (_vms, own) = vms_group(dir.path());
@@ -467,12 +511,12 @@ async fn a_vmm_that_never_stops_waiting_for_memory_fails_in_the_end() {
     let api = api
         .held_by(own)
         .with_memory_wait_limit(Duration::from_millis(500));
-    let started = std::time::Instant::now();
+    let started = tokio::time::Instant::now();
     let error = api.call("GET", "/", None).await.unwrap_err();
     assert!(matches!(error, ApiError::Timeout(_)), "{error}");
     let took = started.elapsed();
     assert!(
-        took >= Duration::from_millis(650) && took < Duration::from_secs(2),
+        took >= Duration::from_millis(700) && took < Duration::from_millis(800),
         "the 500 ms it may wait, then its 200 ms: {took:?}"
     );
 }

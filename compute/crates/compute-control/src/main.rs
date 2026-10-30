@@ -70,6 +70,48 @@ enum Command {
         #[arg(long, default_value = ".")]
         authority: PathBuf,
     },
+    /// Deletes the chunks and manifests in the archive store that no
+    /// pointer the service keeps names any more (ADR 25). Run on a
+    /// schedule, such as daily; safe while hosts archive, on any object
+    /// store. Without `--delete`, only reports. Refused until the fleet's
+    /// pointers are in the service.
+    Sweep {
+        #[command(flatten)]
+        database: StoreArgs,
+        /// The archive store, as `serve --archive` takes it.
+        #[arg(long)]
+        store: String,
+        #[arg(long)]
+        delete: bool,
+    },
+    /// Copies the archive to another object store, for moving it there:
+    /// every chunk and manifest a pointer the service keeps names, checked
+    /// as it is read, unless the other store holds it already. The
+    /// pointers stay in the service (ADR 25). Safe while hosts archive;
+    /// run it again once archives stopped, before pointing the service and
+    /// hosts at the other store, and only what was stored since is copied.
+    /// Prints a report, and fails if the other store lacks anything.
+    /// Refused until the fleet's pointers are in the service.
+    CopyArchive {
+        #[command(flatten)]
+        database: StoreArgs,
+        /// The archive store copied from, as `serve --archive` takes it.
+        #[arg(long)]
+        from: String,
+        /// The store copied to, in the same form.
+        #[arg(long)]
+        to: String,
+        /// Settings for the store copied to alone, instead of the
+        /// environment: a file of its provider's environment variables, one
+        /// `NAME=value` a line (such as `AWS_ENDPOINT`, `AWS_ACCESS_KEY_ID`
+        /// and `AWS_SECRET_ACCESS_KEY`), for a copy between two stores of
+        /// one kind.
+        #[arg(long)]
+        to_env: Option<PathBuf>,
+        /// Objects copied at once.
+        #[arg(long, default_value_t = 16)]
+        at_once: usize,
+    },
 }
 
 #[derive(Args)]
@@ -707,7 +749,147 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Sweep {
+            database,
+            store,
+            delete,
+        } => sweep(&database, &store, delete).await,
+        Command::CopyArchive {
+            database,
+            from,
+            to,
+            to_env,
+            at_once,
+        } => copy_archive(&database, &from, &to, to_env.as_deref(), at_once).await,
     }
+}
+
+/// Sweeps the archive store `url` with the pointers the service keeps in
+/// `database`, printing the report. It goes by the fleet's clock (the
+/// database's), as hosts name what they store by it, and first adopts any
+/// pointer the store still holds that the import missed, so nothing such a
+/// pointer names is deleted.
+async fn sweep(database: &StoreArgs, url: &str, delete: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        database.database != "memory",
+        "a memory store keeps no fleet's pointers"
+    );
+    let store = Arc::new(postgres(database).await?);
+    let imported = store.pointers_imported().await?.context(
+        "the fleet's pointers are not in the service yet: it moves them in once no host \
+         of an earlier release is live, and nothing is swept before",
+    )?;
+    let chunks = ChunkStore::from_url(url)
+        .with_context(|| format!("the archive store {url}"))?
+        .with_context(|| format!("{url} names no object store"))?;
+    let from = chunks.object_pointers();
+    if delete {
+        let adopted = compute_control::pointers::adopt(&*store, &from).await?;
+        if !adopted.is_empty() {
+            eprintln!(
+                "adopted {} pointers the store held that the import missed: {adopted:?}",
+                adopted.len()
+            );
+        }
+    } else {
+        let missed = compute_control::pointers::missed(&*store, &from).await?;
+        if !missed.is_empty() {
+            eprintln!(
+                "{} pointers the store holds were missed by the import and would be adopted \
+                 before a sweep that deletes; what they name counts as unnamed here: {missed:?}",
+                missed.len()
+            );
+        }
+    }
+    let pointers = Arc::new(compute_control::pointers::Pointers::new(store));
+    let fleet_ms = pointers.now_ms().await?;
+    let chunks =
+        chunks
+            .with_pointers(pointers)
+            .with_clock(compute_storage::fresh::Clock::following(Arc::new(
+                compute_storage::fresh::Heard::at(fleet_ms),
+            )));
+    let chunks = &chunks;
+    let moved = std::time::UNIX_EPOCH + std::time::Duration::from_millis(imported.at_ms);
+    let report = compute_storage::sweep::sweep(
+        chunks,
+        |pointer| async move { compute_storage::copy::names(chunks, &pointer).await },
+        delete,
+        moved,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Copies the archive store `from` to `to` by the pointers the service
+/// keeps in `database`, printing the report. It first adopts any pointer
+/// `from` still holds that the import missed, as a sweep does, so nothing
+/// such a pointer names is left behind, and marks `to` as a store whose
+/// pointers the service keeps, so no host on its own keeps its pointers
+/// there.
+async fn copy_archive(
+    database: &StoreArgs,
+    from: &str,
+    to: &str,
+    to_env: Option<&Path>,
+    at_once: usize,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        database.database != "memory",
+        "a memory store keeps no fleet's pointers"
+    );
+    anyhow::ensure!(at_once > 0, "copy at least one object at once");
+    anyhow::ensure!(
+        from != to || to_env.is_some(),
+        "the archive is in {to} already"
+    );
+    let settings = to_env
+        .map(|path| {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            compute_storage::store::settings(&text)
+                .with_context(|| format!("the settings in {}", path.display()))
+        })
+        .transpose()?;
+    let store = Arc::new(postgres(database).await?);
+    let imported = store.pointers_imported().await?.context(
+        "the fleet's pointers are not in the service yet: hosts of an earlier release keep \
+         them in the object store, and a copy of what they name would leave them behind",
+    )?;
+    let open = |url: &str, settings: Option<&[(String, String)]>| -> anyhow::Result<ChunkStore> {
+        match settings {
+            None => ChunkStore::from_url(url),
+            Some(settings) => ChunkStore::from_url_with(url, settings),
+        }
+        .with_context(|| format!("the archive store {url}"))?
+        .with_context(|| format!("{url} names no object store"))
+    };
+    let source = open(from, None)?;
+    let destination = open(to, settings.as_deref())?;
+    let adopted = compute_control::pointers::adopt(&*store, &source.object_pointers()).await?;
+    if !adopted.is_empty() {
+        eprintln!(
+            "adopted {} pointers {from} held that the import missed: {adopted:?}",
+            adopted.len()
+        );
+    }
+    destination
+        .object_pointers()
+        .mark_moved(imported.at_ms)
+        .await
+        .with_context(|| format!("marking {to}"))?;
+    let source = source.with_pointers(Arc::new(compute_control::pointers::Pointers::new(store)));
+    let report = compute_storage::transfer::copy(&source, &destination, at_once).await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    anyhow::ensure!(
+        report.complete(),
+        "{to} lacks what {} pointers and {} objects in the report keep; fix or decide on \
+         those, then copy again",
+        report.unreadable.len(),
+        report.failed.len()
+    );
+    Ok(())
 }
 
 /// Writes a new authority to `out`, refusing to replace one there.

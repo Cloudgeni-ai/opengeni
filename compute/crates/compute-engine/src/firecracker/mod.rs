@@ -68,8 +68,11 @@ const JAILER_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a VMM found by [`Engine::adopt`] may take to answer.
 const ADOPT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The search path the jailer runs with; it inherits nothing else.
-const JAILER_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
+/// The search path the jailer and the holders of a VM's files run with;
+/// they inherit nothing else. The system's own directories, then NixOS's
+/// system profile, which holds what those hold elsewhere: there `/bin` has
+/// only `sh`, and a holder's shell would find no `sleep`.
+const SYSTEM_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin";
 
 /// Guest clock source that restore can correct.
 ///
@@ -375,7 +378,7 @@ impl Firecracker {
         command
             .args(&args)
             .env_clear()
-            .env("PATH", JAILER_PATH)
+            .env("PATH", SYSTEM_PATH)
             .stdin(Stdio::null())
             .stdout(console)
             .stderr(log);
@@ -1082,7 +1085,7 @@ impl Engine for Firecracker {
         vm: &FirecrackerVm,
         file: OwnedFd,
     ) -> impl Future<Output = Result<(), EngineError>> + Send {
-        holder::hold(vm.cgroup.clone(), JAILER_PATH, file)
+        holder::hold(vm.cgroup.clone(), SYSTEM_PATH, file)
     }
 
     fn held(

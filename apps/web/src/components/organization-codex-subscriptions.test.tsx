@@ -505,7 +505,7 @@ describe("organization Codex subscriptions", () => {
     };
     expect(reachesWorkspace(limited, shared)).toBe(false);
     expect(reachesWorkspace(limited, personal)).toBe(false);
-    // Organization API keys never serve Personal workspaces.
+    // An account that can't serve Personal workspaces (a workspace's own) never reaches one.
     expect(reachesWorkspace({ ...access, personalWorkspacesSupported: false }, personal)).toBe(
       false,
     );

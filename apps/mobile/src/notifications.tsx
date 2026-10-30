@@ -100,6 +100,9 @@ async function actOnNotification(
   const item = open[0];
   if (open.length !== 1 || !item) return false;
   if (kind === "approval") {
+    // An MCP server's question is answered in the app, where it is shown; an
+    // older lock-screen action must not answer a question asked since.
+    if (item.serverQuestion) return false;
     await client.sendApprovalDecision(item.workspaceId, item.sessionId, {
       approvalId: item.sourceKey,
       decision: action === APPROVE_ACTION ? "approve" : "reject",

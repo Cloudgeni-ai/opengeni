@@ -1,8 +1,22 @@
 use compute_fleet::{OwnerEpoch, Stamp};
 use object_store::memory::InMemory;
 
-use super::pointers::POINTERS;
 use super::*;
+
+/// When the chunk and manifest tests store: none of them crosses a day.
+fn stored_at() -> SystemTime {
+    UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000)
+}
+
+/// A store over `backend` under `prefix`, on the clock of [`stored_at`].
+fn store_at(backend: Arc<dyn ObjectStore>, prefix: &str) -> ChunkStore {
+    ChunkStore::new(backend, Path::from(prefix)).with_clock(Clock::from_fn(stored_at))
+}
+
+/// What names `chunk` once a store on [`stored_at`]'s clock stored it.
+fn stored(chunk: &EncodedChunk) -> ChunkRef {
+    chunk.reference.on_day(day_of(stored_at()))
+}
 
 #[tokio::test]
 async fn pointers_are_replaced_read_and_deleted() {
@@ -69,9 +83,8 @@ async fn a_forget_held_up_in_flight_never_lands_on_a_later_store() {
     store.publish(first, b"image".to_vec()).await.unwrap();
     let stale = store.read_to_forget("rootfs-b").await.unwrap().unwrap();
     let fenced = store.read_to_forget("rootfs-b").await.unwrap().unwrap();
-    let key = format!("{POINTERS}/rootfs-b");
     assert_eq!(
-        store.fence(&key).await.unwrap(),
+        store.fence("rootfs-b").await.unwrap(),
         Stock::Holds(b"image".to_vec())
     );
     let refused = store.forget(fenced).await;
@@ -142,7 +155,7 @@ async fn every_pointer_write_has_its_own_stamp() {
     assert_eq!(once_body, twice_body);
     assert!(twice_owner > once_owner, "a rewrite takes a later number");
     assert_ne!(once, twice);
-    store.fence("pointers/v3/a").await.unwrap();
+    store.fence("a").await.unwrap();
     assert_ne!(stored().await, twice, "a fence stores it anew");
     store.delete_pointer("a", TEST_EPOCH).await.unwrap();
     let deleted = stored().await;
@@ -272,10 +285,7 @@ async fn a_claim_again_and_a_fence_keep_the_owner() -> Result<()> {
         stored,
         "claimed again without a write"
     );
-    assert_eq!(
-        store.fence("pointers/v3/a").await?,
-        Stock::Holds(b"four".to_vec())
-    );
+    assert_eq!(store.fence("a").await?, Stock::Holds(b"four".to_vec()));
     assert_eq!(
         store.get_owned_pointer("a").await?,
         Some((at(3, 4), b"four".to_vec()))
@@ -319,8 +329,8 @@ async fn a_tombstone_is_final() -> Result<()> {
     fenced_by(&store.delete_pointer("a", OwnerEpoch(1)).await, 2);
     store.delete_pointer("a", OwnerEpoch(2)).await?;
     assert_eq!(backend.get(&path).await?.bytes().await?, tombstone);
-    assert_eq!(store.look("pointers/v3/a").await?, Stock::Tombstone);
-    assert_eq!(store.fence("pointers/v3/a").await?, Stock::Tombstone);
+    assert_eq!(store.look("a").await?, Stock::Tombstone);
+    assert_eq!(store.fence("a").await?, Stock::Tombstone);
     assert_eq!(
         backend.get(&path).await?.bytes().await?,
         tombstone,
@@ -339,32 +349,39 @@ async fn keys_nest_under_the_prefix_so_they_can_be_listed() {
     use futures::TryStreamExt as _;
 
     let backend = Arc::new(InMemory::new());
-    let store = ChunkStore::new(backend.clone(), Path::from("tenant/test"));
+    let store = store_at(backend.clone(), "tenant/test");
     let chunk = EncodedChunk::encode(&[5; 4096], 1).unwrap();
-    store.put_chunk(&chunk).await.unwrap();
+    let put = store.put_chunk(&chunk).await.unwrap();
+    assert_eq!(put.reference, stored(&chunk));
     let listed: Vec<_> = backend
-        .list(Some(&Path::from("tenant/test/chunks/v1")))
+        .list(Some(&Path::from("tenant/test/chunks/v2")))
         .try_collect()
         .await
         .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(
         listed[0].location.as_ref(),
-        format!("tenant/test/{}", chunk.object_key())
+        format!("tenant/test/{}", put.reference.key())
+    );
+    assert_eq!(
+        written(&put.reference.key()),
+        Some(Written::On(day_of(stored_at())))
     );
 }
 
 #[tokio::test]
 async fn deduplicates_and_verifies() {
     let backend = Arc::new(InMemory::new());
-    let store = ChunkStore::new(backend.clone(), Path::from("tenant/test"));
+    let store = store_at(backend, "tenant/test");
     let chunk = EncodedChunk::encode(&vec![9; 4096], 1).unwrap();
-    assert!(store.put_chunk(&chunk).await.unwrap());
-    assert!(!store.put_chunk(&chunk).await.unwrap());
+    assert!(store.put_chunk(&chunk).await.unwrap().new);
+    assert!(!store.put_chunk(&chunk).await.unwrap().new);
     assert_eq!(
-        store.get_chunk(&chunk.reference).await.unwrap(),
+        store.get_chunk(&stored(&chunk)).await.unwrap(),
         vec![9; 4096]
     );
+    // Not stored under the name of the old layout.
+    assert!(store.get_chunk(&chunk.reference).await.is_err());
 }
 
 async fn quarantined(backend: &InMemory) -> Vec<Bytes> {
@@ -414,7 +431,7 @@ async fn a_manifest_bad_on_every_read_is_reported_and_quarantined() {
     let store =
         ChunkStore::new(backend.clone(), Path::from("tenant/test")).with_watch(seen.clone());
     let digest = blake3::hash(b"the manifest named").to_hex().to_string();
-    let key = ChunkStore::manifest_key(&digest);
+    let key = ChunkStore::manifest_key(&digest).unwrap();
     let bad = Bytes::from_static(b"other bytes");
     backend
         .put(&store.path(&key), bad.clone().into())
@@ -436,10 +453,10 @@ async fn a_manifest_bad_on_every_read_is_reported_and_quarantined() {
 async fn truncated_and_corrupt_chunks_are_rejected_quarantined_and_repaired() {
     let backend = Arc::new(InMemory::new());
     let seen = Arc::new(Seen::default());
-    let store =
-        ChunkStore::new(backend.clone(), Path::from("tenant/test")).with_watch(seen.clone());
+    let store = store_at(backend.clone(), "tenant/test").with_watch(seen.clone());
     let chunk = EncodedChunk::encode(&vec![7; 65536], 1).unwrap();
-    let path = store.path(&chunk.object_key());
+    let reference = stored(&chunk);
+    let path = store.path(&reference.key());
     let good = Bytes::from(chunk.bytes.clone());
     let truncated = good.slice(..good.len() - 1);
     let mut flipped = chunk.bytes.clone();
@@ -448,7 +465,7 @@ async fn truncated_and_corrupt_chunks_are_rejected_quarantined_and_repaired() {
 
     for (bad, truncation) in [(truncated, true), (flipped, false)] {
         backend.put(&path, bad.clone().into()).await.unwrap();
-        let error = store.get_chunk(&chunk.reference).await.unwrap_err();
+        let error = store.get_chunk(&reference).await.unwrap_err();
         assert_eq!(
             matches!(error, Error::Truncated { .. }),
             truncation,
@@ -459,67 +476,68 @@ async fn truncated_and_corrupt_chunks_are_rejected_quarantined_and_repaired() {
         assert!(quarantined(&backend).await.contains(&bad));
         // The object itself stays until the right bytes replace it, and
         // neither a short nor a same-length damaged copy counts as held.
-        assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+        assert!(!store.has_chunk(&reference).await.unwrap());
         // The next upload of the same content repairs the shared chunk.
-        assert!(store.put_chunk(&chunk).await.unwrap());
-        assert!(store.has_chunk(&chunk.reference).await.unwrap());
-        assert_eq!(
-            store.get_chunk(&chunk.reference).await.unwrap(),
-            vec![7; 65536]
-        );
+        assert!(store.put_chunk(&chunk).await.unwrap().new);
+        assert!(store.has_chunk(&reference).await.unwrap());
+        assert_eq!(store.get_chunk(&reference).await.unwrap(), vec![7; 65536]);
     }
     // Each bad copy was reported by its key twice: when a read found it,
     // and when the repairing upload found it still there; each time a
     // copy was kept.
-    assert_eq!(*seen.bad.lock().unwrap(), vec![chunk.object_key(); 4]);
-    assert_eq!(*seen.kept.lock().unwrap(), vec![chunk.object_key(); 4]);
+    assert_eq!(*seen.bad.lock().unwrap(), vec![reference.key(); 4]);
+    assert_eq!(*seen.kept.lock().unwrap(), vec![reference.key(); 4]);
 }
 
 #[tokio::test]
 async fn a_missing_or_truncated_chunk_is_not_held() {
     let backend = Arc::new(InMemory::new());
-    let store = ChunkStore::new(backend.clone(), Path::from("tenant/test"));
+    let store = store_at(backend.clone(), "tenant/test");
     let chunk = EncodedChunk::encode(&[4; 8192], 1).unwrap();
-    assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+    let reference = stored(&chunk);
+    assert!(!store.has_chunk(&reference).await.unwrap());
     store.put_chunk(&chunk).await.unwrap();
-    assert!(store.has_chunk(&chunk.reference).await.unwrap());
-    let path = store.path(&chunk.object_key());
+    assert!(store.has_chunk(&reference).await.unwrap());
+    let path = store.path(&reference.key());
     backend
         .put(&path, Bytes::from(chunk.bytes[1..].to_vec()).into())
         .await
         .unwrap();
-    assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+    assert!(!store.has_chunk(&reference).await.unwrap());
     backend.delete(&path).await.unwrap();
-    assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+    assert!(!store.has_chunk(&reference).await.unwrap());
 }
 
 #[tokio::test]
 async fn gcs_checksums_prove_a_chunk_without_reading_it() {
     use crate::fake::{Fake, gcs};
     let fake = Arc::new(Fake::default());
+    let backend: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let store = ChunkStore {
         // Never read: GCS answers from the checksums it keeps.
-        backend: Arc::new(InMemory::new()),
+        backend: backend.clone(),
         prefix: Path::from("p"),
         uploader: Uploader::Gcs(gcs(&fake)),
-        freshness: Freshness::DEFAULT,
-        clock: Clock::system(),
+        pointers: Arc::new(ObjectPointers::new(backend, Path::from("p"))),
+        clock: Clock::from_fn(stored_at),
         watch: None,
+        settle: Duration::ZERO,
     };
     let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
-    assert!(!store.has_chunk(&chunk.reference).await.unwrap());
-    assert!(store.put_chunk(&chunk).await.unwrap());
-    assert!(store.has_chunk(&chunk.reference).await.unwrap());
+    let reference = stored(&chunk);
+    assert!(!store.has_chunk(&reference).await.unwrap());
+    assert!(store.put_chunk(&chunk).await.unwrap().new);
+    assert!(store.has_chunk(&reference).await.unwrap());
     // Same-length damage under the chunk's name is not held...
-    let key = format!("p/{}", chunk.object_key());
+    let key = format!("p/{}", reference.key());
     let mut damaged = chunk.bytes.clone();
     damaged[1] ^= 0x10;
     fake.put_raw(&key, Bytes::from(damaged));
-    assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+    assert!(!store.has_chunk(&reference).await.unwrap());
     // ...and the next upload of the same content replaces it.
-    assert!(store.put_chunk(&chunk).await.unwrap());
+    assert!(store.put_chunk(&chunk).await.unwrap().new);
     assert_eq!(fake.bytes(&key).unwrap(), chunk.bytes);
-    assert!(store.has_chunk(&chunk.reference).await.unwrap());
+    assert!(store.has_chunk(&reference).await.unwrap());
     // A reference whose checksums disagree with its bytes is refused.
     let mut forged = chunk.clone();
     forged.reference.checksums = Some(crate::upload::checksums(b"other"));
@@ -532,16 +550,16 @@ async fn gcs_checksums_prove_a_chunk_without_reading_it() {
 #[tokio::test]
 async fn an_upload_finding_a_bad_object_replaces_it() {
     let backend = Arc::new(InMemory::new());
-    let store = ChunkStore::new(backend.clone(), Path::from("tenant/test"));
+    let store = store_at(backend.clone(), "tenant/test");
     let chunk = EncodedChunk::encode(&[3; 4096], 1).unwrap();
-    let path = store.path(&chunk.object_key());
+    let path = store.path(&stored(&chunk).key());
     backend
         .put(&path, Bytes::from_static(b"bad").into())
         .await
         .unwrap();
-    assert!(store.put_chunk(&chunk).await.unwrap());
+    assert!(store.put_chunk(&chunk).await.unwrap().new);
     assert_eq!(
-        store.get_chunk(&chunk.reference).await.unwrap(),
+        store.get_chunk(&stored(&chunk)).await.unwrap(),
         vec![3; 4096]
     );
     assert_eq!(
@@ -557,13 +575,40 @@ fn store_urls_pick_the_verifying_uploader() {
     let s3 = ChunkStore::from_url("s3://bucket/a/b").unwrap().unwrap();
     assert!(matches!(s3.uploader, Uploader::StoreVerified));
     assert_eq!(s3.prefix.as_ref(), "a/b");
+    // A store opened by URL waits for what it does not have yet.
+    assert_eq!(s3.settle, SETTLE);
+}
+
+#[test]
+fn a_store_opens_by_its_own_settings() {
+    let file = "# the store copied to\n\nexport AWS_ENDPOINT=\"http://127.0.0.1:3900\"\n\
+                AWS_ACCESS_KEY_ID='GKexample'\nAWS_SECRET_ACCESS_KEY=a=b\nAWS_ALLOW_HTTP=true\n\
+                GOOGLE_SERVICE_ACCOUNT=/elsewhere.json\n";
+    let given = settings(file).unwrap();
+    assert_eq!(
+        given[..3],
+        [
+            ("AWS_ENDPOINT".into(), "http://127.0.0.1:3900".into()),
+            ("AWS_ACCESS_KEY_ID".into(), "GKexample".into()),
+            ("AWS_SECRET_ACCESS_KEY".into(), "a=b".into()),
+        ]
+    );
+    assert!(settings("AWS_ENDPOINT").is_err());
+    assert!(settings("=value").is_err());
+    // Another provider's settings are left out, so the S3 store opens.
+    let s3 = ChunkStore::from_url_with("s3://bucket/a", &given)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(s3.uploader, Uploader::StoreVerified));
+    let unknown = [("AWS_NO_SUCH_SETTING".to_owned(), "1".to_owned())];
+    assert!(ChunkStore::from_url_with("s3://bucket/a", &unknown).is_err());
 }
 
 #[tokio::test]
 async fn manifest_round_trip_rejects_corruption_and_invalid_digest() {
     use crate::manifest::{Extent, ExtentSource};
     let backend = Arc::new(InMemory::new());
-    let store = ChunkStore::new(backend.clone(), Path::from("tenant/test"));
+    let store = store_at(backend.clone(), "tenant/test");
     let manifest = DiskManifest {
         version: 1,
         disk_len: 4096,
@@ -575,21 +620,87 @@ async fn manifest_round_trip_rejects_corruption_and_invalid_digest() {
             source: ExtentSource::Zero,
         }],
     };
-    let digest = store.put_manifest(&manifest).await.unwrap();
-    assert_eq!(store.get_manifest(&digest).await.unwrap(), manifest);
-    assert_eq!(store.put_manifest(&manifest).await.unwrap(), digest);
+    let name = store.put_manifest(&manifest).await.unwrap();
+    let (day, digest) = name.split_once('/').unwrap();
+    assert_eq!(day, day_of(stored_at()).to_string());
+    assert_eq!(store.get_manifest(&name).await.unwrap(), manifest);
+    assert_eq!(store.put_manifest(&manifest).await.unwrap(), name);
     assert!(store.get_manifest("../unexpected").await.is_err());
+    // A manifest of the old layout is named by its digest alone.
+    let old = format!("manifests/v1/{digest}.json");
+    backend
+        .put(&store.path(&old), manifest.encode().unwrap().into())
+        .await
+        .unwrap();
+    assert_eq!(store.get_manifest(digest).await.unwrap(), manifest);
     backend
         .put(
-            &store.path(&format!("manifests/v1/{digest}.json")),
+            &store.path(&ChunkStore::manifest_key(&name).unwrap()),
             Bytes::from_static(b"{}").into(),
         )
         .await
         .unwrap();
     assert!(matches!(
-        store.get_manifest(&digest).await,
+        store.get_manifest(&name).await,
         Err(Error::Integrity)
     ));
+}
+
+#[test]
+fn manifest_names_are_a_day_and_a_digest_or_a_digest_alone() {
+    let digest = "0f".repeat(32);
+    assert_eq!(
+        ChunkStore::manifest_key(&format!("20833/{digest}")).unwrap(),
+        format!("manifests/v2/20833/{digest}.json")
+    );
+    assert_eq!(
+        ChunkStore::manifest_key(&digest).unwrap(),
+        format!("manifests/v1/{digest}.json")
+    );
+    for bad in [
+        format!("020833/{digest}"),
+        format!("/{digest}"),
+        format!("day/{digest}"),
+        format!("20833/{}", "0F".repeat(32)),
+        format!("20833/{digest}/x"),
+        "0f".repeat(31),
+        "../x".to_owned(),
+    ] {
+        assert!(ChunkStore::manifest_key(&bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn keys_say_when_they_were_written() {
+    let digest = "0f".repeat(32);
+    let chunk = EncodedChunk::encode(&[1; 64], 1).unwrap();
+    assert_eq!(
+        written(&chunk.reference.on_day(20_833).key()),
+        Some(Written::On(20_833))
+    );
+    assert_eq!(written(&chunk.reference.key()), Some(Written::Legacy));
+    assert_eq!(
+        written(&format!("manifests/v2/20833/{digest}.json")),
+        Some(Written::On(20_833))
+    );
+    assert_eq!(
+        written(&format!("manifests/v1/{digest}.json")),
+        Some(Written::Legacy)
+    );
+    for unknown in [
+        "chunks/v2/020833/zstd/a/b".to_owned(),
+        "chunks/v2/20833/zstd/a".to_owned(),
+        "chunks/v2/20833/zstd/a/b/c".to_owned(),
+        "chunks/v2/20833/zstd//b".to_owned(),
+        "chunks/v3/1/zstd/a/b".to_owned(),
+        format!("manifests/v2/20833/{digest}"),
+        format!("manifests/v2/x/{digest}.json"),
+        "manifests/v1/short.json".to_owned(),
+        "pointers/v3/a".to_owned(),
+        "quarantine/v1/chunks/v1/zstd/a/b.1-0".to_owned(),
+    ] {
+        assert_eq!(written(&unknown), None, "{unknown}");
+    }
 }
 
 /// Forgetting a memory image takes its own number, so an archive of the
@@ -643,4 +754,71 @@ async fn a_claim_of_nothing_still_fences_a_former_owner() -> Result<()> {
         Some((at(2, 1), b"one".to_vec()))
     );
     Ok(())
+}
+
+/// A chunk or manifest the store does not have yet is read again until it
+/// has, for as long as the store settles, then taken as gone; a store that
+/// does not settle takes it as gone at once.
+#[tokio::test(start_paused = true)]
+async fn a_read_waits_while_the_store_catches_up_then_gives_up() {
+    use crate::manifest::{Extent, ExtentSource};
+    let backend = Arc::new(InMemory::new());
+    let writer = store_at(backend.clone(), "tenant/test");
+    let settling = store_at(backend.clone(), "tenant/test").with_settle(Duration::from_secs(60));
+    let chunk = EncodedChunk::encode(&[3; 4096], 1).unwrap();
+    let manifest = DiskManifest {
+        version: 1,
+        disk_len: 4096,
+        base_len: 0,
+        base_digest: "0".repeat(64),
+        extents: vec![Extent {
+            offset: 0,
+            length: 4096,
+            source: ExtentSource::Zero,
+        }],
+    };
+    let reference = stored(&chunk);
+    let name = format!("{}/{}", day_of(stored_at()), {
+        let bytes = manifest.encode().unwrap();
+        blake3::hash(&bytes).to_hex().to_string()
+    });
+
+    // Stored 20 s after it is first read: found.
+    let late = tokio::spawn({
+        let (writer, chunk, manifest) = (writer.clone(), chunk.clone(), manifest.clone());
+        async move {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            writer.put_chunk(&chunk).await.unwrap();
+            writer.put_manifest(&manifest).await.unwrap()
+        }
+    });
+    let started = tokio::time::Instant::now();
+    assert_eq!(settling.get_chunk(&reference).await.unwrap(), vec![3; 4096]);
+    assert_eq!(settling.get_manifest(&name).await.unwrap(), manifest);
+    assert_eq!(late.await.unwrap(), name);
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_secs(20) && waited < Duration::from_secs(40),
+        "{waited:?}"
+    );
+
+    // Never stored: gone once the store has had its time, or at once.
+    let missing = stored(&EncodedChunk::encode(&[4; 4096], 1).unwrap());
+    let started = tokio::time::Instant::now();
+    let gone = settling.get_chunk(&missing).await;
+    assert!(
+        matches!(
+            gone,
+            Err(Error::Object(object_store::Error::NotFound { .. }))
+        ),
+        "{gone:?}"
+    );
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_secs(60) && waited < Duration::from_secs(61),
+        "{waited:?}"
+    );
+    let started = tokio::time::Instant::now();
+    assert!(writer.get_chunk(&missing).await.is_err());
+    assert_eq!(started.elapsed(), Duration::ZERO);
 }

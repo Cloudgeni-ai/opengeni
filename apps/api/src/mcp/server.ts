@@ -208,6 +208,7 @@ import { siteSqlGatewayConfig } from "../site-sql/gateway";
 import { resolveSiteAgentDataContext } from "../site-publishing/agent-data-tools";
 import {
   resolveScheduledTaskCreateInput,
+  SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG,
   scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
   scheduledTaskScheduleToolInput,
   scheduledTaskCreateToolValidation,
@@ -272,6 +273,7 @@ import {
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import {
   changeWorkspaceFileVisibility,
+  codemodeCallExecutionMachine,
   publishSandboxFileArtifact,
 } from "../sandbox-file-artifacts";
 import {
@@ -746,7 +748,7 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
         action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
         agentConfig: z4
           .object(ScheduledTaskAgentConfigInput.shape)
-          .omit({ slackBotChannelId: true, toolPolicy: true })
+          .omit(SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG)
           .strict()
           .optional(),
         ...(events ? { events: scheduledTaskEventsToolInput() } : {}),
@@ -2590,7 +2592,7 @@ function registerSandboxFileArtifactTool(
           ),
       },
     },
-    async ({ path, artifactId, visibility }) => {
+    async ({ path, artifactId, visibility }, extra) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       if ((path === undefined) === (artifactId === undefined))
         throw new Error("Pass exactly one of path or artifactId.");
@@ -2600,12 +2602,27 @@ function registerSandboxFileArtifactTool(
         return json(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility }));
       }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
+      // A Codemode call names its operation in the worker's trusted call
+      // metadata; code that a run_on exec runs on another machine publishes
+      // that machine's file (see codemodeCallExecutionMachine).
+      const operationId = extra?._meta?.["opengeniOperationId"];
+      const executionMachine = await codemodeCallExecutionMachine(deps, {
+        grant,
+        sessionId,
+        codemodeOperationId:
+          extra?._meta?.[FIRST_PARTY_MCP_CALLER_META_KEY] === "codemode" &&
+          typeof operationId === "string" &&
+          UUID_TARGET.test(operationId)
+            ? operationId
+            : null,
+      });
       return json(
         await publishSandboxFileArtifact(deps, {
           grant,
           session,
           path: path!,
           visibility,
+          executionMachine,
         }),
       );
     },
@@ -4539,14 +4556,21 @@ function registerFleetTools(
 
   const oneOffCodemodeEnvironment = async (
     op: RunOnOp,
+    target: string,
   ): Promise<Readonly<Record<string, string>> | undefined> => {
     if (op.kind !== "exec") return undefined;
     const claims = exactAgentAttemptClaims(grant);
     if (!claims || claims.sessionId !== sessionId) return undefined;
+    // The token names the machine the exec runs on, so a Codemode tool that
+    // takes a workspace path (sandbox_file_publish) resolves it there rather
+    // than on the session's active sandbox. run_on targets are sandbox ids.
     const material = await mintSandboxCodemodeToken(
       deps.settings,
       { accountId: grant.accountId, workspaceId: grant.workspaceId },
-      claims,
+      {
+        ...claims,
+        ...(UUID_TARGET.test(target) ? { executionSandboxId: target.toLowerCase() } : {}),
+      },
     );
     if (!material) return undefined;
     return {
@@ -4672,7 +4696,7 @@ function registerFleetTools(
       const resolvedValues = new SecretValueMemory();
       try {
         const typedOp = op as RunOnOp;
-        const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
+        const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp, target);
         // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
         const claims = exactAgentAttemptClaims(grant);
         const secretResolver =

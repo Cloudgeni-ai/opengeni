@@ -17,7 +17,7 @@ export async function readInsightsSiteUsage(
     now: Date;
   },
 ): Promise<InsightsSiteUsageResponse> {
-  const window = insightsUsageWindow(input.query.range, input.now);
+  const window = insightsUsageWindow(input.query, input.now);
   return withRlsContext(db, input, async (tx) => {
     const result = await tx.execute(sql`select payload from opengeni_private.insights_site_usage(
       ${input.accountId}::uuid, ${input.workspaceId}::uuid,

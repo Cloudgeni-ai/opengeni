@@ -487,6 +487,13 @@ const externalActorContexts = new WeakMap<
      */
     firstUseMembership: boolean;
     /**
+     * The revocation sequence read under the organization membership fence
+     * when this request authenticated (plain external mode only). A removal
+     * stamped above it happened after the request authenticated, so neither
+     * first use nor a stated membership may re-create the member.
+     */
+    revocationWatermark: string | null;
+    /**
      * The membership the app stated on this request (plain external mode
      * only), with the revocation watermark read under the organization
      * membership fence when the request authenticated. See
@@ -1153,9 +1160,22 @@ export async function requireWorkspaceSettingsGrant(
   deps: AccessDeps,
   workspaceId: string,
 ): Promise<AccessGrant> {
+  const authorization = await requireWorkspaceSettingsAuthorization(c, deps, workspaceId);
+  return authorization.grant;
+}
+
+/**
+ * {@link requireWorkspaceSettingsGrant}, returning the whole authorization for
+ * a route that checks more about the request (who sent it, and how) after it.
+ */
+export async function requireWorkspaceSettingsAuthorization(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<AccessGrantAuthorization> {
   const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
-  const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
-  if (await workspaceSettingsAuthorized(deps, authorization, workspaceId)) return grant;
+  requireResolvedAccessGrantAuthorization(authorization, workspaceId);
+  if (await workspaceSettingsAuthorized(deps, authorization, workspaceId)) return authorization;
   throw new MissingPermissionRefusal("workspace:admin", {
     message: WORKSPACE_SETTINGS_REFUSAL,
   });
@@ -1190,6 +1210,62 @@ export async function workspaceSettingsAuthorized(
       subjectId: authorization.authenticatedSubjectId,
     })) !== null
   );
+}
+
+/** The refusal of {@link requireWorkspaceContributorGrant}, a plain sentence. */
+export const WORKSPACE_CONTRIBUTOR_REFUSAL =
+  "Only people who can start chats here, acting as themselves, can change this.";
+
+/**
+ * Ordinary shared content of a workspace that anyone who works there may
+ * change for everyone, like a shared Skill or Knowledge entry: its
+ * instructions and the review of the agent's proposed changes to them.
+ * Whoever may change the workspace's settings may (see
+ * {@link workspaceSettingsAuthorized});
+ * otherwise a person of the organization who can start chats here
+ * (`sessions:create`), acting as themselves: signed in, or their own chat or
+ * connected agent or personal API key acting for them within what they
+ * allowed. Agents' own tokens, organization and workspace API keys, services
+ * and people from another product keep their own ways in (agent learning for
+ * instructions), so `sessions:create` alone never lets them change these.
+ */
+export async function workspaceContributionAuthorized(
+  deps: Pick<AccessDeps, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): Promise<boolean> {
+  if (await workspaceSettingsAuthorized(deps, authorization, workspaceId)) return true;
+  if (!isResolvedAccessGrantAuthorization(authorization, workspaceId)) return false;
+  const { grant } = authorization;
+  const metadata = grant.metadata ?? {};
+  const person =
+    authorization.canonicalLocalHumanSession ||
+    (grant.subjectId.startsWith("user:") &&
+      (authorization.canonicalManagedHumanSession ||
+        isVerifiedDelegatedHumanAuthorization(authorization)));
+  return (
+    person &&
+    grant.principalKind === "human_session" &&
+    !grant.serviceInitiator &&
+    !grant.serviceInitiatorContext &&
+    metadata.turnId === undefined &&
+    metadata.attemptId === undefined &&
+    hasPermission(grant.permissions, "sessions:create", grant.permissionMode)
+  );
+}
+
+/** Require {@link workspaceContributionAuthorized}. */
+export async function requireWorkspaceContributorGrant(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<AccessGrant> {
+  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
+  if (await workspaceContributionAuthorized(deps, authorization, workspaceId)) return grant;
+  throw new MissingPermissionRefusal("sessions:create", {
+    message: WORKSPACE_CONTRIBUTOR_REFUSAL,
+  });
 }
 
 /**
@@ -1311,6 +1387,7 @@ async function provisionExternalMemberOnFirstUse(
   if (
     !external.firstUseMembership ||
     external.linked ||
+    external.revocationWatermark === null ||
     // A request that would 403 on its own permission anyway creates nothing.
     (permission !== undefined && !EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS.includes(permission)) ||
     context.subjectId !== external.identity.subjectId ||
@@ -1330,7 +1407,7 @@ async function provisionExternalMemberOnFirstUse(
   )
     return false;
   try {
-    await ensureExternalWorkspaceMemberOnFirstUse(
+    const outcome = await ensureExternalWorkspaceMemberOnFirstUse(
       deps.db,
       {
         organizationId: external.identity.accountId,
@@ -1341,9 +1418,11 @@ async function provisionExternalMemberOnFirstUse(
         subjectId: external.identity.subjectId,
         identity: { source: external.identity.source, externalId: external.identity.externalId },
         permissions: EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS,
+        revocationWatermark: external.revocationWatermark,
       },
     );
-    return true;
+    // Removed after this request authenticated: the removal wins.
+    return outcome !== "superseded";
   } catch (error) {
     // A changed/revoked key, narrowed policy or workspace scope keeps the
     // ordinary denial. Anything else is an infrastructure failure.
@@ -2172,6 +2251,9 @@ async function apiKeyAccessContext(
       selection.mode === "external" && selection.membership
         ? [...new Set(selection.membership.permissions)].sort()
         : null;
+    // Plain external requests may admit the user (first use or a stated
+    // membership), so they order themselves against every removal.
+    const admits = selection.mode === "external" && !service;
     let identity: ExternalIdentity;
     let revocationWatermark: string | null = null;
     try {
@@ -2191,9 +2273,7 @@ async function apiKeyAccessContext(
           // watermark happened after this request authenticated.
           return {
             identity: ensured,
-            revocationWatermark: statedPermissions
-              ? await readExternalWorkspaceRevocationWatermark(tx)
-              : null,
+            revocationWatermark: admits ? await readExternalWorkspaceRevocationWatermark(tx) : null,
           };
         },
       ));
@@ -2235,6 +2315,7 @@ async function apiKeyAccessContext(
       permissionMode: apiKey.permissionMode ?? "legacy",
       ...(linked ? { linked } : {}),
       firstUseMembership: selection.mode !== "linked_native" && !linked && !service,
+      revocationWatermark,
       ...(statedPermissions && revocationWatermark !== null && !service
         ? {
             statedMembership: {
@@ -2396,6 +2477,9 @@ async function delegatedAccessContext(
           ...(payload.executionGeneration
             ? { executionGeneration: payload.executionGeneration }
             : {}),
+          // The machine running the token holder's process (a `run_on` exec),
+          // when it is not the session's active sandbox.
+          ...(payload.executionSandboxId ? { executionSandboxId: payload.executionSandboxId } : {}),
         },
         ...(payload.serviceInitiator ? { serviceInitiator: payload.serviceInitiator } : {}),
         ...(payload.serviceInitiatorContext

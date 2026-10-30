@@ -1805,6 +1805,8 @@ describe("buildConnectionTokenResolver", () => {
         headers: { authorization: "Bearer AC2" },
         connectionId: "conn_oauth",
         connectionVersion: 8,
+        // The provider's actual OAuth grants, for per-tool gating.
+        grantedScopes: ["read"],
         expiresAt: refreshed.expiresAt,
       },
       {
@@ -1812,6 +1814,7 @@ describe("buildConnectionTokenResolver", () => {
         headers: { authorization: "Bearer AC2" },
         connectionId: "conn_oauth",
         connectionVersion: 8,
+        grantedScopes: ["read"],
         expiresAt: refreshed.expiresAt,
       },
     ]);

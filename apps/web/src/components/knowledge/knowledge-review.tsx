@@ -42,7 +42,7 @@ import { ToolbarSummary } from "@opengeni/react/ui/toolbar";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { apiErrorFacts } from "@opengeni/react/ui/api-error";
 import {
-  canManageWorkspaceSettings,
+  canContributeWorkspaceContent,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
 import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
@@ -161,7 +161,8 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
   const canReviewKnowledge =
     hasWorkspacePermission(context.accessContext, workspaceId, "documents:search") &&
     hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage");
-  const canManage = canManageWorkspaceSettings(
+  // Whoever may edit the workspace instructions reviews the agent's changes to them.
+  const canManage = canContributeWorkspaceContent(
     context.accessContext,
     workspace,
     context.managedSelfContext,

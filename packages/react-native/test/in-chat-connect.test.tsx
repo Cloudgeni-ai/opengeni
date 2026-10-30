@@ -157,7 +157,7 @@ const {
 const { ApprovalStrip } = (await import("../src/timeline/decisions")) as {
   ApprovalStrip: ComponentType<{
     approvals: PendingApproval[];
-    onDecide: (id: string, decision: "approve" | "reject") => Promise<void>;
+    onDecide: (id: string, decision: "approve" | "reject", content?: unknown) => Promise<void>;
   }>;
 };
 
@@ -787,5 +787,108 @@ describe("native MCP service card", () => {
     };
     expect(await render("library")).toEqual({ label: false, provider: true });
     expect(await render("manual")).toEqual({ label: false, provider: true });
+  });
+});
+
+describe("native MCP server question", () => {
+  const asked = (properties: Record<string, unknown>, required: string[] = []) =>
+    ({
+      id: "call-share",
+      name: "docs__share",
+      arguments: { doc: "plan" },
+      elicitation: {
+        server: "Docs",
+        round: 2,
+        requests: [
+          {
+            id: "q1",
+            message: "Share the plan with the whole team?",
+            requestedSchema: { type: "object", properties, required },
+          },
+        ],
+      },
+    }) as PendingApproval;
+
+  test("a confirmation reads as the server's question, answered with Allow", async () => {
+    const decided: unknown[] = [];
+    mounted = await renderComponent(
+      <ApprovalStrip
+        approvals={[asked({})]}
+        onDecide={async (...decision) => {
+          decided.push(decision);
+        }}
+      />,
+    );
+    const text = mounted.container.textContent ?? "";
+    expect(text).toContain("Docs asks");
+    expect(text).toContain("Share the plan with the whole team?");
+    expect(buttonLabels()).toEqual(expect.arrayContaining(["Decline", "Allow"]));
+    await act(async () => buttonNamed("Allow")!.click());
+    // The same empty answer the web card sends for a plain confirmation,
+    // naming the question it answers.
+    expect(decided).toEqual([
+      ["call-share", "approve", { content: { q1: {} }, elicitationRound: 2 }],
+    ]);
+  });
+
+  test("a form is filled in place, checked like the server checks it, then sent", async () => {
+    const decided: unknown[] = [];
+    mounted = await renderComponent(
+      <ApprovalStrip
+        approvals={[
+          asked(
+            {
+              folder: {
+                type: "string",
+                title: "Folder",
+                oneOf: [
+                  { const: "finance", title: "Finance" },
+                  { const: "planning", title: "Planning" },
+                ],
+              },
+              copies: { type: "integer", title: "Copies", minimum: 1 },
+              notify: { type: "boolean", title: "Notify the team" },
+            },
+            ["folder"],
+          ),
+        ]}
+        onDecide={async (...decision) => {
+          decided.push(decision);
+        }}
+      />,
+    );
+    // Nothing chosen yet: the problem shows and nothing is sent.
+    await act(async () => buttonNamed("Send answer")!.click());
+    expect(mounted.container.textContent).toContain("Folder is required");
+    expect(decided).toEqual([]);
+    await act(async () => buttonNamed("Planning")!.click());
+    await act(async () => buttonNamed("Notify the team")!.click());
+    const copies = mounted.container.querySelector<HTMLInputElement>('input[aria-label="Copies"]')!;
+    await act(async () => typeInto(copies, "0"));
+    await act(async () => buttonNamed("Send answer")!.click());
+    expect(mounted.container.textContent).toContain("Copies must be at least 1");
+    await act(async () => typeInto(copies, "3"));
+    await act(async () => buttonNamed("Send answer")!.click());
+    expect(decided).toEqual([
+      [
+        "call-share",
+        "approve",
+        { content: { q1: { folder: "planning", copies: 3, notify: true } }, elicitationRound: 2 },
+      ],
+    ]);
+  });
+
+  test("Decline rejects the call", async () => {
+    const decided: unknown[] = [];
+    mounted = await renderComponent(
+      <ApprovalStrip
+        approvals={[asked({ folder: { type: "string", title: "Folder" } })]}
+        onDecide={async (...decision) => {
+          decided.push(decision);
+        }}
+      />,
+    );
+    await act(async () => buttonNamed("Decline")!.click());
+    expect(decided).toEqual([["call-share", "reject"]]);
   });
 });

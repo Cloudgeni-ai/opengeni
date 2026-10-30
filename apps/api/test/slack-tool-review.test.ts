@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { toolReviewAction, toolReviewFields, type ToolActionReview } from "@opengeni/contracts";
 import {
+  slackServerQuestion,
   slackToolReviewBlocks,
   slackToolReviewCanDecide,
 } from "../src/integrations/slack-tool-review";
@@ -64,4 +65,40 @@ test("a single oversized fact links to complete review rather than truncating or
   const oversized = { ...review, effects: ["x".repeat(2801)] };
   expect(slackToolReviewCanDecide(oversized)).toBe(false);
   expect(JSON.stringify(slackToolReviewBlocks(oversized, true))).not.toContain("x".repeat(2801));
+});
+
+test("only a server's confirmation is answerable in Slack; a form is answered in Opengeni", () => {
+  const confirm = slackServerQuestion({
+    server: "Docs",
+    round: 1,
+    requests: [
+      { id: "q1", message: "Share it?", requestedSchema: { type: "object", properties: {} } },
+    ],
+  });
+  expect(confirm).toMatchObject({ kind: "confirm", answerableInSlack: true });
+  expect(confirm.block).toEqual({
+    type: "section",
+    text: { type: "plain_text", text: "Docs asks:\nShare it?" },
+  });
+  const form = slackServerQuestion({
+    server: "Docs",
+    round: 2,
+    requests: [
+      {
+        id: "q1",
+        message: "Which folder?",
+        requestedSchema: { type: "object", properties: { folder: { type: "string" } } },
+      },
+    ],
+  });
+  expect(form).toMatchObject({ kind: "form", answerableInSlack: false });
+  // A question too long to show whole is not answered from a truncated card.
+  const long = slackServerQuestion({
+    server: "Docs",
+    round: 1,
+    requests: [
+      { id: "q1", message: "x".repeat(3000), requestedSchema: { type: "object", properties: {} } },
+    ],
+  });
+  expect(long.answerableInSlack).toBe(false);
 });
