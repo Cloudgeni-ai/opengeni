@@ -150,7 +150,8 @@ describe("projectHistoryForProvider", () => {
     for (const api of ["responses", "chat", "anthropic-messages"] as const) {
       const projected = projectHistoryForProvider(items, api);
       expect(projected).toHaveLength(items.length);
-      expect(projected[1]).toMatchObject({ type: "message", role: "assistant" });
+      // Runtime input, never the model's own speech it could learn to imitate.
+      expect(projected[1]).toMatchObject({ type: "message", role: "user" });
       expect(JSON.stringify(projected[1]!.content)).toContain("exactly seven colors");
       expect(projected[2]).toBe(items[2]);
       expect(projected[3]).toBe(items[3]);

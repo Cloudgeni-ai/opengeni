@@ -424,6 +424,11 @@ describe("Claude web search replay", () => {
     expect(wire).not.toContain("citations");
     expect(wire).toContain("https://example.com/notes");
     expect(wire).toContain("opengeni release notes");
+    // The record is runtime input, never Claude's own words to imitate.
+    const records = body.messages.filter((entry: any) =>
+      JSON.stringify(entry.content).includes("opengeni release notes"),
+    );
+    expect(records.map((entry: any) => entry.role)).toEqual(["user"]);
   });
 
   test("a search deferred behind our tool call continues and its late result replays natively", () => {
@@ -851,6 +856,7 @@ describe("Claude searches outside the Claude transport", () => {
       expect(wire).toContain("https://example.com/notes");
       expect(wire).toContain("Release notes");
       expect(wire).toContain("opengeni release notes");
+      expect(projected[0]).toMatchObject({ type: "message", role: "user" });
     }
     // Canonical history is untouched for a later switch back to Claude.
     expect(item.providerData.anthropic.blocks).toEqual([call, results]);

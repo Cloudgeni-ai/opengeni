@@ -194,8 +194,9 @@ describe("Azure hosted-search evidence continuity", () => {
           const first = requests.length === 1;
           const evidence = body.input.find(
             (item: any) =>
-              item.type === "message" &&
-              item.role === "assistant" &&
+              // The SDK sends user messages as typeless Responses input messages.
+              (item.type ?? "message") === "message" &&
+              item.role === "user" &&
               JSON.stringify(item.content).includes("exactly seven colors"),
           );
           return Response.json({
@@ -273,8 +274,12 @@ describe("Azure hosted-search evidence continuity", () => {
       "web_search_call.results",
     ]);
     const second = requests[1]!.input;
-    expect(second[1]).toMatchObject({ type: "message", role: "assistant" });
+    expect(second[1]).toMatchObject({ role: "user", content: [{ type: "input_text" }] });
     expect(JSON.stringify(second[1].content)).toContain("exactly seven colors");
+    // No request ever shows search evidence as the assistant's own words.
+    for (const item of second)
+      if (item.role === "assistant")
+        expect(JSON.stringify(item.content)).not.toContain("exactly seven colors");
     expect(JSON.stringify(second)).not.toContain("ws_fixture");
     expect(
       second

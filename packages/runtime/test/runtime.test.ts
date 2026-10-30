@@ -14682,7 +14682,7 @@ describe("provider item id stripping", () => {
       ...input,
       { type: "function_call_result", callId: "checkpoint", output: "ACK" },
     ]);
-    expect(first.input[0]).toMatchObject({ type: "message", role: "assistant" });
+    expect(first.input[0]).toMatchObject({ type: "message", role: "user" });
     expect(JSON.stringify(first.input[0])).toContain("exactly seven colors");
     expect(next.input[0]).toBe(first.input[0]);
     expect(next.input[1]).toBe(first.input[1]);

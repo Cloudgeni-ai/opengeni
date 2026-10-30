@@ -415,7 +415,8 @@ export function anthropicMessages(
           if (options.webSearch && sameAccount) append("assistant", anthropicWebSearchBlocks(item));
           else {
             if (!sameAccount) foreignSearch = true;
-            append("assistant", contentBlocks(object(projectHostedSearchEvidence(item)).content));
+            // A labelled runtime record, never Claude's own speech.
+            append("user", contentBlocks(object(projectHostedSearchEvidence(item)).content));
           }
           break;
         }

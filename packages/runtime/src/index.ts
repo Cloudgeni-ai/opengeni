@@ -830,6 +830,10 @@ export {
 } from "./run-events";
 export { toolCallIdFromSdkItem } from "./tool-call-identity";
 export {
+  HostedSearchEvidenceEchoGuard,
+  isHostedSearchEvidenceEchoText,
+} from "./hosted-search-evidence";
+export {
   compactMcpResultCustomDataRunState,
   OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
   OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,

@@ -39,6 +39,8 @@ import { startSteerWatch, type SteerWatch } from "./steer-watch";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
+  HostedSearchEvidenceEchoGuard,
+  isHostedSearchEvidenceEchoText,
   normalizeModelCallUsage,
   normalizeSdkEvent,
   withMcpToolDisplayMetadata,
@@ -951,6 +953,7 @@ export async function runTurnStreamAttempt(
     // undeclared messages the SDK runs past (same response asks for tools)
     // are commentary. Every SDK event of this stream is normalized once.
     const messagePhases = new AssistantMessagePhaseTracker();
+    const evidenceEchoGuard = new HostedSearchEvidenceEchoGuard();
     // Text of the newest assistant message this stream completed durably.
     let latestStreamedAssistantText: string | null = null;
     // Actual input tokens of the most recent model response this turn; the
@@ -1805,7 +1808,8 @@ export async function runTurnStreamAttempt(
                 }
               : { messagePhases },
           );
-        for (const event of normalized) {
+        // A model-written copy of a search record is never shown as chat text.
+        for (const event of evidenceEchoGuard.filter(normalized)) {
           if (event.type === "agent.toolCall.created") {
             const preparedServers = eventing.preparedTools?.mcpServers ?? [];
             // Display metadata and the content-free analytics family are
@@ -2421,9 +2425,12 @@ export async function runTurnStreamAttempt(
       return claimedResult({ status: "idle" });
     }
     const inputWaitYielded = eventing.preparedTools?.inputWaitYield?.yielded === true;
-    const finalOutput = String(
+    const streamFinalOutput = String(
       requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
     );
+    // A copied web-search record is not a reply: treat it as empty so the
+    // turn asks for a real answer instead of publishing the copy.
+    const finalOutput = isHostedSearchEvidenceEchoText(streamFinalOutput) ? "" : streamFinalOutput;
     const durableReplyFacts =
       !inputWaitYielded && finalOutput.trim().length === 0
         ? await sessionTurnFinalReplyFacts(db, input.workspaceId, input.sessionId, activeTurnId)

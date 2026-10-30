@@ -105,13 +105,22 @@ including encrypted reasoning, remain enabled. Other providers' includes are unc
 
 The SDK retains returned evidence in canonical history. Before replay and portable
 compaction accounting, `packages/runtime/src/hosted-search-evidence.ts` projects
-included HTTP(S) URLs and text-result titles/snippets into one unprivileged assistant
-historical-evidence message at the original position. It labels web content as
+included HTTP(S) URLs and text-result titles/snippets into one labelled runtime
+search record (a user-role input message, never assistant text) at the original
+position. It labels web content as
 untrusted, examines at most 64 entries per include, emits at most 20 entries, and
 bounds the serialized message to 32 KiB. Titles/snippets are clipped explicitly;
 URLs are never shortened or rewritten. Omitted evidence is distinguished from
 genuinely empty includes. Provider IDs and arbitrary provider metadata are not
 needed to replay these facts. Canonical hosted items and tool pairing stay intact.
+
+The record must never look like the assistant's own speech. When it did (an
+assistant-role message), GPT models on Azure imitated it and wrote invented
+records as progress text instead of searching. Replay therefore turns any
+assistant message that starts with a record marker into a short note with the
+same item identity, and the worker's stream filter
+(`HostedSearchEvidenceEchoGuard`) keeps such a copy out of the visible
+transcript; a final output that is only a copy counts as an empty reply.
 
 This does not reconstruct evidence absent from older responses, perform another
 search, or guarantee native citation annotations. Sources-only includes supply URLs,
