@@ -43,6 +43,11 @@ export type AgentPromptResources = {
    * the secrets prompt module; omitted keeps prompts unchanged.
    */
   secretReferences?: boolean | undefined;
+  /**
+   * No person will see or answer a question until the task ends (frozen at
+   * session create). Gates the unattended module; omitted keeps prompts unchanged.
+   */
+  unattended?: boolean | undefined;
   workspaceEnvironment?: WorkspaceEnvironmentContext | undefined;
   rig?: RigInstructionsContext | undefined;
 };

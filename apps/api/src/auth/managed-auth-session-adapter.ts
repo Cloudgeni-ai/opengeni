@@ -191,15 +191,15 @@ function serializeCookieHeader(
   name: string,
   value: string,
   attributes: {
-    domain?: string;
-    expires?: Date;
-    httpOnly?: boolean;
-    maxAge?: number;
-    path?: string;
-    partitioned?: boolean;
-    prefix?: "secure" | "host";
-    sameSite?: string;
-    secure?: boolean;
+    domain?: string | undefined;
+    expires?: Date | undefined;
+    httpOnly?: boolean | undefined;
+    maxAge?: number | undefined;
+    path?: string | undefined;
+    partitioned?: boolean | undefined;
+    prefix?: "secure" | "host" | undefined;
+    sameSite?: string | undefined;
+    secure?: boolean | undefined;
   },
 ): string {
   let cookieName = name;

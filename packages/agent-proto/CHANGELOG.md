@@ -1,5 +1,7 @@
 # @opengeni/agent-proto
 
+## 6.0.2
+
 ## 5.5.1
 
 ### Patch Changes
