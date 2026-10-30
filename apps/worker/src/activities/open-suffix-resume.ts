@@ -474,15 +474,20 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
   ) {
     throw new Error("Open suffix resume event does not match an interruption");
   }
-  if (target && callId) {
-    const settled = await settleOpenSuffixTarget(input, target);
-    if (settled === "cancelled") return { action: "cancelled" };
-  }
-  // The pause's other decisions, made before this resume began, run now too.
-  for (const sibling of await openSuffixSiblingDecisions(input)) {
+  // The pause's other decisions, recorded up to this resume's trigger, run
+  // now too, all in the model's call order. Decisions recorded after the
+  // trigger wait for the next resume, which applies them without asking.
+  const settlements: Array<{ row: OpenSuffixPendingToolCall; trigger: OpenSuffixResumeTrigger }> = [
+    ...(target && callId ? [{ row: target, trigger: input.trigger }] : []),
+    ...(await openSuffixSiblingDecisions({ ...input, rows })).map((sibling) => ({
+      row: sibling.row,
+      trigger: { type: "user.approvalDecision", payload: sibling.payload } as const,
+    })),
+  ].sort((left, right) => rows.indexOf(left.row) - rows.indexOf(right.row));
+  for (const settlement of settlements) {
     const settled = await settleOpenSuffixTarget(
-      { ...input, trigger: { type: "user.approvalDecision", payload: sibling.payload } },
-      sibling.row,
+      settlement.trigger === input.trigger ? input : { ...input, trigger: settlement.trigger },
+      settlement.row,
     );
     if (settled === "cancelled") return { action: "cancelled" };
   }

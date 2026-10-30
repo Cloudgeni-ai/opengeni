@@ -40805,10 +40805,10 @@ export type AcceptSessionHumanInputResponseResult =
   | { action: "not_found" };
 
 /**
- * One requires-action boundary may admit exactly one durable resume event.
- * Human-input responses and ordinary approval decisions share this gate: a
- * mixed parallel interruption batch must not accept one of each before the
- * workflow claims the first and advances the turn's trigger/generation.
+ * One requires-action boundary admits one question answer: only the trigger
+ * carries an answer into the resume. Approval decisions never block it; the
+ * peek resumes from the answer first, and that resume applies every approval
+ * decision of the pause recorded before it.
  */
 async function hasAcceptedRequiresActionAdvance(
   tx: Database,
@@ -40841,7 +40841,7 @@ async function hasAcceptedRequiresActionAdvance(
         eq(schema.sessionEvents.sessionId, input.sessionId),
         eq(schema.sessionEvents.turnId, input.turnId),
         eq(schema.sessionEvents.turnGeneration, input.turnGeneration),
-        inArray(schema.sessionEvents.type, ["user.approvalDecision", "user.humanInputResponse"]),
+        eq(schema.sessionEvents.type, "user.humanInputResponse"),
         gt(schema.sessionEvents.sequence, trigger.sequence),
       ),
     )
@@ -84393,6 +84393,9 @@ export async function applySessionTurnSettlement(
       // Decisions recorded while this attempt resumed (after its trigger) are
       // applied by the next resume. Their approvals stay in the frozen run
       // state for it, but are never shown or announced as waiting again.
+      // When every approval was decided that way, the pause is still written
+      // as requires_action with nothing shown; the workflow's immediate
+      // re-peek resumes it from those decisions.
       const decidedSinceTrigger =
         input.runState && input.turnStatus === "requires_action"
           ? await approvalDecisionsAfterTriggerTx(tx as unknown as Database, {
@@ -84567,9 +84570,9 @@ export async function applySessionTurnSettlement(
             if (!(error instanceof InteractionRequestRefusedError)) throw error;
             // The agent learns why as this call's result: the pause records
             // a system rejection, so the turn resumes at once instead of
-            // failing. One decision resumes a pause, so a second refused call
-            // stays pending; the worker's re-freeze after the first is
-            // answered passes it here again and it is refused the same way.
+            // failing. Only one refusal is recorded per pause, so a second
+            // refused call stays pending; a later resume's re-freeze passes
+            // it here again and it is refused the same way.
             interactionRefusalEvent ??= {
               type: "user.approvalDecision",
               payload: {
@@ -90525,10 +90528,10 @@ function pendingApprovalRound(pending: unknown): number | undefined {
 }
 
 /**
- * The newest recorded decision for one approval and question round. Call ids
- * are unique per call, and an MCP server asking again under the same id asks
- * a new round, so this is the decision the person already made for exactly
- * what they see.
+ * The newest recorded decision for one approval and question round, within
+ * the live turn when there is one. Call ids are unique within a turn, and an
+ * MCP server asking again under the same id asks a new round, so this is the
+ * decision the person already made for exactly what they see.
  */
 async function latestApprovalDecisionForRound(
   tx: Database,
@@ -90537,6 +90540,8 @@ async function latestApprovalDecisionForRound(
     sessionId: string;
     approvalId: string;
     round: number | undefined;
+    /** The live turn: call ids are only unique within one turn. */
+    turnId?: string;
   },
 ): Promise<{
   event: typeof schema.sessionEvents.$inferSelect;
@@ -90550,6 +90555,7 @@ async function latestApprovalDecisionForRound(
         eq(schema.sessionEvents.workspaceId, input.workspaceId),
         eq(schema.sessionEvents.sessionId, input.sessionId),
         eq(schema.sessionEvents.type, "user.approvalDecision"),
+        input.turnId === undefined ? undefined : eq(schema.sessionEvents.turnId, input.turnId),
         sql`${schema.sessionEvents.payload} ->> 'approvalId' = ${input.approvalId}`,
       ),
     )
@@ -90616,9 +90622,12 @@ function approvalDecisionPayloadWithAnswer(
 }
 
 /**
- * Accept exactly one decision for the currently waiting approval boundary.
- * The session and active turn are locked with the append so concurrent Pause,
- * Steer, and duplicate decisions cannot manufacture a second resume trigger.
+ * Accept one decision for an approval still open in the live turn's latest
+ * pause, whether the session waits or is resuming from a sibling decision.
+ * The same decision again is idempotent; a different one is refused as
+ * already decided. The session and active turn are locked with the append so
+ * concurrent Pause, Steer, and duplicate decisions stay serialized with the
+ * worker's settlement.
  */
 export async function acceptSessionApprovalDecision(
   db: Database,
@@ -90807,6 +90816,7 @@ export async function acceptSessionApprovalDecision(
           sessionId: input.sessionId,
           approvalId,
           round,
+          ...(liveTurn ? { turnId: liveTurn.id } : {}),
         });
         if (prior) {
           // A decision the waiting pause should already have applied, for a

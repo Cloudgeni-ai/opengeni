@@ -8459,6 +8459,111 @@ describe("clean session control plane", () => {
     });
   });
 
+  test("a call id reused by a later turn is decided afresh while that turn resumes", async () => {
+    const { grant, session } = await fixture();
+    const freeze = async (text: string, callIds: string[]) => {
+      await send(grant, session.id, text);
+      const attemptId = crypto.randomUUID();
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId },
+      );
+      if (!turn) throw new Error("approval turn was not claimed");
+      const attempt = {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: turn.executionGeneration,
+        attemptId,
+      };
+      for (const callId of callIds) {
+        await registerPendingSessionToolCall(client.db, {
+          ...attempt,
+          callId,
+          callType: "function_call",
+          callItem: { type: "function_call", name: "delete_connection", callId, arguments: "{}" },
+        });
+      }
+      await attachOpenSuffixToPendingToolCalls(client.db, {
+        ...attempt,
+        members: callIds.map((callId) => ({
+          callId,
+          interruptionKind: "approval" as const,
+          reasoningItems: [],
+        })),
+      });
+      await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: turn.triggerEventId,
+        attemptId,
+        turnStatus: "requires_action",
+        sessionStatus: "requires_action",
+        activeTurnId: turn.id,
+        runState: {
+          serializedRunState: JSON.stringify({ fixture: text }),
+          pendingApprovals: callIds.map((id) => ({ id })),
+        },
+        events: [
+          { type: "session.requiresAction", payload: { approvals: callIds.map((id) => ({ id })) } },
+        ],
+      });
+      return { turn, attempt };
+    };
+    const decide = async (approvalId: string, decision: "approve" | "reject") =>
+      await acceptSessionApprovalDecision(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        subjectId: grant.subjectId,
+        payload: { approvalId, decision },
+        clientEventId: crypto.randomUUID(),
+      });
+    const resume = async (turnId: string, triggerEventId: string) => {
+      const attemptId = crypto.randomUUID();
+      const resumed = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId, trigger: { kind: "approval", triggerEventId } },
+      );
+      expect(resumed).toMatchObject({ id: turnId, status: "running" });
+      return { attemptId, resumed: resumed! };
+    };
+
+    // The first turn approves its call_0 and ends.
+    const first = await freeze("first", ["call_0"]);
+    const approved = await decide("call_0", "approve");
+    if (approved.action !== "accepted") throw new Error("first approval was refused");
+    const firstResume = await resume(first.turn.id, approved.event.id);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: first.turn.id,
+      triggerEventId: approved.event.id,
+      attemptId: firstResume.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "done" } }],
+    });
+
+    // A later turn's provider numbers its calls from call_0 again.
+    const second = await freeze("second", ["call_0", "call_1"]);
+    const sibling = await decide("call_1", "approve");
+    if (sibling.action !== "accepted") throw new Error("sibling approval was refused");
+    await resume(second.turn.id, sibling.event.id);
+    const reused = await decide("call_0", "reject");
+    expect(reused).toMatchObject({ action: "accepted" });
+    if (reused.action !== "accepted") throw new Error("reused call id was refused");
+    expect(reused.events.length).toBeGreaterThan(0);
+    expect(reused.event.turnId).toBe(second.turn.id);
+  });
+
   test("connector policies enforce Allow/Ask/Block with frozen actors, idempotency, and secret-free audit", async () => {
     const { grant, session } = await fixture();
     const connectionId = `opaque-connection-${crypto.randomUUID()}`;

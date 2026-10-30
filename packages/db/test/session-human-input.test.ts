@@ -1066,6 +1066,8 @@ describe("durable structured human input", () => {
     ).toMatchObject({ action: "accepted" });
 
     const ordinaryFirst = await freezeRequest();
+    // An approval decided first never blocks the question's answer: the
+    // answer's resume applies that approval too.
     expect(
       await acceptSessionApprovalDecision(client.db, {
         accountId: ordinaryFirst.grant.accountId,
@@ -1088,8 +1090,7 @@ describe("durable structured human input", () => {
         respondedBy: ordinaryFirst.grant.subjectId,
       }),
     ).toMatchObject({
-      action: "conflict",
-      request: { id: ordinaryFirst.requestId, status: "pending" },
+      action: "accepted",
     });
 
     const concurrent = await freezeRequest({ parallel: true });
