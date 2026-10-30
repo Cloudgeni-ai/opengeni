@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/example-chat-quickstart",
-  "version": "0.0.57",
+  "version": "0.0.58",
   "private": true,
   "type": "module",
   "scripts": {

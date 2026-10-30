@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use compute_core::{Admission, DiskPolicy, HostPolicy, MemoryPolicy};
+use compute_core::{Admission, DiskPolicy, HostPolicy, MemoryPolicy, Outgrowth};
 use compute_engine::MemoryProfile;
 use compute_engine::firecracker::Firecracker;
 use compute_host::cpu_share::ProcessorShare;
@@ -23,9 +23,11 @@ pub(super) fn host_policy(
         policy.limits = policy.limits.with(step, limit);
     }
     let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
+    let total = memory_share(&meminfo, args.memory_total_mib)?;
     let budget = admission_budget(
         &meminfo,
         memory_profile,
+        total,
         args.memory_capacity_mib,
         args.memory_headroom_mib,
     );
@@ -50,12 +52,18 @@ pub(super) fn host_policy(
         memory_profile,
         args.memory_low_mib,
         args.memory_high_mib,
-        meminfo_field(&meminfo, "MemTotal:") << 10,
+        total,
     )?;
+    if let Some(memory) = policy.memory.as_mut()
+        && compresses_running(memory_profile, !args.no_compress, &meminfo, total)
+    {
+        memory.outgrowth = Some(Outgrowth::default());
+    }
     if let Some(memory) = policy.memory {
         tracing::info!(
             low_mib = memory.low_watermark >> 20,
             high_mib = memory.high_watermark >> 20,
+            running_compressed = memory.outgrowth.is_some(),
             "memory pressure relief"
         );
     }
@@ -78,13 +86,61 @@ pub(super) fn meminfo_field(meminfo: &str, name: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Bytes of host memory the sandboxes may use at most: `total_mib` where
+/// the host shares its memory beyond compute, else all of `MemTotal`.
+pub(super) fn memory_share(meminfo: &str, total_mib: Option<u64>) -> anyhow::Result<u64> {
+    let host = meminfo_field(meminfo, "MemTotal:") << 10;
+    let Some(mib) = total_mib else {
+        return Ok(host);
+    };
+    anyhow::ensure!(
+        mib << 20 <= host,
+        "--memory-total-mib {mib} is more than the host's {} MiB",
+        host >> 20
+    );
+    tracing::info!(
+        share_mib = mib,
+        host_mib = host >> 20,
+        "sandboxes use only their share of the host's memory"
+    );
+    Ok(mib << 20)
+}
+
+/// The sandboxes' share of host memory in MiB, if they have one:
+/// `--memory-total-mib` where given, else `COMPUTE_MEMORY_TOTAL_MIB` (`env`)
+/// where that is set and not empty, as a fleet host's `host.env` sets it
+/// (required on a shared machine: ADR 26). Empty is unset, so a `host.env`
+/// that leaves the line blank, as the example does, keeps all of the
+/// host's memory.
+pub(super) fn memory_total_mib(
+    flag: Option<u64>,
+    env: Option<&str>,
+) -> anyhow::Result<Option<u64>> {
+    if flag.is_some() {
+        return Ok(flag);
+    }
+    let Some(text) = env.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(None);
+    };
+    let mib = text
+        .parse::<u64>()
+        .ok()
+        .filter(|mib| *mib > 0)
+        .with_context(|| {
+            format!("COMPUTE_MEMORY_TOTAL_MIB={text} is not a number of MiB above 0")
+        })?;
+    Ok(Some(mib))
+}
+
 /// Bytes of guest memory the host promises its sandboxes at once:
 /// `capacity_mib` if given, else the huge-page pool where guest memory
-/// lives in it (nothing else on the host uses it), else the host's memory
-/// less `headroom_mib` (default a sixteenth, at least 1 GiB).
+/// lives in it (nothing else on the host uses it), else the `total` bytes
+/// of host memory the sandboxes may use less `headroom_mib` (default a
+/// sixteenth, at least 1 GiB).
 pub(super) fn admission_budget(
     meminfo: &str,
     profile: MemoryProfile,
+    total: u64,
     capacity_mib: Option<u64>,
     headroom_mib: Option<u64>,
 ) -> u64 {
@@ -95,7 +151,6 @@ pub(super) fn admission_budget(
         let pages = meminfo_field(meminfo, "HugePages_Total:");
         return pages * (meminfo_field(meminfo, "Hugepagesize:") << 10);
     }
-    let total = meminfo_field(meminfo, "MemTotal:") << 10;
     let headroom = headroom_mib.map_or((total / 16).max(1 << 30), |mib| mib << 20);
     total.saturating_sub(headroom)
 }
@@ -215,28 +270,119 @@ pub(super) fn memory_policy(
         high_watermark: high,
         compressed_percent: 25,
         balloon_grace: Duration::from_secs(3),
+        outgrowth: None,
     }))
 }
 
-/// The host's memory, `MemTotal` in `/proc/meminfo`, in bytes.
-fn memory_total() -> anyhow::Result<u64> {
-    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
-    Ok(meminfo_field(&meminfo, "MemTotal:") << 10)
+/// The least zswap pool, in percent of the host's memory, worth
+/// compressing running VMs into: when the pool is full zswap takes no more
+/// pages until it has drained, so compression stops dead.
+const LEAST_ZSWAP_POOL_PERCENT: u64 = 20;
+
+/// What caps compressing the sandboxes' running VMs, measured against
+/// `share`, the host memory they may use (all of it, or a shared machine's
+/// share, ADR 26): a swap device under a quarter of it, since each
+/// compressed page takes a slot at its original size, and a zswap pool
+/// (`pool_percent` of all `host` memory, as zswap counts it) under
+/// [`LEAST_ZSWAP_POOL_PERCENT`] of it.
+#[derive(Debug, PartialEq, Eq)]
+struct CompressionCaps {
+    swap: bool,
+    pool: bool,
 }
 
-/// Lets `engine`'s VMs hold together what [`vms_memory_high`] allows on
-/// this host under `policy`, or lifts any earlier limit where none
-/// applies, and says which.
+fn compression_caps(
+    swap: u64,
+    host: u64,
+    share: u64,
+    pool_percent: Option<u64>,
+) -> CompressionCaps {
+    CompressionCaps {
+        swap: swap < share / 4,
+        pool: pool_percent.is_some_and(|percent| {
+            u128::from(percent) * u128::from(host)
+                < u128::from(LEAST_ZSWAP_POOL_PERCENT) * u128::from(share)
+        }),
+    }
+}
+
+/// Whether running VMs may be compressed and held back (ADR 24): on 4 KiB
+/// pages, with compression allowed (`compress`, which the readiness checks
+/// already tied to zswap being on), and with swap for zswap's slots. A
+/// compressed page takes a slot at its original size, though with
+/// writeback off none reaches the device, so the swap device caps what can
+/// be compressed; so does the pool, both against `share`, the memory the
+/// sandboxes may use. Without, running VMs are never compressed and a host
+/// short of memory reaches its wall sooner.
+fn compresses_running(profile: MemoryProfile, compress: bool, meminfo: &str, share: u64) -> bool {
+    if profile.pages != compute_engine::PageSize::Base || !profile.compress || !compress {
+        return false;
+    }
+    let swap = meminfo_field(meminfo, "SwapTotal:") << 10;
+    let host = meminfo_field(meminfo, "MemTotal:") << 10;
+    if swap == 0 {
+        tracing::warn!(
+            "no swap device: running sandboxes are never compressed, so a host short of memory \
+             ends programs in them sooner; add swap (it is never written: zswap writeback is off)"
+        );
+        return false;
+    }
+    let pool_percent = std::fs::read_to_string("/sys/module/zswap/parameters/max_pool_percent")
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok());
+    let caps = compression_caps(swap, host, share, pool_percent);
+    if caps.swap {
+        tracing::warn!(
+            swap_mib = swap >> 20,
+            share_mib = share >> 20,
+            "the swap device is under a quarter of the sandboxes' memory: it caps what running \
+             sandboxes can have compressed"
+        );
+    }
+    if caps.pool {
+        tracing::warn!(
+            percent = pool_percent.unwrap_or(0),
+            share_mib = share >> 20,
+            "zswap's pool is small for the sandboxes' memory: compression stops once it is full"
+        );
+    }
+    true
+}
+
+/// Lets `engine`'s VMs hold together what [`vms_memory_high`] allows of
+/// the host memory they may use (all of it, or `total_mib`) under
+/// `policy` before the kernel slows them, and never more than
+/// [`vms_memory_max`], or lifts any earlier limit where none applies; lets
+/// the kernel compress running VMs where `policy` holds them back (ADR
+/// 24); and says which.
 pub(super) fn limit_vm_memory(
     engine: Firecracker,
     profile: MemoryProfile,
     policy: &HostPolicy,
+    total_mib: Option<u64>,
 ) -> anyhow::Result<Firecracker> {
-    let high = vms_memory_high(profile, policy.memory, memory_total()?);
+    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
+    let total = memory_share(&meminfo, total_mib)?;
+    let high = vms_memory_high(profile, policy.memory, total);
+    let max = vms_memory_max(profile, policy.memory, total);
+    let compress = policy
+        .memory
+        .is_some_and(|memory| memory.outgrowth.is_some());
     let engine = engine
         .with_memory_high(high)
-        .context("limiting the memory the VMs hold together")?;
+        .context("limiting the memory the VMs hold together")?
+        .with_memory_max(max)
+        .context("walling the memory the VMs hold together")?
+        .with_running_compression(compress)
+        .context("compressing running VMs")?;
     log_memory_high(high, policy);
+    if let Some(max) = max {
+        tracing::info!(
+            max_mib = max >> 20,
+            "memory the VMs may never pass together: past it the kernel ends the VM furthest \
+             above its request"
+        );
+    }
     Ok(engine)
 }
 
@@ -258,10 +404,11 @@ pub(super) fn limit_vm_memory(
 /// the VMs a low watermark short of all of it, under 350 MiB was available
 /// and the lease still ran out. The agent counts what the limit leaves as
 /// the most that is available, so before the limit available memory is
-/// below the low watermark and relief is already pausing and saving the
-/// sandboxes above their request. `None` (no limit) without relief or on
-/// huge pages, where guests take their memory from the pool, which their
-/// groups do not count, and every awake sandbox is booked whole.
+/// below the low watermark and relief is already pushing idle sandboxes
+/// out and holding back those above their request. `None` (no limit)
+/// without relief or on huge pages, where guests take their memory from
+/// the pool, which their groups do not count, and every awake sandbox is
+/// booked whole.
 pub(super) fn vms_memory_high(
     profile: MemoryProfile,
     memory: Option<MemoryPolicy>,
@@ -270,6 +417,28 @@ pub(super) fn vms_memory_high(
     let memory = memory?;
     (profile.pages == compute_engine::PageSize::Base)
         .then(|| total.saturating_sub(memory.high_watermark))
+}
+
+/// The most the VMs may ever hold together (their group's `memory.max`):
+/// all of the host's `total` bytes but the midpoint of the two
+/// watermarks, past the [`vms_memory_high`] point where the kernel slows
+/// them. Only VMs that keep growing however they are slowed and compressed
+/// reach it, and then the kernel ends the one furthest above its request
+/// (its VMM's out-of-memory score is lowered by its request), never the
+/// agent or anything else on the host: the host's last defence (ADR 24).
+/// Not a low watermark short of all of it: the kernel's own memory beside
+/// the VMs left under 350 MiB there (see [`vms_memory_high`]). `None`
+/// where there is no [`vms_memory_high`] either.
+pub(super) fn vms_memory_max(
+    profile: MemoryProfile,
+    memory: Option<MemoryPolicy>,
+    total: u64,
+) -> Option<u64> {
+    vms_memory_high(profile, memory, total)?;
+    memory.map(|memory| {
+        let margin = memory.low_watermark / 2 + memory.high_watermark / 2;
+        total.saturating_sub(margin)
+    })
 }
 
 /// Says what the VMs may hold together, and warns when the capacity
@@ -325,6 +494,46 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    /// The swap device and zswap's pool are judged against the memory the
+    /// sandboxes may use: a shared machine's share, not all of it.
+    #[test]
+    fn compression_caps_are_judged_against_the_share() {
+        let host = 64 * GIB;
+        // A dedicated host: 8 GiB of swap caps 64 GiB, a 20 % pool does not.
+        assert_eq!(
+            compression_caps(8 * GIB, host, host, Some(20)),
+            CompressionCaps {
+                swap: true,
+                pool: false
+            }
+        );
+        assert_eq!(
+            compression_caps(16 * GIB, host, host, Some(11)),
+            CompressionCaps {
+                swap: false,
+                pool: true
+            }
+        );
+        // A shared one with 16 GiB for sandboxes: host-setup's 8 GiB of swap
+        // and 11 % of the machine (7 GiB, 44 % of the share) are plenty.
+        assert_eq!(
+            compression_caps(8 * GIB, host, 16 * GIB, Some(11)),
+            CompressionCaps {
+                swap: false,
+                pool: false
+            }
+        );
+        assert_eq!(
+            compression_caps(2 * GIB, host, 16 * GIB, Some(4)),
+            CompressionCaps {
+                swap: true,
+                pool: true
+            }
+        );
+        // An unreadable pool setting caps nothing it can tell.
+        assert!(!compression_caps(16 * GIB, host, host, None).pool);
+    }
 
     /// A host keeps a sixteenth of its processors back, at least half of
     /// one, unless told otherwise.
@@ -395,7 +604,7 @@ mod tests {
         assert_eq!(vms_memory_high(base, relief, 32 * GIB), Some(30 * GIB));
         let meminfo = format!("MemTotal: {} kB\n", (32 * GIB) >> 10);
         assert_eq!(
-            admission_budget(&meminfo, base, None, None),
+            admission_budget(&meminfo, base, 32 * GIB, None, None),
             30 * GIB,
             "the default capacity is what the limit leaves"
         );
@@ -413,17 +622,67 @@ mod tests {
     fn capacity_follows_the_profile() {
         let meminfo =
             "MemTotal:       33554432 kB\nHugePages_Total:   13000\nHugepagesize:       2048 kB\n";
+        let total = memory_share(meminfo, None).unwrap();
+        assert_eq!(total, 32 * GIB);
         assert_eq!(
-            admission_budget(meminfo, MemoryProfile::bare_metal(), None, None),
+            admission_budget(meminfo, MemoryProfile::bare_metal(), total, None, None),
             30 * GIB
         );
         assert_eq!(
-            admission_budget(meminfo, MemoryProfile::nested(), None, None),
+            admission_budget(meminfo, MemoryProfile::nested(), total, None, None),
             13000 * (2 << 20)
         );
         assert_eq!(
-            admission_budget(meminfo, MemoryProfile::bare_metal(), Some(1024), None),
+            admission_budget(
+                meminfo,
+                MemoryProfile::bare_metal(),
+                total,
+                Some(1024),
+                None
+            ),
             GIB
         );
+    }
+
+    /// On a host shared beyond compute, the sandboxes' share is what the
+    /// capacity, the watermarks and the VMs' limits come from, so they
+    /// never reach what the host's other VMs were promised.
+    #[test]
+    fn a_shared_host_sizes_everything_from_its_share() {
+        let meminfo = format!("MemTotal: {} kB\n", (128 * GIB) >> 10);
+        let base = MemoryProfile::bare_metal();
+        let share = memory_share(&meminfo, Some(32 * 1024)).unwrap();
+        assert_eq!(share, 32 * GIB);
+        assert!(memory_share(&meminfo, Some(129 * 1024)).is_err());
+        assert_eq!(
+            admission_budget(&meminfo, base, share, None, None),
+            30 * GIB
+        );
+        let relief = memory_policy(base, None, None, share).unwrap();
+        assert_eq!(relief.unwrap().low_watermark, GIB);
+        assert_eq!(vms_memory_high(base, relief, share), Some(30 * GIB));
+        // The wall: halfway between the watermarks, 1.5 GiB short.
+        assert_eq!(
+            vms_memory_max(base, relief, share),
+            Some(30 * GIB + GIB / 2)
+        );
+    }
+
+    /// The share comes from the flag, else from `host.env`'s line, which
+    /// left blank means no share; a line that is no share is an error.
+    #[test]
+    fn the_share_is_the_flag_else_a_set_host_env_line() {
+        assert_eq!(memory_total_mib(Some(16), Some("32768")).unwrap(), Some(16));
+        assert_eq!(memory_total_mib(None, Some("32768")).unwrap(), Some(32_768));
+        assert_eq!(
+            memory_total_mib(None, Some(" 32768\n")).unwrap(),
+            Some(32_768)
+        );
+        assert_eq!(memory_total_mib(None, Some("")).unwrap(), None);
+        assert_eq!(memory_total_mib(None, Some("  ")).unwrap(), None);
+        assert_eq!(memory_total_mib(None, None).unwrap(), None);
+        for wrong in ["0", "abc", "-1", "32G"] {
+            assert!(memory_total_mib(None, Some(wrong)).is_err(), "{wrong}");
+        }
     }
 }

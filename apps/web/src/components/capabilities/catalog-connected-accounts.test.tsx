@@ -8,12 +8,14 @@ mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
     open,
     title,
+    description,
     confirmLabel,
     onOpenChange,
     onConfirm,
   }: {
     open: boolean;
     title: ReactNode;
+    description?: ReactNode;
     confirmLabel: string;
     onOpenChange: (open: boolean) => void;
     onConfirm: () => Promise<void | boolean>;
@@ -21,6 +23,7 @@ mock.module("@opengeni/react/ui/confirm-dialog", () => ({
     open ? (
       <div role="dialog">
         <p>{title}</p>
+        {description ? <p>{description}</p> : null}
         <button
           type="button"
           onClick={() => {
@@ -422,6 +425,110 @@ describe("catalog connected accounts", () => {
       );
       expect(buttons(signedOut.container)).toEqual(["Add account"]);
       await signedOut.unmount();
+    });
+
+    test("your own account from another workspace names where it came from and stays yours to manage", async () => {
+      const here = "shared-workspace";
+      const personal = "personal-workspace";
+      const workspaces = [
+        { id: here, name: "Acme", kind: "shared" as const },
+        { id: personal, name: "Mia", kind: "personal" as const },
+      ];
+      const local = account({ workspaceId: here, metadata: { email: "mia@work.test" } });
+      const fromPersonal = account({
+        workspaceId: personal,
+        status: "needs_reauth",
+        metadata: { email: "mia@home.test" },
+      });
+      const fromElsewhere = account({
+        workspaceId: "unlisted-workspace",
+        metadata: { email: "mia@other.test" },
+      });
+      const sharedFromElsewhere = account({
+        workspaceId: "unlisted-workspace",
+        subjectId: null,
+        metadata: { email: "team@other.test" },
+      });
+      // Mia may manage her own accounts here and in her Personal workspace,
+      // not in a workspace she can't see.
+      const mine = (workspaceId: string) => workspaceId === here || workspaceId === personal;
+      const actions = management({ canRemoveOwnIn: mine, canReconnectOwnIn: mine });
+      const view = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[local, fromPersonal, fromElsewhere, sharedFromElsewhere]}
+          management={actions}
+          workspaceId={here}
+          workspaces={workspaces}
+        />,
+      );
+      const rows = [...view.container.querySelectorAll("li")].map((row) => row.textContent);
+      expect(rows[0]).toContain("mia@work.test");
+      expect(rows[0]).not.toContain("From");
+      expect(rows[1]).toContain("Only me · From Personal workspace");
+      expect(rows[2]).toContain("Only me · From another workspace");
+      expect(rows[3]).toContain("From another workspace");
+      expect(rows[3]).not.toContain("This workspace");
+      // Her own account is removed or reconnected where it was added, so it is
+      // offered when she may manage her accounts there. A shared account from
+      // another workspace is that workspace's to manage.
+      expect(buttons(view.container)).toEqual([
+        "Add account",
+        "Remove mia@work.test",
+        "Reconnect mia@home.test",
+        "Remove mia@home.test",
+      ]);
+      await act(async () =>
+        (
+          view.container.querySelector(
+            'button[aria-label="Remove mia@home.test"]',
+          ) as HTMLButtonElement
+        ).click(),
+      );
+      const dialog = document.querySelector('[role="dialog"]')!;
+      expect(dialog.textContent).toContain("here and in Personal workspace, where it was added");
+      const confirm = [...dialog.querySelectorAll("button")].find(
+        (button) => button.textContent === "Remove account",
+      )!;
+      await act(async () => confirm.click());
+      expect(actions.onRemove).toHaveBeenCalledWith(fromPersonal);
+      await view.unmount();
+    });
+
+    test("a member who may only connect their own accounts can remove them, not sign them in again", async () => {
+      // Signing in again needs connections:write, which this member lacks.
+      const mine = account({ status: "needs_reauth", metadata: { email: "mine@example.test" } });
+      const shared = account({
+        subjectId: null,
+        status: "needs_reauth",
+        metadata: { email: "team@example.test" },
+      });
+      const view = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[mine, shared]}
+          management={management({
+            canWrite: false,
+            canRemoveOwnIn: () => true,
+            canReconnectOwnIn: () => false,
+          })}
+        />,
+      );
+      expect(buttons(view.container)).toEqual(["Remove mine@example.test"]);
+      await view.unmount();
+    });
+
+    test("accounts that would read the same say when each was connected", async () => {
+      const first = account({ metadata: {}, createdAt: "2026-10-01T09:00:00Z" });
+      const second = account({ metadata: {}, createdAt: "2026-10-20T09:00:00Z" });
+      const view = await render(
+        <CatalogConnectedAccounts item={item} connections={[first, second]} />,
+      );
+      const labels = [...view.container.querySelectorAll("li p")].map((node) => node.textContent);
+      expect(labels).toHaveLength(2);
+      expect(new Set(labels).size).toBe(2);
+      for (const label of labels) expect(label).toMatch(/^Slack account · Connected /);
+      await view.unmount();
     });
 
     test("an opaque account that completed OAuth truthfully needs reconnect", async () => {

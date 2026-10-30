@@ -28,6 +28,8 @@ import {
   getSession,
   retireArchivedChatWaits,
   setSessionArchive,
+  SessionArchiveConfirmationRequiredError,
+  sessionArchiveNeedsPauseConfirmation,
   getSessionEvent,
   getWorkspaceControlEvent,
   getSessionQueueSnapshot,
@@ -45,6 +47,7 @@ import {
   steerAgentSessionInTransaction,
   steerQueuedTurnInTransaction,
   workspaceControlRequestLockTimeoutMs,
+  withEffectiveComposerDraftPolicy,
   withWorkspaceRls,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectRls,
@@ -673,6 +676,7 @@ function composerDraft(
     model: row.model,
     reasoningEffort: row.reasoningEffort as ComposerDraft["reasoningEffort"],
     latencyMode: row.latencyMode as ComposerDraft["latencyMode"],
+    policyFollowsSession: row.policyFollowsSession,
     sourceTurnId: row.sourceTurnId,
     sourceTurnVersion: row.sourceTurnVersion,
     updatedAt: row.updatedAt.toISOString(),
@@ -1044,6 +1048,22 @@ export async function archiveHumanSessionWorkstream(
   if (input.archived && input.pause) {
     await authorizeHumanSessionCommand(deps, context, "session.control");
   }
+  // Ask about active work at once, not after the archive and control locks:
+  // waiting for those first is what delayed the question on busy workspaces.
+  if (
+    input.archived &&
+    input.pause &&
+    !input.confirmPause &&
+    (await sessionArchiveNeedsPauseConfirmation(deps.db, {
+      workspaceId: context.workspaceId,
+      subjectId: context.subjectId,
+      sessionId: context.sessionId,
+      expectedVersion: input.expectedVersion,
+      personalWorkspaceOwnerException: input.personalWorkspaceOwnerException,
+    }))
+  ) {
+    throw new SessionArchiveConfirmationRequiredError();
+  }
   let control: Awaited<ReturnType<typeof mutateSessionControlInTransaction>> | undefined;
   const session = await setSessionArchive(deps.db, {
     ...input,
@@ -1152,12 +1172,15 @@ export async function getHumanComposerDraft(
     deps.db,
     context.workspaceId,
     context.subjectId,
-    (scoped) =>
-      getComposerDraftInTransaction(scoped, {
-        workspaceId: context.workspaceId,
-        sessionId: context.sessionId,
-        subjectId: context.subjectId,
-      }),
+    async (scoped) =>
+      withEffectiveComposerDraftPolicy(
+        scoped,
+        await getComposerDraftInTransaction(scoped, {
+          workspaceId: context.workspaceId,
+          sessionId: context.sessionId,
+          subjectId: context.subjectId,
+        }),
+      ),
   );
   const mapped = composerDraft(row);
   if (mapped) return mapped;
@@ -1171,6 +1194,7 @@ export async function getHumanComposerDraft(
     model: session.model,
     reasoningEffort: session.reasoningEffort,
     latencyMode: session.latencyMode,
+    policyFollowsSession: true,
     sourceTurnId: null,
     sourceTurnVersion: null,
     updatedAt: null,

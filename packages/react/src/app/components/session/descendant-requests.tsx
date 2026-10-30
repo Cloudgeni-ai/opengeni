@@ -3,19 +3,28 @@
 // answered in place. Answers and decisions go to the sub-session itself,
 // through the same requests its own page sends, so the agent cannot tell the
 // difference and the server's permission checks apply unchanged.
+// "Let the agent decide" instead hands a question to this chat's own agent,
+// which answers it for the sub-session.
 import type {
+  McpElicitationAnswer,
   OpenGeniClient,
   SessionEvent,
+  SessionHumanInputRequest,
   SessionSummary,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import { ChevronDownIcon, CornerDownRightIcon } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { PendingApproval } from "../../../approvals";
 import type { HumanInputFormProps } from "../../../components/human-input-form";
 import { usePolledValue } from "../../../hooks/internal";
 import { useHumanInputRequests } from "../../../hooks/use-human-input";
+import {
+  delegatedHumanInputRequestIds,
+  humanInputDelegationMessage,
+} from "../../../human-input-delegation";
+import { useOpenGeniText } from "../../../messages/runtime";
 import {
   ApprovalSurface,
   HumanInputSurface,
@@ -41,6 +50,7 @@ export type DescendantRequestsClient = Pick<
   | "streamEvents"
   | "listHumanInputRequests"
   | "submitHumanInputResponse"
+  | "sendMessage"
   | "listEventPage"
   | "sendApprovalDecision"
   | "getToolActionReview"
@@ -52,6 +62,11 @@ export type DescendantRequestsProps = {
   workspaceId: string;
   /** The session whose page shows the card; keys the collapsed preference. */
   parentSessionId: string;
+  /**
+   * The viewing session's own events: its messages that handed a question to
+   * its agent mark that card as being decided.
+   */
+  events?: readonly SessionEvent[] | undefined;
   /** Descendants waiting on the person, longest-waiting first. */
   waiting: readonly SessionSummary[];
   /** Something was answered or decided here: re-read the tree. */
@@ -75,9 +90,13 @@ const ACTIVITY_POLL_FACTOR = 3;
 // Whether a parent's stack was collapsed, for this tab: it stays collapsed
 // after opening a sub-session and coming back.
 const collapsedStacks = new Map<string, boolean>();
+// Questions handed to the agent from this tab, until its message shows up in
+// the viewing session's events.
+const delegatedRequests = new Set<string>();
 
 export function resetDescendantRequestsStateForTests(): void {
   collapsedStacks.clear();
+  delegatedRequests.clear();
 }
 
 /**
@@ -98,6 +117,8 @@ export function DescendantRequests(props: DescendantRequestsProps) {
     rerender((value) => value + 1);
   };
   const count = props.waiting.length;
+  const events = props.events;
+  const delegatedInEvents = useMemo(() => delegatedHumanInputRequestIds(events ?? []), [events]);
   if (count === 0) return null;
   const stacked = count > 1;
   const label = subSessionsNeedYouLabel(count);
@@ -137,6 +158,7 @@ export function DescendantRequests(props: DescendantRequestsProps) {
             <DescendantRequestItem
               key={session.id}
               {...props}
+              delegatedInEvents={delegatedInEvents}
               session={session}
               compact={stacked && index > 0}
             />
@@ -152,15 +174,22 @@ export default DescendantRequests;
 function DescendantRequestItem({
   client,
   workspaceId,
+  parentSessionId,
   session,
   compact,
+  delegatedInEvents,
   onResolved,
   refreshSignal = 0,
   loadSkillReview,
   allowedSaveTo,
   pollIntervalMs = DEFAULT_POLL_MS,
-}: DescendantRequestsProps & { session: SessionSummary; compact: boolean }) {
+}: DescendantRequestsProps & {
+  session: SessionSummary;
+  compact: boolean;
+  delegatedInEvents: ReadonlySet<string>;
+}) {
   const sessionId = session.id;
+  const t = useOpenGeniText();
   const humanInput = useHumanInputRequests(sessionId, {
     client,
     workspaceId,
@@ -232,11 +261,16 @@ function DescendantRequestItem({
     [client, sessionId, workspaceId],
   );
 
-  const decide = async (approval: PendingApproval, decision: "approve" | "reject") => {
+  const decide = async (
+    approval: PendingApproval,
+    decision: "approve" | "reject",
+    answer?: McpElicitationAnswer,
+  ) => {
     try {
       await client.sendApprovalDecision(workspaceId, sessionId, {
         approvalId: approval.id,
         decision,
+        ...answer,
       });
     } catch (error) {
       toast.error("Couldn't submit the decision", { description: userErrorText(error) });
@@ -244,6 +278,25 @@ function DescendantRequestItem({
     }
     settled();
     await refreshActivity();
+  };
+
+  const [delegations, markDelegated] = useState(0);
+  const agentDeciding = useMemo(() => {
+    const ids = new Set(delegatedInEvents);
+    for (const request of requests) if (delegatedRequests.has(request.id)) ids.add(request.id);
+    // `delegations` re-reads the tab-local set after a hand-off.
+    void delegations;
+    return ids;
+  }, [delegatedInEvents, delegations, requests]);
+  const letAgentDecide = async (request: SessionHumanInputRequest) => {
+    const message = humanInputDelegationMessage(t, { sessionId, sessionTitle: title, request });
+    // A failure reaches the card as is, so it shows the API's own message.
+    await client.sendMessage(workspaceId, parentSessionId, {
+      ...message,
+      clientEventId: crypto.randomUUID(),
+    });
+    delegatedRequests.add(request.id);
+    markDelegated((value) => value + 1);
   };
 
   if (hasRequest) {
@@ -281,6 +334,8 @@ function DescendantRequestItem({
               // Never take the caret from the parent's composer.
               autoFocus={false}
               defaultCollapsed={compact}
+              onLetAgentDecide={letAgentDecide}
+              agentDecidingRequestIds={agentDeciding}
               onSubmit={async (requestId, response: SubmitHumanInputResponseRequest) => {
                 // A failed send resolves null. Reject so the form keeps what was
                 // typed (and its draft) for a retry, as on the sub-session's page.
@@ -311,7 +366,7 @@ function DescendantRequestItem({
               approvals={approvals}
               loadReview={loadReview}
               loadDetails={loadDetails}
-              onApprove={(approval) => decide(approval, "approve")}
+              onApprove={(approval, answer) => decide(approval, "approve", answer)}
               onReject={(approval) => decide(approval, "reject")}
             />
           </div>

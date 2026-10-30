@@ -19,8 +19,8 @@ import {
   createDb,
   createSession,
   createSessionMcpServers,
-  decryptVariableSetValue,
-  encryptVariableSetValue,
+  decryptEnvironmentValue,
+  encryptEnvironmentValue,
   getSession,
   listSessionMcpServersForRun,
   submitHumanPromptInTransaction,
@@ -54,7 +54,11 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(type: ResponseType, granted = permissions) {
+async function fixture(
+  type: ResponseType,
+  granted = permissions,
+  pendingApproval: Record<string, unknown> = { id: "crm-call" },
+) {
   const suffix = crypto.randomUUID();
   const subjectId = `user:${suffix}`;
   const access = await bootstrapWorkspace(client.db, {
@@ -91,8 +95,8 @@ async function fixture(type: ResponseType, granted = permissions) {
         url: "https://crm.example.test/mcp",
         requireApproval: ["update_ticket"],
         headersEncrypted: {
-          Authorization: encryptVariableSetValue(encryptionKey, originalToken),
-          "X-Old": encryptVariableSetValue(encryptionKey, "removed-by-replacement"),
+          Authorization: encryptEnvironmentValue(encryptionKey, originalToken),
+          "X-Old": encryptEnvironmentValue(encryptionKey, "removed-by-replacement"),
         },
       },
     ],
@@ -144,7 +148,7 @@ async function fixture(type: ResponseType, granted = permissions) {
     activeTurnId: claim.turn.id,
     runState: {
       serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
-      pendingApprovals: type === "user.approvalDecision" ? [{ id: "crm-call" }] : [],
+      pendingApprovals: type === "user.approvalDecision" ? [pendingApproval] : [],
       humanInputRequests:
         type === "user.humanInputResponse"
           ? [
@@ -299,7 +303,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
     });
     expect(Object.keys(server.headers_encrypted)).toEqual(["Authorization"]);
     expect(server.headers_encrypted.Authorization).not.toBe(refreshedToken);
-    expect(decryptVariableSetValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
+    expect(decryptEnvironmentValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
       refreshedToken,
     );
     const metadata = await getSession(client.db, f.workspaceId, f.sessionId);
@@ -474,7 +478,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
     ).toBe(type === "user.approvalDecision" ? 202 : 200);
     const server = await stored(f);
     expect(server.credential_version).toBe(2);
-    expect(decryptVariableSetValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
+    expect(decryptEnvironmentValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
       refreshedToken,
     );
   });
@@ -491,7 +495,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
     expect(((await replay.json()) as SessionEvent).id).toBe(event.id);
     const server = await stored(f);
     expect(server.credential_version).toBe(2);
-    expect(decryptVariableSetValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
+    expect(decryptEnvironmentValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
       refreshedToken,
     );
     expect(await responseEvents(f)).toHaveLength(1);
@@ -515,7 +519,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
     const server = await stored(f);
     expect(server.credential_version).toBe(2);
     const winner = replies.findIndex((reply) => reply.status === 202);
-    expect(decryptVariableSetValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
+    expect(decryptEnvironmentValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
       [refreshedToken, "Bearer competing-hook-token"][winner]!,
     );
     expect(await responseEvents(f)).toHaveLength(1);
@@ -541,7 +545,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
       expect((await send(app, f)).status).toBe(500);
       const server = await stored(f);
       expect(server.credential_version).toBe(1);
-      expect(decryptVariableSetValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
+      expect(decryptEnvironmentValue(encryptionKey, server.headers_encrypted.Authorization!)).toBe(
         originalToken,
       );
       expect(await responseEvents(f)).toHaveLength(0);
@@ -571,7 +575,7 @@ describe.each(responseTypes)("%s credential refresh (real PostgreSQL)", (type) =
         {
           id: "crm",
           headersEncrypted: {
-            Authorization: encryptVariableSetValue(encryptionKey, refreshedToken),
+            Authorization: encryptEnvironmentValue(encryptionKey, refreshedToken),
           },
         },
         { id: "disappeared", headersEncrypted: {} },
@@ -613,4 +617,54 @@ test("approval storage never echoes write-only request fields from an internal c
   expect(result.event.payload).toEqual(f.event.payload);
   expect(JSON.stringify(await responseEvents(f))).not.toContain(refreshedToken);
   expect((await stored(f)).credential_version).toBe(1);
+});
+
+test("an approval whose MCP server asks a question needs the answer, or says why not", async () => {
+  const f = await fixture("user.approvalDecision", permissions, {
+    id: "crm-call",
+    elicitation: {
+      server: "CRM",
+      round: 1,
+      requests: [
+        {
+          id: "room",
+          message: "Which room?",
+          requestedSchema: {
+            type: "object",
+            properties: { name: { type: "string", title: "Room" } },
+            required: ["name"],
+          },
+        },
+      ],
+    },
+  });
+  const { app, bus, signals } = appFor(f);
+
+  const withAnswer = (extra: Record<string, unknown>) =>
+    ({ ...f.event, payload: { ...f.event.payload, ...extra } }) as ClientSessionEvent;
+
+  // An approval that does not name the question it answers is refused.
+  const unnamed = await send(app, f, null, withAnswer({ content: { room: { name: "Small" } } }));
+  expect(unnamed.status).toBe(422);
+  expect(await unnamed.text()).toContain("answer it with elicitationRound 1");
+  const stale = await send(app, f, null, withAnswer({ elicitationRound: 2 }));
+  expect(stale.status).toBe(422);
+  expect(await stale.text()).toContain("has asked a newer question");
+  const unanswered = await send(app, f, null, withAnswer({ elicitationRound: 1 }));
+  expect(unanswered.status).toBe(422);
+  expect(await unanswered.text()).toContain("Room is required");
+  expect(await responseEvents(f)).toHaveLength(0);
+  expect(bus.published).toHaveLength(0);
+  expect(signals).toHaveLength(0);
+
+  const answer = withAnswer({ content: { room: { name: "Small" } }, elicitationRound: 1 });
+  expect((await send(app, f, null, answer)).status).toBe(202);
+  const [recorded] = (await responseEvents(f)) as unknown as Array<{
+    payload: { content?: unknown; elicitationRound?: unknown };
+  }>;
+  expect(recorded?.payload).toMatchObject({
+    content: { room: { name: "Small" } },
+    elicitationRound: 1,
+  });
+  expect(signals).toHaveLength(1);
 });

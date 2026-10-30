@@ -97,6 +97,10 @@ export function SessionProfileDialog({
   title = "Edit profile",
   description = "A name, description and avatar help people find this chat and know what it does. The agent doesn't see them.",
   submitLabel = "Save",
+  nameMaxLength = SESSION_TITLE_MAX_LENGTH,
+  descriptionMaxLength = SESSION_DESCRIPTION_MAX_LENGTH,
+  descriptionHint = "One line about what it's for, shown next to its name.",
+  emptyAvatar,
   onSubmit,
   children,
 }: {
@@ -109,6 +113,11 @@ export function SessionProfileDialog({
   title?: string | undefined;
   description?: string | undefined;
   submitLabel?: string | undefined;
+  nameMaxLength?: number | undefined;
+  descriptionMaxLength?: number | undefined;
+  descriptionHint?: string | undefined;
+  /** What shows in place of the avatar when there is none (a project's folder). */
+  emptyAvatar?: React.ReactNode | undefined;
   /** Resolve false to keep the dialog open (a field of the caller's is wrong). */
   onSubmit: (values: SessionProfileValues) => Promise<void | false>;
   /** Extra fields after the profile (a template's setup instructions). */
@@ -221,7 +230,7 @@ export function SessionProfileDialog({
                 aria-hidden="true"
                 className="flex size-12 items-center justify-center rounded-lg border border-dashed border-border-strong text-xs text-fg-subtle"
               >
-                None
+                {emptyAvatar ?? "None"}
               </span>
             )}
           </div>
@@ -229,7 +238,7 @@ export function SessionProfileDialog({
             <Field label="Name" error={nameError ?? undefined}>
               <TextInput
                 value={name}
-                maxLength={SESSION_TITLE_MAX_LENGTH}
+                maxLength={nameMaxLength}
                 autoComplete="off"
                 onChange={(event) => {
                   setName(event.target.value);
@@ -239,15 +248,11 @@ export function SessionProfileDialog({
             </Field>
           </div>
         </div>
-        <Field
-          label="Description"
-          optional
-          hint="One line about what it's for, shown next to its name."
-        >
+        <Field label="Description" optional hint={descriptionHint}>
           <TextArea
             value={about}
             rows={2}
-            maxLength={SESSION_DESCRIPTION_MAX_LENGTH}
+            maxLength={descriptionMaxLength}
             onChange={(event) => setAbout(event.target.value)}
           />
         </Field>

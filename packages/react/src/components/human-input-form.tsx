@@ -26,6 +26,8 @@ import {
   answersFromDrafts,
   choiceOffersOther,
   defaultHumanInputFormMessages,
+  humanInputAgentMayDecide,
+  mergeHumanInputFormMessages,
   emptyDraft,
   initialDrafts,
   secretAnswerFromReading,
@@ -69,7 +71,7 @@ export type HumanInputFormProps = {
    * mounts again, e.g. after visiting Settings and coming back.
    */
   request: Pick<SessionHumanInputRequest, "id" | "questions" | "allowSkip" | "expiresAt"> &
-    Partial<Pick<SessionHumanInputRequest, "workspaceId" | "sessionId" | "status">>;
+    Partial<Pick<SessionHumanInputRequest, "workspaceId" | "sessionId" | "status" | "origin">>;
   /**
    * Resolve only once the response was accepted: the form then forgets the
    * unsent draft and clears secret fields. Reject when sending failed so the
@@ -84,6 +86,17 @@ export type HumanInputFormProps = {
   progressLabel?: ReactNode;
   submitLabel?: string | undefined;
   skipLabel?: string | undefined;
+  /**
+   * "Let the agent decide", offered on every ordinary question (never on a
+   * secret, a Skill review or a secret approval) in place of Skip. By default
+   * it settles the request with `{ outcome: "skipped", agentDecides: true }`,
+   * so the asking agent makes its own best choice. A host can hand the
+   * question to another agent instead (a sub-session's parent); resolve once
+   * that was sent. `false` hides the action.
+   */
+  onLetAgentDecide?: (() => void | Promise<void>) | false | undefined;
+  /** An agent was asked to decide: the action is replaced by a note; answering still works. */
+  agentDeciding?: boolean | undefined;
   messages?: Partial<HumanInputFormMessages> | undefined;
   autoFocus?: boolean | undefined;
   /** Start collapsed to a compact bar (drafts still retained). */
@@ -128,6 +141,8 @@ function HumanInputRequestForm({
   progressLabel,
   submitLabel,
   skipLabel,
+  onLetAgentDecide,
+  agentDeciding = false,
   messages: messageOverrides,
   autoFocus = true,
   defaultCollapsed = false,
@@ -137,7 +152,7 @@ function HumanInputRequestForm({
 }: HumanInputFormProps) {
   const t = useOpenGeniText();
   const formatError = useErrorMessage();
-  const messages = { ...defaultHumanInputFormMessages(t), ...messageOverrides };
+  const messages = mergeHumanInputFormMessages(defaultHumanInputFormMessages(t), messageOverrides);
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
   // Several questions are asked one at a time; every step stays mounted (hidden)
   // so typed secrets and drafts survive moving back and forth.
@@ -146,7 +161,7 @@ function HumanInputRequestForm({
   const [step, setStep] = useState(0);
   const stepQuestion = request.questions[Math.min(step, Math.max(0, lastStep))] ?? null;
   const headerQuestion = singleQuestion ?? (multi ? stepQuestion : null);
-  const decision = decisionButtons ? binaryDecision(request.questions) : null;
+  const decision = binaryDecision(request.questions, { inferFromLabels: decisionButtons });
   const [decisionChoice, setDecisionChoice] = useState<string | null>(null);
   // Agent-written question text renders as inline Markdown; host-provided
   // titles and messages render as given.
@@ -177,7 +192,8 @@ function HumanInputRequestForm({
   ) : (
     description
   );
-  const resolvedSubmitLabel = submitLabel ?? messages.submit;
+  const resolvedSubmitLabel =
+    submitLabel ?? (multi ? messages.submit : (messages.submitOne ?? messages.submit));
   const resolvedSkipLabel = skipLabel ?? messages.skip;
   const formId = useId();
   const titleId = useId();
@@ -554,7 +570,46 @@ function HumanInputRequestForm({
         ))
       : null;
   const errorText = error ?? submissionError;
-  const skipButton = request.allowSkip ? (
+  const agentMayDecide = onLetAgentDecide !== false && humanInputAgentMayDecide(request);
+  const [delegating, setDelegating] = useState(false);
+  const letAgentDecide = async (): Promise<void> => {
+    if (busy || delegating) return;
+    if (typeof onLetAgentDecide !== "function") {
+      await submitResponse({ outcome: "skipped", agentDecides: true });
+      return;
+    }
+    setSubmissionError(null);
+    setDelegating(true);
+    try {
+      await onLetAgentDecide();
+    } catch (cause) {
+      setSubmissionError(formatError(cause));
+    } finally {
+      setDelegating(false);
+    }
+  };
+  const skipButton = agentMayDecide ? (
+    agentDeciding ? (
+      <p
+        role="status"
+        className="m-0 inline-flex min-h-9 items-center gap-1.5 text-og-sm text-og-fg-muted"
+        data-human-input-agent-deciding=""
+      >
+        <span aria-hidden="true" className="size-1.5 rounded-full bg-og-status-waiting" />
+        {messages.agentDeciding ?? t("humanInputModel.yourAgentIsDeciding")}
+      </p>
+    ) : (
+      <DecisionButton
+        kind="quiet"
+        disabled={busy || delegating}
+        busy={delegating}
+        data-human-input-let-agent-decide=""
+        onClick={() => void letAgentDecide()}
+      >
+        {messages.letAgentDecide ?? t("humanInputModel.letTheAgentDecide")}
+      </DecisionButton>
+    )
+  ) : request.allowSkip ? (
     <DecisionButton
       kind="quiet"
       disabled={busy}
@@ -622,11 +677,6 @@ function HumanInputRequestForm({
             </div>
           ) : null}
           {meta ? <p className="m-0 mt-1.5 text-og-xs text-og-fg-subtle">{meta}</p> : null}
-          {request.allowSkip && singleQuestion && !decision ? (
-            <p className="m-0 mt-1 text-og-xs text-og-fg-subtle">
-              {t("humanInputForm.orSkipAndLetThe")}
-            </p>
-          ) : null}
         </div>
         <button
           type="button"
@@ -798,13 +848,27 @@ function firstWord(label: string): string {
  * answered with two buttons; an "Other" free-text answer has no meaning for it,
  * and the composer still accepts a different instruction.
  */
-export function binaryDecision(questions: readonly HumanInputQuestion[]): {
+export function binaryDecision(
+  questions: readonly HumanInputQuestion[],
+  { inferFromLabels = true }: { inferFromLabels?: boolean | undefined } = {},
+): {
   question: HumanInputQuestion;
   accept: HumanInputQuestion["options"][number];
   decline: HumanInputQuestion["options"][number];
 } | null {
   if (questions.length !== 1) return null;
   const question = questions[0]!;
+  // The agent asked for a yes/no decision in its own words: the action first,
+  // the way out second.
+  if (
+    question.confirm === true &&
+    question.kind === "single_select" &&
+    !question.skillReview &&
+    question.options.length === 2
+  ) {
+    return { question, accept: question.options[0]!, decline: question.options[1]! };
+  }
+  if (!inferFromLabels) return null;
   if (
     question.kind !== "single_select" ||
     question.skillReview ||
@@ -1034,10 +1098,26 @@ function QuestionControls({
                 <span className="min-w-0 flex-1">
                   <span className="block text-og-sm font-medium leading-5 [overflow-wrap:anywhere]">
                     {option.label}
+                    {option.recommended ? (
+                      <span
+                        data-human-input-recommended=""
+                        className="ml-2 inline-flex -translate-y-px items-center rounded-full bg-og-accent/12 px-2 align-middle text-og-xs font-medium leading-[1.125rem] text-og-accent"
+                      >
+                        {t("humanInputForm.recommended")}
+                      </span>
+                    ) : null}
                   </span>
                   {option.description ? (
                     <span className="mt-0.5 block text-og-xs leading-[1.125rem] text-og-fg-muted [overflow-wrap:anywhere]">
                       <InlineMarkdown>{option.description}</InlineMarkdown>
+                    </span>
+                  ) : null}
+                  {option.preview ? (
+                    <span
+                      data-human-input-preview=""
+                      className="mt-2 block max-h-40 overflow-auto whitespace-pre-wrap rounded-og-md bg-og-fg/[0.04] px-2.5 py-2 font-og-mono text-og-xs leading-[1.125rem] text-og-fg [overflow-wrap:anywhere]"
+                    >
+                      {option.preview}
                     </span>
                   ) : null}
                 </span>

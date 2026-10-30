@@ -1,7 +1,11 @@
 # 14. Requests, limits and admission
 
 Status: Accepted, 2026-10-16. Built. Amended 2026-10-20: processor time is
-booked and guaranteed like memory.
+booked and guaranteed like memory. Amended 2026-10-29 by
+[24](0024-busy-sandboxes-are-slowed-never-frozen.md): a sandbox in use is
+never paused for memory (step 3 of the relief is gone), running VMs are
+compressed where the host allows it, and the VMMs' out-of-memory score
+follows their request.
 
 ## Context
 
@@ -145,13 +149,15 @@ pick a VM.
   ceiling would waste idle processors and slow a
   burst that harms nobody, and the request is a floor, as in Kubernetes
   and Modal.
-- A running VM is never compressed or swapped: `memory.swap.max` and
-  `memory.zswap.max` are 0 from launch, after adoption and before every
-  resume, and open only while the agent compresses a paused VM, with
-  `memory.zswap.writeback` at 0 so nothing reaches the swap device. A host
-  that compresses must have zswap on, or the agent refuses to start.
-  Status shows each VM's zswap traffic and memory pressure; a running VM
-  with zswap stores is a bug.
+- On a host without the memory rule of 24 (huge pages, compression off or
+  no swap device), a running VM is never compressed or swapped:
+  `memory.swap.max` and `memory.zswap.max` are 0 from launch, after
+  adoption and before every resume, and open only while the agent
+  compresses a paused VM. `memory.zswap.writeback` is always 0, so nothing
+  reaches the swap device. A host that compresses must have zswap on, or
+  the agent refuses to start. Status shows each VM's zswap traffic and
+  memory pressure; there, a running VM with zswap stores is a bug. With
+  the rule, running VMs are compressed as 24 describes.
 - On 4 KiB pages with relief, the VMs together may hold the host's memory
   less the high watermark before the kernel slows them down: their parent
   group's `memory.high`, set as the agent starts (and lifted where it
@@ -208,7 +214,8 @@ pick a VM.
   not count, and every awake sandbox is booked whole. An agent of a
   release before this leaves a limit an earlier one set in place without
   counting it; `max` in the group's `memory.high` lifts it.
-- VMMs and pagers run with `oom_score_adj` -900, so the host's
+- VMMs and pagers run with an `oom_score_adj` that follows their request
+  (24; -900 where nothing limits the VMs together), so the host's
   out-of-memory killer ends nearly anything else first, and the agent with
   -999, so it outlasts the VMs it can bring back. It runs in a service unit
   of its own with a `MemoryMax`; VM cgroups lie outside it. Not -1000:
@@ -244,17 +251,19 @@ pick a VM.
      no confirmation limits or foresees and readings count either way.
      The claim covers the moments in which the guest is expected to
      refill; a guest with statistics just ends it sooner. A sandbox whose let-go is
-     unconfirmed is not ballooned again, but step 3 may still pause and
-     save it, keeping its claim, or give it back its claim if it turns
-     out unsavable and stays awake. Pausing frees nothing, so a claim
+     unconfirmed is not ballooned again, but once idle it may still be
+     paused and saved, keeping its claim, or given back its claim if it
+     turns out unsavable and stays awake. Pausing frees nothing, so a claim
      that ends, for whatever reason, still counts until a reading taken
      after that shows what the guest took; a removed sandbox's claim
      lasts until its VM is ended;
-  3. if that is still not enough, the sandbox furthest above its request
-     is paused and saved, held or not. It loses nothing: once its recorded
-     footprint fits above the high watermark, next to the footprints of
-     those let through before it until a reading shows them, it wakes by
-     itself with its programs. Asking for it meanwhile gets `host_full`.
+  3. (Removed by 24: a sandbox in use above its request was paused and
+     saved here, held or not, which lost CI jobs and connections. Busy
+     sandboxes are now bounded, compressed and shrunk from inside
+     instead.) One an earlier agent paused this way still wakes by itself
+     once its recorded footprint fits above the high watermark, next to
+     the footprints of those let through before it until a reading shows
+     them; asking for it meanwhile gets `host_full`.
   Sandboxes within their request are never touched by any of these.
   A VM's balloon is let go again once it runs after any step and after
   adoption, since a restored image or an earlier agent may have left it

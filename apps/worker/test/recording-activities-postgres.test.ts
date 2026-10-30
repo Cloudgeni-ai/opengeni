@@ -14,6 +14,7 @@ import {
 import { DICTATION_RETENTION_MILLISECONDS } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
+  completeRecordingTranscriptVersion,
   createDb,
   createRecording,
   createRecordingTranscriptVersion,
@@ -24,6 +25,7 @@ import {
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
   markRecordingDeleting,
+  rememberRecordingPersonVoice,
   reserveRecordingChunks,
   setRecordingTrackPrepared,
   updateWorkspaceSettings,
@@ -32,9 +34,11 @@ import {
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { textModelCapabilities } from "@opengeni/core/transcription-service";
+import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import { createHash } from "node:crypto";
 import {
   createRecordingActivities,
+  recordingTranscriptBudgetMilliseconds,
   type RecordingActivityOptions,
 } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -197,6 +201,7 @@ function activities(
   apiKey: string | null = "key",
   diarizer: RecordingDiarizer | null = null,
   aligner: RecordingWordAligner | null = null,
+  now?: () => number,
   startMeetingSummary?: RecordingActivityOptions["startMeetingSummary"],
 ) {
   const warnings: string[] = [];
@@ -217,10 +222,20 @@ function activities(
       cancellationSignal: () => undefined,
       diarizer: () => diarizer,
       aligner: () => aligner,
+      ...(now ? { now } : {}),
       ...(startMeetingSummary ? { startMeetingSummary } : {}),
     }),
   };
 }
+
+test("a transcript's time budget grows with the audio, up to twelve hours", () => {
+  const minutes = (value: number) => value * 60_000;
+  expect(recordingTranscriptBudgetMilliseconds(0)).toBe(minutes(30));
+  // The 51-minute meeting that sat in Transcribing for hours.
+  expect(recordingTranscriptBudgetMilliseconds(minutes(51))).toBe(minutes(30 + 153));
+  expect(recordingTranscriptBudgetMilliseconds(minutes(600))).toBe(minutes(720));
+  expect(recordingTranscriptBudgetMilliseconds(-5)).toBe(minutes(30));
+});
 
 describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
   test("a meeting's ready transcript starts its summary once; a failure is only logged", async () => {
@@ -242,10 +257,18 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       ],
     }));
     const started: unknown[] = [];
-    const ok = activities(storage, provider, "key", null, null, async (_services, input) => {
-      started.push(input);
-      return { started: true, sessionId: crypto.randomUUID(), model: "codex/test" };
-    });
+    const ok = activities(
+      storage,
+      provider,
+      "key",
+      null,
+      null,
+      undefined,
+      async (_services, input) => {
+        started.push(input);
+        return { started: true, sessionId: crypto.randomUUID(), model: "codex/test" };
+      },
+    );
     expect(await ok.activities.transcribeRecordingVersion(recording.input)).toEqual({
       outcome: "complete",
     });
@@ -271,7 +294,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       versionId: again,
       transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
     });
-    const failing = activities(storage, provider, "key", null, null, async () => {
+    const failing = activities(storage, provider, "key", null, null, undefined, async () => {
       throw new Error("no account free");
     });
     expect(
@@ -284,7 +307,309 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(failing.warnings).toContain("meeting summary not started");
   });
 
-  test("prepares each track, keeps the microphone as one speaker and diarizes the rest", async () => {
+  test("past its time budget a transcript fails as timed_out, with no audio sent", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    let called = false;
+    const provider = fakeProvider(async () => {
+      called = true;
+      throw new Error("never asked");
+    });
+    // A retry that starts a day after the meeting was asked to be transcribed.
+    const later = () => Date.now() + 24 * 60 * 60_000;
+    expect(
+      await activities(
+        storage,
+        provider,
+        "key",
+        null,
+        null,
+        later,
+      ).activities.transcribeRecordingVersion(recording.input),
+    ).toEqual({ outcome: "failed", errorCode: "timed_out" });
+    expect(called).toBe(false);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version).toMatchObject({ state: "failed", errorCode: "timed_out" });
+  });
+
+  test("a provider still working when the budget runs out fails the version as timed_out", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    let called = false;
+    let aborted = false;
+    // It never answers and ignores the abort, like a stuck alignment step.
+    const provider = fakeProvider(async (request) => {
+      called = true;
+      request.signal?.addEventListener("abort", () => {
+        aborted = true;
+      });
+      return await new Promise<never>(() => undefined);
+    });
+    // A few seconds of the budget are left: enough to prepare the audio.
+    const budget = recordingTranscriptBudgetMilliseconds(2_000);
+    const nearlyOut = () => Date.now() + budget - 8_000;
+    const started = Date.now();
+    expect(
+      await activities(
+        storage,
+        provider,
+        "key",
+        null,
+        null,
+        nearlyOut,
+      ).activities.transcribeRecordingVersion(recording.input),
+    ).toEqual({ outcome: "failed", errorCode: "timed_out" });
+    expect(Date.now() - started).toBeLessThan(30_000);
+    // On a busy machine the budget can run out before the audio is ready;
+    // when the provider was asked, it was told to stop.
+    if (called) expect(aborted).toBe(true);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version).toMatchObject({ state: "failed", errorCode: "timed_out" });
+  }, 60_000);
+
+  test("a transcript that answers after its budget ran out is neither charged nor saved", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { language: "en", diarizer: "ours" },
+    });
+    const charged = { settled: 0 };
+    // A deployment-funded model charged in credits answers at once; telling
+    // the speakers apart ignores the abort and finishes after the budget.
+    const late = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: false,
+      words: [
+        {
+          text: "Late.",
+          startMilliseconds: 100,
+          endMilliseconds: 400,
+          speaker: null,
+          spaceBefore: false,
+        },
+      ],
+    }));
+    const slow: RecordingDiarizer = {
+      id: "slow",
+      diarize: async (_audio, options) => {
+        await new Promise<void>((resolve) => {
+          if (options.signal?.aborted) resolve();
+          else options.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return {
+          turns: [{ startMilliseconds: 0, endMilliseconds: 2_000, speaker: "S0" }],
+          voices: [],
+          voiceModel: "test-voices",
+        };
+      },
+    };
+    const funded: RecordingTranscriptionProvider = {
+      ...late,
+      funding: "deployment",
+      models: late.models.map((model) => ({
+        ...model,
+        creditPricing: { microsPerMinute: 10_000 },
+      })),
+    };
+    const budget = recordingTranscriptBudgetMilliseconds(2_000);
+    const nearlyOut = () => Date.now() + budget - 6_000;
+    const services = async () =>
+      ({
+        db: client!.db,
+        objectStorage: storage.storage,
+        settings: testSettings({ voiceInputFfmpegPath: ffmpegPath, usageLimitsMode: "managed" }),
+        observability: { warn: () => undefined, info: () => undefined, error: () => undefined },
+        startRecordingWorkflow: null,
+      }) as unknown as ControlActivityServices;
+    const run = createRecordingActivities(services, {
+      registry: createRecordingTranscriptionProviderRegistry([funded]),
+      loadApiKey: async () => "key",
+      heartbeat: () => undefined,
+      cancellationSignal: () => undefined,
+      diarizer: () => slow,
+      aligner: () => null,
+      now: nearlyOut,
+      billing: () => ({
+        admit: async () => undefined,
+        settle: async () => {
+          charged.settled += 1;
+          return { creditCostMicros: 1_000 };
+        },
+      }),
+    });
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({
+      outcome: "failed",
+      errorCode: "timed_out",
+    });
+    // Give the abandoned work time to reach where it would charge and save.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(charged.settled).toBe(0);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version).toMatchObject({ state: "failed", errorCode: "timed_out" });
+  }, 60_000);
+
+  test("a charged transcript whose save briefly fails past its budget is still saved", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { language: "en" },
+    });
+    // The version exists by now, so its budget runs out within `window` of this.
+    const window = 30_000;
+    const outOfTimeAt = Date.now() + window + 500;
+    const answered = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: false,
+      words: [
+        {
+          text: "Saved.",
+          startMilliseconds: 100,
+          endMilliseconds: 400,
+          speaker: null,
+          spaceBefore: false,
+        },
+      ],
+    }));
+    const funded: RecordingTranscriptionProvider = {
+      ...answered,
+      funding: "deployment",
+      models: answered.models.map((model) => ({
+        ...model,
+        creditPricing: { microsPerMinute: 10_000 },
+      })),
+    };
+    const budget = recordingTranscriptBudgetMilliseconds(2_000);
+    const charged = { settled: 0 };
+    const warnings: string[] = [];
+    const services = async () =>
+      ({
+        db: client!.db,
+        objectStorage: storage.storage,
+        settings: testSettings({ voiceInputFfmpegPath: ffmpegPath, usageLimitsMode: "managed" }),
+        observability: {
+          warn: (message: string) => warnings.push(message),
+          info: () => undefined,
+          error: () => undefined,
+        },
+        startRecordingWorkflow: null,
+      }) as unknown as ControlActivityServices;
+    let saves = 0;
+    const run = createRecordingActivities(services, {
+      registry: createRecordingTranscriptionProviderRegistry([funded]),
+      loadApiKey: async () => "key",
+      heartbeat: () => undefined,
+      cancellationSignal: () => undefined,
+      diarizer: () => null,
+      aligner: () => null,
+      now: () => Date.now() + budget - window,
+      saveRetryDelaysMilliseconds: [0, 0, 0],
+      startMeetingSummary: async () => ({ started: false, reason: "test" }),
+      // The database drops the first two saves, the first one only once the
+      // budget has run out.
+      saveTranscript: async (db, version) => {
+        saves += 1;
+        if (saves === 1) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.max(0, outOfTimeAt - Date.now())),
+          );
+        }
+        if (saves <= 2) throw new Error("connection terminated unexpectedly");
+        return completeRecordingTranscriptVersion(db, version);
+      },
+      billing: () => ({
+        admit: async () => undefined,
+        settle: async () => {
+          charged.settled += 1;
+          return { creditCostMicros: 1_000 };
+        },
+      }),
+    });
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
+    expect(saves).toBe(3);
+    expect(charged.settled).toBe(1);
+    expect(warnings.filter((message) => message.includes("trying again"))).toHaveLength(2);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version).toMatchObject({ state: "complete", errorCode: null });
+  }, 60_000);
+
+  test("a charged transcript whose save keeps failing is left to retry, never failed", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { language: "en" },
+    });
+    const answered = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: false,
+      words: [
+        {
+          text: "Kept.",
+          startMilliseconds: 100,
+          endMilliseconds: 400,
+          speaker: null,
+          spaceBefore: false,
+        },
+      ],
+    }));
+    const services = async () =>
+      ({
+        db: client!.db,
+        objectStorage: storage.storage,
+        settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
+        observability: { warn: () => undefined, info: () => undefined, error: () => undefined },
+        startRecordingWorkflow: null,
+      }) as unknown as ControlActivityServices;
+    let saves = 0;
+    const run = createRecordingActivities(services, {
+      registry: createRecordingTranscriptionProviderRegistry([answered]),
+      loadApiKey: async () => "key",
+      heartbeat: () => undefined,
+      cancellationSignal: () => undefined,
+      diarizer: () => null,
+      aligner: () => null,
+      saveRetryDelaysMilliseconds: [0, 0],
+      startMeetingSummary: async () => ({ started: false, reason: "test" }),
+      saveTranscript: async () => {
+        saves += 1;
+        throw new Error("connection terminated unexpectedly");
+      },
+    });
+    await expect(run.transcribeRecordingVersion(recording.input)).rejects.toThrow(
+      "connection terminated unexpectedly",
+    );
+    expect(saves).toBe(3);
+    const [version] = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(version?.state).not.toBe("failed");
+  }, 60_000);
+
+  test("prepares each track, diarizes every track and names the microphone's one voice after the person recording", async () => {
     if (!client) return;
     const storage = memoryStorage();
     const recording = await capturedRecording(storage);
@@ -335,7 +660,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
 
     expect(calls.map((call) => [call.audio.fileName, call.diarize, call.language])).toEqual([
-      ["track-0.webm", false, "en"],
+      ["track-0.webm", true, "en"],
       ["track-1.webm", true, "en"],
     ]);
     const prepared = [...storage.objects.keys()].filter((key) => key.includes("/prepared/"));
@@ -527,12 +852,12 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(diarized).toEqual([]);
     expect((await page(recording.input.versionId)).version.diarization).toBe("provider");
 
-    // Asked for ours: only the diarized track goes through it.
+    // Asked for ours: every track goes through it, the microphone too.
     const first = await version("ours");
     expect(
       await activities(storage, provider, "key", ours).activities.transcribeRecordingVersion(first),
     ).toEqual({ outcome: "complete" });
-    expect(diarized).toEqual(["track-1.webm"]);
+    expect(diarized.sort()).toEqual(["track-0.webm", "track-1.webm"]);
     const mine = await page(first.versionId);
     expect(mine.version.diarization).toBe("ours");
     expect(mine.segments.map((segment) => [segment.speakerLabel, segment.text])).toEqual([
@@ -585,10 +910,210 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
         processingOwner: fourth,
       }),
     ).toEqual({ outcome: "complete" });
-    expect(diarized).toEqual(["track-1.webm"]);
+    expect(diarized.sort()).toEqual(["track-0.webm", "track-1.webm"]);
     expect(await stored(fourth)).toEqual([
       { label: "speaker_0", channel: "call", model: "test-voices" },
       { label: "speaker_1", channel: "call", model: "test-voices" },
+      { label: "track-0", channel: "microphone", model: "test-voices" },
+    ]);
+  });
+
+  test("the person recording is found among the voices on their own microphone", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { diarizer: "ours" },
+    });
+    const word = (text: string, start: number, end: number) => ({
+      text,
+      startMilliseconds: start,
+      endMilliseconds: end,
+      speaker: null,
+      spaceBefore: true,
+    });
+    const provider = fakeProvider(async (request) => ({
+      languages: ["nor"],
+      audioMilliseconds: 2_000,
+      diarized: false,
+      words:
+        request.audio.fileName === "track-0.webm"
+          ? [word("Hei.", 100, 300), word("Velkommen", 600, 1_100), word("hit.", 1_150, 1_500)]
+          : [word("Hallo.", 1_600, 1_900)],
+    }));
+    // Someone in the room says a word; the person recording says the most.
+    const ours: RecordingDiarizer = {
+      id: "test",
+      diarize: async (audio) =>
+        audio.fileName === "track-0.webm"
+          ? {
+              turns: [
+                { startMilliseconds: 0, endMilliseconds: 400, speaker: "A" },
+                { startMilliseconds: 500, endMilliseconds: 1_600, speaker: "B" },
+              ],
+              voices: [
+                { speaker: "A", speechMilliseconds: 5_000, embedding: [1, 0, 0] },
+                { speaker: "B", speechMilliseconds: 6_000, embedding: [0, 1, 0] },
+              ],
+              voiceModel: "test-voices",
+            }
+          : {
+              turns: [{ startMilliseconds: 1_500, endMilliseconds: 2_000, speaker: "A" }],
+              voices: [{ speaker: "A", speechMilliseconds: 5_000, embedding: [0, 0, 1] }],
+              voiceModel: "test-voices",
+            },
+    };
+    const run = activities(storage, provider, "key", ours).activities;
+    const transcript = async (versionId: string) => {
+      const page = await getRecordingTranscriptPage(client!.db, {
+        ...recording.actor,
+        recordingId: recording.input.recordingId,
+        versionId,
+      });
+      return page.segments.map((segment) => [
+        segment.speakerLabel,
+        page.speakers.find((speaker) => speaker.label === segment.speakerLabel)?.name,
+        segment.text,
+      ]);
+    };
+
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
+    expect(await transcript(recording.input.versionId)).toEqual([
+      ["speaker_0", "Speaker 1", "Hei."],
+      ["track-0", "Ingrid Solberg", "Velkommen hit."],
+      ["speaker_1", "Speaker 2", "Hallo."],
+    ]);
+
+    // With voice recognition on, their remembered voice picks theirs, even
+    // when someone else on the microphone spoke more.
+    await updateWorkspaceSettings(client.db, recording.actor.workspaceId, {
+      recordings: { voiceprints: true },
+    });
+    const [me] = await listRecordingPeople(client.db, recording.actor);
+    await rememberRecordingPersonVoice(client.db, {
+      ...recording.actor,
+      personId: me!.id,
+      consent: "self",
+    });
+    await shared!.admin`
+      insert into recording_voiceprints
+        (account_id, workspace_id, person_id, channel, model, embedding, speech_milliseconds, sample_count)
+      values (${recording.input.accountId}, ${recording.actor.workspaceId}, ${me!.id},
+        'microphone', 'test-voices', '{0.9,0.1,0}'::real[], 60000, 3)`;
+    const second = crypto.randomUUID();
+    await createRecordingTranscriptVersion(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+      versionId: second,
+      transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
+    });
+    expect(
+      await run.transcribeRecordingVersion({
+        ...recording.input,
+        versionId: second,
+        processingOwner: second,
+      }),
+    ).toEqual({ outcome: "complete" });
+    expect(await transcript(second)).toEqual([
+      ["track-0", "Ingrid Solberg", "Hei."],
+      ["speaker_0", "Speaker 1", "Velkommen hit."],
+      ["speaker_1", "Speaker 2", "Hallo."],
+    ]);
+  });
+
+  test("the call heard from the speakers doesn't become someone on the microphone", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { diarizer: "ours" },
+    });
+    await updateWorkspaceSettings(client.db, recording.actor.workspaceId, {
+      recordings: { voiceprints: true },
+    });
+    const word = (text: string, start: number, end: number) => ({
+      text,
+      startMilliseconds: start,
+      endMilliseconds: end,
+      speaker: null,
+      spaceBefore: true,
+    });
+    // No headphones: the microphone hears the call a little late, and one
+    // misheard word of it ("gave") matches nothing in computer audio.
+    const provider = fakeProvider(async (request) => ({
+      languages: ["nor"],
+      audioMilliseconds: 4_000,
+      diarized: false,
+      words:
+        request.audio.fileName === "track-0.webm"
+          ? [
+              word("Takk.", 100, 400),
+              word("vi", 1_100, 1_600),
+              word("kommer", 1_600, 2_100),
+              word("på", 2_100, 2_600),
+              word("mandag", 2_600, 3_100),
+              word("gave", 3_200, 3_600),
+            ]
+          : [
+              word("Vi", 1_000, 1_500),
+              word("kommer", 1_500, 2_000),
+              word("på", 2_000, 2_500),
+              word("mandag.", 2_500, 3_000),
+            ],
+    }));
+    // Our diarizer hears the speakers' sound as a voice of its own on the
+    // microphone; what the echo left of it outlasts the person recording.
+    const ours: RecordingDiarizer = {
+      id: "test",
+      diarize: async (audio) =>
+        audio.fileName === "track-0.webm"
+          ? {
+              turns: [
+                { startMilliseconds: 0, endMilliseconds: 500, speaker: "A" },
+                { startMilliseconds: 1_000, endMilliseconds: 3_700, speaker: "E" },
+              ],
+              voices: [
+                { speaker: "A", speechMilliseconds: 5_000, embedding: [1, 0, 0] },
+                { speaker: "E", speechMilliseconds: 6_000, embedding: [0, 1, 0] },
+              ],
+              voiceModel: "test-voices",
+            }
+          : {
+              turns: [{ startMilliseconds: 900, endMilliseconds: 3_100, speaker: "S" }],
+              voices: [{ speaker: "S", speechMilliseconds: 6_000, embedding: [0, 0.9, 0.1] }],
+              voiceModel: "test-voices",
+            },
+    };
+    expect(
+      await activities(storage, provider, "key", ours).activities.transcribeRecordingVersion(
+        recording.input,
+      ),
+    ).toEqual({ outcome: "complete" });
+    const page = await getRecordingTranscriptPage(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+      versionId: recording.input.versionId,
+    });
+    expect(
+      page.segments.map((segment) => [
+        segment.speakerLabel,
+        page.speakers.find((speaker) => speaker.label === segment.speakerLabel)?.name,
+        segment.text,
+      ]),
+    ).toEqual([
+      ["track-0", "Ingrid Solberg", "Takk."],
+      ["speaker_0", "Speaker 1", "Vi kommer på mandag."],
+    ]);
+    // The echo keeps no voice of its own to suggest or learn from.
+    expect(
+      await shared!.admin<{ label: string; channel: string }[]>`
+        select speaker_label as label, channel from recording_speaker_voices
+        where version_id = ${recording.input.versionId} order by speaker_label`,
+    ).toEqual([
+      { label: "speaker_0", channel: "call" },
+      { label: "track-0", channel: "microphone" },
     ]);
   });
 
@@ -742,12 +1267,16 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     };
     const ours: RecordingDiarizer = {
       id: "test",
-      diarize: async () => ({
+      // The microphone holds only the person recording.
+      diarize: async (audio) => ({
         voiceModel: "test-voices",
-        turns: [
-          { startMilliseconds: 0, endMilliseconds: 700, speaker: "A" },
-          { startMilliseconds: 700, endMilliseconds: 2_000, speaker: "B" },
-        ],
+        turns:
+          audio.fileName === "track-0.webm"
+            ? [{ startMilliseconds: 0, endMilliseconds: 2_000, speaker: "A" }]
+            : [
+                { startMilliseconds: 0, endMilliseconds: 700, speaker: "A" },
+                { startMilliseconds: 700, endMilliseconds: 2_000, speaker: "B" },
+              ],
         voices: [],
       }),
     };
@@ -952,6 +1481,9 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     expect(page.segments.map((segment) => [segment.speakerLabel, segment.text])).toEqual([
       [null, "Remember to send the numbers."],
     ]);
+    // Its prepared audio is never stored: the text doesn't wait on a write.
+    expect([...storage.objects.keys()].filter((key) => key.includes("/prepared/"))).toEqual([]);
+    expect(stored.tracks.every((track) => !track.playable)).toBe(true);
 
     // The day is up: the dictation and its audio go.
     expect(storage.objects.size).toBeGreaterThan(0);
@@ -1041,6 +1573,23 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
       errorCode: "insufficient_credits",
       expireAfterMilliseconds: DICTATION_RETENTION_MILLISECONDS,
     });
+  });
+
+  test("an EU-only region refusal fails the dictation without retrying", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const dictation = await capturedDictation(storage);
+    let calls = 0;
+    const run = dictationActivities(storage, async () => {
+      calls += 1;
+      throw new InferenceRegionRestrictedError("voice-one");
+    });
+    expect(await run.transcribeRecordingVersion(dictation.input)).toEqual({
+      outcome: "failed",
+      errorCode: "region_restricted",
+      expireAfterMilliseconds: DICTATION_RETENTION_MILLISECONDS,
+    });
+    expect(calls).toBe(1);
   });
 
   test("expiry leaves meetings alone", async () => {

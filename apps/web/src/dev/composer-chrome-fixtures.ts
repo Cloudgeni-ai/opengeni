@@ -78,8 +78,6 @@ export function gallerySession(overrides: Partial<Session> = {}): Session {
     activeSandboxId: null,
     activeEpoch: 0,
     workingDir: null,
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     rigVersionId: null,
     channelId: null,
@@ -426,7 +424,7 @@ export const galleryModelRows: PickerModelRow[] = projectPickerRows(t, [
   }),
   catalogModel({
     id: "opper/aws/claude-opus-5-5",
-    label: "Claude Opus 5.5 (EU)",
+    label: "Claude Opus 5.5",
     shortLabel: "Opus 5.5",
     provider: "opper",
     providerLabel: "Opper",

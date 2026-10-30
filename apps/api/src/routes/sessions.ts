@@ -1,16 +1,11 @@
 import { readSessionResponsePair } from "./session-response-reads";
-import {
-  legacyVariableSetFields,
-  rejectLegacyVariableSetFields,
-  variableSetsRemovedResponse,
-  withoutEmptyLegacyVariableSetFields,
-} from "../http/variable-sets-removed";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import {
   assertGoalResumeAllowed,
   GoalResumeBlockedError,
   turnAppActionGrant,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
@@ -26,7 +21,15 @@ import { enqueueCapabilitySetupContinuation } from "@opengeni/db";
 import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
 import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
 import { capabilitySetupReadiness } from "../capability-setup-readiness";
-import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import {
+  marketplacePluginCapabilityItem,
+  PLUGIN_CAPABILITY_ID_PREFIX,
+} from "../integrations/marketplace-plugin-catalog";
+import {
+  SITE_FRAME_HEADER,
+  siteFrameBodyRefusal,
+  withoutFileResources,
+} from "@opengeni/contracts/site-session-http";
 import {
   requireWorkspace,
   sessionScheduleTargets,
@@ -185,6 +188,7 @@ import { streamTokenDegraded } from "@opengeni/config";
 import {
   recordAuditEvent,
   acceptSessionApprovalDecision,
+  SessionApprovalAnswerError,
   acceptSessionHumanInputResponse,
   clearSessionGoal,
   clearSessionContext,
@@ -236,6 +240,7 @@ import {
   SessionListAccessError,
   SessionListCursorError,
   SessionListCursorExpiredError,
+  SESSION_LIST_MAX_SESSION_IDS,
   decodeSessionListCursor,
   revokeViewer,
   setSessionGoalStatusWithEvent,
@@ -255,7 +260,6 @@ import {
   SessionRealtimeConflictError,
   SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
-  SessionVariableSetSelectionUnavailableError,
   SessionCreateConnectionSelectionUnavailableError,
   workspaceControlRequestLockTimeoutMs,
   SessionTenancyAccessError,
@@ -324,6 +328,7 @@ import {
   SelfhostedSession,
   usesAgentTransport,
 } from "@opengeni/runtime/sandbox";
+import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -374,6 +379,7 @@ import {
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
   getActorNewSessionDraft,
+  resolveMemberExecutionDefault,
   getManagedHumanSessionCreateCapabilities,
   getHumanComposerDraft,
   forkManagedHumanSession,
@@ -493,8 +499,8 @@ function requireViewerLifecyclePermission(grant: AccessGrant): void {
   ) {
     return;
   }
-  throw new HTTPException(403, {
-    message: `missing permission: ${VIEWER_LIFECYCLE_PERMISSIONS.join(" or ")}`,
+  throw new MissingPermissionRefusal("stream:view", {
+    message: "You don't have permission to watch or use this chat's computer.",
   });
 }
 
@@ -506,6 +512,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     bus,
     objectStorage,
     observability: deps.observability,
+    // Read at call time: route-only compositions (tests) have no workflow client.
+    wakeSessionWorkflow: (input: Parameters<typeof workflowClient.wakeSessionWorkflow>[0]) =>
+      workflowClient.wakeSessionWorkflow(input),
   };
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
   const realtimeVoiceBilling = createRealtimeVoiceBilling({ db, settings });
@@ -513,6 +522,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const realtimeVoiceRefusalResponse = (c: Context, error: unknown): Response | null => {
     if (error instanceof TranscriptionBillingRefusedError) {
       return transcriptionBillingRefusal(c, error);
+    }
+    if (error instanceof InferenceRegionRestrictedError) {
+      return c.json(
+        {
+          error: {
+            status: 422,
+            code: error.code,
+            message: error.message,
+            retryable: false,
+          },
+        },
+        422,
+      );
     }
     if (error instanceof RealtimeVoiceUnavailableError) {
       return c.json(
@@ -795,9 +817,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     let session: Session;
     try {
-      const legacyFields = legacyVariableSetFields(payload);
-      if (legacyFields.length > 0) return variableSetsRemovedResponse(c, 422, legacyFields);
-      payload = withoutEmptyLegacyVariableSetFields(payload);
       const requestedProfile = CreateSessionRequest.parse(payload).profile;
       // only a person present in the app or the host's server sets a
       // task usage limit; an agent acting for a person cannot, even null.
@@ -829,7 +848,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       // capabilities. Ordinary session creation resolves the viewer's settings.
       const siteOrigin = origin ?? currentSiteSessionOrigin();
       if (siteOrigin && currentSiteViewerRlsContext()?.siteId !== siteOrigin.siteId) {
-        const refused = siteFrameBodyRefusal("sessions.create", "/sessions", payload);
+        // The console's own Site view (this request names the Site's id and
+        // version without a frame marker; Site code is always marked)
+        // attaches the person's files to the first message, as it does to
+        // every later one. Site code still may not, and neither does an
+        // origin carried over from elsewhere in the request.
+        const consoleSiteView =
+          Boolean(origin?.siteId) && c.req.header(SITE_FRAME_HEADER) === undefined;
+        const refused = siteFrameBodyRefusal(
+          "sessions.create",
+          "/sessions",
+          consoleSiteView ? withoutFileResources(payload) : payload,
+        );
         if (refused)
           return c.json(
             {
@@ -944,13 +974,26 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
     });
-    return c.json(
-      await getActorNewSessionDraft(
+    const [draft, memberDefault] = await Promise.all([
+      getActorNewSessionDraft(
         { settings: catalog.settings, db },
         grant,
         workspaceId,
         authorization,
       ),
+      resolveMemberExecutionDefault(db, settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
+    ]);
+    // A fresh form starts on the caller's own default when it is usable now.
+    // Without one the draft keeps its usual shape and the form follows the
+    // workspace default.
+    return c.json(
+      memberDefault.usable && memberDefault.target
+        ? { ...draft, memberDefaultExecutionTarget: memberDefault.target }
+        : draft,
     );
   });
 
@@ -1150,6 +1193,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
           ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
           ...(query.scopeSubjectId ? { scopeSubjectId: query.scopeSubjectId } : {}),
+          ...(query.sessionIds ? { sessionIds: query.sessionIds } : {}),
           ...(authorizationScope ? { authorizationScope } : {}),
           // A managed human's own personal workspace has no membership row, so
           // the list's removal fence must fall back to the organization-membership
@@ -1629,9 +1673,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
-    const forkLegacy = rejectLegacyVariableSetFields(c, await c.req.json().catch(() => null));
-    if ("response" in forkLegacy) return forkLegacy.response;
-    const parsed = ForkSessionRequest.safeParse(forkLegacy.payload);
+    const parsed = ForkSessionRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       throw new ApiHttpError(422, {
         code: "validation_failed",
@@ -1945,7 +1987,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               connectionId: claim.connection.id,
               operationId,
               connectionEpoch: claim.connection.connectionEpoch,
-              failureCode: "billing_refused",
+              failureCode:
+                error instanceof InferenceRegionRestrictedError ? error.code : "billing_refused",
             }),
           ),
         ).catch(() => undefined);
@@ -2193,10 +2236,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               failureCode:
                 error instanceof RealtimeWebsocketBrokerError
                   ? error.code
-                  : error instanceof TranscriptionBillingRefusedError ||
-                      error instanceof RealtimeVoiceUnavailableError
-                    ? "billing_refused"
-                    : `${provider?.id ?? "websocket"}_error`,
+                  : error instanceof InferenceRegionRestrictedError
+                    ? error.code
+                    : error instanceof TranscriptionBillingRefusedError ||
+                        error instanceof RealtimeVoiceUnavailableError
+                      ? "billing_refused"
+                      : `${provider?.id ?? "websocket"}_error`,
             }),
           ),
         ).catch(() => undefined);
@@ -2697,14 +2742,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
-  // Variable Sets were replaced by vaults. The route answers 410 so old
-  // clients learn where secrets moved instead of silently doing nothing.
-  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    return variableSetsRemovedResponse(c, 410);
-  });
-
   // Manual rename and description/avatar edit. A user-set title is permanent:
   // the db write is unconditional (source='user'), so it always pins the
   // session over later automatic agent titles. Returns the refreshed session,
@@ -2990,6 +3027,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       // A reviewed integration's card stands for the person's own connected
       // instances of it, which the workspace catalog does not list.
       const integration = integrationDefinitionIdFromCapabilityId(payload.capabilityId) !== null;
+      // A plugin's card stands for its installation in this workspace.
+      const plugin = payload.capabilityId.startsWith(PLUGIN_CAPABILITY_ID_PREFIX);
       const [item, withPolicy] = await Promise.all([
         integration
           ? integrationDefinitionSetupItem(
@@ -2999,13 +3038,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               grant.subjectId,
               payload.capabilityId,
             )
-          : buildCapabilityCatalog({
-              db,
-              workspaceId,
-              settings,
-              subjectId: grant.subjectId,
-              accountId: grant.accountId,
-            }).then((catalog) => catalog.items.find((entry) => entry.id === payload.capabilityId)),
+          : plugin
+            ? marketplacePluginCapabilityItem(db, workspaceId, payload.capabilityId)
+            : buildCapabilityCatalog({
+                db,
+                workspaceId,
+                settings,
+                subjectId: grant.subjectId,
+                accountId: grant.accountId,
+              }).then((catalog) =>
+                catalog.items.find((entry) => entry.id === payload.capabilityId),
+              ),
         withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
       ]);
       const readiness = capabilitySetupReadiness(payload.capabilityId, item, withPolicy);
@@ -4399,6 +4442,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         });
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+          throw new HTTPException(422, { message: error.message });
+        }
+        if (error instanceof SessionApprovalAnswerError) {
           throw new HTTPException(422, { message: error.message });
         }
         throw error;
@@ -5796,8 +5842,14 @@ export function sessionAuthorizationOperationForHttp(
   // Owner-only preview of the same change: identical authority to making it.
   if (suffix === "/visibility/preview" && verb === "GET") return "session.visibility.write";
   if (suffix === "/forks" && verb === "POST") return "session.fork.create";
+  // A read-only link anyone holding it can open: reading the state is a read,
+  // creating, refreshing or stopping it is its own operation.
+  if (suffix === "/share-link") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PUT" || verb === "DELETE") return "session.share_link.write";
+    return null;
+  }
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
-  if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   // Stands in for the person's own next message, so it needs the same access.
   if (suffix === "/capability-continuations" && verb === "POST") return "session.append";
@@ -6135,6 +6187,7 @@ export function sessionListQuery(
   createdFrom: Date | undefined;
   createdBefore: Date | undefined;
   scopeSubjectId: SessionScopeSubjectId | undefined;
+  sessionIds: string[] | undefined;
   hasPageFilters: boolean;
 } {
   const parentSessionId = query.parentSessionId;
@@ -6315,10 +6368,25 @@ export function sessionListQuery(
     }
     scopeSubjectId = parsedEndUser.data;
   }
+  // Comma-separated; one id per value keeps 200 ids within ordinary URL limits.
+  let sessionIds: string[] | undefined;
+  if (query.sessionIds !== undefined) {
+    if (!allowCursor) throw new HTTPException(400, { message: 'sessionIds requires view="page"' });
+    const ids = query.sessionIds.split(",");
+    if (
+      ids.length > SESSION_LIST_MAX_SESSION_IDS ||
+      ids.some((id) => !z.string().uuid().safeParse(id).success)
+    )
+      throw new HTTPException(400, {
+        message: `sessionIds must be 1 to ${SESSION_LIST_MAX_SESSION_IDS} comma-separated session ids`,
+      });
+    sessionIds = [...new Set(ids.map((id) => id.toLowerCase()))];
+  }
   const hasPageFilters =
     needsYouOnly ||
     contentArchivedOnly ||
     mineOnly ||
+    sessionIds !== undefined ||
     originSiteId !== undefined ||
     siteAccessId !== undefined ||
     channelId !== undefined ||
@@ -6371,6 +6439,7 @@ export function sessionListQuery(
     createdFrom,
     createdBefore,
     scopeSubjectId,
+    sessionIds,
     hasPageFilters,
   };
 }
@@ -6822,16 +6891,6 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
     // Covers the create-vs-channel-delete race the pre-validation cannot: the
     // insert's FK rejection surfaces as the same 422 an unknown id gets.
     return c.json({ code: "SESSION_CREATE_REJECTED", message: error.message }, 422);
-  }
-  if (error instanceof SessionVariableSetSelectionUnavailableError) {
-    return c.json(
-      {
-        code: "SESSION_CREATE_REJECTED",
-        message: error.message,
-        details: { variableSetIds: error.variableSetIds },
-      },
-      422,
-    );
   }
   if (error instanceof SessionSpawnDeniedError) {
     return c.json(

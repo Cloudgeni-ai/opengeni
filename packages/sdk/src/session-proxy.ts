@@ -16,6 +16,7 @@ import type {
 import { mintToolToken, resolveToolTokenSecret } from "./tool-auth";
 import { getSessionProxyWorkspaceGrant } from "./session-proxy-client";
 import { normalizeMessageTimeZone } from "@opengeni/contracts/message-time-zone";
+import type { ExternalActorStatedMembership } from "@opengeni/contracts/external-identities";
 export {
   getSessionProxyArtifactAssociation,
   getSessionProxyWorkspaceGrant,
@@ -70,6 +71,15 @@ export type SessionProxyResolution = (
   user: string;
   /** External identity source. Defaults to the facade's `source`, else `"default"`. */
   source?: string | undefined;
+  /**
+   * The user's membership as your app knows it right now, forwarded as
+   * `asUser(user, { membership })`. On every workspace-scoped request the
+   * user's grant in that shared workspace becomes exactly these permissions
+   * before the request is authorized (created if missing, changed only when
+   * it differs). Omit it to use the stored grant. Removing a user stays an
+   * explicit revoke.
+   */
+  membership?: ExternalActorStatedMembership | undefined;
   /**
    * The user is an anonymous visitor your product has not signed in, for
    * example a website visitor keyed by a cookie. Visitors cannot upload
@@ -288,7 +298,7 @@ export type SessionProxyHandlerOptions = {
    * {@link SessionProxyCreateInput}; this hook returns the complete create
    * request (agent, tools, MCP servers, Skills, instructions, model policy), and
    * the relay refuses the routes that would change that setup afterwards: a
-   * chat's agent, tool policy, Skills, variable sets, usage limit, visibility,
+   * chat's agent, tool policy, Skills, usage limit, visibility,
    * active sandbox and Codex account, forks, and `chat/completions`.
    *
    * Without it, the browser creates chats with Opengeni's own create request,
@@ -426,6 +436,8 @@ const CREATE_FIELDS: ReadonlySet<string> = new Set([
   "resources",
   "startMode",
   "modelContext",
+  // The tools the browser's context is for; they travel with that context.
+  "modelContextTools",
   // The person's own time zone, so the agent sees their local time.
   "timeZone",
   // Packaged-app bookkeeping; see `browserCreateFields`.
@@ -481,7 +493,6 @@ const SERVER_OWNED_SESSION_ROUTES: ReadonlySet<string> = new Set([
   "PUT agent",
   "PUT tool-policy",
   "PUT skills",
-  "PUT variable-sets",
   "PUT usage-limit",
   "PUT visibility",
   "POST active-sandbox",
@@ -613,7 +624,10 @@ export function createSessionProxyHandler(
       }
       const source = resolved.source ?? defaultSource;
       const workspaceId = await resolveWorkspace(target, resolved, source, chats);
-      const client = service.asUser(resolved.user, { source });
+      const client = service.asUser(resolved.user, {
+        source,
+        ...(resolved.membership ? { membership: resolved.membership } : {}),
+      });
       const context: SessionProxyContext = {
         request,
         workspaceId,
@@ -930,6 +944,9 @@ export function createSessionProxyHandler(
             extras?.modelContext,
             decidedBrowserContext(extras, browser.browserContext),
           );
+          // The browser's context tools go only with the browser's own context.
+          if (!keepsBrowserContext(extras, browser.browserContext))
+            delete created.modelContextTools;
           return await forward({
             ...defaults,
             ...(toolServer
@@ -961,8 +978,17 @@ export function createSessionProxyHandler(
           created.modelContext,
           decidedBrowserContext(extras, browser.modelContext),
         );
+        const modelContextTools = [
+          ...new Set([
+            ...(created.modelContextTools ?? []),
+            ...(keepsBrowserContext(extras, browser.modelContext)
+              ? (browser.modelContextTools ?? [])
+              : []),
+          ]),
+        ];
         const response = await forward({
           ...created,
+          ...(modelContextTools.length ? { modelContextTools } : {}),
           visibility: created.visibility ?? defaults.visibility,
           agentAccess: created.agentAccess ?? defaults.agentAccess,
           memoryScope: created.memoryScope ?? defaults.memoryScope,
@@ -1060,9 +1086,12 @@ export function createSessionProxyHandler(
               modelSelection,
             );
             if (modelSelection) return await forward(message);
-            // Save requires explicit policy fields. Use this actor's durable draft,
-            // not browser choices. The API's expectedRevision fence rejects races.
+            // Use this actor's durable draft, not browser choices. A draft that
+            // follows the chat's settings is saved without them so it keeps
+            // following; an older API (no such flag) requires them. The API's
+            // expectedRevision fence rejects races.
             const draft = await client.getComposerDraft(workspaceId, sessionId, call);
+            if (draft.policyFollowsSession) return await forward(message);
             return await forward({
               ...message,
               model: draft.model,
@@ -1869,6 +1898,7 @@ function createResources(value: unknown): FileResourceRef[] {
 /** Browser attachments are added; explicit browser model choices win, as for messages. */
 type BrowserCreateFields = {
   modelContext?: string | undefined;
+  modelContextTools?: string[] | undefined;
   timeZone?: string | undefined;
   clientEventId?: string | undefined;
   expectedNewSessionDraftRevision?: number | undefined;
@@ -1889,6 +1919,15 @@ function browserCreateFields(body: Record<string, unknown> | undefined): Browser
     reject(400, "invalid_model_context", "modelContext must be a string.");
   }
   if (modelContext?.trim()) fields.modelContext = modelContext;
+  const modelContextTools = body?.modelContextTools;
+  if (
+    modelContextTools !== undefined &&
+    (!Array.isArray(modelContextTools) ||
+      modelContextTools.some((name) => typeof name !== "string" || !name))
+  ) {
+    reject(400, "invalid_model_context_tools", "modelContextTools must be a list of tool names.");
+  }
+  if (modelContextTools?.length) fields.modelContextTools = modelContextTools as string[];
   const timeZone = normalizeMessageTimeZone(body?.timeZone);
   if (timeZone) fields.timeZone = timeZone;
   const visibility = body?.visibility;
@@ -2029,6 +2068,14 @@ function withBrowserContext(context: unknown): { browserContext?: string } {
     reject(400, "invalid_model_context", "modelContext must be a string.");
   }
   return context.trim() ? { browserContext: context } : {};
+}
+
+/** The browser's context is forwarded as sent (the host neither replaced nor dropped it). */
+function keepsBrowserContext(
+  extras: SessionProxyMessageExtras | undefined,
+  sent: string | undefined,
+): boolean {
+  return Boolean(sent?.trim()) && extras?.browserContext === undefined;
 }
 
 /** The browser's context as the host decided: kept (absent), replaced (a string) or dropped (`null`). */

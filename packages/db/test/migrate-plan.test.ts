@@ -3,7 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
-import { migrationDeploymentMode, planMigrations } from "../src/migrate";
+import { isPreReleaseEligible, migrationDeploymentMode, planMigrations } from "../src/migrate";
 import { BASELINE_MIGRATIONS, SQUASHED_MIGRATIONS } from "../src/migration-baseline";
 
 let blank: BlankTestDatabase;
@@ -47,12 +47,13 @@ describe("migration plan", () => {
   });
 
   test("only rolling migrations pending means no drain", async () => {
-    // The newest migration with no release-phase directive (a concurrent index,
-    // for example, runs after the release instead).
+    // The newest migration that runs in the maintenance span: no opengeni
+    // directive (a concurrent index, for example, runs after the release) and
+    // not posture-inert (those run before the release).
     let pendingName: string | undefined;
     for (const name of [...shipped].reverse()) {
       const sql = await readFile(join(import.meta.dir, "../drizzle", name), "utf8");
-      if (!/^-- opengeni:/m.test(sql)) {
+      if (!/^-- opengeni:/m.test(sql) && !isPreReleaseEligible(name, sql)) {
         pendingName = name;
         break;
       }

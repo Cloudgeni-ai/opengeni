@@ -105,6 +105,7 @@ export const SECTION_KEYS = [
   "secret-values",
   "secret-ask-card",
   "secret-approval",
+  "mcp-question",
   "cadence-picker",
   // People
   "access-list",
@@ -112,6 +113,9 @@ export const SECTION_KEYS = [
   "chat-approvals",
   "chat-questions",
   "chat-connect",
+  "chat-answers",
+  "chat-admission",
+  "inbox-approvals",
   // Foundations
   "logo-tile",
   "relative-time",
@@ -133,6 +137,7 @@ export const SECTION_KEYS = [
   "page-dictation",
   "page-knowledge",
   "page-org-people",
+  "page-eu-only",
 ] as const;
 
 export type SectionKey = (typeof SECTION_KEYS)[number];
@@ -725,6 +730,41 @@ export const SECTIONS: readonly SectionMeta[] = [
     load: () => import("./chat-connect"),
   },
   {
+    key: "chat-answers",
+    group: "Chat",
+    title: "Interactive answers",
+    purpose:
+      "Show options the agent found as cards, a table and a chart the person can filter and pick from.",
+    usedOn: "Chat, embedded chat and phone",
+    load: () => import("./chat-answers"),
+  },
+  {
+    key: "chat-admission",
+    group: "Chat",
+    title: "Messages that can't start",
+    purpose:
+      "Say why a saved message didn't start, name the machine involved, and offer the one way forward.",
+    usedOn: "Chat, embedded chat and phone",
+    load: () => import("./chat-admission"),
+  },
+  {
+    key: "inbox-approvals",
+    group: "Chat",
+    title: "Approvals in the inbox",
+    purpose:
+      "Say what a waiting approval does and where it runs, in the inbox and in notifications.",
+    usedOn: "Inbox on web, desktop and phone; phone and desktop notifications",
+    load: () => import("./inbox-approvals"),
+  },
+  {
+    key: "mcp-question",
+    group: "Chat",
+    title: "MCP server question",
+    purpose: "Answer a question an MCP server asks in the middle of a tool call.",
+    usedOn: "Chat approvals",
+    load: () => import("./mcp-question"),
+  },
+  {
     key: "cadence-picker",
     group: "Forms",
     title: "Cadence picker",
@@ -970,6 +1010,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Everyone in Acme Robotics, with the person page.",
     usedOn: "Organization settings",
     load: () => import("./page-org-people"),
+  },
+  {
+    key: "page-eu-only",
+    group: "Pages",
+    title: "EU-only inference",
+    purpose:
+      "The organization setting and what an EU-only workspace switches off, in production components.",
+    usedOn: "Organization settings > Security & data, model pickers, feature settings",
+    load: () => import("./page-eu-only"),
   },
 ];
 

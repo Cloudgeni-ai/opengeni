@@ -875,6 +875,112 @@ describe("an agent's move between the owner's personal machines", () => {
     expect(cause).toMatchObject({ stage: "session_attempts.claim", sqlState: "OG002" });
     expect(cause.where).toContain("carry_session_attempt_machine_authorization");
   }, 120_000);
+
+  test("an owner's message sent for one machine names it after the chat moved to another", async () => {
+    const f = await fixture();
+    const [other] = await app.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${f.accountId}, true),
+        set_config('opengeni.workspace_id', ${f.workspaceId}, true), set_config('opengeni.subject_id', ${f.owner}, true)`;
+      return await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
+        select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+        from finalize_scoped_enrollment(${f.accountId}::uuid, ${f.workspaceId}::uuid, 'user',
+          ${`ed25519:other-${crypto.randomUUID()}`}, true, false, 'linux', 'x86_64', 'Home server', false)`;
+    });
+    const session = await createSession(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: f.owner },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const move = (targetSandboxId: string, expectedEpoch: number) =>
+      setActiveSandbox(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: session.id,
+        subjectId: f.owner,
+        expectedEpoch,
+        targetSandboxId,
+      });
+    await move(f.sandboxId, session.activeEpoch);
+    const [authority] = await shared.admin`select authority_epoch from sessions
+      where id = ${session.id}`;
+    // The owner's message carries consent for the machine the chat runs on now.
+    await withWorkspaceSubjectSessionActivityRls(client.db, f.workspaceId, f.owner, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          sessionId: session.id,
+          subjectId: f.owner,
+          actor: { type: "human", subjectId: f.owner },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Build it here",
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+          personalResourceAttachment: {
+            mode: "session",
+            expectedAuthorityEpoch: Number(authority!.authority_epoch),
+            workspaceSharedAcknowledged: true,
+            sharedOutputWarningVersion: 1,
+          },
+        }),
+      ),
+    );
+    const explanation = (subjectId: string) =>
+      getSessionMachineAccess(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: session.id,
+        subjectId,
+      });
+    expect(await explanation(f.owner)).toMatchObject({
+      queuedTurnNotApprovedHere: false,
+      queuedTurnApprovedMachines: [],
+    });
+
+    // Before it starts, the chat moves to the owner's other machine: the
+    // message can't start there, and no recheck would change that.
+    await move(other!.sandboxId, session.activeEpoch + 1);
+    expect(await rejectedClaimCause(f.workspaceId, session.id)).toMatchObject({
+      sqlState: "OG002",
+      message: "matching personal-resource grant required",
+    });
+    expect(await explanation(f.owner)).toMatchObject({
+      sandboxId: other!.sandboxId,
+      machineName: "Home server",
+      isOwner: true,
+      queuedTurnBlocked: false,
+      queuedTurnNotApprovedHere: true,
+      queuedTurnApprovedMachines: [{ sandboxId: f.sandboxId, machineName: "Build machine" }],
+    });
+    // Only the sender learns which machines; others learn that it waits.
+    expect(await explanation(f.member)).toMatchObject({
+      isOwner: false,
+      queuedTurnNotApprovedHere: true,
+      queuedTurnApprovedMachines: [],
+    });
+    // The call leaves no capability behind in the caller's transaction.
+    const [leftover] = await shared.admin`select count(*)::int as count
+      from opengeni_private.personal_resource_delegation_capabilities`;
+    expect(leftover!.count).toBe(0);
+
+    // Moving back to the machine it was sent for lets it start.
+    await move(f.sandboxId, session.activeEpoch + 2);
+    expect(await explanation(f.owner)).toMatchObject({
+      sandboxId: f.sandboxId,
+      queuedTurnNotApprovedHere: false,
+      queuedTurnApprovedMachines: [],
+    });
+    expect((await claim(f.workspaceId, session.id)).turnId).toBeTruthy();
+  }, 120_000);
 });
 
 describe("messages from other people on a personal machine", () => {

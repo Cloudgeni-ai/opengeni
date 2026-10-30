@@ -6,7 +6,6 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { AttemptToolNotFoundError } from "@opengeni/codemode";
 import type { Settings } from "@opengeni/config";
 import {
-  AutomationSessionTemplate,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DelegatedAccessTokenPayload,
   signDelegatedAccessToken,
@@ -143,7 +142,7 @@ test("package imports resolve this worktree's actual source modules", () => {
   }
 });
 
-describe.each(["omitted", "explicit"] as const)("automation %s empty permissions", (selection) => {
+describe("background run with empty permissions", () => {
   test.each([
     { name: "automatic attachment", ref: undefined },
     { name: "required", ref: { kind: "mcp", id: "opengeni" } as ToolRef },
@@ -155,13 +154,11 @@ describe.each(["omitted", "explicit"] as const)("automation %s empty permissions
       deferred: true,
     },
   ])("$name skips delegated MCP before token validation or fetch", async ({ ref, deferred }) => {
-    const template = AutomationSessionTemplate.parse({
-      prompt: "Summarize a synthetic report.",
-      ...(ref ? { tools: [ref] } : {}),
-      ...(selection === "explicit" ? { firstPartyMcpTools: [], firstPartyMcpPermissions: [] } : {}),
-    });
-    expect(template.firstPartyMcpPermissions).toEqual([]);
-    expect(template.firstPartyMcpTools).toEqual([]);
+    const template = {
+      tools: ref ? [ref] : ([] as ToolRef[]),
+      firstPartyMcpPermissions: [] as Permission[],
+      firstPartyMcpTools: [] as string[],
+    };
     const settings = settingsFor();
     const refs = withFirstPartyTools(settings, template.tools);
     // Worker augmentation preserves strict/eager merging, not optionality.

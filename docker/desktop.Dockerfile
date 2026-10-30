@@ -195,6 +195,7 @@ RUN set -eux; \
     cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
     cp -aL packages/contracts/node_modules/yaml "$runtime/node_modules/yaml"; \
     cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
+    cp -aL packages/contracts/node_modules/entities "$runtime/node_modules/entities"; \
     test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"; \
     test -f "$runtime/node_modules/@opengeni/sdk/src/site.ts"; \
     test -f "$runtime/node_modules/@opengeni/tool-gateway/src/index.ts"
@@ -700,6 +701,11 @@ RUN set -eux; \
     bash -n /usr/local/bin/opengeni-browserd-down; \
     sha256sum -c /usr/local/share/opengeni/browserd-SHA256SUMS; \
     bash -n /usr/local/bin/opengeni-record
+
+# The same lowest-precedence commit identity as the sandbox image (see
+# docker/sandbox.Dockerfile): anything a deployment, user or repository sets wins.
+RUN git config --system user.name "Opengeni Agent" \
+    && git config --system user.email agent@opengeni.invalid
 
 ENV HOME=/workspace
 ENV DISPLAY=:0

@@ -1,8 +1,9 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { SessionCapabilityCard } from "@opengeni/react/app/components/capabilities/session-capability-card";
-import type { AuthNeededItem } from "@opengeni/react";
+import { ThisComputerCard } from "@opengeni/react/this-computer";
+import { SessionIntegrationCapabilityCard, type AuthNeededItem } from "@opengeni/react";
 
 import { KitSection, StateCell, StatesGrid } from "../kit";
 import { ChatFrame, lead, showPart } from "./chat-shared";
@@ -43,11 +44,49 @@ function emptyList(): unknown {
   return Object.assign([], { items: [], definitions: [], integrations: [], machines: [] });
 }
 
+/** The marketplace plugin the plugin card offers: two Skills and an MCP server. */
+const PLUGIN = {
+  id: "anthropic:sentry",
+  provider: "anthropic",
+  name: "sentry",
+  displayName: "Sentry",
+  description: "Find, triage and explain production errors from Sentry.",
+  category: "Monitoring",
+  sourceUrl: "https://github.com/example/plugins/tree/main/sentry",
+  logoUrl: null,
+  author: { name: "Sentry" },
+  skills: [
+    {
+      name: "triage-errors",
+      description: "Group the newest errors and say which one to fix first.",
+      sourceUrl: "https://github.com/example/plugins/tree/main/sentry/skills/triage-errors",
+    },
+    {
+      name: "explain-issue",
+      description: "Explain one Sentry issue with its stack trace and recent changes.",
+      sourceUrl: "https://github.com/example/plugins/tree/main/sentry/skills/explain-issue",
+    },
+  ],
+  mcpServers: [
+    {
+      name: "sentry",
+      transport: "http",
+      endpoint: "https://mcp.sentry.dev/mcp",
+      requiresConfiguration: false,
+    },
+  ],
+};
+
 const client = new Proxy(
   {
     catalogAssetUrl: () => null,
     connectTransport: () => ({}),
     listCapabilities: async () => ({ items: CATALOG.map((item) => ({ ...item, enabled: false })) }),
+    discoverPlugins: async () => ({ items: [PLUGIN], nextCursor: null }),
+    listInstalledPlugins: async () => ({ plugins: [] }),
+    previewPlugin: async () => {
+      throw new Error("The UI kit doesn't install plugins.");
+    },
     inspectMcpAuthentication: async () => ({ kind: "none" }),
     getGitHubApp: async () => ({
       status: "unbound",
@@ -96,6 +135,7 @@ const context = new Proxy(
             "connections:write",
             "capabilities:manage",
             "sessions:read",
+            "sessions:control",
           ],
         },
       ],
@@ -132,7 +172,7 @@ function notice(id: string, extra: Partial<AuthNeededItem>): AuthNeededItem {
 function capability(
   id: string,
   name: string,
-  kind: "mcp" | "api",
+  kind: "mcp" | "api" | "plugin",
   rationale: string,
 ): AuthNeededItem["capability"] {
   return {
@@ -207,6 +247,22 @@ const CARDS: Record<string, { label: string; item: AuthNeededItem; ask: [string,
     }),
     ask: ["Open a PR with the fix.", "I need GitHub access for this repository. Connect it below."],
   },
+  plugin: {
+    label: "Plugin (Skills and an MCP server)",
+    item: notice("plugin", {
+      providerDomain: "sentry.io",
+      capability: capability(
+        "plugin:marketplace/anthropic/sentry",
+        "Sentry",
+        "plugin",
+        "Install the Sentry plugin so I can triage this morning's errors.",
+      ),
+    }),
+    ask: [
+      "Set yourself up to triage our Sentry errors.",
+      "There's a Sentry plugin with triage Skills and its MCP server. Install it below.",
+    ],
+  },
 };
 
 function Card({ item }: { item: AuthNeededItem }) {
@@ -226,6 +282,129 @@ function Provider({ children }: { children: ReactNode }) {
   return <AppContext.Provider value={context as never}>{children}</AppContext.Provider>;
 }
 
+/* ----------------------------------------------------------------------------
+   Live sign-in steps: a reviewed integration's card against a fake Connect
+   backend. Press Connect to see the card wait for its sign-in window, then
+   Cancel or Reopen window. "fails" reports an error on its first poll;
+   "code" asks the person to enter a code on the provider's page.
+   -------------------------------------------------------------------------- */
+
+function signInClient(definitionId: string, mode: "waits" | "fails" | "code") {
+  let revision = 0;
+  let current: Record<string, unknown> | null = null;
+  const attempt = (overrides: Record<string, unknown>) => {
+    revision += 1;
+    current = {
+      id: `attempt-${definitionId}`,
+      workspaceId: "ws-kit",
+      providerId: definitionId,
+      ownership: "personal",
+      revision,
+      state: "requires_user_action",
+      nextAction: { type: "none" },
+      credentialsCommitted: false,
+      integrationInstalled: false,
+      completionRequirement: "integration",
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      ...overrides,
+    };
+    return structuredClone(current);
+  };
+  const transport = {
+    catalog: async () => [
+      {
+        id: definitionId,
+        label: definitionId,
+        family: "microsoft",
+        readiness: "available",
+        ownership: ["personal"],
+        setup: ["oauth"],
+      },
+    ],
+    accounts: async () => [],
+    pending: async () => [],
+    begin: async () =>
+      attempt({
+        nextAction:
+          mode === "code"
+            ? {
+                type: "wait",
+                userCode: "WDJB-MJHT",
+                verificationUrl: "https://login.example.com/device",
+                pollAfterMs: 5000,
+              }
+            : { type: "authorize", url: "https://login.example.com/authorize?state=kit" },
+      }),
+    recover: async () => structuredClone(current),
+    get: async () => {
+      if (mode === "fails") throw new Error("kit: sign-in failed");
+      return structuredClone(current);
+    },
+    advance: async () => structuredClone(current),
+    cancel: async () => attempt({ state: "cancelled", nextAction: { type: "none" } }),
+    disconnect: async () => {},
+  };
+  return {
+    connectTransport: () => transport,
+    listApiIntegrations: async () => ({ integrations: [] }),
+    getSession: async () => ({ id: "session-kit", tools: [], toolPolicy: { mode: "default" } }),
+    updateSessionToolPolicy: async () => ({}),
+    continueAfterCapabilitySetup: async () => ({ outcome: "queued", updateId: "kit" }),
+  };
+}
+
+const SIGN_IN: {
+  label: string;
+  definitionId: string;
+  name: string;
+  mode: "waits" | "fails" | "code";
+  rationale: string;
+}[] = [
+  {
+    label: "Waiting for sign-in (press Connect)",
+    definitionId: "microsoft-outlook-mail",
+    name: "Outlook Mail",
+    mode: "waits",
+    rationale: "Saving the draft to your Outlook needs your mailbox.",
+  },
+  {
+    label: "Cancelled (press Connect, then Cancel)",
+    definitionId: "microsoft-outlook-calendar",
+    name: "Outlook Calendar",
+    mode: "waits",
+    rationale: "Booking the review meeting needs your Outlook calendar.",
+  },
+  {
+    label: "Sign-in could not continue (press Connect)",
+    definitionId: "microsoft-onedrive",
+    name: "OneDrive",
+    mode: "fails",
+    rationale: "Opening the quarterly report needs your OneDrive.",
+  },
+  {
+    label: "Enter a code on the provider's page (press Connect)",
+    definitionId: "microsoft-teams",
+    name: "Microsoft Teams",
+    mode: "code",
+    rationale: "Posting the summary needs your Teams account.",
+  },
+];
+
+function SignInCard({ entry }: { entry: (typeof SIGN_IN)[number] }) {
+  const [fake] = useState(() => signInClient(entry.definitionId, entry.mode));
+  return (
+    <SessionIntegrationCapabilityCard
+      client={fake as never}
+      workspaceId="ws-kit"
+      sessionId="session-kit"
+      capabilityId={`api:integration:${entry.definitionId}`}
+      name={entry.name}
+      rationale={entry.rationale}
+      returnUrl="https://app.example.com/chat"
+    />
+  );
+}
+
 export default function ChatConnectSection() {
   const oauth = CARDS.oauth!;
   return (
@@ -240,6 +419,15 @@ export default function ChatConnectSection() {
             </StateCell>
           </StatesGrid>
         ) : null}
+        {showPart("signin") ? (
+          <StatesGrid title="Sign-in steps" columns={1}>
+            {SIGN_IN.map((entry) => (
+              <StateCell key={entry.definitionId} label={entry.label} align="stretch">
+                <SignInCard entry={entry} />
+              </StateCell>
+            ))}
+          </StatesGrid>
+        ) : null}
         {showPart("kinds") ? (
           <StatesGrid title="Kinds" columns={2}>
             {Object.entries(CARDS).map(([key, card]) => (
@@ -247,6 +435,14 @@ export default function ChatConnectSection() {
                 <Card item={card.item} />
               </StateCell>
             ))}
+            <StateCell label="This computer (web, app not installed)" align="stretch">
+              <ThisComputerCard
+                rationale="Let me use your computer so I can open the spreadsheet in Excel."
+                productName="Opengeni"
+                machines={[]}
+                downloadUrl="#download"
+              />
+            </StateCell>
           </StatesGrid>
         ) : null}
       </KitSection>

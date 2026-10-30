@@ -1,3 +1,4 @@
+import { decodeHTML, decodeHTMLAttribute } from "entities/decode";
 import type {
   ToolActionReview,
   ToolReviewContext,
@@ -314,6 +315,8 @@ export function toolReviewFields(
       moreFields: original.moreFields + Math.max(0, fields.length - 16),
     };
   }
+  const api = apiEnvelopeReviewFields(args, context);
+  if (api) return api;
   return {
     moreFields: Math.max(0, entries.length - 16),
     fields: entries.slice(0, 16).map(([key, value], index) => {
@@ -361,9 +364,479 @@ export function toolReviewFields(
 
 /** The tool that runs an app action as the person (see @opengeni/contracts/app-actions). */
 const APP_ACTION_REVIEW_TOOL = "admin_action_call";
+
+/* ---- API integration requests ------------------------------------------- */
+
+// An API integration tool's arguments are its HTTP request: `path`, `query`,
+// `header` and `cookie` parameters plus a `body`. That envelope is transport.
+// A person approving "Save a draft email" wants the recipients, subject and
+// text, so the card lifts the request's own fields and reads common shapes
+// (recipients, rich text, date and time, named places) as one plain value.
+// The exact structure stays one click away in Details.
+const API_ENVELOPE_KEYS = new Set(["path", "query", "header", "cookie", "body", "contentType"]);
+// In the order a person checks them: who, what, when, where, the text, then
+// the rest of the addressing.
+const API_LEADING_LABELS: Readonly<Record<string, string>> = {
+  toRecipients: "To",
+  subject: "Subject",
+  start: "Starts",
+  end: "Ends",
+  location: "Location",
+  body: "Message",
+  comment: "Message",
+  ccRecipients: "Cc",
+  bccRecipients: "Bcc",
+  from: "From",
+  replyTo: "Reply to",
+  attendees: "Attendees",
+};
+const API_FIELD_ORDER = Object.keys(API_LEADING_LABELS);
+/** Longer than other previews: the text of a message is what a person checks. */
+const API_TEXT_PREVIEW = 1000;
+
+type ApiEntry = { key: string; value: unknown; path: string; parameter: boolean };
+
+const plainObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+function apiEnvelopeEntries(args: Record<string, unknown>): ApiEntry[] | null {
+  const keys = Object.keys(args);
+  if (keys.length === 0 || !keys.every((key) => API_ENVELOPE_KEYS.has(key))) return null;
+  if (!keys.some((key) => key === "path" || key === "query" || key === "body")) return null;
+  for (const key of ["path", "query", "header", "cookie"])
+    if (args[key] !== undefined && !plainObject(args[key])) return null;
+  const children = (parent: string, parameter: boolean): ApiEntry[] =>
+    plainObject(args[parent])
+      ? Object.entries(args[parent]).map(([key, value]) => ({
+          key,
+          value,
+          path: `${pointer(parent)}${pointer(key)}`,
+          parameter,
+        }))
+      : [];
+  // A message wrapped in the body ({ message: {...}, comment }) reads as the message itself.
+  const body: ApiEntry[] = plainObject(args.body)
+    ? children("body", false).flatMap((entry) =>
+        entry.key === "message" && plainObject(entry.value)
+          ? Object.entries(entry.value).map(([key, value]) => ({
+              key,
+              value,
+              path: `${entry.path}${pointer(key)}`,
+              parameter: false,
+            }))
+          : [entry],
+      )
+    : args.body === undefined
+      ? []
+      : [{ key: "content", value: args.body, path: "/body", parameter: false }];
+  const entries = [
+    ...body,
+    ...children("path", true),
+    ...children("query", true),
+    ...children("header", true),
+    ...children("cookie", true),
+    ...(args.contentType === undefined
+      ? []
+      : [{ key: "contentType", value: args.contentType, path: "/contentType", parameter: true }]),
+  ];
+  return entries.every((entry) => entry.path.length <= 1024) ? entries : null;
+}
+
+/** Longest list of link targets a message preview shows before pointing to Details. */
+const API_LINKS_PREVIEW = 4000;
+// Placeholders for line breaks while text is collected, so that the breaks of
+// nested and adjacent blocks merge the way a browser lays them out.
+const LINE_BREAK = "\u0000";
+const BLOCK_BREAK = "\u0001";
+const PARAGRAPH_BREAK = "\u0002";
+const BREAK_RUN = /[ \u0000-\u0002]*[\u0000-\u0002][ \u0000-\u0002]*/g;
+// Characters that change nothing a person reads.
+const INVISIBLE = /[\u00ad\u200b-\u200d\u2060\ufeff]/g;
+
+// HTML read the way a browser tokenizes it, closely enough for a review card:
+// quoted values may hold ">" or "<!--", an unquoted value may hold a stray
+// quote, and "a < b" stays text. Names and unquoted values stop at "<", and
+// each name or value is matched whole, so a broken tag fails fast.
+const HTML_NAME = `[^\\s"'>/=<]+(?![^\\s"'>/=<])`;
+const HTML_VALUE = `(?:"[^"]*"|'[^']*'|[^\\s><]*(?![^\\s><]))`;
+const HTML_TAG = new RegExp(
+  `<(/?)([a-z][^\\s/>]*)((?:\\s|/|${HTML_NAME}(?:\\s*=\\s*${HTML_VALUE})?)*)>`,
+  "iy",
+);
+// Comments end at "-->", "--!>", or at once for "<!-->" and "<!--->".
+const HTML_COMMENT = /<!--(?:-?>|[\s\S]*?(?:--!?>|$))/y;
+// Doctypes, processing instructions and "</ >" are skipped like comments.
+const HTML_BOGUS = /<(?:!|\?|\/(?![a-z]))[^>]*(?:>|$)/iy;
+const HTML_ATTRIBUTE = new RegExp(`(${HTML_NAME})(?:\\s*=\\s*(${HTML_VALUE}))?`, "g");
+// Their content is never shown; they end at the first literal closing tag.
+const HTML_RAW_TEXT = /^(script|style|title)$/;
+// Any link target or form destination anywhere in the raw HTML, for the
+// fail-safe below.
+const HTML_ANY_TARGET =
+  /(?:^|[\s"'/<])(?:(?:xlink:)?href|action|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>][^\s>]*))/gi;
+/** Enough HTML for the text a card previews; the full value stays in Details. */
+const HTML_READ_LIMIT = 200_000;
+
+/** The value of a tag's own `href` (or SVG `xlink:href`), not `data-href`. */
+function hrefOf(attributes: string): string | undefined {
+  for (const match of attributes.matchAll(HTML_ATTRIBUTE)) {
+    const name = match[1]!.toLowerCase();
+    if (name !== "href" && name !== "xlink:href") continue;
+    const value = match[2] ?? "";
+    return /^["']/.test(value) ? value.slice(1, -1) : value;
+  }
+  return undefined;
+}
+
+/** A link target as the browser reads it, or undefined when it goes nowhere.
+ * Decoded exactly as an attribute value, so the shown address is the real one. */
+function linkTarget(raw: string): string | undefined {
+  const target = decodeHTMLAttribute(raw)
+    .trim()
+    .replace(/^mailto:/i, "");
+  return target && !target.startsWith("#") ? target : undefined;
+}
+
+/**
+ * The text a person reads in an HTML message. A link whose target differs from
+ * its text shows both, "our portal (https://pay.example.net)", because where a
+ * link goes is what a person checks before sending. That holds for a link that
+ * is never closed too: mail clients keep it a link to the end of its text.
+ * Text and link targets are decoded exactly once, the way a browser decodes
+ * them. The text is cut to a preview, and every link target or form
+ * destination the shown preview doesn't show in full is listed first: one
+ * after the cut, one in markup the reader misjudges, one past the read limit.
+ * However long the message, a person never approves a link they can't see.
+ */
+function plainText(content: string, contentType: unknown): ApiReading {
+  if (typeof contentType !== "string" || contentType.toLowerCase() !== "html")
+    return { text: content };
+  const html = content.slice(0, HTML_READ_LIMIT);
+  const shownTargets = new Set<string>();
+  // Text is collected raw and decoded per piece, so nothing decodes twice.
+  const pieces: string[] = [];
+  let out = "";
+  let link: { target: string | undefined; continued: boolean } | undefined;
+  const flush = () => {
+    pieces.push(decodeHTML(out).replace(/[\u0000-\u0002]/g, ""));
+    out = "";
+  };
+  // Everything collected since a link opened is its text.
+  const closeLink = () => {
+    if (!link) return;
+    const { target, continued } = link;
+    link = undefined;
+    flush();
+    const text = pieces.pop()!;
+    const shown = text.trim();
+    if (!target) return void pieces.push(text);
+    shownTargets.add(target);
+    if (shown === target) pieces.push(text);
+    else if (shown) {
+      // The target follows the words, before any space after them.
+      const words = text.trimEnd();
+      pieces.push(`${words} (${target})${text.slice(words.length)}`);
+    } else pieces.push(continued ? text : `${text}${target} `);
+  };
+  const block = (separator: string) => {
+    // A link still open across a paragraph keeps going in the next one.
+    const open = link;
+    closeLink();
+    flush();
+    pieces.push(separator);
+    if (open) link = { target: open.target, continued: true };
+  };
+  let index = 0;
+  while (index < html.length) {
+    const next = html.indexOf("<", index);
+    if (next < 0) break;
+    out += html.slice(index, next);
+    index = next;
+    HTML_COMMENT.lastIndex = HTML_BOGUS.lastIndex = HTML_TAG.lastIndex = next;
+    const comment = HTML_COMMENT.exec(html) ?? HTML_BOGUS.exec(html);
+    if (comment) {
+      index = next + comment[0].length;
+      continue;
+    }
+    const tag = HTML_TAG.exec(html);
+    if (!tag) {
+      // Not a tag: a "<" in the text.
+      out += "<";
+      index = next + 1;
+      continue;
+    }
+    index = next + tag[0].length;
+    const [, closing, rawName = "", attributes = ""] = tag;
+    const name = rawName.toLowerCase();
+    if (!closing && HTML_RAW_TEXT.test(name)) {
+      const end = new RegExp(`</${name}(?=[\\s/>])[^>]*>?`, "ig");
+      end.lastIndex = index;
+      const found = end.exec(html);
+      index = found ? found.index + found[0].length : html.length;
+    } else if (name === "a") {
+      closeLink();
+      const href = closing ? undefined : hrefOf(attributes);
+      if (href !== undefined) {
+        flush();
+        link = { target: linkTarget(href), continued: false };
+      }
+    } else if (/^(p|h[1-6]|blockquote)$/.test(name)) block(PARAGRAPH_BREAK);
+    else if (!closing && name === "br") block(LINE_BREAK);
+    else if (/^(div|li|tr|ul|ol|table|section|article|header|footer)$/.test(name))
+      block(BLOCK_BREAK);
+  }
+  out += html.slice(index);
+  closeLink();
+  flush();
+  const text = pieces
+    .join("")
+    .replace(INVISIBLE, "")
+    // Source line breaks and runs of spaces read as one space, as in a browser.
+    .replace(/\s+/g, " ")
+    // A paragraph leaves a blank line, a block or a line break one line;
+    // several line breaks in a row keep their count, up to a blank line.
+    .replace(BREAK_RUN, (run) => {
+      const lines = run.includes(PARAGRAPH_BREAK)
+        ? 2
+        : Math.max(run.includes(BLOCK_BREAK) ? 1 : 0, run.split(LINE_BREAK).length - 1);
+      return "\n".repeat(Math.min(2, lines));
+    })
+    .trim();
+  const preview = bound(text, API_TEXT_PREVIEW);
+  // Every target in the whole message, in order, including any the reader missed.
+  const targets = new Set<string>();
+  for (const match of content.matchAll(HTML_ANY_TARGET)) {
+    const target = linkTarget(match[1] ?? match[2] ?? match[3] ?? "");
+    if (target) targets.add(target);
+  }
+  for (const target of shownTargets) targets.add(target);
+  const unseen = [...targets].filter((target) => !showsTarget(preview, target));
+  let listed = "";
+  let count = 0;
+  for (const target of unseen) {
+    const next = `${listed}${count ? ", " : ""}${bound(target, API_TEXT_PREVIEW)}`;
+    if (count && next.length > API_LINKS_PREVIEW) break;
+    listed = next;
+    count += 1;
+  }
+  const more = unseen.length - count;
+  const links = count
+    ? `Links: ${listed}${more ? `, and ${more.toLocaleString("en-US")} more. Details lists every link.` : ""}\n\n`
+    : "";
+  return {
+    text: `${links}${preview}`,
+    fitted: true,
+    truncated: preview !== text || more > 0,
+    targets: [...targets],
+  };
+}
+
+/** Whether a preview shows a whole link target, not just the start of a longer address. */
+function showsTarget(preview: string, target: string): boolean {
+  for (let at = preview.indexOf(target); at >= 0; at = preview.indexOf(target, at + 1)) {
+    const before = preview[at - 1] ?? " ";
+    const end = at + target.length;
+    const after = preview[end] ?? " ";
+    // "visit https://example.com." ends a sentence, not the address.
+    const sentenceEnd = after === "." && /\s/.test(preview[end + 1] ?? " ");
+    if (/[\s(]/.test(before) && (/[\s),]/.test(after) || sentenceEnd)) return true;
+  }
+  return false;
+}
+
+/** "Anna Berg <anna@example.com>" for a recipient-like value, else undefined. */
+function recipientText(value: unknown): string | undefined {
+  if (typeof value === "string") return value.includes("@") ? value : undefined;
+  if (!plainObject(value)) return undefined;
+  const inner = plainObject(value.emailAddress) ? value.emailAddress : value;
+  const address = [inner.address, inner.email].find(
+    (entry): entry is string => typeof entry === "string" && entry.includes("@"),
+  );
+  if (!address) return undefined;
+  const name = [inner.name, inner.displayName].find(
+    (entry): entry is string => typeof entry === "string" && entry.trim() !== "",
+  );
+  const text = name && name !== address ? `${name} <${address}>` : address;
+  // A meeting attendee says when coming is optional.
+  return typeof value.type === "string" && value.type.toLowerCase() === "optional"
+    ? `${text} (optional)`
+    : text;
+}
+
+/** "2026-10-28 10:00 (Europe/Oslo)": seconds only when they matter. */
+function dateTimeText(dateTime: string, timeZone: unknown): string {
+  const parsed =
+    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i.exec(
+      dateTime.trim(),
+    );
+  const text = parsed
+    ? `${parsed[1]} ${parsed[2]}:${parsed[3]}${parsed[4] && parsed[4] !== "00" ? `:${parsed[4]}` : ""}${
+        parsed[5] ? (parsed[5].toUpperCase() === "Z" ? " UTC" : ` ${parsed[5]}`) : ""
+      }`
+    : dateTime;
+  const zone = typeof timeZone === "string" ? timeZone.trim() : "";
+  // "23:30 UTC" already says its zone.
+  return zone && !(text.endsWith(" UTC") && /^(utc|z|etc\/utc)$/i.test(zone))
+    ? `${text} (${zone})`
+    : text;
+}
+
+/** One plain reading of a structured value, or undefined to fall back to its size. */
+function apiValueText(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return undefined;
+    const recipients = value.map(recipientText);
+    if (recipients.every((entry) => entry !== undefined)) return recipients.join(", ");
+    // Attachments and other named items read as their names.
+    const names = value.map((item) =>
+      plainObject(item) && typeof item.name === "string" && item.name.trim()
+        ? item.name.trim()
+        : undefined,
+    );
+    return names.every((entry) => entry !== undefined) ? names.join(", ") : undefined;
+  }
+  if (!plainObject(value)) return undefined;
+  const recipient = recipientText(value);
+  if (recipient) return recipient;
+  const keys = Object.keys(value);
+  if (
+    typeof value.dateTime === "string" &&
+    keys.every((key) => ["dateTime", "timeZone"].includes(key))
+  )
+    return dateTimeText(value.dateTime, value.timeZone);
+  if (typeof value.displayName === "string" && value.displayName.trim()) return value.displayName;
+  return undefined;
+}
+
+/**
+ * A plain reading of a value. A message's text comes already fitted to its
+ * preview (`fitted`), because its link list must survive the cut.
+ */
+type ApiReading = {
+  text: string;
+  fitted?: boolean;
+  truncated?: boolean;
+  /** Every link target in an HTML message, in order. */
+  targets?: string[];
+};
+
+/** A message body: its text and how it is written ({ content, contentType }). */
+function messageContent(value: unknown): { content: string; contentType: unknown } | undefined {
+  return plainObject(value) &&
+    typeof value.content === "string" &&
+    Object.keys(value).every((key) => ["content", "contentType"].includes(key))
+    ? { content: value.content, contentType: value.contentType }
+    : undefined;
+}
+
+function apiValueReading(value: unknown): ApiReading | undefined {
+  const message = messageContent(value);
+  if (message) return plainText(message.content, message.contentType);
+  const text = apiValueText(value);
+  return text === undefined ? undefined : { text };
+}
+
+function apiEnvelopeReviewFields(
+  args: Record<string, unknown>,
+  context: ToolReviewContext | undefined,
+): { fields: ToolActionReview["fields"]; moreFields: number } | null {
+  // Only an API integration's arguments are an HTTP request; another tool's
+  // `body` or `query` argument means what that tool says it means.
+  if (context?.kind !== "api" || context.protectedFields?.includes("*")) return null;
+  const entries = apiEnvelopeEntries(args);
+  if (!entries) return null;
+  const rank = (entry: ApiEntry) => {
+    const index = API_FIELD_ORDER.indexOf(entry.key);
+    return entry.parameter
+      ? API_FIELD_ORDER.length + 1
+      : index < 0
+        ? API_FIELD_ORDER.length
+        : index;
+  };
+  // An empty list or object says nothing at a glance; Details still lists it.
+  const empty = (value: unknown) =>
+    (Array.isArray(value) && value.length === 0) ||
+    (plainObject(value) && Object.keys(value).length === 0);
+  const ordered = entries
+    .filter((entry) => !empty(entry.value))
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => rank(a.entry) - rank(b.entry) || a.index - b.index)
+    .map(({ entry }) => entry);
+  const used = new Set<string>();
+  const fields = ordered.map((entry): ToolActionReview["fields"][number] => {
+    const segments = entry.path.slice(1).split("/");
+    const hidden = segments.some((segment) =>
+      protectedReviewField(
+        segment.replaceAll("~1", "/").replaceAll("~0", "~"),
+        context?.protectedFields,
+      ),
+    );
+    const leading =
+      Object.hasOwn(API_LEADING_LABELS, entry.key) && !entry.parameter
+        ? API_LEADING_LABELS[entry.key]
+        : undefined;
+    const label = leading && !used.has(leading) ? leading : toolReviewFieldLabel(entry.key);
+    used.add(label);
+    if (hidden)
+      return {
+        path: entry.path,
+        label,
+        preview: "[Protected value]",
+        truncated: false,
+        protected: true,
+      };
+    const { value } = entry;
+    const structured = value !== null && typeof value === "object";
+    const reading = structured ? apiValueReading(value) : undefined;
+    const read = reading?.text;
+    const count = Array.isArray(value) ? value.length : undefined;
+    const compactList =
+      Array.isArray(value) &&
+      value.length > 0 &&
+      value.length <= 4 &&
+      value.every((item) => ["string", "number", "boolean"].includes(typeof item))
+        ? value.map(valueText).join(", ")
+        : undefined;
+    const text =
+      read ??
+      compactList ??
+      (count !== undefined
+        ? `${count.toLocaleString("en-US")} item${count === 1 ? "" : "s"}`
+        : structured
+          ? `${Object.keys(value).length} field${Object.keys(value).length === 1 ? "" : "s"}`
+          : valueText(value));
+    const limit = read !== undefined || typeof value === "string" ? API_TEXT_PREVIEW : 240;
+    return {
+      path: entry.path,
+      label: bound(label, 256),
+      preview: reading?.fitted ? text : bound(text, limit),
+      ...(count !== undefined ? { count } : {}),
+      // A plain reading is the value a person checks, shown as text; its exact
+      // structure stays in Details. A bare size ("3 fields") opens it here.
+      truncated: reading?.fitted
+        ? reading.truncated === true
+        : text.length > limit || (structured && read === undefined && compactList === undefined),
+    };
+  });
+  return { fields: fields.slice(0, 16), moreFields: Math.max(0, fields.length - 16) };
+}
 // Bookkeeping and opaque identifiers say nothing a person can check.
 const APP_ACTION_UNREADABLE_KEY =
   /^(id|operationId|idempotencyKey|expiresAt|expectedVersion|expectedRevision|expectedEtag)$|Ids?$/;
+
+/** Request fields whose values are codes: the card says them in words. */
+const APP_ACTION_CODED_FIELDS: Readonly<
+  Record<string, { label: string; values: Readonly<Record<string, string>> }>
+> = {
+  fundingSource: {
+    label: "Paid with",
+    values: {
+      opengeni_credits: "Opengeni credits",
+      workspace_gateway: "The workspace's Vercel AI Gateway",
+      supergrok_subscription: "A connected SuperGrok account",
+    },
+  },
+};
 
 /**
  * One short readable line of an app action's key values, for example
@@ -381,6 +854,13 @@ export function appActionReviewSummary(argumentsValue: unknown): string | undefi
     if (parts.length >= 4 || APP_ACTION_UNREADABLE_KEY.test(key)) return;
     if (secretFieldName(key)) {
       parts.push(`${toolReviewFieldLabel(key)}: [Protected value]`);
+      return;
+    }
+    const coded = Object.hasOwn(APP_ACTION_CODED_FIELDS, key)
+      ? APP_ACTION_CODED_FIELDS[key]!
+      : undefined;
+    if (coded && typeof value === "string" && Object.hasOwn(coded.values, value)) {
+      parts.push(`${coded.label}: ${coded.values[value]}`);
       return;
     }
     if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -621,16 +1101,28 @@ export function toolReviewDetails(
     items = [{ label: "Message", ...labelled(value)! }];
   } else if (value && typeof value === "object") {
     const entries = Object.entries(value);
-    total = entries.length;
-    items = entries.slice(offset, offset + limit).map(([key, entry], index) => ({
-      label: bound(
-        (context?.fieldLabels && Object.hasOwn(context.fieldLabels, key)
-          ? context.fieldLabels[key]
-          : undefined) ?? toolReviewFieldLabel(key),
-        256,
-      ),
-      ...preview(entry, key, `${path}${fieldPointer(key, offset + index, path)}`),
+    // A message's Details lead with every link target it holds, so the card's
+    // "Details lists every link" is true however many there are.
+    const message = messageContent(value);
+    const links = message ? (plainText(message.content, message.contentType).targets ?? []) : [];
+    total = links.length + entries.length;
+    const linkItems = links.slice(offset, offset + limit).map((target, index) => ({
+      label: `Link ${offset + index + 1}`,
+      value: bound(target, 4000),
     }));
+    const start = Math.max(0, offset - links.length);
+    const fieldItems = entries
+      .slice(start, start + limit - linkItems.length)
+      .map(([key, entry], position) => ({
+        label: bound(
+          (context?.fieldLabels && Object.hasOwn(context.fieldLabels, key)
+            ? context.fieldLabels[key]
+            : undefined) ?? toolReviewFieldLabel(key),
+          256,
+        ),
+        ...preview(entry, key, `${path}${fieldPointer(key, start + position, path)}`),
+      }));
+    items = [...linkItems, ...fieldItems];
   } else {
     const text = valueText(value);
     total = Math.max(1, Math.ceil(text.length / 4000));

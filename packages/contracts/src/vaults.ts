@@ -342,6 +342,8 @@ export const PASSKEY_FIELD_NAMES = [
   "userHandle",
   "userName",
   "privateKey",
+  "backupEligibility",
+  "backupState",
 ] as const;
 
 // Forbidden anywhere in a name: / { } # \ and C0/C1 control characters.
@@ -1052,7 +1054,7 @@ export const VAULT_ERROR_HTTP_STATUS: Readonly<Record<VaultErrorCode, number>> =
   vault_permission_denied: 403,
   vault_reveal_requires_human: 403,
   human_auth_required: 403,
-  variable_sets_removed: 410,
+  variable_sets_removed: 422,
   encryption_key_missing: 503,
   provider_unavailable: 503,
   provider_rate_limited: 429,

@@ -10,9 +10,10 @@ import {
   type RecordingSpeaker,
   type RecordingTrack,
   type RecordingTranscriptSegment,
+  type RecordingTranscriptionModel,
   type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
-import type { RecorderSnapshot } from "@opengeni/sdk/recordings";
+import type { RecorderSnapshot, RecordingUploadStatus } from "@opengeni/sdk/recordings";
 import { createOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
 const defaultText = createOpenGeniText();
@@ -77,20 +78,38 @@ export function meetingPhase(recording: Recording): MeetingPhase {
  * Stop unless the connection is down or the server refused it. Null when this
  * device isn't recording that meeting, or when capture failed before Stop
  * finished it; the server's {@link meetingPhase} says the rest.
+ *
+ * A meeting recorded here earlier (before a reload, a restart, or a move to
+ * another page) is finished in the background from the audio kept here: it is
+ * `uploading` until the server has it all, then `transcribing`, and
+ * `upload_failed` when the server refused it, keeping the audio here for a retry.
  */
 export type MeetingHereStatus =
   | "recording"
   | "paused"
+  | "uploading"
   | "transcribing"
   | "waiting_for_connection"
   | "upload_failed";
 
 export function meetingHereStatus(
-  recorder: Pick<RecorderSnapshot, "state" | "recordingId" | "upload"> | null,
+  recorder:
+    | (Pick<RecorderSnapshot, "state" | "recordingId" | "upload"> & {
+        uploads?: Readonly<Record<string, RecordingUploadStatus>> | undefined;
+      })
+    | null,
   recordingId: string,
   online = true,
 ): MeetingHereStatus | null {
-  if (!recorder || recorder.recordingId !== recordingId) return null;
+  if (!recorder) return null;
+  if (recorder.recordingId !== recordingId) {
+    const upload = recorder.uploads?.[recordingId];
+    if (!upload || upload.discarded) return null;
+    if (upload.failed) return "upload_failed";
+    if (upload.finalized) return "transcribing";
+    if (!online || upload.retryingAfterError) return "waiting_for_connection";
+    return "uploading";
+  }
   if (recorder.state === "recording") return "recording";
   if (recorder.state === "paused") return "paused";
   if (recorder.state === "idle" || recorder.state === "starting") return null;
@@ -104,6 +123,101 @@ export function meetingHereStatus(
     return "waiting_for_connection";
   }
   return "transcribing";
+}
+
+/** The upload failure this device's recorder holds for a meeting, current or earlier. */
+export function meetingUploadFailure(
+  recorder:
+    | (Pick<RecorderSnapshot, "recordingId" | "upload"> & {
+        uploads?: Readonly<Record<string, RecordingUploadStatus>> | undefined;
+      })
+    | null,
+  recordingId: string,
+): { code: string; message: string } | null {
+  if (!recorder) return null;
+  const upload =
+    recorder.recordingId === recordingId ? recorder.upload : recorder.uploads?.[recordingId];
+  return upload?.failed ?? null;
+}
+
+/** Audio up to this long is usually transcribed in a minute or two. */
+const SHORT_AUDIO_MILLISECONDS = 5 * 60_000;
+
+/**
+ * What to say while a meeting is transcribed: a short one is done in a minute
+ * or two; a long one takes a while (its words may be timed on our side), so
+ * the line says how much audio it is and that the reader needn't wait.
+ */
+export function transcribingText(
+  durationMilliseconds: number,
+  msg: OpenGeniText = defaultText,
+): string {
+  if (durationMilliseconds <= SHORT_AUDIO_MILLISECONDS) {
+    return msg("meetings.detailPage.transcribingThisUsuallyTakesA");
+  }
+  return msg("meetings.detailPage.transcribingLongAudio", {
+    duration: formatDuration(durationMilliseconds, msg),
+  });
+}
+
+/** Refusals that credits, or a model that doesn't use them, fix. */
+export function transcriptNeedsCredits(code: string | null | undefined): boolean {
+  return (
+    code === "insufficient_credits" ||
+    code === "allowance_exhausted" ||
+    code === "monthly_model_cost_limit"
+  );
+}
+
+/** Failures of the provider itself: any other provider may work. */
+const PROVIDER_FAILURES = new Set([
+  "missing_provider_key",
+  "provider_unauthorized",
+  "provider_quota_exceeded",
+  "policy_blocked",
+]);
+/** Failures of the model: another model, even the same provider's, may work. */
+const MODEL_FAILURES = new Set([
+  "provider_too_large",
+  "provider_not_supported",
+  "model_unavailable",
+]);
+
+/**
+ * The model to transcribe a failed meeting with instead, as its one direct
+ * fix: usable here, not the one that failed (nor its provider, when the
+ * provider was the problem), and for a credit refusal one that uses no
+ * credits. A subscription comes first, then a model the deployment covers,
+ * then the workspace's own key. Null when no other model would help.
+ */
+export function transcriptFixModel(
+  code: string | null | undefined,
+  failed: { providerId: string; model: string } | null,
+  models: readonly RecordingTranscriptionModel[],
+): RecordingTranscriptionModel | null {
+  const credits = transcriptNeedsCredits(code);
+  if (!code || (!credits && !PROVIDER_FAILURES.has(code) && !MODEL_FAILURES.has(code))) {
+    return null;
+  }
+  const charged = (entry: RecordingTranscriptionModel) =>
+    entry.chargedInCredits ?? (entry.funding === "deployment" && entry.usdPerHour !== null);
+  const rank = (entry: RecordingTranscriptionModel) =>
+    entry.funding === "workspace_subscription"
+      ? 0
+      : charged(entry)
+        ? 3
+        : entry.usdPerHour === null
+          ? 1
+          : 2;
+  const candidates = models.filter((entry) => {
+    if (!entry.available || !entry.capabilities.batch) return false;
+    if (failed && entry.providerId === failed.providerId) {
+      if (!MODEL_FAILURES.has(code) || entry.model === failed.model) return false;
+    }
+    // The server says which models are charged in credits.
+    return !credits || !charged(entry);
+  });
+  return [...candidates].sort((a, b) => rank(a) - rank(b))[0] ?? null;
 }
 
 /** The one-word state a list row shows, or null when there is nothing to say. */
@@ -172,6 +286,20 @@ export function transcriptErrorText(
       return msg("meetings.recordings.errorInvalidAudio");
     case "storage_unavailable":
       return msg("meetings.recordings.errorStorageUnavailable");
+    case "region_restricted":
+      return msg("inferenceRegion.notSupportedInEu");
+    case "insufficient_credits":
+      return model
+        ? msg("meetings.recordings.errorInsufficientCreditsFor", { modelName: model.modelName })
+        : msg("meetings.recordings.errorInsufficientCredits");
+    case "allowance_exhausted":
+      return msg("meetings.recordings.errorAllowanceExhausted");
+    case "monthly_model_cost_limit":
+      return msg("meetings.recordings.errorMonthlyCostLimit");
+    case "policy_blocked":
+      return msg("meetings.recordings.errorPolicyBlocked");
+    case "timed_out":
+      return msg("meetings.recordings.errorTimedOut");
     default:
       return msg("meetings.recordings.errorUnknown");
   }

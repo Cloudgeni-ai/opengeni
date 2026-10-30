@@ -148,6 +148,7 @@ import type {
   WorkspaceInteractionRevisionEvent,
   VerifyAuthRunRequest,
   WorkspaceRealtimeModelCatalogResponse,
+  SaveComposerDraftRequest,
 } from "@opengeni/sdk";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import type { SessionClientLike } from "@opengeni/react";
@@ -729,11 +730,16 @@ export class MockOpenGeniClient implements SessionClientLike {
   async saveComposerDraft(
     _workspaceId: string,
     sessionId: string,
-    request: Omit<ComposerDraft, "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt">,
+    request: SaveComposerDraftRequest,
   ): Promise<ComposerDraft> {
     const current = await this.getComposerDraft(_workspaceId, sessionId);
+    const { expectedRevision: _revision, ...content } = request;
     const draft: ComposerDraft = {
-      ...request,
+      ...content,
+      // Like the API: a save without a policy keeps the current settings.
+      model: request.model ?? current.model,
+      reasoningEffort: request.reasoningEffort ?? current.reasoningEffort,
+      latencyMode: request.latencyMode ?? current.latencyMode,
       revision: current.revision + 1,
       sourceTurnId: null,
       sourceTurnVersion: null,
@@ -1139,7 +1145,6 @@ export class MockOpenGeniClient implements SessionClientLike {
       setupScript: request.setupScript ?? null,
       checks: request.checks ?? [],
       credentialHooks: request.credentialHooks ?? [],
-      defaultVariableSetIds: [],
       changelog: "Initial version",
       providerImages: {},
       createdBy: "user:demo",
@@ -1285,7 +1290,6 @@ export class MockOpenGeniClient implements SessionClientLike {
       setupScript: base?.setupScript ?? null,
       checks: base?.checks ?? [],
       credentialHooks: base?.credentialHooks ?? [],
-      defaultVariableSetIds: base?.defaultVariableSetIds ?? [],
       changelog: "Promoted from a verified change",
       providerImages: {},
       createdBy: "user:demo",
@@ -3077,8 +3081,6 @@ export class MockOpenGeniClient implements SessionClientLike {
       sandboxGroupId: sessionId,
       activeSandboxId: null,
       activeEpoch: 0,
-      variableSetId: null,
-      environmentId: null,
       rigId: null,
       rigVersionId: null,
       channelId: this.sessionChannelOverrides.get(sessionId) ?? null,
@@ -4001,8 +4003,6 @@ function scheduledTask(
     agentConfig: { prompt, resources: [], tools: [], metadata: {} },
     targetSessionId: null,
     reusableSessionId: null,
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     metadata: {},
     createdAt: now,

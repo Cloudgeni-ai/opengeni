@@ -127,14 +127,22 @@ function normalizeFileList(stdout: string): string[] {
 // Child paths remain forbidden even in these files. See docs/mcp-surfaces.md.
 const organizationMcpSurfaceFiles = new Set([
   "apps/api/src/mcp-oauth.ts",
+  // EU-only: the calling-workspace check covers the organization MCP endpoint too.
+  "apps/api/src/mcp/workspace-content-flow.ts",
   "apps/api/src/organization-mcp.ts",
+  // Disconnect audit: an agent connected to the organization MCP endpoint disconnects.
+  "apps/api/test/disconnect-audit-postgres.test.ts",
   "apps/api/test/organization-mcp-e2e.test.ts",
   "apps/api/test/personal-api-keys.test.ts",
+  "apps/api/test/workspace-content-flow-e2e.test.ts",
+  "apps/api/test/workspace-content-flow-mcp.test.ts",
   "apps/web/src/App.tsx",
   "apps/web/src/components/organization-access/organization-connected-agents.tsx",
   "apps/web/src/dev/ui-kit/sections/page-connected-agents.tsx",
   "packages/sdk/src/client.ts",
   "packages/sdk/src/site-browser-runtime.gen.ts",
+  // Opengeni's organization MCP endpoint added as a remote MCP server.
+  "packages/runtime/test/calling-workspace-prepare.test.ts",
   "scripts/public-api/surface.gen.json",
 ]);
 
@@ -334,6 +342,11 @@ export function checkMcpDefaults(file: string, text: string, out: Finding[]): vo
 }
 
 function isSourceLike(file: string): boolean {
+  // Historical release notes describe removed routes; they are not live defaults
+  // or current usage guidance. Keep other Markdown, source and config checked.
+  if (/(^|\/)CHANGELOG\.md$/.test(file.replace(/\\/g, "/"))) {
+    return false;
+  }
   return /\.(ts|tsx|js|jsx|yaml|yml|json|md|example)$/.test(file);
 }
 

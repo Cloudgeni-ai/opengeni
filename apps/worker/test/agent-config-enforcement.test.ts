@@ -349,7 +349,6 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       ...(options.lazy ? { eager: true } : {}),
     })),
     toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
-    variableSetIds: [],
     ...(options.bundledSkillIds === "omit"
       ? {}
       : { bundledSkillIds: options.bundledSkillIds ?? [] }),

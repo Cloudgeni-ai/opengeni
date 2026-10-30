@@ -24,6 +24,7 @@ export {
   durationBetween,
   flattenActivityItems,
   isPreparingWork,
+  timelineTurnsWithOutput,
   readableWorkDefaultOpen,
   readableWorkShowsPreview,
   readableWorkStatus,
@@ -107,8 +108,10 @@ export { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "./timeline/genie
 export {
   answersFromDrafts,
   defaultHumanInputFormMessages,
+  mergeHumanInputFormMessages,
   emptyDraft,
   formatDeadline,
+  humanInputAgentMayDecide,
   humanInputHeading,
   initialDrafts,
   resolveSecretSaveTo,
@@ -136,6 +139,7 @@ export { isActionableHumanInputRequest } from "./human-input";
 export {
   SESSION_STATUS_BADGE,
   SESSION_STATUS_PRESENTATION,
+  promptSendDestination,
   sessionAdmissionBlocked,
   sessionDisplayStatus,
 } from "./session-status-model";
@@ -167,6 +171,7 @@ export {
   annotationDisplayOrdinal,
   annotationFromSelection,
   annotationHasNote,
+  annotationQuoteText,
   bestQuoteOccurrence,
   matchingQuoteInSource,
   occurrenceOffsets,

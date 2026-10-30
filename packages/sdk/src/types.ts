@@ -30,6 +30,7 @@ export type {
   InsightsCallsScope,
 } from "./insights-usage";
 import type {
+  ClientModelResidencyV1,
   ScheduledTaskEvents,
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
@@ -37,6 +38,15 @@ import type {
   SessionAvatar,
 } from "@opengeni/contracts";
 export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
+export type {
+  McpElicitationAnswer,
+  McpElicitationApprovalRequest,
+  McpElicitationContent,
+  McpElicitationField,
+  McpElicitationRequestedSchema,
+  McpElicitationValue,
+} from "@opengeni/contracts";
+import type { McpElicitationApprovalRequest, McpElicitationContent } from "@opengeni/contracts";
 export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
@@ -286,6 +296,8 @@ export type ToolGatewayTargetApprovalRequest = {
   operationId: string;
   arguments: Record<string, unknown>;
   expectedDefinitionDigest: string;
+  /** "Always allow for this Site" (this person, this Site, this tool and connection). Site context only. */
+  rememberForSite?: boolean;
   siteArtifactId?: string;
   siteVersionId?: string;
 };
@@ -295,6 +307,38 @@ export type ToolGatewayTargetApprovalResponse = {
   tool: ToolGatewayResolvedTool;
   approvalToken: string;
   expiresAt: string;
+};
+/** The viewer's own accounts for a Site's declared tool (host code only). */
+export type ToolGatewaySiteConsentRequest = {
+  identity: ToolGatewayIdentity;
+  siteArtifactId: string;
+  siteVersionId: string;
+  /** The exact arguments, to review what the call would do on the selected account. */
+  arguments?: Record<string, unknown>;
+};
+export type ToolGatewaySiteConsentAccount = {
+  identity: ToolGatewayIdentity;
+  connector: string;
+  account: string;
+};
+/** The provider's own reading of the call (for Gmail, the message as it would be sent). */
+export type ToolGatewaySiteConsentReview = {
+  kind: "generic" | "gmail";
+  email?: {
+    from: string;
+    to: string;
+    cc: string;
+    bcc: string;
+    subject: string;
+    attachments: number;
+  };
+};
+export type ToolGatewaySiteConsentResponse = {
+  version: 1;
+  accounts: ToolGatewaySiteConsentAccount[];
+  selected: ToolGatewayIdentity | null;
+  review: ToolGatewaySiteConsentReview | null;
+  connect: { capabilityId: string | null; name: string; providerDomain: string } | null;
 };
 export type ToolGatewayManifestRequest = {
   identities: ToolGatewayIdentity[];
@@ -1719,6 +1763,54 @@ export type UpdateSessionVisibilityResponse = {
   revokedGrantCount: number;
 };
 
+/** One message a share link shows: the person's or the reply, as text. */
+export type SharedSessionMessage = {
+  role: "user" | "assistant";
+  text: string;
+  /**
+   * The name the chat shows for the person who sent a message, never an
+   * email address or id. Absent for replies, and when the chat has no such
+   * name for them.
+   */
+  sender?: string;
+};
+
+/** A chat's live read-only share link, as its owner sees it. */
+export type SessionShareLink = {
+  shareId: string;
+  /** The page anyone with the link opens. */
+  url: string;
+  workspaceId: string;
+  sessionId: string;
+  title: string;
+  /** Messages the link shows. */
+  messageCount: number;
+  createdAt: string;
+  /** When the snapshot behind the link was last taken. */
+  updatedAt: string;
+};
+
+/** Whether the person can share a chat here, and their live link. */
+export type SessionShareLinkState = {
+  /** False when this deployment has turned share links off. */
+  enabled: boolean;
+  link: SessionShareLink | null;
+};
+
+export type SessionShareLinkList = {
+  links: SessionShareLink[];
+};
+
+/** What anyone holding a share link reads, without signing in. */
+export type SharedSession = {
+  title: string;
+  /** When the snapshot was taken. */
+  sharedAt: string;
+  messages: SharedSessionMessage[];
+  /** Earlier messages left out to keep the snapshot within its size. */
+  omittedMessageCount: number;
+};
+
 export type ForkSessionRequest = {
   idempotencyKey: string;
   visibility: SessionVisibility;
@@ -1877,12 +1969,6 @@ export type Session = {
   activeEpoch: number;
   /** Explicit connected-machine project root; null uses the agent launch root. */
   workingDir: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
-  variableSetIds?: string[] | undefined;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  variableSetId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  environmentId: string | null;
   // The rig + frozen rig version this session rides (M3). Both null for a
   // rig-less session. Frozen at create; a later rig promote never moves them.
   rigId: string | null;
@@ -2029,6 +2115,7 @@ export type SessionListEntry = Pick<
   | "workspaceId"
   | "accountId"
   | "status"
+  | "activeTurnId"
   | "backgroundCommandActivity"
   | "hasSchedules"
   | "hasUpcomingSchedules"
@@ -2075,6 +2162,19 @@ export type SessionListEntry = Pick<
    */
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
+  /**
+   * Newest turn in execution order: the last queued turn, else the executing
+   * turn, else the most recently finished one. Null when the session has no
+   * turn; absent from older servers and SDK-projected full pages.
+   */
+  latestTurn?: SessionListLatestTurn | null | undefined;
+};
+
+export type SessionListLatestTurn = {
+  id: string;
+  status: SessionTurnStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
 };
 export type SessionListEntryResponse = Omit<SessionListResponse, "pinned" | "sessions"> & {
   projection: "summary";
@@ -2137,6 +2237,8 @@ export type SessionListResponse = {
   contentArchivedOnly?: true;
   /** Receipt for the started-or-messaged-by-you filter. */
   mineOnly?: true;
+  /** Receipt for the `sessionIds` selection; older servers ignore that filter. */
+  sessionIdsApplied?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
@@ -2488,6 +2590,10 @@ export type HumanInputOption = {
   id: string;
   label: string;
   description?: string | null | undefined;
+  /** The agent's suggestion; mark it, never pre-select it. */
+  recommended?: boolean | null | undefined;
+  /** A short sample of what the option produces, shown as-is (monospace). */
+  preview?: string | null | undefined;
 };
 
 export type SkillReviewReference = {
@@ -2510,6 +2616,11 @@ export type HumanInputQuestion = {
   /** Required exactly when `kind` is "secret"; null otherwise. */
   secret?: HumanInputSecretSpec | null | undefined;
   required: boolean;
+  /**
+   * A yes/no decision: a single_select with exactly two options, the action
+   * first and the way out second, answered with two buttons.
+   */
+  confirm?: boolean | null | undefined;
   allowOther: boolean;
   validation?:
     | {
@@ -2530,7 +2641,9 @@ export type HumanInputAnswer = {
 
 export type HumanInputResponse =
   | { outcome: "answered"; answers: HumanInputAnswer[] }
-  | { outcome: "skipped" | "expired" | "cancelled" };
+  /** `agentDecides`: the person chose "Let the agent decide". */
+  | { outcome: "skipped"; agentDecides?: true | undefined }
+  | { outcome: "expired" | "cancelled" };
 
 export type SubmitHumanInputResponseRequest =
   | {
@@ -2539,7 +2652,12 @@ export type SubmitHumanInputResponseRequest =
       /** Write-only secret values; never echoed in events or responses. */
       secretAnswers?: HumanInputSecretAnswer[] | undefined;
     }
-  | { outcome: "skipped" };
+  /**
+   * `agentDecides`: "Let the agent decide". The asking agent makes its own best
+   * choice; accepted even when the request does not allow an ordinary skip, but
+   * never for secret questions, Skill reviews or secret approvals.
+   */
+  | { outcome: "skipped"; agentDecides?: true | undefined };
 
 export type SessionHumanInputRequest = {
   id: string;
@@ -3574,17 +3692,17 @@ export type IncidentTelemetrySeriesMetadata = {
 export type IncidentTelemetryDataRoute =
   | { kind: "mcp"; serverId: string }
   | { kind: "first_party"; tool: FirstPartyMcpToolName }
-  | { kind: "variable_set"; variableSetName: string; variableNames: string[] }
+  | { kind: "vault"; vaultName: string; secretNames: string[] }
   | { kind: "rig_credential_hook"; credentialHookId: string };
 
 export type IncidentTelemetryPreflight = {
   requiredResources: ResourceRef[];
   requiredMcpServerIds: string[];
   requiredFirstPartyMcpTools: FirstPartyMcpToolName[];
-  requiredFirstPartyMcpPermissions: Permission[];
+  requiredFirstPartyMcpPermissions: KnownPermission[];
   requiredRig: { name: string; credentialHookIds: string[] } | null;
-  requiredVariableSetNames: string[];
-  requiredVariableNames: string[];
+  requiredVaultNames: string[];
+  requiredSecretNames: string[];
   dataSource: {
     kind: "prometheus";
     queryPath: "/api/v1/query" | "/api/v1/query_range";
@@ -3603,16 +3721,16 @@ export type IncidentTelemetryPreflightInput = Omit<
   | "requiredFirstPartyMcpTools"
   | "requiredFirstPartyMcpPermissions"
   | "requiredRig"
-  | "requiredVariableSetNames"
-  | "requiredVariableNames"
+  | "requiredVaultNames"
+  | "requiredSecretNames"
 > & {
   requiredResources?: ResourceRef[] | undefined;
   requiredMcpServerIds?: string[] | undefined;
   requiredFirstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
-  requiredFirstPartyMcpPermissions?: Permission[] | undefined;
+  requiredFirstPartyMcpPermissions?: KnownPermission[] | undefined;
   requiredRig?: { name: string; credentialHookIds?: string[] | undefined } | null | undefined;
-  requiredVariableSetNames?: string[] | undefined;
-  requiredVariableNames?: string[] | undefined;
+  requiredVaultNames?: string[] | undefined;
+  requiredSecretNames?: string[] | undefined;
 };
 
 export type ScheduledTaskAgentConfig = {
@@ -3717,10 +3835,6 @@ export type ScheduledTask = {
   executionDigest: string;
   targetSessionId: string | null;
   reusableSessionId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. Use `vaultPolicy`. */
-  variableSetId: string | null;
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy selection. */
-  environmentId: string | null;
   // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
   rigId: string | null;
   /** Vaults every run may resolve secret references from (the task vault is always included). */
@@ -3889,6 +4003,15 @@ export type CreateSessionRequest = {
   /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
   modelContext?: string | undefined;
   /**
+   * Tools `modelContext` is for, such as the tool that reaches the open
+   * document it names, or the tools an application's MCP server publishes for
+   * the record it names (by their published names). The first turn loads them
+   * before its first model request, as a tool search by name would, so it can
+   * use them without searching; the session's tools are unchanged. Decided
+   * once at creation; names outside the session's tool selection are ignored.
+   */
+  modelContextTools?: string[] | undefined;
+  /**
    * IANA time zone of the person sending `initialMessage` (for example
    * `Europe/Oslo`), so the model sees the message's local time. In a browser
    * or app the client fills in the device's zone when this is omitted;
@@ -3950,7 +4073,7 @@ export type CreateSessionRequest = {
   mcpServers?: SessionMcpServerInput[] | undefined;
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
-  /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
+  /** Atomically attach the server-derived personal rig closure to the initial turn. */
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
   // addendum 05 §D.1). Three-way union; OMITTED ⇒ the context-dependent server default
@@ -4160,6 +4283,8 @@ export type FirstPartyMcpToolName =
   | "secret_get"
   | "secret_move"
   | "secret_delete"
+  | "secret_profile_get"
+  | "secret_profile_set"
   | "variable_set_list"
   | "environment_list"
   | "variable_set_get_variable"
@@ -4201,6 +4326,9 @@ export type FirstPartyMcpToolName =
   | "scheduled_task_runs_list"
   | "event_sources_list"
   | "events_get"
+  | "event_sources_create_webhook"
+  | "event_sources_update"
+  | "event_sources_delete"
   | "slack_bot_list_channels"
   | "slack_bot_search"
   | "slack_bot_channel_history"
@@ -4384,6 +4512,13 @@ export type ClientModel = {
   capabilities?: ModelCapabilitiesV1 | undefined;
   pricing?: ModelPricingScheduleV1 | undefined;
   definitionVersion?: string | undefined;
+  /**
+   * Transient availability hint. `reason: "region_restricted"`: the workspace
+   * is EU-only and this model's route is not EU by its residency record.
+   */
+  availability?: ModelAvailabilityV1 | undefined;
+  /** Where this route processes data, and how that is known. Absent means unknown, never EU. */
+  residency?: ClientModelResidencyV1 | undefined;
 };
 
 export type ModelAvailabilityV1 = {
@@ -4398,6 +4533,7 @@ export type ModelAvailabilityV1 = {
     | "policy_blocked"
     | "unsupported"
     | "credits_disabled"
+    | "region_restricted"
     | null;
   checkedAt: string | null;
 };
@@ -4932,6 +5068,59 @@ export type OrganizationAgentAdminAccess = {
 export type UpdateOrganizationAgentAdminAccessRequest = {
   sessionAdminAccessAllowed?: boolean;
   chatActionsAllowed?: boolean;
+};
+
+/**
+ * The organization's EU-only inference setting. When on, every model call for
+ * its workspaces runs on an EU route or not at all. Any member can read it;
+ * owners and admins can turn it on, and only an owner or admin in the app in a
+ * browser can turn it off (`canTurnOff`).
+ */
+export type OrganizationInferenceResidency = {
+  organizationId: string;
+  euOnly: boolean;
+  /** 0 until the setting is first changed. */
+  version: number;
+  updatedAt: string | null;
+  /** Whether the caller may turn EU-only off: only an owner or admin in a browser. */
+  canTurnOff: boolean;
+  changed?: boolean | undefined;
+};
+
+/**
+ * Turn EU-only on or off. `expectedVersion` is the current `version` (a stale
+ * one is `409`); `operationId` makes a retry safe. Changes answer `503` while
+ * the deployment doesn't allow them yet.
+ */
+export type UpdateOrganizationInferenceResidencyRequest = {
+  euOnly: boolean;
+  expectedVersion: number;
+  operationId: string;
+};
+
+/** Model-backed features besides the chat model, as reported in `ClientConfig.inferenceFeatures`. */
+export type InferenceFeatureId =
+  | "web_search"
+  | "image_generation"
+  | "video_generation"
+  | "realtime_voice"
+  | "voice_input"
+  | "meeting_transcription"
+  | "live_transcription"
+  | "knowledge_embeddings"
+  | "code_search";
+
+/**
+ * Why the server switched a feature off. `region_restricted`: the workspace
+ * is EU-only and the feature has no EU route here ("Not supported in EU").
+ */
+export type FeatureUnavailableReason = "region_restricted";
+
+/** One feature's availability for the caller's workspace. */
+export type InferenceFeatureAvailability = {
+  id: InferenceFeatureId;
+  available: boolean;
+  unavailableReason: FeatureUnavailableReason | null;
 };
 
 /**
@@ -5566,6 +5755,13 @@ export type ClientConfig = {
    */
   codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
   /**
+   * EU-only inference: each model-backed feature's region availability for the
+   * caller's workspace. `unavailableReason: "region_restricted"` means the
+   * workspace is EU-only and the feature has no EU route here. Absent on older
+   * servers.
+   */
+  inferenceFeatures?: InferenceFeatureAvailability[] | undefined;
+  /**
    * Present only when this deployment archives idle sessions: after `idleDays`
    * without activity a session (unless kept live) becomes read-only.
    */
@@ -5636,93 +5832,6 @@ export type ClientResumableVoiceInputConfig = {
   maxSizeBytes: number;
   maxChunkSizeBytes: number;
   providerSegmentSeconds: number;
-};
-
-export type TranscriptionRecordingErrorCode =
-  | "permission_denied"
-  | "not_supported"
-  | "network"
-  | "provider"
-  | "policy_blocked"
-  | "timeout"
-  | "cancelled"
-  | "unavailable"
-  | "too_large"
-  | "invalid_audio"
-  | "unknown"
-  | "insufficient_credits"
-  | "allowance_exhausted"
-  | "monthly_model_cost_limit";
-
-export type TranscriptionRecordingState =
-  | "uploading"
-  | "segmenting"
-  | "ready"
-  | "transcribing"
-  | "complete"
-  | "failed"
-  | "discarded";
-
-export type TranscriptionRecordingSegmentState =
-  | "preparing"
-  | "pending"
-  | "transcribing"
-  | "complete"
-  | "failed";
-
-export type TranscriptionRecordingSegment = {
-  segmentNumber: number;
-  state: TranscriptionRecordingSegmentState;
-  startMilliseconds: number;
-  durationMilliseconds: number;
-  byteLength: number;
-  errorCode: TranscriptionRecordingErrorCode | null;
-  retryable: boolean;
-};
-
-export type TranscriptionRecording = {
-  id: string;
-  workspaceId: string;
-  mimeType: string;
-  state: TranscriptionRecordingState;
-  nextChunkNumber: number;
-  chunkCount: number;
-  totalBytes: number;
-  totalDurationMilliseconds: number;
-  segmentCount: number;
-  completedSegmentCount: number;
-  transcriptText: string | null;
-  languages: string[];
-  errorCode: TranscriptionRecordingErrorCode | null;
-  retryable: boolean;
-  objectsCleaned: boolean;
-  createdAt: string;
-  updatedAt: string;
-  expiresAt: string;
-};
-
-export type TranscriptionRecordingResponse = {
-  recording: TranscriptionRecording;
-  segments: TranscriptionRecordingSegment[];
-  retryAfterMilliseconds?: number;
-};
-
-export type TranscriptionRecordingListResponse = {
-  recordings: TranscriptionRecording[];
-};
-
-export type TranscriptionRecordingChunk = {
-  chunkNumber: number;
-  byteLength: number;
-  sha256: string;
-  startMilliseconds: number;
-  durationMilliseconds: number;
-  deduplicated: boolean;
-};
-
-export type UploadTranscriptionRecordingChunkResponse = {
-  recording: TranscriptionRecording;
-  chunk: TranscriptionRecordingChunk;
 };
 
 /** Response from POST /v1/workspaces/:workspaceId/transcriptions. */
@@ -6277,6 +6386,17 @@ export type WorkspaceDefaultExecutionTarget =
   | { kind: "managed" }
   | { kind: "machine"; targetSandboxId: string };
 
+/**
+ * `GET/PUT /v1/workspaces/:id/my-default-execution-target`: the caller's own
+ * placement for the new chats they start in the workspace ("Your default
+ * machine"). Null follows the workspace default. `usable` is false when the
+ * saved machine is no longer available to them.
+ */
+export type MemberDefaultExecutionTarget = {
+  target: WorkspaceDefaultExecutionTarget | null;
+  usable: boolean;
+};
+
 export type WorkspaceSettings = {
   /** Exact product-model preferences. Invalid/newer values are ignored per model. */
   modelCompactionThresholds?: unknown;
@@ -6740,6 +6860,14 @@ export type InboxItem = {
   eventSequence: number | null;
   /** One-tap answers for a single short choice question; empty otherwise. */
   choices: InboxItemChoice[];
+  /**
+   * An approval whose tool's MCP server asks the person a question in the
+   * middle of the call: the title is then the server's question. A `confirm`
+   * is answered with Allow or Deny (send `elicitationRound: round` with the
+   * approval); a `form` is answered in the session, where the approval card
+   * shows its fields. Null or absent otherwise.
+   */
+  serverQuestion?: InboxItemServerQuestion | null;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
   /** True while the person has not seen the item's current content. */
@@ -6768,6 +6896,17 @@ export type InboxItemLink = { url: string; label: string };
 
 /** An option of the question behind an inbox item, answerable in one tap. */
 export type InboxItemChoice = { id: string; label: string };
+
+/**
+ * The MCP server asking about an approval in the inbox, how the person
+ * answers (`confirm` has nothing to fill in, `form` has fields) and which of
+ * the call's questions it is: send `round` back as `elicitationRound`.
+ */
+export type InboxItemServerQuestion = {
+  server: string;
+  kind: "confirm" | "form";
+  round: number;
+};
 
 export type ListInboxResponse = {
   items: InboxItem[];
@@ -7247,6 +7386,14 @@ export type ComposerDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /**
+   * True when the draft has no model choice of its own: `model`,
+   * `reasoningEffort` and `latencyMode` are then the chat's current settings
+   * and follow every later change to them (for example by the agent). Send a
+   * model with this draft only after the person picks one. Absent from
+   * servers that predate it, which means false.
+   */
+  policyFollowsSession?: boolean | undefined;
   sourceTurnId: string | null;
   sourceTurnVersion: number | null;
   updatedAt: string | null;
@@ -7296,6 +7443,12 @@ export type NewSessionDraft = {
   selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;
   selectionHistory: NewSessionSelectionHistory;
+  /**
+   * Read-only: the caller's own default placement for new chats ("Your default
+   * machine") when usable now. A fresh form starts on it ahead of the
+   * workspace default. Older servers omit it.
+   */
+  memberDefaultExecutionTarget?: WorkspaceDefaultExecutionTarget | null | undefined;
   updatedAt: string | null;
 };
 
@@ -7581,8 +7734,24 @@ export type DeleteSessionQueueItemRequest = {
 
 export type SaveComposerDraftRequest = Omit<
   ComposerDraft,
-  "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt"
-> & { expectedRevision: number };
+  | "revision"
+  | "sourceTurnId"
+  | "sourceTurnVersion"
+  | "updatedAt"
+  | "policyFollowsSession"
+  | "model"
+  | "reasoningEffort"
+  | "latencyMode"
+> & {
+  expectedRevision: number;
+  /**
+   * The person's pick in the composer. Omit all three to keep (or return)
+   * the draft to the chat's own settings, so it follows later changes.
+   */
+  model?: string | undefined;
+  reasoningEffort?: ReasoningEffort | undefined;
+  latencyMode?: LatencyMode | undefined;
+};
 
 export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expectedRevision"> & {
   expectedDraftRevision: number;
@@ -7611,7 +7780,7 @@ export type SubmitComposerDraftResponse = {
 
 export type SaveNewSessionDraftRequest = Omit<
   NewSessionDraft,
-  "revision" | "selectionHistory" | "updatedAt"
+  "revision" | "selectionHistory" | "updatedAt" | "memberDefaultExecutionTarget"
 > & {
   expectedRevision: number;
 };
@@ -8001,8 +8170,6 @@ export type RigVersion = {
   setupScript: string | null;
   checks: RigCheck[];
   credentialHooks: string[];
-  /** @deprecated Variable Sets were replaced by vaults; inert legacy data. */
-  defaultVariableSetIds: string[];
   changelog: string | null;
   providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
   createdBy: string | null;
@@ -8025,6 +8192,11 @@ export type Channel = {
   workspaceId: string;
   name: string;
   description: string | null;
+  /**
+   * Shown to people instead of the folder icon, like a chat's avatar. Absent
+   * from servers that predate project profiles.
+   */
+  avatar?: SessionAvatar | null | undefined;
   pinned: boolean;
   sortOrder: number;
   createdBy: string | null;
@@ -8035,11 +8207,14 @@ export type Channel = {
 export type CreateChannelRequest = {
   name: string;
   description?: string;
+  avatar?: SessionAvatar | null;
 };
 
 export type UpdateChannelRequest = {
   name?: string;
   description?: string | null;
+  /** null clears it; omitted keeps it. */
+  avatar?: SessionAvatar | null;
   pinned?: boolean;
 };
 
@@ -8356,6 +8531,8 @@ export type VideoGenerationFundingOption = {
   description: string;
   available: boolean;
   unavailableReason: string | null;
+  /** `region_restricted` when EU-only inference switched this source off. */
+  unavailableCode?: FeatureUnavailableReason | undefined;
 };
 
 export type WorkspaceVideoGenerationSettings = {
@@ -8893,120 +9070,6 @@ export type SkillArtifactDefinitionInput = Omit<SkillArtifactDefinition, "name" 
   description?: string | undefined;
 };
 export type SessionSkillInput = Omit<SkillArtifactDefinitionInput, "activationMode">;
-
-// --- Opengeni Review Bot ------------------------------------------------------------
-
-export type PrReviewProvider = GitCredentialProvider;
-export type PrReviewCredentialKind = "github_app" | "managed_github_app" | "provider_token";
-export type PrReviewWebhookAuthKind = "hmac_sha256" | "shared_token" | "basic";
-
-export type CreatePrReviewAppRegistrationRequest = {
-  name: string;
-  provider: PrReviewProvider;
-  providerBaseUrl?: string | undefined;
-  appId?: string | undefined;
-  credentialKind: PrReviewCredentialKind;
-  privateKey?: string | undefined;
-  accessToken?: string | undefined;
-  accessTokenExpiresAt?: string | null | undefined;
-  webhookSecret: string;
-  webhookUsername?: string | undefined;
-};
-
-export type UpdatePrReviewAppRegistrationRequest = {
-  name?: string | undefined;
-  privateKey?: string | undefined;
-  accessToken?: string | undefined;
-  accessTokenExpiresAt?: string | null | undefined;
-  webhookSecret?: string | undefined;
-  webhookUsername?: string | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type PrReviewAppRegistration = {
-  id: string;
-  sourceId: string;
-  accountId: string;
-  workspaceId: string;
-  name: string;
-  provider: PrReviewProvider;
-  providerBaseUrl: string;
-  appId: string | null;
-  installationId: string | null;
-  providerAccountLogin: string | null;
-  providerAccountType: "User" | "Organization" | null;
-  credentialKind: PrReviewCredentialKind;
-  hasCredential: boolean;
-  accessTokenExpiresAt: string | null;
-  webhookAuthKind: PrReviewWebhookAuthKind;
-  hasWebhookSecret: boolean;
-  webhookUsername: string | null;
-  webhookPath: string;
-  status: "active" | "disabled";
-  createdBySubjectId: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type CreatePrReviewRepositoryBindingRequest = {
-  registrationId: string;
-  repositoryUri: string;
-  repositoryFullName: string;
-  providerRepositoryId: string | number;
-  installationId?: string | number | undefined;
-  projectId?: string | number | undefined;
-  model?: string | null | undefined;
-  additionalInstructions?: string | null | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type UpdatePrReviewRepositoryBindingRequest = {
-  model?: string | null | undefined;
-  additionalInstructions?: string | null | undefined;
-  status?: "active" | "disabled" | undefined;
-};
-
-export type PrReviewRepositoryBinding = {
-  id: string;
-  triggerId: string;
-  accountId: string;
-  workspaceId: string;
-  registrationId: string;
-  provider: PrReviewProvider;
-  repositoryUri: string;
-  repositoryFullName: string;
-  providerRepositoryId: string;
-  installationId: string | null;
-  projectId: string | null;
-  model: string | null;
-  additionalInstructions: string | null;
-  status: "active" | "disabled";
-  createdBySubjectId: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ListPrReviewConfigurationResponse = {
-  registrations: PrReviewAppRegistration[];
-  repositories: PrReviewRepositoryBinding[];
-};
-
-export type PrReviewManagedGitHubInstallation = {
-  registrationId: string;
-  installationId: string;
-  accountLogin: string | null;
-  configureUrl: string | null;
-  repositoryCount: number;
-};
-
-export type PrReviewManagedGitHubSetup = {
-  configured: boolean;
-  status: "unavailable" | "not_connected" | "connected";
-  appName: "Opengeni Lens" | "OpenGeni Lens";
-  connectUrl: string | null;
-  installations: PrReviewManagedGitHubInstallation[];
-  missing: string[];
-};
 
 // --- Capabilities ---------------------------------------------------------------
 
@@ -9567,6 +9630,11 @@ export type ApiIntegrationInstallationSummary = {
   approvalRequiredToolCount: number;
   revisionId: string;
   contentSha256: string;
+  /**
+   * Set on an instance a Personal workspace carries for its owner from another
+   * workspace where they connected it "Only me"; it is managed there.
+   */
+  personalExtension?: { originWorkspaceId: string; originWorkspaceName: string };
 };
 
 export type ListApiIntegrationsResponse = {
@@ -10331,6 +10399,14 @@ export type SessionApprovalRequest = {
   name: string;
   /** Tool arguments as the model produced them (usually a JSON string). */
   arguments: unknown;
+  /**
+   * Present when the tool's MCP server stopped mid-call to ask the person
+   * (form elicitation). Approving sends `elicitationRound: elicitation.round`
+   * and the answers as `content`, keyed by `requests[].id` and then by field
+   * name; omitted fields take the form's defaults. Rejecting tells the server
+   * the person declined.
+   */
+  elicitation?: McpElicitationApprovalRequest | undefined;
   [compatibilityField: string]: unknown;
 };
 
@@ -10342,6 +10418,10 @@ export type UserApprovalDecisionEventInput = {
     approvalId: string;
     decision: "approve" | "reject";
     message?: string | undefined;
+    /** Answers to the approval's `elicitation` forms; only with `approve`. */
+    content?: McpElicitationContent | undefined;
+    /** The `elicitation.round` an approval answers; required to approve one. */
+    elicitationRound?: number | undefined;
     /** Server-owned header rotation applied atomically when the response is accepted. */
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
@@ -10667,6 +10747,19 @@ export type SessionMachineAccess = {
    *  brings them to the agent; moving the chat to a machine the sender may
    *  use runs them. Older servers omit it. */
   waitingMessages?: SessionWaitingMessages[] | undefined;
+  /** The next saved message is the machine owner's own and was approved for
+   *  other machines, not this one, so it can't start here and no recheck
+   *  helps: it runs after the chat moves to a machine it was approved for, or
+   *  it is removed and sent again here. Older servers omit it. */
+  queuedTurnNotApprovedHere?: boolean | undefined;
+  /** Where that message may run: the owner's personal machines it was
+   *  approved for. Listed only for its sender; empty for everyone else. */
+  queuedTurnApprovedMachines?: SessionApprovedMachine[] | undefined;
+};
+
+export type SessionApprovedMachine = {
+  sandboxId: string;
+  machineName: string;
 };
 
 export type SessionWaitingMessages = {
@@ -11126,6 +11219,8 @@ export type ClientAgentConfig = {
     id: AgentCapabilityId;
     available: boolean;
     reason?: string | undefined;
+    /** `region_restricted` when EU-only inference switched it off ("Not supported in EU"). */
+    code?: FeatureUnavailableReason | undefined;
   }>;
 };
 

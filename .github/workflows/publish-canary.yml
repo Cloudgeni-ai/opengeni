@@ -76,7 +76,8 @@ jobs:
             selected_fetch="+$EXPECTED_SELECTED_PULL_REF:refs/remotes/origin/selected-pull"
           fi
           if ! git fetch --quiet --no-tags --prune --no-recurse-submodules "${fetch_args[@]}" origin \
-            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/production:refs/remotes/origin/production' \
             '+refs/tags/*:refs/tags/*' \
             "$selected_fetch" >/dev/null 2>&1; then
             echo "::error::Could not restore complete repository history"

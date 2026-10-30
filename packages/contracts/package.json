@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.5.1",
+  "version": "6.0.2",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -26,6 +26,14 @@
       "types": "./src/automation-templates.ts",
       "default": "./src/automation-templates.ts"
     },
+    "./mcp-elicitation": {
+      "types": "./src/mcp-elicitation.ts",
+      "default": "./src/mcp-elicitation.ts"
+    },
+    "./mcp-elicitation-model": {
+      "types": "./src/mcp-elicitation-model.ts",
+      "default": "./src/mcp-elicitation-model.ts"
+    },
     "./prepared-mcp-setup": {
       "types": "./src/prepared-mcp-setup.ts",
       "default": "./src/prepared-mcp-setup.ts"
@@ -45,6 +53,10 @@
     "./allowance-refusal": {
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
+    },
+    "./timeline-order": {
+      "types": "./src/timeline-order.ts",
+      "default": "./src/timeline-order.ts"
     },
     "./learning-refusal": {
       "types": "./src/learning-refusal.ts",
@@ -77,6 +89,14 @@
     "./passkey-only-account": {
       "types": "./src/passkey-only-account.ts",
       "default": "./src/passkey-only-account.ts"
+    },
+    "./secret-value-masking": {
+      "types": "./src/secret-value-masking.ts",
+      "default": "./src/secret-value-masking.ts"
+    },
+    "./secret-shape-masking": {
+      "types": "./src/secret-shape-masking.ts",
+      "default": "./src/secret-shape-masking.ts"
     },
     "./client-error-report": {
       "types": "./src/client-error-report.ts",
@@ -322,6 +342,7 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
+    "entities": "^7.0.1",
     "yaml": "2.9.0",
     "zod": "^4.2.1"
   },

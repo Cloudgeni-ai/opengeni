@@ -11,6 +11,7 @@ import {
   applySessionAgentConfigWriteThrough,
   legacySessionAgentCapabilities,
   newSessionKnowledgeSearchTools,
+  newSessionOpeningTools,
   resolveSessionAgentConfigForCreate,
 } from "../src/domain/agent-config-resolution";
 
@@ -105,6 +106,41 @@ describe("new-session Knowledge search selection", () => {
         toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
       }).tools,
     ).toEqual(oldTools);
+  });
+});
+
+describe("new-session tools named by the opening context", () => {
+  test("only selected first-party tools count; other names need another server; the session's tools are untouched", () => {
+    const tools: ToolRef[] = [
+      { kind: "mcp", id: "opengeni", eager: ["knowledge_search"] },
+      { kind: "mcp", id: "files" },
+    ];
+    const before = structuredClone(tools);
+    // A first-party name outside the selection never counts; any other name is
+    // left to the first turn, which loads it only if a selected server has it.
+    expect(
+      newSessionOpeningTools(
+        tools,
+        ["knowledge_search", "excel_run"],
+        ["excel_run", "session_create", "projects_search", "excel_run"],
+      ),
+    ).toEqual(["excel_run", "projects_search"]);
+    expect(tools).toEqual(before);
+  });
+
+  test("names nothing outside the opengeni ref's own selection", () => {
+    const tools: ToolRef[] = [{ kind: "mcp", id: "opengeni" }];
+    expect(newSessionOpeningTools(tools, ["excel_run"], undefined)).toEqual([]);
+    expect(newSessionOpeningTools(tools, ["excel_run"], [])).toEqual([]);
+    expect(newSessionOpeningTools(tools, [], ["excel_run"])).toEqual([]);
+    expect(newSessionOpeningTools([], ["excel_run"], ["excel_run"])).toEqual([]);
+    const narrowed: ToolRef[] = [{ kind: "mcp", id: "opengeni", allowedTools: ["goal_set"] }];
+    expect(newSessionOpeningTools(narrowed, ["excel_run"], ["excel_run"])).toEqual([]);
+    // Without another selected server no application tool can answer a name.
+    expect(newSessionOpeningTools(tools, ["excel_run"], ["projects_search"])).toEqual([]);
+    expect(
+      newSessionOpeningTools([{ kind: "mcp", id: "app" }], [], ["excel_run", "projects_search"]),
+    ).toEqual(["projects_search"]);
   });
 });
 

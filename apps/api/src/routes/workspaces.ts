@@ -3,7 +3,12 @@ import { elevenLabsKeyAvailable, realtimeVoiceOptions } from "../realtime-websoc
 import {
   createRealtimeVoiceBilling,
   deploymentRealtimeVoice,
+  memberExecutionTargetUsable,
+  realtimeVoiceRegionAllowed,
+  settingsWithInferenceResidency,
   realtimeVoiceOfferProblem,
+  resolveMemberExecutionDefault,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import { withDirectModelProviders, workspaceModelCompactionPolicy } from "@opengeni/config";
 import { getWorkspaceSettings, listConnectionsMetadata } from "@opengeni/db";
@@ -18,15 +23,20 @@ import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
+  machineCanBeWorkspaceDefault,
+  MemberDefaultExecutionTarget,
   resolveRealtimeVoiceSettings,
   resolveWorkspaceRecordingSettings,
   resolveWorkspaceRealtimeDefaultModel,
   resolveWorkspaceRealtimeVoiceSettings,
+  UpdateMemberDefaultExecutionTargetRequest,
   WorkspacePauseTimerRequest,
 } from "@opengeni/contracts";
 import {
+  clearWorkspaceMemberExecutionDefault,
   forgetWorkspaceRecordingVoices,
   getWorkspaceConnectionModelRestrictions,
+  setWorkspaceMemberExecutionDefault,
 } from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
@@ -67,6 +77,7 @@ import {
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
 import { loadWorkspaceCodexCatalogReadiness } from "@opengeni/core";
+import { REGION_RESTRICTED, REGION_RESTRICTED_MESSAGE } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
   getBillingBalance,
@@ -161,7 +172,7 @@ import {
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
-import { projectWorkspaceModelCatalog } from "../model-catalog";
+import { projectWorkspaceModelCatalog, withRegionAvailability } from "../model-catalog";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import { workspaceControlEventVisibility } from "../workspace-control-visibility";
 import {
@@ -565,6 +576,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const executionTarget = parsed.defaultExecutionTarget;
     if (executionTarget?.kind === "machine") {
+      const workspace = await requireWorkspace(deps.db, workspaceId);
       const machine = await getSandbox(deps.db, grant, executionTarget.targetSandboxId);
       const enrollment = machine?.enrollmentId
         ? await getEnrollment(deps.db, grant, machine.enrollmentId)
@@ -574,12 +586,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         !deps.settings.sandboxSelfhostedEnabled ||
         !machine ||
         machine.kind !== "selfhosted" ||
-        machine.scope === "user" ||
+        !machineCanBeWorkspaceDefault(machine, workspace) ||
         !enrollment ||
         enrollment.status !== "active"
       ) {
         throw new HTTPException(422, {
-          message: "Choose an available shared Connected Machine for the workspace default.",
+          message:
+            workspace.kind === "personal"
+              ? "Choose an available Connected Machine for the workspace default."
+              : "Choose an available shared Connected Machine for the workspace default.",
         });
       }
     } else if (
@@ -619,6 +634,43 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
+  });
+
+  // "Your default machine": the caller's own placement for the new chats they
+  // start here, ahead of the workspace default. Personal: nobody else reads it.
+  app.get("/v1/workspaces/:workspaceId/my-default-execution-target", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    const resolved = await resolveMemberExecutionDefault(deps.db, deps.settings, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+    });
+    return c.json(MemberDefaultExecutionTarget.parse(resolved));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/my-default-execution-target", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    const parsed = parseRequestBody(UpdateMemberDefaultExecutionTargetRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid default machine",
+    });
+    const access = { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId };
+    if (parsed.target === null) {
+      await clearWorkspaceMemberExecutionDefault(deps.db, access);
+      return c.json(MemberDefaultExecutionTarget.parse({ target: null, usable: false }));
+    }
+    if (!(await memberExecutionTargetUsable(deps.db, deps.settings, access, parsed.target))) {
+      throw new HTTPException(422, {
+        message:
+          parsed.target.kind === "managed"
+            ? "This deployment does not provide a managed sandbox."
+            : "Choose an available Connected Machine you can use.",
+      });
+    }
+    await setWorkspaceMemberExecutionDefault(deps.db, { ...access, target: parsed.target });
+    return c.json(MemberDefaultExecutionTarget.parse({ target: parsed.target, usable: true }));
   });
 
   // Per-workspace model/provider availability policy (the HARD blocker over
@@ -805,15 +857,23 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationDefaults,
       ...(creditBalance ? { creditBalance } : {}),
     });
-    const catalog = projectWorkspaceModelCatalog(selections, {
-      defaultSelection,
-      creditsSelection: creditsDefaultSessionModel({
-        settings: workspaceCatalogSettings,
-        selections,
-        workspaceSettings,
-        organizationDefaults,
-      }),
+    const { requiredModelGeography } = await settingsWithInferenceResidency(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      settings: workspaceCatalogSettings,
     });
+    const catalog = projectWorkspaceModelCatalog(
+      withRegionAvailability(selections, requiredModelGeography),
+      {
+        defaultSelection,
+        creditsSelection: creditsDefaultSessionModel({
+          settings: workspaceCatalogSettings,
+          selections,
+          workspaceSettings,
+          organizationDefaults,
+        }),
+      },
+    );
     for (const model of catalog.models) {
       model.compactionPolicy = workspaceModelCompactionPolicy(
         workspaceCatalogSettings,
@@ -1258,6 +1318,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       elevenLabsConnected,
       workspaceSettings,
       organizationDefaults,
+      residencySettings,
     ] = await Promise.all([
       workspaceCodexRealtimeReady(deps, grant, workspaceId),
       workspaceXaiOperationAvailable(deps.db, deps.settings, {
@@ -1269,6 +1330,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       elevenLabsKeyAvailable(deps.db, { accountId: grant.accountId, workspaceId }),
       getWorkspaceSettings(deps.db, workspaceId),
       getOrganizationModelDefaults(deps.db, grant.accountId),
+      settingsWithInferenceResidency(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        settings: deps.settings,
+      }),
     ]);
     const availability = (
       credentialReady: boolean,
@@ -1315,7 +1381,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           ])
         : (["none", false] as const);
     const hasCredits = creditStanding === "spendable";
-    const models = [
+    const offeredModels = [
       ...managedCandidates.map((model, index) => ({
         ...model,
         provider: "OpenGeni" as const,
@@ -1370,6 +1436,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         recommended: false,
       })),
     ];
+    // EU-only: a model whose route has no EU residency record is listed as
+    // region_restricted, and nothing else is offered in its place.
+    const models = offeredModels.map((model) =>
+      realtimeVoiceRegionAllowed(residencySettings, model.id)
+        ? model
+        : {
+            ...model,
+            available: false,
+            unavailableReason: REGION_RESTRICTED_MESSAGE,
+            unavailableCode: REGION_RESTRICTED,
+            recommended: false,
+          },
+    );
     // Each model lists the voice settings its provider offers, with the
     // workspace's saved values for it and the organization's default, and
     // which model each of them chose to start voice conversations with.
@@ -1849,8 +1928,6 @@ function requireAccountPermission(
     !grant ||
     (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))
   ) {
-    throw new HTTPException(403, {
-      message: `missing permission: ${permission}`,
-    });
+    throw new MissingPermissionRefusal(permission);
   }
 }

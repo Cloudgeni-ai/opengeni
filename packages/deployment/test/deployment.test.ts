@@ -1734,6 +1734,7 @@ describe("deployment contract", () => {
     expect(EVENT_TRIGGERS_PASSTHROUGH_ENV).toEqual([
       "OPENGENI_EVENT_TRIGGERS_ENABLED",
       "OPENGENI_WEBHOOK_BASE_URL",
+      "OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH",
     ]);
     const outputs = {
       temporal_host: { value: "host:7233" },
@@ -1800,6 +1801,7 @@ describe("deployment contract", () => {
       "OPENGENI_DECISION_MODEL_ID",
       "OPENGENI_DECISION_MODEL_API_KEY",
       "OPENGENI_DECISION_MODEL_BASE_URL",
+      "OPENGENI_DECISION_MODEL_AUTH",
       "OPENGENI_JEV_API_KEY",
       "OPENGENI_JEV_BASE_URL",
       "OPENGENI_JEV_MODEL",

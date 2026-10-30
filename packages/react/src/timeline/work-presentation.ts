@@ -3,11 +3,25 @@
 // renderers decide identically what a turn shows (preparing, working, waiting, worked).
 import { timelineGroupContainsPresentedImage } from "./presented-image";
 import type { TurnSummaryStatus } from "./turn-summary-model";
-import type { ActivityItem, TimelineGroup } from "./types";
+import type { ActivityItem, TimelineGroup, TimelineItem } from "./types";
 import { type OpenGeniText } from "../messages/runtime";
 
 export type ActivityGroup = Extract<TimelineGroup, { kind: "activity" }>;
 export type TurnGroup = Extract<TimelineGroup, { kind: "turn" }>;
+
+/** Once useful output exists, startup decoration must not compete with it. */
+export function timelineTurnsWithOutput(items: readonly TimelineItem[]): Set<string> {
+  return new Set(
+    items.flatMap((item) =>
+      "turnId" in item &&
+      item.turnId &&
+      (item.kind === "tool-call" ||
+        ((item.kind === "agent-message" || item.kind === "reasoning") && item.text.trim()))
+        ? [item.turnId]
+        : [],
+    ),
+  );
+}
 
 export function durationBetween(startedAt: string, endedAt: string): number | undefined {
   const started = Date.parse(startedAt);
@@ -18,13 +32,17 @@ export function durationBetween(startedAt: string, endedAt: string): number | un
   return ended - started;
 }
 
-/** Compaction landmarks among a fold's groups (secondary summary facet). */
+/**
+ * Compaction landmarks among a fold's groups (secondary summary facet). The
+ * one-time rebuild for a new model has its own note and is not counted.
+ */
 export function compactedLandmarkCount(groups: readonly TimelineGroup[]): number {
   return groups.filter(
     (group) =>
       group.kind === "item" &&
       group.item.kind === "context-compaction" &&
-      group.item.phase === "compacted",
+      group.item.phase === "compacted" &&
+      group.item.implementation !== "portable_model_switch",
   ).length;
 }
 

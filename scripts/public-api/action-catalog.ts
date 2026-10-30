@@ -60,6 +60,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   { pattern: /^\/v1\/(analytics-consent|client-errors)$/, reason: "browser telemetry" },
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
   {
+    pattern: /^\/v1\/shared-sessions\//,
+    reason: "a signed-out read of a chat share link; the link itself is the credential",
+  },
+  {
     pattern:
       /^\/v1\/workspaces\/:workspaceId\/(recordings|recording-people|recording-models)(\/|$)/,
     reason:
@@ -124,8 +128,6 @@ export type RouteInputs = {
   body: string[];
   query: string[];
   queryParameters: string[];
-  /** The replacement a retired route names (`routeRetired("METHOD /path", ...)`). */
-  retired?: string;
   /** The workspace permission the handler's first access check requires. */
   permission?: string;
 };
@@ -252,7 +254,6 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
   const looseBody: string[] = [];
   const query: string[] = [];
   const queryParameters = new Set<string>();
-  let retired: string | undefined;
   for (const source of sources) {
     const parsed = parseSync("handler.js", `(${source});`);
     if (parsed.errors.length > 0) continue;
@@ -284,10 +285,6 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
       if (node.type !== "CallExpression") continue;
       const name = calleeName(node);
       const [first, second] = node.arguments as AstNode[];
-      if (name === "routeRetired") {
-        if (first?.type === "Literal" && typeof first.value === "string") retired = first.value;
-        continue;
-      }
       if (requestQueryCall(node)) {
         const parameter = propertyName(first);
         if (first?.type === "Literal" && parameter) queryParameters.add(parameter);
@@ -335,7 +332,6 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
     body: [...new Set([...body, ...looseBody])].slice(0, 1),
     query: [...new Set(query)],
     queryParameters: [...queryParameters].sort(),
-    ...(retired ? { retired } : {}),
     ...gatePermission(sources),
   };
 }
@@ -598,7 +594,6 @@ export function buildActionCatalog(
         sdk: route?.sdk ?? [],
         request,
         query: inputs.queryParameters,
-        retired: inputs.retired,
         permission: inputs.permission,
         response: response.length > 0 ? response : inlineResponseSchemas(method, path),
       };
@@ -627,7 +622,6 @@ export function buildActionCatalog(
         ...(route.query.length > 0 ? { query: [...route.query] } : {}),
         response: [...route.response],
         ...(browserOnly ? { browserOnly } : {}),
-        ...(route.retired ? { retired: route.retired } : {}),
         ...(route.permission ? { permission: route.permission } : {}),
         ...(secretFields.length > 0 ? { secretFields } : {}),
       };

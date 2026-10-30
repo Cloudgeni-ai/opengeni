@@ -8,7 +8,7 @@ A bot only adds what people need to recognise it and to start another like it.
 
 ## Name, description and avatar
 
-Every chat may carry, next to its title:
+Every chat may carry, alongside its title:
 
 - a one-line **description** (up to 280 characters) of what it is for, and
 - an **avatar**: one emoji, one of a curated set of icons, one or two letters,
@@ -39,9 +39,32 @@ image is refused, because everyone else would see only initials; the agent is
 told to share the image first. Each viewer opens the image with their own
 access, and anyone who cannot sees the name's initials instead.
 
+Avatars are mostly seen small: 16 pixels in the sidebar list and 20 in the
+chat header. Detailed pictures, such as characters told apart by a hat or a
+held object, all look alike at that size. The tools therefore ask the agent to
+make an image avatar a flat icon that fills the square: one bold symbol for the
+chat's job on a solid, strong colour that differs from other bots' avatars,
+with no frame, faces, fine detail or text.
+
 Forking a chat copies its description and avatar along with its title and
 agent settings (the fork routines copy the whole source row), so forking a bot
 is the simple way to clone one together with its history.
+
+## Project profiles
+
+A project (the sidebar group chats are filed in) has the same profile: its
+name, a description (up to 2000 characters, as before) and an avatar of the
+same kinds. The avatar replaces the folder icon in the sidebar, the new-chat
+project picker and the Move to project lists; pointing at a project's header
+shows its description. People edit all three with **Edit project…** in the
+project's menu, the same dialog as a chat's **Edit profile…**. Agents set them
+with `project_create` and `project_update`.
+
+The avatar lives on the `channels` row (migration `1100_project_avatar.sql`)
+and goes through `POST`/`PATCH /v1/workspaces/:workspaceId/channels`. Changing a
+project's profile needs the same permission as renaming it
+(`sessions:create`). Projects are shared with the whole workspace, so an image
+avatar must be one everyone in the workspace can open, as in a shared chat.
 
 ## Bot templates
 
@@ -50,24 +73,41 @@ A bot template is where a new bot starts: a name, description, avatar and
 exempt from the idle-session archive, already carries the template's name,
 description and avatar, and has the setup instructions as its first message.
 The agent then sets itself up with its ordinary tools (installing Skills,
-requesting connections, creating schedules and event triggers, choosing a
-machine) and the chat simply continues as the bot.
+offering plugins and connections, creating schedules and event triggers,
+choosing a machine) and the chat simply continues as the bot.
 
 Setup instructions can be exact ("install these Skills and create this
 schedule") so the agent sets itself up without asking, or open-ended ("ask how
 they handle on-call today and set up what fits") so the same template works for
-people whose tools differ. Setup never bypasses anything: connections still need
-a person's authorization and Skill installs follow the workspace's Skill
-settings.
+people whose tools differ. Setup never bypasses anything: connections and
+plugins still need a person's click on the card the agent shows, and Skill
+installs follow the workspace's Skill settings.
 
-Templates are stored per workspace (`bot_templates`). Everyone in the workspace
-can start a bot from one. Whoever saved a template, a workspace admin, or a
-workspace-level (service) caller may change or delete it. Routes:
+Plugins from the marketplace are part of the integration catalogue the agent
+already searches for connectors (`capability_catalog_search`, kind `plugin`,
+ids `plugin:marketplace/<provider>/<name>`). When setup names a plugin, the
+agent asks for it with `capability_authorization_request` exactly as for a
+connector. The chat shows a plugin card with the agent's reason, who made the
+plugin and what it adds; **Review plugin** lists its Skills and MCP servers and
+installs it for the workspace. Installing needs the same `capabilities:manage`
+permission as the Plugins page. Someone without it sees that a workspace admin
+has to install it, and the agent is told the same, so it does not send them to
+the card. The agent continues once the plugin is installed, and a plugin that
+is already installed shows as done.
+
+Templates are stored per workspace (`bot_templates`, visibility in migration
+`1064_bot_template_visibility.sql`). Like a chat, each template is either
+shared with the workspace, so everyone can start bots from it, or **Only me**,
+so only whoever saved it can see, find or use it. A template the agent saves
+from an Only me chat is Only me; one saved from a shared chat is shared. People
+choose in the template dialog and can change it later. Whoever saved a shared
+template, a workspace admin, or a workspace-level (service) caller may change
+or delete it; an Only me template belongs to the person who saved it. Routes:
 
 | Route | Needs |
 | --- | --- |
 | `GET /v1/workspaces/:workspaceId/bot-templates` and `/:templateId` | `sessions:read` |
-| `POST /v1/workspaces/:workspaceId/bot-templates` | `sessions:create` |
+| `POST /v1/workspaces/:workspaceId/bot-templates` | `sessions:create`; a `sourceSessionId` must be a chat in the workspace the caller can open |
 | `PATCH` and `DELETE /v1/workspaces/:workspaceId/bot-templates/:templateId` | `sessions:create`, and manage access |
 
 A workspace keeps at most 200 templates.
@@ -100,13 +140,17 @@ template:
 }
 ```
 
-The file carries no ids, owner or image: an image avatar stays in its
-workspace and is dropped on export.
+The file carries no ids, owner, visibility or image: an image avatar stays in
+its workspace and is dropped on export. An imported template is shared with
+the workspace; make it Only me from its **Edit** dialog.
 
-## What is not here yet
+## In Slack
 
-- Plugins in setup instructions: a template can name Skills, connectors,
-  schedules and machines today; installing a whole plugin from the agent is a
-  follow-up.
-- A bot's own identity in other channels such as Slack (posting under its name
-  and avatar) is a follow-up.
+When the workspace's Slack app has the optional `chat:write.customize` grant, a
+bot posts its own replies in Slack under its name and avatar instead of the
+app's: progress, answers and results in its threads, and messages it prepares
+for a channel or a scheduled task. Approvals, limits and other notices stay the
+app's, and Slack labels every such post as an app message, so readers can tell
+it is not a person. Only a chat with an avatar posts this way; others post as
+the app. See [Slack bot](slack-bot.md) for the grant and the signed avatar
+picture URL.

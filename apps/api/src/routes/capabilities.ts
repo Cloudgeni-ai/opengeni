@@ -12,7 +12,6 @@ import {
 } from "@opengeni/contracts";
 import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import type { Hono } from "hono";
-import { HTTPException } from "hono/http-exception";
 import {
   ConnectorConnectionRequiredError,
   hasPermission,
@@ -22,6 +21,7 @@ import {
   updateConnectorToolPermissions,
   getSessionMcpToolPermissions,
   updateSessionMcpToolPermissions,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -35,10 +35,7 @@ import {
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { boundedLimit } from "../http/common";
 import { z } from "zod";
-import pluginSnapshot from "../../../../data/catalog/plugins-snapshot.json";
-const discoverablePlugins = pluginSnapshot.sources
-  .flatMap((source) => source.entries.map((entry) => ({ ...entry, provider: source.provider })))
-  .sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
+import { discoverablePlugins } from "../integrations/marketplace-plugin-catalog";
 import { inspectMcpAuthentication } from "../integrations/oauth-client";
 import { parseRequestJson } from "../http/request-body";
 
@@ -236,7 +233,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
       personalSetup &&
       !hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode)
     )
-      throw new HTTPException(403, { message: "missing permission: capabilities:manage" });
+      throw new MissingPermissionRefusal("capabilities:manage");
     const payload = await parseRequestJson(c, EnableCapabilityRequest);
     const installation = await enableCapability({
       db,

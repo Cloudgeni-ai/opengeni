@@ -441,18 +441,17 @@ export function mergeRecordingTranscriptionPieces(
 export type RecordingTrackPlan = {
   trackNumber: number;
   /**
-   * Every word on this track is one known speaker (`track-N`), so it needs
-   * no diarization: the microphone next to computer audio is the person
-   * recording.
+   * The person recording's label (`track-N`) when this track is their
+   * microphone next to computer audio. Their voice on it is them; anyone
+   * else in the room with them is told apart like on any other track.
    */
-  fixedLabel: string | null;
-  diarize: boolean;
+  recorderLabel: string | null;
 };
 
 /**
- * Decide how to label each track. When a microphone track sits next to a
- * system-audio track, the microphone is the person recording and only the
- * other tracks need diarization.
+ * Decide how to label each track. Every track is diarized. When a microphone
+ * track sits next to a system-audio track, the microphone is the person
+ * recording's, so their voice on it carries the track's label.
  */
 export function planRecordingTracks(
   tracks: ReadonlyArray<{ trackNumber: number; source: RecordingTrackSource }>,
@@ -460,22 +459,79 @@ export function planRecordingTracks(
   const hasSystem = tracks.some((track) => track.source === "system");
   return [...tracks]
     .sort((left, right) => left.trackNumber - right.trackNumber)
-    .map((track) =>
-      hasSystem && track.source === "microphone"
-        ? {
-            trackNumber: track.trackNumber,
-            fixedLabel: `track-${track.trackNumber}`,
-            diarize: false,
-          }
-        : { trackNumber: track.trackNumber, fixedLabel: null, diarize: true },
-    );
+    .map((track) => ({
+      trackNumber: track.trackNumber,
+      recorderLabel:
+        hasSystem && track.source === "microphone" ? `track-${track.trackNumber}` : null,
+    }));
 }
 
 export type RecordingTrackWords = {
   trackNumber: number;
-  fixedLabel: string | null;
+  /**
+   * The person recording, on their own microphone: `speaker` is the diarized
+   * id of their voice, or null when every word on the track is theirs.
+   */
+  recorder: { label: string; speaker: string | null } | null;
   words: readonly RecordingTranscribedWord[];
+  /**
+   * Diarized voices on this microphone whose words were almost all the call
+   * heard from the speakers (see `withoutMicrophoneEchoes`). They are the
+   * speakers, not people in the room.
+   */
+  echoSpeakers?: readonly string[];
 };
+
+/**
+ * Find the person recording among the voices on their own microphone. One
+ * voice (or none told apart) makes the whole track theirs. With several, it
+ * is the voice that matched their remembered voice, else the one that spoke
+ * the most, since the microphone is closest to them; the others are people
+ * in the room with them. A voice that was almost all the call heard from the
+ * speakers is not a person: it is never picked over a real voice, and what
+ * the echo left of it is dropped.
+ */
+export function withRecorderVoice(
+  track: RecordingTrackWords,
+  matchedSpeaker: string | null,
+): RecordingTrackWords {
+  if (!track.recorder) return track;
+  const speech = new Map<string, number>();
+  for (const word of track.words) {
+    if (!word.text.trim() || word.speaker === null) continue;
+    const length = Math.max(0, word.endMilliseconds - word.startMilliseconds);
+    speech.set(word.speaker, (speech.get(word.speaker) ?? 0) + length);
+  }
+  const echoes = new Set(track.echoSpeakers ?? []);
+  // When every voice is an echo, the person recording may still be one of
+  // them (told apart badly, or silent), so they are all candidates then.
+  const people = [...speech.keys()].filter((candidate) => !echoes.has(candidate));
+  const candidates = people.length > 0 ? people : [...speech.keys()];
+  let speaker: string | null = null;
+  if (speech.size > 1) {
+    if (matchedSpeaker !== null && speech.has(matchedSpeaker)) {
+      speaker = matchedSpeaker;
+    } else {
+      let most = -1;
+      for (const candidate of candidates) {
+        const length = speech.get(candidate)!;
+        if (length > most) {
+          most = length;
+          speaker = candidate;
+        }
+      }
+    }
+  }
+  const recorder = { label: track.recorder.label, speaker };
+  if (speaker === null) return { ...track, recorder };
+  const dropped = new Set([...echoes].filter((echo) => echo !== speaker));
+  if (dropped.size === 0) return { ...track, recorder };
+  return {
+    ...track,
+    recorder,
+    words: track.words.filter((word) => word.speaker === null || !dropped.has(word.speaker)),
+  };
+}
 
 /** How far apart the same word may land in two tracks and still be one sound. */
 const ECHO_WINDOW_MILLISECONDS = 1_500;
@@ -483,6 +539,13 @@ const ECHO_WINDOW_MILLISECONDS = 1_500;
 const ECHO_MAX_MISHEARD_IN_A_ROW = 2;
 /** Matching words an echo needs, so one shared "ja" or "okay" stays. */
 const ECHO_MIN_MATCHED_WORDS = 2;
+/**
+ * Share of a microphone voice's spoken time that was echo before the voice is
+ * the speakers rather than a person. On a real 29-minute call without
+ * headphones, the voices diarized from the speakers' sound were 92 to 98%
+ * echo and the person recording 7%; someone in the room is near 0%.
+ */
+const ECHO_VOICE_SHARE = 0.8;
 
 /** A word as compared across tracks: letters and digits only, any case. */
 function echoKey(text: string): string {
@@ -527,7 +590,10 @@ function heardNear(starts: readonly number[] | undefined, at: number): boolean {
  * the microphone's runs of words that were said at the same moment in
  * computer audio: at least two matching words, with at most two misheard
  * words in a row between them. What the person says, even right after
- * someone else, stays.
+ * someone else, stays. A diarized voice whose spoken time was almost all such
+ * echo is the speakers themselves; it is marked in `echoSpeakers` so the
+ * misheard bits the echo left behind don't become a person
+ * (`withRecorderVoice` drops them).
  */
 export function withoutMicrophoneEchoes(
   tracks: readonly RecordingTrackWords[],
@@ -573,7 +639,23 @@ export function withoutMicrophoneEchoes(
       index = end + 1;
     }
     if (dropped.size === 0) return track;
-    return { ...track, words: words.filter((_, position) => !dropped.has(position)) };
+    const spoken = new Map<string, { echo: number; total: number }>();
+    words.forEach((word, position) => {
+      if (word.speaker === null || keys[position] === "") return;
+      const length = Math.max(0, word.endMilliseconds - word.startMilliseconds);
+      const time = spoken.get(word.speaker) ?? { echo: 0, total: 0 };
+      time.total += length;
+      if (dropped.has(position)) time.echo += length;
+      spoken.set(word.speaker, time);
+    });
+    const echoSpeakers = [...spoken]
+      .filter(([, time]) => time.total > 0 && time.echo >= ECHO_VOICE_SHARE * time.total)
+      .map(([speaker]) => speaker);
+    return {
+      ...track,
+      words: words.filter((_, position) => !dropped.has(position)),
+      ...(echoSpeakers.length > 0 ? { echoSpeakers } : {}),
+    };
   });
 }
 
@@ -592,43 +674,55 @@ const SEGMENT_HARD_MAX_MILLISECONDS = 180_000;
 const SENTENCE_END = /[.!?…。！？]["')\]]*$/u;
 
 /**
- * Speaker labels for a track's words. Diarized ids become `speaker_N` in
- * order of first appearance; with several diarized tracks they carry the
- * track (`t1_speaker_0`), since each provider call numbers speakers anew.
+ * Speaker labels for every track's words. The person recording's voice on
+ * their own microphone carries the track's label (`track-0`). Every other
+ * diarized voice becomes `speaker_N`, numbered across the whole recording by
+ * track and then by first appearance, since each track's diarization numbers
+ * its speakers anew. (Versions made before this numbered each track on its
+ * own and prefixed the track, as `t1_speaker_0`, when several were diarized.)
  */
-function trackLabeler(track: RecordingTrackWords, prefixTracks: boolean) {
-  const numbers = new Map<string, number>();
-  return (speaker: string | null): string | null => {
-    if (track.fixedLabel) return track.fixedLabel;
-    if (speaker === null) return null;
-    let number = numbers.get(speaker);
-    if (number === undefined) {
-      number = numbers.size;
-      numbers.set(speaker, number);
+function recordingLabeler(tracks: readonly RecordingTrackWords[]) {
+  const isRecorder = (track: RecordingTrackWords, speaker: string | null) =>
+    track.recorder !== null &&
+    (track.recorder.speaker === null || speaker === null || speaker === track.recorder.speaker);
+  const numbers = new Map<number, Map<string, number>>();
+  let next = 0;
+  for (const track of tracks) {
+    const byId = new Map<string, number>();
+    for (const word of track.words) {
+      if (!word.text.trim() || word.speaker === null || byId.has(word.speaker)) continue;
+      if (isRecorder(track, word.speaker)) continue;
+      byId.set(word.speaker, next);
+      next += 1;
     }
-    return prefixTracks ? `t${track.trackNumber}_speaker_${number}` : `speaker_${number}`;
+    numbers.set(track.trackNumber, byId);
+  }
+  return (track: RecordingTrackWords, speaker: string | null): string | null => {
+    if (track.recorder && isRecorder(track, speaker)) return track.recorder.label;
+    if (speaker === null) return null;
+    const number = numbers.get(track.trackNumber)?.get(speaker);
+    return number === undefined ? null : `speaker_${number}`;
   };
 }
 
 /**
  * The transcript label each diarized speaker id gets on each track, as
  * buildRecordingSegments assigns them, so per-speaker data (such as voices)
- * can follow the speakers into the transcript.
+ * can follow the speakers into the transcript. The person recording's own
+ * voice maps to their track's label.
  */
 export function recordingSpeakerLabels(
   tracks: readonly RecordingTrackWords[],
 ): Map<number, Map<string, string>> {
-  const diarizedTracks = tracks.filter((track) => !track.fixedLabel).length;
+  const label = recordingLabeler(tracks);
   const labels = new Map<number, Map<string, string>>();
   for (const track of tracks) {
-    if (track.fixedLabel) continue;
-    const label = trackLabeler(track, diarizedTracks > 1);
     const byId = new Map<string, string>();
     for (const word of track.words) {
       if (!word.text.trim() || word.speaker === null || byId.has(word.speaker)) continue;
-      byId.set(word.speaker, label(word.speaker)!);
+      byId.set(word.speaker, label(track, word.speaker)!);
     }
-    labels.set(track.trackNumber, byId);
+    if (byId.size > 0) labels.set(track.trackNumber, byId);
   }
   return labels;
 }
@@ -641,10 +735,9 @@ export function recordingSpeakerLabels(
 export function buildRecordingSegments(
   tracks: readonly RecordingTrackWords[],
 ): RecordingTranscriptSegmentDraft[] {
-  const diarizedTracks = tracks.filter((track) => !track.fixedLabel).length;
+  const label = recordingLabeler(tracks);
   const segments: RecordingTranscriptSegmentDraft[] = [];
   for (const track of tracks) {
-    const label = trackLabeler(track, diarizedTracks > 1);
     let current: RecordingTranscriptSegmentDraft | null = null;
     const close = () => {
       if (current && current.text.trim()) {
@@ -656,7 +749,7 @@ export function buildRecordingSegments(
     for (const word of track.words) {
       const text = word.text.trim();
       if (!text) continue;
-      const speaker = label(word.speaker);
+      const speaker = label(track, word.speaker);
       const open = current as RecordingTranscriptSegmentDraft | null;
       if (open) {
         const length = open.endMilliseconds - open.startMilliseconds;
@@ -697,11 +790,9 @@ export function recordingDiarizationKind(input: {
   providerDiarized: boolean;
   ourDiarizer: boolean;
 }): RecordingDiarization {
-  if (input.plans.some((plan) => plan.diarize)) {
-    if (input.ourDiarizer) return "ours";
-    if (input.providerDiarized) return "provider";
-  }
-  return input.plans.some((plan) => plan.fixedLabel) ? "tracks" : "none";
+  if (input.ourDiarizer) return "ours";
+  if (input.providerDiarized) return "provider";
+  return input.plans.some((plan) => plan.recorderLabel) ? "tracks" : "none";
 }
 
 // --- ElevenLabs Scribe ------------------------------------------------------
@@ -763,10 +854,6 @@ type ElevenLabsResponse = {
 };
 
 /**
- * The shortest standard form of a provider's language code: ISO 639-3 "eng"
- * and "nob" become "en" and "nb"; a code Intl can't read is kept as given.
- */
-/**
  * ElevenLabs knows Norwegian as one language ("no", "nor"), so Bokmål and
  * Nynorsk are sent as Norwegian.
  */
@@ -774,12 +861,39 @@ export function elevenLabsLanguage(code: string): string {
   return code === "nb" || code === "nn" || code === "nob" || code === "nno" ? "no" : code;
 }
 
+/**
+ * The shortest standard form of a provider's language code: ISO 639-3 "eng"
+ * and "nob" become "en" and "nb"; a code Intl can't read is kept as given.
+ */
 export function canonicalLanguageTag(code: string): string {
   try {
     return Intl.getCanonicalLocales(code.trim())[0] ?? code;
   } catch {
     return code;
   }
+}
+
+/**
+ * The languages a transcript is in. One asked for in a language is in that
+ * language, even when the model labels a few phrases with a neighbour (Danish
+ * in Norwegian speech): the languages it heard that are the one asked for are
+ * kept as it named them, or else the one asked for.
+ */
+export function transcriptLanguages(
+  requested: string | null | undefined,
+  heard: Iterable<string>,
+): string[] {
+  const all = [...new Set(heard)];
+  if (!requested?.trim()) return all;
+  const asked = canonicalLanguageTag(requested);
+  const matching = all.filter((tag) => languageFamily(tag) === languageFamily(asked));
+  return matching.length > 0 ? matching : [asked];
+}
+
+/** A language without its region or script; Norwegian's written forms are one. */
+function languageFamily(code: string): string {
+  const base = canonicalLanguageTag(code).toLowerCase().split("-")[0] ?? code;
+  return base === "nb" || base === "nn" || base === "no" ? "no" : base;
 }
 
 function seconds(value: unknown): number | null {

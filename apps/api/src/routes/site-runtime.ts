@@ -1110,7 +1110,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     host: SiteRuntimeHost & { versionId: string },
     viewer: SiteRuntimeViewer,
   ): PublishedSiteDataViewer =>
-    sitePublishedDataViewer(host, viewer.principal, viewer.kind === "guest");
+    sitePublishedDataViewer(host, viewer.principal, viewer.kind === "guest", {
+      access: viewer.kind,
+      email: viewer.email,
+    });
 
   /**
    * Site SQL: run one named query of this Site as the viewer. The query's
@@ -1538,18 +1541,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
             null,
           );
       }
-      // Every conversation gets this Site's own data tools, pinned to this
-      // Site and acting as this viewer (site-publishing/agent-data-tools.ts).
+      // People outside the workspace get this Site's own data tools, pinned
+      // to this Site and acting as this viewer (site-publishing/agent-data-tools.ts).
+      // Members chat with their own tools, so they get none here.
       const dataTools =
         viewer.kind === "member"
           ? []
-          : await siteAgentDataToolsForStart(
-              deps,
-              host.scope,
-              host.site.id,
-              viewer.kind,
-              undefined,
-            );
+          : await siteAgentDataToolsForStart(deps, host.scope, host.site.id);
       const dataToolPermissions = permissionsRequiredByFirstPartyTools(dataTools);
       // One transaction counts the start and reserves a per-turn estimate
       // against the visitor's and the Site's windows; only the funded allowance
@@ -1856,20 +1854,27 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw invalid(`A message is at most ${MESSAGE_MAX_CHARS} characters`);
       if (draft.resources.length > 0 || (draft.annotations?.length ?? 0) > 0)
         throw invalid("Messages on a published Site are text only");
+      const conversationModel = async () => {
+        const current = await send("GET", target);
+        const session = current.ok
+          ? ((await current.json().catch(() => null)) as { model?: unknown } | null)
+          : (await current.body?.cancel(), null);
+        return typeof session?.model === "string" ? session.model : null;
+      };
+      // Without a model the draft follows the conversation's own settings,
+      // which are always allowed; only the billing rule still applies.
+      const model = draft.model ?? (await conversationModel());
+      if (model === null) throw invalid("This conversation is not available");
       const allowed = new Set((await siteViewerModels(host, viewer, limits)).allowed);
       // People outside the workspace never use a subscription-billed model.
-      if (viewer.kind !== "member" && isSubscriptionBilledModel([], draft.model))
+      if (viewer.kind !== "member" && isSubscriptionBilledModel([], model))
         throw siteNotAvailableForViewer(
           "agent_model",
           "This Site's assistant cannot use that model for you",
           { reason: "subscription_model" },
         );
-      if (!allowed.has(draft.model)) {
-        const current = await send("GET", target);
-        const session = current.ok
-          ? ((await current.json().catch(() => null)) as { model?: unknown } | null)
-          : (await current.body?.cancel(), null);
-        if (session?.model !== draft.model)
+      if (draft.model !== undefined && !allowed.has(draft.model)) {
+        if ((await conversationModel()) !== draft.model)
           throw sitePublishingError(
             400,
             "validation_failed",
@@ -1881,9 +1886,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         text: draft.text,
         annotations: [],
         resources: [],
-        model: draft.model,
-        reasoningEffort: draft.reasoningEffort,
-        latencyMode: draft.latencyMode,
+        ...(draft.model !== undefined ? { model: draft.model } : {}),
+        ...(draft.reasoningEffort !== undefined ? { reasoningEffort: draft.reasoningEffort } : {}),
+        ...(draft.latencyMode !== undefined ? { latencyMode: draft.latencyMode } : {}),
       };
     };
     switch (id) {

@@ -296,6 +296,11 @@ Archiving keeps the published revision, so the Archived view orders by that
 too. A collection's is the newest of its own and that of any non-archived entry or
 sub-collection below it that the reader can see in the selected scope; the walk
 descends through sub-collections by membership. Collection rows show that date.
+Writes keep each collection's newest change, and the member it came through, up
+to date (migration 1032), so a list follows that chain and checks it for the
+reader instead of walking every member. The walk still answers any collection
+whose chain passes a member the reader cannot see or the scope filter excludes,
+the Review queue, and organizations not yet built by their first Knowledge write.
 Search keeps relevance order, with each row's own change breaking ties; an
 **Added** window orders by creation time, the date it filters on. Review groups
 and the Review queue also list the newest proposal first. Collections hides the
@@ -391,14 +396,23 @@ the snapshot or earlier model context. Newly accepted turns use the shared chat'
 current destination. A genuinely incompatible retained scope fails at startup
 with an explanation to send a new message; Retry cannot reopen that same turn.
 
-A personal workspace makes Personal the default destination only for work with a
-verified initiating person. Work with no such person, such as a published Site's
-guest chat or other service-started work, uses the Workspace destination with no
-person, as it does in a shared workspace. Because a personal workspace's
-Workspace layer is not shown in its settings, that work saves no Knowledge,
-Skills or instructions there: all three learning modes are frozen as Off. A
-private chat, or a chat that chose user memory, still requires its verified
-owner.
+A Personal workspace learns exactly like a shared workspace. Nobody but its
+owner can be in it, and organization admins, other members and other workspaces
+cannot reach it, so its Workspace layer is as private as the owner's Personal
+layer. An Only me chat, or a chat that chose user memory, learns for its
+verified person; a workspace chat, and work with no person such as a published
+Site's guest chat, learns to the Workspace layer under that workspace's modes.
+As in a shared workspace, only work that learns for its person reads that
+person's Personal Knowledge and Only me files: a workspace chat there reads
+neither, and the files it makes are Workspace files. Migration 1095 copied each
+owner's saved Personal defaults, and their chat and task overrides from that
+workspace, to the Personal workspace's own layer when it had none, so its chats
+keep the modes the owner chose. Existing personal entries, Skills, instructions
+and Only me files made there are unchanged; the owner and their Only me chats
+keep them. Workspace chats and schedules there, including ones from before 1095
+that learned for the owner, no longer read that earlier personal Knowledge or
+those Only me files. A schedule that uses an Only me file needs an Only me
+target chat, or the file shared with the workspace, as in a shared workspace.
 
 An agent saves to the destination it explicitly chooses, beyond its chat's
 default. From a chat that learns for its person, saving a workspace instruction,
@@ -411,7 +425,11 @@ or the person's) for that category, as of acceptance: Off refuses it, and Review
 first leaves a pending proposal in that owner's review. Work with no verified
 initiating person cannot choose a personal destination, nobody else's personal
 Skill is reachable, permanent Skill deletion stays within the chat's own scope,
-and shared Knowledge still cannot point at private evidence.
+and shared Knowledge still cannot point at private evidence. The one deletion
+exception is work the verified owner started in their own Personal workspace
+(their chats and scheduled tasks): that workspace has no other member, so it
+may also permanently remove the workspace's Skills under its own Skills mode
+(migration 1070).
 
 Only-me chats in a shared workspace can be scheduled as existing-session targets.
 A selected personal connector source creates an owner-only session for each run,

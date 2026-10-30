@@ -55,6 +55,7 @@ export type {
   McpPersonalConnectionSummary,
   OAuthStartRequest,
   OAuthStartResponse,
+  OrganizationInferenceResidency,
   OrganizationPrivacySettings,
   OrganizationPrivateSessionSettings,
   OrganizationRecoveryOverview,

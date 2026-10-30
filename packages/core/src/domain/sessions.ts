@@ -1,3 +1,4 @@
+import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
 import type { TeamsConversationProof } from "@opengeni/db";
 import {
@@ -108,6 +109,7 @@ import {
   normalizeAutomaticSessionTitle,
   resolveWorkspaceSessionToolDefaults,
   resolveWorkspaceDefaultExecutionTarget,
+  machineCanBeWorkspaceDefault,
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   stableJson,
@@ -152,7 +154,6 @@ import {
   type TurnInitiator,
   type TurnInitiatorContext,
   type TurnExecutionPolicyV1,
-  type VariableSet,
   type XaiProviderAccountAuthoritySnapshotV1,
   type ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
@@ -163,7 +164,7 @@ import {
   canonicalSessionCommandHash,
   frozenInitiatorForCommandActor,
   getComposerDraftInTransaction,
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getAnySessionInGroup,
   getEnrollment,
   getChannel,
@@ -236,6 +237,7 @@ import {
   type AccessGrantAuthorization,
 } from "../access";
 import { externalCreationMetadata } from "./external-creation-attribution";
+import { resolveMemberExecutionDefault } from "./member-execution-defaults";
 import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
 
@@ -280,8 +282,13 @@ import {
 } from "../default-session-model";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
+  personalWorkspaceExtensionMcpServers,
+  personalWorkspaceExtensionSubject,
+} from "./personal-workspace-connectors";
+import {
   applySessionAgentConfigWriteThrough,
   newSessionKnowledgeSearchTools,
+  newSessionOpeningTools,
   legacySessionAgentCapabilities,
   resolveSessionAgentConfigForCreate,
   withAgentConfigHttpErrors,
@@ -291,7 +298,7 @@ import {
   workspaceSessionToolPolicyDefaultServerIdsFor,
 } from "./session-tool-policy";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
-import { requireEnvironmentEncryption, variableSetsRemovedError } from "./encryption-key";
+import { requireEnvironmentEncryption } from "./encryption-key";
 import {
   freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
@@ -492,7 +499,7 @@ export function requireDeploymentFirstPartyMcpTools(
 
 function sessionSpawnDeniedMessage(denial: SessionSpawnDenial): string {
   if (denial.code === "nested_agent_depth_override_forbidden") {
-    return `requested nested-agent depth limit ${denial.requestedMaxNestedAgentDepthOverride ?? "unknown"} exceeds inherited limit ${denial.effectiveMaxNestedAgentDepth}; workspace:admin is required to increase it`;
+    return `requested nested-agent depth limit ${denial.requestedMaxNestedAgentDepthOverride ?? "unknown"} exceeds inherited limit ${denial.effectiveMaxNestedAgentDepth}; only a workspace admin can raise it`;
   }
   return `nested-agent depth ${denial.attemptedDepth} exceeds effective limit ${denial.effectiveMaxNestedAgentDepth} (current parent depth ${denial.currentDepth})`;
 }
@@ -743,7 +750,8 @@ export function settingsWithSessionMcpServerMetadata(
   return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromMetadata));
 }
 
-function validateSessionMcpServersForCreate(
+/** Session-create MCP server validation, shared by automations that start chats. */
+export function validateSessionMcpServersForCreate(
   settings: Settings,
   grant: AccessGrant,
   servers: SessionMcpServerInput[],
@@ -777,7 +785,7 @@ function validateSessionMcpServersForCreate(
     const headersEncrypted = Object.fromEntries(
       Object.entries(headers).map(([name, value]) => [
         name,
-        encryptVariableSetValue(encryptionKey!, value),
+        encryptEnvironmentValue(encryptionKey!, value),
       ]),
     );
     runtimeServers.push(mcpServerConfigFromInput(server));
@@ -879,7 +887,7 @@ export function validateSessionMcpCredentialUpdates(input: {
       headersEncrypted: Object.fromEntries(
         Object.entries(headers).map(([name, value]) => [
           name,
-          encryptVariableSetValue(encryptionKey, value),
+          encryptEnvironmentValue(encryptionKey, value),
         ]),
       ),
     };
@@ -1016,6 +1024,11 @@ export async function createAndStartSessionWithOutcome(input: {
   modelContext?: string | null;
   /** The IANA zone of the person sending the initial message; unresolvable names are ignored. */
   timeZone?: string | null;
+  /**
+   * Tools the opening context is for, already narrowed to the session's own
+   * selection; frozen in the initial turn's metadata (see newSessionOpeningTools).
+   */
+  openingTools?: readonly string[];
   resources: ResourceRef[];
   skills?: SessionSkill[];
   bundledSkillIds?: import("@opengeni/contracts").BundledSkillId[] | undefined;
@@ -1035,13 +1048,6 @@ export async function createAndStartSessionWithOutcome(input: {
   createdBy?: TurnInitiator;
   createdByContext?: TurnInitiatorContext;
   createdByActor?: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
-  // Ordered low-to-high precedence. Names/ids only; session.created never
-  // carries variable values.
-  variableSets?: Array<{
-    id: string;
-    name: string;
-    scope: VariableSet["scope"];
-  }>;
   // The rig + frozen active rig version resolved at create (M3). Both null ⇒ a
   // rig-less session (byte-for-byte today's behavior). Frozen here so a later
   // rig promote never moves an existing session's version.
@@ -1325,8 +1331,6 @@ export async function createAndStartSessionWithOutcome(input: {
           reasoningEffort: input.reasoningEffort,
           latencyMode: input.latencyMode ?? "standard",
           sandboxBackend: input.sandboxBackend,
-          variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
-          variableSetId: input.variableSets?.at(-1)?.id ?? null,
           rigId: input.rigId ?? null,
           rigVersionId: input.rigVersionId ?? null,
           channelId: input.channelId ?? null,
@@ -1439,8 +1443,6 @@ export async function createAndStartSessionWithOutcome(input: {
         reasoningEffort: input.reasoningEffort,
         latencyMode: input.latencyMode ?? "standard",
         sandboxBackend: input.sandboxBackend,
-        variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
-        variableSetId: input.variableSets?.at(-1)?.id ?? null,
         rigId: input.rigId ?? null,
         rigVersionId: input.rigVersionId ?? null,
         channelId: input.channelId ?? null,
@@ -1576,6 +1578,7 @@ async function finishStartSession(
     surface?: SessionTurnSurface | null;
     modelContext?: string | null;
     timeZone?: string | null;
+    openingTools?: readonly string[];
     resources: ResourceRef[];
     tools: ToolRef[];
     toolPolicy: SessionToolPolicy;
@@ -1584,11 +1587,6 @@ async function finishStartSession(
     reasoningEffort: Settings["openaiReasoningEffort"];
     turnExecutionPolicy: TurnExecutionPolicyV1;
     sandboxBackend: Settings["sandboxBackend"];
-    variableSets?: Array<{
-      id: string;
-      name: string;
-      scope: VariableSet["scope"];
-    }>;
     goal?: GoalSpec | null;
     initialAutomaticTitle?: string | null;
     sessionMcpServers?: SessionMcpServerMetadata[];
@@ -1671,18 +1669,10 @@ async function finishStartSession(
       reasoningEffortFallback: input.reasoningEffort,
       turnExecutionPolicy: input.turnExecutionPolicy,
       ...(initialTimeZone ? { initialTimeZone } : {}),
+      ...(input.openingTools?.length ? { initialOpeningTools: [...input.openingTools] } : {}),
       surface: input.surface ?? null,
       createdEventPayload: {
         toolPolicy: input.toolPolicy,
-        ...(input.variableSets?.length
-          ? {
-              variableSetIds: input.variableSets.map((variableSet) => variableSet.id),
-              variableSets: input.variableSets,
-              // Legacy highest-precedence aliases.
-              variableSetId: input.variableSets.at(-1)!.id,
-              variableSetName: input.variableSets.at(-1)!.name,
-            }
-          : {}),
         ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
       },
       goal: input.goal
@@ -1839,34 +1829,19 @@ export function assertConfiguredModel(settings: Settings, model: string | null |
   canonicalConfiguredModel(settings, model);
 }
 
-export const CODEX_COMPACTION_V2_PROVIDER_LOCKED = "codex_compaction_v2_provider_locked" as const;
-
-/** Session is frozen on Codex remote compaction v2; non-Codex models are refused. */
-export class CodexCompactionV2ProviderLockedError extends Error {
-  readonly code = CODEX_COMPACTION_V2_PROVIDER_LOCKED;
-  readonly productModelId: string;
-
-  constructor(productModelId: string) {
-    super(
-      `session is locked to Codex remote compaction v2; model "${productModelId}" is not a Codex subscription model`,
-    );
-    this.name = "CodexCompactionV2ProviderLockedError";
-    this.productModelId = productModelId;
-  }
-}
-
 /**
- * Fail closed when a remote_v2 session would run a non-Codex product model.
- * Portable sessions and non-Codex sessions keep free mid-session provider swap.
+ * True when running `productModelId` on this session must first convert its
+ * Codex remote_v2 context to portable form. Any model may run on any session:
+ * the worker rebuilds portable context from stored history before the first
+ * non-Codex turn and keeps the session portable from then on.
  */
-export function assertSessionAllowsProductModel(
+export function sessionNeedsPortableModelSwitch(
   session: Pick<Session, "codexCompactionMode">,
   productModelId: string | null | undefined,
-): void {
-  if (productModelId === null || productModelId === undefined) return;
-  if (session.codexCompactionMode !== "remote_v2") return;
-  if (isCodexBilledModel(productModelId)) return;
-  throw new CodexCompactionV2ProviderLockedError(productModelId);
+): boolean {
+  if (productModelId === null || productModelId === undefined) return false;
+  if (session.codexCompactionMode !== "remote_v2") return false;
+  return !isCodexBilledModel(productModelId);
 }
 
 /**
@@ -2098,6 +2073,7 @@ function finalizePostUserMessageTurn(
           model: result.draft.model,
           reasoningEffort: result.draft.reasoningEffort as ReasoningEffort,
           latencyMode: result.draft.latencyMode as ComposerDraft["latencyMode"],
+          policyFollowsSession: result.draft.policyFollowsSession,
           sourceTurnId: result.draft.sourceTurnId,
           sourceTurnVersion: result.draft.sourceTurnVersion,
           updatedAt: result.draft.updatedAt.toISOString(),
@@ -2140,14 +2116,6 @@ export async function postUserMessageTurn(
       ? requestedModel
       : null;
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, effectiveModelForGate);
-  try {
-    assertSessionAllowsProductModel(sessionForModelGate, effectiveModelForGate);
-  } catch (error) {
-    if (error instanceof CodexCompactionV2ProviderLockedError) {
-      throw new HTTPException(422, { message: error.message, cause: error });
-    }
-    throw error;
-  }
   const operationKey = input.clientEventId ?? crypto.randomUUID();
   let result;
   try {
@@ -2280,7 +2248,7 @@ export async function postUserMessageTurn(
 
 /**
  * Full create-session flow shared by `POST /sessions` and the first-party MCP
- * `session_create` tool: payload validation, resource/tool/variableSet
+ * `session_create` tool: payload validation, resource/tool
  * checks, usage limits, session start, and usage recording. `rawPayload` is
  * the unparsed request body so absent-vs-empty execution-context fields keep
  * their meaning: a child inherits repositories (never files), tools, and MCP
@@ -2483,13 +2451,6 @@ export async function retryFailedSession(
     retainedModel,
   );
   const model = canonicalConfiguredModel(settings, request.model ?? retainedModel)!;
-  try {
-    assertSessionAllowsProductModel(session, model);
-  } catch (error) {
-    if (error instanceof CodexCompactionV2ProviderLockedError)
-      throw new HTTPException(422, { message: error.message, cause: error });
-    throw error;
-  }
   await assertWorkspaceModelPolicyAllows(deps.db, settings, workspaceId, model);
   const executionPolicy = withDeveloperSetupCredentialRestriction(
     resolveTurnExecutionPolicyV1(settings, {
@@ -2920,7 +2881,6 @@ async function createSessionForRequestInFileScope(
               ? { requestedSessionId: payload.requestedSessionId }
               : {}),
             visibility: effectiveVisibility,
-            variableSetIds: payload.variableSetIds ?? [],
             initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
             deferInitialTurn: payload.startMode === "realtime",
             agentConfig,
@@ -2971,16 +2931,27 @@ async function createSessionForRequestInFileScope(
       throw error;
     }
   }
-  // A workspace default applies only to a new root's own box. Explicit targets,
-  // explicit backends, children, and shared groups retain their chosen placement.
-  // A keyed shell already froze its route in the insert transaction: recovery
-  // must keep that route even when the workspace default has since changed.
+  // A default applies only to a new root's own box. Explicit targets, explicit
+  // backends, children, and shared groups retain their chosen placement. A
+  // keyed shell already froze its route in the insert transaction: recovery
+  // must keep that route even when a default has since changed. A person's own
+  // default ("Your default machine") places the chats they start themselves
+  // ahead of the workspace default; automations and agent-created chats follow
+  // the workspace default, and an unusable personal choice falls back to it.
   if (
     !parentSession &&
     !payload.targetSandboxId &&
     payload.sandboxBackend === undefined &&
     (payload.sandbox === undefined || payload.sandbox === "new")
   ) {
+    const memberDefault =
+      !retainedKeyedShellExecution && !creationInitiator.actor && replayManagedHumanSubjectId
+        ? await resolveMemberExecutionDefault(db, unresolvedDeps.settings, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: replayManagedHumanSubjectId,
+          })
+        : null;
     if (retainedKeyedShellExecution) {
       payload.sandboxBackend = retainedKeyedShellExecution.sandboxBackend;
       if (retainedKeyedShellExecution.activeSandboxId) {
@@ -2988,6 +2959,14 @@ async function createSessionForRequestInFileScope(
         if (retainedKeyedShellExecution.workingDir) {
           payload.workingDir = retainedKeyedShellExecution.workingDir;
         }
+      }
+    } else if (memberDefault?.usable && memberDefault.target) {
+      if (memberDefault.target.kind === "machine") {
+        payload.targetSandboxId = memberDefault.target.targetSandboxId;
+        // A machine brings its own environment; see the workspace default below.
+        if (payload.rigId === undefined) payload.rigId = null;
+      } else {
+        payload.sandboxBackend = unresolvedDeps.settings.sandboxBackend;
       }
     } else {
       let target: ReturnType<typeof resolveWorkspaceDefaultExecutionTarget>;
@@ -3006,7 +2985,7 @@ async function createSessionForRequestInFileScope(
           !unresolvedDeps.settings.sandboxSelfhostedEnabled ||
           !machine ||
           machine.kind !== "selfhosted" ||
-          machine.scope === "user"
+          !machineCanBeWorkspaceDefault(machine, workspace)
         ) {
           throw new HTTPException(422, {
             message:
@@ -3179,6 +3158,17 @@ async function createSessionForRequestInFileScope(
           await listSessionMcpServersForChildInheritance(db, workspaceId, parentSession.id),
         )
       : validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers);
+  if (hasOwnProperty(rawPayload, "mcpServers")) {
+    // An Opengeni API key reads its organization: EU-only content stays in
+    // EU-only workspaces.
+    for (const server of payload.mcpServers) {
+      await assertMcpCredentialContentFlowAllowed(db, {
+        target: { accountId: grant.accountId, workspaceId },
+        url: server.url,
+        headers: server.headers,
+      });
+    }
+  }
   const runtimeSettings = settingsWithSessionMcpServerConfigs(
     capabilityRuntimeSettings,
     sessionMcpServers.runtimeServers,
@@ -3188,7 +3178,22 @@ async function createSessionForRequestInFileScope(
   const mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy> = {};
   if (Object.keys(requestedMcpPolicies).length > 0) {
     requirePermission(grant, "sessions:control");
-    const inheritedServers = await listEnabledMcpCapabilityServers(db, workspaceId);
+    const ownServers = await listEnabledMcpCapabilityServers(db, workspaceId);
+    // Include any connectors a Personal workspace carries for its owner: the
+    // same enabled set the session runs with.
+    const inheritedServers = [
+      ...ownServers,
+      ...(await personalWorkspaceExtensionMcpServers(db, {
+        workspaceId,
+        accountId: grant.accountId,
+        subjectId: personalWorkspaceExtensionSubject(
+          inheritedPersonalConnectionDelegations
+            ? { personalConnectionDelegations: inheritedPersonalConnectionDelegations }
+            : { subjectId: grant.subjectId },
+        ),
+        ownServers: [...settings.mcpServers, ...ownServers],
+      })),
+    ];
     for (const [id, policy] of Object.entries(requestedMcpPolicies)) {
       const inherited = inheritedServers.find((server) => server.id === id);
       if (!inherited || sessionMcpServers.runtimeServers.some((server) => server.id === id)) {
@@ -3364,7 +3369,7 @@ async function createSessionForRequestInFileScope(
   let tools = withFirstPartyTools(selectedTools, runtimeSettings);
 
   const captureLinkedAuthority = prepareExternalLinkTurnAdmission(authorization);
-  const { attachmentOwnerContext, variableSets } = await measureSessionStartPhase(
+  const attachmentOwnerContext = await measureSessionStartPhase(
     unresolvedDeps.observability,
     "resource_validation",
     async () => {
@@ -3391,9 +3396,7 @@ async function createSessionForRequestInFileScope(
         resources,
         ownerContext,
       );
-      // Variable Sets were replaced by vaults (RM-1); a session never selects one.
-      if (payload.variableSetIds?.length) throw variableSetsRemovedError("variableSetIds");
-      return { attachmentOwnerContext: ownerContext, variableSets: [] as VariableSet[] };
+      return ownerContext;
     },
   );
   const attachmentOwner =
@@ -3516,12 +3519,6 @@ async function createSessionForRequestInFileScope(
             ...(payload.sandboxBackend ? { sandboxBackend: payload.sandboxBackend } : {}),
             ...(payload.targetSandboxId ? { targetSandboxId: payload.targetSandboxId } : {}),
             ...(payload.workingDir ? { workingDir: payload.workingDir } : {}),
-            ...(variableSets.length
-              ? {
-                  variableSetIds: variableSets.map((variableSet) => variableSet.id),
-                  variableSetId: variableSets.at(-1)!.id,
-                }
-              : {}),
             ...(payload.rigId ? { rigId: payload.rigId } : {}),
             ...(payload.goal ? { goal: payload.goal } : {}),
             ...(payload.firstPartyMcpPermissions
@@ -3695,6 +3692,7 @@ async function createSessionForRequestInFileScope(
     firstPartyMcpTools,
     settings.mcpServers,
   );
+  const openingTools = newSessionOpeningTools(tools, firstPartyMcpTools, payload.modelContextTools);
   // Creation's stored tool snapshot can omit configured workspace defaults.
   // Freeze initial-turn accounts against the same executable policy as later
   // messages; explicit selections and exclusions remain exact.
@@ -4030,9 +4028,7 @@ async function createSessionForRequestInFileScope(
     });
   }
   const initialLearningScope =
-    effectiveVisibility === "user_private" ||
-    sessionScope.memoryScope === "user" ||
-    workspace.kind === "personal"
+    effectiveVisibility === "user_private" || sessionScope.memoryScope === "user"
       ? ("personal" as const)
       : ("workspace" as const);
   const initialLearningActor = initialLearningContext?.actor;
@@ -4102,6 +4098,7 @@ async function createSessionForRequestInFileScope(
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
       timeZone: payload.timeZone ?? null,
+      ...(openingTools.length ? { openingTools } : {}),
       resources,
       skills,
       bundledSkillIds,
@@ -4173,11 +4170,6 @@ async function createSessionForRequestInFileScope(
       ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
       ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
       createdByActor: creationInitiator.actor ?? null,
-      variableSets: variableSets.map((variableSet) => ({
-        id: variableSet.id,
-        name: variableSet.name,
-        scope: variableSet.scope,
-      })),
       // Frozen rig binding (M3): both null for a rig-less session (today's path).
       rigId: frozenRigId,
       rigVersionId: frozenRigVersionId,
@@ -4562,14 +4554,6 @@ async function acceptSessionUserMessageInFileScope(
       throw new Error("effective follow-up model unexpectedly resolved to null");
     }
     await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
-    try {
-      assertSessionAllowsProductModel(existingSession, effectiveModel);
-    } catch (error) {
-      if (error instanceof CodexCompactionV2ProviderLockedError) {
-        throw new HTTPException(422, { message: error.message, cause: error });
-      }
-      throw error;
-    }
     const sessionReasoningEffort = existingSession.reasoningEffort;
     const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
     const sessionLatencyMode = existingSession.latencyMode;
@@ -5110,13 +5094,6 @@ export async function setSessionModel(
           reasoningEffort: input.reasoningEffort,
           validate: (session) => {
             try {
-              assertSessionAllowsProductModel(
-                {
-                  codexCompactionMode:
-                    session.codexCompactionMode as Session["codexCompactionMode"],
-                },
-                model,
-              );
               // Validate fresh selection/provider and preserved latency exactly as
               // prompt admission does; never silently clamp requested settings.
               resolveTurnExecutionPolicyV1(settings, {

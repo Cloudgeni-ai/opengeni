@@ -18,6 +18,9 @@ import type { RecordingsClientLike } from "../recordings";
 
 const WORKSPACE = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
 const ME = "user:ingrid";
+const SALES_WORKSPACE = "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e";
+/** The viewer's own Only me meeting stored in the Sales workspace. */
+export const ELSEWHERE_RECORDING_ID = "3e2d1c0b-9a8f-4e7d-8c6b-5a4f3e2d1c0b";
 const NOW = Date.now();
 const minutes = (count: number) => count * 60_000;
 const iso = (offset: number) => new Date(NOW - offset).toISOString();
@@ -249,6 +252,12 @@ export function createMeetingsFixture(
     language?: string | null;
     /** Whether the server reports the workspace's recorders start with live text on. */
     liveTranscript?: boolean;
+    /** The viewer also has Only me meetings in another workspace, "Sales". */
+    otherWorkspaces?: boolean;
+    /** Every model is the deployment's, charged in credits: none transcribes without them. */
+    creditsOnly?: boolean;
+    /** The organization's ChatGPT subscription also transcribes meetings, at no credit cost. */
+    subscription?: boolean;
   } = {},
 ): MeetingsFixture {
   const readyId = "5f2d1c4b-0a9e-4d8c-b7f6-e5d4c3b2a190";
@@ -468,8 +477,49 @@ export function createMeetingsFixture(
     dictationDefault: null,
     pinned: false,
   };
+  const offered = options.pinned ? pinnedModels : unpinnedModels;
   const models: ListRecordingModelsResponse = {
-    ...(options.pinned ? pinnedModels : unpinnedModels),
+    ...offered,
+    ...(options.subscription
+      ? {
+          models: [
+            ...offered.models,
+            {
+              providerId: "codex-subscription",
+              providerName: "ChatGPT",
+              model: "chatgpt-dictation",
+              name: "ChatGPT dictation",
+              available: true,
+              funding: "workspace_subscription" as const,
+              usdPerHour: null,
+              capabilities: {
+                batch: true,
+                live: false,
+                diarization: false,
+                liveDiarization: false,
+                multichannel: false,
+                maxSpeakers: null,
+                wordTimestamps: false,
+                languages: [],
+                languageDetection: true,
+                keyterms: false,
+                speakerLibrary: false,
+                maxDurationSeconds: null,
+                maxFileBytes: null,
+              },
+            },
+          ],
+        }
+      : {}),
+    ...(options.creditsOnly
+      ? {
+          models: offered.models.map((entry) => ({
+            ...entry,
+            funding: "deployment" as const,
+            usdPerHour: entry.usdPerHour ?? 0.4,
+          })),
+        }
+      : {}),
     ...(options.language !== undefined ? { language: options.language } : {}),
     ...(options.liveTranscript !== undefined ? { liveTranscript: options.liveTranscript } : {}),
   };
@@ -521,6 +571,28 @@ export function createMeetingsFixture(
       ],
     ],
   ]);
+  // The viewer's own Only me meetings stored in another workspace of the
+  // organization appear in this workspace's list, labelled with where they live.
+  if (options.otherWorkspaces && options.state !== "empty") {
+    const sales = { id: SALES_WORKSPACE, name: "Sales" };
+    recordings = [
+      ...recordings,
+      recording(ELSEWHERE_RECORDING_ID, "Pipeline review", minutes(60 * 3), 1_864_000, {
+        workspaceId: SALES_WORKSPACE,
+        sourceWorkspace: sales,
+      }),
+      recording(
+        "4f3e2d1c-0b9a-4f8e-9d7c-6b5a4f3e2d1c",
+        "Forecast with Lea",
+        minutes(60 * 26),
+        3_104_000,
+        {
+          workspaceId: SALES_WORKSPACE,
+          sourceWorkspace: sales,
+        },
+      ),
+    ].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  }
   const client = {
     listRecordings: async (
       _workspaceId: string,

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   createMemoryRecordingChunkStore,
   RecordingUploader,
@@ -6,6 +7,7 @@ import {
 } from "@opengeni/sdk/recordings";
 import { act, useState } from "react";
 import { ChatComposer } from "../src/components/chat-composer";
+import { composerTranscription } from "../src/app/components/Composer";
 import { appendFinalTranscript } from "../src/hooks/use-transcription";
 import {
   VOICE_RECORDING_TIMESLICE_MILLISECONDS,
@@ -386,7 +388,7 @@ describe("useVoiceInput: dictations as recordings", () => {
     await hook.unmount();
   });
 
-  test("Cancel and Escape keep real speech; only an accidental start is thrown away", async () => {
+  test("Cancel and Escape delete the dictation, so nothing offers it again", async () => {
     for (const via of ["cancel", "escape"] as const) {
       const server = new FakeServer();
       const { platform, recorders } = fakePlatform(server);
@@ -401,17 +403,17 @@ describe("useVoiceInput: dictations as recordings", () => {
         else document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
         await settle();
       });
-      await waitFor(() => hook.result.current.status === "transcript-ready");
-      expect(recorders[0]?.stopped).toBe(true);
-      expect(hook.result.current.savedTranscript).toBe("hello voice");
+      expect(hook.result.current.status).toBe("idle");
+      expect(hook.result.current.hasRecoverableRecording).toBe(false);
+      expect(recorders[0]?.discarded).toBe(true);
+      expect(server.recordings.has(id)).toBe(false);
       expect(draft.value).toBe("");
-      expect(server.recordings.has(id)).toBe(true);
       await hook.unmount();
     }
 
     const server = new FakeServer();
     const { platform, recorders } = fakePlatform(server);
-    const { hook, advance } = await renderDurable(server, platform);
+    const { hook } = await renderDurable(server, platform);
     await act(async () => {
       await hook.result.current.start();
     });
@@ -423,18 +425,48 @@ describe("useVoiceInput: dictations as recordings", () => {
       await settle();
     });
     expect(hook.result.current.status).toBe("recording");
-    advance(1_000);
-    await act(async () => {
-      hook.result.current.cancel();
-      await settle();
-    });
-    expect(hook.result.current.status).toBe("idle");
-    expect(recorders[0]?.discarded).toBe(true);
-    expect(server.recordings.size).toBe(0);
+    expect(recorders[0]?.discarded).toBe(false);
     await hook.unmount();
   });
 
-  test("cancel while it is being heard keeps the text to insert later", async () => {
+  test("setting a dictation aside keeps real speech; only an accidental start is thrown away", async () => {
+    const server = new FakeServer();
+    const { platform, recorders } = fakePlatform(server);
+    const { hook, draft, advance } = await renderDurable(server, platform);
+    await act(async () => {
+      await hook.result.current.start();
+    });
+    const id = hook.result.current.recordingId!;
+    advance(45_000);
+    await act(async () => {
+      hook.result.current.setAside();
+      await settle();
+    });
+    await waitFor(() => hook.result.current.status === "transcript-ready");
+    expect(recorders[0]?.stopped).toBe(true);
+    expect(hook.result.current.savedTranscript).toBe("hello voice");
+    expect(draft.value).toBe("");
+    expect(server.recordings.has(id)).toBe(true);
+    await hook.unmount();
+
+    const quick = new FakeServer();
+    const second = fakePlatform(quick);
+    const accidental = await renderDurable(quick, second.platform);
+    await act(async () => {
+      await accidental.hook.result.current.start();
+    });
+    accidental.advance(1_000);
+    await act(async () => {
+      accidental.hook.result.current.setAside();
+      await settle();
+    });
+    expect(accidental.hook.result.current.status).toBe("idle");
+    expect(second.recorders[0]?.discarded).toBe(true);
+    expect(quick.recordings.size).toBe(0);
+    await accidental.hook.unmount();
+  });
+
+  test("cancel while it is being heard deletes it; an offered one only stops retrying", async () => {
     const server = new FakeServer();
     server.heard = null;
     const { platform } = fakePlatform(server);
@@ -447,21 +479,92 @@ describe("useVoiceInput: dictations as recordings", () => {
       hook.result.current.stop();
       await settle();
     });
+    await waitFor(() => hook.result.current.status === "transcribing");
     await act(async () => {
       hook.result.current.cancel();
       await settle();
     });
-    expect(hook.result.current.status).toBe("recovered");
-    server.complete(id, "kept for later");
-    await waitFor(() => hook.result.current.status === "transcript-ready");
-    expect(draft.value).toBe("");
-    expect(hook.result.current.savedTranscript).toBe("kept for later");
-    await act(async () => {
-      await hook.result.current.discard();
-      await settle();
-    });
+    expect(hook.result.current.status).toBe("idle");
+    expect(hook.result.current.hasRecoverableRecording).toBe(false);
     expect(server.recordings.has(id)).toBe(false);
     expect(draft.value).toBe("");
+    await hook.unmount();
+
+    // A dictation an earlier page left, offered here and still being heard.
+    const left = new FakeServer();
+    left.heard = null;
+    const leftId = left.seed({ id: "left-behind", state: "processing" }).id;
+    const offered = await renderDurable(left, fakePlatform(left).platform);
+    await waitFor(() => offered.hook.result.current.status === "retrying");
+    await act(async () => {
+      offered.hook.result.current.cancel();
+      await settle();
+    });
+    expect(offered.hook.result.current.status).toBe("recovered");
+    expect(offered.hook.result.current.hasRecoverableRecording).toBe(true);
+    expect(left.recordings.has(leftId)).toBe(true);
+    await offered.hook.unmount();
+  });
+
+  test("a host that keeps speech gets a cancelled dictation's copy before it is deleted", async () => {
+    const chunks = [new Uint8Array([1, 2]), new Uint8Array([3])];
+    for (const when of ["recording", "transcribing"] as const) {
+      const server = new FakeServer();
+      server.heard = null;
+      const { platform } = fakePlatform(server, { chunks, elapsedMilliseconds: 6_000 });
+      const copies: Array<{ bytes: number[]; cancelled: boolean; durationMilliseconds: number }> =
+        [];
+      const { hook } = await renderDurable(server, platform, {
+        onAudio: (copy) => {
+          void copy.audio.arrayBuffer().then((buffer) =>
+            copies.push({
+              bytes: [...new Uint8Array(buffer)],
+              cancelled: copy.cancelled === true,
+              durationMilliseconds: copy.durationMilliseconds,
+            }),
+          );
+        },
+      });
+      await act(async () => {
+        await hook.result.current.start();
+      });
+      const id = hook.result.current.recordingId!;
+      if (when === "transcribing") {
+        await act(async () => {
+          hook.result.current.stop();
+          await settle();
+        });
+        await waitFor(() => hook.result.current.status === "transcribing");
+      }
+      await act(async () => {
+        hook.result.current.cancel();
+        await settle();
+      });
+      await waitFor(() => copies.some((copy) => copy.cancelled));
+      expect(copies.at(-1)).toEqual({
+        bytes: [1, 2, 3],
+        cancelled: true,
+        durationMilliseconds: 6_000,
+      });
+      expect(hook.result.current.status).toBe("idle");
+      expect(server.recordings.has(id)).toBe(false);
+      await hook.unmount();
+    }
+
+    // An accidental start leaves nothing to keep.
+    const server = new FakeServer();
+    const { platform } = fakePlatform(server, { chunks });
+    let given = 0;
+    const { hook } = await renderDurable(server, platform, { onAudio: () => (given += 1) });
+    await act(async () => {
+      await hook.result.current.start();
+    });
+    await act(async () => {
+      hook.result.current.cancel();
+      await settle();
+    });
+    expect(given).toBe(0);
+    expect(server.recordings.size).toBe(0);
     await hook.unmount();
   });
 
@@ -609,6 +712,56 @@ describe("useVoiceInput: one request", () => {
     await hook.unmount();
   });
 
+  test("an EU-only refusal (422 region_restricted) is a region error, with or without details", async () => {
+    for (const details of [{ code: "region_restricted" }, undefined]) {
+      installMediaMocks();
+      let calls = 0;
+      const refusal = new OpenGeniApiError(
+        422,
+        JSON.stringify({
+          error: {
+            status: 422,
+            code: "region_restricted",
+            message: "Not supported in EU",
+            retryable: false,
+            outcomeUnknown: false,
+            ...(details ? { details } : {}),
+          },
+        }),
+        { mutation: true },
+      );
+      const hook = await renderHook(
+        () =>
+          useVoiceInput({
+            client: {
+              transcribeAudio: async () => {
+                calls += 1;
+                throw refusal;
+              },
+            },
+            workspaceId: "ws-1",
+            capability: resumableCapability,
+            enabled: true,
+            value: "",
+            setValue: () => undefined,
+            focusInput: () => undefined,
+          }),
+        undefined,
+      );
+      await act(async () => {
+        await hook.result.current.start();
+      });
+      await act(async () => {
+        hook.result.current.stop();
+        await settle();
+      });
+      expect(calls).toBe(1);
+      expect(hook.result.current.status).toBe("error");
+      expect(hook.result.current.error).toBe("region_restricted");
+      await hook.unmount();
+    }
+  });
+
   test("permission denial is controlled and a cancelled start stays cancelled", async () => {
     installMediaMocks({ deny: true });
     let draft = "keep";
@@ -711,9 +864,7 @@ describe("composer dictation", () => {
       await settle();
     });
     expect(mounted.container.querySelector("[data-voice-waveform]")).toBeTruthy();
-    expect(
-      mounted.container.querySelector("[aria-label='Stop without transcribing']"),
-    ).toBeTruthy();
+    expect(mounted.container.querySelector("[aria-label='Discard dictation']")).toBeTruthy();
     await act(async () => {
       mounted?.container
         .querySelector<HTMLButtonElement>("[aria-label='Stop and transcribe']")
@@ -832,7 +983,7 @@ describe("composer dictation", () => {
     });
     await act(async () => {
       mounted?.container
-        .querySelector<HTMLButtonElement>("[aria-label='Stop without transcribing']")
+        .querySelector<HTMLButtonElement>("[aria-label='Discard dictation']")
         ?.click();
       await settle();
     });
@@ -893,6 +1044,68 @@ describe("composer dictation", () => {
     });
     expect(mounted.container.querySelector(blocked)).toBeNull();
     expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeTruthy();
+  });
+});
+
+describe("the mic in an EU-only workspace", () => {
+  const context = (config: Record<string, unknown>) =>
+    ({
+      client: { transcribeAudio: async () => ({ text: "", languages: [] }) },
+      workspaces: [{ id: "ws-1", settings: {} }],
+      clientConfig: config,
+    }) as unknown as Parameters<typeof composerTranscription>[0];
+
+  test("stays, switched off, and says Not supported in EU", async () => {
+    const transcription = composerTranscription(
+      context({
+        voiceInput: { available: true, providers: ["azure-speech"] },
+        inferenceFeatures: [
+          { id: "voice_input", available: false, unavailableReason: "region_restricted" },
+        ],
+      }),
+      "ws-1",
+    );
+    const sends: string[] = [];
+    mounted = await renderComponent(
+      <ChatComposer composer={composerState("", () => {}, sends)} transcription={transcription} />,
+    );
+    const mic = mounted.container.querySelector<HTMLButtonElement>(
+      "[aria-label='Not supported in EU']",
+    );
+    expect(mic).toBeTruthy();
+    expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeNull();
+    await act(async () => {
+      mic!.click();
+      await settle();
+    });
+    expect(mounted.container.querySelector("[data-voice-waveform]")).toBeNull();
+  });
+
+  test("an available mic is unchanged; without voice input there is no mic", () => {
+    const available = composerTranscription(
+      context({
+        voiceInput: { available: true, providers: ["azure-speech"] },
+        inferenceFeatures: [{ id: "voice_input", available: true, unavailableReason: null }],
+      }),
+      "ws-1",
+    );
+    expect(available?.capability?.available).toBe(true);
+    expect(available?.workspaceEnabled).toBe(true);
+    expect(composerTranscription(context({ voiceInput: { available: false } }), "ws-1")).toBe(
+      undefined,
+    );
+  });
+
+  test("no speech-to-text route at all: no mic, and no EU label", () => {
+    expect(
+      composerTranscription(
+        context({
+          voiceInput: { available: false, providers: [] },
+          inferenceFeatures: [{ id: "voice_input", available: false, unavailableReason: null }],
+        }),
+        "ws-1",
+      ),
+    ).toBe(undefined);
   });
 });
 

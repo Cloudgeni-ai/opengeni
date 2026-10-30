@@ -79,7 +79,6 @@ export async function signInThroughWeb(baseUrl: string): Promise<WebSignInResult
     const client = new OpenGeniClient({
       baseUrl,
       fetch: expoStreamingFetch,
-      onDeprecation: false,
     });
     const token = await client.exchangeNativeAppCode({
       code,

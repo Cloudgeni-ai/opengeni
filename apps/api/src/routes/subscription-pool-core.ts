@@ -29,6 +29,7 @@ import {
   type SubscriptionCoreWake,
 } from "@opengeni/db";
 import type { SubscriptionPoolAccount } from "./subscription-account-pools";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 import { SUBSCRIPTION_CORE_CUTOVER_DISABLED, typedHttpError } from "./subscription-core-http";
 import {
   requirePrivateSubscriptionHuman,
@@ -203,6 +204,7 @@ async function workspaceTarget(c: Context, ctx: PoolContext, workspaceId: string
     admin: { accountId: authority.accountId, workspaceId, subjectId: authority.subjectId },
     connectionId,
     account,
+    grant,
   };
 }
 
@@ -366,6 +368,7 @@ export async function coreWorkspaceDisconnect(
   const result = await disconnectSubscriptionCoreConnection(ctx.deps.db, ctx.core.binding, {
     ...target.admin,
     connectionId: target.connectionId,
+    audit: disconnectAuditActor(c, { subjectId: target.admin.subjectId, grant: target.grant }),
   });
   disconnectRefused(result.outcome, ctx.displayName);
   await deliverPoolCoreWake(ctx.deps, ctx.core, result.wake);
@@ -441,6 +444,7 @@ export async function coreOrganizationAccount(
     const result = await disconnectSubscriptionCoreConnection(deps.db, core.binding, {
       ...admin,
       connectionId,
+      audit: disconnectAuditActor(c, { subjectId: actor.actorSubjectId }),
     });
     disconnectRefused(result.outcome, displayName);
     await deliverPoolCoreWake(deps, core, result.wake);

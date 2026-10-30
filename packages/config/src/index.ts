@@ -20,6 +20,14 @@ export {
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
 export * from "./web-search";
+export * from "./side-feature-residency";
+import {
+  parseSideFeatureResidencyJson,
+  sideFeatureResidencyDeclarationWarnings,
+  sideFeatureRouteAllowed,
+  type SideFeatureResidencySettings,
+  type SideFeatureTarget,
+} from "./side-feature-residency";
 import {
   WebSearchProviderCredentialsSchema,
   webSearchProviderCredentialsFromEnv,
@@ -75,6 +83,7 @@ import {
   ModelResidencyDeclaration,
   ModelResidencyV1,
   UNKNOWN_MODEL_RESIDENCY,
+  isEuResidency,
   modelResidencyClaim,
   modelResidencyRouteProblems,
 } from "@opengeni/contracts";
@@ -665,6 +674,28 @@ const SettingsSchema = z.object({
       )
       .default([]),
   ),
+  teamsBotAllowedGroupChatIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim())
+            .filter(Boolean)
+        : value,
+    z
+      .array(
+        z
+          .string()
+          .max(550)
+          .refine(
+            (value) =>
+              value[36] === ":" &&
+              z.string().uuid().safeParse(value.slice(0, 36)).success &&
+              value.slice(37).length > 0,
+          ),
+      )
+      .default([]),
+  ),
   teamsBotSetupAdminIds: z.preprocess(
     (value) =>
       typeof value === "string"
@@ -697,6 +728,10 @@ const SettingsSchema = z.object({
   privacyOnlyMeAllowed: EnvBoolean.default(true),
   privacyWorkspaceDefaultRequired: EnvBoolean.default(false),
   privacyAdminScheduleSummariesRequired: EnvBoolean.default(false),
+  // Read-only chat share links: a person can create a link to a chat that
+  // anyone holding it can read without signing in. Off, nobody can create
+  // one and existing links stop opening.
+  privacyChatShareLinksAllowed: EnvBoolean.default(true),
   integrationsOauthClientsJson: z.string().default("{}"),
   gmailWatchTopicName: z
     .string()
@@ -818,6 +853,12 @@ const SettingsSchema = z.object({
   // pauses event dispatch; stored sources, triggers and events are kept.
   // Env: OPENGENI_EVENT_TRIGGERS_ENABLED.
   eventTriggersEnabled: EnvBoolean.default(false),
+  // The deepest chain of automations waking each other through Opengeni's own
+  // events: a run is one level deeper than the deepest event it carries, and
+  // events that would start a deeper run are left out. It stops accidental
+  // loops; it is not meant to be tuned.
+  // Env: OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH.
+  automationMaxChainDepth: z.coerce.number().int().min(1).max(100).default(3),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -833,6 +874,12 @@ const SettingsSchema = z.object({
   // when absent, retain the deployment-level window-minus-reserved-output
   // behavior.
   contextEffectiveWindowTokens: z.coerce.number().int().positive().optional(),
+  // Env: OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED. When a human/API turn in a
+  // root session ends at its automatic compaction threshold, request the
+  // checkpoint right away (labeled proactive) so it runs while the person is
+  // away instead of in front of their next message. Off restores compaction
+  // only at the next model boundary.
+  idleContextCompactionEnabled: EnvBoolean.default(true),
   // Proactive compaction threshold as a ratio of the model context window.
   // Defaults to 90%: compact as late as possible — retained context beats early
   // headroom now that per-model windows are declared honestly (input-effective,
@@ -995,12 +1042,6 @@ const SettingsSchema = z.object({
   sessionArchiveEnabled: EnvBoolean.default(true),
   /** Days without a new turn before a session becomes eligible for the archive. */
   sessionArchiveIdleDays: z.coerce.number().int().min(1).max(3650).default(30),
-  voiceInputResumableRetentionSeconds: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(7 * 24 * 60 * 60)
-    .default(24 * 60 * 60),
   voiceInputFfmpegPath: z.string().trim().min(1).max(1024).default("ffmpeg"),
   /**
    * Our own CPU speaker models for meeting recordings (apps/worker/speakers):
@@ -1174,6 +1215,15 @@ const SettingsSchema = z.object({
   // model id to residency declaration. An undeclared model uses a built-in
   // rule: Azure is unknown, never EU.
   builtinModelResidencyJson: z.string().optional(),
+  // Where operator-run side-feature routes (self-hosted search, the
+  // deployment's Azure voice, speech and embedding resources, an
+  // OpenAI-compatible decision model) process data: route id to residency
+  // declaration. Other side-feature routes use code-owned rules.
+  sideFeatureResidencyJson: z.string().optional(),
+  // Per-run only, never read from the environment: set by the execution
+  // overlay when the workspace is EU-only. Every model route the run resolves
+  // must then have an EU residency record. See docs/eu-only-inference.md.
+  requiredModelGeography: z.enum(["eu"]).optional(),
   // Codex (ChatGPT) subscription: when enabled, a per-workspace connected
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
@@ -1262,6 +1312,13 @@ const SettingsSchema = z.object({
   decisionModelId: z.string().trim().min(1).optional(),
   decisionModelApiKey: z.string().optional(),
   decisionModelBaseUrl: z.string().url().optional(),
+  // How an explicit decision model signs in. `deployment_identity` is for an
+  // Azure OpenAI v1 resource (provider openai with its /openai/v1 base URL):
+  // a Microsoft Entra token for the deployment's own identity, the standard
+  // AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or
+  // AZURE_CLIENT_SECRET, instead of a static key.
+  // OPENGENI_DECISION_MODEL_AUTH
+  decisionModelAuth: z.enum(["api_key", "deployment_identity"]).default("api_key"),
   // Decision-observability fence. When enabled, the worker emits one
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
   // sticky-sharded decision. It never changes placement/admission/failover.
@@ -1949,6 +2006,14 @@ const SettingsSchema = z.object({
   documentEmbeddingDimensions: z.coerce.number().int().positive().default(3072),
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
+  // How OpenAI-compatible document embeddings sign in. `deployment_identity`
+  // is for an Azure OpenAI v1 resource (OPENGENI_DOCUMENT_EMBEDDING_BASE_URL
+  // set to its /openai/v1 URL, the deployment name as the model): a Microsoft
+  // Entra token for the deployment's own identity, the standard
+  // AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or
+  // AZURE_CLIENT_SECRET, instead of a static key.
+  // OPENGENI_DOCUMENT_EMBEDDING_AUTH
+  documentEmbeddingAuth: z.enum(["api_key", "deployment_identity"]).default("api_key"),
   documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
   // Site SQL: optional per-Site Cloudflare storage (one SQLite Durable Object
   // per Site, docs/site-data.md). Off unless enabled here, the gateway's
@@ -2153,12 +2218,6 @@ const SettingsSchema = z.object({
   githubAppSlug: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   githubAppPrivateKey: z.string().optional(),
-  prReviewGithubAppId: z.string().optional(),
-  prReviewGithubClientId: z.string().optional(),
-  prReviewGithubClientSecret: z.string().optional(),
-  prReviewGithubAppSlug: z.string().optional(),
-  prReviewGithubWebhookSecret: z.string().optional(),
-  prReviewGithubAppPrivateKey: z.string().optional(),
   signupChallengeEnabled: EnvBoolean.default(false),
   signupChallengeSiteKey: z.string().optional(),
   signupChallengeSecretKey: z.string().optional(),
@@ -2542,15 +2601,98 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
 export type DecisionModelSettings = Pick<
   Settings,
   "decisionModelProvider" | "decisionModelId" | "decisionModelApiKey" | "decisionModelBaseUrl"
->;
-/** Explicit deployment credentials only. Compatibility is code-search-only. */
+> &
+  Partial<
+    Pick<
+      Settings,
+      | "decisionModelAuth"
+      | "azureTenantId"
+      | "azureClientId"
+      | "azureFederatedTokenFile"
+      | "azureClientSecret"
+      | "azureAuthorityHost"
+    >
+  > &
+  SideFeatureResidencySettings;
+
+/**
+ * A configured decision model. It signs in with a static key, or with a
+ * Microsoft Entra token for the deployment's own identity (Azure OpenAI only).
+ */
+export type DecisionModelConfiguration =
+  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
+  | {
+      provider: "openai";
+      model: string;
+      baseUrl: string;
+      azureEntra: NonNullable<ReturnType<typeof deploymentAzureEntraCredential>>;
+    };
+
+/**
+ * Explicit deployment credentials only. Compatibility is code-search-only.
+ * Under EU-only inference a decision model whose route is not EU is not
+ * configured at all, so code search and model tool routing are off.
+ */
 export function decisionModelConfiguration(
   settings: DecisionModelSettings &
     Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
   allowLegacyCodeSearch = false,
-):
-  | { provider: "jev" | "openai" | "openrouter"; model: string; apiKey: string; baseUrl?: string }
-  | undefined {
+): DecisionModelConfiguration | undefined {
+  const config = unrestrictedDecisionModelConfiguration(settings, allowLegacyCodeSearch);
+  return config && sideFeatureRouteAllowed(settings, decisionModelTarget(config))
+    ? config
+    : undefined;
+}
+
+/**
+ * The route a decision model sends over. An OpenAI-compatible model is
+ * resolved with the endpoint it calls (api.openai.com without a base URL),
+ * so a declaration covers only the endpoint it names.
+ */
+export function decisionModelTarget(config: {
+  provider: "jev" | "openai" | "openrouter";
+  baseUrl?: string | undefined;
+}): SideFeatureTarget {
+  return config.provider === "openai"
+    ? { route: "decision_model.openai", endpoint: config.baseUrl ?? "https://api.openai.com/v1" }
+    : `decision_model.${config.provider}`;
+}
+
+/**
+ * The side-feature route (with its endpoint) the configured decision model
+ * sends over, whether or not it may run under the residency requirement.
+ */
+export function decisionModelRoute(
+  settings: DecisionModelSettings &
+    Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
+  allowLegacyCodeSearch = false,
+): SideFeatureTarget | null {
+  const config = unrestrictedDecisionModelConfiguration(settings, allowLegacyCodeSearch);
+  return config ? decisionModelTarget(config) : null;
+}
+
+function unrestrictedDecisionModelConfiguration(
+  settings: DecisionModelSettings &
+    Partial<Pick<Settings, "jevApiKey" | "jevModel" | "jevBaseUrl">>,
+  allowLegacyCodeSearch: boolean,
+): DecisionModelConfiguration | undefined {
+  if (settings.decisionModelAuth === "deployment_identity") {
+    // Azure OpenAI v1 only: it needs the resource's base URL and the deployment identity.
+    const azureEntra = deploymentAzureEntraCredential(settings);
+    if (
+      settings.decisionModelProvider !== "openai" ||
+      !settings.decisionModelId ||
+      !settings.decisionModelBaseUrl ||
+      !azureEntra
+    )
+      return undefined;
+    return {
+      provider: "openai",
+      model: settings.decisionModelId,
+      baseUrl: settings.decisionModelBaseUrl,
+      azureEntra,
+    };
+  }
   const explicit =
     settings.decisionModelProvider !== undefined ||
     settings.decisionModelId !== undefined ||
@@ -3435,6 +3577,7 @@ const RegistryModelSchema = z
     toolOutputTruncationTokens: z.number().int().positive().optional(),
     reasoningEffort: z.boolean().optional(), // legacy compatibility input/projection
     hostedWebSearch: z.boolean().optional(), // legacy compatibility input/projection
+    hostedWebSearchContextSize: z.enum(["low", "medium", "high"]).optional(),
     capabilities: ModelCapabilitiesV1Schema.optional(),
     pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
     // Where this route processes data, overriding the provider's declaration.
@@ -3569,6 +3712,19 @@ const RegistryProviderSchema = z
     models: z.array(RegistryModelSchema).min(1),
   })
   .superRefine((provider, ctx) => {
+    provider.models.forEach((model, index) => {
+      if (model.hostedWebSearchContextSize === undefined) return;
+      const hostedSearchEnabled =
+        model.capabilities?.hostedTools.webSearch.runnable ?? model.hostedWebSearch ?? false;
+      if (provider.api !== "responses" || !hostedSearchEnabled) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["models", index, "hostedWebSearchContextSize"],
+          message:
+            "hostedWebSearchContextSize requires a Responses route with hosted web search enabled",
+        });
+      }
+    });
     if (!operatorDeclaresResidency(provider.kind)) {
       if (provider.residency !== undefined) {
         ctx.addIssue({
@@ -4409,6 +4565,8 @@ export interface ConfiguredModel {
   toolOutputTruncationTokens?: number | undefined;
   reasoningEffort: boolean;
   hostedWebSearch: boolean;
+  /** Operator route setting; absent preserves the hosted-search SDK default. */
+  hostedWebSearchContextSize?: "low" | "medium" | "high" | undefined;
 }
 
 /**
@@ -4775,7 +4933,7 @@ export const OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT = 300_000;
 export const OPENGENI_OPPER_MODELS: readonly OpperCatalogModel[] = [
   OpperCatalogModel.parse({
     upstreamModelId: "aws/claude-opus-5-5",
-    label: "Claude Opus 5.5 (EU)",
+    label: "Claude Opus 5.5",
     shortLabel: "Opus 5.5",
     aliases: [],
     capabilities: opperCapabilities({
@@ -5591,6 +5749,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     teamsBotEnabled: optional("OPENGENI_TEAMS_BOT_ENABLED"),
     teamsBotAllowedTenantIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS"),
     teamsBotAllowedChannelIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS"),
+    teamsBotAllowedGroupChatIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS"),
     teamsBotSetupAdminIds: optional("OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS"),
     teamsBotClientId: optional("OPENGENI_TEAMS_BOT_CLIENT_ID"),
     teamsBotClientSecret: optional("OPENGENI_TEAMS_BOT_CLIENT_SECRET"),
@@ -5604,6 +5763,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     privacyAdminScheduleSummariesRequired: optional(
       "OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED",
     ),
+    privacyChatShareLinksAllowed: optional("OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED"),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
@@ -5647,9 +5807,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sessionUsageLimitsEnabled: optional("OPENGENI_SESSION_USAGE_LIMITS_ENABLED"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
     eventTriggersEnabled: optional("OPENGENI_EVENT_TRIGGERS_ENABLED"),
+    automationMaxChainDepth: optional("OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),
+    idleContextCompactionEnabled: optional("OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED"),
     contextCompactionThresholdRatio: optional("OPENGENI_COMPACTION_THRESHOLD_RATIO"),
     contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
     contextAutoCompactThresholdTokens: optional("OPENGENI_CONTEXT_AUTO_COMPACT_THRESHOLD_TOKENS"),
@@ -5712,9 +5874,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     sessionArchiveEnabled: optional("OPENGENI_SESSION_ARCHIVE_ENABLED"),
     sessionArchiveIdleDays: optional("OPENGENI_SESSION_ARCHIVE_IDLE_DAYS"),
-    voiceInputResumableRetentionSeconds: optional(
-      "OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS",
-    ),
     voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
     recordingSpeakersBinaryPath: optional("OPENGENI_RECORDING_SPEAKERS_BINARY_PATH"),
     recordingSpeakerModelsDir: optional("OPENGENI_RECORDING_SPEAKER_MODELS_DIR"),
@@ -5760,6 +5919,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedModelsJson: optional("OPENGENI_MANAGED_MODELS_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     builtinModelResidencyJson: optional("OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON"),
+    sideFeatureResidencyJson: optional("OPENGENI_SIDE_FEATURE_RESIDENCY_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
     experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
@@ -5780,6 +5940,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     decisionModelId: optional("OPENGENI_DECISION_MODEL_ID"),
     decisionModelApiKey: optional("OPENGENI_DECISION_MODEL_API_KEY"),
     decisionModelBaseUrl: optional("OPENGENI_DECISION_MODEL_BASE_URL"),
+    decisionModelAuth: optional("OPENGENI_DECISION_MODEL_AUTH"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
     subscriptionCrossProviderFailoverEnabled: optional(
@@ -6009,6 +6170,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingDimensions: optional("OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS"),
     documentEmbeddingApiKey: optional("OPENGENI_DOCUMENT_EMBEDDING_API_KEY"),
     documentEmbeddingBaseUrl: optional("OPENGENI_DOCUMENT_EMBEDDING_BASE_URL"),
+    documentEmbeddingAuth: optional("OPENGENI_DOCUMENT_EMBEDDING_AUTH"),
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
     sitesCloudflareStorageEnabled: optional("OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED"),
     sitesGatewayInternalOrigin: optional("OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN"),
@@ -6142,12 +6304,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),
     githubWebhookSecret: optional("OPENGENI_GITHUB_WEBHOOK_SECRET"),
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
-    prReviewGithubAppId: optional("OPENGENI_PR_REVIEW_GITHUB_APP_ID"),
-    prReviewGithubClientId: optional("OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID"),
-    prReviewGithubClientSecret: optional("OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET"),
-    prReviewGithubAppSlug: optional("OPENGENI_PR_REVIEW_GITHUB_APP_SLUG"),
-    prReviewGithubWebhookSecret: optional("OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET"),
-    prReviewGithubAppPrivateKey: optional("OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY"),
     signupChallengeEnabled: optional("OPENGENI_SIGNUP_CHALLENGE_ENABLED"),
     signupChallengeSiteKey: optional("OPENGENI_SIGNUP_CHALLENGE_SITE_KEY"),
     signupChallengeSecretKey: optional("OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY"),
@@ -6286,6 +6442,8 @@ const RETIRED_DEPLOYMENT_SWITCHES: ReadonlyArray<{ name: string; reason: string 
 
 const warnedRetiredDeploymentSwitches = new Set<string>();
 
+const warnedSideFeatureResidency = new Set<string>();
+
 function warnRetiredDeploymentSwitches(source: NodeJS.ProcessEnv): void {
   for (const { name, reason } of RETIRED_DEPLOYMENT_SWITCHES) {
     if (source[name] === undefined || warnedRetiredDeploymentSwitches.has(name)) continue;
@@ -6335,10 +6493,13 @@ const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "editable_artifact_export_status",
 ];
 
-/** Tools that read event sources and events; they exist only where event triggers run. */
+/** Tools for event sources and events; they exist only where event triggers run. */
 const EVENT_TRIGGER_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "event_sources_list",
   "events_get",
+  "event_sources_create_webhook",
+  "event_sources_update",
+  "event_sources_delete",
 ];
 
 /**
@@ -8390,10 +8551,18 @@ function builtinResidencyDeclarations(settings: Settings): ReadonlyMap<string, M
   return declarations;
 }
 
-/** The built-in provider's endpoint, for the residency route check. */
+/**
+ * The built-in provider's endpoint, for the residency route check. Without a
+ * base URL, Azure calls `azureOpenaiDeployment` through its deployment path
+ * for every model, so only that model can be EU there.
+ */
 function builtinResidencyBaseUrl(settings: Settings): string | undefined {
   if (settings.openaiProvider === "azure") {
-    return settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
+    if (settings.azureOpenaiBaseUrl) return settings.azureOpenaiBaseUrl;
+    const endpoint = settings.azureOpenaiEndpoint?.replace(/\/+$/u, "");
+    return endpoint && settings.azureOpenaiDeployment
+      ? `${endpoint}/openai/deployments/${settings.azureOpenaiDeployment}`
+      : endpoint;
   }
   return settings.openaiBaseUrl ?? "https://api.openai.com/v1";
 }
@@ -8450,6 +8619,49 @@ const BuiltinModelResidencyDeclarations = z.record(
   z.string().trim().min(1),
   ModelResidencyDeclaration,
 );
+
+/**
+ * Whether a route with this residency may run under the settings' residency
+ * requirement. Without a requirement every route may run; under `eu` only a
+ * route whose live record is EU may.
+ */
+export function modelRouteMeetsResidencyRequirement(
+  settings: Pick<Settings, "requiredModelGeography">,
+  residency: unknown,
+): boolean {
+  return settings.requiredModelGeography !== "eu" || isEuResidency(residency);
+}
+
+// Settings objects are immutable snapshots; every client build and request
+// check for one run reads the same routes.
+const euModelRoutesCache = new WeakMap<Settings, ReadonlyMap<string, ReadonlySet<string>>>();
+
+/**
+ * The routes that may carry requests under an EU requirement: provider id to
+ * the upstream model ids whose every configured route is EU. An upstream id
+ * listed by any non-EU route of the same provider is excluded.
+ */
+export function euModelRoutes(settings: Settings): ReadonlyMap<string, ReadonlySet<string>> {
+  const cached = euModelRoutesCache.get(settings);
+  if (cached) return cached;
+  const verdicts = new Map<string, Map<string, boolean>>();
+  for (const model of configuredModels(settings)) {
+    const provider = verdicts.get(model.providerId) ?? new Map<string, boolean>();
+    provider.set(
+      model.upstreamModelId,
+      (provider.get(model.upstreamModelId) ?? true) && isEuResidency(model.residency),
+    );
+    verdicts.set(model.providerId, provider);
+  }
+  const routes: ReadonlyMap<string, ReadonlySet<string>> = new Map(
+    [...verdicts].map(([providerId, models]) => [
+      providerId,
+      new Set([...models].filter(([, eu]) => eu).map(([upstreamModelId]) => upstreamModelId)),
+    ]),
+  );
+  euModelRoutesCache.set(settings, routes);
+  return routes;
+}
 
 /** `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON`: model id to residency declaration. */
 export function parseBuiltinModelResidencyJson(
@@ -8570,6 +8782,9 @@ function definitionVersionFor(
     // changing it; it is intentionally not a second executable-definition
     // freeze inside TurnExecutionPolicyV1.
     ...(model.requestPolicy ? { requestPolicy: model.requestPolicy } : {}),
+    ...(model.hostedWebSearchContextSize === undefined
+      ? {}
+      : { hostedWebSearchContextSize: model.hostedWebSearchContextSize }),
     pricing: model.pricing ?? null,
     // Where an operator declares a route processes data is executable
     // identity: moving it fails accepted turns instead of silently moving them.
@@ -9360,6 +9575,9 @@ export function configuredModels(
             : { toolOutputTruncationTokens: model.toolOutputTruncationTokens }),
           reasoningEffort: capabilities.reasoning.runnable,
           hostedWebSearch: capabilities.hostedTools.webSearch.runnable,
+          ...(model.hostedWebSearchContextSize === undefined
+            ? {}
+            : { hostedWebSearchContextSize: model.hostedWebSearchContextSize }),
         }),
       );
     }
@@ -12088,6 +12306,17 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       console.warn(
         `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declares models that are not configured built-in models: ${unmatched.join(", ")}`,
       );
+    }
+  }
+  if (settings.sideFeatureResidencyJson?.trim()) {
+    parseSideFeatureResidencyJson(settings.sideFeatureResidencyJson);
+    // Logged once per process: settings are read many times.
+    for (const warning of sideFeatureResidencyDeclarationWarnings(
+      settings.sideFeatureResidencyJson,
+    )) {
+      if (warnedSideFeatureResidency.has(warning)) continue;
+      warnedSideFeatureResidency.add(warning);
+      console.warn(`[config] OPENGENI_SIDE_FEATURE_RESIDENCY_JSON: ${warning}`);
     }
   }
   if (

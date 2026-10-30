@@ -5,7 +5,7 @@ import {
 import {
   ACTIVE_SESSION_HISTORY_COMPACTION_RATIO,
   hasPendingSteerAfterContextCompaction,
-  isSessionCompactionRequested,
+  sessionCompactionRequestTrigger,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -65,6 +65,7 @@ import {
 import {
   createCompactionModelUsageEventState,
   processCompactionModelUsageEvent,
+  servedRouteProcessingResidency,
 } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
@@ -143,6 +144,7 @@ export type CompactionPrepDeps = {
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
+  portableModelSwitchPending?: ClaimTurnOk["portableModelSwitchPending"];
   resolvedModel: GovernanceModelOk["resolvedModel"];
   workspaceAgentInstructions: GovernanceModelOk["workspaceAgentInstructions"];
   workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
@@ -287,6 +289,12 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
 
   const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
+  // The summarizer runs on the turn's route (or the built-in fallback for it).
+  const compactionProcessingResidency = servedRouteProcessingResidency(
+    settings,
+    resolvedModel,
+    turnExecutionPolicy.productModelId,
+  );
   let compactionCreditPolicyRevision: number | undefined;
   // Wire fingerprint of the latest compaction request; its usage callback runs
   // after that request's response, before the next compaction request.
@@ -330,6 +338,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         latestCompactionPromptCacheRequest = null;
         return request;
       },
+      processingResidency: compactionProcessingResidency,
     });
   };
   const compactionSummarizerFor = (systemInstructions?: string): CompactionSummarizer => {
@@ -531,7 +540,12 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       workspaceMemory,
       rig: rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
     });
-    const requested = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+    const requestTrigger = await sessionCompactionRequestTrigger(
+      db,
+      input.workspaceId,
+      input.sessionId,
+    );
+    const requested = requestTrigger !== null;
     let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
     if (requested) {
       try {
@@ -552,7 +566,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             {
               force: true,
               clearRequestedCompaction: true,
-              trigger: "operator",
+              trigger: requestTrigger ?? "operator",
               materializeHistory: media.materializeScreenshotHistory,
               projectModelInput: compactionModelHistoryProjector,
               ...compactionModeOptions,
@@ -632,7 +646,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       }
       if (outcome.events.length > 0) {
         if (outcome.compacted) {
-          recordContextCompaction(observability, "operator");
+          recordContextCompaction(observability, requestTrigger ?? "operator");
         }
         await publishCompactionOutcomeEvents(outcome.events);
       }
@@ -690,6 +704,7 @@ export async function runPostAgentCompaction(
     claimedResult,
     turn,
     session,
+    portableModelSwitchPending = false,
     resolvedModel,
     remotePrefix,
     remoteCompactionRequester,
@@ -717,7 +732,12 @@ export async function runPostAgentCompaction(
   }
 
   if (compactionOnlyTurn) {
-    const requested = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+    const requestTrigger = await sessionCompactionRequestTrigger(
+      db,
+      input.workspaceId,
+      input.sessionId,
+    );
+    const requested = requestTrigger !== null;
     let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
     if (
       requested &&
@@ -754,7 +774,7 @@ export async function runPostAgentCompaction(
             {
               force: true,
               clearRequestedCompaction: true,
-              trigger: "operator",
+              trigger: requestTrigger ?? "operator",
               projectModelInput: compactionModelHistoryProjector,
               ...compactionModeOptions,
             },
@@ -831,7 +851,7 @@ export async function runPostAgentCompaction(
       }
       if (outcome.events.length > 0) {
         if (outcome.compacted) {
-          recordContextCompaction(observability, "operator");
+          recordContextCompaction(observability, requestTrigger ?? "operator");
         }
         await publishCompactionOutcomeEvents(outcome.events);
       }
@@ -864,7 +884,8 @@ export async function runPostAgentCompaction(
     preparedPortable ||
     (remoteCompactionRequester && session.codexCompactionMode === "remote_v2")
   ) {
-    const forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+    const forced =
+      (await sessionCompactionRequestTrigger(db, input.workspaceId, input.sessionId)) !== null;
     const thresholdTokens = compactionThresholdTokens(eventing.modelRunSettings);
     if (
       forced ||
@@ -892,14 +913,20 @@ export async function runPostAgentCompaction(
   // retry, exactly like Codex. Other failures end this turn honestly.
   // Run before every fresh inference. Approval resumes replay their frozen
   // RunState verbatim and recovering attempts already compacted, if needed,
-  // before the first attempt's model boundary.
-  if (attempt.triggerType === "user.message" || attempt.triggerType === "system.update.delivered") {
-    let forced = false;
+  // before the first attempt's model boundary. A chat moving off Codex remote
+  // compaction rebuilds Codex's checkpoint here whatever triggered the turn,
+  // since no other model can read it.
+  if (
+    attempt.triggerType === "user.message" ||
+    attempt.triggerType === "system.update.delivered" ||
+    portableModelSwitchPending
+  ) {
+    let forcedTrigger: Awaited<ReturnType<typeof sessionCompactionRequestTrigger>> = null;
     try {
       // Operator /compact (the slash command) sets a durable request flag;
       // observe it without consuming it so a failed/stale attempt cannot
       // lose the request. The replacement transaction clears it on success.
-      forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+      forcedTrigger = await sessionCompactionRequestTrigger(db, input.workspaceId, input.sessionId);
       const outcome = await waitForTurnOperation(
         maybeCompactContext(
           db,
@@ -919,11 +946,11 @@ export async function runPostAgentCompaction(
           // resolution uses the built-in Responses summarizer with the same
           // session prompt-cache key as the main model calls.
           compactSummarizer,
-          forced
+          forcedTrigger !== null
             ? {
                 force: true,
                 clearRequestedCompaction: true,
-                trigger: "operator",
+                trigger: forcedTrigger,
                 materializeHistory: media.materializeScreenshotHistory,
                 projectModelInput: compactionModelHistoryProjector,
                 ...compactionModeOptions,
@@ -940,7 +967,7 @@ export async function runPostAgentCompaction(
       );
       if (outcome.events.length > 0) {
         if (outcome.compacted) {
-          const compactionTrigger = forced ? "operator" : undefined;
+          const compactionTrigger = forcedTrigger ?? undefined;
           recordContextCompaction(observability, compactionTrigger ?? "auto");
         }
         await publishCompactionOutcomeEvents(outcome.events);
@@ -984,7 +1011,7 @@ export async function runPostAgentCompaction(
           attemptId: input.attemptId,
         },
         {
-          clearRequestedCompaction: forced,
+          clearRequestedCompaction: forcedTrigger !== null,
           publishLiveEvents: publishCompactionLiveEvents,
           providerRejection: compactionProviderRejection(compactError),
         },
@@ -1010,7 +1037,7 @@ export async function runPostAgentCompaction(
           turnStatus: "failed",
           sessionStatus: "idle",
           activeTurnId: null,
-          ...(forced && !landmark.requestConsumed
+          ...(forcedTrigger !== null && !landmark.requestConsumed
             ? { consumeRequestedCompactionFailure: true }
             : {}),
         }))

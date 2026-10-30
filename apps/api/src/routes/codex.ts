@@ -234,8 +234,10 @@ import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   getManagedSession,
   hasPermission,
+  requireAccessContext,
   requireAccessGrant,
   requireCanonicalLocalAccountAdministrator,
+  resolveAccountAdminAuthorizationStamp,
   resolveCatalogSettings,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -268,6 +270,8 @@ import {
   requireNotAgent,
 } from "../http/acting-person";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { isConfiguredDeploymentKeyRequest } from "../http/auth";
 import * as z from "zod/v4";
 import {
   CodexSourceRequest,
@@ -280,6 +284,7 @@ import {
   verifyCodexRedemptionConfirmation,
 } from "../codex-redemption-security";
 import { parseRequestBody } from "../http/request-body";
+import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
 
 const CODEX_OVERVIEW_STALE_MS = 15 * 60_000;
 const CODEX_REDEMPTION_CONFIRMATION_SECONDS = 5 * 60;
@@ -297,6 +302,11 @@ const redemptionBody = redemptionPrepareBody.extend({
 type ManagedCookieHuman = {
   subjectId: string;
   browserSessionHash: string;
+  /**
+   * Admitted as an account administrator without a person (no organization
+   * membership to read people, gateways or defaults through).
+   */
+  accountAdministrator?: true;
 };
 
 /**
@@ -360,6 +370,13 @@ export async function requireOrganizationCodexHuman(
   options: {
     /** A provider sign-in step: the person does it in the browser, never an agent. */
     providerConsent?: boolean;
+    /**
+     * Also admit an account administrator the request authenticated as
+     * without a person (configured key, account-scoped key, signed
+     * delegation with account:admin). Only for routes whose database writes
+     * accept the same proof (subscription connections and their settings).
+     */
+    accountAdministrator?: boolean;
   } = {},
 ): Promise<ManagedCookieHuman> {
   if (options.providerConsent) requireNotAgent(c, "Signing in to a provider");
@@ -373,6 +390,26 @@ export async function requireOrganizationCodexHuman(
       human = {
         subjectId: agent.subjectId,
         browserSessionHash: await agentSessionHash(agent.subjectId),
+      };
+    }
+  }
+  if (
+    !human &&
+    options.accountAdministrator &&
+    (deps.settings.productAccessMode !== "local" || c.req.header("authorization"))
+  ) {
+    const context = await requireAccessContext(c, deps);
+    const stamp = await resolveAccountAdminAuthorizationStamp(c, deps, {
+      accountId: parsed.data,
+      subjectId: context.subjectId,
+    });
+    if (stamp) {
+      // No browser: a sign-in this principal starts is only ever continued by
+      // the same principal, and never matches a person's browser session.
+      return {
+        subjectId: stamp.actorSubjectId,
+        browserSessionHash: await hashCodexBrowserSession(`account-admin:${stamp.actorSubjectId}`),
+        accountAdministrator: true,
       };
     }
   }
@@ -408,6 +445,39 @@ export async function requireOrganizationCodexHuman(
     throw error;
   }
   return human;
+}
+
+/**
+ * The organization's subscription model administrator: an organization
+ * owner or admin (or an agent acting as one), or any account administrator
+ * the request authenticated as. The subscription writers accept the same
+ * set; organization gateways, defaults and reset redemption stay with people.
+ */
+export async function requireOrganizationSubscriptionAdministrator(
+  c: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+  options: { providerConsent?: boolean } = {},
+): Promise<ManagedCookieHuman> {
+  return await requireOrganizationCodexHuman(c, deps, organizationId, {
+    ...options,
+    accountAdministrator: true,
+  });
+}
+
+/**
+ * The browser-origin rule for organization subscription changes. It guards
+ * cookie-authenticated requests. A request carrying its own credential (a
+ * bearer token or the deployment access key header) is not authenticated by
+ * a cookie and cannot be forged cross-site, as the workspace subscription
+ * routes already accept.
+ */
+export function requireOrganizationSubscriptionMutationOrigin(
+  c: Context,
+  deps: ApiRouteDeps,
+): void {
+  if (c.req.header("authorization") || isConfiguredDeploymentKeyRequest(c, deps.settings)) return;
+  requireSameOriginBrowserMutation(c, deps);
 }
 
 async function requireRedemptionHuman(
@@ -685,6 +755,11 @@ type CodexConnectState = {
   actorSubjectId?: string;
   deviceAuthId?: string;
   userCode?: string;
+  /**
+   * `user`: the person's own Codex subscription, connected from this
+   * workspace and kept in their own Personal workspace.
+   */
+  scope?: "user";
   iat?: number;
 };
 
@@ -718,14 +793,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/organizations/:organizationId/codex/accounts", async (c) => {
     const organizationId = c.req.param("organizationId");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
 
     return await coreOrganizationCodexAccounts(c, deps, organizationId, human.subjectId);
   });
 
   app.get("/v1/organizations/:organizationId/codex/accounts/:accountId/usage", async (c) => {
     const organizationId = c.req.param("organizationId");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const credentialId = c.req.param("accountId");
     if (!z.string().uuid().safeParse(credentialId).success) {
       throw new HTTPException(404, { message: "codex account not found" });
@@ -747,7 +822,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // the organization's Models page (any workspace use not required).
   app.get("/v1/organizations/:organizationId/codex/accounts/:accountId/overview", async (c) => {
     const organizationId = c.req.param("organizationId");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     return await coreOrganizationCodexOverview(
       c,
       deps,
@@ -811,11 +886,11 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/organizations/:organizationId/codex/connect/start", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
     // Device sign-in accepts an agent acting as an admin, as the workspace
     // route does: the agent relays the short code and the person still
     // approves at OpenAI themselves. The state binds the same person.
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     // The device-code start touches no account state: public compatibility
     // (a disabled cutover still fails closed).
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
@@ -842,8 +917,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/organizations/:organizationId/codex/connect/poll", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const { state } = (await c.req.json().catch(() => null)) as {
       state?: string;
     };
@@ -928,8 +1003,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/organizations/:organizationId/codex/accounts/:accountId/activate", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const credentialId = c.req.param("accountId");
 
     return await coreCodexActivate(
@@ -942,8 +1017,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/organizations/:organizationId/codex/settings", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const parsed = parseRequestBody(
       SubscriptionRotationSettingsRequest,
       await c.req.json().catch(() => null),
@@ -960,8 +1035,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/organizations/:organizationId/codex/accounts/:accountId/allocator", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const parsed = parseRequestBody(
       SubscriptionAccountToggleRequest,
       await c.req.json().catch(() => null),
@@ -976,8 +1051,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     "/v1/organizations/:organizationId/codex/accounts/:accountId/extra-credits",
     async (c) => {
       const organizationId = c.req.param("organizationId");
-      requireSameOriginBrowserMutation(c, deps);
-      const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+      requireOrganizationSubscriptionMutationOrigin(c, deps);
+      const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
       const parsed = parseRequestBody(
         SubscriptionAccountToggleRequest,
         await c.req.json().catch(() => null),
@@ -991,8 +1066,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/organizations/:organizationId/codex/accounts/:accountId", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const body = (await c.req.json().catch(() => null)) as {
       label?: unknown;
     } | null;
@@ -1008,14 +1083,15 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/organizations/:organizationId/codex/accounts/:accountId", async (c) => {
     const organizationId = c.req.param("organizationId");
-    requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
 
     return await coreCodexDisconnect(c, deps, {
       accountId: organizationId,
       workspaceId: null,
       subjectId: human.subjectId,
       connectionId: c.req.param("accountId"),
+      audit: disconnectAuditActor(c, { subjectId: human.subjectId }),
     });
   });
 
@@ -1025,6 +1101,21 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     if (await managedCookieHuman(c, deps)) requireSameOriginBrowserMutation(c, deps);
+    const body = (await c.req.json().catch(() => null)) as { scope?: unknown } | null;
+    if (body?.scope !== undefined && body.scope !== "user" && body.scope !== "workspace")
+      throw new HTTPException(400, { message: "invalid Codex scope" });
+    const personal = body?.scope === "user";
+    // The person's own subscription: the verified person, with their own
+    // Personal workspace in this organization, refused before the sign-in.
+    if (personal)
+      await requireSubscriptionScopeMutation(
+        c,
+        deps,
+        workspaceId,
+        "user",
+        "Codex",
+        "own_personal_workspace",
+      );
     // The device-code start touches no account state.
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
     try {
@@ -1040,6 +1131,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       actorSubjectId: grant.subjectId,
       deviceAuthId: start.deviceAuthId,
       userCode: start.userCode,
+      ...(personal ? { scope: "user" } : {}),
     });
     return c.json({
       userCode: start.userCode,
@@ -1064,12 +1156,30 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       payload.workspaceId !== workspaceId ||
       payload.actorSubjectId !== grant.subjectId ||
       !payload.deviceAuthId ||
-      !payload.userCode
+      !payload.userCode ||
+      (payload.scope !== undefined && payload.scope !== "user")
     ) {
       throw new HTTPException(400, {
         message: "codex connect state is invalid or expired",
       });
     }
+    // The person's own subscription: re-checked now, before any sign-in
+    // result is read, and written in their own Personal workspace.
+    const ownWorkspace = async () => {
+      const owner = await requireSubscriptionScopeMutation(
+        c,
+        deps,
+        workspaceId,
+        "user",
+        "Codex",
+        "own_personal_workspace",
+      );
+      if (owner.subjectId !== grant.subjectId || owner.accountId !== grant.accountId)
+        throw new HTTPException(403, { message: "Codex connection identity changed" });
+      return owner.workspaceId;
+    };
+    const personal = payload.scope === "user";
+    const startedIn = personal ? await ownWorkspace() : workspaceId;
     // The device code itself expires 15 minutes after start; surface that to the
     // client (the 1-hour signed-state TTL is longer than the device window).
     if (
@@ -1119,11 +1229,15 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     // The core writer decides authority from the grant's subject: an
     // organization administrator (new or reconnected shared account), a
     // workspace administrator (reconnect of an account this workspace
-    // manages), or the person in their own Personal workspace.
+    // manages), or the person in their own Personal workspace (also when
+    // they connect their own from another workspace of the organization).
+    if (personal && (await ownWorkspace()) !== startedIn)
+      throw new HTTPException(403, { message: "Codex connection identity changed" });
     return await coreCodexConnected(c, deps, {
       accountId: grant.accountId,
-      workspaceId,
+      workspaceId: startedIn,
       subjectId: grant.subjectId,
+      ...(personal ? { personal: true } : {}),
       credential: {
         credentialEncrypted: encryptEnvironmentValue(
           key,
@@ -1313,6 +1427,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       subjectId: grant.subjectId,
       connectionId: c.req.param("accountId"),
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
   });
 
@@ -1326,6 +1441,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
       subjectId: grant.subjectId,
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
   });
 

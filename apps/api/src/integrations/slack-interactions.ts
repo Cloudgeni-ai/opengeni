@@ -1,9 +1,14 @@
-import { slackToolReviewBlocks, slackToolReviewCanDecide } from "./slack-tool-review";
+import {
+  slackServerQuestion,
+  slackToolReviewBlocks,
+  slackToolReviewCanDecide,
+} from "./slack-tool-review";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   approvalIdentifier,
   ApproveSlackUserLinkAccessRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  McpElicitationApprovalRequest,
   resolveWorkspaceSessionToolDefaults,
   hasOpenGeniSlackReactionScope,
   ListSlackUserLinkAccessRequestsResponse,
@@ -50,6 +55,7 @@ import {
 import {
   acceptSessionHumanInputResponse,
   acceptSessionApprovalDecision,
+  SessionApprovalAnswerError,
   approveSlackUserLinkAccessRequest,
   advanceSlackInteractionDelivery,
   bindSlackInteractionSession,
@@ -3675,7 +3681,6 @@ type SlackNewSessionDefaults = {
   excludedMcpServerIds?: string[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   firstPartyMcpPermissions?: NonNullable<Session["firstPartyMcpPermissions"]>;
-  variableSetIds?: string[];
   rigId?: string;
   sandboxBackend?: Session["sandboxBackend"];
   targetSandboxId?: string;
@@ -3686,9 +3691,9 @@ type SlackNewSessionDefaults = {
  * What a new Slack task starts with.
  *
  * A Slack message is not the website composer, so the person's last composer
- * selection (an explicit connector list, a Variable Set, a compute target)
- * never narrows it. Connectors, first-party tools, Variable Sets, Sandbox
- * Environment and compute are left to session creation, which applies the
+ * selection (an explicit connector list, a compute target) never narrows
+ * it. Connectors, first-party tools, Sandbox Environment and compute are left
+ * to session creation, which applies the
  * workspace defaults and freezes the person's own connections through the
  * ordinary delegation snapshot. Repositories are the person's own recently
  * used repositories that the workspace GitHub App still offers them, attached
@@ -3744,7 +3749,6 @@ async function slackNewSessionDefaults(
     ...(pending.firstPartyMcpPermissions
       ? { firstPartyMcpPermissions: pending.firstPartyMcpPermissions }
       : {}),
-    variableSetIds: pending.variableSetIds,
     ...(pending.rigId ? { rigId: pending.rigId } : {}),
     sandboxBackend: pending.sandboxBackend,
     ...(pending.sandboxBackend === "selfhosted" && pending.activeSandboxId
@@ -4732,14 +4736,35 @@ async function executeSlackAction(
   if (handle.actionKind === "approval_approve" || handle.actionKind === "approval_reject") {
     if (!handle.targetId) throw new SlackInteractionPermanentError("slack_action_target_invalid");
     const decision = handle.actionKind === "approval_approve" ? "approve" : "reject";
-    const accepted = await acceptSessionApprovalDecision(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: handle.sessionId,
-      subjectId: grant.subjectId,
-      payload: { approvalId: handle.targetId, decision },
-      clientEventId: `slack-action:${handle.id}`,
-    });
+    // An MCP server's question names the round the card showed, so a card
+    // for an earlier question cannot answer a newer one.
+    const elicitationRound =
+      handle.targetValue && /^[1-9]\d?$/u.test(handle.targetValue)
+        ? Number(handle.targetValue)
+        : undefined;
+    let accepted: Awaited<ReturnType<typeof acceptSessionApprovalDecision>>;
+    try {
+      accepted = await acceptSessionApprovalDecision(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: handle.sessionId,
+        subjectId: grant.subjectId,
+        payload: {
+          approvalId: handle.targetId,
+          decision,
+          ...(elicitationRound !== undefined ? { elicitationRound } : {}),
+        },
+        clientEventId: `slack-action:${handle.id}`,
+      });
+    } catch (error) {
+      // The MCP server's question needs typed answers, or it asked again
+      // since this card was posted: the person answers in the session.
+      if (!(error instanceof SessionApprovalAnswerError)) throw error;
+      return {
+        result: "needs_answer",
+        text: `${mention}This approval has a question to answer in the session. ${openSessionText(deps, interaction.workspaceId, handle.sessionId)}`,
+      };
+    }
     if (accepted.action === "conflict") {
       return {
         result: "stale",
@@ -5010,12 +5035,14 @@ async function publishSlackSharedResult(
   const publicationOperationId = deterministicUuid(
     `slack-shared-result:${origin.interactionId}:${event.id}:${origin.policyActivationVersion}`,
   );
+  const identity = await client.sessionIdentity(interaction.workspaceId, interaction.sessionId);
   await deliverSlackModelText(async (format) => {
     await client.postMessage({
       operationId: publicationOperationId,
       channelId: origin.sourceChannelId,
       threadTimestamp: origin.sourceThreadTs,
       text: `<@${origin.initiatingSlackUserId}> ${boundedOutput(format(output))}`,
+      ...(identity ? { identity } : {}),
     });
   });
   return {
@@ -5137,7 +5164,12 @@ async function postSlackControlCard(
   });
 }
 
-type SlackApprovalSummary = { id: string; name: string };
+type SlackApprovalSummary = {
+  id: string;
+  name: string;
+  /** The MCP server's question that paused this call, from the event itself. */
+  question: McpElicitationApprovalRequest | null;
+};
 
 function slackApprovalSummaries(payload: unknown): SlackApprovalSummary[] {
   const approvals = record(payload)?.approvals;
@@ -5148,7 +5180,14 @@ function slackApprovalSummaries(payload: unknown): SlackApprovalSummary[] {
       const rawItem = record(value?.rawItem);
       const id = approvalIdentifier(approval);
       const name = boundedString(value?.name ?? value?.toolName ?? rawItem?.name, 256);
-      return id ? { id, name: name ?? "Opengeni action" } : null;
+      const question = McpElicitationApprovalRequest.safeParse(value?.elicitation);
+      return id
+        ? {
+            id,
+            name: name ?? "Opengeni action",
+            question: question.success ? question.data : null,
+          }
+        : null;
     })
     .filter((approval): approval is SlackApprovalSummary => approval !== null)
     .slice(0, MAX_SLACK_APPROVALS_PER_CARD);
@@ -5285,19 +5324,30 @@ async function slackApprovalCard(
     reviews.flatMap((review) => (review ? [[review.id, review] as const] : [])),
   );
   const actionable = approvals.filter((approval) => {
+    // A server's question is the decision itself, so it needs no saved review.
+    if (approval.question) return true;
     const review = reviewById.get(approval.id);
     return review && slackToolReviewCanDecide(review);
   });
   const specs = actionable
     .flatMap((approval) => [
-      {
-        actionKind: "approval_approve" as const,
-        actionKey: `approval:${approval.id}:approve`,
-        targetId: approval.id,
-      },
+      ...(approval.question && !slackServerQuestion(approval.question).answerableInSlack
+        ? []
+        : [
+            {
+              actionKind: "approval_approve" as const,
+              actionKey: approval.question
+                ? `approval:${approval.id}:approve:${approval.question.round}`
+                : `approval:${approval.id}:approve`,
+              targetId: approval.id,
+              ...(approval.question ? { targetValue: String(approval.question.round) } : {}),
+            },
+          ]),
       {
         actionKind: "approval_reject" as const,
-        actionKey: `approval:${approval.id}:reject`,
+        actionKey: approval.question
+          ? `approval:${approval.id}:reject:${approval.question.round}`
+          : `approval:${approval.id}:reject`,
         targetId: approval.id,
       },
     ])
@@ -5314,9 +5364,51 @@ async function slackApprovalCard(
   const byKey = new Map(handles.map((handle) => [handle.actionKey, handle]));
   const blocks: SlackMessageBlock[] = [];
   for (const approval of approvals) {
-    const approve = byKey.get(`approval:${approval.id}:approve`);
-    const reject = byKey.get(`approval:${approval.id}:reject`);
+    const round = approval.question ? `:${approval.question.round}` : "";
+    const approve = byKey.get(`approval:${approval.id}:approve${round}`);
+    const reject = byKey.get(`approval:${approval.id}:reject${round}`);
     const review = reviewById.get(approval.id);
+    if (approval.question) {
+      // What the call does (when it can be shown), then the server's question
+      // right above its answer. Anything to fill in is answered in the session.
+      if (review && slackToolReviewCanDecide(review)) {
+        blocks.push(...slackToolReviewBlocks(review, privateAudience));
+      }
+      const question = slackServerQuestion(approval.question);
+      blocks.push(question.block);
+      if (!question.answerableInSlack && link) {
+        blocks.push({
+          type: "section",
+          text: { type: "mrkdwn", text: `<${link}|Answer in Opengeni>` },
+        });
+      }
+      const elements: Extract<SlackMessageBlock, { type: "actions" }>["elements"] = [];
+      if (question.answerableInSlack && approve) {
+        elements.push({
+          type: "button",
+          action_id: SLACK_ACTION_ID_BY_KIND.approval_approve,
+          value: approve.id,
+          text: { type: "plain_text", text: "Allow", emoji: true },
+          style: "primary",
+        });
+      }
+      if (reject) {
+        elements.push({
+          type: "button",
+          action_id: SLACK_ACTION_ID_BY_KIND.approval_reject,
+          value: reject.id,
+          text: { type: "plain_text", text: "Decline", emoji: true },
+        });
+      }
+      if (elements.length) {
+        blocks.push({
+          type: "actions",
+          block_id: `opengeni_approval_${event.sequence}_${blocks.length}`,
+          elements,
+        });
+      }
+      continue;
+    }
     if (!review) continue;
     blocks.push(...slackToolReviewBlocks(review, privateAudience));
     // Render the original event deterministically, even after a decision. The
@@ -6180,6 +6272,12 @@ function slackTerminalProgressSameTurn(
   );
 }
 
+const SLACK_AGENT_AUTHORED_DELIVERY_KINDS: ReadonlySet<string> = new Set([
+  "progress",
+  "reply",
+  "final",
+]);
+
 async function postDelivery(
   client: Awaited<ReturnType<typeof createOpenGeniSlackBotInteractionClient>>,
   interaction: SlackInteraction,
@@ -6191,6 +6289,11 @@ async function postDelivery(
   ),
   blocks?: SlackMessageBlock[],
 ) {
+  // The agent's own words post under a bot chat's name and avatar; system
+  // notices (approvals, limits, failures) stay the app's.
+  const identity = SLACK_AGENT_AUTHORED_DELIVERY_KINDS.has(kind)
+    ? await client.sessionIdentity(interaction.workspaceId, interaction.sessionId)
+    : undefined;
   const post = async (label: string | null) => {
     const rendered = withWorkspaceLine(label, boundedOutput(text), blocks);
     await client.postMessage({
@@ -6199,6 +6302,7 @@ async function postDelivery(
       threadTimestamp: interaction.slackThreadTs,
       text: rendered.text,
       ...(rendered.blocks ? { blocks: rendered.blocks } : {}),
+      ...(identity ? { identity } : {}),
     });
   };
   const label = slackMessageWorkspaceLabel(interaction);

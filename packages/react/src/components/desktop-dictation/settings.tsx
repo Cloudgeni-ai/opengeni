@@ -508,7 +508,15 @@ export function DesktopDictationSettings({
           {history.slice(0, 10).map((entry) => (
             <SettingRow
               key={entry.id}
-              label={<span className="line-clamp-2 font-normal break-words">{entry.text}</span>}
+              label={
+                entry.cancelled ? (
+                  <span className="font-normal text-fg-muted">
+                    {t("desktopDictation.settings.cancelledDictation")}
+                  </span>
+                ) : (
+                  <span className="line-clamp-2 font-normal break-words">{entry.text}</span>
+                )
+              }
               description={
                 <>
                   <RelativeTime date={entry.at} focusable={false} />
@@ -551,7 +559,9 @@ export function DesktopDictationSettings({
                       <RotateCcwIcon aria-hidden />
                     </Button>
                   ) : null}
-                  <CopyText text={entry.text} label={t("desktopDictation.settings.copyText")} />
+                  {entry.text ? (
+                    <CopyText text={entry.text} label={t("desktopDictation.settings.copyText")} />
+                  ) : null}
                 </div>
               }
             />

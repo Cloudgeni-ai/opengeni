@@ -2,9 +2,18 @@ import { expect, test } from "bun:test";
 import { RunContext } from "@openai/agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { FIRST_PARTY_MCP_CALLER_META_KEY } from "@opengeni/contracts";
+import {
+  FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_SECRET_VALUES_META_KEY,
+  SecretValueMemory,
+} from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
-import { attemptToolCallMeta, buildOpenGeniAgent, prepareAgentTools } from "../src/index";
+import {
+  attemptToolCallMeta,
+  buildOpenGeniAgent,
+  prepareAgentTools,
+  withAttemptSecretValues,
+} from "../src/index";
 
 const operationId = "8d4c7c1e-0b7f-4a55-9d0f-3f2a1c9b6e10";
 
@@ -42,6 +51,30 @@ test("a third-party server never learns the caller surface", () => {
       transportMeta: { [FIRST_PARTY_MCP_CALLER_META_KEY]: "model" },
     }),
   ).toEqual({ opengeniOperationId: operationId });
+});
+
+test("only the first-party server learns the values a call's arguments resolved to", () => {
+  const fake = "fake-resolved-value-0000-not-a-secret";
+  const label = "\u007B\u007Bsecret:fake-vault/FAKE/value}}";
+  const memory = new SecretValueMemory();
+  memory.rememberForOperation(operationId, fake, label);
+  withAttemptSecretValues(memory, () => {
+    const context = { operationId, caller: { kind: "model" as const } };
+    expect(attemptToolCallMeta("opengeni", context)[FIRST_PARTY_SECRET_VALUES_META_KEY]).toEqual([
+      { value: fake, label },
+    ]);
+    expect(
+      attemptToolCallMeta("github", context)[FIRST_PARTY_SECRET_VALUES_META_KEY],
+    ).toBeUndefined();
+    // Transport metadata cannot inject values for the server to mask.
+    expect(
+      attemptToolCallMeta("opengeni", {
+        operationId: "another-operation",
+        caller: { kind: "model" },
+        transportMeta: { [FIRST_PARTY_SECRET_VALUES_META_KEY]: [{ value: "x", label: "y" }] },
+      })[FIRST_PARTY_SECRET_VALUES_META_KEY],
+    ).toBeUndefined();
+  });
 });
 
 test("the attempt gateway marks model and Codemode calls to the first-party server", async () => {

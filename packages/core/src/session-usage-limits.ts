@@ -280,6 +280,7 @@ export async function setSessionUsageLimitForAccess(
       limitMicros: request.limitMicros,
       expectedVersion: request.expectedVersion,
       operationId: request.operationId,
+      ...(request.window !== undefined ? { window: request.window } : {}),
       actor,
       producerEnabled: sessionUsageLimitsProducerEnabled(deps.settings),
     });

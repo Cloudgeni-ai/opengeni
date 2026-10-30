@@ -29,7 +29,13 @@
  * capability decides whether a removal audits cleared Apps designations.
  */
 import { sql } from "drizzle-orm";
-import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "../database";
+import { rawRows, withRlsContext, type Database } from "../database";
+import {
+  insertDisconnectAuditEventInScope,
+  SUBSCRIPTION_CONNECTION_DISCONNECTED_AUDIT_ACTION,
+  type DisconnectAuditActor,
+} from "../disconnect-audit";
+import { setSubscriptionAdministrationSubject } from "./account-administrator";
 import { withLosslessContentWriteVersion } from "../lossless-json";
 import * as schema from "../schema";
 import { resolveSubscriptionConnectionId } from "../subscription-core-repository";
@@ -208,7 +214,7 @@ export async function connectSubscriptionCoreConnection(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (tx) => {
-        await setSubjectRlsContext(tx, input.subjectId);
+        await setSubscriptionAdministrationSubject(tx, input);
         if (
           input.workspaceId !== null &&
           (input.personal === true ||
@@ -515,13 +521,43 @@ export type SubscriptionCoreDisconnectResult = {
   wake: SubscriptionCoreWake | null;
 };
 
+/**
+ * Who asked for a disconnect: each removed connection is audited
+ * (`subscription_connection.disconnected`) in the transaction that removes it.
+ */
+export type SubscriptionCoreDisconnectAudit = { audit?: DisconnectAuditActor | null };
+
+/**
+ * This transaction's own count of updated `subscription_connections` rows,
+ * or null when the server does not count them (`track_counts` off).
+ *
+ * The disconnect routine reports `removed` for an already-disconnected
+ * connection too; only its guarded update (`disconnected_at IS NULL`) tells
+ * a real disconnect from a repeat. Personal connections are hidden from app
+ * reads, so the routine's effect is observed through the transaction's own
+ * statistics: exact under concurrency (a waiting repeat updates nothing) and
+ * lock-free.
+ */
+async function connectionRowsUpdatedInTransaction(tx: Database): Promise<bigint | null> {
+  const [row] = await rawRows<{ counted: boolean; updated: string }>(
+    tx,
+    sql`select pg_catalog.current_setting('track_counts')::boolean as counted,
+      pg_catalog.pg_stat_get_xact_tuples_updated('subscription_connections'::regclass)::text
+        as updated`,
+  );
+  return row?.counted ? BigInt(row.updated) : null;
+}
+
 async function disconnectInTransaction(
   tx: Database,
   provider: SubscriptionCoreProvider,
-  input: SubscriptionCoreConnectScope,
+  input: SubscriptionCoreConnectScope & SubscriptionCoreDisconnectAudit,
   connectionId: string,
+  /** Whose account it is, for the audit record (personal rows are hidden from app reads). */
+  ownership: "personal" | "shared",
 ): Promise<{ outcome: SubscriptionCoreDisconnectOutcome; clearedAppsWorkspaceIds: string[] }> {
   const providerId = subscriptionCoreProviderId(provider);
+  const updatedBefore = input.audit ? await connectionRowsUpdatedInTransaction(tx) : null;
   // Only a provider with Apps designations has any to clear.
   const designations = provider.adapter.capabilities.apps
     ? await rawRows<{ workspace_id: string }>(
@@ -538,6 +574,24 @@ async function disconnectInTransaction(
       ) as outcome`,
   );
   const outcome = row?.outcome;
+  // Only the disconnect that actually ends the connection is recorded. With
+  // no statistics to tell, a removal is recorded rather than skipped.
+  const updatedAfter =
+    outcome === "removed" && input.audit ? await connectionRowsUpdatedInTransaction(tx) : null;
+  const ended = updatedBefore === null || updatedAfter === null || updatedAfter > updatedBefore;
+  if (outcome === "removed" && input.audit && ended) {
+    await insertDisconnectAuditEventInScope(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      action: SUBSCRIPTION_CONNECTION_DISCONNECTED_AUDIT_ACTION,
+      actor: input.audit,
+      target: { type: "subscription_connection", id: connectionId, provider: providerId },
+      details: {
+        connectionKind: subscriptionCoreConnectionKind(provider),
+        ownership,
+      },
+    });
+  }
   if (outcome === "removed" && input.workspaceId !== null) {
     // Legacy parity: the workspace's Apps designation of a removed account is
     // cleared (by the cascade) and audited in that workspace.
@@ -588,7 +642,7 @@ async function disconnectTarget(
   provider: SubscriptionCoreProvider,
   input: SubscriptionCoreConnectScope,
   rawId: string,
-): Promise<{ id: string; organization: boolean } | null> {
+): Promise<{ id: string; organization: boolean; ownership: "personal" | "shared" } | null> {
   const providerId = subscriptionCoreProviderId(provider);
   const connectionKind = subscriptionCoreConnectionKind(provider);
   if (input.workspaceId === null) {
@@ -601,10 +655,10 @@ async function disconnectTarget(
           and kind = ${connectionKind} and ownership = 'shared'
           and ${organizationAdministeredConnection()}`,
     );
-    return row ? { id: row.id, organization: true } : null;
+    return row ? { id: row.id, organization: true, ownership: "shared" } : null;
   }
   const personal = await resolvePersonalConnectionIdInTransaction(tx, provider, input, rawId);
-  if (personal) return { id: personal, organization: false };
+  if (personal) return { id: personal, organization: false, ownership: "personal" };
   const id = await resolveSubscriptionConnectionId(tx, {
     accountId: input.accountId,
     provider: providerId,
@@ -616,7 +670,7 @@ async function disconnectTarget(
     workspaceId: input.workspaceId,
   });
   const entry = pool.connections.find((candidate) => candidate.row.id === id);
-  return entry ? { id, organization: entry.source === "organization" } : null;
+  return entry ? { id, organization: entry.source === "organization", ownership: "shared" } : null;
 }
 
 /**
@@ -676,7 +730,7 @@ export async function resolveSubscriptionCoreRouteConnectionId(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
+      await setSubscriptionAdministrationSubject(tx, input);
       return await resolveRouteConnectionIdInTransaction(tx, provider, input, input.connectionId);
     },
   );
@@ -690,13 +744,13 @@ export async function resolveSubscriptionCoreRouteConnectionId(
 export async function disconnectSubscriptionCoreConnection(
   db: Database,
   provider: SubscriptionCoreProvider,
-  input: SubscriptionCoreConnectScope & { connectionId: string },
+  input: SubscriptionCoreConnectScope & SubscriptionCoreDisconnectAudit & { connectionId: string },
 ): Promise<SubscriptionCoreDisconnectResult> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
+      await setSubscriptionAdministrationSubject(tx, input);
       const target = await disconnectTarget(tx, provider, input, input.connectionId);
       if (!target) {
         return {
@@ -709,7 +763,13 @@ export async function disconnectSubscriptionCoreConnection(
       if (input.workspaceId !== null && target.organization) {
         throw provider.errors.organizationManaged();
       }
-      const result = await disconnectInTransaction(tx, provider, input, target.id);
+      const result = await disconnectInTransaction(
+        tx,
+        provider,
+        input,
+        target.id,
+        target.ownership,
+      );
       return {
         ...result,
         connectionId: target.id,
@@ -753,14 +813,14 @@ export type SubscriptionCoreDisconnectAllResult = {
 export async function disconnectAllSubscriptionCoreConnections(
   db: Database,
   provider: SubscriptionCoreProvider,
-  input: SubscriptionCoreConnectScope & { workspaceId: string },
+  input: SubscriptionCoreConnectScope & SubscriptionCoreDisconnectAudit & { workspaceId: string },
 ): Promise<SubscriptionCoreDisconnectAllResult> {
   try {
     return await withRlsContext(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (tx) => {
-        await setSubjectRlsContext(tx, input.subjectId);
+        await setSubscriptionAdministrationSubject(tx, input);
         const personalWorkspace =
           (await workspaceKind(tx, input.accountId, input.workspaceId)) === "personal";
         const ids = personalWorkspace
@@ -768,6 +828,7 @@ export async function disconnectAllSubscriptionCoreConnections(
               await listSubscriptionCorePersonalConnectionRowsInTransaction(tx, provider, input)
             ).map((row) => row.id)
           : [];
+        const personalIds = new Set(ids);
         const pool = await readSubscriptionCoreWorkspacePool(tx, provider, input);
         for (const entry of pool.connections) {
           if (entry.source === "workspace" && !ids.includes(entry.row.id)) ids.push(entry.row.id);
@@ -776,7 +837,13 @@ export async function disconnectAllSubscriptionCoreConnections(
         let removed = 0;
         const cleared = new Set<string>();
         for (const id of ids) {
-          const result = await disconnectInTransaction(tx, provider, input, id);
+          const result = await disconnectInTransaction(
+            tx,
+            provider,
+            input,
+            id,
+            personalIds.has(id) ? "personal" : "shared",
+          );
           if (result.outcome === "removed") {
             removed += 1;
             for (const workspaceId of result.clearedAppsWorkspaceIds) cleared.add(workspaceId);

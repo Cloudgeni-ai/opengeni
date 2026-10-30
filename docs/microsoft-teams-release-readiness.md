@@ -10,8 +10,8 @@ below in staging before approving a production rollout.
 
 ## Two independent integrations
 
-The pilot targets personal conversations and standard team channels. The current
-activity parser distinguishes personal conversations from channels, but cannot
+The pilot supports personal conversations and explicitly approved group chats.
+The existing channel route remains separately gated. The activity parser cannot
 distinguish standard, private and shared channel types. The separate exact channel
 allowlist denies every unapproved channel, even with broad bot rollout enabled.
 An operator must verify a channel is standard before adding it; the allowlist is
@@ -68,6 +68,7 @@ Reference: [Azure Bot registration](https://learn.microsoft.com/en-us/azure/bot-
 | `OPENGENI_TEAMS_BOT_ENABLED` | Broad bot rollout; default false |
 | `OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS` | Explicit pilot/reviewer tenant admission while broad rollout is off |
 | `OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS` | Exact operator-verified standard channels as `tenantId:channelId`; empty denies all channels |
+| `OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS` | Exact approved group chats as `tenantId:conversationId`; empty denies all groups, independently of broad rollout |
 | `OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS` | Explicit operator-approved `tenantId:actorObjectId` installer pairs |
 | `OPENGENI_TEAMS_BOT_CLIENT_ID` | Bot's Entra application ID |
 | `OPENGENI_TEAMS_BOT_CLIENT_SECRET` | Server-only bot credential |
@@ -84,9 +85,17 @@ allowlist is explicit operator approval of a Teams actor, not proof that the
 actor holds a Microsoft tenant administrator role. Keep it empty until the
 operator has independently approved the intended installer. Personal messages use
 the dedicated Teams private-conversation authority seam to create an owner-only
-session inside that shared workspace; this does not allow binding a Personal
-workspace or grant the bot a canonical managed-browser session. Channel sessions
-remain workspace-visible. Both incoming work and outgoing replies recheck the
+session. Like a Slack bot DM, a new 1:1 chat lands in the sender's own Personal
+workspace (named by their active organization membership) while Personal
+workspaces are on and they can start chats there; otherwise it stays in the
+installation's shared workspace. A chat that starts landing in the Personal
+workspace is a fresh conversation, and turning Personal workspaces off returns
+to the earlier one; a first message still waiting to start its Personal chat
+then gets the usual admission notice. The bot is still installed in, and its link still belongs
+to, the shared workspace, so losing access there stops the chat. This does not
+grant the bot a canonical managed-browser session. Channel and group-chat
+sessions stay in the shared workspace and remain workspace-visible. Both
+incoming work and outgoing replies recheck the
 current session audience: a direct message requires the exact linked owner and
 `user_private` visibility; a channel requires shared visibility. A later audience
 change blocks both directions rather than reusing a stale route grant. Human approvals happen in the authenticated Opengeni
@@ -142,12 +151,11 @@ python3 -m zipfile -c ../opengeni-teams.zip manifest.json color.png outline.png
 python3 -m zipfile -l ../opengeni-teams.zip
 ```
 
-The package advertises personal conversations and team channels only. It makes
-no group-chat, file-transfer, tab, SSO, RSC, shared/private-channel, or Graph
-permission claim. Do not add one merely to satisfy a validator: implement and
-verify that capability first. Manifest 1.25 meets the documented minimum schema
-for channel-enabled Store submissions from July 2026; it does not by itself prove
-all current channel-specific Store policies are met.
+The package defaults to personal conversations. Explicitly set
+`OPENGENI_TEAMS_APP_GROUP_CHATS=true` to include group chats. It makes no team,
+file-transfer, tab, SSO, RSC, or Graph permission claim. Do not add unsupported
+channel capabilities merely to satisfy a validator: implement and verify them
+first. Manifest 1.25 does not by itself prove Store policy compliance.
 
 Validate the generated ZIP in Teams Developer Portal and retain its report.
 Local unit tests verify identity separation, safe metadata, least-capability
@@ -206,11 +214,18 @@ Required acceptance cases:
 5. Duplicate delivery does not create duplicate work. Restart/retry and outbound
    uncertainty preserve truthful receipts. Verify cleanup/revocation and that a
    different tenant, conversation or workspace cannot reuse a stored binding.
-6. Group chats, attachments and invoke activities are ignored by the message
-   normalizer. Verify that behavior. Private/shared channel type is not currently
-   classified automatically: verify each allowed channel is standard. A channel
-   absent from the exact allowlist must be denied even with broad rollout enabled.
-   Remove an entry and verify pending work/replies stop.
+6. Group chats require their exact allowlist entry and an explicit bot mention,
+   even with broad rollout enabled. Verify every participant is linked and has
+   workspace access, group work uses a distinct workspace-visible session, and
+   personal history is never reused. Change membership or unlink a participant;
+   verify old pending replies stop and a newly accepted audience gets fresh history.
+   Verify inline `text/html` representations accompanying canonical `activity.text`
+   are accepted without parsing or fetching HTML. Files, images, URL-backed HTML,
+   mixed attachment arrays and invoke activities remain rejected.
+   Private/shared channel type is not classified automatically: verify each
+   allowed channel is standard. A channel absent from its exact allowlist must
+   be denied even with broad rollout enabled. Remove an entry and verify pending
+   work/replies stop.
 7. Test the same package in a controlled external tenant under its own app
    policy, using a real non-home-tenant user. Verify isolation and expected denial
    for an external tenant not on the pilot allowlist.
@@ -219,6 +234,11 @@ Required acceptance cases:
    exercise read operations with known fixtures. Sending messages needs explicit
    test authorization and a disposable conversation; never post to real users
    merely as a connectivity probe.
+   The connector also searches chat and channel messages (Microsoft Search limited
+   to `chatMessage`) and looks up colleagues with `User.Read.All`, which needs
+   administrator consent. Verify a search finds a known fixture message, that a
+   request for other entity types is refused, and that the colleague lookup
+   returns a known user's manager and direct reports.
 9. Verify onboarding, help/error states, uninstall/disconnect and reconnect on
    Teams desktop, web and mobile. Record any unsupported behavior honestly.
 
@@ -288,3 +308,44 @@ Disconnect disables the existing tenant/workspace binding and cancels pending wo
 Reconnect uses that same binding. Moving a Teams organization to a different
 workspace, or replacing the Teams organization bound to a workspace, is not supported.
 The retained binding preserves existing conversation and delivery history.
+
+## Approved group chats
+
+Group chats are opt-in through `OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS`:
+exact tenant UUID and conversation ID pairs, separated by commas. Tenant admission
+alone never enables a group. Set `OPENGENI_TEAMS_APP_GROUP_CHATS=true` when generating
+an internal package to advertise personal and groupchat scopes. Default packages
+advertise personal chats only; no unsupported all-channel feature is claimed.
+
+Only explicit bot mentions are admitted. Each participant must link their own
+Opengeni account in a direct chat and hold current read access to the connected
+workspace. The sender also needs permission to create sessions. Connector chat
+membership supplies the complete roster (up to 250 humans); missing identities,
+unknown bots, foreign tenants, oversized rosters, and failed lookup refuse work.
+No Graph/RSC all-message permission is needed. Identity proof links are never
+posted to the group.
+
+Group work is workspace-visible, not a private group ACL. It receives a distinct
+native session and keeps the accepted sender's native turn authority. Personal
+chat history is never reused. Changed membership or account mapping retires the
+old route; returning to an earlier roster creates fresh history. Every outbound
+part checks the current roster and live account mappings again. Old pending
+replies are refused after an audience change.
+
+Microsoft membership lookup and message delivery are separate operations, so
+there remains a provider-side race between the last lookup and sending. Teams
+may also expose already-posted chat history to members added later. Use approved
+internal groups whose participants may share this workspace's content; this is
+not a replacement for Teams history-sharing policy.
+
+Authenticated inbound diagnostics record fixed rejection reasons, bounded schema
+paths and attachment counts (including the count of HTML representations), without
+message content, provider identifiers, URLs or credentials. These records run only
+after Connector authentication and help distinguish ignored activity shape from
+rollout, bot identity and installer-policy denials. They do not prove a reply was
+delivered. Unsupported attachments remain rejected.
+
+Teams inline `text/html` representations accompanying canonical `activity.text`
+are accepted, matching Microsoft's [receive-message payload](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/build-conversational-capability#receive-a-message-activity).
+Only the canonical text is consumed. HTML is never parsed or fetched; URL-backed
+HTML, files, images, and mixed attachment arrays remain rejected.

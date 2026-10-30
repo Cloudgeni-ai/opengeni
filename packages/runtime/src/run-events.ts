@@ -26,7 +26,11 @@ import {
 
 import { normalizeProtocolJsonValue } from "./protocol-json";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
-import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
+import { mcpElicitationApproval, mcpInputRequestOf } from "./mcp-input-requests";
+import {
+  isInternalGenericDispatchRegistrationItem,
+  isOpeningToolLoadResponse,
+} from "./lazy-tool-transport";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
 import { isPreemptedModelResponse } from "./model-preemption";
 import { isConnectedMachineOutcomeUnknownOutput } from "@opengeni/sdk";
@@ -865,7 +869,9 @@ function modelResponseFromSdkEvent(event: RunStreamEvent): any {
   if (event.type === "raw_model_stream_event") {
     const data = (event as any).data;
     if (data?.type === "response_done") {
-      return data.response;
+      // The local opening tool load is not a provider response: no usage,
+      // timing, billing or context signal.
+      return isOpeningToolLoadResponse(data) ? null : data.response;
     }
   }
   if (isOpenAIResponsesRawModelStreamEvent(event)) {
@@ -981,7 +987,14 @@ export function serializeApprovals(interruptions: unknown[]): unknown[] {
           interruptionToolName(item),
         ),
     )
-    .map(serializeApprovalInterruption);
+    .map((item) => {
+      const serialized = serializeApprovalInterruption(item);
+      // A call paused by its MCP server's question carries that question.
+      const request = mcpInputRequestOf(item);
+      return request && serialized && typeof serialized === "object"
+        ? { ...serialized, elicitation: mcpElicitationApproval(request) }
+        : serialized;
+    });
   return normalizeProtocolJsonValue(approvals, '$["approvals"]');
 }
 

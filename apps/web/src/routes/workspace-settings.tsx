@@ -3,6 +3,7 @@
 // API keys and Developer. Models lives in Organization settings (a
 // workspace's Models URL redirects there), as does the org/billing console.
 import { t } from "@opengeni/react/app/lib/console-text";
+import { inferenceFeatureRestriction } from "@opengeni/react";
 import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { PencilIcon, Trash2Icon, UserIcon } from "lucide-react";
@@ -14,7 +15,7 @@ import { AgentActivityRow } from "@/components/settings/agent-activity";
 import { MeetingDefaultsSection } from "@/components/meetings/meeting-defaults-section";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
-import { DefaultMachineRow } from "@/components/settings/default-machine-row";
+import { DefaultMachineRow, MyDefaultMachineRow } from "@/components/settings/default-machine-row";
 import { DefaultSandboxEnvironmentRow } from "@/components/settings/default-sandbox-environment-row";
 import { WorkspaceSandboxImageRow } from "@/components/workspace-sandbox-image-row";
 import {
@@ -224,20 +225,15 @@ function OperationalWorkspaceSettingsRoute({
       ) : null}
 
       {section === "usage" ? (
-        personal ? (
-          <Notice tone="muted" title="Budgets apply to shared workspaces">
-            Your Personal workspace uses {organizationLabel}'s credits without a monthly budget.
-          </Notice>
-        ) : (
-          <Suspense fallback={<SettingsRowsFallback label="Loading usage" />}>
-            <LazyWorkspaceUsagePage
-              key={workspaceId}
-              workspaceId={workspaceId}
-              workspaceName={activeWorkspace?.name ?? "this workspace"}
-              organizationId={accountId}
-            />
-          </Suspense>
-        )
+        <Suspense fallback={<SettingsRowsFallback label="Loading usage" />}>
+          <LazyWorkspaceUsagePage
+            key={workspaceId}
+            workspaceId={workspaceId}
+            workspaceName={activeWorkspace?.name ?? "this workspace"}
+            organizationId={accountId}
+            personalOrganizationLabel={personal ? organizationLabel : undefined}
+          />
+        </Suspense>
       ) : null}
 
       {section === "api-keys" ? (
@@ -483,6 +479,7 @@ function WorkspaceGeneralSettings({
           }
         />
         <DefaultMachineRow workspaceId={workspaceId} />
+        <MyDefaultMachineRow workspaceId={workspaceId} />
         <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
         <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <VideoGenerationPreferenceRow
@@ -682,7 +679,7 @@ function BusySendPreferenceRow({
  * with, so its cached prompt stays stable; Off also pauses the tool in running
  * sessions until it is switched back.
  */
-function CodeSearchPreferenceRow({
+export function CodeSearchPreferenceRow({
   workspaceId,
   canManage,
 }: {
@@ -691,15 +688,25 @@ function CodeSearchPreferenceRow({
 }) {
   const context = useAppContext();
   const capability = context.clientConfig.codeSearch;
+  // EU-only without an EU decision model: the server reports code search
+  // unavailable and `region_restricted`; shown, switched off. No route at all
+  // (no reason): not shown.
+  const regionRestricted = inferenceFeatureRestriction(t, context.clientConfig, "code_search");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const explicit = workspace?.settings?.codeSearchEnabled;
-  const value = explicit === true ? "on" : explicit === false ? "off" : "default";
+  const value = regionRestricted
+    ? "off"
+    : explicit === true
+      ? "on"
+      : explicit === false
+        ? "off"
+        : "default";
   const [saving, setSaving] = useState(false);
-  if (capability?.available !== true) return null;
+  if (capability?.available !== true && regionRestricted === null) return null;
   const defaultPhrase =
-    capability.workspaceDefault === "on"
+    capability?.workspaceDefault === "on"
       ? "Default turns it on"
-      : capability.workspaceDefault === "split"
+      : capability?.workspaceDefault === "split"
         ? "Default gives it to half of new sessions"
         : "Default leaves it off";
 
@@ -723,11 +730,17 @@ function CodeSearchPreferenceRow({
     }
   }
 
-  const reason = canManage ? undefined : "Only workspace admins can change this.";
+  // The description already says "Not supported in EU".
+  const reason =
+    regionRestricted || canManage ? undefined : "Only workspace admins can change this.";
   return (
     <SettingRow
       label="Fast code search"
-      description={`Agents find code in one step. ${defaultPhrase}; Off also pauses it in running sessions.`}
+      description={
+        regionRestricted
+          ? `Agents find code in one step. ${regionRestricted}.`
+          : `Agents find code in one step. ${defaultPhrase}; Off also pauses it in running sessions.`
+      }
       controlWidth="auto"
       control={
         <SegmentedControl
@@ -740,7 +753,7 @@ function CodeSearchPreferenceRow({
             { value: "off", label: "Off" },
           ].map((option) => ({
             ...option,
-            disabled: saving || !canManage,
+            disabled: saving || !canManage || regionRestricted !== null,
             ...(reason ? { disabledReason: reason } : {}),
           }))}
         />

@@ -121,6 +121,21 @@ export function scheduledTaskEventsToolInput() {
     );
 }
 
+/**
+ * Agent-config fields agents never set through the schedule tools: a person
+ * chooses Slack posting and connector policy, and chat settings for an
+ * automation (attached servers, memory, reach, inline Skills) are set by a
+ * person or the app that manages it.
+ */
+export const SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG = {
+  slackBotChannelId: true,
+  toolPolicy: true,
+  mcpServers: true,
+  memoryScope: true,
+  agentAccess: true,
+  skills: true,
+} as const;
+
 export function scheduledTaskCreateToolInput(options: { events: boolean } = { events: false }) {
   return (
     z
@@ -144,7 +159,7 @@ export function scheduledTaskCreateToolInput(options: { events: boolean } = { ev
           ),
         agentConfig: z
           .object(ScheduledTaskAgentConfigInput.shape)
-          .omit({ slackBotChannelId: true, toolPolicy: true })
+          .omit(SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG)
           .strict()
           .optional()
           .describe(
@@ -160,14 +175,13 @@ export function scheduledTaskCreateToolInput(options: { events: boolean } = { ev
           : { schedule: scheduledTaskScheduleToolInput() }),
       })
       // Only a person pins connector accounts; agents never do.
-      // Variable Sets were removed (RM-1); agents choose vaults via vaultPolicy.
       .omit({
         agentLearning: true,
         connectionAuthorities: true,
+        // Agents can't lock a schedule to themselves.
+        creatorLocked: true,
         pinnedAccounts: true,
         pinnedAccountsRequired: true,
-        variableSetId: true,
-        environmentId: true,
         ...(options.events ? {} : { events: true as const }),
       })
       .strict()

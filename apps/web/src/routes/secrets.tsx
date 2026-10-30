@@ -6,6 +6,7 @@
 //   /secrets/$vaultId             a vault's page   ?view=availability|new-item&type=
 //   /secrets/$vaultId/$itemId     an item's page   ?view=edit
 import { t } from "@opengeni/react/app/lib/console-text";
+import { usePersonName } from "@opengeni/react/app/lib/use-person-name";
 import {
   useVault,
   useVaultItem,
@@ -68,7 +69,11 @@ import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructiv
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { orgLabel } from "@opengeni/react/app/lib/org";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canManageWorkspaceSettings,
+  hasAccountPermission,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 import {
   connectViewProvider,
   type SecretsConnectOwner,
@@ -212,16 +217,16 @@ export function SecretsRoute({
   const navigate = useNavigate();
   const access = context.accessContext;
   const can = (permission: string) => hasWorkspacePermission(access, workspaceId, permission);
-  const canList = can("secrets:list") || can("variable-sets:list");
+  const canList = can("secrets:list");
   const canWrite = can("secrets:write");
   // "use = reveal": viewers can see that an item exists, never its value.
-  const canUse = can("secrets:use") || can("variable-sets:use") || can("environments:use");
+  const canUse = can("secrets:use");
   const workspaceGrant = access.workspaceGrants.find((grant) => grant.workspaceId === workspaceId);
   const accountId = workspaceGrant?.accountId ?? null;
   const canManageOrganization = Boolean(
     accountId && hasAccountPermission(access, accountId, "account:admin"),
   );
-  const canWriteWorkspace = can("variable-sets:write") || can("secrets:write");
+  const canWriteWorkspace = can("secrets:write");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const organizationName = workspace
     ? orgLabel(t, workspace.accountId, access.accountGrants)
@@ -234,7 +239,11 @@ export function SecretsRoute({
     [context.workspaces, workspace?.accountId],
   );
   const capabilityOff = secretsCapabilityOff(workspace?.settings);
-  const canEditAgentDefaults = can("workspace:admin");
+  const canEditAgentDefaults = canManageWorkspaceSettings(
+    access,
+    workspace,
+    context.managedSelfContext,
+  );
 
   const vaults = useVaults({ enabled: canList });
   const api = vaults.api;
@@ -822,41 +831,6 @@ function VaultRoute({
 }
 
 /* ------------------------------------------------------------ an item's page */
-
-/**
- * Who a subject is, for "Version 3 · by Ada": "you" for the signed-in person,
- * else the workspace member's name. Null until known; history then says "a person".
- */
-function usePersonName(workspaceId: string, enabled = true): (subjectId: string) => string | null {
-  const context = useAppContext();
-  const selfSubjectId = context.accessContext.subjectId;
-  const [names, setNames] = useState<ReadonlyMap<string, string>>(() => new Map());
-  useEffect(() => {
-    if (!enabled) return;
-    let active = true;
-    void context.client
-      .listWorkspaceMembers(workspaceId)
-      .then((members) => {
-        if (!active) return;
-        setNames(
-          new Map(
-            members.map((member) => [
-              member.subjectId,
-              member.subjectLabel?.trim() || member.subjectId.replace(/^(user|service):/, ""),
-            ]),
-          ),
-        );
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
-  }, [context.client, workspaceId, enabled]);
-  return useCallback(
-    (subjectId: string) => (subjectId === selfSubjectId ? "you" : (names.get(subjectId) ?? null)),
-    [names, selfSubjectId],
-  );
-}
 
 function ItemRoute({
   workspaceId,

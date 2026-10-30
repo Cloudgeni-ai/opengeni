@@ -32,7 +32,9 @@ export const ContentPage = /* @__PURE__ */ forwardRef<
       <div
         data-slot="content-page-inner"
         className={cn(
-          "mx-auto flex w-full min-w-0 flex-col px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:px-6 lg:px-8",
+          // `--og-content-page-start`: a host can widen the start edge where
+          // something sits over the page's top-left corner (window controls).
+          "mx-auto flex w-full min-w-0 flex-col px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:pr-6 sm:pl-[var(--og-content-page-start,1.5rem)] lg:px-8",
           width === "standard" ? "max-w-5xl" : "max-w-7xl",
           className,
         )}

@@ -150,6 +150,53 @@ test("composer capabilities: read-only until Customize for this chat, then toggl
   });
 });
 
+test("in an EU-only workspace the picker and the composer menu say Not supported in EU", async () => {
+  const euOnly = capabilityAvailability({
+    capabilities: [
+      { id: "webSearch", available: false, reason: "Off here", code: "region_restricted" },
+    ],
+  });
+  await act(async () =>
+    root.render(
+      <AgentCapabilityPicker
+        draft={draftFromRequest("all")}
+        onChange={() => {}}
+        availability={euOnly}
+      />,
+    ),
+  );
+  const pickerRow = container.querySelector('[data-capability="webSearch"]')!;
+  expect(pickerRow.textContent).toContain("Not supported in EU");
+  expect(pickerRow.textContent).not.toContain("Off here");
+  expect(pickerRow.querySelector<HTMLInputElement>("input[type=checkbox]")!.disabled).toBe(true);
+
+  const onChange = mock();
+  await act(async () =>
+    root.render(
+      <ComposerCapabilitiesMenuBody
+        presentation="dialog"
+        capabilities={{
+          customized: true,
+          draft: draftFromRequest("all"),
+          availability: euOnly,
+          onCustomizedChange: () => {},
+          onChange,
+        }}
+        connectorsSelected={0}
+        connectorsTotal={0}
+        onOpenConnectors={() => {}}
+      />,
+    ),
+  );
+  const menuRow = container.querySelector('[data-capability="webSearch"]')!;
+  expect(menuRow.textContent).toContain("Not supported in EU");
+  // Even while customizing, it can't be switched on.
+  const control = menuRow.querySelector<HTMLButtonElement>("button")!;
+  expect(control.getAttribute("aria-label")).toBe("Web search, Not supported in EU");
+  await act(async () => control.click());
+  expect(onChange).not.toHaveBeenCalled();
+});
+
 test("inspector sections slice prompt modules out of the operational contract", () => {
   const content = "Base.\n\nRuntime.";
   const sections = instructionSections([

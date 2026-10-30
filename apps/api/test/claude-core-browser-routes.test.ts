@@ -4,9 +4,10 @@
  * attempt completes only on the runtime it started on; the organization
  * routes (setup token, OAuth sign-in, list, rename, allocator, activate,
  * rotation, access, disconnect) answer from core connections, including by a
- * legacy id the cutover kept as an alias; and a private account is connected,
- * listed, renamed and reconnected only from its owner's own Personal
- * workspace (403 from a shared workspace, refused in another member's).
+ * legacy id the cutover kept as an alias; and a private account lives in its
+ * owner's own Personal workspace: connected there or in place from a shared
+ * workspace of the organization, listed, renamed and reconnected there, and
+ * refused in another member's.
  *
  * C3 ships Claude's registry entry; this process registers it (the module
  * binding below) and the test database gets its registry row. Run this file
@@ -433,26 +434,9 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
     expect(listed.usage.credentialVersion).toBe(listed.version);
   });
 
-  test("a private account only from its owner's Personal workspace", async () => {
+  test("a private account lives only in its owner's Personal workspace", async () => {
     const before = exchanges;
     const rowsBefore = (await claudeRows()).length;
-    const refusal = {
-      status: 403,
-      body: {
-        code: null,
-        message: "Connect a private Claude account from your own Personal workspace.",
-      },
-    };
-    // From a shared workspace the person belongs to: refused before any sign-in.
-    expect(
-      await browser(workspace(sharedWorkspaceId, "/claude/accounts/setup-token"), "POST", {
-        token: setupToken(),
-        scope: "user",
-      }),
-    ).toEqual(refusal);
-    expect(
-      await browser(`${oauth(workspace(sharedWorkspaceId, ""))}/start`, "POST", { scope: "user" }),
-    ).toEqual(refusal);
     // Another member's Personal workspace is never the owner's: it is not
     // even visible to them (404, as for any workspace they cannot read).
     const elsewhere = await browser(
@@ -471,6 +455,15 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
     expect(exchanges).toBe(before);
     expect((await claudeRows()).length).toBe(rowsBefore);
 
+    // From a shared workspace the person belongs to, connected in place: it
+    // is theirs, kept in their own Personal workspace.
+    const inPlace = await browser(
+      workspace(sharedWorkspaceId, "/claude/accounts/setup-token"),
+      "POST",
+      { token: setupToken(), scope: "user", label: "From the team" },
+    );
+    expect(inPlace).toMatchObject({ status: 200, body: { connected: true, scope: "user" } });
+
     // In the owner's Personal workspace: a pasted setup token...
     const pasted = await browser(
       workspace(personalWorkspaceId, "/claude/accounts/setup-token"),
@@ -488,7 +481,7 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
     expect(signedIn).toMatchObject({ status: 200, body: { connected: true, scope: "user" } });
     const owned = (await claudeRows()).filter((row) => row.ownership === "personal");
     expect(owned.map((row) => row.id).sort()).toEqual(
-      [pasted.body.accountId, signedIn.body.accountId].sort(),
+      [inPlace.body.accountId, pasted.body.accountId, signedIn.body.accountId].sort(),
     );
 
     // Listed to their owner as private accounts, with one credential version.
@@ -498,12 +491,13 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
       (account: { scope: string }) => account.scope === "user",
     );
     expect(mine.map((account: { id: string }) => account.id).sort()).toEqual(
-      [pasted.body.accountId, signedIn.body.accountId].sort(),
+      [inPlace.body.accountId, pasted.body.accountId, signedIn.body.accountId].sort(),
     );
     for (const account of mine) expect(account.usage.credentialVersion).toBe(account.version);
     // Never listed in the shared workspace.
     const sharedListing = await browser(workspace(sharedWorkspaceId, "/claude/accounts"));
     expect(JSON.stringify(sharedListing.body)).not.toContain(pasted.body.accountId);
+    expect(JSON.stringify(sharedListing.body)).not.toContain(inPlace.body.accountId);
 
     // Renamed there: the plain legacy account shape (no usage reading).
     const renamed = await browser(

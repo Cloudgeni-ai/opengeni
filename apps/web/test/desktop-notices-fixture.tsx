@@ -18,10 +18,9 @@ const params = new URLSearchParams(location.search);
 const platform = params.get("platform") ?? "macos";
 if (platform !== "browser") document.documentElement.dataset.desktop = platform;
 if (platform === "windows") {
-  // Chromium has no native Windows overlay. Supply the same CSS
-  // environment-derived values the Electron host exposes.
-  document.documentElement.style.setProperty("--og-caption-buttons-width", "138px");
-  document.documentElement.style.setProperty("--og-caption-row-height", "56px");
+  // Chromium has no native Windows overlay: stand in for the 44px title bar
+  // area the desktop shell asks for.
+  document.documentElement.style.setProperty("--og-window-bar-height", "44px");
 }
 const theme = params.get("theme") === "light" ? "light" : "dark";
 document.documentElement.classList.toggle("dark", theme === "dark");
@@ -40,7 +39,7 @@ function Preview() {
     if (params.get("update") !== "0") showApiUpdateNotice(false);
   }, []);
   return (
-    <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
+    <main data-window-frame className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <div ref={mountApiUpdateNotice} className="shrink-0" />
       {params.has("signin") ? <SignInCallbackNotice userId="user-1" /> : null}
       <div
@@ -49,6 +48,7 @@ function Preview() {
       >
         <nav
           aria-label="Primary"
+          data-shell-rail
           data-collapsed={collapsed}
           style={{ width: collapsed ? 56 : 240 }}
           className="shrink-0 border-r border-border bg-surface"

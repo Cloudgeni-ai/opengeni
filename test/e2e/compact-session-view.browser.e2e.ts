@@ -97,6 +97,9 @@ describe("compact session view on the live local workspace route (API fixture)",
         mutation?: ReturnType<typeof deferred>;
         mutationStarted: boolean;
         requirePauseConfirmation?: boolean;
+        /** Holds the active-work answer, as a slow server would. */
+        holdConfirmation?: ReturnType<typeof deferred>;
+        confirmationStarted?: boolean;
         readOnly?: boolean;
         adminOnly?: boolean;
         permissionMode?: "legacy" | "explicit";
@@ -257,11 +260,14 @@ describe("compact session view on the live local workspace route (API fixture)",
         const request = route.request().postDataJSON();
         fixture.archiveRequests ??= [];
         fixture.archiveRequests.push(request);
-        if (request.archived && fixture.requirePauseConfirmation && !request.confirmPause)
+        if (request.archived && fixture.requirePauseConfirmation && !request.confirmPause) {
+          fixture.confirmationStarted = true;
+          await fixture.holdConfirmation?.promise;
           return json(
             { code: "session_archive_confirmation_required", message: "Active work" },
             409,
           );
+        }
         fixture.mutationStarted = true;
         await fixture.mutation?.promise;
         fixture.root = {
@@ -699,7 +705,11 @@ describe("compact session view on the live local workspace route (API fixture)",
       .getByRole("button", { name: "Archive session", exact: true })
       .and(page.locator(`[data-session-actions="${root.id}"]`))
       .click();
-    const dialog = page.getByRole("dialog", { name: "Pause and archive this chat?", exact: true });
+    // The question names the chat it archives.
+    const dialog = page.getByRole("dialog", {
+      name: "Pause and archive “Archive me”?",
+      exact: true,
+    });
     await dialog.waitFor();
     expect(await rootRow.count()).toBe(1);
     expect(archiveFixture.root.archived).toBe(false);
@@ -719,6 +729,92 @@ describe("compact session view on the live local workspace route (API fixture)",
     expect(requests.at(-1)?.confirmPause).toBe(true);
     expect(requests.at(-1)?.clientEventId).toBe(requests.at(-2)?.clientEventId);
     expect(requests.at(-1)?.mode).toBe("pause_and_archive");
+  }, 45_000);
+
+  test("a late active-work answer never opens the dialog on the page the person moved to", async () => {
+    const root = { ...rows[0]!, title: "Archive me", archived: false, archivedAt: null };
+    const holdConfirmation = deferred();
+    archiveFixture = {
+      root,
+      children: [],
+      peers: rows.slice(1, 30),
+      mutationStarted: false,
+      readStarted: false,
+      failReads: false,
+      requirePauseConfirmation: true,
+      holdConfirmation,
+    };
+    await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions`, { waitUntil: "networkidle" });
+    await choose("Group by", "None");
+    await choose("Status", "Active");
+    await settleRead();
+    const rail = page.locator("[data-sessionpin-session-list]");
+    await rail.locator(`a[data-session-row="${root.id}"]`).hover();
+    await rail
+      .getByRole("button", { name: "Archive session", exact: true })
+      .and(page.locator(`[data-session-actions="${root.id}"]`))
+      .click();
+    await waitFor(() => archiveFixture?.confirmationStarted === true, {
+      timeoutMs: 5_000,
+      intervalMs: 10,
+      describe: () => "The archive request did not reach the fixture.",
+    });
+    // While the server is slow to answer, the person opens another chat.
+    const peer = rows[1]!;
+    await rail.locator(`a[data-session-row="${peer.id}"]`).click();
+    await page.waitForURL(`**/sessions/${peer.id}`);
+    holdConfirmation.resolve();
+    const notice = page.getByText("“Archive me” wasn't archived", { exact: true });
+    await notice.waitFor();
+    expect(await page.getByRole("dialog", { name: /^Pause and archive/ }).count()).toBe(0);
+    expect(archiveFixture.mutationStarted).toBe(false);
+    // The notice still lets them finish what they asked for.
+    await page
+      .locator("[data-sonner-toast]")
+      .filter({ has: notice })
+      .getByRole("button", { name: "Pause and archive", exact: true })
+      .click();
+    await page.getByText("Chat archived", { exact: true }).waitFor();
+    const requests = archiveFixture.archiveRequests!;
+    expect(requests.at(-1)?.confirmPause).toBe(true);
+    expect(requests.at(-1)?.clientEventId).toBe(requests.at(-2)?.clientEventId);
+  }, 45_000);
+
+  test("the active-work dialog closes when the person moves to another page", async () => {
+    const root = { ...rows[0]!, title: "Archive me", archived: false, archivedAt: null };
+    archiveFixture = {
+      root,
+      children: [],
+      peers: rows.slice(1, 30),
+      mutationStarted: false,
+      readStarted: false,
+      failReads: false,
+      requirePauseConfirmation: true,
+    };
+    await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${rows[1]!.id}`, {
+      waitUntil: "networkidle",
+    });
+    const rail = page.locator("[data-sessionpin-session-list]");
+    await rail.locator(`a[data-session-row="${rows[2]!.id}"]`).click();
+    await page.waitForURL(`**/sessions/${rows[2]!.id}`);
+    await choose("Group by", "None");
+    await choose("Status", "Active");
+    await settleRead();
+    await rail.locator(`a[data-session-row="${root.id}"]`).hover();
+    await rail
+      .getByRole("button", { name: "Archive session", exact: true })
+      .and(page.locator(`[data-session-actions="${root.id}"]`))
+      .click();
+    const dialog = page.getByRole("dialog", {
+      name: "Pause and archive “Archive me”?",
+      exact: true,
+    });
+    await dialog.waitFor();
+    await page.goBack();
+    await page.waitForURL(`**/sessions/${rows[1]!.id}`);
+    await dialog.waitFor({ state: "hidden" });
+    expect(archiveFixture.mutationStarted).toBe(false);
+    expect(archiveFixture.archiveRequests?.length).toBe(1);
   }, 45_000);
 
   for (const permissionMode of ["legacy", "explicit"] as const)

@@ -13,6 +13,8 @@ import {
   BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_NOTES_VERSION,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
+  BROWSER_OBSERVATION_NOTICES_PARAMETER,
+  BROWSER_SESSION_NO_OBSERVATION_PARAMETER,
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
@@ -297,7 +299,9 @@ export type PlacementBrowserSessionReference = {
 };
 
 export type PlacementBrowserSession = PlacementBrowserSessionReference & {
-  observation: BrowserObservationValue;
+  /** Null when a session continued in the person's own browser with none of
+   * its tabs left: it has no tab until one is opened. */
+  observation: BrowserObservationValue | null;
   /** The tab inventory at creation, when the controller reports it. */
   targets?: BrowserTargetValue[];
   /** A plain line about how the controller launched this browser. */
@@ -801,7 +805,7 @@ export class BrowserControlClient {
     try {
       data = await this.requestJson({
         method: "POST",
-        path: "/v1/browser-sessions",
+        path: `/v1/browser-sessions?${BROWSER_SESSION_NO_OBSERVATION_PARAMETER}=1`,
         token: this.adminToken,
         body: {
           ...reference,
@@ -840,7 +844,7 @@ export class BrowserControlClient {
     }
     return {
       ...returnedReference,
-      observation: BrowserObservation.parse(data.observation),
+      observation: data.observation === null ? null : BrowserObservation.parse(data.observation),
       ...creationTargets(data.targets, returnedReference),
       ...creationNotice(data.notice),
       ...creationDisplay(data.display),
@@ -2201,11 +2205,16 @@ export class BrowserControlSessionClient {
     return response;
   }
 
-  async selectTarget(targetId: string): Promise<BrowserObservationValue> {
+  /** notices: the caller is the agent and receives (and so uses up) any
+   * notice about the tab; see BROWSER_OBSERVATION_NOTICES_PARAMETER. */
+  async selectTarget(
+    targetId: string,
+    options: BrowserObservationNoticeRequest = {},
+  ): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.targetPath(targetId, "select"),
+        path: withObservationNotices(this.targetPath(targetId, "select"), options),
         token: this.controlToken,
         body: {},
       }),
@@ -2224,11 +2233,14 @@ export class BrowserControlSessionClient {
     return data.map((target) => BrowserTarget.parse(target));
   }
 
-  async observe(targetId: string): Promise<BrowserObservationValue> {
+  async observe(
+    targetId: string,
+    options: BrowserObservationNoticeRequest = {},
+  ): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
         method: "GET",
-        path: this.targetPath(targetId, "observation"),
+        path: withObservationNotices(this.targetPath(targetId, "observation"), options),
         token: this.viewToken,
       }),
     );
@@ -2354,7 +2366,10 @@ export class BrowserControlSessionClient {
     );
   }
 
-  async action(command: BrowserActionCommandValue): Promise<BrowserActionReceiptValue> {
+  async action(
+    command: BrowserActionCommandValue,
+    options: BrowserObservationNoticeRequest = {},
+  ): Promise<BrowserActionReceiptValue> {
     const parsed = BrowserActionCommand.parse(command);
     if (
       parsed.browserSessionId !== this.reference.browserSessionId ||
@@ -2370,9 +2385,12 @@ export class BrowserControlSessionClient {
         async (timeoutMs) =>
           await this.parent.requestForSession({
             method: "POST",
-            // Controllers that predate resolved targets or notes ignore these
-            // parameters.
-            path: `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1&${BROWSER_ACTION_RECEIPT_NOTES_PARAMETER}=${BROWSER_ACTION_RECEIPT_NOTES_VERSION}`,
+            // Controllers that predate resolved targets, notes or notices
+            // ignore these parameters.
+            path: withObservationNotices(
+              `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1&${BROWSER_ACTION_RECEIPT_NOTES_PARAMETER}=${BROWSER_ACTION_RECEIPT_NOTES_VERSION}`,
+              options,
+            ),
             token: this.controlToken,
             body: parsed,
             timeoutMs,
@@ -2447,7 +2465,7 @@ export class BrowserControlSessionClient {
     return BrowserPasskeySyncResponse.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.path("passkeys/sync"),
+        path: this.path("passkeys/sync?backupFlags=1"),
         token: this.controlToken,
         body: parsed,
       }),
@@ -4224,6 +4242,15 @@ function requireBoundedText(
     throw new BrowserControlProtocolError(`${label} is invalid`);
   }
   return value;
+}
+
+/** Whether a request returns BrowserObservation.notice to its caller, the
+ * agent; other callers neither receive nor use one up. */
+export type BrowserObservationNoticeRequest = { notices?: boolean };
+
+function withObservationNotices(path: string, options: BrowserObservationNoticeRequest): string {
+  if (!options.notices) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}${BROWSER_OBSERVATION_NOTICES_PARAMETER}=1`;
 }
 
 function boundedUrl(value: unknown): string {

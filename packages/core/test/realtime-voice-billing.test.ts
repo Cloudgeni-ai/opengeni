@@ -150,6 +150,7 @@ test("credit-funded voice honors the workspace switch that turns Opengeni credit
     allowedModels: null,
     allowCreditModels: false,
   });
+  const euOnly = spyOn(db, "isWorkspaceEuOnly").mockResolvedValue(false);
   try {
     const settings = testSettings({
       billingMode: "stripe",
@@ -186,5 +187,6 @@ test("credit-funded voice honors the workspace switch that turns Opengeni credit
     expect(await selfHosted.creditsDisabled("workspace-a")).toBe(false);
   } finally {
     policy.mockRestore();
+    euOnly.mockRestore();
   }
 });

@@ -137,6 +137,9 @@ import {
   SaveWorkspaceSkillRequest as ContractSaveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest as ContractApplyWorkspaceSkillRevisionRequest,
   RemoveWorkspaceSkillRequest as ContractRemoveWorkspaceSkillRequest,
+  OrganizationInferenceResidency as ContractOrganizationInferenceResidency,
+  UpdateOrganizationInferenceResidencyRequest as ContractUpdateOrganizationInferenceResidencyRequest,
+  InferenceFeatureAvailability as ContractInferenceFeatureAvailability,
 } from "@opengeni/contracts";
 import { SandboxBackend as DeploymentSandboxBackend } from "@opengeni/deployment";
 import type { z } from "zod";
@@ -276,6 +279,9 @@ import type {
   ViewerHeartbeatResponse,
   ViewerHolder,
   WorkspaceMember,
+  OrganizationInferenceResidency,
+  UpdateOrganizationInferenceResidencyRequest,
+  InferenceFeatureAvailability,
 } from "../src/types";
 import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/transcription";
 import type {
@@ -713,7 +719,7 @@ describe("SDK / contracts parity", () => {
     ).toBe(false);
   });
 
-  test("established-session submit requires one exact policy snapshot", () => {
+  test("established-session submit carries one whole policy snapshot or none", () => {
     const submit: SubmitComposerDraftRequest = {
       expectedDraftRevision: 4,
       clientEventId: "submit-draft-4",
@@ -729,6 +735,9 @@ describe("SDK / contracts parity", () => {
     expect(ContractSubmitComposerDraftRequest.safeParse(submit).success).toBe(true);
     const { latencyMode: _latencyMode, ...missingLatency } = submit;
     expect(ContractSubmitComposerDraftRequest.safeParse(missingLatency).success).toBe(false);
+    // A draft that follows the chat's settings is submitted without any.
+    const { model: _model, reasoningEffort: _effort, ...following } = missingLatency;
+    expect(ContractSubmitComposerDraftRequest.safeParse(following).success).toBe(true);
   });
 
   test("scheduled task literals and shapes match the contracts", () => {
@@ -1478,4 +1487,35 @@ test("Skill write requests the SDK sends are the ones the API validates", () => 
     reason: "Create",
   };
   expect(ContractSaveWorkspaceSkillRequest.parse(save).scope).toBe("workspace");
+});
+
+test("EU-only inference shapes match the contracts both ways", () => {
+  const fromContract = {
+    setting: (
+      value: z.infer<typeof ContractOrganizationInferenceResidency>,
+    ): OrganizationInferenceResidency => value,
+    feature: (
+      value: z.infer<typeof ContractInferenceFeatureAvailability>,
+    ): InferenceFeatureAvailability => value,
+  };
+  const toContract = {
+    setting: (
+      value: OrganizationInferenceResidency,
+    ): z.infer<typeof ContractOrganizationInferenceResidency> => value,
+    update: (
+      value: UpdateOrganizationInferenceResidencyRequest,
+    ): z.input<typeof ContractUpdateOrganizationInferenceResidencyRequest> => value,
+    feature: (
+      value: InferenceFeatureAvailability,
+    ): z.infer<typeof ContractInferenceFeatureAvailability> => value,
+  };
+  expect(Object.keys(fromContract)).toEqual(["setting", "feature"]);
+  expect(Object.keys(toContract)).toEqual(["setting", "update", "feature"]);
+  expect(
+    ContractInferenceFeatureAvailability.parse({
+      id: "web_search",
+      available: false,
+      unavailableReason: "region_restricted",
+    } satisfies InferenceFeatureAvailability).unavailableReason,
+  ).toBe("region_restricted");
 });

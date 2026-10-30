@@ -12,7 +12,7 @@ export function oauthAccountFailureMessage(reason: AccountFailure): string {
     case "account_already_connected":
       return "This account is already connected. Reconnect the existing account in connection settings.";
     case "account_identity_unavailable":
-      return "This service does not provide enough account information to safely add another connection. Manage or reconnect the existing connection in settings.";
+      return "We couldn't confirm which account this is, so another connection can't be added safely. Reconnect the existing connection in settings, then try again.";
   }
 }
 
@@ -58,6 +58,8 @@ export function decideOAuthAccountConnection(input: {
     const requested = matching.find((connection) => connection.id === input.requestedConnectionId);
     if (!requested) return { kind: "reject", reason: "account_mismatch" };
     const expected = verifiedIdentity(requested.metadata, input.identityKeys);
+    // A failed identity read is not evidence of a different account.
+    if (expected && !identity) return { kind: "reject", reason: "account_identity_unavailable" };
     if (expected && (!sameIssuer(requested) || expected !== identity)) {
       return { kind: "reject", reason: "account_mismatch" };
     }

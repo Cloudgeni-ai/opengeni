@@ -42,6 +42,7 @@ import {
   PencilIcon,
   PinIcon,
   SearchIcon,
+  Share2Icon,
   ShieldCheckIcon,
   ShieldOffIcon,
   SmartphoneIcon,
@@ -60,6 +61,8 @@ import {
   type SessionAdminAccessControl,
 } from "../session/session-admin-access";
 import { SessionAncestryBreadcrumb } from "../session/subagents";
+import { ShareChatDialog } from "../session/share-chat-dialog";
+import { useSessionUiFeature } from "../../lib/session-ui-features";
 import {
   SESSION_HEADER_PARTS,
   useSessionHeaderOverflow,
@@ -263,6 +266,16 @@ export function SessionHeader({
   const context = useOptionalAppContext();
   const canArchive = Boolean(onArchive) && session.parentSessionId === null;
   const [grantAdminOpen, setGrantAdminOpen] = useState(false);
+  const shareLinksFeature = useSessionUiFeature("shareLinks");
+  // Only the person who started a top-level chat can share it; the server
+  // decides whether links are on at all and says so in the dialog.
+  const canShare =
+    shareLinksFeature &&
+    context !== null &&
+    session.parentSessionId === null &&
+    session.createdBy?.kind === "subject" &&
+    session.createdBy.subjectId === context.accessContext.subjectId;
+  const [shareOpen, setShareOpen] = useState(false);
   const canEditProfile = Boolean(onUpdateProfile);
   const [profileOpen, setProfileOpen] = useState(false);
   const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
@@ -390,17 +403,6 @@ export function SessionHeader({
             label={startupLabel}
             always={inMenu("status")}
           />
-          {session.description && !rename.editing ? (
-            // Gives way before anything else: it truncates to nothing on a
-            // crowded row and is hidden on narrow screens.
-            <span
-              data-session-description=""
-              title={session.description}
-              className="ml-1 hidden min-w-0 max-w-[28rem] shrink-[1000000] truncate text-sm text-fg-muted md:block"
-            >
-              {session.description}
-            </span>
-          ) : null}
           {accessSlot && !inMenu("access") ? (
             <span ref={part("access")} className="flex shrink-0 items-center">
               {accessSlot}
@@ -651,6 +653,16 @@ export function SessionHeader({
                 <DropdownMenuShortcut>{copyLinkKeys.label}</DropdownMenuShortcut>
               ) : null}
             </DropdownMenuItem>
+            {canShare ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = () => setShareOpen(true);
+                }}
+              >
+                <Share2Icon />
+                Share…
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
               className={inMenu("pin") ? undefined : "lg:hidden"}
               aria-keyshortcuts={pinKeys?.ariaKeys}
@@ -769,6 +781,15 @@ export function SessionHeader({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
+        {canShare && context ? (
+          <ShareChatDialog
+            client={context.client}
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            open={shareOpen}
+            onOpenChange={setShareOpen}
+          />
+        ) : null}
         {onUpdateProfile && profileOpen ? (
           <SessionProfileEditorDialog
             session={session}
@@ -789,6 +810,8 @@ export function SessionHeader({
               description: session.description ?? "",
               avatar: session.avatar ?? null,
               setupInstructions: "",
+              // Shared like the chat, so an Only me chat stays private by default.
+              visibility: session.tenancy?.visibility === "private" ? "private" : "workspace",
             }}
             onSubmit={async (values) => {
               const created = await onSaveBotTemplate({ ...values, sourceSessionId: session.id });

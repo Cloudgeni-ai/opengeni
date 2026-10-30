@@ -9,7 +9,7 @@ import {
   ensureSessionWorkspaceGovernance,
   sessionHasToolRouterHistory,
   SUBSCRIPTION_CORE_XAI,
-  turnCanChangeWorkspaceSettings,
+  turnWorkspaceSettingsAccess,
 } from "@opengeni/db";
 import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
@@ -31,7 +31,7 @@ import {
 } from "@opengeni/config";
 import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
 import { executeCoreXaiImageGeneration } from "../xai-image-generation";
-import { rigProviderImageContentHash } from "@opengeni/core";
+import { createSessionCredentialEnvironment, rigProviderImageContentHash } from "@opengeni/core";
 import {
   admitVideoGenerationRequest,
   managedVideoGenerationCredentialLease,
@@ -73,6 +73,7 @@ import {
 import {
   structuredToolTransportForTurn,
   connectedSubscriptionImageGenerationAuthority,
+  openingToolNamesForTurn,
   textVerbosityForTurn,
   reasoningSummaryForTurn,
 } from "./tool-policy";
@@ -89,10 +90,22 @@ import type {
   SandboxRuntimeState,
 } from "./turn-context";
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
-import { configuredToolDecisionModel, recordToolDecisionUsage } from "./tool-discovery";
+import {
+  configuredToolDecisionModel,
+  configuredToolMeaningRanker,
+  recordToolDecisionUsage,
+} from "./tool-discovery";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
+import { currentAttemptSecretValues } from "./secret-values";
+import {
+  decisionModelProcessingResidency,
+  gateImageGenerationOption,
+  gateVideoGenerationOption,
+  imageGenerationRoute,
+  videoGenerationRoute,
+} from "./side-feature-gates";
 import {
   attemptQuestionVaultValidator,
   createAttemptSecretResolver,
@@ -299,7 +312,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         return Uint8Array.from(Buffer.from(read.content, "base64"));
       },
     });
-  const imageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
+  const unrestrictedImageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
     // Never expose a paid image operation unless its permanent artifact can
     // be committed. Failing after provider execution would leave an
     // unrecoverable outcome-unknown operation with no user-visible image.
@@ -508,6 +521,14 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     };
   })();
+  const imageGenerationOption = gateImageGenerationOption(
+    runSettings,
+    imageGenerationRoute({
+      nativeHosted: Boolean(nativeImageProviderBinding),
+      providerKind: resolvedModel?.provider.kind,
+    }),
+    unrestrictedImageGenerationOption,
+  );
   // The video tools are attached whenever the deployment has object storage,
   // a sandbox and the agent has the media tools, whatever the workspace's
   // policy. Each call reads the live policy and credential, so a turn that
@@ -549,7 +570,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     );
   };
-  const videoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> =
+  // The one live read of the video policy: each tool call reads it, never the
+  // turn's startup. The EU gate below reads the same way when EU applies.
+  const readVideoGenerationPolicy = () => getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
+  const unrestrictedVideoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> =
     !objectStorage ||
     eventing.modelRunSettings.sandboxBackend === "none" ||
     !resolveAgentToolFamilies(session.agent).media
@@ -566,14 +590,14 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               turn.initiatingHumanSubjectId ??
               (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : "")
             ).startsWith("external_user:"),
-            canChangeSettings: () =>
-              turnCanChangeWorkspaceSettings(db, {
+            settingsAccess: () =>
+              turnWorkspaceSettingsAccess(db, {
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 turnId: turn.id,
               }),
-            readPolicy: () => getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+            readPolicy: readVideoGenerationPolicy,
             resolveCredential: resolveVideoGenerationCredential,
             admit: async ({ policy, credential, toolInput, toolCallId }) => {
               const referenceSandbox = await resolveVideoReferenceSandboxAccess(
@@ -633,6 +657,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             },
           }),
         };
+  // EU-only inference: no video route is EU, so under EU the tools are not
+  // offered; each call also checks the route its live funding policy names.
+  const videoGenerationOption = gateVideoGenerationOption(
+    runSettings,
+    async () => videoGenerationRoute((await readVideoGenerationPolicy()).fundingSource),
+    unrestrictedVideoGenerationOption,
+  );
   const serviceTier = serviceTierForLatencyMode(
     turnExecutionPolicy.providerId,
     turnExecutionPolicy.latencyMode,
@@ -738,6 +769,21 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             ),
         )
       : undefined;
+  // One resolver per attempt, shared by exec references and the credential
+  // profile so approvals, audit and caching stay consistent.
+  const attemptResolver = createAttemptSecretResolver({
+    db,
+    bus,
+    settings: eventing.modelRunSettings,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: turn.executionGeneration,
+    agent: session.agent,
+    vaultAccess: deps.vaultAccess,
+  });
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
@@ -800,20 +846,18 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
-        // W1: `{{secret:…}}` references resolve at the exec boundary.
-        secretResolver: createAttemptSecretResolver({
+        // W1: `{{secret:…}}` references resolve at the exec boundary, and the
+        // session's credential profile adds its variables to every command
+        // through the same resolver.
+        secretResolver: attemptResolver,
+        credentials: createSessionCredentialEnvironment({
           db,
-          bus,
-          settings: eventing.modelRunSettings,
-          accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          turnId: turn.id,
-          attemptId: input.attemptId,
-          executionGeneration: turn.executionGeneration,
-          agent: session.agent,
-          vaultAccess: deps.vaultAccess,
+          resolver: attemptResolver,
         }),
+        // Every tool result is masked with the attempt's known secret values.
+        secretValueMemory: currentAttemptSecretValues() ?? null,
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;
         },
@@ -876,9 +920,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // session's MCP allow-list; the effective context window drives the
         // compaction threshold.
         hostedWebSearch,
+        ...(resolvedModel?.configured.hostedWebSearchContextSize === undefined
+          ? {}
+          : { hostedWebSearchContextSize: resolvedModel.configured.hostedWebSearchContextSize }),
         ...imageGenerationOption,
         ...videoGenerationOption,
         lazyToolTransport,
+        // A new session's opening tools load in its first turn's first model
+        // step, as a search by name would; the tool block stays unchanged.
+        openingToolNames: openingToolNamesForTurn(resolvedModel, turn.metadata),
         toolSearchDecisionModel: configuredToolDecisionModel({
           settings: runSettings,
           onUnavailable: () =>
@@ -896,6 +946,14 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               modelId,
               usage,
               requestId,
+              processingResidency: decisionModelProcessingResidency(runSettings),
+            }),
+        }),
+        toolSearchMeaningRanker: configuredToolMeaningRanker({
+          settings: runSettings,
+          onError: (error) =>
+            observability.warn("Tool search meaning ranking is unavailable; using keywords", {
+              error: error instanceof Error ? error.message : String(error),
             }),
         }),
         ...(eventing.toolPreparationReady

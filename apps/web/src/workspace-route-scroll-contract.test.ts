@@ -25,10 +25,6 @@ const workspaceRouteContracts = {
   workspaceSecretsIndexRoute: { kind: "page", source: "routes/secrets.tsx" },
   workspaceSecretsVaultRoute: { kind: "page", source: "routes/secrets.tsx" },
   workspaceSecretsItemRoute: { kind: "page", source: "routes/secrets.tsx" },
-  // The old Variable sets URLs redirect to Secrets.
-  workspaceVariableSetsRoute: { kind: "redirect" },
-  workspaceVariableSetDetailRoute: { kind: "redirect" },
-  workspaceEnvironmentsRoute: { kind: "redirect" },
   workspaceRigsRoute: { kind: "page", source: "routes/rigs.tsx" },
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },

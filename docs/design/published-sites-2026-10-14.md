@@ -268,8 +268,8 @@ with these refinements:
   `internal.<sites domain>`. It accepts `GATEWAY_SECRET_PREVIOUS` for
   rotation, and the Durable Object refuses replayed request ids.
 - Named queries carry an audience (`everyone`, `signed_in`, `managers`);
-  guests run only `everyone` queries. `:viewer_kind` and `:viewer_signed_in`
-  are bound alongside `:viewer`.
+  guests run only `everyone` queries. `:viewer_kind`, `:viewer_signed_in`,
+  `:viewer_access` and `:viewer_email` are bound alongside `:viewer`.
 - Site SQL has its own limits (`SiteSqlLimits`, `OPENGENI_SITES_SQL_*`)
   derived from the profile kind rather than new `SiteLimits` fields; custom
   profiles use the free Site SQL numbers.

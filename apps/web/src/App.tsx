@@ -11,7 +11,6 @@
 //                                               ?connection=<id>[&view=choose-vaults|replace-token])
 //   /workspaces/:id/secrets/:vaultId         → one vault (?view=availability|new-item&type)
 //   /workspaces/:id/secrets/:vaultId/:itemId → one item (?view=edit)
-//   /workspaces/:id/variable-sets[/:id], /environments → redirect to Secrets
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
 //   /workspaces/:id/inbox                    → things that need you, from agents (temporary inbox)
@@ -74,6 +73,7 @@ import {
 } from "@opengeni/react/app/lib/session-search-route";
 import {
   artifactReturnSearch,
+  siteViewArtifactsReturn,
   siteViewSearch,
   parseCheckoutOutcome,
   type CheckoutOutcome,
@@ -174,6 +174,10 @@ const LazyOrgSettingsRoute = lazyRouteComponent(
 const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
+);
+const LazySharedSessionRoute = lazyRouteComponent(
+  () => import("@/routes/shared-session"),
+  "SharedSessionRoute",
 );
 const LazyExcelAddinRoute = lazyRouteComponent(
   () => import("@/routes/excel-addin"),
@@ -399,6 +403,13 @@ const resetPasswordRoute = createRoute({
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
 });
+// A chat someone shared with a link. PUBLIC, like `/reset-password`: the
+// person opening it usually isn't signed in and may have no account.
+const sharedSessionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "share/$shareId",
+  component: SharedSession,
+});
 // How to add the Excel add-in. PUBLIC, like `/reset-password`: agents and
 // colleagues send this link to people who may not be signed in.
 const excelAddinRoute = createRoute({
@@ -578,22 +589,6 @@ const workspaceSecretsItemRoute = createRoute({
   path: "$vaultId/$itemId",
   validateSearch: (search: Record<string, unknown>): { view?: "edit" } =>
     search.view === "edit" ? { view: "edit" } : {},
-});
-// Variable sets became Secrets (Q-48): old links land on the same place.
-const workspaceVariableSetsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "variable-sets",
-  component: SecretsRedirect,
-});
-const workspaceVariableSetDetailRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "variable-sets/$variableSetId",
-  component: SecretsRedirect,
-});
-const workspaceEnvironmentsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "environments",
-  component: SecretsRedirect,
 });
 const workspaceRigsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -1032,6 +1027,7 @@ const routeTree = rootRoute.addChildren([
   connectAgentRoute,
   teamsConnectRoute,
   resetPasswordRoute,
+  sharedSessionRoute,
   excelAddinRoute,
   desktopReturnRoute,
   identityLinkRoute,
@@ -1062,9 +1058,6 @@ const routeTree = rootRoute.addChildren([
       workspaceSecretsVaultRoute,
       workspaceSecretsItemRoute,
     ]),
-    workspaceVariableSetsRoute,
-    workspaceVariableSetDetailRoute,
-    workspaceEnvironmentsRoute,
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceReadOnlyChatsRoute,
@@ -1225,21 +1218,6 @@ function Secrets() {
       connectionId={connection}
       owner={owner}
     />
-  );
-}
-
-function SecretsRedirect() {
-  const { workspaceId, variableSetId } = useParams({ strict: false });
-  if (!workspaceId) return null;
-  // A variable set's id is kept by its vault, so its page maps one to one.
-  return variableSetId ? (
-    <Navigate
-      to="/workspaces/$workspaceId/secrets/$vaultId"
-      params={{ workspaceId, vaultId: variableSetId }}
-      replace
-    />
-  ) : (
-    <Navigate to="/workspaces/$workspaceId/secrets" params={{ workspaceId }} replace />
   );
 }
 
@@ -1530,14 +1508,16 @@ function ArtifactDetail() {
 
 function SiteViewPage() {
   const { workspaceId, siteId } = workspaceSiteViewRoute.useParams();
-  const { conversation, new: startNew } = workspaceSiteViewRoute.useSearch();
+  const search = workspaceSiteViewRoute.useSearch();
   return (
     <LazySiteViewRoute
       key={`${workspaceId}:${siteId}`}
       workspaceId={workspaceId}
       siteId={siteId}
-      conversation={conversation}
-      startNew={startNew === true}
+      conversation={search.conversation}
+      startNew={search.new === true}
+      page={search.page}
+      artifactsReturn={siteViewArtifactsReturn(search)}
     />
   );
 }
@@ -1650,6 +1630,11 @@ function SiteAuthorize() {
 function ResetPassword() {
   const { token } = resetPasswordRoute.useSearch();
   return <LazyResetPasswordRoute token={token} />;
+}
+
+function SharedSession() {
+  const { shareId } = sharedSessionRoute.useParams();
+  return <LazySharedSessionRoute shareId={shareId} />;
 }
 
 function SetupAccount() {

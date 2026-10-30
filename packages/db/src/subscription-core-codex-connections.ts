@@ -16,6 +16,7 @@ import {
   disconnectSubscriptionCoreConnection,
   type SubscriptionCoreConnectRefusal,
   type SubscriptionCoreConnectScope,
+  type SubscriptionCoreDisconnectAudit,
   type SubscriptionCoreDisconnectOutcome,
 } from "./subscription-core/connections";
 import { SUBSCRIPTION_CORE_CODEX } from "./subscription-core-codex-adapter";
@@ -89,7 +90,7 @@ export type SubscriptionCoreCodexDisconnectResult = {
  */
 export async function disconnectSubscriptionCoreCodexConnection(
   db: Database,
-  input: SubscriptionCoreConnectScope & { connectionId: string },
+  input: SubscriptionCoreConnectScope & SubscriptionCoreDisconnectAudit & { connectionId: string },
 ): Promise<SubscriptionCoreCodexDisconnectResult> {
   return await disconnectSubscriptionCoreConnection(db, SUBSCRIPTION_CORE_CODEX, input);
 }
@@ -101,7 +102,7 @@ export async function disconnectSubscriptionCoreCodexConnection(
  */
 export async function disconnectAllSubscriptionCoreCodexConnections(
   db: Database,
-  input: SubscriptionCoreConnectScope & { workspaceId: string },
+  input: SubscriptionCoreConnectScope & SubscriptionCoreDisconnectAudit & { workspaceId: string },
 ): Promise<{
   removed: number;
   refused: {

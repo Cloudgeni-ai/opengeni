@@ -11,6 +11,7 @@ export type TeamsManifestOptions = {
   termsOfUseUrl: string;
   version?: string;
   appName?: string;
+  groupChats?: boolean;
 };
 
 function guid(value: string, name: string): string {
@@ -56,20 +57,22 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
     name: { short: appName, full: appName },
     description: {
       short: "Work with Opengeni agents in Teams.",
-      full: "Ask Opengeni agents for help in a personal chat or mention Opengeni in a connected team channel. An Opengeni administrator must connect the Teams conversation to an authorized workspace before agent work can begin.",
+      full: options.groupChats
+        ? "Ask Opengeni agents for help in personal chats or mention Opengeni in an approved group chat. Every group participant must link their account and have access to the connected Opengeni workspace."
+        : "Ask Opengeni agents for help in personal chats. Connect your Opengeni account to get started.",
     },
     icons: { color: "color.png", outline: "outline.png" },
     accentColor: "#111111",
     bots: [
       {
         botId: guid(options.botId, "botId"),
-        scopes: ["personal", "team"],
+        scopes: options.groupChats ? ["personal", "groupchat"] : ["personal"],
         isNotificationOnly: false,
         supportsFiles: false,
       },
     ],
     validDomains: [publicUrl.hostname],
-    // No Graph, RSC, tabs, SSO, group chat, or private/shared-channel claim.
+    // No Graph, RSC, tabs, SSO, or unimplemented all-channel capability claim.
   };
 }
 
@@ -90,6 +93,7 @@ export function teamsManifestOptionsFromEnv(
     termsOfUseUrl: required("OPENGENI_TEAMS_TERMS_URL"),
     version: env.OPENGENI_TEAMS_APP_VERSION,
     appName: env.OPENGENI_TEAMS_APP_NAME,
+    groupChats: env.OPENGENI_TEAMS_APP_GROUP_CHATS === "true",
   };
 }
 

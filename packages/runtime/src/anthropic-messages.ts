@@ -1026,6 +1026,13 @@ export class AnthropicMessagesModel implements Model {
           result.push(block);
           continue;
         }
+        if (image.data === block.source.data) {
+          // Same bytes under a wrong type label (a JPEG sent as image/png): send
+          // them with the type they really are. Nothing was resized, so no note.
+          // A mislabeled image was never sent before, so this is its only form.
+          result.push({ ...block, source: { ...block.source, media_type: image.mediaType } });
+          continue;
+        }
         const { cache_control: cache, ...unmarked } = block;
         projection.resized = true;
         result.push({

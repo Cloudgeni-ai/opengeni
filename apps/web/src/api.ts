@@ -18,7 +18,10 @@ import {
   apiErrorFromResponseBody,
   isApiErrorStatus,
 } from "@opengeni/react/app/lib/app-api";
-import { securityReauthenticationPath } from "./lib/sign-in-feedback";
+import {
+  organizationSecurityReturnPath,
+  securityReauthenticationPath,
+} from "./lib/sign-in-feedback";
 import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
@@ -1044,6 +1047,11 @@ function authReturnBase(): string {
   if (typeof window === "undefined") return "/";
   const teamsReturn = teamsAuthReturnPath(window.location);
   if (teamsReturn) return teamsReturn;
+  const organizationSecurity = organizationSecurityReturnPath(
+    window.location.pathname,
+    window.location.search,
+  );
+  if (organizationSecurity) return organizationSecurity;
   return window.location.pathname === "/connect-agent" ||
     window.location.pathname === "/native-sign-in" ||
     window.location.pathname === "/site-auth/authorize"
@@ -1310,9 +1318,8 @@ export function showApiUpdateNotice(willReload: boolean): void {
   const notice = existing ?? document.createElement("div");
   notice.id = "opengeni-api-update-notice";
   notice.setAttribute("role", "status");
-  // A notice across the top of the app: in the desktop app it is the window's
-  // top row, so it keeps clear of the window controls and moves the window
-  // (apps/web/src/styles.css).
+  // A notice across the top of the app (styled in apps/web/src/styles.css);
+  // in the desktop app it sits below the window bar and also moves the window.
   notice.setAttribute("data-app-notice", "");
   notice.setAttribute("data-window-drag", "");
   const message = document.createElement("span");

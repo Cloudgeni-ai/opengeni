@@ -10,7 +10,7 @@ import {
   type SessionHumanInputRequest,
   type SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { HumanInputForm, OpenGeniLinkProvider, SecretRefText } from "@opengeni/react/session-ui";
+import { HumanInputForm, OpenGeniLinkProvider } from "@opengeni/react/session-ui";
 import {
   notificationPlainText,
   parseNotificationText,
@@ -78,7 +78,10 @@ const KIND_WORD: Record<InboxItem["kind"], string> = {
 };
 
 function KindIcon({ item }: { item: InboxItem }) {
-  if (item.kind === "question") return <MessageCircleQuestionIcon />;
+  // An MCP server's question is an approval of its call, but reads as a question.
+  if (item.kind === "question" || (item.kind === "approval" && item.serverQuestion)) {
+    return <MessageCircleQuestionIcon />;
+  }
   if (item.kind === "approval") return <ShieldCheckIcon />;
   if (item.kind === "goal_paused") return <CirclePauseIcon />;
   if (item.kind === "reply") return <MessageSquareTextIcon />;
@@ -221,7 +224,8 @@ function InboxList({ label, children }: { label: string; children: ReactNode }) 
   );
 }
 
-function InboxRow(props: {
+/** One inbox row. Exported for the DEV UI kit. */
+export function InboxRow(props: {
   item: InboxItem;
   unread: boolean;
   title: string;
@@ -427,11 +431,16 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       await context.client.sendApprovalDecision(item.workspaceId, item.sessionId, {
         approvalId: item.sourceKey,
         decision,
+        // An MCP server's confirmation is answered for the question shown.
+        ...(decision === "approve" && item.serverQuestion
+          ? { elicitationRound: item.serverQuestion.round }
+          : {}),
       });
       leave(item);
-      toast.success(decision === "approve" ? "Approved" : "Denied", {
-        description: item.sessionTitle ?? undefined,
-      });
+      toast.success(
+        decision === "reject" ? "Denied" : item.serverQuestion ? "Allowed" : "Approved",
+        { description: item.sessionTitle ?? undefined },
+      );
     });
 
   const snooze = (item: InboxItem, until: Date | null) =>
@@ -480,13 +489,6 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   // Under the title: what exactly is asked for, or the agent's note.
   const description = (item: InboxItem): ReactNode => {
     if (!item.body) return undefined;
-    if (item.kind === "approval") {
-      return (
-        <code className="my-0.5 inline-block max-w-full truncate rounded-[6px] bg-surface-2 px-1.5 py-0.5 align-top font-mono text-xs text-fg">
-          <SecretRefText text={item.body} linkable={false} />
-        </code>
-      );
-    }
     if (item.kind === "reply") return notificationPlainText(item.body) || undefined;
     return undefined;
   };
@@ -496,13 +498,20 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     const parts: string[] = [];
     // Another member's agent sent it: say who, first.
     if (item.sender) parts.push(`From ${item.sender.label}`);
+    if (item.kind === "approval" && item.serverQuestion) {
+      parts.push(`${item.serverQuestion.server} asks`);
+    }
     if (item.kind === "notification" && item.urgency === "time_sensitive") {
       parts.push("Time-sensitive");
     }
     if (item.kind === "goal_paused" || item.kind === "question" || item.kind === "reply") {
       parts.push(KIND_WORD[item.kind]);
     }
-    if (item.kind === "approval" && !item.body) parts.push(KIND_WORD.approval);
+    // An approval's title says what it does; its body says where ("Gmail").
+    // A server question's meta already says who asks.
+    if (item.kind === "approval" && !item.serverQuestion) {
+      parts.push(item.body || KIND_WORD.approval);
+    }
     if (item.sessionAvailable !== false) parts.push(item.sessionTitle ?? "Untitled session");
     if (scope === "all" && workspacesWithItems.size > 1) {
       const name = workspaceNames.get(item.workspaceId);
@@ -515,6 +524,28 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
 
   const control = (item: InboxItem): ReactNode => {
     const pending = busy[item.id];
+    if (item.kind === "approval" && item.serverQuestion) {
+      // A plain confirmation is answered here; a form is answered in the
+      // session, where its approval card shows the fields.
+      return (
+        <>
+          <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "reject")}>
+            <XIcon />
+            {pending === "reject" ? "Denying…" : "Deny"}
+          </RowButton>
+          {item.serverQuestion.kind === "confirm" ? (
+            <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "approve")}>
+              <CheckIcon />
+              {pending === "approve" ? "Allowing…" : "Allow"}
+            </RowButton>
+          ) : (
+            <RowButton disabled={Boolean(pending)} onClick={() => openSession(item)}>
+              Answer
+            </RowButton>
+          )}
+        </>
+      );
+    }
     if (item.kind === "approval") {
       return (
         <>

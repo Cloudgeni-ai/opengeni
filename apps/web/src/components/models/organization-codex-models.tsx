@@ -428,6 +428,7 @@ export function OrgCodexConnectPage({
   const signingIn = Boolean(codex.pending);
   return (
     <ModelsFormPage
+      connectStep
       title="Connect Codex"
       description={`Sign in with the ChatGPT account whose plan pays for work across ${places.organizationName}.`}
       onClose={onClose}

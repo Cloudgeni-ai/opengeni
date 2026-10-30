@@ -22,14 +22,22 @@ import { useNavigate } from "@tanstack/react-router";
    Organization settings > Models: who sees which part.
 
    - Owners and admins: every account and every workspace's model rules.
+   - An account administrator without a person (the deployment's access key,
+     or a service with account:admin): the organization's subscription
+     accounts (Codex, SuperGrok, Claude) and every workspace it can open.
+     Organization keys and organization defaults are read through a person's
+     organization membership, so they stay with owners and admins.
    - A workspace admin who isn't one: the workspaces they administer, and the
      accounts those workspaces use, read-only.
-   - A member: only their own Personal workspace, whose default model and
-     Allowed models only they set, and the accounts it can use, read-only.
-   - A key or service without a membership never gets here; the route says
-     who manages models instead (org-settings.tsx).
+   - A member: their own Personal workspace, whose default model and Allowed
+     models only they set, and the accounts it can use, read-only. Each
+     shared workspace where they manage connections opens too, to connect and
+     manage their own subscriptions there ("Only me"); its models stay
+     read-only.
+   - Any other key or service never gets here; the route says who manages
+     models instead (org-settings.tsx).
 
-   Only owners and admins add accounts.
+   Only owners, admins and account administrators add accounts.
    -------------------------------------------------------------------------- */
 
 export function OrganizationModelsSection({
@@ -37,6 +45,7 @@ export function OrganizationModelsSection({
   organizationId,
   organizationName,
   administrator,
+  personAdministrator = administrator,
   administeredWorkspaceIds,
   workspace: requestedWorkspace,
   account: requestedAccount,
@@ -46,7 +55,10 @@ export function OrganizationModelsSection({
   anchorWorkspaceId: string;
   organizationId: string;
   organizationName: string;
+  /** Administers the organization's subscription accounts (owner, admin or account administrator). */
   administrator: boolean;
+  /** An owner or admin acting as a person: also organization keys and defaults. */
+  personAdministrator?: boolean;
   administeredWorkspaceIds: readonly string[];
   /** `?workspace=`: the workspace whose model page is open, or that a page was opened from. */
   workspace: string | undefined;
@@ -55,12 +67,15 @@ export function OrganizationModelsSection({
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const overview = useOrganizationWorkspaces(context.client, organizationId, administrator);
+  // The administration overview is a person's; an account administrator
+  // without one lists the shared workspaces it can open.
+  const overview = useOrganizationWorkspaces(context.client, organizationId, personAdministrator);
   // Kept here, above the per-workspace page, so moving between the list and a
   // workspace's page never drops a sign-in that is still going.
   const organizationAccounts = useOrganizationModelAccounts({
     organizationId,
     enabled: administrator && Boolean(organizationId),
+    gatewaysEnabled: personAdministrator && Boolean(organizationId),
   });
   // Old organization Models links name its accounts without the "org:" mark.
   const { account, view } = useMemo(
@@ -78,25 +93,33 @@ export function OrganizationModelsSection({
     const describe = (id: string, name: string): ModelsWorkspace | null => {
       const workspace = own.find((each) => each.id === id);
       const personal = isPersonalWorkspace(workspace ?? null, context.managedSelfContext);
+      const canManage = workspace
+        ? personal
+          ? canManageWorkspaceSettings(context.accessContext, workspace, context.managedSelfContext)
+          : hasWorkspacePermission(context.accessContext, id, "workspace:admin")
+        : false;
       return {
         id,
         name: workspace?.name ?? name,
         personal,
-        canManage: workspace
-          ? personal
-            ? canManageWorkspaceSettings(
-                context.accessContext,
-                workspace,
-                context.managedSelfContext,
-              )
-            : hasWorkspacePermission(context.accessContext, id, "workspace:admin")
-          : false,
+        canManage,
+        connectOwn:
+          !administrator &&
+          !personal &&
+          !canManage &&
+          Boolean(workspace) &&
+          hasWorkspacePermission(context.accessContext, id, "connections:write"),
         savedDefaultModel: resolveWorkspaceSessionDefaults(workspace?.settings)?.model ?? null,
       };
     };
     const shared = administrator
       ? (overview.workspaces ?? own.filter((each) => each.kind !== "personal"))
-      : own.filter((each) => administeredWorkspaceIds.includes(each.id));
+      : own.filter(
+          (each) =>
+            administeredWorkspaceIds.includes(each.id) ||
+            (!isPersonalWorkspace(each, context.managedSelfContext) &&
+              hasWorkspacePermission(context.accessContext, each.id, "connections:write")),
+        );
     const personal = own.filter((each) => isPersonalWorkspace(each, context.managedSelfContext));
     const seen = new Set<string>();
     return [...shared, ...personal]
@@ -121,8 +144,12 @@ export function OrganizationModelsSection({
   const targetEntry = workspaces.find((each) => each.id === target);
   // A workspace page this person can't manage (or can't open) says so instead.
   // Owners and admins still open it: its defaults read-only, and the
-  // organization's accounts and Connect account as everywhere else.
-  if (requestedWorkspace && (!targetWorkspace || (!targetEntry?.canManage && !administrator))) {
+  // organization's accounts and Connect account as everywhere else. A member
+  // who manages connections there opens it for their own subscriptions.
+  if (
+    requestedWorkspace &&
+    (!targetWorkspace || (!targetEntry?.canManage && !targetEntry?.connectOwn && !administrator))
+  ) {
     return (
       <DetailPage
         back={{
@@ -164,12 +191,18 @@ export function OrganizationModelsSection({
         targetWorkspace,
         context.managedSelfContext,
       )}
+      canAdministerWorkspace={hasWorkspacePermission(
+        context.accessContext,
+        target,
+        "workspace:admin",
+      )}
       canManageConnections={hasWorkspacePermission(
         context.accessContext,
         target,
         "connections:write",
       )}
       canManageOrganizationModels={administrator}
+      organizationPeopleAdministrator={personAdministrator}
       account={account}
       view={view}
       onConnectionChange={() => undefined}

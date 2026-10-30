@@ -26,7 +26,11 @@ await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
 
 const result = await Bun.build({
-  entrypoints: [resolve(root, "src/service-worker.ts"), resolve(root, "src/popup.ts")],
+  entrypoints: [
+    resolve(root, "src/service-worker.ts"),
+    resolve(root, "src/popup.ts"),
+    resolve(root, "src/site-permissions-page.ts"),
+  ],
   outdir: output,
   target: "browser",
   format: "esm",
@@ -42,10 +46,12 @@ if (!result.success) {
   for (const log of result.logs) console.error(log);
   process.exit(1);
 }
-await Bun.write(
-  resolve(output, "popup.html"),
-  brandedPopup(await readFile(resolve(root, "popup.html"), "utf8"), brand),
-);
+for (const page of ["popup.html", "site-permissions.html"]) {
+  await Bun.write(
+    resolve(output, page),
+    brandedPopup(await readFile(resolve(root, page), "utf8"), brand),
+  );
+}
 await cp(resolve(root, "popup.css"), resolve(output, "popup.css"));
 const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
 const manifest = packagedManifest(brandedManifest(sourceManifest, brand), packageJson.version);
@@ -65,6 +71,8 @@ const installFiles = [
   "popup.html",
   "popup.css",
   "popup.js",
+  "site-permissions.html",
+  "site-permissions-page.js",
   "service-worker.js",
   ...ICON_FILES.map((icon) => `icons/${icon}`),
   "fonts/dm-sans-latin-wght-normal.woff2",

@@ -9,6 +9,7 @@ import {
   updateSessionToolPolicy,
 } from "@opengeni/core";
 import {
+  claimSessionWorkForAttempt,
   claimRecordingTranscriptVersion,
   completeRecordingTranscriptVersion,
   createDb,
@@ -19,6 +20,7 @@ import {
   encryptEnvironmentValue,
   ensureManagedAccessForUser,
   finalizeRecording,
+  freezeAgentLearningPolicy,
   getSessionForSubject,
   markRecordingChunksUploaded,
   reserveRecordingChunks,
@@ -91,6 +93,39 @@ function services(overrides: Partial<typeof settings> = {}): ControlActivityServ
     signalSessionAttemptQuiesced: null,
     inspectSessionAttemptActivity: null,
   } as unknown as ControlActivityServices;
+}
+
+/** Claims the summary chat's first turn as the worker does and freezes its
+ * learning policy, the first thing a run does before the model is called. */
+async function freezeFirstTurnLearning(
+  scope: { accountId: string; workspaceId: string },
+  sessionId: string,
+) {
+  const [turn] = await shared!.admin<{ human: string | null; workflowId: string }[]>`
+    select initiating_human_subject_id as human, temporal_workflow_id as "workflowId"
+    from session_turns where session_id = ${sessionId}::uuid`;
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+    sessionId,
+    workflowId: turn!.workflowId,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error(`Claim failed: ${claim.reason}`);
+  const policy = await freezeAgentLearningPolicy(client.db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    actor: {
+      kind: "agent",
+      sessionId,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+    },
+  });
+  return { human: turn!.human, policy };
 }
 
 async function workspace(options: { subscription: boolean }) {
@@ -274,6 +309,14 @@ describe("built-in meeting summary", () => {
     const [row] = await shared!.admin<{ visibility: string; owner: string | null }[]>`
       select visibility, owner_subject_id as owner from sessions where id = ${first.sessionId}::uuid`;
     expect(row).toEqual({ visibility: "user_private", owner: scope.owner });
+
+    // The service starts it, but the turn runs for the meeting's owner, like
+    // their own Only me automation: the run's first step, freezing what it may
+    // learn, gets their personal layer instead of refusing a human-less turn
+    // in their private chat.
+    const run = await freezeFirstTurnLearning(scope, first.sessionId);
+    expect(run.human).toBe(scope.owner);
+    expect(run.policy).toMatchObject({ defaultScope: "personal", subjectId: scope.owner });
   }, 180_000);
 
   test("a shared meeting gets a workspace chat", async () => {
@@ -286,9 +329,13 @@ describe("built-in meeting summary", () => {
     const [row] = await shared!.admin<{ visibility: string; owner: string | null }[]>`
       select visibility, owner_subject_id as owner from sessions where id = ${started.sessionId}::uuid`;
     expect(row).toEqual({ visibility: "workspace_shared", owner: null });
+    // No one person's: it learns into the workspace, for no human.
+    const run = await freezeFirstTurnLearning(scope, started.sessionId);
+    expect(run.human).toBeNull();
+    expect(run.policy).toMatchObject({ defaultScope: "workspace" });
   }, 180_000);
 
-  test("nothing starts when the setting is off, notes exist, or the owner's own automation writes them", async () => {
+  test("nothing starts when the setting is off or notes exist; the owner's automations don't stop it", async () => {
     if (!realDb) return;
     serveCodex();
     const off = await workspace({ subscription: true });
@@ -316,8 +363,9 @@ describe("built-in meeting summary", () => {
     });
     expect(await noted.sessionsFor(notedInput.recordingId)).toEqual([]);
 
-    // The owner's own automation for ready transcripts, such as the "Meeting
-    // notes" template, writes the notes instead, while event triggers run.
+    // An automation of the owner's for ready transcripts, such as the
+    // "Meeting notes" template, doesn't stop it: nothing can tell whether the
+    // automation writes notes, and whichever saves notes first keeps them.
     const automated = await workspace({ subscription: true });
     const space = {
       accountId: automated.accountId,
@@ -361,10 +409,14 @@ describe("built-in meeting summary", () => {
       ],
     });
     const automatedInput = await automated.meeting();
-    expect(
-      await startMeetingSummary(services({ eventTriggersEnabled: true }), automatedInput),
-    ).toEqual({ started: false, reason: "own_automation" });
-    expect(await automated.sessionsFor(automatedInput.recordingId)).toEqual([]);
+    const alongside = await startMeetingSummary(
+      services({ eventTriggersEnabled: true }),
+      automatedInput,
+    );
+    if (!alongside.started) throw new Error(JSON.stringify(alongside));
+    expect(await automated.sessionsFor(automatedInput.recordingId)).toEqual([
+      { id: alongside.sessionId },
+    ]);
   }, 180_000);
 
   test("without a subscription account that can serve it, nothing starts and no credits are spent", async () => {
@@ -379,6 +431,22 @@ describe("built-in meeting summary", () => {
     expect(await startMeetingSummary(services({ codexSubscriptionEnabled: false }), input)).toEqual(
       { started: false, reason: "no_subscription" },
     );
+    expect(await scope.sessionsFor(input.recordingId)).toEqual([]);
+  }, 180_000);
+
+  test("in an EU-only workspace nothing starts on a subscription model outside the EU", async () => {
+    if (!realDb) return;
+    serveCodex();
+    const scope = await workspace({ subscription: true });
+    const input = await scope.meeting();
+    await shared!.admin`insert into organization_inference_residency
+        (account_id, eu_only, version, updated_by_subject_id)
+      values (${scope.accountId}, true, 1, ${scope.owner})
+      on conflict (account_id) do update set eu_only = true`;
+    expect(await startMeetingSummary(services(), input)).toEqual({
+      started: false,
+      reason: "region_restricted",
+    });
     expect(await scope.sessionsFor(input.recordingId)).toEqual([]);
   }, 180_000);
 
@@ -667,5 +735,33 @@ describe("meetingSummaryModel", () => {
         chatDefault: chat(served),
       }),
     ).toBeNull();
+  });
+
+  test("under EU-only inference only a model whose route is EU counts", () => {
+    const eu = { ...settings, requiredModelGeography: "eu" as const };
+    expect(
+      meetingSummaryModel({
+        settings: eu,
+        selections: [selection(served), selection(other)],
+        chatDefault: chat(served),
+      }),
+    ).toBeNull();
+    const euResidency = {
+      geography: "eu" as const,
+      deploymentType: "self_hosted" as const,
+      regions: [],
+      evidence: {
+        source: "operator_declaration" as const,
+        reference: "test",
+        verifiedAt: "2026-10-27",
+      },
+    };
+    expect(
+      meetingSummaryModel({
+        settings: eu,
+        selections: [selection({ ...served, residency: euResidency })],
+        chatDefault: chat(served),
+      }),
+    ).toEqual(chat(served));
   });
 });

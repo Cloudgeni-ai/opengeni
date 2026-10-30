@@ -4,8 +4,14 @@ import {
   UpdateOrganizationModelAccountSettingsRequest,
   UpdateWorkspaceModelAccountSettingsRequest,
   WorkspaceModelAccountSettings,
+  type Permission,
 } from "@opengeni/contracts";
-import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  MissingPermissionRefusal,
+  requireAccessGrant,
+  requireWorkspaceSettingsGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   deliverSubscriptionCoreCodexWake,
   readOrganizationSubscriptionSettings,
@@ -28,8 +34,10 @@ import { z } from "zod";
 
 import { ApiHttpError } from "../http/api-error";
 import { requestValidationError } from "../http/request-body";
-import { requireOrganizationCodexHuman } from "./codex";
-import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import {
+  requireOrganizationSubscriptionAdministrator,
+  requireOrganizationSubscriptionMutationOrigin,
+} from "./codex";
 
 const Uuid = z.string().uuid();
 
@@ -61,9 +69,9 @@ export function subscriptionSettingsLockedHttpError(error: unknown): ApiHttpErro
 }
 
 /** Typed refusals to HTTP: 403, 409 (locked, Personal workspace, version), 422 or 503 (busy). */
-function refused(error: unknown): never {
+function refused(error: unknown, permission: Permission): never {
   if (error instanceof SubscriptionSettingsForbiddenError) {
-    throw new HTTPException(403, { message: error.message });
+    throw new MissingPermissionRefusal(permission, { message: error.message });
   }
   const locked = subscriptionSettingsLockedHttpError(error);
   if (locked) throw locked;
@@ -124,7 +132,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
   app.get(organizationPath, async (c) => {
     c.header("cache-control", "private, no-store");
     const organizationId = parseId(c.req.param("organizationId"), "organization");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     try {
       return c.json(
         OrganizationModelAccountSettings.parse(
@@ -135,14 +143,14 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
         ),
       );
     } catch (error) {
-      refused(error);
+      refused(error, "account:admin");
     }
   });
 
   app.patch(organizationPath, async (c) => {
-    requireSameOriginBrowserMutation(c, deps);
+    requireOrganizationSubscriptionMutationOrigin(c, deps);
     const organizationId = parseId(c.req.param("organizationId"), "organization");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const parsed = UpdateOrganizationModelAccountSettingsRequest.safeParse(await jsonBody(c));
     if (!parsed.success) {
       throw requestValidationError(parsed.error, "body", {
@@ -161,14 +169,14 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
       await wake(deps, result.wake);
       return c.json(OrganizationModelAccountSettings.parse(result.settings));
     } catch (error) {
-      refused(error);
+      refused(error, "account:admin");
     }
   });
 
   app.get(`${organizationPath}/overview`, async (c) => {
     c.header("cache-control", "private, no-store");
     const organizationId = parseId(c.req.param("organizationId"), "organization");
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     const after = c.req.query("after");
     if (after !== undefined && !Uuid.safeParse(after).success) {
       throw new HTTPException(422, { message: "invalid cursor" });
@@ -190,7 +198,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
         ),
       );
     } catch (error) {
-      refused(error);
+      refused(error, "account:admin");
     }
   });
 
@@ -211,13 +219,15 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
         ),
       );
     } catch (error) {
-      refused(error);
+      refused(error, "workspace:admin");
     }
   });
 
   app.patch(workspacePath, async (c) => {
     const workspaceId = parseId(c.req.param("workspaceId"), "workspace");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    // The owner of a Personal workspace may ask too; it then follows the
+    // organization's settings, a plain 409 rather than an admin refusal.
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = UpdateWorkspaceModelAccountSettingsRequest.safeParse(await jsonBody(c));
     if (!parsed.success) {
       throw requestValidationError(parsed.error, "body", {
@@ -237,7 +247,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
       await wake(deps, result.wake);
       return c.json(WorkspaceModelAccountSettings.parse(result.settings));
     } catch (error) {
-      refused(error);
+      refused(error, "workspace:admin");
     }
   });
 }

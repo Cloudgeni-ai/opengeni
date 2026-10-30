@@ -8,7 +8,11 @@ import {
   type CodexUsagePayload,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs, type ConfiguredModel, type Settings } from "@opengeni/config";
-import type { EntitlementsPort } from "@opengeni/contracts";
+import {
+  modelCallProcessingResidency,
+  type ModelCallProcessingResidencyV1,
+  type EntitlementsPort,
+} from "@opengeni/contracts";
 import {
   admissibleWorkspaceModel,
   admitModelCall,
@@ -52,7 +56,10 @@ import {
   type SubscriptionCoreCodexOperationScope,
 } from "@opengeni/db";
 import {
+  findInferenceRegionRestrictedError,
   MultiProviderModelProvider,
+  inferenceResidencyRequirement,
+  withInferenceResidency,
   normalizeModelCallUsage,
   runSingleModelCall,
   SingleModelCallProviderError,
@@ -243,14 +250,26 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
         ...reasoningEffortFor(model, input.request.reasoningEffort),
         ...(input.signal ? { signal: input.signal } : {}),
       };
-      const execute = async (): Promise<SingleModelCallResult> => {
-        const binding = new MultiProviderModelProvider(settings).resolveBinding(model.id);
-        return await runSingleModelCall(
-          { client: binding.client, provider: binding.provider, modelId: binding.modelId },
-          request,
-          input.onTextDelta ? { onTextDelta: input.onTextDelta } : {},
-        );
-      };
+      // EU-only inference: resolution refuses a non-EU route, and the
+      // transport refuses any request that is not on one.
+      let servedResidency: ModelCallProcessingResidencyV1 | undefined;
+      const execute = async (): Promise<SingleModelCallResult> =>
+        await withInferenceResidency(settings, async () => {
+          const binding = new MultiProviderModelProvider(settings).resolveBinding(model.id);
+          // Where the call ran: the served route's residency claim; a missing
+          // or invalid record is unknown (the model-call fact's projection).
+          servedResidency = modelCallProcessingResidency(binding.residency);
+          return await runSingleModelCall(
+            {
+              client: binding.client,
+              provider: binding.provider,
+              modelId: binding.modelId,
+              residency: inferenceResidencyRequirement(settings),
+            },
+            request,
+            input.onTextDelta ? { onTextDelta: input.onTextDelta } : {},
+          );
+        });
       let result: SingleModelCallResult;
       try {
         result =
@@ -297,6 +316,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             ...(usage.gatewayBilling ? { gatewayBilling: usage.gatewayBilling } : {}),
             normalizedUsage: normalizeModelCallUsage(usage.usage),
             sourceId,
+            ...(servedResidency ? { processingResidency: servedResidency } : {}),
             ...(usageLimitSessionId ? { usageLimitSessionId } : {}),
             usageLimitMetrics: deps.usageLimitMetrics ?? null,
             // A failed task-usage receipt never suppresses the credit
@@ -639,6 +659,16 @@ export function publicModelCallError(error: unknown): unknown {
       code: "unsupported_parameter",
       param: error.parameter,
       message: error.message,
+    });
+  }
+  const regionRestricted = findInferenceRegionRestrictedError(error);
+  if (regionRestricted) {
+    return new ModelCallError({
+      status: 422,
+      type: "invalid_request_error",
+      code: "region_restricted",
+      param: "model",
+      message: regionRestricted.message,
     });
   }
   if (error instanceof CodexReloginRequired) return subscriptionReconnectRequired("Codex");
