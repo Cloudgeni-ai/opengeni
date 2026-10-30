@@ -217,6 +217,9 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     slackWorkspaceRoutingEnabled: false,
     agentMaxModelCallsPerTurn: 40,
     contextWindowTokens: 1_050_000,
+    // Existing turn fixtures assert exact post-turn state; tests that exercise
+    // the idle checkpoint request enable it explicitly.
+    idleContextCompactionEnabled: false,
     contextCompactionThresholdRatio: 0.9,
     contextReservedOutputTokens: 128_000,
     modelToolOutputTruncationTokens: 10_000,

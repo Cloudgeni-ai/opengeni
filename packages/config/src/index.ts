@@ -874,6 +874,12 @@ const SettingsSchema = z.object({
   // when absent, retain the deployment-level window-minus-reserved-output
   // behavior.
   contextEffectiveWindowTokens: z.coerce.number().int().positive().optional(),
+  // Env: OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED. When a human/API turn in a
+  // root session ends at its automatic compaction threshold, request the
+  // checkpoint right away (labeled proactive) so it runs while the person is
+  // away instead of in front of their next message. Off restores compaction
+  // only at the next model boundary.
+  idleContextCompactionEnabled: EnvBoolean.default(true),
   // Proactive compaction threshold as a ratio of the model context window.
   // Defaults to 90%: compact as late as possible — retained context beats early
   // headroom now that per-model windows are declared honestly (input-effective,
@@ -5805,6 +5811,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),
+    idleContextCompactionEnabled: optional("OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED"),
     contextCompactionThresholdRatio: optional("OPENGENI_COMPACTION_THRESHOLD_RATIO"),
     contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
     contextAutoCompactThresholdTokens: optional("OPENGENI_CONTEXT_AUTO_COMPACT_THRESHOLD_TOKENS"),

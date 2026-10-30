@@ -4970,6 +4970,7 @@ export const englishMessages = {
   "timeline.compactionCopy.checkpointWouldNotReduceMemory":
     "Checkpoint would not reduce memory size",
   "timeline.compactionCopy.compactionInterrupted": "Compaction interrupted",
+  "timeline.compactionCopy.compactionPostponed": "Compaction postponed",
   "timeline.compactionCopy.compactionWasNotNeededChat":
     "Compaction was not needed. Chat history is unchanged.",
   "timeline.compactionCopy.couldnTCompactConversationHistory":
@@ -4978,6 +4979,8 @@ export const englishMessages = {
   "timeline.compactionCopy.itWillRetryIfStill":
     "It will retry if still needed. Chat history is unchanged.",
   "timeline.compactionCopy.noActiveHistoryToCompact": "No active history to compact",
+  "timeline.compactionCopy.noSubscriptionCapacityRightNow":
+    "No subscription capacity right now. It runs with your next message if still needed.",
   "timeline.compactionCopy.parameter": "Parameter",
   "timeline.compactionCopy.requestId": "Request ID",
   "timeline.compactionCopy.requestItAgainToRetry":
