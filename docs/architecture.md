@@ -1655,7 +1655,8 @@ errors or a failure of every catalog entry. See [startup decisions and measureme
 
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
-`request_human_input`, `list_models` (lists, never switches models), optional
+`request_human_input`, `list_models` (lists, never switches models),
+[`privacy_facts`](privacy-facts.md) (privacy and data-handling facts), optional
 [`code_search`](code-search.md), and optional provider
 [`web_search`/`web_fetch`](web-search.md). Authorized first-party harness control
 tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,

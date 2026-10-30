@@ -502,6 +502,7 @@ export function sessionEffectiveToolProjectionInput(
     ? [
         "request_human_input",
         "list_models",
+        "privacy_facts",
         "skill_read",
         ...AGENT_SKILL_MANAGE_TOOL_NAMES,
         ...media.runtime,
@@ -607,6 +608,7 @@ export function sessionEffectiveToolProjectionInput(
     "skill_read",
     "request_human_input",
     "list_models",
+    "privacy_facts",
     ...webSearchPlan.providerTools,
     // Interaction entry tools stay visible even with progressive disclosure;
     // the remaining authorized family tools are disclosed after opening.

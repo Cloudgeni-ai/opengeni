@@ -127,6 +127,11 @@ import {
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
+import {
+  createPrivacyFactsAttemptToolDefinition,
+  loadPrivacyFactsLive,
+  privacyFactsRouteForTurn,
+} from "./privacy-facts";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
 import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
@@ -907,6 +912,31 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           modelNotes: currentCatalog.modelNotes,
         };
       },
+    }),
+    createPrivacyFactsAttemptToolDefinition({
+      route: privacyFactsRouteForTurn({
+        settings: runSettings,
+        policy: turnExecutionPolicy,
+        resolved: resolvedModel,
+      }),
+      deployment: {
+        privacyPolicyUrl: runSettings.legalPrivacyPolicyUrl ?? null,
+        termsOfServiceUrl: runSettings.legalTermsOfServiceUrl ?? null,
+        supportEmail: runSettings.supportEmail ?? null,
+        // Archiving needs object storage; without it the worker never archives.
+        sessionArchiveIdleDays:
+          runSettings.sessionArchiveEnabled && deps.objectStorage
+            ? runSettings.sessionArchiveIdleDays
+            : null,
+      },
+      loadLive: async () =>
+        await loadPrivacyFactsLive({
+          db,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          actorSubjectId: turn.initiatingHumanSubjectId ?? null,
+          deploymentEuOnly: runSettings.requiredModelGeography === "eu",
+        }),
     }),
     ...(titleToolPlan.promoteTitleTool
       ? [

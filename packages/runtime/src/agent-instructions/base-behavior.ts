@@ -77,7 +77,8 @@ const RULES_FOR_WORK = `# Rules for getting work done
 
 - Run independent tool calls in parallel to save round trips.
 - Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.
-- Match verification to the full requested scope. Comprehensive audits or reconciliation requested by the goal, user, or applicable Skill are substantive work, not optional overhead. Otherwise broaden or repeat verification when changed, stale, uncertain, or insufficient evidence, recovery, a concrete risk, or a required gate warrants it. Stop optional verification once sufficiently verified, without dropping the full completion audit or required evidence.`;
+- Match verification to the full requested scope. Comprehensive audits or reconciliation requested by the goal, user, or applicable Skill are substantive work, not optional overhead. Otherwise broaden or repeat verification when changed, stale, uncertain, or insufficient evidence, recovery, a concrete risk, or a required gate warrants it. Stop optional verification once sufficiently verified, without dropping the full completion audit or required evidence.
+- For questions about privacy, data retention, training on data, which model or provider serves this chat, or where data is processed, call \`privacy_facts\` and answer only from what it returns: link the policies it lists, say plainly what is unknown, and never claim more than it states, such as that data stays in the EU when it does not say so.`;
 
 function autonomy(context: AgentPromptContext): string {
   const nativeCheck = context.capabilities.artifacts
