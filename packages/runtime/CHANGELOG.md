@@ -1,5 +1,40 @@
 # @opengeni/runtime
 
+## 6.1.1
+
+### Minor Changes
+
+- 6573dc7: The system instructions and tool list follow how a chat started and never change mid-chat, so earlier requests stay cacheable. A chat that a scheduled task or event trigger starts unattended is told so from its first turn, like a session created with `unattended: true`. When the switch, or a person writing in an automation's chat, makes a turn's attendance differ from how the chat started, that turn's input carries a short note saying so (the unattended guidance, or that a person is now present and can answer). In a chat switched to unattended after it started, a question or hand-off to a person returns at once with a result saying no one will answer.
+
+  Unattended sessions no longer wait on a person anywhere. A call that needs someone's approval under the workspace's tool permissions is refused at once with an error result saying nobody can approve it in an unattended session, in model tool calls and in Codemode, so the agent works around it and lists it as a step left for a person. Nothing is approved and no approval request is opened; permissions stay exactly as configured. Chats that scheduled tasks and event triggers start are unattended by default; a task chooses with `agentConfig.unattended`, and a task that sets `approvalTimeoutSeconds` without it stays attended. A new **Work without me** switch in a chat's Agent tab turns unattended mode on or off from the next turn, through `PUT /v1/workspaces/:workspaceId/sessions/:id/unattended` (SDK `updateSessionUnattended`); session reads include `unattended`. Explicit choices (the switch, the create option, a task's `agentConfig.unattended`) stay; only the automatic default of a scheduled or event-triggered chat ends when a person writes in it from the web app, Slack or a voice call. Interactive sessions are unchanged.
+
+- 9cf4bc0: Sessions can be created unattended. `unattended: true` on session create says no person will see or answer questions until the task ends, as in an API automation or another headless run. Until now the agent could not tell, so it ended such runs with a question nobody would read. An unattended session's instructions say a question ends the work unanswered: settle open choices with the most conventional option, finish the reversible work inside the workspace, never take or stand in for a step only a person can take, leave that and anything destructive, external or unauthorised undone, and end with the result, the assumptions made and the steps left for a person. Tools that wait for a person (`request_human_input`, `interaction_request_human`) are not offered. The setting is frozen at create under a reserved metadata key that caller metadata never sets, is not inherited by child sessions, a fork reads as attended, and a keyed retry that changes it conflicts. Interactive sessions are unchanged byte for byte.
+
+### Patch Changes
+
+- 0422c7b: Connecting Gmail now asks Google only to read mail. When an agent later needs to draft, send or organize mail, the chat shows "Give Gmail more access" with an Allow button, which reconnects the same account and asks only for the missing permission; everything already allowed stays. Once the account holds that access, the agent carries on by itself, the same way it does after a first connection. Every Gmail tool stays in the agent's tool list; a tool the account cannot use yet stops before anything runs and before any approval card. Accounts connected earlier keep their access.
+
+  Connect begin requests accept an optional `requestedScopes` list for a reconnect (`reconnectAccountId` is required with it), and OAuth provider profiles can declare `incrementalScopes` that are asked for only when requested or already granted. The connection token resolver now returns `grantedScopes` for every OAuth credential. The capability continuation request also accepts `{ connectionId }`: after a reconnect from an account's own card, the chat continues once that account is active and holds the scopes the card asked for.
+
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/contracts@6.1.0
+  - @opengeni/sdk@6.1.0
+  - @opengeni/capabilities@6.1.0
+  - @opengeni/codemode@6.1.0
+  - @opengeni/codex@6.1.0
+  - @opengeni/config@6.1.0
+  - @opengeni/interaction@6.1.0
+  - @opengeni/observability@6.1.0
+  - @opengeni/tool-gateway@6.1.0
+  - @opengeni/vaults@6.1.0
+  - @opengeni/agent-proto@6.1.0
+  - @opengeni/decisions@6.1.0
+  - @opengeni/network@6.1.0
+  - @opengeni/xai-subscription@6.1.0
+
 ## 6.0.2
 
 ### Minor Changes

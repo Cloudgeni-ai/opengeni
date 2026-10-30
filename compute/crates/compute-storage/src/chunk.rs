@@ -112,6 +112,11 @@ pub struct ChunkRef {
     /// them (older manifests) the object must be read to be proven.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksums: Option<String>,
+    /// The UTC day it was stored under ([`crate::fresh::day_of`]), part of
+    /// its name (ADR 25); `None` in the old layout, named by its content
+    /// alone, and for a chunk not yet stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day: Option<u32>,
 }
 
 impl ChunkRef {
@@ -146,7 +151,28 @@ impl ChunkRef {
         };
         // The compressed bytes hash prevents different zstd levels/versions from
         // racing under the same key. See EncodedChunk::object_key.
-        format!("chunks/v1/{codec}/{}/{}", self.hash, self.stored_hash)
+        match self.day {
+            Some(day) => format!("chunks/v2/{day}/{codec}/{}/{}", self.hash, self.stored_hash),
+            None => format!("chunks/v1/{codec}/{}/{}", self.hash, self.stored_hash),
+        }
+    }
+
+    /// The same chunk as stored under day `day`.
+    #[must_use]
+    pub fn on_day(&self, day: u32) -> Self {
+        Self {
+            day: Some(day),
+            ..self.clone()
+        }
+    }
+
+    /// Whether `other` names the same bytes, whatever day either was
+    /// stored under.
+    #[must_use]
+    pub fn same_bytes(&self, other: &Self) -> bool {
+        self.hash == other.hash
+            && self.stored_hash == other.stored_hash
+            && self.codec == other.codec
     }
 }
 
@@ -177,11 +203,14 @@ impl EncodedChunk {
                     .map_err(|_| Error::Invalid("stored length"))?,
                 codec,
                 checksums: Some(crate::upload::checksums(&bytes)),
+                day: None,
             },
             bytes,
         })
     }
 
+    /// The key of the chunk as `reference` names it, which a stored chunk's
+    /// reference ([`crate::store::ChunkStore::put_chunk`]) gives with its day.
     #[must_use]
     pub fn object_key(&self) -> String {
         self.reference.key()

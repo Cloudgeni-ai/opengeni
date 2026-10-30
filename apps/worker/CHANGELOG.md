@@ -1,5 +1,50 @@
 # @opengeni/worker-bundle
 
+## 6.1.1
+
+### Minor Changes
+
+- 6573dc7: The system instructions and tool list follow how a chat started and never change mid-chat, so earlier requests stay cacheable. A chat that a scheduled task or event trigger starts unattended is told so from its first turn, like a session created with `unattended: true`. When the switch, or a person writing in an automation's chat, makes a turn's attendance differ from how the chat started, that turn's input carries a short note saying so (the unattended guidance, or that a person is now present and can answer). In a chat switched to unattended after it started, a question or hand-off to a person returns at once with a result saying no one will answer.
+
+  Unattended sessions no longer wait on a person anywhere. A call that needs someone's approval under the workspace's tool permissions is refused at once with an error result saying nobody can approve it in an unattended session, in model tool calls and in Codemode, so the agent works around it and lists it as a step left for a person. Nothing is approved and no approval request is opened; permissions stay exactly as configured. Chats that scheduled tasks and event triggers start are unattended by default; a task chooses with `agentConfig.unattended`, and a task that sets `approvalTimeoutSeconds` without it stays attended. A new **Work without me** switch in a chat's Agent tab turns unattended mode on or off from the next turn, through `PUT /v1/workspaces/:workspaceId/sessions/:id/unattended` (SDK `updateSessionUnattended`); session reads include `unattended`. Explicit choices (the switch, the create option, a task's `agentConfig.unattended`) stay; only the automatic default of a scheduled or event-triggered chat ends when a person writes in it from the web app, Slack or a voice call. Interactive sessions are unchanged.
+
+### Patch Changes
+
+- 258accd: Pass the acquired lease identity when creating a clean sandbox for Sandbox Environment verification, so compute-backed verification can start successfully.
+- c042f45: A turn reaches its first model request sooner. The startup progress receipts a turn writes while it prepares (credentials ready, preparing tools, tools ready, client ready, preparing the model request) no longer hold up the next startup step: each starts at once in an ordered per-attempt lane, and the model-request audit and every other awaited append or settlement still commit after the receipts issued before them, so the event log keeps the same order. A receipt that cannot be delivered no longer fails the turn; a fenced attempt is still refused by its next awaited append. Model requests are byte-for-byte unchanged.
+- Updated dependencies [9552358]
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/core@6.1.0
+  - @opengeni/contracts@6.1.0
+  - @opengeni/sdk@6.1.0
+  - @opengeni/runtime@6.1.0
+  - @opengeni/db@6.1.0
+  - @opengeni/capabilities@6.1.0
+  - @opengeni/codemode@6.1.0
+  - @opengeni/codex@6.1.0
+  - @opengeni/config@6.1.0
+  - @opengeni/documents@6.1.0
+  - @opengeni/events@6.1.0
+  - @opengeni/github@6.1.0
+  - @opengeni/interaction@6.1.0
+  - @opengeni/observability@6.1.0
+  - @opengeni/storage@6.1.0
+  - @opengeni/tool-gateway@6.1.0
+  - @opengeni/vaults@6.1.0
+  - @opengeni/vaults-bitwarden@6.1.0
+  - @opengeni/vaults-keeper@6.1.0
+  - @opengeni/vaults-onepassword@6.1.0
+  - @opengeni/vaults-protonpass@6.1.0
+  - @opengeni/agent-proto@6.1.0
+  - @opengeni/decisions@6.1.0
+  - @opengeni/jev@6.1.0
+  - @opengeni/network@6.1.0
+  - @opengeni/subscriptions@6.1.0
+  - @opengeni/xai-subscription@6.1.0
+
 ## 6.0.2
 
 ### Minor Changes

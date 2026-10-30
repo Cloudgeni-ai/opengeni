@@ -2,13 +2,16 @@
 //!
 //! The caller must supply an immutable, point-in-time view of what it stores.
 //! Publishing objects is separate from advancing which stored copy is current;
-//! that pointer belongs to the host agent.
+//! that pointer belongs to the host agent, and is kept by a
+//! [`pointer_store::PointerStore`]: in a fleet the control service's.
 
 pub mod chunk;
+pub mod copy;
 #[cfg(test)]
 mod fake;
 pub mod fresh;
 pub mod manifest;
+pub mod pointer_store;
 pub mod store;
 pub mod sweep;
 mod upload;

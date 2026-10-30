@@ -937,14 +937,23 @@ tools, limits and explicit replacement of old source schedules.
 The reviewed Gmail connector uses Opengeni's REST-backed MCP bridge. Its
 historical `https://gmailmcp.googleapis.com/mcp/v1` connection identity remains
 stable, but setup, tool discovery, and execution do not contact Google's
-Developer Preview MCP server. Opengeni requests only the three scopes used by
-the reviewed tool surface:
+Developer Preview MCP server. The reviewed tool surface uses three scopes,
+asked for one step at a time (incremental consent):
 
-- `https://www.googleapis.com/auth/gmail.readonly`
-- `https://www.googleapis.com/auth/gmail.compose`
-- `https://www.googleapis.com/auth/gmail.modify`
+- `https://www.googleapis.com/auth/gmail.readonly`, the only scope a first
+  connection asks for (search and read);
+- `https://www.googleapis.com/auth/gmail.compose`, asked for in the chat the
+  first time a tool drafts or sends;
+- `https://www.googleapis.com/auth/gmail.modify`, asked for in the chat the
+  first time a tool organizes, trashes or imports mail.
 
-Those scopes support search/read, drafts, sending and mailbox organization.
+All tools stay listed for the model. A tool whose scope the account lacks stops
+before any provider request or approval, publishes an `insufficient_scope` auth
+notice and returns a not-run error; the chat card's Allow reconnects the same
+account for the base scope, the account's current Gmail grants and the missing
+scope, never more than the three above. A plain reconnect keeps exactly the
+grants the account already holds. Accounts connected before incremental consent
+keep all three scopes.
 Permanent message deletion requires a broader scope and remains unavailable.
 Tool permissions use the selected account’s Allow / Ask first / Block choices;
 connector recommendations are defaults. Gmail OAuth is handled by the ordinary
@@ -987,7 +996,7 @@ after an ambiguous provider response - it fails closed with an explicit
 
 OAuth discovery reads Google's pinned OpenID metadata with PKCE S256 and uses
 the deployment's registered client. After exchanging the authorization code,
-setup requires a fresh refresh token, all three reported Gmail scopes, and a
+setup requires a fresh refresh token, the reported `gmail.readonly` scope, and a
 successful `GET https://gmail.googleapis.com/gmail/v1/users/me/profile`. Only
 the verified mailbox email label is stored; counts and history identifiers are
 discarded. The label does not replace the signed Opengeni owner authority.
@@ -1016,6 +1025,9 @@ Before importing/enabling the capability in a deployment:
    verification and any applicable security assessment. A Google project left
    in Testing can expire refresh tokens after seven days; reauthorization is
    then required even when the bridge is working correctly.
+   All three Gmail scopes are restricted, including `gmail.readonly`, so
+   incremental consent does not change this requirement; list all three in the
+   consent screen's data access settings.
 5. Run the normal reviewed catalog import, open **Capabilities**, search for
    **Gmail**, and select **Connect only for me**. The ownership choice is fixed:
    every member connects their own mailbox, and other workspace members cannot

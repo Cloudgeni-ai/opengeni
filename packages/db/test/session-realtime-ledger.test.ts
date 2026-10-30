@@ -1464,6 +1464,38 @@ describe("session realtime ledger", () => {
     expect(admitted.accepted[0]!.entry.turnId).toEqual(expect.any(String));
   });
 
+  test("a person talking ends an automation's unattended default, not an explicit choice", async () => {
+    for (const [setting, expected] of [
+      ["unattended_by_default", "attended"],
+      ["unattended", "unattended"],
+    ] as const) {
+      const value = await privateFixture(true);
+      const where = and(
+        eq(schema.sessions.workspaceId, value.owner.workspaceId),
+        eq(schema.sessions.id, value.owner.sessionId),
+      );
+      await transaction(value.owner.workspaceId, async (tx) => {
+        await tx.update(schema.sessions).set({ unattendedSetting: setting }).where(where);
+      });
+      const connection = await claimInitial(value);
+      await complete(value, connection.claimed.connection);
+      await proveProviderStarted(value, connection.claimed.connection);
+      await transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(
+          tx,
+          delegationSyncInput(value, connection.claimed.connection),
+        ),
+      );
+      const [row] = await transaction(value.owner.workspaceId, (tx) =>
+        tx
+          .select({ setting: schema.sessions.unattendedSetting })
+          .from(schema.sessions)
+          .where(where),
+      );
+      expect(row!.setting).toBe(expected);
+    }
+  });
+
   test("voice delegation preserves its frozen connector snapshot through replay", async () => {
     const value = await privateFixture(true);
     const connection = await claimInitial(value);
