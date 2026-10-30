@@ -989,7 +989,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     any path, which also catches an agent that died or hangs. A rotation
     is four periods (three on a host without a store), since each run
     takes the next path, so with `--canary-every 5m` that is 25 minutes.
-  - `compute.sample.age` above a minute: the agent's loop is stuck.
+  - `compute.sample.age` above a minute: the agent's loop is stuck. In a
+    fleet the agent's process then stops itself for systemd to start it
+    again (log line `the agent has not said what the host can take on
+    for a minute`), keeping the VMs and the lease; repeated restarts mean
+    a host that needs a person.
   - `compute.step.oldest_age` above the step's usual time, for example
     ten minutes for an archive.
   - `compute.sandbox.unhealthy` above zero: sandboxes broken, blocked or
@@ -1094,8 +1098,10 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   a host must never hold a longer term than the service it renews with.
   Until it is upgraded, a host renews the lease it holds but cannot
   register again, since hosts only register under terms equal to their
-  own. Never roll the service back below such a release while hosts run
-  it.
+  own: one whose lease runs out meanwhile (cut off, or an agent restart
+  longer than its term) keeps its VMs frozen until it is upgraded. Never
+  roll the service back below such a release while hosts run it: roll
+  the hosts back first.
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)), and a host in a fleet
   keeps its lease however many sandboxes it has: the old agent renews

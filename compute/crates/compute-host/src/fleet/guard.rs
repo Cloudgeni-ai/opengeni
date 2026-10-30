@@ -289,8 +289,8 @@ impl Fenced {
     }
 }
 
-/// The guard's side of [`Fenced`]: the VMs it ended since they last ran
-/// unfrozen, so each is recorded and logged once however many steps its
+/// The guard's side of [`Fenced`]: the VMs it ended since the lease was
+/// last valid, so each is recorded and logged once however many steps its
 /// kill takes.
 #[derive(Debug)]
 struct Fencing {
@@ -738,7 +738,10 @@ fn step_once(
     if matches!(step.action, Some(GuardAction::Freeze | GuardAction::Kill)) {
         saying.say(true);
     }
-    if step.action != Some(GuardAction::Kill) {
+    // A kill episode ends once the lease is valid again: until then a VM
+    // is recorded once, however many steps its kill takes and whatever a
+    // step in between reads.
+    if deadline > now {
         fencing.ended.clear();
     }
     if let Some(action) = step.action {

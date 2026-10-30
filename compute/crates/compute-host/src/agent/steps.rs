@@ -42,8 +42,10 @@ const SHRINK_LIMIT: Duration = Duration::from_secs(15);
 const LAST_WORDS_WAIT: Duration = Duration::from_secs(2);
 
 /// How long after the guard records ending a VM the VM's end still counts
-/// as the guard's doing: the agent hears of it within moments.
-const FENCED_WITHIN: Duration = Duration::from_secs(60);
+/// as the guard's doing. The agent usually hears of it within moments, but
+/// the host stalls that lose a lease can stall the agent too, and the
+/// record names the VM, so a long window costs nothing.
+const FENCED_WITHIN: Duration = Duration::from_secs(600);
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_event(&mut self, event: Event<E::Vm>) {
@@ -976,11 +978,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.lost_vm(id, incarnation, end);
     }
 
-    /// How the VM named `name` ended, which its process alone said was
-    /// `end`: [`End::Fenced`] for one that ended on its own (as far as its
-    /// process told) when the guard recorded ending it moments before.
-    fn why_ended(&self, name: Id, end: End) -> End {
-        if end != End::Exited {
+    /// How the VM of sandbox `id` ended, which its process alone said was
+    /// `end`: [`End::Fenced`] for one that ended on its own, or whose
+    /// memory could no longer be served, as a killed VM's pager can tell
+    /// first, when the guard recorded ending it shortly before. The guard
+    /// names a VM by its group, which is named after the sandbox the host
+    /// made it for, a ready VM's own id for one a create claimed.
+    fn why_ended(&self, id: Id, end: End) -> End {
+        if !matches!(end, End::Exited | End::MemoryLost) {
             return end;
         }
         let Some(freezes) = &self.guard_freezes else {
@@ -991,6 +996,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .since_origin()
                 .saturating_sub(FENCED_WITHIN),
         );
+        let name = self.records.get(id).map_or(id, |record| record.host());
         if freezes.fenced().ended(&name.to_string(), since) {
             End::Fenced
         } else {

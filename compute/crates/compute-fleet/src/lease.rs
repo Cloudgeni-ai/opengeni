@@ -115,8 +115,14 @@ impl LeaseTerms {
     ///
     /// Hosts and the service must run the same terms: a host refuses to
     /// register with a service that names others. A release that changes
-    /// them rolls out to the service first; hosts still on the shorter
-    /// term then only stop their VMs earlier than the service assumes.
+    /// them rolls out to the service first, and hosts follow promptly:
+    /// hosts still on the shorter term stop their VMs earlier than the
+    /// service assumes, which is safe, but cannot register again, so one
+    /// whose lease runs out meanwhile (cut off, or restarted for longer
+    /// than its term) stays frozen until it is upgraded. The service is
+    /// never rolled back below
+    /// a release while hosts run its longer term: an older leader would
+    /// give up on a host whose VMs still run. Roll hosts back first.
     pub const RECOMMENDED: Self = Self {
         term: Duration::from_secs(30),
         margin: Duration::from_secs(5),

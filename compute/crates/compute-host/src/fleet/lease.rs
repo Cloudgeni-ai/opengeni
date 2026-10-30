@@ -21,6 +21,12 @@
 //! A reading of the agent's status that takes longer than two renewal
 //! intervals is warned of too, and logged with how long it took once the
 //! agent answers: renewals meanwhile carry the reading before it.
+//! An agent that has not answered one for [`STUCK_AFTER`] is stuck, not
+//! busy: the process asks itself to stop, as systemd would, and the agent
+//! that systemd starts again takes back the VMs, which run on meanwhile.
+//! The lease is renewed all along, as in any restart. Renewing on for a
+//! stuck agent alone would keep every sandbox on the host out of reach
+//! without the service ever moving one.
 //!
 //! It runs from the moment the agent process starts until it exits. A
 //! restarted agent takes back what the previous run left before it
@@ -49,6 +55,38 @@ use super::Agent;
 use super::gate::{LeaseGate, boot_now};
 use super::record::LeaseFile;
 use crate::agent::HostError;
+
+/// How long an agent that serves may take to answer a reading of its
+/// status before it counts as stuck and its process stops to be started
+/// again: far longer than a disk stall keeps it busy, and short enough
+/// that a stuck agent is started again within a minute or two.
+const STUCK_AFTER: Duration = Duration::from_secs(60);
+
+/// A reading of the agent's status, or `None` for one that ended without
+/// an answer (its task panicked or was dropped).
+type Reading = Option<Result<HostStatus, HostError>>;
+
+/// Sends a reading's answer, or `None` if it ends without one, so a
+/// reading never stays under way for good.
+struct Answering {
+    readings: mpsc::UnboundedSender<Reading>,
+    sent: bool,
+}
+
+impl Answering {
+    fn send(mut self, status: Result<HostStatus, HostError>) {
+        self.sent = true;
+        let _ = self.readings.send(Some(status));
+    }
+}
+
+impl Drop for Answering {
+    fn drop(&mut self) {
+        if !self.sent {
+            let _ = self.readings.send(None);
+        }
+    }
+}
 
 /// The service's answer to one request, or why there is none.
 enum Answer {
@@ -83,11 +121,13 @@ struct Running {
     renewer: Renewer,
     answers: mpsc::UnboundedSender<(Renewal, Answer)>,
     /// Where readings of the agent's status come back.
-    readings: mpsc::UnboundedSender<Result<HostStatus, HostError>>,
+    readings: mpsc::UnboundedSender<Reading>,
     /// Since when a reading is under way, if one is.
     reading: Option<At>,
     /// Whether the reading under way was warned of as slow.
     slow: bool,
+    /// Whether the process was asked to stop for a stuck agent.
+    restarting: bool,
     /// What the host can take on, as the agent's latest status said;
     /// renewals carry it while the agent serves.
     capacity: Option<Capacity>,
@@ -105,8 +145,9 @@ struct Running {
 }
 
 impl Renewer {
-    /// Renews until the agent stops; fails only if the lease file cannot be
-    /// written, since then the guard would act on a stale lease.
+    /// Renews until the agent stops; fails if the lease file cannot be
+    /// written, since then the guard would act on a stale lease, and if the
+    /// agent serves but is gone.
     pub(crate) async fn run(self) -> anyhow::Result<()> {
         let (answers, mut answered) = mpsc::unbounded_channel();
         let (readings, mut read) = mpsc::unbounded_channel();
@@ -116,6 +157,7 @@ impl Renewer {
             readings,
             reading: None,
             slow: false,
+            restarting: false,
             capacity: None,
             attempt: None,
             not_before: At::ZERO,
@@ -415,11 +457,26 @@ impl Running {
 
     /// Asks the agent for its status on a task of its own, unless a
     /// reading is under way (warned of once it takes long) or the agent
-    /// does not serve.
+    /// does not serve. Once a reading of an agent that serves has been
+    /// under way for [`STUCK_AFTER`], asks the process to stop, for systemd
+    /// to start it again.
     fn read(&mut self) {
         let now = boot_now();
         if let Some(since) = self.reading {
             let taken = now.since_origin().saturating_sub(since.since_origin());
+            if taken > STUCK_AFTER && !self.restarting && self.renewer.agent.handle().is_some() {
+                self.restarting = true;
+                tracing::error!(
+                    waited_ms = ms(taken),
+                    "the agent has not said what the host can take on for a minute: it is stuck, so its process stops for systemd to start it again; the VMs run on and the lease is renewed meanwhile"
+                );
+                if let Err(error) = rustix::process::kill_process(
+                    rustix::process::getpid(),
+                    rustix::process::Signal::TERM,
+                ) {
+                    tracing::error!(%error, "the agent's process could not ask itself to stop");
+                }
+            }
             if !self.slow && taken > self.renewer.lease.terms().renew_every * 2 {
                 self.slow = true;
                 tracing::warn!(
@@ -434,16 +491,19 @@ impl Running {
             return;
         };
         self.reading = Some(now);
-        let readings = self.readings.clone();
+        let answering = Answering {
+            readings: self.readings.clone(),
+            sent: false,
+        };
         tokio::spawn(async move {
-            let _ = readings.send(handle.status().await);
+            answering.send(handle.status().await);
         });
     }
 
     /// Takes in a reading of the agent's status, for the next renewals,
     /// and sends the service what the host can take on when it changed
     /// since last sent. Fails if the agent serves but no longer answers.
-    fn report(&mut self, reading: Result<HostStatus, HostError>) -> anyhow::Result<()> {
+    fn report(&mut self, reading: Reading) -> anyhow::Result<()> {
         if let Some(since) = self.reading.take()
             && std::mem::take(&mut self.slow)
         {
@@ -452,6 +512,10 @@ impl Running {
                 .saturating_sub(since.since_origin());
             tracing::info!(took_ms = ms(taken), "the agent answers again");
         }
+        // A reading that ended without an answer: the next tick reads again.
+        let Some(reading) = reading else {
+            return Ok(());
+        };
         let renewer = &self.renewer;
         if renewer.agent.handle().is_none() {
             self.capacity = None;
@@ -569,5 +633,24 @@ mod tests {
     fn terms_survive_the_wire() {
         let terms = LeaseTerms::RECOMMENDED;
         assert_eq!(terms_of(wire_terms(terms)), terms);
+    }
+
+    /// A reading whose task ends without an answer still says so, so the
+    /// renewer reads again instead of waiting on it for good.
+    #[test]
+    fn a_reading_that_ends_unanswered_says_so() {
+        let (readings, mut read) = mpsc::unbounded_channel();
+        drop(Answering {
+            readings: readings.clone(),
+            sent: false,
+        });
+        assert!(matches!(read.try_recv(), Ok(None)));
+        Answering {
+            readings,
+            sent: false,
+        }
+        .send(Err(HostError::Stopped));
+        assert!(matches!(read.try_recv(), Ok(Some(Err(_)))));
+        assert!(read.try_recv().is_err(), "one answer each");
     }
 }

@@ -207,16 +207,24 @@ can be built and tested.
   host after three missed renewals, as it did before. Renewals never wait
   on the agent either: they carry the agent's latest reading of what the
   host can take on, read on a task of its own once a second, so a busy
-  agent cannot hold them up. A gap is visible before it costs anything:
+  agent cannot hold them up. An agent that has not answered one for a
+  minute is stuck rather than busy: its process stops itself, renewing
+  the lease as any stop does, and the agent systemd starts again takes
+  back the VMs, which run on meanwhile, so a stuck agent neither keeps
+  its sandboxes out of reach for good nor costs their programs. A gap is
+  visible before it costs anything:
   the host warns once two renewals in a row go unanswered, with how long
   its lease has left, the service records how long each host went
   unheard (`compute_fleet_host_renewal_gap_seconds`), and a VM the guard
   kills raises the host's `fenced` alarm, with the VM's end recorded as
   `fenced`. A host only re-registers under terms equal to its own, so a
   release that changes them rolls out service first, hosts promptly
-  after; a host on the old terms renews meanwhile and re-registers once
-  upgraded, and the service must not be rolled back below the release
-  while hosts run it.
+  after; a host on the old terms renews meanwhile, but one whose lease
+  runs out cannot register again until it is upgraded. The leader gives
+  up on a host after its own term, so the service must never be rolled
+  back below the release while hosts run it: an older leader would give
+  up on a host 20 s before its VMs stop, and wake its sandboxes elsewhere
+  while they still run. Roll hosts back first.
 - **A host that comes back is fenced until it has caught up.** It
   registers again only once its last registration lapsed (the store
   refuses while that one is live, since its VMs may still run), and lists
