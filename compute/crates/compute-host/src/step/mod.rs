@@ -58,6 +58,12 @@ const PREFETCH_LIMIT: Duration = Duration::from_secs(5);
 /// whose last write has an unknown fate, and the longest it waits between
 /// tries.
 const SETTLE_RETRY: (Duration, Duration) = (Duration::from_millis(50), Duration::from_secs(5));
+/// How many times in a row a sandbox's wakes may fail, the last one the
+/// VMM refusing an image made on another kind of host, before the
+/// sandbox gives the image up and boots from its disk. With the wake
+/// backoff that is a few seconds: room for a refusal that was the host's,
+/// such as a pager that could not start, to pass.
+const REFUSALS_FROM_ELSEWHERE: u32 = 5;
 
 mod files;
 mod learned;
@@ -231,6 +237,9 @@ pub(crate) struct Job<E: Engine, S> {
     /// The sandbox's last activity when the step was issued, in
     /// milliseconds since the Unix epoch; every write of the record keeps it.
     pub last_used_ms: u64,
+    /// How many times in a row the sandbox's steps had failed for now when
+    /// this one was issued; see [`compute_core::SandboxView::failures`].
+    pub failures: u32,
 }
 
 fn failure(error: &EngineError) -> Outcome {
@@ -948,10 +957,11 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// engine keeps can read is given up, since none ever will. Otherwise
     /// the refusal may have been the host's (memory short, a pager that
     /// could not start or reach the store, a VMM killed while loading) and
-    /// the image is kept for a retry. That includes an image made on
-    /// another processor model: whether its saved processor state fits
-    /// this one is unproven, and the image still wakes on a host like the
-    /// one that made it.
+    /// the image is kept for a retry. An image made on another kind of
+    /// host (another processor model or host kernel) is kept too, but only
+    /// for [`REFUSALS_FROM_ELSEWHERE`] wakes in a row: its saved processor
+    /// state may not fit this host, which does not change while it runs,
+    /// and nothing sends the sandbox to a host like the one that made it.
     async fn rejected(
         &mut self,
         images: &Images,
@@ -962,32 +972,15 @@ impl<E: Engine, S: Store> Job<E, S> {
         const OP: &str = "restore";
         tracing::warn!(id = %self.id, %error, "the VMM refused the memory image");
         let made_under = image.meta().runtime.as_deref().unwrap_or("");
-        match self.engine.reads(made_under) {
-            Readable::No(why) => {
-                tracing::warn!(
-                    id = %self.id,
-                    made_under,
-                    why,
-                    "no VMM here reads the refused image; waking from the disk"
-                );
-                if let Err(error) = self.commit(Change::new().image(false)).await {
-                    return state_failure(&error);
-                }
-                return failure(&EngineError::new(
-                    ErrorKind::MemoryLost,
-                    OP,
-                    format!("the memory image cannot be read here: {why}; {error}"),
-                ));
+        if let Some(why) = self.refused_for_good(made_under) {
+            if let Err(error) = self.commit(Change::new().image(false)).await {
+                return state_failure(&error);
             }
-            Readable::Yes | Readable::Unknown if made_under != self.engine.runtime() => {
-                tracing::warn!(
-                    id = %self.id,
-                    made_under,
-                    runtime = self.engine.runtime(),
-                    "the refused image was made under another runtime"
-                );
-            }
-            Readable::Yes | Readable::Unknown => {}
+            return failure(&EngineError::new(
+                ErrorKind::MemoryLost,
+                OP,
+                format!("{why}; {error}"),
+            ));
         }
         if image.meta().remote {
             #[cfg(target_os = "linux")]
@@ -1035,6 +1028,59 @@ impl<E: Engine, S: Store> Job<E, S> {
             Ok(Err(suspect)) => {
                 self.quarantine_current(images, &suspect).await;
                 failure(&suspect_error(OP, suspect))
+            }
+        }
+    }
+
+    /// Why the VMM refusing an image made under `made_under` settles it,
+    /// if it does: no VMM the engine keeps reads its format, or it was made
+    /// on another kind of host and this is its
+    /// [`REFUSALS_FROM_ELSEWHERE`]th wake in a row to fail.
+    fn refused_for_good(&self, made_under: &str) -> Option<String> {
+        match self.engine.reads(made_under) {
+            Readable::No(why) => {
+                tracing::warn!(
+                    id = %self.id,
+                    made_under,
+                    why,
+                    "no VMM here reads the refused image; waking from the disk"
+                );
+                Some(format!("the memory image cannot be read here: {why}"))
+            }
+            Readable::Elsewhere(why) => {
+                let refusals = self.failures.saturating_add(1);
+                if refusals < REFUSALS_FROM_ELSEWHERE {
+                    tracing::warn!(
+                        id = %self.id,
+                        made_under,
+                        why,
+                        refusals,
+                        "the refused image was made on another kind of host"
+                    );
+                    return None;
+                }
+                tracing::warn!(
+                    id = %self.id,
+                    made_under,
+                    why,
+                    refusals,
+                    "the VMM keeps refusing an image made on another kind of host; \
+                     waking from the disk"
+                );
+                Some(format!(
+                    "the memory image was refused {refusals} wakes in a row, and {why}"
+                ))
+            }
+            Readable::Yes | Readable::Unknown => {
+                if made_under != self.engine.runtime() {
+                    tracing::warn!(
+                        id = %self.id,
+                        made_under,
+                        runtime = self.engine.runtime(),
+                        "the refused image was made under another runtime"
+                    );
+                }
+                None
             }
         }
     }
