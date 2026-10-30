@@ -166,6 +166,12 @@ const PROVEN_SESSION_MILLISECONDS = 30_000;
 const CLOSE_WAIT_MILLISECONDS = 3_000;
 /** Waits before retrying the save made when the recorder stops. */
 const FINAL_SAVE_RETRY_MILLISECONDS = [250, 1_000, 3_000];
+/**
+ * Streamed audio is reported at least this often, with or without text. A
+ * live model charged in credits is metered by these reports, and the server
+ * bounds a track's sessions by them.
+ */
+const REPORT_MILLISECONDS = 60_000;
 /** A plain commit not followed by its timed copy within this long is kept as is. */
 const UNTIMED_COMMIT_MILLISECONDS = 1_500;
 /** How far back the clock remembers where pushed audio sat in the recording. */
@@ -318,6 +324,10 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
   let lastCommitEnd = 0;
   let streamedSamples = 0;
   let sampleRate = 16_000;
+  /** The streamed total the latest save reported. */
+  let reportedMilliseconds = 0;
+  /** A session was granted for this track before. */
+  let granted = false;
   let nextSegment = 0;
   let unsaved: LiveTranscriptSegment[] = [];
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -365,6 +375,7 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
     for (;;) {
       const batch = unsaved.slice(0, 100);
       const streamedMilliseconds = Math.round((streamedSamples / sampleRate) * 1_000);
+      reportedMilliseconds = streamedMilliseconds;
       try {
         await options.client.appendRecordingLiveSegments(options.workspaceId, options.recordingId, {
           trackNumber: options.trackNumber,
@@ -406,6 +417,13 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
     unsaved.push(segment);
     emit({ segments: [...snapshot.segments, segment], partial: "" });
     scheduleSave();
+  };
+
+  /** Report the streamed total once a minute of it is unreported, text or not. */
+  const reportIfDue = () => {
+    if (closed || saveTimer) return;
+    const streamed = (streamedSamples / sampleRate) * 1_000;
+    if (streamed - reportedMilliseconds >= REPORT_MILLISECONDS) scheduleSave(true);
   };
 
   /** Where the session's audio has reached, in recording time. */
@@ -660,12 +678,25 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
   const connect = async () => {
     if (connecting || closed || !canStream || Date.now() < retryAt) return;
     connecting = true;
+    if (granted) {
+      // Report the audio so far before asking again: the server counts time
+      // only up to a report, so a pause or a dropped session isn't counted.
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = null;
+      saving = saving.then(save);
+      await saving;
+      if (closed) {
+        connecting = false;
+        return;
+      }
+    }
     try {
       session = await options.client.createRecordingLiveSession(
         options.workspaceId,
         options.recordingId,
         { trackNumber: options.trackNumber },
       );
+      granted = true;
     } catch (error) {
       connecting = false;
       const status = (error as { status?: number }).status;
@@ -833,6 +864,7 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
         if (socket?.readyState === OPEN) {
           streamedSamples += Math.round((duration * sampleRate) / 1_000);
         }
+        reportIfDue();
         return;
       }
       const converted = resamplePcm16(samples, rate, session?.audio.sampleRate ?? sampleRate);
@@ -863,6 +895,7 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
         pendingSamples -= pending.shift()!.samples.length;
       }
       flush();
+      reportIfDue();
     },
 
     async close() {
@@ -937,8 +970,12 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
     },
 
     setPaused(value) {
+      const changed = value !== paused;
       paused = value;
       if (sentTrack) sentTrack.enabled = !value;
+      // Report on pausing and resuming, so the paused time isn't counted
+      // against the audio streamed.
+      if (changed && granted && !closed) scheduleSave(true);
     },
   };
 }

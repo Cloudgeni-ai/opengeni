@@ -134,9 +134,14 @@ export const recordingTracks = pgTable(
     // until a charged append first sets them.
     liveChargedMilliseconds: integer("live_charged_milliseconds"),
     liveChargedCostUsdMicros: bigint("live_charged_cost_usd_micros", { mode: "number" }),
-    // Migration 1103. Live sessions granted for the track, and when the first was.
+    // Migration 1103. Live sessions granted for the track, measured per session
+    // against the audio the recorder reports (see recording-live.ts).
     liveGrants: integer("live_grants"),
-    liveFirstGrantedAt: timestamp("live_first_granted_at", { withTimezone: true }),
+    liveGrantedAt: timestamp("live_granted_at", { withTimezone: true }),
+    liveReportedAt: timestamp("live_reported_at", { withTimezone: true }),
+    liveCountedAt: timestamp("live_counted_at", { withTimezone: true }),
+    liveCoveredMilliseconds: bigint("live_covered_milliseconds", { mode: "number" }),
+    liveUnreportedGrants: integer("live_unreported_grants"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

@@ -1059,6 +1059,26 @@ export function registerRecordingRoutes(
     if (result.version.state === "queued" || result.version.state === "processing") {
       await startTranscript(actor.accountId, result.recording, result.version.id);
     }
+    // A live charge whose debit failed is paid now rather than on the
+    // workspace's next voice use. Best effort: the recording is finalized.
+    const billing = deps.transcription?.billing;
+    if (
+      billing?.reconcile &&
+      result.recording.tracks.some(
+        (track) =>
+          track.live && liveChargedInCredits(registry.get(track.live.providerId), actor.accountId),
+      )
+    ) {
+      await billing
+        .reconcile({ accountId: actor.accountId, workspaceId: actor.workspaceId })
+        .catch((error: unknown) => {
+          observability?.error("live transcript debits weren't reconciled at finalize", {
+            workspaceId: actor.workspaceId,
+            recordingId,
+            error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+          });
+        });
+    }
     return c.json({ recording: result.recording, transcript: result.version });
   });
 

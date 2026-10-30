@@ -11,12 +11,18 @@
 -- track's live_cost_usd_micros stays the list price of everything streamed
 -- (as the previous release writes it), and a usage allowance that prices
 -- unbilled use counts only the difference, so audio charged in credits never
--- counts twice: not after a switch to an uncharged model, nor when a pod of
--- the previous release writes the total during a rolling deploy.
+-- counts twice, also after a switch to an uncharged model. (During a rolling
+-- deploy, audio a pod of the previous release saves counts at list price and
+-- is then charged by the next save on this release; see docs/recordings.md.)
 --
--- live_grants and live_first_granted_at: live sessions granted for the track,
--- and when the first was. The recorder reports its own streamed total, so a
--- track whose grants run far ahead of what it reports gets no more.
+-- Live sessions of a track charged in credits are bounded by the audio its
+-- recorder reports, against time measured between its reports so a pause
+-- never counts: live_grants counts the sessions granted; live_granted_at is
+-- when the latest began; live_reported_at is the recorder's latest save of
+-- the track's total; live_counted_at is how far live_covered_milliseconds
+-- counts, the time that ended in a report of more audio (or, for a session
+-- never reported on, the time up to the next request); and
+-- live_unreported_grants counts sessions never reported on.
 --
 -- Rolling: nullable columns without default or check are catalog-only, and
 -- the previous release never reads or writes them; null means none charged
@@ -28,15 +34,27 @@ ALTER TABLE recording_tracks
   ADD COLUMN IF NOT EXISTS live_charged_milliseconds integer,
   ADD COLUMN IF NOT EXISTS live_charged_cost_usd_micros bigint,
   ADD COLUMN IF NOT EXISTS live_grants integer,
-  ADD COLUMN IF NOT EXISTS live_first_granted_at timestamp with time zone;
+  ADD COLUMN IF NOT EXISTS live_granted_at timestamp with time zone,
+  ADD COLUMN IF NOT EXISTS live_reported_at timestamp with time zone,
+  ADD COLUMN IF NOT EXISTS live_counted_at timestamp with time zone,
+  ADD COLUMN IF NOT EXISTS live_covered_milliseconds bigint,
+  ADD COLUMN IF NOT EXISTS live_unreported_grants integer;
 COMMENT ON COLUMN recording_tracks.live_charged_milliseconds IS
   'Streamed live transcript audio already paid for (charged in credits, or counted at list price once charging began), in milliseconds. Null when none was charged.';
 COMMENT ON COLUMN recording_tracks.live_charged_cost_usd_micros IS
   'List price of the live transcript audio charged in credits; usage allowances never count it. Null when none was charged.';
 COMMENT ON COLUMN recording_tracks.live_grants IS
   'Live transcript sessions granted for this track. Null when none was.';
-COMMENT ON COLUMN recording_tracks.live_first_granted_at IS
-  'When the first live transcript session for this track was granted.';
+COMMENT ON COLUMN recording_tracks.live_granted_at IS
+  'When the latest live transcript session for this track was granted; null when none is open.';
+COMMENT ON COLUMN recording_tracks.live_reported_at IS
+  'When the recorder last saved this track''s streamed total.';
+COMMENT ON COLUMN recording_tracks.live_counted_at IS
+  'How far live_covered_milliseconds counts: the latest grant or report of this track''s live transcript.';
+COMMENT ON COLUMN recording_tracks.live_covered_milliseconds IS
+  'Time by the server''s clock that ended in a report of more streamed audio for this track, or in a request after a session never reported on.';
+COMMENT ON COLUMN recording_tracks.live_unreported_grants IS
+  'Live transcript sessions of this track the recorder never reported on before asking for another.';
 
 -- Same signature; only the recording_tracks branch changes: it counts the
 -- growth of the list price of audio not charged in credits.

@@ -354,41 +354,58 @@ the text: overlapping saves (a retry after a lost response) wait on the
 recording's lock and charge only what the one before left, and a receipt
 that fails fails the save, which the recorder retries. The credit debit
 follows the commit with the same idempotency key; one that fails is applied
-from its receipt by the workspace's next voice admission (dictation, voice
-input or another live session), within 3 days. When the recorder stops, its
-last save is retried a few times, so the end of a meeting is charged too.
+from its receipt when the meeting is finalized, or by the workspace's next
+voice admission (dictation, voice input or another live session), within 3
+days. When the recorder stops, its last save is retried a few times, so the
+end of a meeting is charged too.
 
 `live.costUsd` is the list price of everything streamed, and
 `live_charged_cost_usd_micros` the list price of the part charged in credits;
 a usage allowance that prices unbilled use counts only the rest, so charged
 audio never counts twice (also when a track switches to a model not charged
-in credits, or a pod of the previous release writes the total during a
-deploy). Audio streamed to a model not charged in credits moves the mark too.
+in credits). Audio streamed to a model not charged in credits moves the mark
+too.
 
 The audio goes from the device straight to the provider, so the charged
 duration is the recorder's own `streamedMilliseconds`, not something the
 server measured. The ledger records it with basis `client_reported_duration`.
 The server only lets the total grow, so retries and late saves never charge
-twice. To bound a recorder that stops reporting or under-reports, a track
-charged in credits gets 4 live sessions, one more for every 5 minutes of
-audio it reports, and at most 40; and none once the time since its first
-session is ahead of its reported audio by more than 10 minutes plus a quarter
-of that time. A refused grant is a 409 (`live_grant_limit` or
-`live_streamed_behind`, "The live transcript stopped for this track. The
-recording continues and is transcribed when it ends."). A session the
-provider fails to start isn't counted.
+twice. The recorder reports its total about every minute while streaming
+(text or silence), when it pauses and resumes, and before asking for another
+session. A track charged in credits is bounded by those reports, with time
+measured between them so a pause never counts:
+
+- The time up to a report of more audio counts (at most 3 minutes of it), the
+  time up to a report of no more audio (a pause, or a session that never
+  connected) doesn't, and a session never reported on before the next
+  request counts all its time up to that request.
+- A track gets no more sessions once that time is ahead of its reported
+  audio by more than 10 minutes plus a quarter of it, once 4 of its sessions
+  went unreported, or after 20 sessions plus one for every 5 minutes it
+  reported (at most 100).
+
+A refused grant is a 409 (`live_grant_limit` or `live_streamed_behind`, "The
+live transcript stopped for this track. The recording continues and is
+transcribed when it ends."); the recording carries on. A session the
+provider fails to start isn't counted. An honest recorder isn't refused for
+silence, long pauses or quick pause and resume cycles.
 
 Residual risk: each grant still opens one provider session (up to the
 provider's session limit) whose audio is only as metered as the recorder
-reports, so a modified client can stream unpaid audio within those bounds,
-for example by holding several sessions at once or under-reporting within the
-slack, and the bounds are per track, not per recording or account. A long
-pause followed by a reconnect counts as time not streamed, so after a pause of
-more than about 10 minutes plus a quarter of the meeting so far the track's
-preview stops (the recording and its transcript are unaffected). A save whose
-receipt never commits, after the recorder's last retries, leaves that last
-stretch unpaid, and a debit not reconciled within 3 days stays a receipt
-without a ledger entry.
+reports. A modified client that reports its audio as paused (no more audio)
+while it streams, or holds several sessions at once, streams unpaid audio
+until the session limits above stop it, and the bounds are per track, not
+per recording or account. If the recorder's pause or resume report is lost,
+up to 3 minutes per report counts as streamed time, within the slack. A save
+whose receipt never commits, after the recorder's last retries, leaves that
+last stretch unpaid, and a debit not reconciled within 3 days stays a
+receipt without a ledger entry.
+
+Rollout: while pods of the previous release still serve during a deploy,
+a live save they handle stores the track's list-price total without moving
+the charged mark, so a usage allowance counts that audio at list price, and
+the next save on the new release charges it in credits as well. The overlap
+is limited to audio saved through old pods during the rollout.
 
 With a `system` track, the microphone's live text is under the recording
 owner's name (the person recording sees their own; others see the owner's

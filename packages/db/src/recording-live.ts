@@ -49,39 +49,57 @@ function trackWhere(input: { workspaceId: string; recordingId: string; trackNumb
  * How far a track's live sessions may run ahead of the audio its recorder
  * reports, when that audio is charged in credits. The audio goes from the
  * device straight to the provider, so the recorder's own total is the meter;
- * these bounds keep a recorder that stops reporting (or under-reports) from
- * getting more sessions. A track gets {@link LIVE_GRANTS_FREE} sessions, one
- * more for each {@link LIVE_GRANT_EARNED_PER_MILLISECONDS} of audio it
- * reports, and at most {@link LIVE_GRANTS_MAX}; and none once the time since
- * its first session is ahead of its reported audio by more than
- * {@link LIVE_BEHIND_SLACK_MILLISECONDS} plus
- * {@link LIVE_BEHIND_SLACK_FRACTION} of that time.
+ * these bounds keep a recorder that doesn't report (or under-reports) from
+ * getting more sessions, and never refuse one that reports honestly, however
+ * it pauses or stays silent.
+ *
+ * Time is measured between the recorder's reports, so a pause never counts.
+ * The recorder reports its total about every minute while streaming, when it
+ * pauses and resumes, and before asking for another session. The time up to
+ * a report of more audio counts (at most {@link LIVE_REPORT_GAP_MAX_MILLISECONDS}
+ * of it, as an honest recorder reports far more often while streaming); the
+ * time up to a report of no more audio (a pause, or a session that never
+ * connected) doesn't. A session the recorder never reported on before asking
+ * for another counts all its time up to that request, and as unreported.
+ *
+ * A track gets no more sessions once:
+ * - {@link LIVE_UNREPORTED_GRANTS_MAX} of its sessions went unreported;
+ * - it had {@link LIVE_GRANTS_FREE} sessions, one more for each
+ *   {@link LIVE_GRANT_EARNED_PER_MILLISECONDS} of audio it reported, and at
+ *   most {@link LIVE_GRANTS_MAX};
+ * - or the time its sessions covered is ahead of its reported audio by more
+ *   than {@link LIVE_BEHIND_SLACK_MILLISECONDS} plus
+ *   {@link LIVE_BEHIND_SLACK_FRACTION} of that time.
  */
-export const LIVE_GRANTS_FREE = 4;
+export const LIVE_UNREPORTED_GRANTS_MAX = 4;
+export const LIVE_GRANTS_FREE = 20;
 export const LIVE_GRANT_EARNED_PER_MILLISECONDS = 5 * 60_000;
-export const LIVE_GRANTS_MAX = 40;
+export const LIVE_GRANTS_MAX = 100;
 export const LIVE_BEHIND_SLACK_MILLISECONDS = 10 * 60_000;
 export const LIVE_BEHIND_SLACK_FRACTION = 0.25;
+export const LIVE_REPORT_GAP_MAX_MILLISECONDS = 3 * 60_000;
 
 /** Why a track gets no more live sessions, or null when it may have one. */
 export function liveGrantRefusal(input: {
   /** Sessions granted for the track so far. */
   grants: number;
+  /** Sessions of the track the recorder never reported on. */
+  unreportedGrants: number;
   /** Audio the recorder reported streaming for the track. */
   streamedMilliseconds: number;
-  /** Time since the track's first session; null before it has one. */
-  sinceFirstGrantMilliseconds: number | null;
+  /** Time counted against the reported audio (see above). */
+  coveredMilliseconds: number;
 }): "live_grant_limit" | "live_streamed_behind" | null {
+  if (input.unreportedGrants >= LIVE_UNREPORTED_GRANTS_MAX) return "live_grant_limit";
   const allowed = Math.min(
     LIVE_GRANTS_MAX,
     LIVE_GRANTS_FREE + Math.floor(input.streamedMilliseconds / LIVE_GRANT_EARNED_PER_MILLISECONDS),
   );
   if (input.grants >= allowed) return "live_grant_limit";
-  const since = input.sinceFirstGrantMilliseconds;
+  const covered = input.coveredMilliseconds;
   if (
-    since !== null &&
-    since - input.streamedMilliseconds >
-      LIVE_BEHIND_SLACK_MILLISECONDS + LIVE_BEHIND_SLACK_FRACTION * since
+    covered - input.streamedMilliseconds >
+    LIVE_BEHIND_SLACK_MILLISECONDS + LIVE_BEHIND_SLACK_FRACTION * covered
   ) {
     return "live_streamed_behind";
   }
@@ -125,20 +143,37 @@ export async function startRecordingLiveTrack(
       .select({
         streamed: schema.recordingTracks.liveStreamedMilliseconds,
         grants: schema.recordingTracks.liveGrants,
-        sinceFirst: sql<
+        covered: schema.recordingTracks.liveCoveredMilliseconds,
+        unreported: schema.recordingTracks.liveUnreportedGrants,
+        // The latest session, which this request ends: whether the recorder
+        // reported on it, and the time since the last grant or report (null
+        // when no session is open).
+        latestReported: sql<
+          boolean | null
+        >`${schema.recordingTracks.liveReportedAt} >= ${schema.recordingTracks.liveGrantedAt}`,
+        sinceCounted: sql<
           number | null
-        >`(extract(epoch from now() - ${schema.recordingTracks.liveFirstGrantedAt}) * 1000)::float8`,
+        >`case when ${schema.recordingTracks.liveGrantedAt} is not null then (extract(epoch from clock_timestamp() - ${schema.recordingTracks.liveCountedAt}) * 1000)::float8 end`,
       })
       .from(schema.recordingTracks)
       .where(trackWhere(input))
       .for("update");
     if (!current) throw new RecordingNotFoundError("Track not found");
+    // A session never reported on counts all its time and as unreported; a
+    // reported one counts the time since its last report, as a report would.
+    const open = current.sinceCounted !== null;
+    const reported = current.latestReported === true;
+    const tail = open ? Math.max(0, Number(current.sinceCounted)) : 0;
+    const covered =
+      Number(current.covered ?? 0) +
+      (reported ? Math.min(tail, LIVE_REPORT_GAP_MAX_MILLISECONDS) : tail);
+    const unreported = (current.unreported ?? 0) + (open && !reported ? 1 : 0);
     if (input.bounded) {
       const refusal = liveGrantRefusal({
         grants: current.grants ?? 0,
+        unreportedGrants: unreported,
         streamedMilliseconds: Number(current.streamed),
-        sinceFirstGrantMilliseconds:
-          current.sinceFirst === null ? null : Number(current.sinceFirst),
+        coveredMilliseconds: covered,
       });
       if (refusal) throw new RecordingConflictError(LIVE_GRANT_REFUSED_MESSAGE, refusal);
     }
@@ -148,7 +183,10 @@ export async function startRecordingLiveTrack(
         liveProviderId: input.providerId,
         liveModel: input.model,
         liveGrants: sql`coalesce(${schema.recordingTracks.liveGrants}, 0) + 1`,
-        liveFirstGrantedAt: sql`coalesce(${schema.recordingTracks.liveFirstGrantedAt}, now())`,
+        liveGrantedAt: sql`clock_timestamp()`,
+        liveCountedAt: sql`clock_timestamp()`,
+        liveCoveredMilliseconds: Math.round(covered),
+        liveUnreportedGrants: unreported,
       })
       .where(trackWhere(input))
       .returning({ trackNumber: schema.recordingTracks.trackNumber });
@@ -161,7 +199,7 @@ export async function startRecordingLiveTrack(
 /**
  * Take back a session counted by {@link startRecordingLiveTrack} that the
  * provider never started, so a provider outage doesn't use up the track's
- * sessions.
+ * sessions, and no time is counted for it.
  */
 export async function releaseRecordingLiveGrant(
   db: Database,
@@ -170,7 +208,11 @@ export async function releaseRecordingLiveGrant(
   await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     await tx
       .update(schema.recordingTracks)
-      .set({ liveGrants: sql`greatest(coalesce(${schema.recordingTracks.liveGrants}, 0) - 1, 0)` })
+      .set({
+        liveGrants: sql`greatest(coalesce(${schema.recordingTracks.liveGrants}, 0) - 1, 0)`,
+        liveGrantedAt: null,
+        liveCountedAt: null,
+      })
       .where(trackWhere(input));
   });
 }
@@ -287,6 +329,19 @@ export async function appendRecordingLiveSegments(
       .update(schema.recordingTracks)
       .set({
         liveStreamedMilliseconds: streamed,
+        // A report of more audio counts the time since the last grant or
+        // report; any report ends what is counted, so a pause never counts
+        // (see liveGrantRefusal).
+        liveReportedAt: sql`clock_timestamp()`,
+        liveCountedAt: sql`clock_timestamp()`,
+        ...(streamed > streamedBefore
+          ? {
+              liveCoveredMilliseconds: sql`coalesce(${schema.recordingTracks.liveCoveredMilliseconds}, 0) + coalesce(least(
+                extract(epoch from clock_timestamp() - ${schema.recordingTracks.liveCountedAt}) * 1000,
+                ${LIVE_REPORT_GAP_MAX_MILLISECONDS}
+              ), 0)::bigint`,
+            }
+          : {}),
         // Audio streamed to a model not charged in credits counts at list
         // price instead, so once charging began the mark moves past it too.
         ...(charge

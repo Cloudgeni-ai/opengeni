@@ -240,6 +240,17 @@ export function createVoiceInputBilling(deps: {
       const receipt = await recordVoiceInputReceipt(tx, pricedSettlement(deps.settings, input));
       return { creditCostMicros: Number(receipt.quantity) };
     },
+
+    async reconcile({ accountId, workspaceId }) {
+      if (!voiceInputCreditBillingActive(deps.settings)) return;
+      // No in-flight settlement is waited for: a debit applied here and by
+      // its own settlement shares one idempotency key, so it applies once.
+      await reconcileUnsettledVoiceInputCharges(deps.db, {
+        accountId,
+        workspaceId,
+        minAgeMilliseconds: 0,
+      });
+    },
   };
 }
 

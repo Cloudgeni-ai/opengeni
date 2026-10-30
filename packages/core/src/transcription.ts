@@ -155,6 +155,12 @@ export type TranscriptionBilling = {
     tx: Database,
     input: TranscriptionSettlement,
   ): Promise<{ creditCostMicros: number }>;
+  /**
+   * Apply now the debit of every receipt in the workspace whose debit never
+   * committed (as `admit` does on the next voice request), so a meeting's
+   * failed live charges are paid when it is finalized.
+   */
+  reconcile?(input: { accountId: string; workspaceId: string }): Promise<void>;
 };
 
 /** What a billing refusal names: voice input, or a meeting's live transcript. */

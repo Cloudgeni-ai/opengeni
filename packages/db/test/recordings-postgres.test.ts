@@ -61,7 +61,6 @@ import {
   updateWorkspaceSettings,
   workspaceMemberDisplayName,
   LIVE_GRANT_REFUSED_MESSAGE,
-  LIVE_GRANTS_FREE,
   type Database,
   type DbClient,
   type RecordingLiveModel,
@@ -2103,9 +2102,9 @@ describe("recordings and usage allowances", () => {
     });
   });
 
-  test("a track charged in credits gets live sessions only while it reports the audio they stream", async () => {
-    if (!client || !shared) return;
-    const db = client.db;
+  /** A meeting with two tracks streaming live, and its recorder's moves. */
+  async function liveMeeting() {
+    const db = client!.db;
     const scope = await workspace();
     const recordingId = crypto.randomUUID();
     const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
@@ -2119,49 +2118,136 @@ describe("recordings and usage allowances", () => {
       ],
     });
     const live = { providerId: "azure-openai", model: "gpt-4o-transcribe" };
-    const start = async (trackNumber: number, bounded = true) =>
-      await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber, ...live, bounded });
-    const refused = (code: string) => ({ code, message: LIVE_GRANT_REFUSED_MESSAGE });
-    for (let session = 0; session < LIVE_GRANTS_FREE; session++) await start(0);
-    await expect(start(0)).rejects.toMatchObject(refused("live_grant_limit"));
-    // A session the provider never started gives its place back.
-    await releaseRecordingLiveGrant(db, { ...actor, recordingId, trackNumber: 0 });
-    await start(0);
-    await expect(start(0)).rejects.toMatchObject(refused("live_grant_limit"));
-    // Reported audio earns more: one more session for every five minutes.
-    await appendRecordingLiveSegments(db, {
-      ...actor,
+    const streamed = new Map<number, number>();
+    return {
       recordingId,
-      trackNumber: 0,
-      streamedMilliseconds: 300_000,
-      pricing: unbilled,
-      segments: [],
-    });
-    await start(0);
-    await expect(start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+      start: async (trackNumber = 0, bounded = true) =>
+        await startRecordingLiveTrack(db, { ...actor, recordingId, trackNumber, ...live, bounded }),
+      release: async (trackNumber = 0) =>
+        await releaseRecordingLiveGrant(db, { ...actor, recordingId, trackNumber }),
+      /** Report the track's total, `more` milliseconds past its last report. */
+      report: async (more: number, trackNumber = 0) => {
+        const total = (streamed.get(trackNumber) ?? 0) + more;
+        streamed.set(trackNumber, total);
+        await appendRecordingLiveSegments(db, {
+          ...actor,
+          recordingId,
+          trackNumber,
+          streamedMilliseconds: total,
+          pricing: unbilled,
+          segments: [],
+        });
+      },
+      /** Let `minutes` pass: every live timestamp of the recording's tracks moves back. */
+      elapse: async (minutes: number) => {
+        const columns = await shared!.admin<{ column_name: string }[]>`
+          select column_name from information_schema.columns
+          where table_name = 'recording_tracks' and column_name like 'live%at'`;
+        for (const { column_name } of columns) {
+          await shared!.admin.unsafe(
+            `update recording_tracks set "${column_name}" = "${column_name}" - make_interval(secs => $1)
+             where recording_id = $2`,
+            [minutes * 60, recordingId],
+          );
+        }
+      },
+    };
+  }
+  const refused = (code: string) => ({ code, message: LIVE_GRANT_REFUSED_MESSAGE });
+
+  test("an honest recorder's quick pause and resume cycles early on are never refused", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // Each resume is a new session that streams a few seconds, reported on
+    // pausing and on resuming.
+    for (let cycle = 0; cycle < 12; cycle++) {
+      await meeting.start(0);
+      await meeting.report(5_000);
+      await meeting.report(0);
+    }
+    await meeting.start(0);
+  });
+
+  test("an honest silent track reconnecting after 14 minutes is never refused", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // Silence streams too, and the recorder reports it every minute (the SDK
+    // test covers that it does), then before asking again.
+    await meeting.start(0);
+    for (let minute = 0; minute < 14; minute++) {
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+    }
+    await meeting.report(0);
+    await meeting.start(0);
+  });
+
+  test("an honest recorder resuming after a long pause is never refused", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    // Five minutes streamed, then an hour paused (reported on pausing and on
+    // resuming), and the session drops right after: the pause isn't counted.
+    await meeting.start(0);
+    for (let minute = 0; minute < 5; minute++) {
+      await meeting.elapse(1);
+      await meeting.report(60_000);
+    }
+    await meeting.elapse(60);
+    await meeting.report(0);
+    await meeting.elapse(0.5);
+    await meeting.report(30_000);
+    await meeting.start(0);
+  });
+
+  test("a recorder that doesn't report the audio its live sessions stream is refused more", async () => {
+    if (!client || !shared) return;
+    // Sessions never reported on: four, then no more until it reports.
+    const silent = await liveMeeting();
+    for (let session = 0; session < 4; session++) await silent.start(0);
+    await expect(silent.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    await silent.report(1_000);
+    await silent.start(0);
+    // A session never reported on counts all its time: half an hour of it
+    // with nothing reported is past the 10 minutes plus a quarter allowed.
+    await silent.start(1);
+    await silent.elapse(30);
+    await expect(silent.start(1)).rejects.toMatchObject(refused("live_streamed_behind"));
     // Audio not charged in credits is counted, never refused.
-    await start(0, false);
-    const behind = async (minutes: number) =>
-      await shared!.admin`
-        update recording_tracks
-        set live_grants = 0, live_first_granted_at = now() - make_interval(mins => ${minutes})
-        where recording_id = ${recordingId} and track_number = 0`;
-    // 30 minutes since the first session with 5 reported: 25 behind, past
-    // the 10 minutes plus a quarter of the time it allows.
-    await behind(30);
-    await expect(start(0)).rejects.toMatchObject(refused("live_streamed_behind"));
-    // 15 minutes with 5 reported is within it.
-    await behind(15);
-    await start(0);
+    await silent.start(1, false);
+
+    // Reporting far less audio than the time between reports.
+    const under = await liveMeeting();
+    await under.start(0);
+    for (let report = 0; report < 4; report++) {
+      await under.elapse(3);
+      await under.report(1_000);
+    }
+    await under.start(0);
+    await under.elapse(3);
+    await under.report(1_000);
+    await under.elapse(3);
+    await under.report(1_000);
+    await expect(under.start(0)).rejects.toMatchObject(refused("live_streamed_behind"));
     // Each track is bounded on its own.
-    await start(1);
-    const rows = await shared.admin<{ track_number: number; live_grants: number }[]>`
-      select track_number, live_grants from recording_tracks
-      where recording_id = ${recordingId} order by track_number`;
-    expect([...rows]).toEqual([
-      { track_number: 0, live_grants: 1 },
-      { track_number: 1, live_grants: 1 },
-    ]);
+    await under.start(1);
+
+    // Twenty sessions, then one more for every five minutes reported.
+    const many = await liveMeeting();
+    for (let session = 0; session < 20; session++) {
+      await many.start(0);
+      await many.report(1_000);
+    }
+    await expect(many.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    // A session the provider never started gives its place back.
+    await many.release(0);
+    await many.start(0);
+    await many.report(300_000);
+    await many.start(0);
+    await expect(many.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
+    const rows = await shared.admin<{ live_grants: number; live_unreported_grants: number }[]>`
+      select live_grants, live_unreported_grants from recording_tracks
+      where recording_id = ${many.recordingId} and track_number = 0`;
+    expect([...rows]).toEqual([{ live_grants: 21, live_unreported_grants: 0 }]);
   });
 
   test("an allowance that ignores unbilled usage doesn't count recordings", async () => {

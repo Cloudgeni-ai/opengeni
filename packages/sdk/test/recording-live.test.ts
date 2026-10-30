@@ -372,6 +372,49 @@ describe("live transcriber", () => {
     }
   });
 
+  test("a silent track reports its audio every minute, on pause and resume, and before asking again", async () => {
+    FakeSocket.opened = [];
+    const api = client();
+    const calls: string[] = [];
+    const live = createLiveTranscriber({
+      client: {
+        createRecordingLiveSession: async () => {
+          calls.push("grant");
+          return await api.createRecordingLiveSession();
+        },
+        appendRecordingLiveSegments: async (workspace, recording, request) => {
+          calls.push(`report ${request.streamedMilliseconds}`);
+          return await api.appendRecordingLiveSegments(workspace, recording, request);
+        },
+      },
+      workspaceId: "w",
+      recordingId: "r",
+      trackNumber: 0,
+      WebSocket: FakeSocket,
+    });
+    live.push(tenth(0), 16_000, 0);
+    await settle();
+    FakeSocket.opened[0]!.open();
+    // Silence: no text, so nothing to save but the audio streamed.
+    for (let at = 100; at < 60_000; at += 100) live.push(tenth(0), 16_000, at);
+    await settle();
+    expect(calls).toEqual(["grant", "report 60000"]);
+    live.push(tenth(0), 16_000, 60_000);
+    live.setPaused(true);
+    await settle();
+    live.setPaused(false);
+    await settle();
+    expect(calls.slice(2)).toEqual(["report 60100", "report 60100"]);
+    // The session drops; the next one is asked for only after a report.
+    FakeSocket.opened[0]!.close();
+    await new Promise((done) => setTimeout(done, 1_050));
+    live.push(tenth(0), 16_000, 60_100);
+    await settle();
+    expect(calls.slice(4)).toEqual(["report 60100", "grant"]);
+    expect(api.saved.every((request) => request.segments.length === 0)).toBe(true);
+    live.abort();
+  });
+
   test("a dropped connection holds audio and reconnects with a new grant", async () => {
     FakeSocket.opened = [];
     const api = client();

@@ -21,7 +21,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createSpeechToTextDeployment } from "@opengeni/core/transcription-service";
-import { createVoiceInputBilling, reconcileUnsettledVoiceInputCharges } from "@opengeni/core";
+import { createVoiceInputBilling } from "@opengeni/core";
 import { createApp, type AppDependencies } from "../src/app";
 import { meetingLanguage } from "../src/routes/recordings";
 
@@ -1231,6 +1231,7 @@ describe("recording routes", () => {
           }
           return await real.settle(input);
         },
+        reconcile: async (input) => await real.reconcile!(input),
       },
     };
     const minted: string[] = [];
@@ -1317,7 +1318,7 @@ describe("recording routes", () => {
     expect((await first).status).toBe(200);
     expect(await receipts()).toEqual(["0-30000", "30000-45000", "45000-50000"]);
     // A debit that fails leaves its receipt, so the audio isn't charged again;
-    // the next voice admission applies the debit from it.
+    // finalizing the meeting applies the debit from it.
     failNext = "debit";
     expect((await append(60_000)).status).toBe(200);
     expect((await append(70_000)).status).toBe(200);
@@ -1342,13 +1343,31 @@ describe("recording routes", () => {
     expect((await debits()).map((row) => range(row.source)).sort()).toEqual(
       charged.filter((source) => source !== "50000-60000").sort(),
     );
+    const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1]);
+    const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+      trackNumber: 0,
+      chunks: [
+        {
+          chunkNumber: 0,
+          byteLength: bytes.byteLength,
+          sha256: sha(bytes),
+          startMilliseconds: 0,
+          durationMilliseconds: 1_000,
+        },
+      ],
+    });
+    scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+    await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+      trackNumber: 0,
+      chunkNumbers: [0],
+    });
     expect(
-      await reconcileUnsettledVoiceInputCharges(db.db, {
-        accountId: scope.accountId,
-        workspaceId: scope.workspaceId,
-        minAgeMilliseconds: 0,
-      }),
-    ).toEqual({ reconciled: 1 });
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+          tracks: [{ trackNumber: 0, chunkCount: 1 }],
+        })
+      ).status,
+    ).toBe(200);
     const settled = await debits();
     expect(settled.map((row) => range(row.source)).sort()).toEqual([...charged].sort());
     // The duration is the recorder's, and the ledger says so.
