@@ -100,6 +100,7 @@ import {
   recordSlackInteractionInbound,
   retireSlackInteractionRoute,
   touchSlackAgentUserState,
+  claimSlackAgentOpenNotice,
   type SlackAgentRecord,
   listSlackThreadMessagesSinceLastInvocation,
   probeSlackActionHandleTenancy,
@@ -211,12 +212,41 @@ import {
   type LoadedSlackAgents,
 } from "./slack-agents";
 import {
+  isOpenSlackAgentSubject,
+  OPEN_SLACK_AGENT_TRIGGER_KINDS,
+  openSlackAgentGrant,
+  openSlackAgentIdFromSubject,
+  openSlackAgentInstructions,
+  openSlackAgentRefusal,
+  openSlackAgentSessionOptions,
+  renderSlackOpenAgentStartLine,
+  slackOpenAgentClosedThreadText,
+  slackOpenAgentMentionOnlyThreadText,
+  slackOpenAgentMembersOnlyThreadText,
+  slackOpenAgentNotEligibleText,
+  slackOpenAgentSharedConversationText,
+} from "./slack-open-agents";
+import {
   buildSlackAppHomeAccessBlocks,
   buildSlackAppHomeBlocks,
   escapeSlackMrkdwn,
   isSlackAppHomeLinkAction,
+  slackAppHomeAskAction,
   slackAppHomeOpenedEvent,
 } from "./slack-app-home";
+import {
+  handleSlackAskSubmission,
+  openSlackAskFormForCommand,
+  openSlackAskFormForShortcut,
+  openSlackAskFormFromHome,
+  type SlackAskHelpers,
+} from "./slack-ask";
+import {
+  handleSlackAgentProposalAction,
+  SLACK_AGENT_PROPOSAL_CANCEL_ACTION_ID,
+  SLACK_AGENT_PROPOSAL_CREATE_ACTION_ID,
+} from "./slack-agent-proposals";
+import { handleSlackAgentUpdateAction, isSlackAgentUpdateAction } from "./slack-agent-updates";
 import { importSlackReactionImage, type ImportedSlackReactionImage } from "../slack-reaction-files";
 import { parseRequestJson } from "../http/request-body";
 import { errorMessage } from "@opengeni/contracts/values";
@@ -399,13 +429,30 @@ export const SLACK_TASK_FIRST_PARTY_MCP_TOOLS = [
 
 /**
  * Tools every chat started from Slack gets once its installation has Slack
- * agents: passing a request on to another agent, and listing the same agent's
- * other chats. Both check the calling chat server-side.
+ * agents: passing a request on to another agent, listing the same agent's
+ * other chats, and proposing a new agent. All check the calling chat
+ * server-side.
  */
 export const SLACK_AGENT_FIRST_PARTY_MCP_TOOLS: readonly FirstPartyMcpToolName[] = [
   "slack_agent_handoff",
   "slack_agent_chats",
+  "slack_agent_propose",
 ];
+
+/**
+ * With workspace routing on but no agents yet, a Slack-started chat can still
+ * propose the first one, but only when the request talks about agents
+ * ({@link slackRequestMentionsAgents}). Every other chat of an installation
+ * without agents gets exactly today's tools.
+ */
+export const SLACK_AGENT_PROPOSE_FIRST_PARTY_MCP_TOOLS: readonly FirstPartyMcpToolName[] = [
+  "slack_agent_propose",
+];
+
+/** Whether a request talks about agents, such as "create a Slack agent called …". */
+export function slackRequestMentionsAgents(text: string): boolean {
+  return /\bagents?\b/iu.test(text);
+}
 
 /** The Slack task tools that are not already default built-in tools. */
 export const SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS: readonly FirstPartyMcpToolName[] =
@@ -719,6 +766,25 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       throw new HTTPException(403, {
         message: "Slack installation unavailable",
       });
+    // The bare command opens the Ask form when the installation has agents,
+    // using the command's own trigger. Otherwise, or when Slack refuses the
+    // modal, it answers like `info`.
+    if (
+      entry.text.trim().length === 0 &&
+      (await openSlackAskFormForCommand(
+        deps,
+        installation,
+        {
+          triggerId: entry.providerEventId.slice("command:".length),
+          slackTeamId: entry.slackTeamId,
+          slackUserId: entry.slackUserId,
+          slackChannelId: entry.slackChannelId,
+        },
+        slackAskHelpers(deps),
+      ))
+    ) {
+      return c.body(null, 200);
+    }
     // `<command> info` is a read-only ephemeral explainer. It never reaches the
     // durable inbox, never verifies channel membership, and never creates a
     // session, so it is safe anywhere the command is available. The bare
@@ -757,8 +823,21 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     const signed = await readSignedSlackRequest(c, deps);
     const form = new URLSearchParams(signed.rawBody);
     const payload = parseJsonObject(form.get("payload") ?? "");
+    if (payload.type === "view_submission") {
+      const answer = await handleSlackAskSubmission(deps, payload, slackAskHelpers(deps));
+      if (!answer) throw new HTTPException(400, { message: "unsupported Slack interaction" });
+      return c.json(answer);
+    }
     if (payload.type === "block_actions") {
       if (isSlackAppHomeLinkAction(payload)) return c.json({ ok: true });
+      const homeAsk = slackAppHomeAskAction(payload);
+      if (homeAsk) {
+        await openSlackAskFormFromHome(deps, homeAsk, slackAskHelpers(deps));
+        return c.json({ ok: true });
+      }
+      if (isSlackAgentUpdateAction(payload)) {
+        return c.json(await handleSlackAgentUpdateAction(deps, payload));
+      }
       const entry = normalizedBlockActionInteraction(payload);
       const installation = await resolveSlackInstallationRoute(deps.db, entry.slackTeamId);
       if (!installation) {
@@ -793,6 +872,28 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       throw new HTTPException(403, {
         message: "Slack installation unavailable",
       });
+    // With agents, the shortcut opens the Ask form on this message; its
+    // submission queues this same request with the chosen agent. Without
+    // agents, or if Slack refuses the modal, it is queued right away as before.
+    if (
+      await openSlackAskFormForShortcut(
+        deps,
+        installation,
+        {
+          triggerId,
+          providerEventId: `shortcut:${triggerId}`,
+          slackTeamId: teamId,
+          slackUserId: userId,
+          slackChannelId: channelId,
+          slackMessageTs: messageTs,
+          slackThreadTs: threadTs,
+          text,
+        },
+        slackAskHelpers(deps),
+      )
+    ) {
+      return c.json({ ok: true });
+    }
     await enqueueNormalizedSlackInteraction(deps, installation, {
       providerEventId: `shortcut:${triggerId}`,
       providerMessageId: `shortcut:${triggerId}`,
@@ -1750,7 +1851,8 @@ async function resolveSlackRouteForEntry(
   deps: ApiRouteDeps,
   home: SlackRouteTenancy,
   entry: SlackInteractionInboxEntry,
-  subjectId: string,
+  /** Null for someone with no Opengeni identity: they have no workspaces. */
+  subjectId: string | null,
   options: {
     threadTenancy: SlackRouteTenancy | null;
     askEnabled: boolean;
@@ -1776,11 +1878,18 @@ async function resolveSlackRouteForEntry(
   } as const;
   // A mapped thread wins outright, and with the flag off nothing is consulted at
   // all, so neither case reads anything. Naming a Slack agent inside a mapped
-  // thread is the one exception: it can move the thread to that agent.
+  // thread, or choosing one on the Ask form for a message in it, is the one
+  // exception: it can move the thread to that agent.
   if (
     !deps.settings.slackWorkspaceRoutingEnabled ||
     (options.threadTenancy &&
-      (agents.length === 0 || !slackAgentAddressForEntry(entry, agents, options.botUserId)))
+      (agents.length === 0 ||
+        (!slackAgentAddressForEntry(entry, agents, options.botUserId) &&
+          !(
+            entry.targetSlackAgentId &&
+            !entry.handoffFromSlackAgentId &&
+            entry.targetSlackAgentId !== (options.threadAgentId ?? null)
+          ))))
   ) {
     return resolveSlackWorkspaceRoute(base);
   }
@@ -1798,7 +1907,9 @@ async function resolveSlackRouteForEntry(
           slackUserId: entry.slackUserId,
         })
       : Promise.resolve(null),
-    listNamedSubjectSlackRoutableWorkspaces(deps.db, { accountId: home.accountId, subjectId }),
+    subjectId
+      ? listNamedSubjectSlackRoutableWorkspaces(deps.db, { accountId: home.accountId, subjectId })
+      : Promise.resolve([]),
     getOrganizationPrivacyPreferences(deps.db, home.accountId),
   ]);
   // With Personal workspaces turned off, new Slack work never lands in one.
@@ -1822,6 +1933,7 @@ async function resolveSlackRouteForEntry(
           agents,
           threadAgentId: options.threadAgentId ?? null,
           handoffAgentId: entry.targetSlackAgentId ?? null,
+          handedOffBySlackAgentId: entry.handoffFromSlackAgentId ?? null,
         }
       : {}),
   });
@@ -2115,7 +2227,12 @@ async function slackStartMessageLineForAgentEntry(
   home: SlackRouteTenancy,
   interaction: Pick<
     SlackInteraction,
-    "id" | "workspaceId" | "visibility" | "routedWorkspaceLabel" | "slackAgentId"
+    | "id"
+    | "workspaceId"
+    | "visibility"
+    | "routedWorkspaceLabel"
+    | "slackAgentId"
+    | "owningSubjectId"
   > &
     Partial<Pick<SlackInteraction, "handoffFromSlackAgentId">>,
   sessionId: string,
@@ -2128,6 +2245,22 @@ async function slackStartMessageLineForAgentEntry(
   const agent = interaction.slackAgentId
     ? context.agents.records.find((candidate) => candidate.id === interaction.slackAgentId)
     : undefined;
+  if (agent && isOpenSlackAgentSubject(interaction.owningSubjectId)) {
+    // An open chat has no link (only members can open it) and tells each
+    // person once that members of the workspace can read what they say.
+    const notice = await claimSlackAgentOpenNotice(deps.db, home, {
+      connectionId: entry.connectionId,
+      slackAgentId: agent.id,
+      slackUserId: entry.slackUserId,
+      interactionId: interaction.id,
+    });
+    return renderSlackOpenAgentStartLine({
+      agentName: agent.name,
+      workspaceName: context.agents.labels.get(agent.targetWorkspaceId) ?? null,
+      handedOffByName: null,
+      notice,
+    });
+  }
   const privateTask =
     isDirectMessageShortcut(entry) ||
     (interaction.visibility === "private" && entry.triggerKind !== "dm");
@@ -2705,12 +2838,18 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     entry.connectionId,
     entry.slackUserId,
   );
-  if (!link) {
+  const postLinkPrompt = async () => {
     await client.postMessage({
       operationId: deterministicUuid(`slack-link:${entry.id}`),
       userId: entry.slackUserId,
       text: `Link your Slack identity to Opengeni before starting work: ${linkUrl(deps, entry, entry.createdAt.getTime())}. No session was created.`,
     });
+  };
+  // A chat an open agent owns is the agent's own: whoever asks in it, it
+  // continues as the agent (see slack-open-agents.ts), or not at all.
+  const threadOpenAgentId = openSlackAgentIdFromSubject(existing?.owningSubjectId);
+  if (!link && !threadOpenAgentId && !deps.settings.slackWorkspaceRoutingEnabled) {
+    await postLinkPrompt();
     return;
   }
   // Slack agents need workspace routing. With it off, or with no agents, this
@@ -2718,16 +2857,75 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   const slackAgents = deps.settings.slackWorkspaceRoutingEnabled
     ? await loadSlackAgentsForConnection(deps, home, entry.connectionId)
     : NO_SLACK_AGENTS;
-  const resolution = await resolveSlackRouteForEntry(deps, home, entry, link.subjectId, {
-    botUserId: installation.botUserId,
-    threadTenancy: existing
-      ? { accountId: existing.accountId, workspaceId: existing.workspaceId }
-      : null,
-    askEnabled: true,
-    ...(slackAgents.records.length > 0
-      ? { agents: slackAgents, threadAgentId: existing?.slackAgentId ?? null }
-      : {}),
-  });
+  const agentById = (id: string | null | undefined) =>
+    id ? (slackAgents.records.find((agent) => agent.id === id) ?? null) : null;
+  if (!link && !threadOpenAgentId && !slackAgents.records.some((agent) => agent.open)) {
+    await postLinkPrompt();
+    return;
+  }
+  let threadOpenAgent: SlackAgentRecord | null = null;
+  if (threadOpenAgentId) {
+    const agent = agentById(threadOpenAgentId);
+    if (!agent?.open) {
+      await client.postMessage({
+        operationId: deterministicUuid(`slack-open-agent-closed:${entry.id}`),
+        userId: entry.slackUserId,
+        text: slackOpenAgentClosedThreadText(agent?.name ?? null),
+      });
+      return;
+    }
+    if (!OPEN_SLACK_AGENT_TRIGGER_KINDS.has(entry.triggerKind)) {
+      await client.postMessage({
+        operationId: deterministicUuid(`slack-open-agent-mention-only:${entry.id}`),
+        userId: entry.slackUserId,
+        text: slackOpenAgentMentionOnlyThreadText(agent.name),
+      });
+      return;
+    }
+    threadOpenAgent = agent;
+  }
+  const resolution: SlackRouteResolution =
+    threadOpenAgent && existing
+      ? {
+          kind: "resolved",
+          accountId: existing.accountId,
+          workspaceId: existing.workspaceId,
+          label: null,
+          source: "thread",
+          slackAgentId: threadOpenAgent.id,
+        }
+      : await resolveSlackRouteForEntry(deps, home, entry, link?.subjectId ?? null, {
+          botUserId: installation.botUserId,
+          threadTenancy: existing
+            ? { accountId: existing.accountId, workspaceId: existing.workspaceId }
+            : null,
+          askEnabled: true,
+          ...(slackAgents.records.length > 0
+            ? { agents: slackAgents, threadAgentId: existing?.slackAgentId ?? null }
+            : {}),
+        });
+  const membersOnlyThread = async (agent: SlackAgentRecord) => {
+    await client.postMessage({
+      operationId: deterministicUuid(`slack-open-agent-members-only:${entry.id}`),
+      userId: entry.slackUserId,
+      text: slackOpenAgentMembersOnlyThreadText(
+        agent.name,
+        slackAgents.labels.get(agent.targetWorkspaceId) ?? null,
+      ),
+    });
+  };
+  if (!link && !threadOpenAgent) {
+    // Without a link only an open agent can answer, and never in a member's chat.
+    const threadAgent = agentById(existing?.slackAgentId);
+    if (existing && threadAgent?.open) {
+      await membersOnlyThread(threadAgent);
+      return;
+    }
+    if (!(resolution.kind === "resolved" && agentById(resolution.slackAgentId)?.open)) {
+      await postLinkPrompt();
+      return;
+    }
+  }
   if (resolution.kind === "ask") {
     await askSlackRouteChoice(
       deps,
@@ -2747,15 +2945,67 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     accountId: resolution.accountId,
     workspaceId: resolution.workspaceId,
   };
-  const grant = await resolveSlackTargetAuthority(deps.db, {
-    subjectId: link.subjectId,
-    targetAccountId: target.accountId,
-    targetWorkspaceId: target.workspaceId,
-  });
-  const routedAgent = resolution.slackAgentId
-    ? (slackAgents.records.find((agent) => agent.id === resolution.slackAgentId) ?? null)
-    : null;
-  if (routedAgent && (!grant || !hasPermission(grant.permissions, "sessions:create"))) {
+  let grant: AccessGrant | null =
+    link && !threadOpenAgent
+      ? await resolveSlackTargetAuthority(deps.db, {
+          subjectId: link.subjectId,
+          targetAccountId: target.accountId,
+          targetWorkspaceId: target.workspaceId,
+        })
+      : null;
+  const routedAgent = agentById(resolution.slackAgentId);
+  // Someone the agent's workspace does not let start chats can still ask an
+  // open agent, as the agent. Members keep their own path, unchanged.
+  let openAgent: SlackAgentRecord | null = threadOpenAgent;
+  if (
+    !openAgent &&
+    routedAgent?.open &&
+    OPEN_SLACK_AGENT_TRIGGER_KINDS.has(entry.triggerKind) &&
+    (!grant || !hasPermission(grant.permissions, "sessions:create"))
+  ) {
+    if (existing) {
+      // A member's chat stays theirs: nobody else takes the thread over.
+      await membersOnlyThread(routedAgent);
+      return;
+    }
+    openAgent = routedAgent;
+  }
+  const memberThreadAgent = agentById(existing?.slackAgentId);
+  if (!openAgent && !grant && existing && memberThreadAgent?.open) {
+    await membersOnlyThread(memberThreadAgent);
+    return;
+  }
+  if (openAgent) {
+    const refusal =
+      policyDecision.disposition !== "ordinary"
+        ? ("shared_conversation" as const)
+        : openSlackAgentRefusal(
+            await client.slackOpenAgentAskerFacts(entry.slackChannelId, entry.slackUserId),
+            entry.slackTeamId,
+          );
+    if (refusal) {
+      await client.postMessage({
+        operationId: deterministicUuid(`slack-open-agent-refused:${entry.id}`),
+        userId: entry.slackUserId,
+        text:
+          refusal === "shared_conversation"
+            ? slackOpenAgentSharedConversationText(openAgent.name)
+            : slackOpenAgentNotEligibleText(openAgent.name),
+      });
+      return;
+    }
+    grant = openSlackAgentGrant(openAgent, {
+      slackTeamId: entry.slackTeamId,
+      slackUserId: entry.slackUserId,
+      slackChannelId: entry.slackChannelId,
+      providerEventId: entry.providerEventId,
+    });
+  }
+  if (
+    !openAgent &&
+    routedAgent &&
+    (!grant || !hasPermission(grant.permissions, "sessions:create"))
+  ) {
     // The person cannot use this agent: say which agent and where it works,
     // and start nothing.
     await postSlackRouteRefusal(deps, client, entry, {
@@ -2792,11 +3042,12 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     const mayMove =
       existing.initiatingSlackUserId === entry.slackUserId ||
       Boolean(
-        await resolveSlackTargetAuthority(deps.db, {
+        link &&
+        (await resolveSlackTargetAuthority(deps.db, {
           subjectId: link.subjectId,
           targetAccountId: existing.accountId,
           targetWorkspaceId: existing.workspaceId,
-        }).then((current) => current && hasPermission(current.permissions, "sessions:create")),
+        }).then((current) => current && hasPermission(current.permissions, "sessions:create"))),
       );
     if (!mayMove) {
       await client.postMessage({
@@ -2939,6 +3190,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     await continueSlackSession(deps, grant, existing, prepared.entry, remounted.resources, {
       modelContext: prepared.modelContext,
       botUserId: installation.botUserId,
+      ...(openAgent ? { open: true } : {}),
     });
     return;
   }
@@ -2968,7 +3220,8 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     triggeringProviderEventId: entry.providerEventId,
     initiatingSlackUserId: entry.slackUserId,
     owningSubjectId: grant.subjectId,
-    visibility: routePolicy.visibility,
+    // An open chat is the workspace's: its members can read it, nobody else.
+    visibility: openAgent ? "workspace" : routePolicy.visibility,
   });
   requireSlackInteractionMatchesTarget(interaction, target);
   if (interaction.sessionId) {
@@ -2987,14 +3240,13 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     await continueSlackSession(deps, grant, interaction, prepared.entry, remounted.resources, {
       modelContext: prepared.modelContext,
       botUserId: installation.botUserId,
+      ...(openAgent ? { open: true } : {}),
     });
     return;
   }
-  const preferredModel = await getLatestSessionModelForSubject(
-    deps.db,
-    interaction.workspaceId,
-    grant.subjectId,
-  );
+  const preferredModel = openAgent
+    ? null
+    : await getLatestSessionModelForSubject(deps.db, interaction.workspaceId, grant.subjectId);
   let session: Awaited<ReturnType<typeof createSessionForRequest>>;
   try {
     const defaults = await slackNewSessionDefaults(
@@ -3002,6 +3254,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       grant,
       interaction,
       `slack:${entry.connectionId}:${entry.providerEventId}`,
+      { open: openAgent !== null },
     );
     const prepared = slackInvocationPreparedMessage(
       deps,
@@ -3018,8 +3271,12 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
         requestedSessionId: interaction.sessionReservationId,
         initialMessage: prepared.entry.text,
         ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
-        instructions:
-          slackAgents.records.length > 0
+        instructions: openAgent
+          ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${openSlackAgentInstructions(
+              openAgent,
+              slackAgents.labels.get(openAgent.targetWorkspaceId) ?? null,
+            )}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
+          : slackAgents.records.length > 0
             ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${slackAgentSessionInstructions({
                 loaded: slackAgents,
                 agent: routedAgent,
@@ -3046,13 +3303,14 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
             : undefined,
         resources: [...defaults.resources, ...preparedAttachments.resources],
         ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
+        ...(openAgent ? openSlackAgentSessionOptions(deps.settings) : {}),
         idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
         clientEventId: `slack:${entry.providerEventId}`,
       },
       undefined,
       {
         surface: "slack",
-        ...(defaults.firstPartyMcpTools === undefined
+        ...(defaults.firstPartyMcpTools === undefined && !openAgent
           ? {
               firstPartyMcpToolAdditions:
                 slackAgents.records.length > 0
@@ -3060,7 +3318,13 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
                       ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
                       ...SLACK_AGENT_FIRST_PARTY_MCP_TOOLS,
                     ]
-                  : SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
+                  : deps.settings.slackWorkspaceRoutingEnabled &&
+                      slackRequestMentionsAgents(entry.text)
+                    ? [
+                        ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
+                        ...SLACK_AGENT_PROPOSE_FIRST_PARTY_MCP_TOOLS,
+                      ]
+                    : SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
             }
           : {}),
       },
@@ -3142,6 +3406,11 @@ export async function handOffSlackAgentChat(
     sessionId: input.sessionId,
   });
   if (!interaction) return refuse("Only a chat started from Slack can pass a request on.");
+  // An open chat runs as the agent for whoever asked: it never carries a
+  // request, or a note about it, into another chat.
+  if (isOpenSlackAgentSubject(interaction.owningSubjectId)) {
+    return refuse("This chat cannot be passed on. Answer the request yourself.");
+  }
   const installation = await resolveSlackInstallationRoute(deps.db, interaction.slackTeamId);
   if (
     !installation ||
@@ -3243,7 +3512,9 @@ export async function handOffSlackAgentChat(
       })
     : null;
   const routingAgent = slackRoutingAgent(target, loaded.labels.get(target.targetWorkspaceId));
-  if (!askerGrant || !hasPermission(askerGrant.permissions, "sessions:create")) {
+  // An open agent takes anyone; the queued message is checked like any other
+  // (guests, external users and shared conversations are refused there).
+  if (!target.open && (!askerGrant || !hasPermission(askerGrant.permissions, "sessions:create"))) {
     const client = await createOpenGeniSlackBotInteractionClient(deps, {
       ...home,
       connectionId: interaction.connectionId,
@@ -3825,14 +4096,17 @@ async function acknowledgeSlackSession(
   // the hint freezes it durably before the post, so a repair renders identical
   // bytes; a failure here raises into the retryable inbox path rather than
   // binding the ledger to a hint-less acknowledgement it can never revise.
-  const showHint = await resolveSlackInteractionFirstTaskHint(deps.db, {
-    // The identity link is HOME; the interaction row is TARGET.
-    workspaceId: entry.workspaceId,
-    interactionWorkspaceId: interaction.workspaceId,
-    connectionId: entry.connectionId,
-    slackUserId: entry.slackUserId,
-    interactionId: interaction.id,
-  });
+  // An open chat has its own one-time notice instead, in its start line.
+  const showHint = isOpenSlackAgentSubject(interaction.owningSubjectId)
+    ? false
+    : await resolveSlackInteractionFirstTaskHint(deps.db, {
+        // The identity link is HOME; the interaction row is TARGET.
+        workspaceId: entry.workspaceId,
+        interactionWorkspaceId: interaction.workspaceId,
+        connectionId: entry.connectionId,
+        slackUserId: entry.slackUserId,
+        interactionId: interaction.id,
+      });
   const startMessageLine = interaction.startMessageLine;
   const sessionId = interaction.sessionId;
   // "<Agent> is on it" is posted as the agent.
@@ -3930,6 +4204,8 @@ async function reserveSlackStartMessageButton(
   action: { actionKind: "session_pause" | "session_resume"; actionKey: string },
 ): Promise<SlackInteractionActionHandle | null> {
   if (!interaction.sessionId || !interaction.initiatingSlackUserId) return null;
+  // Nobody can press a button on an open chat: its owner is the agent.
+  if (isOpenSlackAgentSubject(interaction.owningSubjectId)) return null;
   const [handle] = await reserveSlackInteractionActionHandles(deps.db, {
     interaction,
     sessionEventSequence: 0,
@@ -4404,6 +4680,7 @@ async function slackNewSessionDefaults(
   grant: AccessGrant,
   interaction: { workspaceId: string; sessionReservationId: string; owningSubjectId: string },
   createKey: string,
+  options: { open?: boolean } = {},
 ): Promise<SlackNewSessionDefaults> {
   const pending = await getSessionByCreateIdempotencyKey(
     deps.db,
@@ -4411,6 +4688,9 @@ async function slackNewSessionDefaults(
     createKey,
   );
   if (!pending) {
+    // An open chat is the agent's, not the asker's: no personal model choice
+    // or recent repositories; the workspace defaults apply.
+    if (options.open) return { resources: [] };
     const [modelChoice, resources] = await Promise.all([
       getActorNewSessionModelChoice(deps, grant, interaction.workspaceId),
       slackRecentRepositoryResources(deps, grant, interaction.workspaceId),
@@ -4420,7 +4700,7 @@ async function slackNewSessionDefaults(
   if (
     pending.id !== interaction.sessionReservationId ||
     interaction.owningSubjectId !== grant.subjectId ||
-    pending.createdBy.kind !== "subject" ||
+    pending.createdBy.kind !== (options.open ? "service" : "subject") ||
     pending.createdBy.subjectId !== grant.subjectId
   ) {
     throw new SlackInteractionPermanentError("slack_session_create_identity_mismatch");
@@ -4805,13 +5085,37 @@ async function continueSlackSession(
   interaction: SlackInteraction,
   entry: SlackInteractionInboxEntry,
   resources: FileResourceRef[] = [],
-  options: { modelContext?: string | null; botUserId?: string | null } = {},
+  options: { modelContext?: string | null; botUserId?: string | null; open?: boolean } = {},
 ) {
   if (
     !interaction.sessionId ||
     (interaction.visibility === "private" && interaction.owningSubjectId !== grant.subjectId)
   ) {
     throw new SlackInteractionPermanentError("session_owner_mismatch");
+  }
+  if (options.open) {
+    // An open chat runs unattended: nothing waits on a person, and Stop is a
+    // member's control in Opengeni, so every message is a new message.
+    if (interaction.owningSubjectId !== grant.subjectId) {
+      throw new SlackInteractionPermanentError("session_owner_mismatch");
+    }
+    await reopenSlackInteractionDelivery(deps.db, interaction);
+    await withSlackAllowanceAdmissionNotice(deps, entry, interaction, async () => {
+      await acceptSessionUserMessage(
+        await withCatalogSettings(deps, grant),
+        grant,
+        interaction.workspaceId,
+        interaction.sessionId!,
+        {
+          text: entry.text,
+          ...(options.modelContext ? { modelContext: options.modelContext } : {}),
+          resources,
+          clientEventId: `slack:${entry.providerEventId}`,
+          surface: "slack",
+        },
+      );
+    });
+    return;
   }
   const sessionId = interaction.sessionId;
   await reopenSlackInteractionDelivery(deps.db, interaction);
@@ -4995,6 +5299,14 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
   // would refuse it. Branch first.
   if (actionId === "opengeni.route.select" || actionId === "opengeni.route.cancel") {
     await handleSlackRouteChoice(deps, home, entry, actionId, handleId);
+    return;
+  }
+  // A proposal card is checked against its stored proposal, not a handle.
+  if (
+    actionId === SLACK_AGENT_PROPOSAL_CREATE_ACTION_ID ||
+    actionId === SLACK_AGENT_PROPOSAL_CANCEL_ACTION_ID
+  ) {
+    await handleSlackAgentProposalAction(deps, home, entry, actionId, handleId);
     return;
   }
   // A handle lives in the workspace that owns its session, which is not the
@@ -7163,6 +7475,8 @@ const SLACK_BLOCK_ACTION_IDS = new Set([
   "opengeni.shared_result.publish",
   "opengeni.route.select",
   "opengeni.route.cancel",
+  "opengeni.agent_proposal.create",
+  "opengeni.agent_proposal.cancel",
 ]);
 
 export function normalizedBlockActionInteraction(
@@ -7406,6 +7720,15 @@ export async function usableSlackAgentsFor(
   return {
     agents: loaded.records.filter((agent) => reachable.has(agent.targetWorkspaceId)),
     loaded,
+  };
+}
+
+/** What the Ask form borrows from this pipeline. */
+function slackAskHelpers(deps: ApiRouteDeps): SlackAskHelpers {
+  return {
+    usableAgents: (installation, subjectId) => usableSlackAgentsFor(deps, installation, subjectId),
+    linkUrl: (identity) => linkUrl(deps, identity),
+    permanentDeliveryError: permanentSlackDeliveryError,
   };
 }
 

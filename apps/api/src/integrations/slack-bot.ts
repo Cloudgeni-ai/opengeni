@@ -213,6 +213,7 @@ export type SlackMessageBlock =
       type: "section";
       block_id?: string;
       text: { type: "mrkdwn" | "plain_text"; text: string; emoji?: boolean };
+      accessory?: { type: "image"; image_url: string; alt_text: string };
     }
   | {
       type: "actions";
@@ -222,6 +223,8 @@ export type SlackMessageBlock =
         action_id: string;
         value: string;
         text: { type: "plain_text"; text: string; emoji?: boolean };
+        /** A link button: Slack opens it and still sends the action. */
+        url?: string;
         style?: "primary" | "danger";
       }>;
     }
@@ -259,13 +262,22 @@ export type SlackHomeBlock =
   | {
       type: "actions";
       block_id: string;
-      elements: Array<{
-        type: "button";
-        action_id: string;
-        text: { type: "plain_text"; text: string; emoji?: boolean };
-        url: string;
-        style?: "primary" | "danger";
-      }>;
+      elements: Array<
+        | {
+            type: "button";
+            action_id: string;
+            text: { type: "plain_text"; text: string; emoji?: boolean };
+            url: string;
+            style?: "primary" | "danger";
+          }
+        | {
+            type: "button";
+            action_id: string;
+            text: { type: "plain_text"; text: string; emoji?: boolean };
+            value: string;
+            style?: "primary" | "danger";
+          }
+      >;
     }
   | { type: "divider" };
 
@@ -280,6 +292,8 @@ type SlackBotOperation =
   | "file.content.read"
   | "file.upload"
   | "home.publish"
+  | "view.open"
+  | "dm.open"
   | "message.post"
   | "message.update"
   | "message.delete";
@@ -1208,6 +1222,32 @@ export class OpenGeniSlackBotClient {
     });
   }
 
+  /**
+   * Open a modal for the person whose click or command carried `triggerId`.
+   * Slack accepts a trigger once, within three seconds, so this is never
+   * retried; the caller falls back to a plain reply.
+   */
+  async openView(input: { triggerId: string; view: Record<string, unknown> }) {
+    const triggerId = requiredSlackString(input.triggerId, "trigger_id");
+    const view = JSON.stringify(input.view);
+    if (Buffer.byteLength(view, "utf8") > 48 * 1024) {
+      throw new RangeError("Slack modal exceeds the supported byte size");
+    }
+    return await this.withAudit("view.open", async (headers) => {
+      const payload = await this.call(headers, "views.open", { trigger_id: triggerId, view });
+      return { viewId: requiredSlackString(slackRecord(payload.view)?.id, "view.id") };
+    });
+  }
+
+  /** The channel id of the bot's direct message with one person. */
+  async openDirectMessage(userId: string) {
+    const user = requiredSlackString(userId, "user_id");
+    return await this.withAudit("dm.open", async (headers) => {
+      const opened = await this.call(headers, "conversations.open", { users: user });
+      return { channelId: requiredSlackString(slackRecord(opened.channel)?.id, "channel.id") };
+    });
+  }
+
   async slackTaskPolicyFacts(channelId: string, userId: string) {
     return await this.withAudit("channel_history.read", async (headers) => {
       const conversation = await this.requireMemberChannel(headers, channelId);
@@ -1224,6 +1264,65 @@ export class OpenGeniSlackBotClient {
         throw new SlackBotProviderError("slack_task_initiator_unavailable");
       }
       return { conversation, initiator };
+    });
+  }
+
+  /**
+   * Live facts for someone asking an open Slack agent: the conversation, and
+   * who they are in Slack from `users.info` (always read, unlike the task
+   * policy). Guest and external facts are null when Slack did not say, so a
+   * caller can fail closed.
+   */
+  async slackOpenAgentAskerFacts(channelId: string, userId: string) {
+    return await this.withAudit("channel_history.read", async (headers) => {
+      const conversation = await this.requireMemberChannel(headers, channelId);
+      const payload = await this.call(headers, "users.info", { user: userId });
+      const user = slackRecord(payload.user);
+      const asker = projectSlackTaskPolicyUser(payload.user, this.metadata.slackTeamId);
+      if (!asker || asker.id !== userId) {
+        throw new SlackBotProviderError("slack_task_initiator_unavailable");
+      }
+      return {
+        conversation,
+        asker: {
+          ...asker,
+          isBot: user?.is_bot === true || user?.is_app_user === true,
+          deleted: user?.deleted === true,
+          isStranger: user?.is_stranger === true,
+        },
+      };
+    });
+  }
+
+  /**
+   * One Slack person's profile facts for update messages: time zone, and
+   * whether they are deactivated, a guest, external or an app. On the app's
+   * own user, `apiAppId` names the installed Slack app.
+   */
+  async userProfileFacts(userId: string) {
+    return await this.withAudit("users.list", async (headers) => {
+      const payload = await this.call(headers, "users.info", { user: userId });
+      const user = slackRecord(payload.user);
+      const policy = projectSlackTaskPolicyUser(payload.user, this.metadata.slackTeamId);
+      if (!user || !policy || policy.id !== userId) {
+        throw new SlackBotProviderError("user_not_found");
+      }
+      const tzOffset = user.tz_offset;
+      return {
+        id: policy.id,
+        tz: nullableBoundedSlackString(user.tz, 128),
+        tzOffset:
+          typeof tzOffset === "number" && Number.isInteger(tzOffset) && Math.abs(tzOffset) <= 86_400
+            ? tzOffset
+            : null,
+        deleted: user.deleted === true,
+        isBot: user.is_bot === true || user.id === "USLACKBOT",
+        // Unknown counts as excluded: update messages only go to people
+        // Slack says are full members of this team.
+        isGuest: policy.isGuest !== false,
+        isExternal: policy.isExternal !== false || user.is_stranger === true,
+        apiAppId: nullableBoundedSlackString(slackRecord(user.profile)?.api_app_id, 64),
+      };
     });
   }
 

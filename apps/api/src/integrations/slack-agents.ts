@@ -57,6 +57,7 @@ export function slackRoutingAgent(
     targetAccountId: agent.targetAccountId,
     targetWorkspaceId: agent.targetWorkspaceId,
     targetWorkspaceLabel: targetWorkspaceLabel ?? null,
+    ...(agent.open ? { open: true } : {}),
   };
 }
 
@@ -126,6 +127,9 @@ export function slackAgentSessionInstructions(input: {
       ].join("\n"),
     );
   }
+  lines.push(
+    "When someone asks to create a new agent, call slack_agent_propose; it posts a card that an admin of the agent's workspace confirms. It needs an icon: generate one if you can generate images, otherwise ask the person for an emoji.",
+  );
   return lines.join("\n\n");
 }
 

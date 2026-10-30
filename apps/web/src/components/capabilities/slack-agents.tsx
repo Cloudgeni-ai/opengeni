@@ -178,7 +178,11 @@ export function SlackAgentsSection({
               }
               title={agent.name}
               description={agent.description}
-              meta={[workspaceName(agent), slackAgentCall(agent)]}
+              meta={[
+                workspaceName(agent),
+                slackAgentCall(agent),
+                ...(agent.open ? ["Anyone in Slack"] : []),
+              ]}
               onOpen={agent.viewerCanManage ? () => onEdit(agent) : undefined}
               menuLabel={`More actions for ${agent.name}`}
               menu={

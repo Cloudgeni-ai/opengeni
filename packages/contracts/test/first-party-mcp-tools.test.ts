@@ -42,6 +42,7 @@ const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "slack_bot_delete_message",
   "slack_agent_handoff",
   "slack_agent_chats",
+  "slack_agent_propose",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",

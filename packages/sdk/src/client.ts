@@ -68,6 +68,10 @@ import type {
   SlackAgentListResponse,
   SlackAgentResponse,
   UpdateSlackAgentRequest,
+  SlackAgentUpdatePreviewRequest,
+  SlackAgentUpdatePreviewResponse,
+  SlackAgentUpdateSettings,
+  UpdateSlackAgentUpdateSettingsRequest,
   CreateAutomationTemplateRequest,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
@@ -10779,6 +10783,41 @@ export class OpenGeniClient {
     return await this.requestJson<SlackAgentIntroResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/intro`,
+      request,
+    );
+  }
+
+  /** Update messages about Slack agents for one Slack installation. */
+  async getOpenGeniSlackAgentUpdateSettings(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<SlackAgentUpdateSettings> {
+    return await this.requestJson<SlackAgentUpdateSettings>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agent-updates?connectionId=${encodeURIComponent(connectionId)}`,
+    );
+  }
+
+  /** An organization admin turns update messages on or off, or limits them to channel posts. */
+  async setOpenGeniSlackAgentUpdateSettings(
+    workspaceId: string,
+    request: UpdateSlackAgentUpdateSettingsRequest,
+  ): Promise<SlackAgentUpdateSettings> {
+    return await this.requestJson<SlackAgentUpdateSettings>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agent-updates`,
+      request,
+    );
+  }
+
+  /** An organization admin sends one update message to their own linked Slack account now. */
+  async previewOpenGeniSlackAgentUpdate(
+    workspaceId: string,
+    request: SlackAgentUpdatePreviewRequest,
+  ): Promise<SlackAgentUpdatePreviewResponse> {
+    return await this.requestJson<SlackAgentUpdatePreviewResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agent-updates/preview`,
       request,
     );
   }

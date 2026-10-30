@@ -577,6 +577,18 @@ export default defineConfig({
               priority: 21,
             },
             {
+              // The window bar (with the actions provider behind it) serves
+              // settings and full pages, not a direct session. Left to
+              // entry-aware merging it can join the small chunk a direct
+              // session loads for the rig hooks, together with the settings
+              // search, so the session would download the command actions
+              // graph unused.
+              name: "window-bar",
+              test: /packages[\\/]react[\\/]src[\\/]app[\\/](?:components[\\/]window-bar|lib[\\/]window-bar-row)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
               // Budget pages, Workspace settings > Usage and the member slider
               // (with its Radix primitive, used nowhere else; it must not join
               // the shared UI runtime). Only reached from lazy settings routes.

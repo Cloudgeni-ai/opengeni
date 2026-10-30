@@ -176,8 +176,10 @@ export type SlackRouteInputs = {
   agents?: readonly SlackRoutingAgent[];
   /** The agent of the chat already mapped to this thread, if any. */
   threadAgentId?: string | null;
-  /** A request passed on to this exact agent by another chat. */
+  /** A request passed on to this exact agent by another chat, or sent to it from the Ask form. */
   handoffAgentId?: string | null;
+  /** The agent that passed the request on; null when a person chose the agent (Ask form). */
+  handedOffBySlackAgentId?: string | null;
 };
 
 /**
@@ -296,12 +298,33 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
   const usableAgents = agents.filter((agent) =>
     candidates.some((candidate) => candidate.workspaceId === agent.targetWorkspaceId),
   );
+  // An open agent can be named by anyone; whether this person may use it
+  // (a guest or an external user may not) is checked by the caller. It is
+  // never offered on the picker, which only lists what membership allows.
+  const nameableAgents = agents.some((agent) => agent.open === true)
+    ? agents.filter(
+        (agent) =>
+          agent.open === true || usableAgents.some((candidate) => candidate.id === agent.id),
+      )
+    : usableAgents;
 
-  // 0b. A request another chat passed on goes to exactly that agent. Access is
-  //     still checked live by the caller, like every other resolved route.
+  // 0b. A request another chat passed on, or one a person sent from the Ask
+  //     form, goes to exactly that agent. Access is still checked live by the
+  //     caller, like every other resolved route. Choosing another agent on the
+  //     form for a thread that already has a chat moves the thread, exactly
+  //     like naming that agent in the thread.
   if (input.handoffAgentId) {
     const agent = agents.find((candidate) => candidate.id === input.handoffAgentId);
-    if (agent) return agentResolution(agent, "handoff");
+    if (agent) {
+      if (
+        input.threadTenancy &&
+        !input.handedOffBySlackAgentId &&
+        agent.id !== (input.threadAgentId ?? null)
+      ) {
+        return { ...agentResolution(agent, "agent_name"), switchThread: true };
+      }
+      return agentResolution(agent, "handoff");
+    }
   }
 
   const address = slackAgentAddressForEntry(input.entry, agents, input.botUserId);
@@ -312,7 +335,7 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
           reason: "unknown_agent" as const,
           requested: found.requested,
           candidates,
-          usableAgents,
+          usableAgents: nameableAgents,
         }
       : {
           kind: "denied" as const,
@@ -320,10 +343,10 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
           requested: found.agent.name,
           candidates,
           agent: found.agent,
-          usableAgents,
+          usableAgents: nameableAgents,
         };
   const usable = (agent: SlackRoutingAgent) =>
-    usableAgents.some((candidate) => candidate.id === agent.id);
+    nameableAgents.some((candidate) => candidate.id === agent.id);
 
   // 1. A mapped thread keeps its workspace, even if the channel moved since.
   //    Naming a different agent in the thread moves the thread to that agent.
