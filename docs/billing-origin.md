@@ -310,9 +310,11 @@ credits, so the lowest point is either now or a mark.
 Each receipt also carries running totals over every row up to and including
 its own (`paidCreditTotals`): the sums of paid parts, fee debt repaid, fees'
 unfunded shares and paid inflows, the lowest mark, a receipt count, and this
-month's fees. Writes that change paid credit take the account lock and stamp
-`created_at` after taking it, so the latest receipt's totals cover every row
-before it. The balance read sums the balance and API spending in one pass
+month's fees. Writes that change paid credit take the account lock, and a
+receipt row is stamped at the settlement time but strictly after every row
+that can carry a receipt, so the latest receipt's totals cover every row
+before it even if the database clock steps back (a failover to a host
+slightly behind). The balance read sums the balance and API spending in one pass
 over the ledger, exactly as without the fee, and takes the paid-credit
 figures from the latest receipt (through the partial index
 `credit_ledger_receipt_rows_idx`) plus any rows that can carry a receipt

@@ -29,8 +29,10 @@ import { BYOK_PLATFORM_FEE_TYPE } from "@opengeni/contracts";
    including it (`paidCreditTotals`, PaidCreditChain): the sums of
    paid parts, fee debt repaid, fees' unfunded shares and paid inflows, the
    lowest mark, and this month's fees. Ledger writes that change paid credit
-   take the account lock and stamp `created_at` after it, so the latest
-   receipt holds the totals of every row before it. The balance read takes
+   take the account lock, and a receipt is stamped strictly after every row
+   that can carry one (`receiptCreatedAt`), even if the database clock
+   steps back, so the latest receipt holds the totals of every row before
+   it. The balance read takes
    that one receipt, through credit_ledger_receipt_rows_idx, plus the rows
    that can carry a receipt written after it (normally none). Its cost does
    not grow with fees, top-ups or grants; ordinary debits' metadata is never
@@ -137,6 +139,8 @@ export type PaidCreditTotals = {
   paidInflows: [number, number, boolean][] | null;
   /** `[at, unpaid micros]` per unpaid inflow without a receipt after it. */
   unpaidInflows: [number, number][] | null;
+  /** The latest row that can carry a receipt (created_at, as text); null for none. */
+  receiptRowsThrough: string | null;
 };
 
 export type PaidCreditState = {
@@ -152,6 +156,8 @@ export type PaidCreditState = {
   unpaidCreditsMicros: number;
   /** Running totals through now, which the next receipt extends. */
   chain: PaidCreditChain;
+  /** The latest row that can carry a receipt; the next receipt is stamped after it. */
+  receiptRowsThrough: string | null;
 };
 
 /** Paid credit from the read's totals and the account's credits (`creditsMicros`). */
@@ -209,6 +215,7 @@ export function paidCreditState(totals: PaidCreditTotals, creditsMicros: number)
     unrecordedFeeDebtRepaidMicros: repaid,
     unpaidCreditsMicros: Math.max(0, credits - paidCreditsMicros),
     chain,
+    receiptRowsThrough: totals.receiptRowsThrough,
   };
 }
 

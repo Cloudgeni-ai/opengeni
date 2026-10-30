@@ -102,6 +102,7 @@ import {
   getBillingBalance,
   getSpendableCreditBalance,
   paidCreditReceipt,
+  receiptCreatedAt,
   planCreditDebit,
   planPostUseCreditAllocations,
   readBillingBalance,
@@ -6703,9 +6704,9 @@ export async function applyCreditLedgerEntryOnce(
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
           idempotencyKey: input.idempotencyKey,
-          metadata: { ...input.metadata, ...receipt },
+          metadata: { ...input.metadata, ...receipt.metadata },
           occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
+          createdAt: receipt.createdAt,
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
@@ -6984,6 +6985,7 @@ async function insertPostUseDebit(
   },
   usageOrigin: BillingOrigin,
   settledAt: string,
+  createdAt: SQL = sql`${settledAt}::timestamptz`,
 ): Promise<string | null> {
   const inserted = await scopedDb
     .insert(schema.creditLedgerEntries)
@@ -6998,7 +7000,7 @@ async function insertPostUseDebit(
       idempotencyKey: input.idempotencyKey,
       metadata: input.metadata ?? {},
       occurredAt: input.occurredAt ?? new Date(),
-      createdAt: sql`${settledAt}::timestamptz`,
+      createdAt,
     })
     .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
     .returning({ id: schema.creditLedgerEntries.id });
@@ -7089,6 +7091,7 @@ export async function applyByokPlatformFeeDebit(
         },
         usageOrigin,
         settledAt,
+        receiptCreatedAt(settledAt, paid),
       );
       return insertedId
         ? { debitedMicros: input.amountMicros, ...funding }

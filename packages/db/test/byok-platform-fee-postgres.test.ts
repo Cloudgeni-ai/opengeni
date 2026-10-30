@@ -744,6 +744,41 @@ test("a receipt's running totals equal a full recount of the ledger", async () =
   expect(after.paidCreditsMicros).toBe(before.paidCreditsMicros! - 1 * M);
 }, 180_000);
 
+test("a database clock that steps back never hides a receipt from the running totals", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("free");
+  await credit(accountId, "credit_topup", 10 * M);
+  await fee(accountId, 1 * M, "api");
+  // The fee was stamped by a host whose clock ran ten minutes ahead; the
+  // writes below use the normal clock again.
+  await shared.admin`
+    update credit_ledger_entries set created_at = created_at + interval '10 minutes'
+    where account_id = ${accountId} and type = 'byok_platform_fee'`;
+  await credit(accountId, "credit_topup", 5 * M);
+  await credit(accountId, "grant", 2 * M);
+  await fee(accountId, 2 * M, "api");
+  const balance = await balanceOf(accountId);
+  expect(balance.creditsMicros).toBe(14 * M);
+  // $15 topped up less $3 of fees; the $2 grant is unpaid.
+  expect(balance.paidCreditsMicros).toBe(12 * M);
+  expect(balance.byokPlatformFeeMonthMicros).toBe(3 * M);
+  const [latest] = await shared.admin<{ chain: Record<string, number | string | null> }[]>`
+    select metadata->'paidCreditTotals' chain from credit_ledger_entries
+    where account_id = ${accountId} and metadata ? 'paidCreditTotals'
+    order by created_at desc, (metadata->'paidCreditTotals'->'n') desc limit 1`;
+  expect(latest!.chain.n).toBe(5);
+  expect(latest!.chain.paidPart).toBe(12 * M);
+  expect(latest!.chain.paidInflow).toBe(15 * M);
+  expect(latest!.chain.feesInMonth).toBe(3 * M);
+  // Every receipt is stamped after the one before it.
+  const [order] = await shared.admin<{ ordered: boolean }[]>`
+    select bool_and(created_at > previous) ordered from (
+      select created_at, lag(created_at) over (order by (metadata->'paidCreditTotals'->>'n')::int) previous
+      from credit_ledger_entries where account_id = ${accountId} and metadata ? 'paidCreditTotals') receipts
+    where previous is not null`;
+  expect(order!.ordered).toBe(true);
+}, 180_000);
+
 test("fee reads and settlement read the ledger once, even after an unfunded fee", async () => {
   if (!client || !shared) return;
   const accountId = await account("free");
