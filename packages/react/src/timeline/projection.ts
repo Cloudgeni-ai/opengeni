@@ -293,7 +293,8 @@ export function buildTimeline(
   // answer is on the wait the moment it is recorded, before work resumes.
   const approvalWaitsById = new Map<string, { notice: NoticeItem; turnId: string | null }>();
   // How each approval was first worded: a later wait that asks again about
-  // the ones still open may carry no display of its own.
+  // the ones still open may carry no display of its own, or other words, and
+  // history keeps the question the person first saw.
   const approvalWordingById = new Map<
     string,
     Pick<NonNullable<NoticeItem["approvalActions"]>[number], "title" | "facts">
@@ -1409,16 +1410,15 @@ export function buildTimeline(
         }
         const approvalActions = approvalActionsOf(payload).map((action) => {
           const earlier = approvalWordingById.get(action.id);
-          const facts = action.facts ?? earlier?.facts;
-          const worded = {
-            ...action,
-            title: action.title ?? earlier?.title ?? null,
-            ...(facts ? { facts } : {}),
-          };
+          if (earlier) {
+            const { facts: _later, ...rest } = action;
+            return { ...rest, ...earlier };
+          }
+          const worded = { ...action, title: action.title ?? null };
           if (worded.title)
             approvalWordingById.set(action.id, {
               title: worded.title,
-              ...(facts ? { facts } : {}),
+              ...(action.facts ? { facts: action.facts } : {}),
             });
           return worded;
         });

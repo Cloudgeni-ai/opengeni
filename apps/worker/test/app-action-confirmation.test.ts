@@ -308,3 +308,86 @@ test("a failed lookup keeps the plain question; the card still asks", async () =
   });
   expect(seen[0]!.call.reviewContext).not.toHaveProperty("targetFacts");
 });
+
+test("a resumed attempt asks with the words first saved, without reading the targets again", async () => {
+  const { seen, policy } = recording();
+  let looked = 0;
+  const cards = new Map();
+  const hooks = withAppActionConfirmation(policy, {
+    workspaceId: "ws-1",
+    sessionId: "chat-1",
+    authority: async () => ({ kind: "confirm", subjectId: "user:bendik", permissions: [] }),
+    targets: async () => {
+      looked += 1;
+      // Renamed since, or a lookup that timed out this time.
+      return { connectionId: { kind: "connection", name: "Renamed" } };
+    },
+    saved: async (approvalId) =>
+      approvalId === "call-1"
+        ? {
+            title: "Remove the Gmail connection for bendik@cloudgeni.ai?",
+            targetFacts: [{ label: "Added", value: "14 Oct 2026, 07:41 UTC" }],
+          }
+        : undefined,
+    cards,
+  });
+  await hooks.prepare(appCall("call-1", removal("c-gmail")));
+  expect(looked).toBe(0);
+  expect(seen[0]!.call.reviewContext).toMatchObject({
+    title: "Remove the Gmail connection for bendik@cloudgeni.ai?",
+    targetFacts: [{ label: "Added", value: "14 Oct 2026, 07:41 UTC" }],
+  });
+  expect(cards.get("call-1")).toMatchObject({
+    title: "Remove the Gmail connection for bendik@cloudgeni.ai?",
+  });
+  // A call never saved before is read as usual.
+  await hooks.prepare(appCall("call-2", removal("c-other")));
+  expect(looked).toBe(1);
+});
+
+test("hooks running at once for one call share one decision and one lookup", async () => {
+  const { seen, policy } = recording();
+  let looked = 0;
+  let checks = 0;
+  const hooks = withAppActionConfirmation(policy, {
+    workspaceId: "ws-1",
+    sessionId: "chat-1",
+    authority: async () => {
+      checks += 1;
+      return { kind: "confirm", subjectId: "user:bendik", permissions: [] };
+    },
+    targets: async () => {
+      looked += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { connectionId: { kind: "connection", name: `Gmail ${looked}` } };
+    },
+  });
+  await Promise.all([
+    hooks.prepare(appCall("call-1", removal("c-gmail"))),
+    hooks.begin(appCall("call-1", removal("c-gmail"))),
+  ]);
+  expect([checks, looked]).toEqual([1, 1]);
+  expect(new Set(seen.map((entry) => entry.call.reviewContext?.title))).toEqual(
+    new Set(["Remove the Gmail 1 connection?"]),
+  );
+});
+
+test("a card's title fits the saved review's 256 characters", async () => {
+  const { seen, policy } = recording();
+  const hooks = withAppActionConfirmation(policy, {
+    workspaceId: "ws-1",
+    sessionId: "chat-1",
+    authority: async () => ({ kind: "confirm", subjectId: "user:bendik", permissions: [] }),
+    targets: async () => ({
+      workspaceId: { kind: "workspace", name: "W".repeat(80) },
+      connectionId: { kind: "connection", name: "N".repeat(80), account: "A".repeat(80) },
+    }),
+  });
+  await hooks.prepare(
+    appCall("call-1", {
+      id: "deleteConnection",
+      pathParameters: { workspaceId: "ws-2", connectionId: "c-1" },
+    }),
+  );
+  expect(seen[0]!.call.reviewContext!.title!.length).toBeLessThanOrEqual(256);
+});

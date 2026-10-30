@@ -287,7 +287,10 @@ export function appActionCallPathIds(
 function plainName(text: string | undefined): string | undefined {
   const line = text
     ?.replace(/[\u0000-\u001f\u007f\u2028\u2029]/gu, " ")
-    .replace(/[“”]/g, '"')
+    // Format characters (bidi overrides, zero-width) could reorder the question.
+    .replace(/\p{Cf}/gu, "")
+    // Quotes that could pass for the question's own.
+    .replace(/[“”„‟«»‹›＂〝〞]/gu, '"')
     .replace(/\s+/g, " ")
     .trim();
   if (!line) return undefined;
@@ -444,8 +447,12 @@ export function appActionConfirmationTitle(
       const itself = / (session|workspace)$/.exec(action);
       if (itself && parameter === (itself[1] === "session" ? "sessionId" : "workspaceId"))
         return `${action.slice(0, itself.index)} ${itself[1] === "session" ? chat : workspace}?`;
-      if (!label || parameter === "workspaceId" || parameter === "sessionId")
+      if (!label || parameter === "workspaceId" || parameter === "sessionId") {
+        // A route-named action never puts its request line beside a name.
+        if (!/^[a-z][A-Za-z0-9]*$/.test(entry.id) && where.includes("“"))
+          return `${entry.method === "DELETE" ? "Delete something" : "Make a change"}${where}?`;
         return `${action}${where}?`;
+      }
       // Somewhere other than here is named too; here goes without saying.
       const elsewhere =
         typeof path?.workspaceId === "string" && path.workspaceId !== here.workspaceId
@@ -458,32 +465,73 @@ export function appActionConfirmationTitle(
         const account = plainName(target!.account);
         return `Remove the ${name} connection${account && account !== name ? ` for ${account}` : ""}${elsewhere}?`;
       }
-      return `${routeAction(entry, parameter!, target!) ?? action} “${label}”${elsewhere}?`;
+      return `${targetAction(entry, action, parameter!, target!)} “${label}”${elsewhere}?`;
     }
   }
 }
 
+/** Route segments that act on what precedes them ("…/:taskId/pause"), so it is named directly. */
+const ACTING_SEGMENTS: Record<string, string> = {
+  activate: "Activate",
+  disable: "Disable",
+  duplicate: "Duplicate",
+  enable: "Enable",
+  end: "End",
+  heartbeat: "Heartbeat",
+  move: "Move",
+  opened: "Open",
+  pause: "Pause",
+  prepare: "Prepare",
+  reconnect: "Reconnect",
+  redeem: "Redeem",
+  refresh: "Refresh",
+  "refresh-access": "Refresh access of",
+  reindex: "Reindex",
+  restore: "Restore",
+  resume: "Resume",
+  retry: "Retry",
+  revoke: "Revoke",
+  rollback: "Roll back",
+  "rotate-secret": "Rotate the secret of",
+  suspend: "Suspend",
+  sync: "Sync",
+  takedown: "Take down",
+  test: "Test",
+  trigger: "Trigger",
+  verify: "Verify",
+};
+
 /**
- * "Delete Site", "Restore vault item", "Change the approval of vault item":
- * an action the catalog names only by its route, in words from that route
- * and the kind of what it found, never "Run DELETE /v1/…".
+ * The words before a target's quoted name: "Delete scheduled task", "Add
+ * document in document collection" when the target holds what changes,
+ * "Change the approval of vault item" for an action the catalog names only
+ * by its route; never "Run DELETE /v1/…" before a name.
  */
-function routeAction(
+function targetAction(
   entry: ActionCatalogEntry,
+  action: string,
   parameter: string,
   target: AppActionTarget,
-): string | undefined {
-  if (/^[a-z][A-Za-z0-9]*$/.test(entry.id)) return undefined;
+): string {
   const segments = entry.path.split("/");
   const after = segments.slice(segments.indexOf(`:${parameter}`) + 1);
-  if (after.some((segment) => segment.startsWith(":") || !/^[a-z][a-z-]*$/.test(segment)))
-    return undefined;
-  const verb = entry.method === "DELETE" ? "Delete" : "Change";
+  const last = after.at(-1);
+  const acting = last !== undefined && Object.hasOwn(ACTING_SEGMENTS, last);
   const kind = target.kind;
+  if (/^[a-z][A-Za-z0-9]*$/.test(entry.id)) {
+    // The target is what changes, or holds it: "Add document in …".
+    if (after.length === 0 || acting || action.toLowerCase().endsWith(kind.toLowerCase()))
+      return action;
+    return `${action} ${entry.method === "POST" ? "in" : "for"} ${kind}`;
+  }
+  const words = after.slice(0, acting ? -1 : undefined);
+  const plain = words.every((segment) => /^[a-z][a-z-]*$/.test(segment)) && words.length <= 2;
+  const part = words.join(" ").replaceAll("-", " ");
+  if (acting && plain) return `${ACTING_SEGMENTS[last!]}${part ? ` the ${part} of` : ""} ${kind}`;
+  if (entry.method === "POST") return `Make a change to ${kind}`;
+  const verb = entry.method === "DELETE" ? "Delete" : "Change";
   if (after.length === 0) return `${verb} ${kind}`;
-  if (after.length === 1 && entry.method === "POST")
-    return `${capitalized(after[0]!.replaceAll("-", " "))} ${kind}`;
-  return `${verb} the ${after.join(" ").replaceAll("-", " ")} of ${kind}`;
+  return plain ? `${verb} the ${part} of ${kind}` : `${verb} part of ${kind}`;
 }
 
 /**

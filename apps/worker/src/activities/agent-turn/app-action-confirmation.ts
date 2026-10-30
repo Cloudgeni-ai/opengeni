@@ -47,8 +47,12 @@ export type AppActionApprovalCard = {
 function confirmationTitle(args: unknown, chat: AppActionChat, targets?: AppActionTargets): string {
   const title = appActionConfirmationTitle(args, chat, targets);
   const price = chat.settings ? videoPolicyCardPrice(chat.settings, args) : null;
-  return price ? `${title} ${price}` : title;
+  const full = price ? `${title} ${price}` : title;
+  // The saved review's title holds at most 256 characters.
+  return full.length > TITLE_LIMIT ? `${full.slice(0, TITLE_LIMIT - 1).trimEnd()}…` : full;
 }
+
+const TITLE_LIMIT = 256;
 
 /**
  * Word an app action's pending approval as the same plain question its saved
@@ -108,23 +112,38 @@ export function withAppActionConfirmation(
     authority: () => Promise<AppActionAuthority>;
     /** What the call's ids name, read as the person the chat acts for. */
     targets?: (args: unknown, reader: AppActionReader) => Promise<AppActionTargets>;
+    /**
+     * The card a previous attempt saved for this call, so a resumed attempt
+     * asks with the same words instead of reading its targets again.
+     */
+    saved?: (approvalId: string) => Promise<AppActionApprovalCard | undefined>;
     cards?: Map<string, AppActionApprovalCard>;
   },
 ): ConnectorActionPolicyHooks {
-  const decided = new Map<string, AppActionApprovalCard | null>();
+  // In flight too, so parallel hooks for one call share one decision.
+  const decided = new Map<string, Promise<AppActionApprovalCard | null>>();
   const decide = async (call: ConnectorActionToolCall): Promise<ConnectorActionToolCall> => {
     if (call.serverId !== "opengeni" || call.toolName !== APP_ACTION_CALL_TOOL_NAME) return call;
-    let card = decided.get(call.approvalId);
-    if (card === undefined) {
-      const authority =
-        appActionCallNeedsConfirmation(call.arguments) &&
-        !appActionCallHandlesSecrets(call.arguments)
-          ? await chat.authority()
-          : null;
-      card = authority?.kind === "confirm" ? await cardFor(call.arguments, authority) : null;
-      decided.set(call.approvalId, card);
-      if (card) chat.cards?.set(call.approvalId, card);
+    let pending = decided.get(call.approvalId);
+    if (!pending) {
+      pending = (async () => {
+        const authority =
+          appActionCallNeedsConfirmation(call.arguments) &&
+          !appActionCallHandlesSecrets(call.arguments)
+            ? await chat.authority()
+            : null;
+        if (authority?.kind !== "confirm") return null;
+        const card =
+          (await chat.saved?.(call.approvalId).catch(() => undefined)) ??
+          (await cardFor(call.arguments, authority));
+        chat.cards?.set(call.approvalId, card);
+        return card;
+      })();
+      decided.set(call.approvalId, pending);
+      // A failed decision is decided again next time.
+      pending.catch(() => decided.delete(call.approvalId));
     }
+    const card = await pending;
     if (card) {
       return {
         ...call,

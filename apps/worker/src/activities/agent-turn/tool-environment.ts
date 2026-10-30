@@ -2,7 +2,10 @@ import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
 import { firstPartyToolsForAttendance, sessionIsUnattended } from "./unattended";
-import { resolveAppActionTargets } from "@opengeni/db/app-action-targets";
+import {
+  resolveAppActionTargets,
+  savedAppActionApprovalCard,
+} from "@opengeni/db/app-action-targets";
 import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
@@ -587,7 +590,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             subjectId: reader.subjectId,
-            organizationAdmin: reader.permissions.includes("account:admin"),
             onLookupError: (error, parameter) =>
               console.warn("app action target lookup failed", {
                 parameter,
@@ -596,6 +598,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           },
           args,
         ),
+      saved: async (approvalId) =>
+        await savedAppActionApprovalCard(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          approvalId,
+        }),
       cards: eventing.appActionApprovalCards,
     },
   );

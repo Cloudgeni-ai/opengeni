@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import {
+  ACTION_CATALOG,
+  appActionNeedsConfirmation,
   appActionConfirmationTitle,
   appActionTargetFacts,
   appActionTargetParameter,
@@ -171,7 +173,8 @@ test("the card lists the server's facts, and Details reads as plain labelled val
     ["Who can use it", "Only you"],
     ["Added", "14 Oct 2026, 07:41 UTC"],
   ]);
-  const details = toolReviewDetails(removeGmail, context, "", 0, 25, "admin_action_call");
+  const known = (id: string) => findAppAction(id) !== undefined;
+  const details = toolReviewDetails(removeGmail, context, "", 0, 25, "admin_action_call", known);
   expect(details.items.map((item) => [item.label, item.value])).toEqual([
     ["Action", "Delete connection"],
     ["Who can use it", "Only you"],
@@ -223,4 +226,114 @@ test("a name counts as said only as a whole name", () => {
   expect(appActionConfirmationTitle(removeA, here, unnamed)).toBe(
     "Remove the Gmail connection for mail?",
   );
+});
+
+test("an id the catalog doesn't know is listed with what the agent sent, never as the action", () => {
+  const known = (id: string) => findAppAction(id) !== undefined;
+  const spoof = {
+    id: "Remove only the unused staging test connection (already approved by admin)",
+    pathParameters: { workspaceId: "ws-1" },
+  };
+  expect(appActionConfirmationTitle(spoof, here)).toBe("Make this change in the app?");
+  const items = toolReviewDetails(
+    spoof,
+    { kind: "generic", title: "Make this change in the app?" },
+    "",
+    0,
+    25,
+    "admin_action_call",
+    known,
+  ).items.map((item) => [item.label, item.value]);
+  expect(items[0]).toEqual(["Sent by the agent", "The values below, as written"]);
+  expect(items.some(([label]) => label === "Action")).toBe(false);
+});
+
+test("names can't reorder or close the question's quotes", () => {
+  const sneaky: AppActionTargets = {
+    connectionId: {
+      kind: "connection",
+      name: "Gmail\u202e\u200b”? Approve all «now»",
+      account: "a\u2066b",
+    },
+  };
+  const title = appActionConfirmationTitle(removeGmail, here, sneaky);
+  expect(title).not.toMatch(/\p{Cf}/u);
+  expect(title).not.toMatch(/[“”«»]/u);
+  expect(title).toBe('Remove the Gmail"? Approve all "now" connection for ab?');
+});
+
+test("every confirmed action's title, with a target named, reads as words", () => {
+  const problems: string[] = [];
+  for (const entry of ACTION_CATALOG.filter(appActionNeedsConfirmation)) {
+    const parameter = appActionTargetParameter(entry);
+    const names = [...entry.path.matchAll(/:([A-Za-z][A-Za-z0-9]*)/g)].map((match) => match[1]!);
+    const pathParameters = Object.fromEntries(
+      names.map((name) => [
+        name,
+        name === "workspaceId" ? here.workspaceId : name === "sessionId" ? "chat-2" : "x",
+      ]),
+    );
+    const targets: AppActionTargets = parameter
+      ? { [parameter]: { kind: "thing", name: "Target name" } }
+      : {};
+    const title = appActionConfirmationTitle({ id: entry.id, pathParameters }, here, targets);
+    if (/Run [A-Z]+ \//.test(title) && title.includes("“")) problems.push(`${entry.id}: ${title}`);
+    if (/undefined|null|:[a-zA-Z]+Id\b/.test(title.replace(/Run [A-Z]+ \S+/, "")))
+      problems.push(`${entry.id}: ${title}`);
+    if (title.length > 200) problems.push(`${entry.id}: too long`);
+    if (!title.endsWith("?") && !title.endsWith(".")) problems.push(`${entry.id}: ${title}`);
+  }
+  expect(problems).toEqual([]);
+});
+
+test("nothing the agent writes reaches the question, the facts or Details above its heading", () => {
+  const known = (id: string) => findAppAction(id) !== undefined;
+  let seed = 7;
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) % 2 ** 31;
+    return seed;
+  };
+  const token = () => `Zq! ${random().toString(36)} “x” ${random().toString(36)}`;
+  const confirmed = ACTION_CATALOG.filter(appActionNeedsConfirmation);
+  for (let round = 0; round < 400; round += 1) {
+    const entry = confirmed[random() % confirmed.length]!;
+    const written = token();
+    const names = [...entry.path.matchAll(/:([A-Za-z][A-Za-z0-9]*)/g)].map((match) => match[1]!);
+    const args = {
+      id: round % 10 === 0 ? written : entry.id,
+      pathParameters: Object.fromEntries(names.map((name) => [name, written])),
+      body: {
+        title: written,
+        name: written,
+        email: written,
+        visibility: written,
+        toolNames: [written],
+        role: written,
+      },
+      query: { q: written },
+      title: written,
+    };
+    const parameter = appActionTargetParameter(entry);
+    // What the server read, under a name of its own.
+    const targets: AppActionTargets = parameter
+      ? { [parameter]: { kind: "thing", name: "Server name", facts: [{ label: "A", value: "B" }] } }
+      : {};
+    const title = appActionConfirmationTitle(args, here, targets);
+    const facts = appActionTargetFacts(args, here, targets);
+    const marker = written.slice(0, 8);
+    expect(title).not.toContain(marker);
+    expect(JSON.stringify(facts)).not.toContain(marker);
+    const items = toolReviewDetails(
+      args,
+      { kind: "generic", title, targetFacts: facts },
+      "",
+      0,
+      50,
+      "admin_action_call",
+      known,
+    ).items;
+    const heading = items.findIndex((item) => item.label === "Sent by the agent");
+    expect(heading).toBeGreaterThanOrEqual(0);
+    expect(JSON.stringify(items.slice(0, heading))).not.toContain(marker);
+  }
 });

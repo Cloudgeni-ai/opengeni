@@ -23,7 +23,10 @@ export function approvalHistoryTitle(title: string): string {
     const char = title[index];
     if (char === "“") quoted += 1;
     else if (char === "”") quoted = Math.max(0, quoted - 1);
-    else if (char === "?" && quoted === 0) return title.slice(0, index).trim();
+    // The question ends at a "?" that ends the title or starts another
+    // sentence, so a "?" inside an account name doesn't cut it short.
+    else if (char === "?" && quoted === 0 && /^(\s+\p{Lu}|\s*$)/u.test(title.slice(index + 1)))
+      return title.slice(0, index).trim();
   }
   return title.trim();
 }

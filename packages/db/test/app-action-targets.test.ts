@@ -1,8 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
-import { createDb, type DbClient } from "../src";
-import { resolveAppActionTargets, scheduleSummary } from "../src/app-action-targets";
+import { createDb, createWorkspace, type DbClient } from "../src";
+import {
+  resolveAppActionTargets,
+  savedAppActionApprovalCard,
+  scheduleSummary,
+} from "../src/app-action-targets";
 
 // An app action's approval names what it changes from Opengeni's own records,
 // only in the chat's organization and as the person the chat acts for.
@@ -32,8 +36,13 @@ async function organization(label: string) {
   return { accountId: account!.id, workspaceId: await workspace("Staging"), workspace };
 }
 
-/** A member of the organization and of the workspace. */
-async function member(accountId: string, workspaceId: string, role = "member") {
+/** A member of the organization and of the workspace, with their roles in each. */
+async function member(
+  accountId: string,
+  workspaceId: string,
+  role = "member",
+  workspaceRole = "member",
+) {
   const subjectId = `user:${crypto.randomUUID()}`;
   const [personal] = await shared!.admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${accountId}, 'Personal') returning id`;
@@ -41,8 +50,8 @@ async function member(accountId: string, workspaceId: string, role = "member") {
     insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
     values (${accountId}, ${subjectId}, ${role}, 'active', ${personal!.id})`;
   await shared!.admin`
-    insert into workspace_memberships (account_id, workspace_id, subject_id)
-    values (${accountId}, ${workspaceId}, ${subjectId})`;
+    insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+    values (${accountId}, ${workspaceId}, ${subjectId}, ${workspaceRole})`;
   return subjectId;
 }
 
@@ -101,7 +110,7 @@ test("a connection resolves to its integration, account and telling facts", asyn
   });
   const scope = { accountId: org.accountId, workspaceId: org.workspaceId, subjectId: person };
   expect(await resolveAppActionTargets(client.db, scope, removal(org.workspaceId, gmail))).toEqual({
-    workspaceId: { kind: "workspace", name: "Staging" },
+    // The chat's own workspace is "this workspace", with no lookup.
     connectionId: {
       kind: "connection",
       name: "Gmail",
@@ -128,7 +137,7 @@ test("a connection resolves to its integration, account and telling facts", asyn
   });
 });
 
-test("what the person can't see, or another organization's, reads as not found", async () => {
+test("what the person can't see reads as not found; another organization's stays unresolved", async () => {
   if (!client) return;
   const org = await organization("Cloudgeni");
   const other = await organization("Someone else");
@@ -151,16 +160,14 @@ test("what the person can't see, or another organization's, reads as not found",
     removal(org.workspaceId, theirs),
   );
   expect(colleague.connectionId).toEqual({ kind: "connection" });
-  // The other organization's workspace and its connection: nothing is named.
+  // The other organization's workspace and its connection may exist: nothing
+  // is named, and nothing is called not found.
   const stranger = await resolveAppActionTargets(
     client.db,
     scope,
     removal(other.workspaceId, foreign),
   );
-  expect(stranger).toEqual({
-    workspaceId: { kind: "workspace" },
-    connectionId: { kind: "connection" },
-  });
+  expect(stranger).toEqual({});
   expect(JSON.stringify(stranger)).not.toContain("stranger");
   // An id that isn't one, or a route without a lookup, names nothing either.
   expect(
@@ -194,9 +201,15 @@ test("another workspace is named only for someone who acts in it", async () => {
   const outsider = await member(org.accountId, org.workspaceId);
   const scope = { accountId: org.accountId, workspaceId: org.workspaceId, subjectId: outsider };
   expect(await resolveAppActionTargets(client.db, scope, call)).toEqual({});
+  // A workspace admin of Staging is still an outsider to Marketing.
+  const stagingAdmin = await member(org.accountId, org.workspaceId, "member", "admin");
+  expect(
+    await resolveAppActionTargets(client.db, { ...scope, subjectId: stagingAdmin }, call),
+  ).toEqual({});
   // An organization admin, or a member of Marketing, sees it as the API does.
+  const organizationAdmin = await member(org.accountId, org.workspaceId, "admin");
   for (const reader of [
-    { ...scope, organizationAdmin: true },
+    { ...scope, subjectId: organizationAdmin },
     { ...scope, subjectId: subjectId },
   ]) {
     const targets = await resolveAppActionTargets(client.db, reader, call);
@@ -300,7 +313,13 @@ test("organization records and other people's keys need an admin; webhooks show 
     pathParameters: { organizationId: org.accountId, [parameter]: value },
   });
   const member_ = { accountId: org.accountId, workspaceId: org.workspaceId, subjectId: person };
-  const admin = { ...member_, organizationAdmin: true };
+  const admin = { ...member_, subjectId: await member(org.accountId, org.workspaceId, "admin") };
+  // A workspace admin whose organization role is member: the turn's frozen
+  // grant can imply account:admin for them, but the API's routes don't.
+  const workspaceAdmin = {
+    ...member_,
+    subjectId: await member(org.accountId, org.workspaceId, "member", "admin"),
+  };
   const read = async (scope: typeof member_, value: ReturnType<typeof call>, parameter: string) =>
     (await resolveAppActionTargets(client!.db, scope, value))[parameter];
   const deleteOrgKey = call("deleteOrganizationApiKey", "apiKeyId", orgKey);
@@ -312,6 +331,21 @@ test("organization records and other people's keys need an admin; webhooks show 
   expect(await read(member_, revokeMine, "apiKeyId")).toMatchObject({ name: "My laptop" });
   expect(await read(member_, revokeTheirs, "apiKeyId")).toBeUndefined();
   expect(await read(member_, deleteHook, "webhookId")).toBeUndefined();
+  for (const value of [deleteOrgKey, revokeTheirs]) {
+    expect(await read(workspaceAdmin, value, "apiKeyId")).toBeUndefined();
+  }
+  expect(await read(workspaceAdmin, deleteHook, "webhookId")).toBeUndefined();
+  // Another organization's id is unresolved, not "not found".
+  expect(
+    await read(
+      admin,
+      {
+        ...deleteOrgKey,
+        pathParameters: { organizationId: crypto.randomUUID(), apiKeyId: orgKey },
+      },
+      "apiKeyId",
+    ),
+  ).toBeUndefined();
   // An admin sees what the API shows them.
   expect(await read(admin, deleteOrgKey, "apiKeyId")).toMatchObject({ name: "CI deploy key" });
   expect(await read(admin, revokeTheirs, "apiKeyId")).toMatchObject({ name: "Their laptop" });
@@ -363,7 +397,7 @@ test("every confirmed action's lookup runs against the real schema and says not 
     await import("@opengeni/contracts/app-actions");
   const { appActionTargetLookupKey } = await import("../src/app-action-targets");
   const org = await organization("Cloudgeni");
-  // An owner, who may read every target an action can name.
+  // An owner, who may read every target an action can name, read live.
   const person = await member(org.accountId, org.workspaceId, "owner");
   const failures: string[] = [];
   let checked = 0;
@@ -387,7 +421,6 @@ test("every confirmed action's lookup runs against the real schema and says not 
         accountId: org.accountId,
         workspaceId: org.workspaceId,
         subjectId: person,
-        organizationAdmin: true,
         onLookupError: (error, name) =>
           failures.push(
             `${entry.id} ${name}: ${String((error as { cause?: Error }).cause?.message ?? (error as Error).message).slice(0, 200)}`,
@@ -396,7 +429,7 @@ test("every confirmed action's lookup runs against the real schema and says not 
       { id: entry.id, pathParameters },
     );
     for (const name of names) {
-      if (!appActionTargetLookupKey(entry.path, name)) continue;
+      if (!appActionTargetLookupKey(entry.path, name) || name === "workspaceId") continue;
       checked += 1;
       // Found (the workspace and organization themselves) or plainly not found; never an error.
       if (!targets[name]) failures.push(`${entry.id} ${name}: unresolved`);
@@ -407,3 +440,113 @@ test("every confirmed action's lookup runs against the real schema and says not 
   expect(failures).toEqual([]);
   expect(checked).toBeGreaterThan(100);
 }, 120_000);
+
+test("a member never sees a colleague's private rows or the workspace's keys and webhooks", async () => {
+  if (!client) return;
+  const org = await organization("Cloudgeni");
+  const person = await member(org.accountId, org.workspaceId);
+  const colleague = await member(org.accountId, org.workspaceId);
+  const workspaceAdmin = await member(org.accountId, org.workspaceId, "member", "admin");
+  const [source] = await shared!.admin<{ id: string }[]>`
+    insert into event_sources (account_id, workspace_id, kind, name, visibility,
+      owner_subject_id, created_by_subject_id)
+    values (${org.accountId}, ${org.workspaceId}, 'workspace', 'Colleague private source',
+      'private', ${colleague}, ${colleague})
+    returning id`;
+  const [template] = await shared!.admin<{ id: string }[]>`
+    insert into bot_templates (account_id, workspace_id, name, setup_instructions, visibility,
+      created_by_subject_id)
+    values (${org.accountId}, ${org.workspaceId}, 'Colleague private template', 'x', 'private',
+      ${colleague})
+    returning id`;
+  const [key] = await shared!.admin<{ id: string }[]>`
+    insert into api_keys (account_id, workspace_id, name, prefix, key_hash, credential_kind)
+    values (${org.accountId}, ${org.workspaceId}, 'Prod deploy key', 'og_zz12',
+      ${crypto.randomUUID()}, 'workspace')
+    returning id`;
+  const [hook] = await shared!.admin<{ id: string }[]>`
+    insert into workspace_webhooks (account_id, workspace_id, url, secret_encrypted, event_types)
+    values (${org.accountId}, ${org.workspaceId}, 'https://ops.example.com/hook', 'sealed',
+      ${["turn.completed"]})
+    returning id`;
+  const calls = [
+    ["deleteEventSource", "sourceId", source!.id],
+    ["deleteBotTemplate", "templateId", template!.id],
+    ["deleteApiKey", "apiKeyId", key!.id],
+    ["deleteWorkspaceWebhook", "webhookId", hook!.id],
+  ] as const;
+  const read = async (subjectId: string, [id, parameter, value]: (typeof calls)[number]) =>
+    (
+      await resolveAppActionTargets(
+        client!.db,
+        { accountId: org.accountId, workspaceId: org.workspaceId, subjectId },
+        { id, pathParameters: { workspaceId: org.workspaceId, [parameter]: value } },
+      )
+    )[parameter];
+  for (const call of calls) {
+    const target = await read(person, call);
+    expect(target?.name).toBeUndefined();
+    expect(JSON.stringify(target ?? {})).not.toMatch(/Colleague|Prod deploy|ops\.example/u);
+  }
+  // Their owner sees the private ones; a workspace admin manages keys and webhooks.
+  expect((await read(colleague, calls[0]))?.name).toBe("Colleague private source");
+  expect((await read(colleague, calls[1]))?.name).toBe("Colleague private template");
+  expect((await read(workspaceAdmin, calls[2]))?.name).toBe("Prod deploy key");
+  expect((await read(workspaceAdmin, calls[3]))?.name).toBe("ops.example.com");
+});
+
+test("a resumed attempt reads the wording its approval was first saved with", async () => {
+  if (!client) return;
+  const org = await organization("Cloudgeni");
+  // A fully set up workspace, so a chat can be created in it.
+  const workspace = await createWorkspace(client.db, { accountId: org.accountId, name: "Ops" });
+  const ids = {
+    workspaceId: workspace.id,
+    sessionId: crypto.randomUUID(),
+    turnId: crypto.randomUUID(),
+  };
+  // Only the saved request matters here, not the turn and attempt it belongs to.
+  await shared!.admin.begin(async (tx) => {
+    await tx`
+      insert into sessions(id, account_id, workspace_id, initial_message, model,
+        reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, tool_policy,
+        root_session_id, status, created_by_kind, created_by_subject_id)
+      values (${ids.sessionId}, ${org.accountId}, ${ids.workspaceId}, 'Remove connections',
+        'test-model', 'medium', 'standard', 'none', ${ids.sessionId},
+        ${tx.json({ mode: "explicit", inheritedFromSessionId: null })}, ${ids.sessionId},
+        'idle', 'subject', 'user:bendik')`;
+    await tx`set local session_replication_role = replica`;
+    await tx`
+      insert into connector_action_requests
+        (account_id, workspace_id, session_id, turn_id, creation_attempt_id,
+         creation_execution_generation, approval_id, initiator_kind, initiator_subject_id,
+         connection_id, server_id, tool_name, action_name, policy_source, policy_decision,
+         action_fingerprint, review_context, status)
+      values (${org.accountId}, ${ids.workspaceId}, ${ids.sessionId}, ${ids.turnId},
+        ${crypto.randomUUID()}, 1, 'call-1', 'subject', 'user:bendik',
+        'session-mcp:opengeni:hash', 'opengeni', 'admin_action_call', 'admin_action_call',
+        'default', 'ask', ${"f".repeat(64)},
+        ${tx.json({
+          kind: "generic",
+          title: "Remove the Gmail connection for bendik@cloudgeni.ai?",
+          targetFacts: [{ label: "Added", value: "14 Oct 2026, 07:41 UTC" }],
+        })},
+        'pending')`;
+  });
+  const scope = { accountId: org.accountId, ...ids };
+  expect(await savedAppActionApprovalCard(client.db, { ...scope, approvalId: "call-1" })).toEqual({
+    title: "Remove the Gmail connection for bendik@cloudgeni.ai?",
+    targetFacts: [{ label: "Added", value: "14 Oct 2026, 07:41 UTC" }],
+  });
+  expect(
+    await savedAppActionApprovalCard(client.db, { ...scope, approvalId: "call-2" }),
+  ).toBeUndefined();
+  // Another turn's request is another question.
+  expect(
+    await savedAppActionApprovalCard(client.db, {
+      ...scope,
+      turnId: crypto.randomUUID(),
+      approvalId: "call-1",
+    }),
+  ).toBeUndefined();
+});

@@ -1025,6 +1025,8 @@ export function toolReviewDetails(
   offset: number,
   limit = 25,
   toolName?: string,
+  /** The app action catalog has this id, so its name is the server's words. */
+  knownAppAction?: (id: string) => boolean,
 ): Omit<ToolReviewDetailsPage, "id" | "actionDigest" | "version"> {
   if (
     !Number.isSafeInteger(offset) ||
@@ -1105,7 +1107,10 @@ export function toolReviewDetails(
     // the server found it, then each value the agent sent under a plain
     // label, set apart so a sent value never passes for a server fact.
     const all: DetailItem[] = [];
-    const action = typeof args.id === "string" ? args.id : undefined;
+    // Only an action the catalog knows is named up here; any other id is
+    // the agent's text and is listed with what it sent.
+    const action =
+      typeof args.id === "string" && knownAppAction?.(args.id) === true ? args.id : undefined;
     if (action)
       all.push({
         label: "Action",
@@ -1119,7 +1124,7 @@ export function toolReviewDetails(
       all.push({ label: fact.label, value: fact.value, truncated: false });
     const sentFrom = all.length;
     Object.entries(args).forEach(([key, entry], index) => {
-      if (key === "id" && typeof entry === "string") return;
+      if (key === "id" && action !== undefined) return;
       const parentPath = fieldPointer(key, index);
       if (
         ["pathParameters", "query", "body"].includes(key) &&

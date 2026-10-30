@@ -225,6 +225,32 @@ describe("an answered approval", () => {
       "You approved “Remove the Linear connection for Bendik · Cloudgeni” (Added: 2 Oct).",
       "You declined “Remove the Linear connection for Bendik · Cloudgeni” (Added: 9 Oct).",
     ]);
+    // Asked again in other words (renamed since, or a lookup that failed):
+    // history still says the question the person first saw.
+    const reworded = buildTimeline(englishText, [
+      ...asking([gmail, drive]),
+      decide(4, "c-1", "approve"),
+      event(5, "session.status.changed", { status: "running" }),
+      event(6, "session.requiresAction", {
+        approvals: [
+          {
+            ...bare(drive),
+            display: {
+              toolName: "admin_action_call",
+              title: "Delete connection in this workspace?",
+            },
+          },
+        ],
+      }),
+      event(7, "session.status.changed", { status: "requires_action" }),
+      decide(8, "c-2", "approve"),
+    ]);
+    const last = reworded.filter(
+      (item): item is NoticeItem => item.kind === "notice" && item.approval === true,
+    );
+    expect(noticeDisplayText(englishText, last.at(-1)!)).toBe(
+      "You approved “Remove the Google Drive connection for bendik@cloudgeni.ai”.",
+    );
   });
 
   test("history keeps a quoted name's own question mark", () => {
@@ -232,6 +258,13 @@ describe("an answered approval", () => {
       "Delete Site “Why?”",
     );
     expect(approvalHistoryTitle("Send email")).toBe("Send email");
+    // An unquoted account label with its own "?" isn't cut short.
+    expect(approvalHistoryTitle("Remove the Gmail connection for who?me@example.com?")).toBe(
+      "Remove the Gmail connection for who?me@example.com",
+    );
+    expect(
+      approvalHistoryTitle("Create a link to this chat? Anyone with the link can read it."),
+    ).toBe("Create a link to this chat");
   });
 
   test("a rejection Opengeni made itself is never the person's", () => {
