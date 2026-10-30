@@ -1386,8 +1386,8 @@ function normalizeGeneratedSessionTitle(
  * versa). `api: "chat"` providers (Fireworks) speak /v1/chat/completions, where
  * the summary is choices[0].message.content; `api: "responses"` (the default,
  * built-in OpenAI/Azure) speaks /v1/responses as before. When no client/api is
- * supplied it uses the built-in OpenAI/Azure Responses path. Non-Azure Responses
- * requests use store:false; the resolved Azure wire profile omits it.
+ * supplied it uses the built-in OpenAI/Azure Responses path. Responses requests
+ * use store:false, Azure included.
  */
 export async function summarizeForCompaction(
   settings: Settings,
@@ -1482,9 +1482,8 @@ export async function summarizeForCompaction(
           // Retain schemas for the warm prefix without letting the checkpoint
           // model select or execute a tool (including a historical Azure tool).
           toolChoice: "none",
-          // The selected provider, not the deployment default, owns this wire
-          // policy. Override any inherited value on a prepared Azure request.
-          ...(azureResponses ? {} : { store: false }),
+          // Override any inherited value: the summary is never read back.
+          store: false,
         },
         outputType: "text",
         tracing: false,
@@ -1498,9 +1497,9 @@ export async function summarizeForCompaction(
           // Azure can select a historical tool despite empty schemas. Keep this
           // verified policy off subscription/gateway transports with other contracts.
           ...(azureResponses ? { toolChoice: "none" as const } : {}),
-          // Azure rejects store:false; the Codex subscription transport enforces
-          // it independently. Other Responses routes remain explicitly storeless.
-          ...(azureResponses ? {} : { store: false }),
+          // Every Responses route is storeless, Azure included; the Codex
+          // subscription transport also enforces it independently.
+          store: false,
           ...(options.promptCacheKey
             ? { providerData: { prompt_cache_key: options.promptCacheKey } }
             : {}),
