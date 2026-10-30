@@ -21,6 +21,7 @@ interface FakePull {
   files: string[];
   labels: string[];
   green: boolean;
+  mergeable?: "MERGEABLE" | "CONFLICTING";
   merged?: string;
 }
 
@@ -85,7 +86,7 @@ class FakeGitHub implements GitHub {
         headRef: p.title === "Version" ? "changeset-release/main" : `branch-${p.number}`,
         sameRepository: true,
         draft: false,
-        mergeable: "MERGEABLE" as const,
+        mergeable: p.mergeable ?? ("MERGEABLE" as const),
         labels: p.labels,
         labeledAt: NOW - 3_600_000 + p.number,
         autoMergeAt: null,
@@ -374,6 +375,60 @@ describe("a batcher pass", () => {
     expect(gh.pulls.get(1)!.merged).toBeDefined();
     expect(gh.pulls.get(2)!.merged).toBeDefined();
     expect(gh.commits.get(await gh.mainSha())!.tree).toBe(built.manifest.members[1]!.tree);
+  });
+
+  test("the first member's new head is checked at its own place in the batch", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    await run(gh, options());
+    const built = gh.batch();
+
+    const fresh = hash("head:1 rebased");
+    gh.sameContent.set(fresh, gh.pulls.get(1)!.head);
+    gh.pulls.get(1)!.head = fresh;
+    await run(gh, options());
+    expect(gh.batch().sha).toBe(built.sha);
+
+    gh.finishCi(built.sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeDefined();
+    expect(gh.pulls.get(2)!.merged).toBeDefined();
+    expect(gh.commits.get(await gh.mainSha())!.tree).toBe(built.manifest.members[1]!.tree);
+  });
+
+  test("a new head that now conflicts is ejected, never landed", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    await run(gh, options());
+    const built = gh.batch();
+
+    const fresh = hash("head:2 conflicting");
+    gh.sameContent.set(fresh, gh.pulls.get(2)!.head);
+    gh.pulls.get(2)!.head = fresh;
+    gh.pulls.get(2)!.mergeable = "CONFLICTING";
+    gh.finishCi(built.sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(2)!.merged).toBeUndefined();
+    expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(1)!.merged).toBeUndefined();
+    expect(gh.refs.get(built.name)).toBeUndefined();
+  });
+
+  test("a Version PR's new head restarts its batch", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(5, { title: "Version" });
+    await run(gh, options());
+    const built = gh.batch();
+
+    const fresh = hash("version regenerated");
+    gh.sameContent.set(fresh, gh.pulls.get(5)!.head);
+    gh.pulls.get(5)!.head = fresh;
+    await run(gh, options());
+    const rebuilt = gh.batch();
+    expect(rebuilt.manifest.id).not.toBe(built.manifest.id);
+    expect(rebuilt.manifest.members[0]).toMatchObject({ number: 5, head: fresh });
   });
 
   test("a member's new head with other content restarts its batch", async () => {

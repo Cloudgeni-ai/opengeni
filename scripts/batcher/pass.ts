@@ -144,7 +144,9 @@ async function observe(ctx: Context): Promise<Observation> {
  * at the member's place in the candidate gives exactly the tree CI is testing
  * there. Merging the same main into a branch again or rebasing it does that, so
  * the batch carries on and lands the new head instead of starting over. Each
- * check merges on a scratch branch; anything unexpected keeps the old rule.
+ * check merges on a scratch branch; anything unexpected keeps the old rule. A
+ * new head that conflicts or takes a used migration number is never kept: it
+ * is ejected. A dry run merges nothing, so it reports every new head.
  */
 async function sameTree(
   ctx: Context,
@@ -155,7 +157,7 @@ async function sameTree(
   const { gh } = ctx;
   const { manifest } = batch;
   const same: Record<number, string> = {};
-  const heads = new Map(pulls.map((p) => [p.number, p.headSha]));
+  const heads = new Map(pulls.filter((p) => p.conflict === null).map((p) => [p.number, p.headSha]));
   const moved = manifest.members.flatMap((member, index) => {
     const head = heads.get(member.number);
     return head !== undefined && head !== member.head && !member.version
@@ -177,8 +179,8 @@ async function sameTree(
   if (sha !== manifest.base) return same;
   for (const { member, index, head } of moved) {
     const scratch = `${BUILD_PREFIX}${manifest.id}-recheck-${member.number}`;
-    await gh.createBranch(scratch, before[index]!);
     try {
+      await gh.createBranch(scratch, before[index]!);
       const result = await gh.mergeInto(
         scratch,
         head,
