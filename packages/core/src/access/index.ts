@@ -1163,7 +1163,16 @@ export async function requireWorkspaceContributorGrant(
   deps: AccessDeps,
   workspaceId: string,
 ): Promise<AccessGrant> {
-  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  // A first-use external membership holds only the defaults, which never pass
+  // this rule (people from another product aren't contributors, and the
+  // defaults lack workspace:admin), so a refused request creates nothing.
+  const authorization = await accessGrantAuthorization(
+    await requireAccessContext(c, deps),
+    deps,
+    workspaceId,
+    undefined,
+    { firstUseMembership: true, firstUseRequires: "workspace:admin" },
+  );
   const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
   if (await workspaceContributionAuthorized(deps, authorization, workspaceId)) return grant;
   throw new MissingPermissionRefusal("sessions:create", {
@@ -1443,7 +1452,15 @@ async function accessGrantAuthorization(
   deps: AccessDeps,
   workspaceId: string,
   permission?: Permission,
-  options: { firstUseMembership?: boolean } = {},
+  options: {
+    firstUseMembership?: boolean;
+    /**
+     * What a first-use membership would need for the request to succeed when
+     * the route decides after resolving (no `permission`). First use creates
+     * nothing unless the defaults include it.
+     */
+    firstUseRequires?: Permission;
+  } = {},
 ): Promise<AccessGrantAuthorization> {
   // No named-subject or organization-key fallback may widen verified OAuth
   // bounds. These grants came from this resolution's live native access only.
@@ -1498,7 +1515,13 @@ async function accessGrantAuthorization(
       !grant &&
       !personal &&
       options.firstUseMembership === true &&
-      (await provisionExternalMemberOnFirstUse(deps, context, external, workspaceId, permission))
+      (await provisionExternalMemberOnFirstUse(
+        deps,
+        context,
+        external,
+        workspaceId,
+        permission ?? options.firstUseRequires,
+      ))
     ) {
       grant = await membershipGrant();
     }
