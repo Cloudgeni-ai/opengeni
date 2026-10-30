@@ -131,6 +131,19 @@ spec:
             value: '{{ "{{ printf `%.0f` $value }}" }} refusal(s) (10 min)'
             user_impact: 'New sandboxes or wakes fail, so some chats cannot run commands.'
             next_step: 'Check whether the host group is at its maximum size, and raise it or the hosts'' size.'
+        - alert: OpenGeniComputePointersWaiting
+          expr: |
+            max(compute_control_pointers_waiting_hosts{ {{- $scope }}}) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'The control service has not moved the fleet''s stored-copy pointers in, because hosts of an earlier release are still live.'
+            headline: 'Compute upgrade waiting on old hosts'
+            value: '{{ "{{ printf `%.0f` $value }}" }} host(s) of an earlier release'
+            user_impact: 'Hosts of the new release cannot save or restore sandboxes, so sandboxes on them stay awake and cannot move.'
+            next_step: 'Upgrade or drain the hosts the replicas'' logs name as keeping their pointers in the object store.'
+            runbook_url: {{ printf "%s#the-control-service" $runbook }}
         - alert: OpenGeniComputeApiErrors
           expr: |
             (

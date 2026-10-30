@@ -70,6 +70,20 @@ enum Command {
         #[arg(long, default_value = ".")]
         authority: PathBuf,
     },
+    /// Deletes the chunks and manifests in the archive store that no
+    /// pointer the service keeps names any more (ADR 25). Run on a
+    /// schedule, such as daily; safe while hosts archive, on any object
+    /// store. Without `--delete`, only reports. Refused until the fleet's
+    /// pointers are in the service.
+    Sweep {
+        #[command(flatten)]
+        database: StoreArgs,
+        /// The archive store, as `serve --archive` takes it.
+        #[arg(long)]
+        store: String,
+        #[arg(long)]
+        delete: bool,
+    },
 }
 
 #[derive(Args)]
@@ -707,7 +721,70 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Sweep {
+            database,
+            store,
+            delete,
+        } => sweep(&database, &store, delete).await,
     }
+}
+
+/// Sweeps the archive store `url` with the pointers the service keeps in
+/// `database`, printing the report. It goes by the fleet's clock (the
+/// database's), as hosts name what they store by it, and first adopts any
+/// pointer the store still holds that the import missed, so nothing such a
+/// pointer names is deleted.
+async fn sweep(database: &StoreArgs, url: &str, delete: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        database.database != "memory",
+        "a memory store keeps no fleet's pointers"
+    );
+    let store = Arc::new(postgres(database).await?);
+    let imported = store.pointers_imported().await?.context(
+        "the fleet's pointers are not in the service yet: it moves them in once no host \
+         of an earlier release is live, and nothing is swept before",
+    )?;
+    let chunks = ChunkStore::from_url(url)
+        .with_context(|| format!("the archive store {url}"))?
+        .with_context(|| format!("{url} names no object store"))?;
+    let from = chunks.object_pointers();
+    if delete {
+        let adopted = compute_control::pointers::adopt(&*store, &from).await?;
+        if !adopted.is_empty() {
+            eprintln!(
+                "adopted {} pointers the store held that the import missed: {adopted:?}",
+                adopted.len()
+            );
+        }
+    } else {
+        let missed = compute_control::pointers::missed(&*store, &from).await?;
+        if !missed.is_empty() {
+            eprintln!(
+                "{} pointers the store holds were missed by the import and would be adopted \
+                 before a sweep that deletes; what they name counts as unnamed here: {missed:?}",
+                missed.len()
+            );
+        }
+    }
+    let pointers = Arc::new(compute_control::pointers::Pointers::new(store));
+    let fleet_ms = pointers.now_ms().await?;
+    let chunks =
+        chunks
+            .with_pointers(pointers)
+            .with_clock(compute_storage::fresh::Clock::following(Arc::new(
+                compute_storage::fresh::Heard::at(fleet_ms),
+            )));
+    let chunks = &chunks;
+    let moved = std::time::UNIX_EPOCH + std::time::Duration::from_millis(imported.at_ms);
+    let report = compute_storage::sweep::sweep(
+        chunks,
+        |pointer| async move { compute_storage::copy::names(chunks, &pointer).await },
+        delete,
+        moved,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 /// Writes a new authority to `out`, refusing to replace one there.

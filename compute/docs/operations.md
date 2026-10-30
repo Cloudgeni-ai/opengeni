@@ -241,10 +241,10 @@ computeControl:
       iam.gke.io/gcp-service-account: opengeni-compute-control@example.iam.gserviceaccount.com
 ```
 
-The daily sweep of the store (ADR 17) runs as a CronJob from the same
-image and identity (`computeControl.sweep`). It deletes only from Google
-Cloud Storage; with an `az://` or `s3://` archive turn it off
-(`sweep.enabled: false`), which the chart requires.
+The daily sweep of the store (ADR 17, 25) runs as a CronJob from the same
+image, identity and database (`computeControl.sweep`), as `compute-control
+sweep`: it reads the pointers the service keeps. It deletes on any archive,
+`gs://`, `az://` or `s3://`.
 
 ### Hosts
 
@@ -820,22 +820,52 @@ before users move to compute from Modal:
 
 - **Deleting a sandbox: its pointer goes last, its bytes later.** Removal
   records the intent, stops the VM, removes its network and then deletes
-  the pointer in object storage; a step that fails is tried again, and the
-  sandbox shows as removing (or blocked) until all are done. A daily sweep
-  (`compute-host sweep --store ... --delete`) then deletes the chunks and
-  manifests no pointer names that were stored more than about a week
-  before it began ([ADR 17](adr/0017-sweeping-unnamed-chunks.md)). Age
-  counts from when an object was last stored, so a copy archived long ago
-  goes at the first sweep after nothing names it. A chunk another sandbox
-  still names stays: identical content is shared.
+  its pointer; a step that fails is tried again, and the sandbox shows as
+  removing (or blocked) until all are done. A daily sweep then deletes the
+  chunks and manifests no pointer names whose day ended at least a whole
+  day before it began, two to three days after the last pointer naming
+  them went ([ADR 25](adr/0025-pointers-in-the-control-service-and-objects-by-day.md)).
+  Objects in the old layout (`chunks/v1`, `manifests/v1`) go once they
+  were last stored more than a week before the sweep. A chunk another
+  sandbox still names stays: identical content is shared.
+- **Where pointers live.** In a fleet the control service keeps them, in
+  its database (`compute_pointers`); the sweep runs from the control image
+  (`compute-control sweep --store ... --delete`) with that database. A
+  host on its own keeps them in its object store, which must enforce
+  conditional writes (GCS, Azure, S3 itself; not Garage), and sweeps with
+  `compute-host sweep`. When a fleet first runs a release that keeps them
+  in the service, the service moves them in by itself once no host of an
+  earlier release is live, and marks the object store so that nothing
+  sweeps by the pointers left there; until then hosts of the new release
+  neither archive nor restore and the sweep refuses to start, so upgrade
+  every host soon after the service. `compute_control_pointers_imported`
+  says whether the move happened and
+  `compute_control_pointers_waiting_hosts` how many hosts of an earlier
+  release it waits for; `OpenGeniComputePointersWaiting` fires when that
+  stays above zero for 30 minutes. Right after the move, again a few
+  times over the next hour, and before each sweep that deletes, the
+  service adopts any pointer the object store still holds that it has
+  none of (one an import missed on a store that listed it late), and says
+  so. Objects of the old layout, which only those pointers name, are not
+  swept until a week after the move. Copying a fleet's archive to another
+  store is then a copy of its `chunks/` and `manifests/`.
+- **One clock.** Hosts in a fleet name the day of what they store by the
+  fleet's clock, the database's, which the service tells with every
+  pointer answer, moved on between answers by the host's monotonic clock,
+  so a step of its system clock changes nothing; the sweep starts by it
+  too. A host or replica whose own clock is more than a minute from it
+  logs a warning, but stores safely.
+- **The archive store must keep what it acknowledges.** A host drops its
+  local copy once the store holds the chunks, so a store that acknowledges
+  a write before it is durable (Garage in its `dangerous` consistency
+  mode, which acknowledges once one node has it) can lose a stored copy if
+  a node fails in the moment before it passed a write on.
 - **Forgotten memory images** (30 days after last use by default) lose
   their pointer entry together with their working-set pack, and their
   chunks go at a following sweep under the same rule.
-- **Only GCS sweeps delete.** A sweep that deletes needs deletes on
-  condition, which we use on GCS; on Azure and S3 it refuses and only
-  reports, so unnamed chunks stay there until conditional deletes are
-  built for those stores. Deleting a pointer there leaves an empty one,
-  which reads as no copy.
+- **Every store's sweep deletes.** No delete is conditional: a host writes
+  only names of its current day, so a late delete of an older day's name
+  never takes a newer write.
 - **Provider retention comes on top.** GCS soft delete keeps deleted
   objects 7 days by default; set the bucket's policy to what we promise.
 - **Quarantined objects** (stored copies that failed their checksum, kept

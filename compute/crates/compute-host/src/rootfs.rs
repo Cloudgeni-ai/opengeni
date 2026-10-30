@@ -72,7 +72,13 @@ pub async fn build(args: BuildArgs) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let image = match args.store {
         Some(store) => match Chunked::from_url(&store)? {
-            Some(chunked) => chunked.put_rootfs(&args.output).await?,
+            Some(chunked) => {
+                // It writes the image's pointer in the store itself, as a
+                // host on its own keeps them; a fleet's service builds its
+                // images on its hosts, which keep pointers in the service.
+                chunked.check_pointers().await?;
+                chunked.put_rootfs(&args.output).await?
+            }
             None => Directory::new(store).put_rootfs(&args.output).await?,
         },
         None => file_id(&args.output).await?,
