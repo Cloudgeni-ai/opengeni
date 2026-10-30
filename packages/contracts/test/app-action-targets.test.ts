@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   ACTION_CATALOG,
+  appActionCallPathIds,
   appActionNeedsConfirmation,
   appActionConfirmationTitle,
   appActionTargetFacts,
@@ -357,4 +358,17 @@ test("a long name is cut whole, never through an emoji", () => {
     /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/u,
   );
   expect(title).toContain("😀…");
+});
+
+test("ids are read exactly as sent; padded or percent-encoded ones stay unread", () => {
+  const call = (connectionId: string) => ({
+    ...removeGmail,
+    pathParameters: { workspaceId: "ws-1", connectionId },
+  });
+  expect(appActionCallPathIds(call(gmailId))?.ids).toEqual({
+    workspaceId: "ws-1",
+    connectionId: gmailId,
+  });
+  expect(appActionCallPathIds(call(` ${gmailId}`))?.ids).toEqual({ workspaceId: "ws-1" });
+  expect(appActionCallPathIds(call("a%3Ab"))?.ids).toEqual({ workspaceId: "ws-1" });
 });

@@ -278,7 +278,10 @@ export function appActionCallPathIds(
   const ids: Record<string, string> = {};
   for (const [, name] of entry.path.matchAll(/:([A-Za-z][A-Za-z0-9]*)/g)) {
     const value = path?.[name!];
-    if (typeof value === "string" && value.trim()) ids[name!] = value.trim();
+    // Exactly as sent: a padded id, or one a route decodes again ("%3A"),
+    // may not be the record the route acts on, so it's left unread.
+    if (typeof value === "string" && value && value === value.trim() && !value.includes("%"))
+      ids[name!] = value;
   }
   return { entry, ids };
 }

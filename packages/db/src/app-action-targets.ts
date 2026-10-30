@@ -1202,32 +1202,42 @@ const workspaceCustomModelLookup = workspaceRow(
   }),
 );
 
-const organizationCustomModelLookup = organizationRow(
-  "custom model",
-  ["account:admin"],
-  async (db, accountId, id) =>
-    (
-      await db
-        .select({
-          label: schema.organizationModelProviderCustomModels.label,
-          model: schema.organizationModelProviderCustomModels.upstreamModelId,
-        })
-        .from(schema.organizationModelProviderCustomModels)
+/** The organization's own custom models are read as the person, whose admin role their row policy checks. */
+const organizationCustomModelLookup: Lookup = async (where) => {
+  ownOrganization(where);
+  await organizationMay(where, "account:admin");
+  if (!UUID.test(where.id)) return missing("custom model");
+  const models = schema.organizationModelProviderCustomModels;
+  const provider = customModelProvider(where);
+  const row = await withRlsContext(
+    where.db,
+    { accountId: where.accountId, workspaceId: null },
+    async (db) => {
+      await setSubjectRlsContext(db, where.subjectId);
+      const [found] = await db
+        .select({ label: models.label, model: models.upstreamModelId })
+        .from(models)
         .where(
           and(
-            eq(schema.organizationModelProviderCustomModels.id, id),
-            eq(schema.organizationModelProviderCustomModels.accountId, accountId),
-            isNull(schema.organizationModelProviderCustomModels.retiredAt),
+            eq(models.id, where.id),
+            eq(models.accountId, where.accountId),
+            isNull(models.retiredAt),
+            // Only the provider the route manages.
+            provider ? sql`${models.providerKind} = ${provider}` : undefined,
           ),
         )
-        .limit(1)
-    )[0],
-  (row) => ({
-    kind: "custom model",
-    name: row.label?.trim() || row.model,
-    facts: facts(["Model", row.label?.trim() ? row.model : undefined]),
-  }),
-);
+        .limit(1);
+      return found;
+    },
+  );
+  return row
+    ? {
+        kind: "custom model",
+        name: row.label?.trim() || row.model,
+        facts: facts(["Model", row.label?.trim() ? row.model : undefined]),
+      }
+    : missing("custom model");
+};
 
 const SUBSCRIPTION_NAMES: Record<string, string> = {
   codex: "ChatGPT",
@@ -1306,7 +1316,9 @@ const subscriptionAccountLookup: Lookup = async (where) => {
 
 const githubInstallationLookup: Lookup = async (where) => {
   const workspaceId = await workspaceAccess(where, where.ids.workspaceId, "github:use");
-  if (!/^[1-9][0-9]{0,15}$/.test(where.id)) return missing("GitHub installation");
+  // As the route reads it: digits, as a number ("0042" is installation 42).
+  if (!/^[0-9]{1,15}$/.test(where.id)) return missing("GitHub installation");
+  const installationId = Number(where.id);
   const row = await asPersonIn(where, workspaceId, async (db) => {
     const [found] = await db
       .select({
@@ -1316,7 +1328,7 @@ const githubInstallationLookup: Lookup = async (where) => {
       .from(schema.githubInstallations)
       .where(
         and(
-          sql`${schema.githubInstallations.installationId}::text = ${where.id}`,
+          sql`${schema.githubInstallations.installationId} = ${installationId}`,
           eq(schema.githubInstallations.workspaceId, workspaceId),
         ),
       )
@@ -1327,7 +1339,7 @@ const githubInstallationLookup: Lookup = async (where) => {
     ? {
         kind: "GitHub installation",
         // The id was found in this workspace, so it names the right one.
-        name: row.login?.trim() || `Installation ${where.id}`,
+        name: row.login?.trim() || `Installation ${installationId}`,
         facts: facts(["Type", row.type]),
       }
     : missing("GitHub installation");
@@ -1521,6 +1533,9 @@ export async function savedAppActionApprovalCard(
           eq(schema.connectorActionRequests.sessionId, input.sessionId),
           eq(schema.connectorActionRequests.turnId, input.turnId),
           eq(schema.connectorActionRequests.approvalId, input.approvalId),
+          // Only an app action's own card.
+          eq(schema.connectorActionRequests.serverId, "opengeni"),
+          eq(schema.connectorActionRequests.toolName, "admin_action_call"),
         ),
       )
       .limit(1);

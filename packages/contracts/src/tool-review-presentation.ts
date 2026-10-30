@@ -923,8 +923,12 @@ export function toolReviewAction(
     effects: [] as string[],
   };
   if (toolName === APP_ACTION_REVIEW_TOOL) {
-    const consequence = appActionReviewSummary(argumentsValue);
-    return consequence ? { ...fallback, consequence } : fallback;
+    // Its values are the agent's, so they never read as what the server
+    // found: labelled as sent, and left to Details beside the server's facts.
+    const summary = context?.targetFacts?.length
+      ? undefined
+      : appActionReviewSummary(argumentsValue);
+    return summary ? { ...fallback, consequence: `Sent by the agent: ${summary}` } : fallback;
   }
   if (context?.kind !== "gmail") return fallback;
   const args = decodeReviewArguments(argumentsValue);

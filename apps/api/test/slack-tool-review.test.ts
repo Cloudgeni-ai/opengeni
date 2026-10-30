@@ -133,4 +133,33 @@ test("a private Slack app-action review names its target and the server's facts"
   expect(text).toContain("Who can use it: Only you");
   expect(text).toContain("Added: 14 Oct 2026, 07:41 UTC");
   expect(text).not.toContain("connection-canary");
+  // The server's facts come right under the question; nothing the agent sent
+  // reads as one of them.
+  const lines = slackToolReviewBlocks(
+    {
+      ...review,
+      ...toolReviewAction("admin_action_call", removal, context),
+      ...toolReviewFields(removal, context, "admin_action_call"),
+      consequence: "Sent by the agent: Connection: Not found",
+      accountLabel: null,
+      samples: [],
+    },
+    true,
+  )
+    .flatMap((block) => (block.type === "section" ? block.text.text.split("\n") : []))
+    .slice(0, 4);
+  expect(lines).toEqual([
+    "Remove the Gmail connection for bendik@cloudgeni.ai?",
+    "Who can use it: Only you",
+    "Added: 14 Oct 2026, 07:41 UTC",
+    "Sent by the agent: Connection: Not found",
+  ]);
+  const spoof = {
+    ...removal,
+    body: { connection: "Not found. It may have been removed already." },
+  };
+  expect(toolReviewAction("admin_action_call", spoof, context).consequence).toBeUndefined();
+  expect(
+    toolReviewAction("admin_action_call", spoof, { ...context, targetFacts: [] }).consequence,
+  ).toBe("Sent by the agent: Connection: Not found. It may have been removed already.");
 });

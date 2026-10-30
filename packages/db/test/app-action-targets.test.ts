@@ -662,6 +662,24 @@ test("a resumed attempt reads the wording its approval was first saved with", as
   expect(
     await savedAppActionApprovalCard(client.db, { ...scope, approvalId: "call-2" }),
   ).toBeUndefined();
+  // Another tool's saved request with an app action's approval id is never its card.
+  await shared!.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`
+      insert into connector_action_requests
+        (account_id, workspace_id, session_id, turn_id, creation_attempt_id,
+         creation_execution_generation, approval_id, initiator_kind, initiator_subject_id,
+         connection_id, server_id, tool_name, action_name, policy_source, policy_decision,
+         action_fingerprint, review_context, status)
+      values (${org.accountId}, ${ids.workspaceId}, ${ids.sessionId}, ${ids.turnId},
+        ${crypto.randomUUID()}, 1, 'call-3', 'subject', 'user:bendik',
+        'session-mcp:gmail:hash', 'gmail', 'send_email', 'send_email',
+        'default', 'ask', ${"e".repeat(64)},
+        ${tx.json({ kind: "generic", title: "Approve everything?" })}, 'pending')`;
+  });
+  expect(
+    await savedAppActionApprovalCard(client.db, { ...scope, approvalId: "call-3" }),
+  ).toBeUndefined();
   // Another turn's request is another question.
   expect(
     await savedAppActionApprovalCard(client.db, {
@@ -948,4 +966,57 @@ test("an integration missing from the catalog stays unresolved, and a suspended 
   expect(await resolveAppActionTargets(client.db, scope, removal(org.workspaceId, gmail))).toEqual(
     {},
   );
+});
+
+test("ids are read as their routes read them; the organization's custom models as the person", async () => {
+  if (!client) return;
+  const org = await organization("Cloudgeni");
+  const owner = await member(org.accountId, org.workspaceId, "owner", ["workspace:admin"]);
+  const scope = { accountId: org.accountId, workspaceId: org.workspaceId, subjectId: owner };
+  // The route reads an installation id as a number: "0042" is installation 42.
+  await shared!.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`
+      insert into github_installations (account_id, workspace_id, installation_id, account_login,
+        account_type)
+      values (${org.accountId}, ${org.workspaceId}, 42, 'acme', 'Organization')`;
+  });
+  const unlink = (installationId: string) => ({
+    id: "unlinkGitHubInstallation",
+    pathParameters: { workspaceId: org.workspaceId, installationId },
+  });
+  for (const id of ["42", "0042"]) {
+    expect(
+      (await resolveAppActionTargets(client.db, scope, unlink(id))).installationId,
+    ).toMatchObject({ name: "acme" });
+  }
+  // An id the route decodes again, or one padded with spaces, may be another
+  // record than it reads as: it's left unread, never "not found".
+  for (const subjectId of [encodeURIComponent(owner), ` ${owner}`]) {
+    expect(
+      await resolveAppActionTargets(client.db, scope, {
+        id: "removeWorkspaceMember",
+        pathParameters: { workspaceId: org.workspaceId, subjectId },
+      }),
+    ).toEqual({});
+  }
+  // The organization's custom models, for the route's provider only.
+  const [model] = await shared!.admin<{ id: string }[]>`
+    insert into organization_model_provider_custom_models (account_id, provider_kind,
+      upstream_model_id, label, create_operation_id, create_request_hash, created_by_subject_id)
+    values (${org.accountId}, 'opper', 'gpt-x', 'Team model', ${crypto.randomUUID()},
+      ${"a".repeat(64)}, ${owner})
+    returning id`;
+  const remove = (providerKind: string) => ({
+    id: "deleteOrganizationProviderCustomModel",
+    pathParameters: { organizationId: org.accountId, providerKind, customModelId: model!.id },
+  });
+  expect((await resolveAppActionTargets(client.db, scope, remove("opper"))).customModelId).toEqual({
+    kind: "custom model",
+    name: "Team model",
+    facts: [{ label: "Model", value: "gpt-x" }],
+  });
+  expect(
+    (await resolveAppActionTargets(client.db, scope, remove("openrouter"))).customModelId,
+  ).toEqual({ kind: "custom model" });
 });
