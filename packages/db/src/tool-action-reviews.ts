@@ -278,6 +278,8 @@ export async function getToolReviewDetailsPage(
       record.request.reviewContext ?? undefined,
       input.path,
       input.offset,
+      25,
+      record.request.toolName,
     );
   } catch {
     return null;

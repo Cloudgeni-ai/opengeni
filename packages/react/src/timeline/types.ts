@@ -474,6 +474,11 @@ export type NoticeItem = {
   approvalActions?: Array<{
     id: string;
     title: string | null;
+    /**
+     * Server-read facts about what it changes (`display.facts`), in card
+     * order; history uses them only to tell two alike lines apart.
+     */
+    facts?: Array<{ label: string; value: string }>;
     /** automatic_reject: Opengeni declined it, not the person. */
     decision?: "approve" | "reject" | "automatic_reject";
   }>;

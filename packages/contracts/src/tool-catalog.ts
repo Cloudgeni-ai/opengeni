@@ -101,6 +101,19 @@ export const ToolDisplayMetadata = /* @__PURE__ */ defineSchema(() =>
       connector: z.string().min(1).max(512).optional(),
       /** The connector's provider, so a host can draw its logo. */
       providerDomain: z.string().min(1).max(253).optional(),
+      /**
+       * What an app action changes, as facts the server read when it asked
+       * ("Added: 2 Oct 2026, 10:12 UTC"); history uses them to tell two
+       * alike approvals apart. Never text from the call's arguments.
+       */
+      facts: z
+        .array(
+          z
+            .object({ label: z.string().min(1).max(64), value: z.string().min(1).max(256) })
+            .strict(),
+        )
+        .max(12)
+        .optional(),
     })
     .strict(),
 );

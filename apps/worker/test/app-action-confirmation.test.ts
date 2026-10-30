@@ -188,3 +188,96 @@ test("turning on video paid with credits asks once, with the price on the card a
     reviewContext: { title: "Turn off video for every chat in this workspace?" },
   });
 });
+
+const removal = (connectionId: string) => ({
+  id: "deleteConnection",
+  pathParameters: { workspaceId: "ws-1", connectionId },
+  body: { expectedVersion: 1 },
+});
+
+test("each parallel removal's card names its own connection, read by the server, and the event says the same", async () => {
+  const { seen, policy } = recording();
+  const looked: unknown[] = [];
+  const found = {
+    "c-gmail": { name: "Gmail", account: "bendik@cloudgeni.ai", added: "14 Oct 2026, 07:41 UTC" },
+    "c-linear": { name: "Linear", account: "Bendik · Cloudgeni", added: "2 Oct 2026, 10:12 UTC" },
+  } as const;
+  const cards = new Map();
+  const hooks = withAppActionConfirmation(policy, {
+    workspaceId: "ws-1",
+    sessionId: "chat-1",
+    authority: async () => "confirm",
+    targets: async (args) => {
+      looked.push(args);
+      const id = (args as { pathParameters: { connectionId: keyof typeof found } }).pathParameters
+        .connectionId;
+      const hit = found[id];
+      return hit
+        ? {
+            connectionId: {
+              kind: "connection",
+              name: hit.name,
+              account: hit.account,
+              facts: [{ label: "Added", value: hit.added }],
+            },
+          }
+        : { connectionId: { kind: "connection" } };
+    },
+    cards,
+  });
+  // The agent's own words in the call never reach the card.
+  const spoofed = { ...removal("c-gmail"), title: "Remove an unused test connection?" };
+  await Promise.all([
+    hooks.prepare(appCall("call-1", spoofed)),
+    hooks.prepare(appCall("call-2", removal("c-linear"))),
+    hooks.prepare(appCall("call-3", removal("c-gone"))),
+  ]);
+  const byId = new Map(seen.map((entry) => [entry.call.approvalId, entry.call.reviewContext]));
+  expect(byId.get("call-1")).toMatchObject({
+    title: "Remove the Gmail connection for bendik@cloudgeni.ai?",
+    targetFacts: [{ label: "Added", value: "14 Oct 2026, 07:41 UTC" }],
+  });
+  expect(byId.get("call-2")).toMatchObject({
+    title: "Remove the Linear connection for Bendik · Cloudgeni?",
+  });
+  // Not there: says so, and names nothing.
+  expect(byId.get("call-3")).toMatchObject({
+    title: "Delete connection in this workspace?",
+    targetFacts: [{ label: "Connection", value: "Not found. It may have been removed already." }],
+  });
+  // Looked up once per call, even across preparation and execution.
+  await hooks.begin(appCall("call-1", spoofed));
+  expect(looked).toHaveLength(3);
+  const approval = {
+    type: "tool_approval_item",
+    rawItem: { callId: "call-1", name: prefixedMcpToolName("opengeni", "admin_action_call") },
+    name: prefixedMcpToolName("opengeni", "admin_action_call"),
+    arguments: JSON.stringify(spoofed),
+  };
+  expect(
+    withAppActionApprovalTitle(approval, { workspaceId: "ws-1", sessionId: "chat-1", cards }),
+  ).toMatchObject({
+    display: {
+      title: "Remove the Gmail connection for bendik@cloudgeni.ai?",
+      facts: [{ label: "Added", value: "14 Oct 2026, 07:41 UTC" }],
+    },
+  });
+});
+
+test("a failed lookup keeps the plain question; the card still asks", async () => {
+  const { seen, policy } = recording();
+  const hooks = withAppActionConfirmation(policy, {
+    workspaceId: "ws-1",
+    sessionId: "chat-1",
+    authority: async () => "confirm",
+    targets: async () => {
+      throw new Error("database unavailable");
+    },
+  });
+  await hooks.prepare(appCall("call-1", removal("c-gmail")));
+  expect(seen[0]!.call).toMatchObject({
+    defaultDecision: "ask",
+    reviewContext: { title: "Delete connection in this workspace?" },
+  });
+  expect(seen[0]!.call.reviewContext).not.toHaveProperty("targetFacts");
+});

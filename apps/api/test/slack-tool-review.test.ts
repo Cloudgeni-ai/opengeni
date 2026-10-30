@@ -102,3 +102,35 @@ test("only a server's confirmation is answerable in Slack; a form is answered in
   });
   expect(long.answerableInSlack).toBe(false);
 });
+
+test("a private Slack app-action review names its target and the server's facts", () => {
+  const removal = {
+    id: "deleteConnection",
+    pathParameters: { workspaceId: "ws-1", connectionId: "connection-canary" },
+    body: { expectedVersion: 1 },
+  };
+  const context = {
+    kind: "generic" as const,
+    title: "Remove the Gmail connection for bendik@cloudgeni.ai?",
+    targetFacts: [
+      { label: "Who can use it", value: "Only you" },
+      { label: "Added", value: "14 Oct 2026, 07:41 UTC" },
+    ],
+  };
+  const text = slackToolReviewBlocks(
+    {
+      ...review,
+      ...toolReviewAction("admin_action_call", removal, context),
+      ...toolReviewFields(removal, context, "admin_action_call"),
+      accountLabel: null,
+      samples: [],
+    },
+    true,
+  )
+    .map((block) => (block.type === "section" ? block.text.text : ""))
+    .join("\n");
+  expect(text).toContain("Remove the Gmail connection for bendik@cloudgeni.ai?");
+  expect(text).toContain("Who can use it: Only you");
+  expect(text).toContain("Added: 14 Oct 2026, 07:41 UTC");
+  expect(text).not.toContain("connection-canary");
+});

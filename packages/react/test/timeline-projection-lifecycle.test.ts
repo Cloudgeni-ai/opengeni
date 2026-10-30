@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../src/timeline/projection";
 import { toolRowPresentation } from "../src/timeline/tool-presentation";
-import { noticeDisplayText } from "../src/timeline/notice-presentation";
+import { approvalHistoryTitle, noticeDisplayText } from "../src/timeline/notice-presentation";
 import type {
   NoticeItem,
   SessionStatusItem,
@@ -72,7 +72,7 @@ describe("a tool call waiting for approval", () => {
     const item = call(buildTimeline(englishText, rejected));
     expect(item.awaitingApproval).toBeUndefined();
     const row = toolRowPresentation(englishText, item);
-    expect(row.preview).toEqual({ kind: "text", text: "You rejected this" });
+    expect(row.preview).toEqual({ kind: "text", text: "You declined this" });
     expect(row.running).toBe(false);
     expect(row.cancelled).toBe(false);
     const settled = call(
@@ -87,7 +87,7 @@ describe("a tool call waiting for approval", () => {
     );
     expect(toolRowPresentation(englishText, settled).preview).toEqual({
       kind: "text",
-      text: "You rejected this",
+      text: "You declined this",
     });
   });
 });
@@ -130,7 +130,7 @@ describe("an answered approval", () => {
       event(5, "session.status.changed", { status: "running" }),
     ]);
     const item = notice(items);
-    expect(noticeDisplayText(englishText, item)).toBe("You rejected “Send email”.");
+    expect(noticeDisplayText(englishText, item)).toBe("You declined “Send email”.");
     expect(item.resolvedAt).toBe(new Date(Date.UTC(2026, 8, 30) + 4000).toISOString());
   });
 
@@ -146,7 +146,7 @@ describe("an answered approval", () => {
       decide(4, "call-1", "approve"),
       decide(5, "call-2", "reject"),
     ]);
-    expect(noticeDisplayText(englishText, notice(answered))).toBe("You approved 1 and rejected 1.");
+    expect(noticeDisplayText(englishText, notice(answered))).toBe("You approved 1 and declined 1.");
   });
 
   test("without a recorded decision, says only that it was answered", () => {
@@ -157,6 +157,60 @@ describe("an answered approval", () => {
       ]),
     );
     expect(noticeDisplayText(englishText, item)).toBe("You responded to this approval.");
+  });
+
+  test("parallel app-action approvals say what was decided, one line each, told apart", () => {
+    const removal = (callId: string, title: string, added: string) => ({
+      id: callId,
+      name: "opengeni__admin_action_call",
+      display: {
+        toolName: "admin_action_call",
+        title,
+        facts: [
+          { label: "Who can use it", value: "Only you" },
+          { label: "Added", value: added },
+        ],
+      },
+      rawItem: { callId },
+    });
+    const gmail = removal("c-1", "Remove the Gmail connection for bendik@cloudgeni.ai?", "14 Oct");
+    const drive = removal(
+      "c-2",
+      "Remove the Google Drive connection for bendik@cloudgeni.ai?",
+      "18 Aug",
+    );
+    const linearA = removal("c-3", "Remove the Linear connection for Bendik · Cloudgeni?", "2 Oct");
+    const linearB = removal("c-4", "Remove the Linear connection for Bendik · Cloudgeni?", "9 Oct");
+    const items = buildTimeline(englishText, [
+      ...asking([gmail, drive, linearA, linearB]),
+      decide(4, "c-1", "approve"),
+      decide(5, "c-2", "reject"),
+      decide(6, "c-3", "approve"),
+      decide(7, "c-4", "approve"),
+    ]);
+    // Before, this read "You responded to this approval." whenever more than one was asked.
+    expect(noticeDisplayText(englishText, notice(items)).split("\n")).toEqual([
+      "You approved “Remove the Gmail connection for bendik@cloudgeni.ai”.",
+      "You declined “Remove the Google Drive connection for bendik@cloudgeni.ai”.",
+      "You approved “Remove the Linear connection for Bendik · Cloudgeni” (Added: 2 Oct).",
+      "You approved “Remove the Linear connection for Bendik · Cloudgeni” (Added: 9 Oct).",
+    ]);
+    // A wait that resumed after one answer says that answer; the rest are asked again later.
+    const resumed = buildTimeline(englishText, [
+      ...asking([gmail, drive, linearA]),
+      decide(4, "c-1", "approve"),
+      event(5, "session.status.changed", { status: "running" }),
+    ]);
+    expect(noticeDisplayText(englishText, notice(resumed))).toBe(
+      "You approved “Remove the Gmail connection for bendik@cloudgeni.ai”.",
+    );
+  });
+
+  test("history keeps a quoted name's own question mark", () => {
+    expect(approvalHistoryTitle("Delete Site “Why?”? It can't be undone.")).toBe(
+      "Delete Site “Why?”",
+    );
+    expect(approvalHistoryTitle("Send email")).toBe("Send email");
   });
 
   test("a rejection Opengeni made itself is never the person's", () => {
@@ -177,7 +231,9 @@ describe("an answered approval", () => {
         event(5, "agent.toolCall.created", { id: "call-1", name: "send_message", arguments: {} }),
         decision,
       ]);
-      expect(noticeDisplayText(englishText, notice(items))).toBe("Declined automatically.");
+      expect(noticeDisplayText(englishText, notice(items))).toBe(
+        "Declined automatically: “Send email”.",
+      );
     }
     const mixed = buildTimeline(englishText, [
       ...asking([sendEmail, { id: "call-2", name: "deploy", rawItem: { callId: "call-2" } }]),

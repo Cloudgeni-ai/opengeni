@@ -3604,8 +3604,16 @@ function approvalActionsOf(
       (value): value is string => typeof value === "string" && value.length > 0,
     );
     if (!id) continue;
-    const title = stringValue(asRecord(record.display).title).trim();
-    actions.push({ id, title: title || null });
+    const display = asRecord(record.display);
+    const title = stringValue(display.title).trim();
+    const facts = (Array.isArray(display.facts) ? display.facts : [])
+      .slice(0, 12)
+      .map((fact) => ({
+        label: stringValue(asRecord(fact).label).trim(),
+        value: stringValue(asRecord(fact).value).trim(),
+      }))
+      .filter((fact) => fact.label && fact.value);
+    actions.push({ id, title: title || null, ...(facts.length > 0 ? { facts } : {}) });
   }
   return actions;
 }

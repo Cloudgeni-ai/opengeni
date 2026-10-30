@@ -265,9 +265,19 @@ export function toolReviewFields(
   context?: ToolReviewContext,
   toolName?: string,
 ): { fields: ToolActionReview["fields"]; moreFields: number } {
-  // An app action's card says what it does in one plain line (its
-  // consequence); its raw arguments (action id, path, body) stay in Details.
-  if (toolName === APP_ACTION_REVIEW_TOOL) return { fields: [], moreFields: 0 };
+  // An app action's card lists what it changes, as the server found it, and
+  // says what it does in one plain line (its consequence); its raw arguments
+  // (action id, path, body) stay in Details.
+  if (toolName === APP_ACTION_REVIEW_TOOL)
+    return {
+      fields: (context?.targetFacts ?? []).map((fact, index) => ({
+        path: `/$target/${index}`,
+        label: fact.label,
+        preview: bound(fact.value, 240),
+        truncated: false,
+      })),
+      moreFields: 0,
+    };
   const args = decodeReviewArguments(argumentsValue);
   if (!args) return { fields: [], moreFields: 0 };
   const entries = Object.entries(args);
@@ -1014,6 +1024,7 @@ export function toolReviewDetails(
   path: string,
   offset: number,
   limit = 25,
+  toolName?: string,
 ): Omit<ToolReviewDetailsPage, "id" | "actionDigest" | "version"> {
   if (
     !Number.isSafeInteger(offset) ||
@@ -1089,7 +1100,47 @@ export function toolReviewDetails(
   };
   let total: number;
   let items: DetailItem[];
-  if (Array.isArray(value)) {
+  if (toolName === APP_ACTION_REVIEW_TOOL && path === "" && args) {
+    // An app action's Details read as what it changes, then each value it
+    // was called with under a plain label, rather than its call envelope.
+    const all: DetailItem[] = (context?.targetFacts ?? []).map((fact) => ({
+      label: fact.label,
+      value: fact.value,
+      truncated: false,
+    }));
+    Object.entries(args).forEach(([key, entry], index) => {
+      if (key === "id" && typeof entry === "string") {
+        const name = /^[a-z][A-Za-z0-9]*$/.test(entry) ? toolReviewFieldLabel(entry) : entry;
+        all.push({
+          label: "Action",
+          value: bound(name, 4000),
+          truncated: false,
+        });
+        return;
+      }
+      const parentPath = fieldPointer(key, index);
+      if (
+        ["pathParameters", "query", "body"].includes(key) &&
+        entry !== null &&
+        typeof entry === "object" &&
+        !Array.isArray(entry)
+      ) {
+        Object.entries(entry).forEach(([name, item], position) =>
+          all.push({
+            label: bound(toolReviewFieldLabel(name), 256),
+            ...preview(item, name, `${parentPath}${fieldPointer(name, position, parentPath)}`),
+          }),
+        );
+        return;
+      }
+      all.push({
+        label: bound(toolReviewFieldLabel(key), 256),
+        ...preview(entry, key, parentPath),
+      });
+    });
+    total = all.length;
+    items = all.slice(offset, offset + limit);
+  } else if (Array.isArray(value)) {
     total = value.length;
     items = value.slice(offset, offset + limit).map((entry, index) => ({
       label: `${offset + index + 1}`,

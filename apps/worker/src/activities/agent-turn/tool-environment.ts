@@ -2,6 +2,7 @@ import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
 import { firstPartyToolsForAttendance, sessionIsUnattended } from "./unattended";
+import { resolveAppActionTargets } from "@opengeni/db/app-action-targets";
 import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
@@ -544,6 +545,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     routeAllowsTitleRequests: routeAllowsSessionTitleRequests(resolvedModel),
   });
   const attemptConnectorActionBindings = [...githubRestMcp.connectorBindings];
+  // The person this chat's app actions ask, as the live check last found them.
+  let appActionSubjectId: string | null = null;
   const connectorActionPolicy: ConnectorActionPolicyHooks = withAppActionConfirmation(
     {
       preview: async (call) =>
@@ -565,15 +568,24 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       sessionId: input.sessionId,
       settings: runSettings,
       // Live per change, the same check the API makes before running it.
-      authority: async () =>
-        (
-          await resolveSessionAppActionAuthority(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-          })
-        ).kind,
+      authority: async () => {
+        const authority = await resolveSessionAppActionAuthority(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+        });
+        appActionSubjectId = "subjectId" in authority ? authority.subjectId : null;
+        return authority.kind;
+      },
+      // Names what a confirmed change touches, read as that person.
+      targets: async (args) =>
+        await resolveAppActionTargets(
+          db,
+          { accountId: input.accountId, subjectId: appActionSubjectId },
+          args,
+        ),
+      cards: eventing.appActionApprovalCards,
     },
   );
   const bundledSkills =
