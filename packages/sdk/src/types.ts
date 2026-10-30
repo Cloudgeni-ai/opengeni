@@ -877,11 +877,14 @@ export type UpdateSessionToolPolicyRequest =
 /**
  * The person finished setup from a capability card the agent posted in this
  * chat. The server wakes the agent once per card so it continues the request
- * that needed the capability.
+ * that needed the capability. Name the capability from an agent's
+ * recommendation card, or the connected account from that account's own card
+ * (for example after allowing more access); the account continues only once
+ * it is active and holds the access the card asked for.
  */
-export type ContinueAfterCapabilitySetupRequest = {
-  capabilityId: string;
-};
+export type ContinueAfterCapabilitySetupRequest =
+  | { capabilityId: string }
+  | { connectionId: string };
 
 /** Why no continuation was sent. Each is a normal outcome, not an error. */
 export type CapabilitySetupContinuationSkipReason =
@@ -3981,6 +3984,14 @@ export type CreateSessionRequest = {
   initialMessage?: string | undefined;
   /** Exempt the new session from the idle-session archive, e.g. for a persistent agent. */
   keepLive?: boolean | undefined;
+  /**
+   * No person will see or answer questions until the task ends (an API
+   * automation or other headless run). The agent is told so and resolves open
+   * choices itself instead of asking; tools that wait for a person are not
+   * offered. Frozen at create for every later turn; not inherited by child
+   * sessions, and a fork reads as attended. Servers that predate it ignore it.
+   */
+  unattended?: boolean | undefined;
   /**
    * The new chat's name, description and avatar, as if a person set them (a
    * bot started from a template, for example). Display metadata only; never

@@ -608,6 +608,9 @@ pub struct SandboxView {
     /// Bytes its running VM holds uncompressed above its request: what it
     /// borrowed. None for a sandbox whose request is its whole size.
     pub borrowed: u64,
+    /// How many times in a row its steps failed for now (see
+    /// [`Failure::Transient`]) since one last succeeded.
+    pub failures: u32,
 }
 
 impl SandboxView {
@@ -838,6 +841,7 @@ impl Host {
             } else {
                 0
             },
+            failures: sandbox.retry.map_or(0, |retry| retry.failures),
         })
     }
 

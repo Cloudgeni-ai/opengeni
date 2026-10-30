@@ -16,6 +16,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::host::{Id, Reply, Request};
 
+mod pointers;
+
+pub use pointers::{
+    KeptPointer, POINTER_READ_PATH, POINTER_WRITE_PATH, PointerFound, PointerRead, PointerWrite,
+    PointerWritten,
+};
+
 /// Where the service's host API lives: registrations, renewals and reports
 /// are posted under it.
 pub const REGISTER_PATH: &str = "/v1/hosts/register";
@@ -183,6 +190,14 @@ pub struct Capacity {
     /// release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest: Option<String>,
+    /// Whether it keeps the pointers to its stored copies in the service
+    /// ([`PointerRead`], ADR 25) rather than in the object store itself.
+    /// Once the service holds a fleet's pointers it refuses a host that
+    /// does not, whose writes it would never see. Told here for the same
+    /// reason as [`Capacity::guest`]; `false` from a host of an earlier
+    /// release.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pointers_in_service: bool,
 }
 
 /// A sandbox a registering host still has, under the owner epoch its

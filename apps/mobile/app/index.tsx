@@ -35,7 +35,12 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useAccount } from "@/account";
 import { useAgentCall } from "@/call";
-import { cachedLists, rememberLists } from "@/session-list-cache";
+import {
+  cachedLists,
+  rememberLists,
+  rememberSessionRow,
+  subscribeLists,
+} from "@/session-list-cache";
 import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
 import { serverLabel } from "@/account-store";
 import { BrandMark } from "@/brand-mark";
@@ -148,6 +153,12 @@ function Home() {
   // A workspace switch shows that workspace's last list at once.
   useEffect(() => {
     setLists(cachedLists(workspaceId).home ?? EMPTY_SESSION_LISTS);
+    if (!workspaceId) return;
+    // A chat open above this screen keeps its row here current, so coming back
+    // shows the list already in order instead of reordering under a tap.
+    return subscribeLists(workspaceId, (next) => {
+      if (next.home) setLists(next.home);
+    });
   }, [workspaceId]);
 
   useFocusEffect(
@@ -270,7 +281,11 @@ function Home() {
         sentAt,
         resources: [...chosen.resources, ...attachments.readyResources],
       });
-      if (flushed) await draftSync.acknowledgeConsumed(flushed).catch(() => null);
+      // The new chat leads the lists before anyone comes back to them.
+      rememberSessionRow(created, { created: true });
+      // The draft is the server's now. Settling its saved copy starts here, before
+      // the composer empties, but needn't hold the chat back.
+      if (flushed) void draftSync.acknowledgeConsumed(flushed).catch(() => null);
       setDraft("");
       attachments.clear();
       options.reset();

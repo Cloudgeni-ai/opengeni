@@ -1615,9 +1615,9 @@ computeControl:
     nodePort: null
     annotations: {}
     loadBalancerSourceRanges: []
-  # The store's daily sweep (`compute-host sweep --delete`, ADR 17), from the
-  # same image, with the same identity. Deleting sweeps are for Google Cloud
-  # Storage archives only: turn it off for az:// and s3://.
+  # The store's daily sweep (`compute-control sweep --delete`, ADR 17 and
+  # 25), from the same image, with the same identity and database. It
+  # deletes on any archive: gs://, az:// and s3:// alike.
   sweep:
     enabled: true
     schedule: "17 3 * * *"

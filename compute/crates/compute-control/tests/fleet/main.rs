@@ -11,6 +11,7 @@ mod lifecycle;
 mod metrics;
 mod moves;
 mod native;
+mod pointers;
 mod reach;
 mod support;
 mod templates;

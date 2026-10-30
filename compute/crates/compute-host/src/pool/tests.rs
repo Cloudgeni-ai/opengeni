@@ -16,6 +16,7 @@ fn template(shape: Shape) -> Template {
             boot_args: String::new(),
             networked: false,
             memory: String::new(),
+            runtime: String::new(),
             ready_port: 52,
         },
         footprint: shape.bytes(),
@@ -159,6 +160,7 @@ fn inputs_follow_file_contents() {
         boot_args: String::new(),
         networked: false,
         memory: String::new(),
+        runtime: String::new(),
         ready_port: 52,
         hashes: Hashes::default(),
     };
@@ -224,6 +226,7 @@ async fn a_stored_image_is_named_by_its_id_and_never_read() {
         boot_args: String::new(),
         networked: false,
         memory: String::new(),
+        runtime: String::new(),
         ready_port: 52,
         hashes: Hashes::default(),
     };
@@ -283,6 +286,7 @@ fn hashes_are_kept_for_the_next_agent() {
         boot_args: String::new(),
         networked: false,
         memory: String::new(),
+        runtime: String::new(),
         ready_port: 52,
         hashes,
     };
@@ -319,6 +323,13 @@ fn inputs_name_every_change() {
     let mut other = base.clone();
     other.ready_port = 53;
     assert_ne!(base.key(), other.key(), "another readiness contract");
+    let mut other = base.clone();
+    other.runtime = "Firecracker snapshot format v8.0.0 on a processor under Linux 6.18.1".into();
+    assert_ne!(
+        base.key(),
+        other.key(),
+        "saved under another runtime, as before the host's kernel changed"
+    );
     assert_eq!(base.key(), base.clone().key());
     assert!(base.dir_name().starts_with("1x512-"));
     assert!(base.vm_name().len() <= 64);

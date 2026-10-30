@@ -155,6 +155,8 @@ import {
   type PromptCacheCallSample,
   type PromptCacheDiagnostics,
   type PromptCacheObservation,
+  sessionMetadataUnattended,
+  withSessionUnattendedMetadata,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -30416,6 +30418,11 @@ export type SessionCreateInput = {
   firstPartyMcpPermissions?: Permission[] | null;
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
+  /**
+   * No person will see or answer a question until the task ends. Recorded only
+   * under the reserved metadata key, which a caller-supplied value never sets.
+   */
+  unattended?: boolean;
   /** Vault narrowing for this session (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   policyRole?: string | null;
@@ -30763,6 +30770,8 @@ type SessionCreateReplayIdentity = {
   memoryScope?: SessionMemoryScope;
   /** Resolved creation-time configuration; omitted and null are equivalent. */
   agentConfig?: ResolvedAgentConfig | null;
+  /** Unattended create; omitted means interactive. */
+  unattended?: boolean;
 };
 
 // Session metadata is immutable after creation and already participates in
@@ -30850,6 +30859,10 @@ function assertSessionCreateReplayIdentity(
     throw new SessionCreateIdempotencyConflictError();
   }
   if (existing.createRequestedVisibility !== (input.visibility ?? "workspace_shared")) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  // A keyed retry must not silently flip whether anyone answers the agent.
+  if (sessionMetadataUnattended(existing.metadata) !== (input.unattended === true)) {
     throw new SessionCreateIdempotencyConflictError();
   }
   // A keyed retry that asks for a different agent-access, end-user, or memory
@@ -31074,15 +31087,18 @@ async function createSessionInTransaction(
   // A session an agent starts never stores a secret value its attempt knows.
   input = { ...input, initialMessage: maskSecretValuesForStorage(input.initialMessage, "message") };
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
-  const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
-    withBundledSkillSelectionMetadata(
-      metadataWithAgentConfigCreateIdentity(
-        metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
-        input.agentConfig,
+  const sessionMetadata = withSessionUnattendedMetadata(
+    metadataWithSelectedInstalledSkillCreateIdentity(
+      withBundledSkillSelectionMetadata(
+        metadataWithAgentConfigCreateIdentity(
+          metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
+          input.agentConfig,
+        ),
+        input.bundledSkillIds,
       ),
-      input.bundledSkillIds,
+      selectedInstalledSkillIds,
     ),
-    selectedInstalledSkillIds,
+    input.unattended === true,
   );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
@@ -31143,6 +31159,7 @@ async function createSessionInTransaction(
         ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
         ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+        ...(input.unattended ? { unattended: true } : {}),
       });
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
@@ -31530,6 +31547,7 @@ async function createSessionInTransaction(
           ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
           ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+          ...(input.unattended ? { unattended: true } : {}),
         });
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
@@ -88417,6 +88435,11 @@ export type EnqueueCapabilitySetupContinuationInput = {
   workspaceId: string;
   sessionId: string;
   capabilityId: string;
+  /**
+   * The card is a connected account's own notice (expired access, more access
+   * a tool needs) rather than a capability card: find it by this connection.
+   */
+  connectionId?: string;
   /** The live catalog's name for the capability, shown to the agent. */
   capabilityName: string;
   /**
@@ -88470,19 +88493,7 @@ export async function enqueueCapabilitySetupContinuation(
 ): Promise<EnqueueCapabilitySetupContinuationResult> {
   const read = await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
     const tx = scoped as unknown as Database;
-    const [card] = await tx
-      .select({ id: schema.sessionEvents.id, sequence: schema.sessionEvents.sequence })
-      .from(schema.sessionEvents)
-      .where(
-        and(
-          eq(schema.sessionEvents.workspaceId, input.workspaceId),
-          eq(schema.sessionEvents.sessionId, input.sessionId),
-          eq(schema.sessionEvents.type, "tool.auth_needed"),
-          sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
-        ),
-      )
-      .orderBy(desc(schema.sessionEvents.sequence))
-      .limit(1);
+    const [card] = await latestAuthCardTx(tx, input);
     if (!card) return { kind: "skip", reason: "no_card" } as const;
     const [existing] = await tx
       .select()
@@ -88643,6 +88654,58 @@ export async function enqueueCapabilitySetupContinuation(
     }
     throw error;
   }
+}
+
+/** The latest card the continuation answers: a capability card, or an account's own. */
+async function latestAuthCardTx(
+  tx: Database,
+  input: Pick<
+    EnqueueCapabilitySetupContinuationInput,
+    "workspaceId" | "sessionId" | "capabilityId" | "connectionId"
+  >,
+): Promise<Array<{ id: string; sequence: number; payload: unknown }>> {
+  return await tx
+    .select({
+      id: schema.sessionEvents.id,
+      sequence: schema.sessionEvents.sequence,
+      payload: schema.sessionEvents.payload,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "tool.auth_needed"),
+        input.connectionId
+          ? sql`${schema.sessionEvents.payload} ->> 'connectionId' = ${input.connectionId}`
+          : sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.sequence))
+    .limit(1);
+}
+
+/**
+ * The latest auth notice this chat showed for one connected account, so the
+ * caller can check the account now has what the notice asked for before it
+ * continues the request. Null when the chat showed none.
+ */
+export async function latestConnectionAuthNotice(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; connectionId: string },
+): Promise<{ id: string; payload: Record<string, unknown> } | null> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
+    const [card] = await latestAuthCardTx(scoped as unknown as Database, {
+      ...input,
+      capabilityId: "",
+    });
+    if (!card) return null;
+    const payload =
+      card.payload && typeof card.payload === "object" && !Array.isArray(card.payload)
+        ? (card.payload as Record<string, unknown>)
+        : {};
+    return { id: card.id, payload };
+  });
 }
 
 async function userMessageAfterSequenceTx(
@@ -92370,7 +92433,11 @@ function mapSession(
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),
     mcpApprovalPolicies: row.mcpApprovalPolicies,
-    metadata: row.metadata,
+    // A person makes a fork to continue the work, so a fork reads as attended
+    // even though the fork routine copies the source row's metadata.
+    metadata: row.forkedFromSessionId
+      ? withSessionUnattendedMetadata(row.metadata, false)
+      : row.metadata,
     ...(tenancyViewer ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) } : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,

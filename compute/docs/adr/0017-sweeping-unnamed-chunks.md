@@ -1,6 +1,10 @@
 # 17. Sweeping the chunks no copy names
 
-Status: Accepted, 2026-10-16
+Status: Accepted, 2026-10-16. How a sweep stays safe (conditional pointer
+writes in the store, objects stored again after a week, conditional
+deletes) is replaced by [25](0025-pointers-in-the-control-service-and-objects-by-day.md),
+which keeps a fleet's pointers in the control service and names objects
+by day.
 
 ## Context
 

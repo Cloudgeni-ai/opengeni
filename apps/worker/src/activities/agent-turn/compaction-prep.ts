@@ -54,6 +54,7 @@ import {
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { type SessionEvent } from "@opengeni/contracts";
+import { sessionIsUnattended } from "./unattended";
 
 import { acceptsPromptCacheKeyForTurn } from "./codex";
 import {
@@ -202,13 +203,15 @@ export type PostAgentCompactionOutcome =
  */
 export function standaloneCompactionInstructions(input: {
   settings: Settings;
-  session: Pick<ClaimTurnOk["session"], "agent" | "instructions" | "resources">;
+  session: Pick<ClaimTurnOk["session"], "agent" | "instructions" | "resources"> &
+    Partial<Pick<ClaimTurnOk["session"], "metadata">>;
   workspaceAgentInstructions: string | null | undefined;
   workspaceAgentIdentity: string | null;
   structuredWorkspacePolicyActive: boolean;
   workspaceMemory: string | null | undefined;
   rig: { name: string; version: number } | undefined;
 }): string {
+  const unattended = sessionIsUnattended({ metadata: input.session.metadata ?? {} });
   if (input.session.agent) {
     return inspectPersistentAgentInstructions(input.settings, {
       agentConfig: input.session.agent,
@@ -218,11 +221,10 @@ export function standaloneCompactionInstructions(input: {
       ...(input.workspaceMemory ? { workspaceMemory: input.workspaceMemory } : {}),
       ...(input.session.instructions ? { sessionInstructions: input.session.instructions } : {}),
       ...(input.rig ? { rig: input.rig } : {}),
-      agentPromptResources: agentPromptResourcesFor(
-        input.settings,
-        input.session.resources,
-        input.rig ? { rig: input.rig } : {},
-      ),
+      agentPromptResources: agentPromptResourcesFor(input.settings, input.session.resources, {
+        ...(input.rig ? { rig: input.rig } : {}),
+        ...(unattended ? { unattended: true } : {}),
+      }),
     }).composed;
   }
   return appendWorkspaceMemory(
@@ -234,6 +236,7 @@ export function standaloneCompactionInstructions(input: {
         undefined,
         input.rig,
         agentPromptExperimentsFor(input.settings).experiments,
+        unattended ? { unattended: true } : undefined,
       ),
       input.session.instructions ?? undefined,
     ),
