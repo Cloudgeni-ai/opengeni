@@ -9,6 +9,19 @@
 //! holds. A registration's rulings are carried out before the deadline it
 //! brings is written: until then the guard keeps the VMs frozen.
 //!
+//! Renewals never wait on the agent: what the host can take on is read
+//! from the agent's status on a task of its own, once a second, and each
+//! renewal carries the latest reading. An agent busy for seconds, as one
+//! whose disk stalls can be, would otherwise hold up the renewals and let
+//! the guard freeze every VM on the host.
+//!
+//! Renewals that go unanswered for two in a row are logged as a warning
+//! once, with how long the lease has left and the last error, and the
+//! answer that ends the gap is logged with how long it lasted.
+//! A reading of the agent's status that takes longer than two renewal
+//! intervals is warned of too, and logged with how long it took once the
+//! agent answers: renewals meanwhile carry the reading before it.
+//!
 //! It runs from the moment the agent process starts until it exits. A
 //! restarted agent takes back what the previous run left before it
 //! answers anything, which on a host with many sandboxes can take longer
@@ -22,7 +35,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use compute_core::At;
-use compute_fleet::{HostEpoch, HostLease, LeaseTerms, Renewal};
+use compute_fleet::{Guard, HostEpoch, HostLease, LeaseTerms, Renewal};
 use compute_protocol::fleet::{
     Answered, Boot, Capacity, Held, HostInfo, REGISTER_PATH, RENEW_PATH, REPORT_PATH, ReadyClones,
     Register, Registered, Renew, Renewed, Report, Terms,
@@ -35,6 +48,7 @@ use tokio::sync::mpsc;
 use super::Agent;
 use super::gate::{LeaseGate, boot_now};
 use super::record::LeaseFile;
+use crate::agent::HostError;
 
 /// The service's answer to one request, or why there is none.
 enum Answer {
@@ -68,6 +82,15 @@ pub(crate) struct Renewer {
 struct Running {
     renewer: Renewer,
     answers: mpsc::UnboundedSender<(Renewal, Answer)>,
+    /// Where readings of the agent's status come back.
+    readings: mpsc::UnboundedSender<Result<HostStatus, HostError>>,
+    /// Since when a reading is under way, if one is.
+    reading: Option<At>,
+    /// Whether the reading under way was warned of as slow.
+    slow: bool,
+    /// What the host can take on, as the agent's latest status said;
+    /// renewals carry it while the agent serves.
+    capacity: Option<Capacity>,
     /// The registration attempt under way, sent unchanged until answered.
     attempt: Option<Register>,
     /// No registration is sent before this: the service said the previous
@@ -75,6 +98,10 @@ struct Running {
     not_before: At,
     /// The capacity last sent.
     reported: Option<Capacity>,
+    /// Why the last renewal that failed got no answer.
+    last_error: Option<String>,
+    /// Since when renewals have gone unanswered, once that was warned of.
+    warned: Option<Duration>,
 }
 
 impl Renewer {
@@ -82,12 +109,19 @@ impl Renewer {
     /// written, since then the guard would act on a stale lease.
     pub(crate) async fn run(self) -> anyhow::Result<()> {
         let (answers, mut answered) = mpsc::unbounded_channel();
+        let (readings, mut read) = mpsc::unbounded_channel();
         let mut running = Running {
             renewer: self,
             answers,
+            readings,
+            reading: None,
+            slow: false,
+            capacity: None,
             attempt: None,
             not_before: At::ZERO,
             reported: None,
+            last_error: None,
+            warned: None,
         };
         let mut report = tokio::time::interval(Duration::from_secs(1));
         report.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -97,7 +131,8 @@ impl Renewer {
             tokio::select! {
                 () = tokio::time::sleep(wait) => running.send().await?,
                 Some((renewal, answer)) = answered.recv() => running.take(renewal, answer).await?,
-                _ = report.tick() => running.report().await,
+                _ = report.tick() => running.read(),
+                Some(reading) = read.recv() => running.report(reading)?,
             }
         }
     }
@@ -108,16 +143,11 @@ impl Running {
     async fn send(&mut self) -> anyhow::Result<()> {
         let renewer = &mut self.renewer;
         let handle = renewer.agent.handle();
-        let status = match &handle {
-            Some(handle) => match handle.status().await {
-                Ok(status) => Some(status),
-                Err(_) => anyhow::bail!("the agent stopped"),
-            },
-            None => None,
-        };
-        let renewal = renewer.lease.send(boot_now());
+        let now = boot_now();
+        let renewal = renewer.lease.send(now);
         let timeout = renewer.lease.terms().term;
         if let Some(epoch) = renewal.epoch {
+            self.unanswered(now);
             // The renewal's number rose: the file says so before it goes.
             self.store()?;
             let renewer = &self.renewer;
@@ -125,7 +155,7 @@ impl Running {
                 host: renewer.host.unwrap_or_default(),
                 epoch: epoch.0,
                 seq: renewal.seq,
-                capacity: status.as_ref().map(|status| capacity(status, renewer)),
+                capacity: handle.as_ref().and(self.capacity.clone()),
             };
             self.post(RENEW_PATH, &body, timeout, renewal, Answer::Renewed);
             return Ok(());
@@ -235,11 +265,15 @@ impl Running {
         match answer {
             Answer::Failed(error) => {
                 tracing::debug!(%error, seq = renewal.seq, "no answer from the control service");
+                if renewal.epoch.is_some() {
+                    self.last_error = Some(error);
+                }
             }
             Answer::Renewed(Renewed::Renewed { epoch, seq }) => {
                 let same = renewal.epoch == Some(HostEpoch(epoch)) && renewal.seq == seq;
                 if same && self.renewer.lease.renewed(renewal) {
                     self.store()?;
+                    self.answered(renewal);
                 }
             }
             Answer::Renewed(Renewed::Unknown) => {
@@ -302,6 +336,8 @@ impl Running {
             renewer.host = Some(host);
             self.attempt = None;
             self.reported = None;
+            self.warned = None;
+            self.last_error = None;
             self.store()?;
             tracing::info!(
                 host,
@@ -333,21 +369,104 @@ impl Running {
         Ok(())
     }
 
-    /// Sends what the host can take on, when it changed since last sent.
-    async fn report(&mut self) {
+    /// Warns, once per gap, when renewals sent `now` have gone unanswered
+    /// for two in a row: the guard freezes the VMs once the lease is
+    /// within [`Guard::LEAD`] of its deadline.
+    fn unanswered(&mut self, now: At) {
+        let terms = self.renewer.lease.terms();
+        let deadline = self.renewer.lease.deadline().since_origin();
+        // The last renewal answered was sent a term before the deadline.
+        let since = deadline.saturating_sub(terms.term);
+        let silent = now.since_origin().saturating_sub(since);
+        if self.warned.is_some() || deadline.is_zero() || silent < terms.renew_every * 5 / 2 {
+            return;
+        }
+        self.warned = Some(since);
+        let left = deadline.saturating_sub(now.since_origin());
+        tracing::warn!(
+            unanswered_for_ms = ms(silent),
+            lease_left_ms = ms(left),
+            freezes_in_ms = ms(left.saturating_sub(Guard::LEAD)),
+            last_error = self
+                .last_error
+                .as_deref()
+                .unwrap_or("none yet: no answer arrived"),
+            "renewals to the control service go unanswered: this host's VMs freeze if none is answered before the lease runs out"
+        );
+    }
+
+    /// Notes that the service accepted `renewal`, which moved the deadline;
+    /// one that ends a gap warned of is logged.
+    fn answered(&mut self, renewal: Renewal) {
+        let now = boot_now().since_origin();
+        if let Some(since) = self.warned.take() {
+            tracing::info!(
+                unanswered_for_ms = ms(now.saturating_sub(since)),
+                round_trip_ms = ms(now.saturating_sub(renewal.sent.since_origin())),
+                last_error = self
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("none: answers were late"),
+                "the control service answers renewals again"
+            );
+        }
+        self.last_error = None;
+    }
+
+    /// Asks the agent for its status on a task of its own, unless a
+    /// reading is under way (warned of once it takes long) or the agent
+    /// does not serve.
+    fn read(&mut self) {
+        let now = boot_now();
+        if let Some(since) = self.reading {
+            let taken = now.since_origin().saturating_sub(since.since_origin());
+            if !self.slow && taken > self.renewer.lease.terms().renew_every * 2 {
+                self.slow = true;
+                tracing::warn!(
+                    waited_ms = ms(taken),
+                    "the agent is slow to say what the host can take on: renewals go on carrying what it said before"
+                );
+            }
+            return;
+        }
+        let Some(handle) = self.renewer.agent.handle() else {
+            self.capacity = None;
+            return;
+        };
+        self.reading = Some(now);
+        let readings = self.readings.clone();
+        tokio::spawn(async move {
+            let _ = readings.send(handle.status().await);
+        });
+    }
+
+    /// Takes in a reading of the agent's status, for the next renewals,
+    /// and sends the service what the host can take on when it changed
+    /// since last sent. Fails if the agent serves but no longer answers.
+    fn report(&mut self, reading: Result<HostStatus, HostError>) -> anyhow::Result<()> {
+        if let Some(since) = self.reading.take()
+            && std::mem::take(&mut self.slow)
+        {
+            let taken = boot_now()
+                .since_origin()
+                .saturating_sub(since.since_origin());
+            tracing::info!(took_ms = ms(taken), "the agent answers again");
+        }
         let renewer = &self.renewer;
-        let (Some(host), Some(epoch)) = (renewer.host, renewer.lease.epoch()) else {
-            return;
-        };
-        let Some(handle) = renewer.agent.handle() else {
-            return;
-        };
-        let Ok(status) = handle.status().await else {
-            return;
+        if renewer.agent.handle().is_none() {
+            self.capacity = None;
+            return Ok(());
+        }
+        let Ok(status) = reading else {
+            anyhow::bail!("the agent stopped");
         };
         let capacity = capacity(&status, renewer);
+        self.capacity = Some(capacity.clone());
+        let (Some(host), Some(epoch)) = (renewer.host, renewer.lease.epoch()) else {
+            return Ok(());
+        };
         if self.reported.as_ref() == Some(&capacity) {
-            return;
+            return Ok(());
         }
         self.reported = Some(capacity.clone());
         let request = renewer
@@ -368,7 +487,13 @@ impl Running {
                 tracing::debug!(%error, "reporting capacity failed");
             }
         });
+        Ok(())
     }
+}
+
+/// Whole milliseconds, for logs.
+fn ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// What the host can take on, from its status; its ready clones all start

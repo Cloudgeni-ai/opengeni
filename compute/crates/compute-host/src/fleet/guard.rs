@@ -11,7 +11,9 @@
 //! not keep, never takes it.
 //!
 //! Beside its lock it keeps [`Freezes`], the count of what it did to the
-//! VMs' freezer, for the agent's checks of its guests.
+//! VMs' freezer, for the agent's checks of its guests, and [`Fenced`], the
+//! VMs it ended because they had not frozen by the deadline, so the agent
+//! says why they ended.
 //!
 //! Opening the watchdog feeds it, and so does closing it: it stays armed
 //! (`nowayout`), and the kernel pings it as it stays so. A feed at any
@@ -216,6 +218,117 @@ impl Freezes {
         std::fs::write(&staging, format!("{guard} {count} {}\n", nanos(boot_now())))?;
         std::fs::rename(&staging, &self.path)
     }
+
+    /// The VMs the same guard records it ended.
+    #[must_use]
+    pub fn fenced(&self) -> Fenced {
+        Fenced {
+            path: self.path.with_extension("fenced"),
+        }
+    }
+}
+
+/// The VMs a guard ended because they had not frozen by the time the
+/// lease ran out, kept beside its lock (see [`Freezes::fenced`]) so that
+/// the agent can tell a VM the guard ended from one that ended on its own.
+/// One line per VM: the name of its group and when the guard ended it, in
+/// nanoseconds on the boot clock, newest last; `*` names every VM, as when
+/// the guard could not tell them apart. The guard writes it before it
+/// kills, so the agent never sees a VM end before it is recorded, and
+/// keeps the latest [`Fenced::KEPT`].
+#[derive(Clone, Debug)]
+pub struct Fenced {
+    path: PathBuf,
+}
+
+impl Fenced {
+    /// How many of the latest VMs ended the record keeps.
+    pub const KEPT: usize = 32;
+
+    /// Every VM recorded, with when the guard ended it, oldest first;
+    /// nothing when there is no record or it cannot be read.
+    #[must_use]
+    pub fn read(&self) -> Vec<(String, At)> {
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|line| {
+                let (name, at) = line.split_once(' ')?;
+                let at = at.trim().parse::<u64>().ok()?;
+                Some((name.to_owned(), At::from_duration(Duration::from_nanos(at))))
+            })
+            .collect()
+    }
+
+    /// Whether the guard recorded ending the VM whose group is `name` at
+    /// `since` or later.
+    #[must_use]
+    pub fn ended(&self, name: &str, since: At) -> bool {
+        self.read()
+            .iter()
+            .any(|(ended, at)| (ended == name || ended == "*") && *at >= since)
+    }
+
+    /// Records that the guard ends the VMs `names` now.
+    fn record(&self, names: &[String]) -> io::Result<()> {
+        let now = boot_now();
+        let mut kept = self.read();
+        kept.extend(names.iter().map(|name| (name.clone(), now)));
+        let skip = kept.len().saturating_sub(Self::KEPT);
+        let mut text = String::new();
+        for (name, at) in &kept[skip..] {
+            text.push_str(name);
+            text.push(' ');
+            text.push_str(&nanos(*at).to_string());
+            text.push('\n');
+        }
+        let staging = self.path.with_extension("fenced.staging");
+        std::fs::write(&staging, text)?;
+        std::fs::rename(&staging, &self.path)
+    }
+}
+
+/// The guard's side of [`Fenced`]: the VMs it ended since they last ran
+/// unfrozen, so each is recorded and logged once however many steps its
+/// kill takes.
+#[derive(Debug)]
+struct Fencing {
+    fenced: Fenced,
+    ended: std::collections::BTreeSet<String>,
+}
+
+impl Fencing {
+    fn new(fenced: Fenced) -> Self {
+        Self {
+            fenced,
+            ended: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Records and logs the VMs of `names` it has not ended yet, `overdue`
+    /// past the deadline: a loud, rare event, since it costs each its
+    /// running programs.
+    fn ending(&mut self, names: Vec<String>, overdue: Duration) {
+        let new: Vec<String> = names
+            .into_iter()
+            .filter(|name| !self.ended.contains(name))
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        if let Err(error) = self.fenced.record(&new) {
+            tracing::error!(%error, "the guard could not record the VMs it ends");
+        }
+        for name in new {
+            tracing::error!(
+                vm = %name,
+                overdue_ms = u64::try_from(overdue.as_millis()).unwrap_or(u64::MAX),
+                "the guard ends a VM that had not frozen by the time the host's lease ran out: its running programs are lost"
+            );
+            self.ended.insert(name);
+        }
+    }
 }
 
 /// The guard's side of [`Freezes`]: its count, which it moves on whether
@@ -355,7 +468,9 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
     };
     let cgroup = Cgroup::at(&config.cgroup);
     let guard = Guard::new();
-    let mut saying = Saying::new(Freezes::beside(&config.lock));
+    let freezes = Freezes::beside(&config.lock);
+    let mut fencing = Fencing::new(freezes.fenced());
+    let mut saying = Saying::new(freezes);
     saying.say(true);
     let mut last = None;
     let mut ready = None;
@@ -369,7 +484,14 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
     let socket = std::env::var("NOTIFY_SOCKET").ok();
     tracing::info!(cgroup = %config.cgroup.display(), "guard running");
     loop {
-        let feed = step_once(&guard, &cgroup, config, &mut last, &mut saying);
+        let feed = step_once(
+            &guard,
+            &cgroup,
+            config,
+            &mut last,
+            &mut saying,
+            &mut fencing,
+        );
         if feed {
             if watchdog.is_none()
                 && let Fence::Machine { device, timeout } = &config.fence
@@ -584,6 +706,7 @@ fn step_once(
     config: &GuardConfig,
     last: &mut Option<GuardAction>,
     saying: &mut Saying,
+    fencing: &mut Fencing,
 ) -> bool {
     // A file it cannot read holds no lease it can trust.
     let deadline = LeaseFile::read(&config.lease_file).map_or(At::ZERO, LeaseFile::deadline);
@@ -609,19 +732,27 @@ fn step_once(
             )
         }
     };
-    let step = guard.step(boot_now(), deadline, observed);
+    let now = boot_now();
+    let step = guard.step(now, deadline, observed);
     // Before the VMs stop, the count says so.
     if matches!(step.action, Some(GuardAction::Freeze | GuardAction::Kill)) {
         saying.say(true);
     }
+    if step.action != Some(GuardAction::Kill) {
+        fencing.ended.clear();
+    }
     if let Some(action) = step.action {
         let result = match action {
             GuardAction::Freeze => cgroup.set_frozen(true),
-            GuardAction::Kill => kill_running(cgroup),
+            GuardAction::Kill => kill_running(cgroup, fencing, now.saturating_since(deadline)),
             GuardAction::Thaw => cgroup.set_frozen(false),
         };
         if *last != Some(action) {
-            tracing::warn!(?action, ?observed, "guard acting on the VMs");
+            // Ahead of the deadline, how long the lease had left; past it,
+            // negative, how long it is overdue.
+            let lease_left_ms =
+                i128::from(nanos(deadline)).saturating_sub(i128::from(nanos(now))) / 1_000_000;
+            tracing::warn!(?action, ?observed, %lease_left_ms, "guard acting on the VMs");
         }
         if let Err(error) = result {
             tracing::error!(?action, %error, "the guard could not act on the VMs");
@@ -639,24 +770,45 @@ fn step_once(
     step.feed
 }
 
-/// Kills the VMs that still run: every group inside the VMs' cgroup that
-/// is neither frozen nor empty. A VM that froze stays frozen, to run on if
-/// the lease is renewed: one VM ending while frozen (deleted, or its
-/// process killed) reads as not frozen, and so makes the whole cgroup
-/// read so, until its memory is released, and that must not end the
-/// others. Every process goes if any sits in the cgroup itself, or what
-/// is inside cannot be read.
-fn kill_running(cgroup: &Cgroup) -> std::io::Result<()> {
+/// Kills the VMs that still run, `overdue` past the deadline: every group
+/// inside the VMs' cgroup that is neither frozen nor empty. A VM that
+/// froze stays frozen, to run on if the lease is renewed: one VM ending
+/// while frozen (deleted, or its process killed) reads as not frozen, and
+/// so makes the whole cgroup read so, until its memory is released, and
+/// that must not end the others. Every process goes if any sits in the
+/// cgroup itself, or what is inside cannot be read. Each VM is recorded
+/// in [`Fenced`] before it is killed.
+fn kill_running(cgroup: &Cgroup, fencing: &mut Fencing, overdue: Duration) -> std::io::Result<()> {
     let children = match (cgroup.processes(), cgroup.children()) {
         (Ok(own), Ok(children)) if own.is_empty() => children,
-        _ => return cgroup.kill_all(),
+        _ => {
+            fencing.ending(vec!["*".to_owned()], overdue);
+            return cgroup.kill_all();
+        }
     };
+    let running: Vec<Cgroup> = children
+        .into_iter()
+        .filter(|child| {
+            !child
+                .freezer()
+                .is_ok_and(|state| state.frozen || state.empty)
+        })
+        .collect();
+    fencing.ending(
+        running
+            .iter()
+            .map(|child| {
+                child.path().file_name().map_or_else(
+                    || "*".to_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
+            })
+            .collect(),
+        overdue,
+    );
     let mut result = Ok(());
-    for child in children {
-        let stopped = child
-            .freezer()
-            .is_ok_and(|state| state.frozen || state.empty);
-        if !stopped && let Err(error) = child.kill_all() {
+    for child in running {
+        if let Err(error) = child.kill_all() {
             result = Err(error);
         }
     }
@@ -749,9 +901,17 @@ mod tests {
         let (guard, cgroup) = (Guard::new(), Cgroup::at(&group));
         let freezes = Freezes::beside(&config.lock);
         let mut saying = Saying::new(freezes.clone());
+        let mut fencing = Fencing::new(freezes.fenced());
         let mut last = None;
         let mut step = |saying: &mut Saying| {
-            assert!(step_once(&guard, &cgroup, &config, &mut last, saying));
+            assert!(step_once(
+                &guard,
+                &cgroup,
+                &config,
+                &mut last,
+                saying,
+                &mut fencing
+            ));
         };
         step(&mut saying);
         let running = freezes.read().unwrap();
@@ -828,20 +988,67 @@ mod tests {
         set(&group.join("gone"), "0", "populated 0\nfrozen 1\n");
         let killed = |path: &Path| path.join("cgroup.kill").exists();
         let (guard, cgroup) = (Guard::new(), Cgroup::at(&group));
-        let mut saying = Saying::new(Freezes::beside(&config.lock));
+        let freezes = Freezes::beside(&config.lock);
+        let fenced = freezes.fenced();
+        let mut fencing = Fencing::new(fenced.clone());
+        let mut saying = Saying::new(freezes);
         let mut last = None;
-        let feed = step_once(&guard, &cgroup, &config, &mut last, &mut saying);
+        let before = boot_now();
+        let feed = step_once(
+            &guard,
+            &cgroup,
+            &config,
+            &mut last,
+            &mut saying,
+            &mut fencing,
+        );
         assert_eq!(last, Some(GuardAction::Kill));
         assert!(!feed, "not every VM is known to be stopped yet");
         assert!(killed(&group.join("ending")), "the one still running");
         assert!(!killed(&group.join("frozen")), "a frozen VM stays frozen");
         assert!(!killed(&group.join("gone")));
         assert!(!killed(&group));
+        // The one killed is recorded, once however many steps its kill
+        // takes, so the agent says the guard ended it.
+        assert!(fenced.ended("ending", before));
+        assert!(!fenced.ended("frozen", before));
+        assert!(!fenced.ended("ending", boot_now() + Duration::from_secs(1)));
+        assert!(!step_once(
+            &guard,
+            &cgroup,
+            &config,
+            &mut last,
+            &mut saying,
+            &mut fencing,
+        ));
+        assert_eq!(fenced.read().len(), 1, "{:?}", fenced.read());
 
         // A process in the VMs' cgroup itself: everything goes.
         std::fs::write(group.join("cgroup.procs"), "4242\n").unwrap();
-        assert!(!step_once(&guard, &cgroup, &config, &mut last, &mut saying));
+        assert!(!step_once(
+            &guard,
+            &cgroup,
+            &config,
+            &mut last,
+            &mut saying,
+            &mut fencing,
+        ));
         assert!(killed(&group));
+        assert!(fenced.ended("frozen", before), "every VM went");
+    }
+
+    #[test]
+    fn the_record_of_vms_ended_keeps_the_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let fenced = Freezes::beside(&dir.path().join("guard.lock")).fenced();
+        assert!(fenced.read().is_empty(), "none before the first");
+        let names: Vec<String> = (0..Fenced::KEPT + 5).map(|n| format!("vm{n}")).collect();
+        fenced.record(&names).unwrap();
+        let kept = fenced.read();
+        assert_eq!(kept.len(), Fenced::KEPT);
+        assert_eq!(kept[0].0, "vm5", "the oldest went first");
+        assert!(fenced.ended(&format!("vm{}", Fenced::KEPT + 4), At::ZERO));
+        assert!(!fenced.ended("vm0", At::ZERO));
     }
 
     /// A guard whose watchdog cannot be armed exits without ever looking

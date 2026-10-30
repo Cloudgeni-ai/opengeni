@@ -683,6 +683,9 @@ enum End {
     Stopped,
     /// The host ended it for memory (ADR 24).
     ForMemory,
+    /// The host's guard ended it: the host's lease with the control
+    /// service ran out before the VM froze (ADR 18).
+    Fenced,
 }
 
 impl End {
@@ -693,6 +696,7 @@ impl End {
             Self::MemoryLost => "memory_lost",
             Self::Stopped => "guest_stopped",
             Self::ForMemory => "ended_for_memory",
+            Self::Fenced => "fenced",
         }
     }
 }

@@ -41,6 +41,10 @@ const SHRINK_LIMIT: Duration = Duration::from_secs(15);
 /// said before it ends the VM anyway (see [`HostAgent::reap`]).
 const LAST_WORDS_WAIT: Duration = Duration::from_secs(2);
 
+/// How long after the guard records ending a VM the VM's end still counts
+/// as the guard's doing: the agent hears of it within moments.
+const FENCED_WITHIN: Duration = Duration::from_secs(60);
+
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_event(&mut self, event: Event<E::Vm>) {
         match event {
@@ -944,6 +948,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     pub(super) fn exited(&mut self, id: Id, incarnation: u64, end: End) {
+        let end = self.why_ended(id, end);
         if self.ready_exited(id, incarnation, end) {
             return;
         }
@@ -955,15 +960,42 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if slot.incarnation != Some(incarnation) {
             return;
         }
-        if end == End::MemoryLost {
-            tracing::warn!(
+        match end {
+            End::MemoryLost => tracing::warn!(
                 %id,
                 "VM's memory can no longer be served; ending it, and running programs are lost"
-            );
-        } else {
-            tracing::warn!(%id, "VM process ended on its own; running programs are lost");
+            ),
+            End::Fenced => {
+                let what = "the guard ended the VM: it had not frozen by the time the host's lease \
+                            with the control service ran out; running programs are lost";
+                tracing::error!(%id, "{what}");
+                self.alarm(id, Alarm::Fenced, what);
+            }
+            _ => tracing::warn!(%id, "VM process ended on its own; running programs are lost"),
         }
         self.lost_vm(id, incarnation, end);
+    }
+
+    /// How the VM named `name` ended, which its process alone said was
+    /// `end`: [`End::Fenced`] for one that ended on its own (as far as its
+    /// process told) when the guard recorded ending it moments before.
+    fn why_ended(&self, name: Id, end: End) -> End {
+        if end != End::Exited {
+            return end;
+        }
+        let Some(freezes) = &self.guard_freezes else {
+            return end;
+        };
+        let since = compute_core::At::from_duration(
+            crate::fleet::boot_now()
+                .since_origin()
+                .saturating_sub(FENCED_WITHIN),
+        );
+        if freezes.fenced().ended(&name.to_string(), since) {
+            End::Fenced
+        } else {
+            end
+        }
     }
 
     /// Ends VM process `incarnation` of `id`, which is lost (it ended on its

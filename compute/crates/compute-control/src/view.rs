@@ -201,8 +201,9 @@ pub enum Unplaced {
 pub struct View {
     inner: RwLock<Inner>,
     /// How long a host may go without a renewal this replica reads before
-    /// placement passes it over: its lease's term, after which it runs no
-    /// VM, so a create sent to it could only wait for it to come back.
+    /// placement passes it over ([`compute_fleet::LeaseTerms::silent_after`]):
+    /// one cut off that long would most likely only hold a create sent to
+    /// it until it comes back.
     silent_after: Duration,
 }
 
