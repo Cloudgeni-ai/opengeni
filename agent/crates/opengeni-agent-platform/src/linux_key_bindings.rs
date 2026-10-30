@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(restore, [254]);
         // Then owner 2 ends too.
         let (kept, restore) = settle_claims(&kept, |_| false, rows);
-        assert!(kept.is_empty());
+        assert_eq!(kept, [] as [Claim; 0]);
         assert_eq!(restore, [255]);
         // A crashed owner's claim is pruned and its keycode restored by the
         // next session's start, which releases nothing of its own.
@@ -722,7 +722,7 @@ mod tests {
             let bindings = KeyBindings::new(X11Display::named(&display));
             bindings.prepare();
             let plan = plan_text(&conn, "ø");
-            assert!(plan.bindings.is_empty());
+            assert_eq!(plan.bindings, [] as [(u8, u32, Vec<u32>); 0]);
             assert_eq!(plan.used, BTreeMap::from([(keycode, O_SLASH)]));
 
             // That session is killed, and a session starting meanwhile
