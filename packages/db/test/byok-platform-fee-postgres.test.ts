@@ -671,6 +671,9 @@ test("paid credit and fee debt are read from the latest receipt, not from every 
   // One pass over the ledger for the balance; the paid-credit figures come
   // from the latest receipt alone, whatever the number of fees before it.
   const rows = fees + 3;
+  // Fresh statistics: the planner can't estimate the receipt filter, and
+  // with them it used to read and sort every receipt to find the latest.
+  await shared.admin`analyze credit_ledger_entries`;
   for (const read of [
     (db: DbClient["db"]) => getByokFeeSpendableBalance(db, accountId, "api"),
     (db: DbClient["db"]) => getBillingBalance(db, accountId),
