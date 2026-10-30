@@ -106,6 +106,9 @@ const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
 
 const opengeniPrivateSchema = pgSchema("opengeni_private");
 
+/** Who asked for a pending context compaction (`sessions.compact_request_trigger`). */
+export type CompactRequestTrigger = "operator" | "proactive";
+
 export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
 
 export type ConnectorActionPolicySnapshotEntry = {
@@ -5194,6 +5197,9 @@ export const channels = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description"),
+    // The project's avatar (1100), the same shape and bounds as a chat's.
+    // Display metadata for people only.
+    avatar: jsonb("avatar").$type<SessionAvatar>(),
     pinned: boolean("pinned").notNull().default(false),
     // Explicit user order within the pinned and unpinned project groups.
     sortOrder: integer("sort_order").notNull().default(0),
@@ -5478,6 +5484,11 @@ export const sessions = pgTable(
     // a compaction, then clears it. A durable flag (not a transient signal) so
     // the trigger survives a worker restart and converges before the next turn.
     compactRequested: boolean("compact_requested").notNull().default(false),
+    // Who asked for the pending request (migration 1102): 'operator' for
+    // /compact, 'proactive' for the worker's idle checkpoint after a turn that
+    // reached the automatic threshold. NULL (older writers) reads as operator.
+    // Meaningful only while compactRequested is true.
+    compactRequestTrigger: text("compact_request_trigger").$type<CompactRequestTrigger>(),
     queueVersion: integer("queue_version").notNull().default(0),
     queueHeadPosition: bigint("queue_head_position", { mode: "number" }).notNull().default(0),
     queueTailPosition: bigint("queue_tail_position", { mode: "number" }).notNull().default(0),

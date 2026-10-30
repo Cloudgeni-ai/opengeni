@@ -23,6 +23,8 @@ const toastSuccess = mock((_message: string, _options?: unknown) => undefined);
 const navigate = mock(async (_options: unknown) => undefined);
 const captureAnalyticsEvent = mock((_name: string) => true);
 let accountRole: "owner" | "admin" | "member" = "owner";
+// Replaces the role's permissions for one test; null keeps the role's own.
+let accountPermissionsOverride: string[] | null = null;
 
 const getBilling = mock(async () => ({
   mode: "stripe" as const,
@@ -161,6 +163,7 @@ const context = {
         },
         // An admin holds what the API grants admins; account:admin stays the owner's.
         get permissions(): string[] {
+          if (accountPermissionsOverride) return accountPermissionsOverride;
           return accountRole === "owner"
             ? ["account:admin", "billing:read", "billing:manage", "api_keys:manage"]
             : accountRole === "admin"
@@ -642,9 +645,10 @@ describe("organization billing StrictMode ownership", () => {
     }
   });
 
-  test("keeps model connections unavailable outside an organization administrator session", async () => {
+  test("opens model connections for an access key with account:admin, without person-only reads", async () => {
     const priorMode = context.clientConfig.auth.mode;
-    context.clientConfig.auth.mode = "apiKey";
+    context.clientConfig.auth.mode = "deploymentKey";
+    getOrganizationAdministrationOverview.mockClear();
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -653,8 +657,33 @@ describe("organization billing StrictMode ownership", () => {
       await act(async () =>
         root.render(<OrgSettingsRoute workspaceId={workspaceId} section="models" />),
       );
-      // Models is hidden outside an organization administrator session, and a
-      // direct link says who manages models instead of opening another page.
+      await flush();
+      // The key administers the organization's subscription accounts, as the
+      // API and the database accept it. People and defaults stay with people.
+      expect(container.textContent).not.toContain("Only admins manage models");
+      expect(container.textContent).toContain("the subscriptions and keys that pay for them");
+      expect(getOrganizationAdministrationOverview).not.toHaveBeenCalled();
+    } finally {
+      context.clientConfig.auth.mode = priorMode;
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("keeps model connections unavailable to a key without account:admin", async () => {
+    const priorMode = context.clientConfig.auth.mode;
+    context.clientConfig.auth.mode = "deploymentKey";
+    accountPermissionsOverride = ["billing:read"];
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () =>
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="models" />),
+      );
+      // Models is hidden without administrator authority, and a direct link
+      // says who manages models instead of opening another page.
       expect(container.textContent).toContain(
         "Only admins manage models. Ask an admin to add one.",
       );
@@ -666,6 +695,7 @@ describe("organization billing StrictMode ownership", () => {
       ).toBeNull();
     } finally {
       context.clientConfig.auth.mode = priorMode;
+      accountPermissionsOverride = null;
       await act(async () => root.unmount());
       container.remove();
     }

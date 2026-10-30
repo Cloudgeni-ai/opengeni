@@ -31,6 +31,9 @@ import {
   getManagedUserProfilesByIds,
   ensureExternalIdentity,
   ensureExternalWorkspaceMemberOnFirstUse,
+  applyStatedExternalWorkspaceMembership,
+  readExternalWorkspaceRevocationWatermark,
+  StatedExternalMembershipLastAdminError,
   USER_ISOLATION_WORKSPACE_SOURCE_PREFIX,
   lockExternalWorkspaceMembershipLifecycle,
   resolveExternalIdentityLink,
@@ -61,6 +64,7 @@ import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 import type { UserPresenceRecorder } from "../user-presence";
 import { MissingPermissionRefusal } from "./permission-refusal";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
+import { rethrowExternalWorkspaceOperation } from "./external-membership-refusal";
 
 export * from "./permission-refusal";
 import { sha256Hex } from "@opengeni/contracts/values";
@@ -482,6 +486,18 @@ const externalActorContexts = new WeakMap<
      * on first use. See {@link provisionExternalMemberOnFirstUse}.
      */
     firstUseMembership: boolean;
+    /**
+     * The membership the app stated on this request (plain external mode
+     * only), with the revocation watermark read under the organization
+     * membership fence when the request authenticated. See
+     * {@link applyStatedMembership}.
+     */
+    statedMembership?: {
+      permissions: Permission[];
+      revocationWatermark: string;
+      /** Workspaces already reconciled by this request. */
+      applied: Map<string, Promise<void>>;
+    };
   }
 >();
 
@@ -1006,6 +1022,42 @@ export function requireOrganizationAdministrationStamp(
 }
 
 /**
+ * This request's account:admin proof for one account and subject, or null
+ * when the request did not authenticate as an administrator of that account.
+ * Uses only the request's already-resolved access context: the canonical
+ * resolver's grants (configured key, account-scoped key, signed delegation
+ * or a person) decide, never the caller's input. Organization-membership
+ * administrators also receive a proof; the database needs it only for
+ * administrators without such a membership.
+ */
+export async function resolveAccountAdminAuthorizationStamp(
+  c: Context,
+  deps: AccessDeps,
+  input: { accountId: string; subjectId: string },
+): Promise<AccountAdminAuthorizationStamp | null> {
+  let context: AccessContext;
+  try {
+    context = await requireAccessContext(c, deps);
+  } catch (error) {
+    if (error instanceof HTTPException) return null;
+    throw error;
+  }
+  if (context.subjectId !== input.subjectId) return null;
+  const grant = context.workspaceGrants.find(
+    (candidate) => candidate.accountId === input.accountId,
+  );
+  if (!grant) return null;
+  try {
+    return requireAccountAdminAuthorizationStamp(
+      accessGrantAuthorizationFromContext(context, grant),
+    );
+  } catch (error) {
+    if (error instanceof HTTPException) return null;
+    throw error;
+  }
+}
+
+/**
  * Verify that an access authorization was minted by the canonical request
  * resolver for this exact subject and workspace.
  *
@@ -1141,6 +1193,47 @@ export async function workspaceSettingsAuthorized(
 }
 
 /**
+ * Read by the person and, through app actions, by the agent: why a Personal
+ * workspace refuses member changes, and, for someone who can create a chat
+ * share link here, what works instead.
+ */
+export const PERSONAL_WORKSPACE_MEMBERS_MESSAGE =
+  "Personal workspaces are private to their owner and can't have other members.";
+export const PERSONAL_WORKSPACE_MEMBERS_SHARE_MESSAGE =
+  "Personal workspaces are private to their owner and can't have other members. To let someone read a chat from here, create a share link for that chat: anyone with the link can read the conversation up to the moment it was shared.";
+
+/**
+ * A member change in a Personal workspace can never succeed, for anyone. Say
+ * so plainly to someone who can use the workspace, instead of a missing
+ * permission that sends them looking for an administrator. Anyone else keeps
+ * the original refusal, so this reveals nothing about other workspaces. The
+ * share link is suggested only to someone who can create one: a signed-in
+ * person, on a server that allows share links.
+ */
+async function refuseMembersInPersonalWorkspace(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<void> {
+  let grant: AccessGrant;
+  try {
+    grant = await requireAccessGrant(c, deps, workspaceId);
+  } catch {
+    return;
+  }
+  const workspace = await getWorkspace(deps.db, workspaceId);
+  if (workspace?.kind === "personal") {
+    const canShare =
+      deps.settings.privacyChatShareLinksAllowed !== false && grant.subjectId.startsWith("user:");
+    throw new HTTPException(403, {
+      message: canShare
+        ? PERSONAL_WORKSPACE_MEMBERS_SHARE_MESSAGE
+        : PERSONAL_WORKSPACE_MEMBERS_MESSAGE,
+    });
+  }
+}
+
+/**
  * Authority for a shared workspace's own Members surface (list, candidates,
  * add, change, remove). A holder of the requested workspace permission keeps
  * the ordinary grant. Otherwise an active organization owner or administrator,
@@ -1164,6 +1257,8 @@ export async function requireWorkspaceMemberManagementAuthority(
     };
   } catch (error) {
     if (!(error instanceof HTTPException) || error.status !== 403) throw error;
+    if (permission === "members:manage")
+      await refuseMembersInPersonalWorkspace(c, deps, workspaceId);
     const context = await requireAccessContext(c, deps);
     if (!canonicalManagedCookieContexts.has(context) || !context.subjectId.startsWith("user:")) {
       throw error;
@@ -1261,6 +1356,106 @@ async function provisionExternalMemberOnFirstUse(
   }
 }
 
+/**
+ * A stated membership delegates exactly what the external-members endpoints
+ * let this key delegate, refused with their errors: the key must manage
+ * members, stay inside its custom policy (no legacy admin wildcard from a
+ * custom policy, no key management from setup keys), and pass the database's
+ * grant ceiling (literal `secrets:read`; a key without `workspace:admin`
+ * delegates only permissions it holds literally). Checked on every request
+ * that states a membership, whether or not the stored grant already matches.
+ */
+function requireStatedMembershipCeiling(
+  context: AccessContext,
+  external: NonNullable<ReturnType<typeof externalActorContexts.get>>,
+  permissions: Permission[],
+): void {
+  const key = external.permissions;
+  if (
+    !(
+      key.includes("members:manage") ||
+      (external.permissionMode === "legacy" && key.includes("workspace:admin"))
+    )
+  )
+    throw new HTTPException(403, {
+      message: "External membership operation requires an organization service key",
+    });
+  requireApiKeyDelegationContext(context, permissions);
+  if (
+    (permissions.includes("secrets:read") && !key.includes("secrets:read")) ||
+    (!key.includes("workspace:admin") &&
+      permissions.some((permission) => !key.includes(permission)))
+  )
+    rethrowExternalWorkspaceOperation(
+      Object.assign(new Error("external grant exceeds service authority"), { code: "42501" }),
+    );
+}
+
+/**
+ * Apply the membership an app stated on this request to the user's grant in
+ * `workspaceId` (see `applyStatedExternalWorkspaceMembership`). The hot path
+ * writes nothing: the stored grant this resolution already read is compared
+ * first, and a write happens only when it differs (then once per workspace
+ * and request). Personal workspaces and workspaces that do not admit members
+ * (another organization's, SDK per-user) keep their own grant. Returns true
+ * when the stored grant must be read again.
+ */
+async function applyStatedMembership(
+  deps: AccessDeps,
+  context: AccessContext,
+  external: NonNullable<ReturnType<typeof externalActorContexts.get>>,
+  stated: NonNullable<
+    NonNullable<ReturnType<typeof externalActorContexts.get>>["statedMembership"]
+  >,
+  workspaceId: string,
+  personal: boolean,
+  stored: AccessGrant | null,
+): Promise<boolean> {
+  requireStatedMembershipCeiling(context, external, stated.permissions);
+  if (personal || context.subjectId !== external.identity.subjectId) return false;
+  if (
+    stored &&
+    stored.permissions.length === stated.permissions.length &&
+    stored.permissions.every((permission) => stated.permissions.includes(permission))
+  )
+    return false;
+  let pending = stated.applied.get(workspaceId);
+  if (!pending) {
+    pending = (async () => {
+      const workspace = await getWorkspace(deps.db, workspaceId);
+      if (
+        !workspace ||
+        workspace.kind !== "shared" ||
+        workspace.accountId !== external.identity.accountId ||
+        workspace.externalSource?.startsWith(USER_ISOLATION_WORKSPACE_SOURCE_PREFIX)
+      )
+        return;
+      try {
+        await applyStatedExternalWorkspaceMembership(
+          deps.db,
+          {
+            organizationId: external.identity.accountId,
+            workspaceId,
+            actorSubjectId: `api_key:${external.keyId}`,
+          },
+          {
+            identity: external.identity,
+            permissions: stated.permissions,
+            revocationWatermark: stated.revocationWatermark,
+          },
+        );
+      } catch (error) {
+        if (error instanceof StatedExternalMembershipLastAdminError)
+          throw new HTTPException(409, { message: error.message, cause: error });
+        rethrowExternalWorkspaceOperation(error);
+      }
+    })();
+    stated.applied.set(workspaceId, pending);
+  }
+  await pending;
+  return true;
+}
+
 async function accessGrantAuthorization(
   context: AccessContext,
   deps: AccessDeps,
@@ -1309,7 +1504,15 @@ async function accessGrantAuthorization(
           permissions: [...managedPersonalWorkspacePermissions],
         }
       : await membershipGrant();
-    if (
+    const stated = options.firstUseMembership === true ? external.statedMembership : undefined;
+    if (stated) {
+      // Request entry only, like first use: a fresh re-check of a live
+      // connection applies the stored grant.
+      if (
+        await applyStatedMembership(deps, context, external, stated, workspaceId, personal, grant)
+      )
+        grant = await membershipGrant();
+    } else if (
       !grant &&
       !personal &&
       options.firstUseMembership === true &&
@@ -1965,18 +2168,35 @@ async function apiKeyAccessContext(
     } catch {
       throw new HTTPException(400, { message: "invalid external actor selection" });
     }
+    const statedPermissions =
+      selection.mode === "external" && selection.membership
+        ? [...new Set(selection.membership.permissions)].sort()
+        : null;
     let identity: ExternalIdentity;
+    let revocationWatermark: string | null = null;
     try {
-      identity = await withAccountRls(deps.db, apiKey.accountId, async (tx) => {
-        // Provisioning locks the live membership after its identity lock.
-        // Claim the lifecycle prefix first so a membership-fenced session
-        // writer can recheck that identity without a lock inversion.
-        await lockExternalWorkspaceMembershipLifecycle(tx, apiKey.accountId);
-        return await ensureExternalIdentity(tx, {
-          accountId: apiKey.accountId,
-          ...selection.identity,
-        });
-      });
+      ({ identity, revocationWatermark } = await withAccountRls(
+        deps.db,
+        apiKey.accountId,
+        async (tx) => {
+          // Provisioning locks the live membership after its identity lock.
+          // Claim the lifecycle prefix first so a membership-fenced session
+          // writer can recheck that identity without a lock inversion.
+          await lockExternalWorkspaceMembershipLifecycle(tx, apiKey.accountId);
+          const ensured = await ensureExternalIdentity(tx, {
+            accountId: apiKey.accountId,
+            ...selection.identity,
+          });
+          // Under the same fence as every revoke: a revoke stamped above this
+          // watermark happened after this request authenticated.
+          return {
+            identity: ensured,
+            revocationWatermark: statedPermissions
+              ? await readExternalWorkspaceRevocationWatermark(tx)
+              : null,
+          };
+        },
+      ));
     } catch (error) {
       if (nestedPostgresSqlState(error) === "42501") {
         throw new HTTPException(403, { message: "external identity is unavailable" });
@@ -2015,6 +2235,15 @@ async function apiKeyAccessContext(
       permissionMode: apiKey.permissionMode ?? "legacy",
       ...(linked ? { linked } : {}),
       firstUseMembership: selection.mode !== "linked_native" && !linked && !service,
+      ...(statedPermissions && revocationWatermark !== null && !service
+        ? {
+            statedMembership: {
+              permissions: statedPermissions,
+              revocationWatermark,
+              applied: new Map<string, Promise<void>>(),
+            },
+          }
+        : {}),
     });
     if (organizationApiKeyAccess(apiKey.permissions) === "developer_setup") {
       developerSetupApiKeyContexts.add(context);

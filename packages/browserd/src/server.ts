@@ -12,6 +12,7 @@ import {
   BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_OBSERVATION_NOTICES_PARAMETER,
+  BROWSER_SESSION_NO_OBSERVATION_PARAMETER,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
   COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER,
@@ -777,7 +778,25 @@ export class BrowserControlServer {
           409,
         );
       }
-      return success(await this.supervisor.passkeySync(sync.data));
+      const response = await this.supervisor.passkeySync(sync.data);
+      if (url.searchParams.get("backupFlags") === "1") {
+        return success({ ...response, supportsBackupFlags: true });
+      }
+      // Older APIs strictly parse registration material too. Keep their wire
+      // shape unchanged; the pending event retains its original flags until
+      // acknowledged, so an upgraded caller can still retrieve them.
+      return success({
+        ...response,
+        events: response.events.map((event) => {
+          if (event.type !== "registered") return event;
+          const {
+            backupEligibility: _eligibility,
+            backupState: _state,
+            ...credential
+          } = event.credential;
+          return { ...event, credential };
+        }),
+      });
     }
     if (segments.length === 4 && segments[3] === "recordings") {
       if (request.method !== "POST") {
@@ -1134,6 +1153,8 @@ export class BrowserControlServer {
 
   private async createSession(request: Request): Promise<Response> {
     const body = parseCreateSession(await readJsonObject(request));
+    const acceptsNoObservation =
+      new URL(request.url).searchParams.get(BROWSER_SESSION_NO_OBSERVATION_PARAMETER) === "1";
     try {
       return await this.withLifecycleLock(body.browserSessionId, async () => {
         const controlDigest = tokenDigest(body.controlToken);
@@ -1191,7 +1212,9 @@ export class BrowserControlServer {
             ? { browserExecutablePath: this.browserExecutablePath }
             : {}),
         };
-        const created = await this.supervisor.createSession(sessionOptions);
+        const created = await this.supervisor.createSession(sessionOptions, {
+          acceptsNoObservation,
+        });
         // The tab inventory rides along so the caller can show the opened
         // browser without another round trip. It is a read-only convenience:
         // a failed listing leaves the created session intact.

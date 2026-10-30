@@ -1,9 +1,14 @@
-import type { EventTypeDescriptor, WebhookEventAdapter } from "@opengeni/contracts";
+import {
+  webhookPresetOf,
+  type EventTypeDescriptor,
+  type WebhookEventAdapter,
+} from "@opengeni/contracts";
 
 /**
- * The event types a webhook adapter is known to produce, for trigger pickers
- * and agents. Standard webhooks name their own types, so their catalog is the
- * types the source actually delivered recently.
+ * The event types a webhook preset's app is known to send, for trigger
+ * pickers and agents. Standard webhooks and formats written out by hand name
+ * their own types, so their catalog is the types the source actually
+ * delivered recently.
  */
 
 type CatalogEntry = { type: string; description: string; fields?: Array<[string, string]> };
@@ -138,17 +143,14 @@ const TAILSCALE_TYPES: CatalogEntry[] = [
   { type: "test", description: "A test event sent from the Tailscale admin console" },
 ];
 
-const CATALOG: Partial<Record<WebhookEventAdapter, CatalogEntry[]>> = {
-  linear: LINEAR_TYPES,
-  sentry: SENTRY_TYPES,
-};
-
 /**
  * The documented types of apps a custom webhook preset fills in, keyed by the
  * format's `preset`. A custom source without a known preset lists the types it
  * actually received.
  */
 const PRESET_CATALOG: Record<string, CatalogEntry[]> = {
+  linear: LINEAR_TYPES,
+  sentry: SENTRY_TYPES,
   tailscale: TAILSCALE_TYPES,
 };
 
@@ -166,17 +168,16 @@ function descriptor(entry: CatalogEntry): EventTypeDescriptor {
 }
 
 /**
- * A webhook source's event types: the adapter's (or custom preset's) known
- * types, then any other type the source delivered recently.
+ * A webhook source's event types: its preset's known types, then any other
+ * type the source delivered recently.
  */
 export function webhookEventTypeCatalog(
   source: { adapter: WebhookEventAdapter | null; format: { preset?: string | undefined } | null },
   recent: ReadonlyArray<{ type: string; count: number }>,
 ): EventTypeDescriptor[] {
-  const preset = source.adapter === "custom" ? source.format?.preset : undefined;
+  const { preset } = webhookPresetOf({ adapter: source.adapter, preset: source.format?.preset });
   const entries =
-    CATALOG[source.adapter ?? "standard"] ??
-    (preset !== undefined && Object.hasOwn(PRESET_CATALOG, preset) ? PRESET_CATALOG[preset] : []);
+    preset !== null && Object.hasOwn(PRESET_CATALOG, preset) ? PRESET_CATALOG[preset] : [];
   const known = (entries ?? []).map(descriptor);
   const seen = new Set(known.map((entry) => entry.type));
   const observed = recent

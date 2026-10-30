@@ -40,7 +40,7 @@ export function AgentLearningSettingsPage({ workspaceId }: { workspaceId: string
       accountId: workspace.accountId,
     }).canManageCompanyProfileAgentPolicy,
   );
-  const shared = useLearningDefaults(workspaceId, personal ? "personal" : "workspace");
+  const shared = useLearningDefaults(workspaceId, "workspace");
   const mine = useLearningDefaults(workspaceId, "personal");
   const identity = useIdentityLearningPolicy(workspaceId, managesOrganizationIdentity);
   const queue = useReviewQueue(workspaceId, 0);

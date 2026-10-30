@@ -40,7 +40,6 @@ type SkillsFailure = { title: string; cause: unknown };
 /** Both product destinations use this catalog and the same folder write API. */
 export function SkillsPanel({
   workspaceId,
-  personalWorkspace = false,
   query = "",
   onFindSkill,
   onImportSkill,
@@ -50,7 +49,6 @@ export function SkillsPanel({
   openSkillRef,
 }: {
   workspaceId: string;
-  personalWorkspace?: boolean;
   query?: string;
   onFindSkill?: (() => void) | undefined;
   onImportSkill?: (() => void) | undefined;
@@ -63,7 +61,6 @@ export function SkillsPanel({
     <SkillsPanelContent
       context={useAppContext()}
       workspaceId={workspaceId}
-      personalWorkspace={personalWorkspace}
       query={query}
       onFindSkill={onFindSkill}
       onImportSkill={onImportSkill}
@@ -78,7 +75,6 @@ export function SkillsPanel({
 export function SkillsPanelContent({
   context,
   workspaceId,
-  personalWorkspace = false,
   query = "",
   onFindSkill,
   onImportSkill,
@@ -89,7 +85,6 @@ export function SkillsPanelContent({
 }: {
   context: AppContextValue;
   workspaceId: string;
-  personalWorkspace?: boolean;
   query?: string;
   onFindSkill?: (() => void) | undefined;
   onImportSkill?: (() => void) | undefined;
@@ -239,9 +234,7 @@ export function SkillsPanelContent({
       const id = slotKey.slice("skill:".length);
       if (id === "new") {
         if (record && record.id === draftId) return;
-        const scope = ([personalWorkspace ? "user" : "workspace", "organization"] as const).find(
-          canManage,
-        );
+        const scope = (["workspace", "organization"] as const).find(canManage);
         if (scope) create(scope);
         else slot.close({ replace: true });
         return;
@@ -622,7 +615,7 @@ export function SkillsPanelContent({
           hidden={Boolean(query.trim()) && !matchingSkills.length && !record}
           action={
             <div hidden={Boolean(query.trim())} className="flex flex-wrap gap-2">
-              {([personalWorkspace ? "user" : "workspace", "organization"] as const)
+              {(["workspace", "organization"] as const)
                 .filter(canManage)
                 .slice(0, 1)
                 .map((scope) => (

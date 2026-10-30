@@ -28,6 +28,13 @@ export type OrganizationSettingsAccess = {
   /** An owner or admin in an administrator session. */
   administrator: boolean;
   /**
+   * Administers the organization's subscription accounts (Codex, SuperGrok,
+   * Claude): an owner or admin, or any account administrator such as the
+   * deployment's access key or a service with account:admin. The API and the
+   * database accept the same set.
+   */
+  modelsAdministrator: boolean;
+  /**
    * Shared workspaces in this organization the person administers. A workspace
    * admin who isn't an organization admin manages those workspaces' models.
    */
@@ -75,6 +82,10 @@ export function organizationSettingsAccess(input: {
   const organizationAdministratorSession = managedHumanSession || singleUser;
   // The one rule the rail's picker also uses to tell administrators from a key that creates by name.
   const administrator = administersOrganization(input);
+  // Subscription accounts keep their own rule: an owner-or-admin session or a
+  // literal account:admin grant (a key or service), not organization Knowledge's.
+  const modelsAdministrator =
+    administrator || hasAccountPermission(accessContext, accountId, "account:admin");
   const administeredWorkspaceIds = accessContext.workspaceGrants
     .filter(
       (grant) =>
@@ -92,10 +103,12 @@ export function organizationSettingsAccess(input: {
     visible.add("integrations");
   }
   // Every model setting lives on Organization > Models: owners and admins manage
-  // all of it, workspace admins the workspaces they administer, and every
-  // signed-in member their own Personal workspace (each membership has one).
+  // all of it, an account administrator without a person (a key or service)
+  // the organization's subscription accounts, workspace admins the workspaces
+  // they administer, and every signed-in member their own Personal workspace
+  // (each membership has one).
   if (
-    administrator ||
+    modelsAdministrator ||
     (organizationAdministratorSession && administeredWorkspaceIds.length > 0) ||
     (managedHumanSession && !singleUser && actorRole !== null)
   ) {
@@ -127,6 +140,7 @@ export function organizationSettingsAccess(input: {
     managedHumanSession,
     organizationAdministratorSession,
     administrator,
+    modelsAdministrator,
     administeredWorkspaceIds,
     canReadBilling,
     canManageBilling,

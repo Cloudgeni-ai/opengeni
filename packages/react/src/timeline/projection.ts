@@ -14,6 +14,12 @@ import {
   type SessionStatus,
   type TimelineAnnotation,
 } from "@opengeni/sdk";
+import {
+  isAgentActivityEvent,
+  isTurnExecutionEvidence,
+  orderTimelineEvents,
+  prescanTurnAnchors,
+} from "@opengeni/sdk/timeline-order";
 import fleetDecisionItem from "./fleet-decision-projection";
 import { isAgentWorkHumanInput } from "./agent-work-human-input";
 import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";
@@ -283,6 +289,9 @@ export function buildTimeline(
     for (const item of presentationWaits.get(key) ?? []) item.resolvedAt = event.occurredAt;
     presentationWaits.delete(key);
   };
+  // Open approval waits by the approval ids they ask about, so the person's
+  // answer is on the wait the moment it is recorded, before work resumes.
+  const approvalWaitsById = new Map<string, { notice: NoticeItem; turnId: string | null }>();
   // Live model-capacity waits. Later lifecycle evidence that the turn is no
   // longer blocked (resume, a non-waiting status, its settlement) resolves
   // them, so a recovered wait never lingers as a warning.
@@ -632,7 +641,7 @@ export function buildTimeline(
           });
           break;
         }
-        const voiceMessage = realtimeVoiceMessage(payload);
+        const voiceMessage = realtimeVoiceMessage(t, payload);
         const sender = messageSender(payload.initiator);
         const humanInputDelegation = parseHumanInputDelegation(payload.modelContext);
         const userMessage: UserMessageItem = {
@@ -1392,17 +1401,49 @@ export function buildTimeline(
             call.awaitingApproval = true;
           }
         }
-        rememberPresentationWait(
-          {
-            kind: "notice",
-            id: event.id,
-            tone: "waiting",
-            text: t("timeline.projection.approvalNeededTheTurnIs"),
-            approval: true,
-            occurredAt: event.occurredAt,
-          },
-          turnId,
-        );
+        const approvalActions = approvalActionsOf(payload);
+        const notice: NoticeItem = {
+          kind: "notice",
+          id: event.id,
+          tone: "waiting",
+          text: t("timeline.projection.approvalNeededTheTurnIs"),
+          approval: true,
+          ...(approvalActions.length > 0 ? { approvalActions } : {}),
+          occurredAt: event.occurredAt,
+        };
+        for (const action of approvalActions) approvalWaitsById.set(action.id, { notice, turnId });
+        rememberPresentationWait(notice, turnId);
+        break;
+      }
+
+      case "user.approvalDecision": {
+        // The person answered: the wait reads as answered at once, saying how,
+        // rather than waiting for the run to resume.
+        if (event.duplicateOfEventId) break;
+        const approvalId = stringValue(payload.approvalId);
+        if (!approvalId || (payload.decision !== "approve" && payload.decision !== "reject")) break;
+        // Opengeni itself rejects a call it refused or whose approval expired;
+        // that is not the person's answer and never reads as theirs.
+        const automatic =
+          payload.decision === "reject" &&
+          (payload.refusal !== undefined || event.clientEventId?.startsWith("system:") === true);
+        const decision = automatic ? "automatic_reject" : payload.decision;
+        // The call it names stops waiting too: an approved call runs now, a
+        // rejected one never will.
+        const call = callsById.get(approvalId);
+        if (call?.kind === "tool-call" && call.awaitingApproval) {
+          delete call.awaitingApproval;
+          if (decision === "approve") call.status = "running";
+          else call.approvalRejected = automatic ? "automatic" : "person";
+        }
+        const open = approvalWaitsById.get(approvalId);
+        if (!open) break;
+        approvalWaitsById.delete(approvalId);
+        const action = open.notice.approvalActions?.find((each) => each.id === approvalId);
+        if (action) action.decision = decision;
+        if (open.notice.approvalActions?.every((each) => each.decision !== undefined)) {
+          resolvePresentationWait(event, turnId ?? open.turnId);
+        }
         break;
       }
 
@@ -2030,7 +2071,15 @@ export function buildTimeline(
   return items;
 }
 
-function realtimeVoiceMessage(payload: Record<string, unknown>): {
+/**
+ * A voice request shows its transcript. A voice handoff's stored text is a
+ * fixed English notice, not something the person said, so it shows in the
+ * reader's language.
+ */
+function realtimeVoiceMessage(
+  t: OpenGeniText,
+  payload: Record<string, unknown>,
+): {
   text: string;
   presentation: {
     kind: "realtime_voice" | "realtime_voice_handoff";
@@ -2041,9 +2090,14 @@ function realtimeVoiceMessage(payload: Record<string, unknown>): {
   const visibleText = stringValue(payload.text);
   if (presentation.kind === "realtime_voice" || presentation.kind === "realtime_voice_handoff") {
     const context = stringValue(presentation.context);
-    return visibleText && context
-      ? { text: visibleText, presentation: { kind: presentation.kind, context } }
-      : null;
+    if (!visibleText || !context) return null;
+    return {
+      text:
+        presentation.kind === "realtime_voice_handoff"
+          ? t("timeline.projection.voiceSessionEnded")
+          : visibleText,
+      presentation: { kind: presentation.kind, context },
+    };
   }
   return null;
 }
@@ -2292,10 +2346,27 @@ function markRepeatedMachineRequests(items: TimelineItem[]): void {
  * the URL annotation table that would make them resolvable. Keep the canonical
  * model-history item untouched, but never expose those unusable handles in the
  * human timeline. Ordinary markdown links and structured URL citations remain.
+ *
+ * A handle is U+E200, `cite` or `filecite`, U+E202-separated references such
+ * as `turn0search3`, then U+E201. It also reaches the timeline without its
+ * delimiters (`citeturn0search3turn1view0`, when a model writes it as plain
+ * text), cut short, or still streaming at the end of the text.
  */
 export function stripOpaqueCitationTokens(text: string): string {
-  return text.replace(/\s*cite(?:[^]+)+/gu, "");
+  return text
+    .replace(PROVIDER_CITATION_HANDLE, "")
+    .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
+    .replace(PROVIDER_CITATION_DELIMITER, "")
+    .replace(BARE_PROVIDER_CITATION_HANDLE, "");
 }
+
+const PROVIDER_CITATION_HANDLE =
+  /\s*\u{E200}(?:file)?cite(?:\u{E202}[^\u{E200}-\u{E202}]*)*\u{E201}/gu;
+/** A handle whose end has not streamed in yet, or never will. */
+const UNFINISHED_PROVIDER_CITATION_HANDLE = /\s*\u{E200}[^\u{E201}\s]*$/u;
+const PROVIDER_CITATION_DELIMITER = /[\u{E200}-\u{E202}]/gu;
+/** `cite` or `filecite` glued to one or more references, which no prose writes. */
+const BARE_PROVIDER_CITATION_HANDLE = /[ \t]*(?:file)?cite(?:turn\d+[a-z_]+\d+)+/gu;
 
 /**
  * The turn summary's short outcome for a usage ceiling. The adjacent notice row
@@ -3145,14 +3216,7 @@ const ROUTINE_MACHINE_INPUT_KINDS: ReadonlySet<MachineInputMember["kind"]> = new
 
 /* --- helpers ---------------------------------------------------------------- */
 
-type TurnAnchorPrescan = {
-  queuedTurnByTrigger: Map<string, string>;
-  startSeqByTrigger: Map<string, number>;
-  cancelledBeforeStartTriggers: Set<string>;
-  directChatSequenceByTrigger: Map<string, number>;
-  explicitQueuedTriggers: Set<string>;
-  startedTurnIds: Set<string>;
-};
+export { isTurnExecutionEvidence };
 
 /** Navigation uses the same queue/start/withdrawal rules as transcript ordering. */
 export function timelineQuestionPlacement(question: SessionEvent, evidence: SessionEvent[]) {
@@ -3168,235 +3232,6 @@ export function timelineQuestionPlacement(question: SessionEvent, evidence: Sess
   )
     return { kind: "pending" as const };
   return { kind: "visible" as const, sequence: question.sequence };
-}
-
-function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
-  const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
-  const queuedTurnByTrigger = new Map<string, string>();
-  const startSeqByTrigger = new Map<string, number>();
-  const cancelledTurnIds = new Set<string>();
-  const withdrawnTurnIds = new Set<string>();
-  const fallbackSeqByTurn = new Map<string, number>();
-  const directChatSequenceByTrigger = new Map<string, number>();
-  const explicitQueuedTriggers = new Set<string>();
-  const queueSteerSequenceByTurn = new Map<string, number>();
-  const startedTurnIds = new Set<string>();
-  const userMessageSequenceById = new Map<string, number>();
-
-  for (const event of ordered) {
-    const payload = asRecord(event.payload);
-    const turnId = event.turnId ?? null;
-    if (event.type === "user.message") {
-      userMessageSequenceById.set(event.id, event.sequence);
-      if (payload.routing === "queued_for_execution") {
-        explicitQueuedTriggers.add(event.id);
-      } else if (
-        payload.routing === "accepted_for_execution" ||
-        payload.routing === "accepted_for_steering"
-      ) {
-        directChatSequenceByTrigger.set(event.id, event.sequence);
-      }
-    }
-    if (event.type === "user.message" && payload.delivery === "steer") {
-      directChatSequenceByTrigger.set(event.id, event.sequence);
-    }
-    if (event.type === "session.control.steer_requested") {
-      const targetTurnId = typeof payload.targetTurnId === "string" ? payload.targetTurnId : null;
-      if (targetTurnId && !queueSteerSequenceByTurn.has(targetTurnId)) {
-        queueSteerSequenceByTurn.set(targetTurnId, event.sequence);
-      }
-    }
-    if (
-      event.type === "session.queue.changed" &&
-      (payload.operation === "edit" || payload.operation === "delete")
-    ) {
-      const withdrawnTurnId =
-        typeof payload.turnId === "string" ? payload.turnId : (turnId ?? null);
-      if (withdrawnTurnId) withdrawnTurnIds.add(withdrawnTurnId);
-    }
-    if (event.type === "turn.queued") {
-      const triggerEventId =
-        typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
-      const queuedTurnId = typeof payload.turnId === "string" ? payload.turnId : turnId;
-      if (triggerEventId && queuedTurnId) {
-        queuedTurnByTrigger.set(triggerEventId, queuedTurnId);
-        if (
-          (payload.routing === "accepted_for_execution" ||
-            payload.routing === "accepted_for_steering") &&
-          !directChatSequenceByTrigger.has(triggerEventId)
-        ) {
-          directChatSequenceByTrigger.set(
-            triggerEventId,
-            userMessageSequenceById.get(triggerEventId) ?? event.sequence,
-          );
-        }
-      }
-      continue;
-    }
-    if (event.type === "turn.started") {
-      const triggerEventId =
-        typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
-      if (triggerEventId && !startSeqByTrigger.has(triggerEventId)) {
-        startSeqByTrigger.set(triggerEventId, event.sequence);
-      }
-      if (turnId) {
-        startedTurnIds.add(turnId);
-      }
-    } else if (event.type === "turn.cancelled" && turnId) {
-      cancelledTurnIds.add(turnId);
-    }
-
-    if (turnId && isTurnExecutionEvidence(event.type)) {
-      const previous = fallbackSeqByTurn.get(turnId);
-      if (previous === undefined || event.sequence < previous) {
-        fallbackSeqByTurn.set(turnId, event.sequence);
-      }
-    }
-    if (
-      turnId &&
-      isTurnExecutionEvidence(event.type) &&
-      !(event.type === "turn.superseded" && payload.beforeAttempt === true)
-    ) {
-      startedTurnIds.add(turnId);
-    }
-  }
-
-  for (const [triggerEventId, turnId] of queuedTurnByTrigger) {
-    const queueSteerSequence = queueSteerSequenceByTurn.get(turnId);
-    if (queueSteerSequence !== undefined) {
-      directChatSequenceByTrigger.set(triggerEventId, queueSteerSequence);
-    }
-    if (!startSeqByTrigger.has(triggerEventId)) {
-      const fallbackSeq = fallbackSeqByTurn.get(turnId);
-      if (fallbackSeq !== undefined) {
-        startSeqByTrigger.set(triggerEventId, fallbackSeq);
-      }
-    }
-  }
-
-  const cancelledBeforeStartTriggers = new Set<string>();
-  for (const [triggerEventId, turnId] of queuedTurnByTrigger) {
-    if (
-      (cancelledTurnIds.has(turnId) || withdrawnTurnIds.has(turnId)) &&
-      !startSeqByTrigger.has(triggerEventId) &&
-      !fallbackSeqByTurn.has(turnId)
-    ) {
-      cancelledBeforeStartTriggers.add(triggerEventId);
-    }
-  }
-
-  return {
-    queuedTurnByTrigger,
-    startSeqByTrigger,
-    cancelledBeforeStartTriggers,
-    directChatSequenceByTrigger,
-    explicitQueuedTriggers,
-    startedTurnIds,
-  };
-}
-
-function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan): SessionEvent[] {
-  const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
-  const insertions = new Map<number, SessionEvent[]>();
-
-  for (const event of ordered) {
-    if (event.type !== "user.message") {
-      continue;
-    }
-    // Steer is an accepted direction change, not waiting queue copy. Keep it
-    // directly in chat across refresh/reconnect even before its turn starts.
-    const directChatSequence = prescan.directChatSequenceByTrigger.get(event.id);
-    if (directChatSequence !== undefined) {
-      pushInsertion(insertions, directChatSequence, event);
-      continue;
-    }
-    const queuedTurnId = prescan.queuedTurnByTrigger.get(event.id);
-    if (!queuedTurnId) {
-      if (prescan.explicitQueuedTriggers.has(event.id)) {
-        const startSeq = prescan.startSeqByTrigger.get(event.id);
-        if (startSeq !== undefined) {
-          pushInsertion(insertions, startSeq, event);
-        }
-        continue;
-      }
-      pushInsertion(insertions, event.sequence, event);
-      continue;
-    }
-    if (prescan.cancelledBeforeStartTriggers.has(event.id)) {
-      continue;
-    }
-    const startSeq = prescan.startSeqByTrigger.get(event.id);
-    if (startSeq !== undefined) {
-      pushInsertion(insertions, startSeq, event);
-      continue;
-    }
-    // A waiting prompt belongs only in the prompt queue. It enters the
-    // timeline at turn.started (or the first same-turn activity fallback),
-    // never as a second queued representation.
-  }
-
-  const projected: SessionEvent[] = [];
-  for (const event of ordered) {
-    const before = insertions.get(event.sequence);
-    if (before) {
-      projected.push(...before);
-    }
-    if (event.type !== "user.message") {
-      projected.push(event);
-    }
-  }
-  return projected;
-}
-
-function pushInsertion(
-  insertions: Map<number, SessionEvent[]>,
-  sequence: number,
-  event: SessionEvent,
-): void {
-  const bucket = insertions.get(sequence);
-  if (bucket) {
-    bucket.push(event);
-  } else {
-    insertions.set(sequence, [event]);
-  }
-}
-
-function isAgentActivityEvent(type: string): boolean {
-  return (
-    type.startsWith("agent.") ||
-    type.startsWith("sandbox.") ||
-    type === "subscription.account.selected" ||
-    type === "subscription.account.switched"
-  );
-}
-
-/**
- * Evidence that a queued prompt crossed the execution boundary when an older
- * or partially recovered ledger is missing its canonical `turn.started`.
- * Queue/control bookkeeping intentionally does not qualify: moving, editing,
- * steering, or deleting a waiting row must never make its prompt appear in the
- * transcript as though inference had begun.
- */
-export function isTurnExecutionEvidence(type: string): boolean {
-  return (
-    isAgentActivityEvent(type) ||
-    type === "turn.completed" ||
-    type === "turn.failed" ||
-    // An admission refusal can settle a queued turn before it ever starts:
-    // its prompt still belongs above the "usage limit reached" row.
-    type === "usage.exhausted" ||
-    type === "turn.superseded" ||
-    type === "turn.recovery.requested" ||
-    type === "turn.capacity_waiting" ||
-    type === "session.requiresAction" ||
-    type === "tool.auth_needed" ||
-    type === "credential.auth_needed" ||
-    type.startsWith("turn.startup.phase.") ||
-    type.startsWith("rig.setup.") ||
-    type === "codex.capacity.waiting" ||
-    type === "codex.capacity.resumed" ||
-    type === "codex.fleet.decision"
-  );
 }
 
 function turnEndItem(
@@ -3753,6 +3588,26 @@ function approvalCallIds(payload: Record<string, unknown>): string[] {
     if (id) ids.push(id);
   }
   return ids;
+}
+
+/** The actions an approval request asks about, with their display titles when given. */
+function approvalActionsOf(
+  payload: Record<string, unknown>,
+): NonNullable<NoticeItem["approvalActions"]> {
+  const approvals = Array.isArray(payload.approvals) ? payload.approvals : [];
+  const actions: NonNullable<NoticeItem["approvalActions"]> = [];
+  for (const approval of approvals) {
+    const record = asRecord(approval);
+    const raw = asRecord(record.rawItem);
+    // The same id `user.approvalDecision` answers (see `approvalCallIds`).
+    const id = [raw.callId, raw.id, record.id, record.callId].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    if (!id) continue;
+    const title = stringValue(asRecord(record.display).title).trim();
+    actions.push({ id, title: title || null });
+  }
+  return actions;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

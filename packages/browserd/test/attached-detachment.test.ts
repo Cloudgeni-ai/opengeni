@@ -1,19 +1,24 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { BrowserInteractionController } from "@opengeni/interaction";
+import {
+  BrowserInteractionController,
+  InteractionDefiniteDriverError,
+} from "@opengeni/interaction";
 import type { BrowserActionCommand } from "@opengeni/contracts";
 import { AgentBrowserDriver, type BrowserCdpConnection } from "../src/cdp-driver";
 import {
   AttachedChromeCdpConnection,
   type AttachedBrowserBridgeTransport,
 } from "../src/attached-cdp";
-import { CdpCommandTimeoutError, CdpTransportError } from "../src/cdp";
+import { CdpCommandTimeoutError, CdpProtocolError, CdpTransportError } from "../src/cdp";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
 
 class DetachmentBridge implements AttachedBrowserBridgeTransport {
   readonly commands: Array<Readonly<Record<string, unknown>>> = [];
   readonly attached = new Set<string>();
   readonly events: Array<Record<string, unknown>> = [];
+  /** How many documents each tab has loaded since its first. */
+  readonly navigations = new Map<string, number>();
   private sequence = 0;
   beforeAttachReply: (() => Promise<void>) | null = null;
   beforeCommandReply: ((method: unknown) => Promise<void>) | null = null;
@@ -21,6 +26,11 @@ class DetachmentBridge implements AttachedBrowserBridgeTransport {
   detach(tabId: string, reason: "target_closed" | "canceled_by_user"): void {
     this.attached.delete(tabId);
     this.event(tabId, "OpenGeni.debuggerDetached", { reason });
+  }
+
+  /** The tab loads a new document, as a navigation the driver does not see. */
+  navigate(tabId: string): void {
+    this.navigations.set(tabId, (this.navigations.get(tabId) ?? 0) + 1);
   }
 
   event(tabId: string, method: string, params: Record<string, unknown>): void {
@@ -62,7 +72,7 @@ class DetachmentBridge implements AttachedBrowserBridgeTransport {
             frameTree: {
               frame: {
                 id: `frame-${id}`,
-                loaderId: `loader-${id}`,
+                loaderId: `loader-${id}-${this.navigations.get(id) ?? 0}`,
                 url: `https://browser.example.test/${id}`,
               },
             },
@@ -179,13 +189,14 @@ async function drainDetach(bridge: DetachmentBridge): Promise<void> {
   await Bun.sleep(0);
 }
 
-test("reattaches only the disconnected tab and invalidates its old causal fences", async () => {
+test("reattaches only the disconnected tab and invalidates its old causal fences once its page changed", async () => {
   const { bridge, connection, driver } = await fixture();
   try {
     const before = await driver.observe("7");
     const other = await driver.observe("8");
     bridge.detach("7", "target_closed");
     await drainDetach(bridge);
+    bridge.navigate("7");
     const after = await driver.observe("7");
     expect(after.target.targetGeneration).not.toBe(before.target.targetGeneration);
     expect(after.target.documentGeneration).not.toBe(before.target.documentGeneration);
@@ -224,6 +235,122 @@ test("reattaches only the disconnected tab and invalidates its old causal fences
           String(c.method).startsWith("Input."),
       ),
     ).toBe(false);
+  } finally {
+    connection.close();
+  }
+});
+
+test("an observation made before the tab's debugging ended still acts on its unchanged page", async () => {
+  // A password manager shows its inline menu (another extension's frame), and
+  // Chrome ends the attachment of the tab without changing its page.
+  const { bridge, connection, driver } = await fixture();
+  try {
+    const before = await driver.observe("7");
+    bridge.detach("7", "target_closed");
+    await drainDetach(bridge);
+    // Before, the click was refused as targeting an earlier target generation.
+    await driver.dispatch({
+      protocolVersion: 1,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      operationId: randomUUID(),
+      browserSessionId: before.browserSessionId,
+      controllerGeneration: before.target.controllerGeneration,
+      targetId: "7",
+      expectedTargetGeneration: before.target.targetGeneration,
+      expectedDocumentGeneration: before.target.documentGeneration!,
+      expectedFrameId: before.frameId,
+      observationMode: "none",
+      action: { type: "pointer", action: "click", x: 10, y: 10 },
+    });
+    expect(
+      bridge.commands.filter((c) => c.type === "debugger.attach" && c.tabId === "7"),
+    ).toHaveLength(2);
+    expect(
+      bridge.commands.filter((c) => c.method === "Input.dispatchMouseEvent").length,
+    ).toBeGreaterThan(0);
+    // Ended again, while attaching once more, it still keeps that authority.
+    bridge.detach("7", "target_closed");
+    await drainDetach(bridge);
+    let endedWhileAttaching = false;
+    bridge.beforeAttachReply = async () => {
+      if (endedWhileAttaching) return;
+      endedWhileAttaching = true;
+      bridge.detach("7", "target_closed");
+    };
+    await driver.observe("7").catch(() => undefined);
+    bridge.beforeAttachReply = null;
+    const after = await driver.observe("7");
+    expect(endedWhileAttaching).toBe(true);
+    expect(after.target.targetGeneration).toBe(before.target.targetGeneration);
+    expect(after.target.documentGeneration).toBe(before.target.documentGeneration);
+    expect(after.frameId).toBe(before.frameId);
+  } finally {
+    connection.close();
+  }
+});
+
+test("a background tab drawn before its debugging ended takes input on its unchanged page without a new capture", async () => {
+  // The agent's tab opened in the background and has never been shown, so
+  // the first input has it draw with a capture. A password manager's menu
+  // then ends the attachment, and while that frame is in the page Chrome
+  // refuses captures. The same document has still drawn.
+  const bridge = new DetachmentBridge();
+  let refuseCaptures = false;
+  bridge.beforeCommandReply = async (method) => {
+    if (method === "Page.captureScreenshot" && refuseCaptures)
+      throw new Error("Cannot access a chrome-extension:// URL of different extension");
+  };
+  const neverShown = bridge.request.bind(bridge);
+  bridge.request = async <T>(payload: Readonly<Record<string, unknown>>): Promise<T> => {
+    const expression = String((payload.params as Record<string, unknown>)?.expression ?? "");
+    if (
+      payload.method === "Page.createIsolatedWorld" &&
+      bridge.attached.has(String(payload.tabId))
+    ) {
+      bridge.commands.push(payload);
+      return { result: { executionContextId: 1 } } as T;
+    }
+    if (payload.method === "Runtime.evaluate" && expression.includes("visibility-state")) {
+      bridge.commands.push(payload);
+      return { result: { result: { value: false } } } as T;
+    }
+    return await neverShown<T>(payload);
+  };
+  const { connection, driver } = await fixture(bridge);
+  const click = (observation: Awaited<ReturnType<typeof driver.observe>>) =>
+    driver.dispatch({
+      protocolVersion: 1,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      operationId: randomUUID(),
+      browserSessionId: observation.browserSessionId,
+      controllerGeneration: observation.target.controllerGeneration,
+      targetId: "7",
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration!,
+      expectedFrameId: observation.frameId,
+      observationMode: "none",
+      action: { type: "pointer", action: "click", x: 10, y: 10 },
+    });
+  const captures = () =>
+    bridge.commands.filter((c) => c.method === "Page.captureScreenshot").length;
+  const presses = () =>
+    bridge.commands.filter((c) => c.method === "Input.dispatchMouseEvent").length;
+  try {
+    const before = await driver.observe("7");
+    await click(before);
+    expect(captures()).toBeGreaterThan(0);
+    const pressed = presses();
+    expect(pressed).toBeGreaterThan(0);
+    bridge.detach("7", "target_closed");
+    await drainDetach(bridge);
+    refuseCaptures = true;
+    const captured = captures();
+    await click(before);
+    expect(captures()).toBe(captured);
+    expect(presses()).toBeGreaterThan(pressed);
+    expect(
+      bridge.commands.filter((c) => c.type === "debugger.attach" && c.tabId === "7"),
+    ).toHaveLength(2);
   } finally {
     connection.close();
   }
@@ -482,10 +609,11 @@ test("detachment during a semantic read discards that observation and reads agai
     await drainDetach(bridge);
     held.release();
     const after = await observing;
-    expect(after.target.targetGeneration).not.toBe(first.target.targetGeneration);
-    expect(after.target.documentGeneration).not.toBe(first.target.documentGeneration);
-    expect(after.frameId).not.toBe(first.frameId);
+    // Read on a new attachment, of the same document.
     expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
+    expect(after.target.targetGeneration).toBe(first.target.targetGeneration);
+    expect(after.target.documentGeneration).toBe(first.target.documentGeneration);
+    expect(after.frameId).toBe(first.frameId);
     expect(bridge.commands.some((c) => String(c.method).startsWith("Input."))).toBe(false);
   } finally {
     held.release();
@@ -963,7 +1091,8 @@ test("a read Chrome refuses because its attachment ended reads again on a new at
       });
     }, 20);
     const state = await driver.targetState("7");
-    expect(state.targetGeneration).not.toBe(first.target.targetGeneration);
+    // The same document on the new attachment keeps its authority.
+    expect(state.targetGeneration).toBe(first.target.targetGeneration);
     const after = await driver.observe("7");
     expect(after.target.targetGeneration).toBe(state.targetGeneration);
     expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
@@ -982,7 +1111,7 @@ test("a refused read whose detach is never reported still attaches again", async
     const first = await driver.observe("7");
     bridge.detachSilently("7");
     const after = await driver.observe("7");
-    expect(after.target.targetGeneration).not.toBe(first.target.targetGeneration);
+    expect(after.target.targetGeneration).toBe(first.target.targetGeneration);
     expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
   } finally {
     connection.close();
@@ -1072,9 +1201,10 @@ for (const ending of ["during", "before"] as const)
         message:
           "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
       });
-      // The page as the click left it, read on the new attachment.
+      // The page as the click left it, read on the new attachment; the
+      // click did not change the document.
       expect(receipt.observation?.target.id).toBe("7");
-      expect(receipt.observation?.target.targetGeneration).not.toBe(
+      expect(receipt.observation?.target.targetGeneration).toBe(
         observation.target.targetGeneration,
       );
       expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
@@ -1181,7 +1311,7 @@ test("Chrome's frame refusal for an attachment it is ending reads again on a new
       });
     }, 20);
     const after = await driver.observe("7");
-    expect(after.target.targetGeneration).not.toBe(first.target.targetGeneration);
+    expect(after.target.targetGeneration).toBe(first.target.targetGeneration);
     expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
     // Input refused the same way before anything was sent is a definite
     // failure, and the tab attaches again for the next call.
@@ -1215,3 +1345,196 @@ test("Chrome's frame refusal for an attachment it is ending reads again on a new
     connection.close();
   }
 });
+
+for (const after of ["a lost and refused reattach", "an unresponsive tab"] as const)
+  test(`a permission setting followed by ${after} is an unknown outcome, not a failure`, async () => {
+    // The browser really did set the permission before the failure, so the
+    // action may have taken effect.
+    class RefusingBridge extends DetachmentBridge {
+      refuse = false;
+      override async request<T>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+        if (payload.type === "debugger.attach" && this.refuse) {
+          this.commands.push(payload);
+          throw new AttachedBrowserBridgeError(
+            "driver_rejected",
+            "Another debugger is already attached to the tab with id: 7.",
+            false,
+          );
+        }
+        return await super.request<T>(payload);
+      }
+    }
+    const bridge = new RefusingBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    let permissionSet = false;
+    let timedOut = false;
+    const wrapped: BrowserCdpConnection = {
+      on: connection.on.bind(connection),
+      waitForEvent: connection.waitForEvent.bind(connection),
+      close: connection.close.bind(connection),
+      async send<T>(
+        method: string,
+        params: Readonly<Record<string, unknown>> = {},
+        options: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal } = {},
+      ) {
+        if (after === "an unresponsive tab" && permissionSet && options.sessionId) {
+          timedOut = true;
+          throw new CdpCommandTimeoutError(method, options.sessionId);
+        }
+        if (method !== "Browser.setPermission")
+          return await connection.send<T>(method, params, options);
+        // The fixture bridge has no permission store: the browser answers an
+        // accepted setting with an empty result.
+        permissionSet = true;
+        if (after === "a lost and refused reattach") {
+          bridge.refuse = true;
+          bridge.detach("7", "target_closed");
+          await drainDetach(bridge);
+        }
+        return {} as T;
+      },
+    };
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `fixture-${randomUUID()}`;
+    const driver = new AgentBrowserDriver({
+      browserSessionId,
+      controllerGeneration,
+      engine: "chrome",
+      focusEmulation: false,
+      runner: {
+        async run<T>() {
+          return { cdpUrl: "opengeni-attached://local" } as T;
+        },
+      },
+      connect: async () => wrapped,
+    });
+    await driver.start();
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      const observation = await controller.observe("7");
+      const receipt = await controller.run({
+        protocolVersion: 1,
+        actor: { kind: "agent", subjectId: "agent:test" },
+        operationId: randomUUID(),
+        browserSessionId,
+        controllerGeneration,
+        targetId: "7",
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration!,
+        expectedFrameId: observation.frameId,
+        action: { type: "permission", permission: "geolocation", setting: "granted" },
+      });
+      expect(permissionSet).toBe(true);
+      expect(after === "a lost and refused reattach" ? bridge.refuse : timedOut).toBe(true);
+      expect(receipt.state).toBe("outcome_unknown");
+      expect(receipt.error?.code).toBe(
+        after === "a lost and refused reattach" ? "outcome_unknown" : "tab_not_responding",
+      );
+      if (after === "a lost and refused reattach")
+        expect(receipt.error?.message).toStartWith("The tab disconnected while browser input");
+    } finally {
+      await driver.close().catch(() => undefined);
+      connection.close();
+    }
+  });
+
+// How a permission setting ends, and what the action then reports: a definite
+// refusal (the browser's, or one its connection reports before applying it,
+// or a connection that could not be opened) is a failure; a setting that
+// went out and got no answer may have applied.
+for (const [ending, expected] of [
+  ["the browser refuses it", { state: "failed", code: "invalid_action" }],
+  ["its connection refuses it", { state: "failed", code: "permission_denied" }],
+  ["no connection can be opened for it", { state: "failed", code: "unsupported" }],
+  ["the browser does not answer it", { state: "outcome_unknown", code: "driver_failed" }],
+] as const)
+  test(`a permission setting that ends because ${ending} reports ${expected.state}`, async () => {
+    const bridge = new DetachmentBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    const wrapped: BrowserCdpConnection = {
+      on: connection.on.bind(connection),
+      waitForEvent: connection.waitForEvent.bind(connection),
+      close: connection.close.bind(connection),
+      async send<T>(
+        method: string,
+        params: Readonly<Record<string, unknown>> = {},
+        options: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal } = {},
+      ) {
+        if (method !== "Browser.setPermission")
+          return await connection.send<T>(method, params, options);
+        if (ending === "the browser refuses it")
+          throw new CdpProtocolError(method, -32_000, "Permission can't be granted.");
+        if (ending === "its connection refuses it")
+          throw new InteractionDefiniteDriverError("permission_denied", "refused before applying");
+        throw new CdpCommandTimeoutError(method, options.sessionId);
+      },
+    };
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `fixture-${randomUUID()}`;
+    const driver = new AgentBrowserDriver({
+      browserSessionId,
+      controllerGeneration,
+      engine: "chrome",
+      focusEmulation: false,
+      runner: {
+        async run<T>() {
+          return { cdpUrl: "opengeni-attached://local" } as T;
+        },
+      },
+      connect: async () => wrapped,
+    });
+    await driver.start();
+    if (ending === "no connection can be opened for it") {
+      // The connection fails as the permission action asks for it, before
+      // anything is sent.
+      const internals = driver as unknown as {
+        dispatchPermissionAction: (...args: unknown[]) => Promise<void>;
+        ensureConnection: () => Promise<BrowserCdpConnection>;
+      };
+      const dispatch = internals.dispatchPermissionAction;
+      internals.dispatchPermissionAction = async (...args) => {
+        const ensure = internals.ensureConnection;
+        internals.ensureConnection = async () => {
+          internals.ensureConnection = ensure;
+          throw new InteractionDefiniteDriverError("unsupported", "no browser connection");
+        };
+        return await dispatch.apply(driver, args);
+      };
+    }
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      const observation = await controller.observe("7");
+      const receipt = await controller.run({
+        protocolVersion: 1,
+        actor: { kind: "agent", subjectId: "agent:test" },
+        operationId: randomUUID(),
+        browserSessionId,
+        controllerGeneration,
+        targetId: "7",
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration!,
+        expectedFrameId: observation.frameId,
+        action: { type: "permission", permission: "geolocation", setting: "granted" },
+      });
+      expect({ state: receipt.state, code: receipt.error?.code }).toEqual(expected);
+      if (expected.state === "failed")
+        expect(receipt.error?.message).not.toContain("do not replay");
+    } finally {
+      await driver.close().catch(() => undefined);
+      connection.close();
+    }
+  });

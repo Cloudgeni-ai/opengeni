@@ -37,6 +37,48 @@ const RULES: Rule[] = [
       "List connected password managers and deployment availability: 1Password, Proton Pass, Keeper, Bitwarden and external vaults. Returns connection metadata and setup status, not secret values; does not contact providers.",
   },
   {
+    method: "PUT",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/share-link$/,
+    text: () =>
+      "Share a chat with anyone, for example family or a friend, without adding them to a workspace: creates a read-only link to the conversation as it is now, or refreshes the existing link so it includes the newest messages. Anyone with the link can read the conversation, without signing in: each person's messages under the name the chat shows for them, and the replies; tool details, files and anything not shown in the replies are left out. Only the person who started the chat can share it. Returns the link's url to give them.",
+  },
+  {
+    method: "GET",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/share-link$/,
+    text: () =>
+      "Check whether a chat has a share link and get its url. enabled is false when share links are turned off here.",
+  },
+  {
+    method: "DELETE",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/share-link$/,
+    text: () =>
+      "Stop sharing a chat: its share link stops working at once. Sharing it again later makes a new link.",
+  },
+  {
+    method: "GET",
+    pattern: /\/workspaces\/:workspaceId\/share-links$/,
+    text: () =>
+      "List the chats the person has shared with a link in this workspace, with each url.",
+  },
+  {
+    method: "POST",
+    pattern: /\/workspaces\/:workspaceId\/members$/,
+    text: () =>
+      "Add someone who is already in the organization to a shared workspace, so they can see its shared chats and work there. A Personal workspace can't have other members. To let someone only read one chat, for example family or a friend, use createSessionShareLink instead.",
+  },
+  {
+    method: "POST",
+    pattern: /^\/v1\/organizations\/:organizationId\/invitations$/,
+    text: () =>
+      "Invite someone by email to join the organization, optionally into shared workspaces. They see only the workspaces they are added to, never anyone's Personal workspace. To let someone only read one chat, for example family or a friend, use createSessionShareLink instead; they need no account.",
+  },
+  {
+    method: "PUT",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/visibility$/,
+    text: () =>
+      "Choose who in this workspace can see a chat: private (only the person who started it) or workspace (every member of this workspace). It never shows the chat to anyone outside the workspace; to let someone else read it, use createSessionShareLink.",
+  },
+  {
     method: "POST",
     pattern: /\/vault-providers\/connections$/,
     text: () =>

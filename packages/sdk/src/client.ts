@@ -642,6 +642,10 @@ import type {
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
   SessionVisibility,
+  SessionShareLink,
+  SessionShareLinkList,
+  SessionShareLinkState,
+  SharedSession,
   SessionVisibilityChangePreview,
   SessionScopeSubjectId,
   SessionEvent,
@@ -904,6 +908,12 @@ export type SessionListPageOptions = {
   createdFrom?: string;
   /** Exclusive ISO-8601 creation upper bound. */
   createdBefore?: string;
+  /**
+   * Only these sessions, at most 200 ids. Narrows the caller's ordinary list
+   * (other filters, archive status and Site scope still apply); never widens it.
+   * Pass `archiveStatus: "all"` to include personally archived sessions.
+   */
+  sessionIds?: readonly string[];
   /** Return only the complete personal pinned projection. */
   pinsOnly?: boolean;
   /** Skip pinned details when the pinned section is loaded separately. Defaults to true. */
@@ -925,6 +935,7 @@ const SESSION_PAGE_FILTER_KEYS = [
   "updatedBefore",
   "createdFrom",
   "createdBefore",
+  "sessionIds",
 ] as const;
 const SESSION_PAGE_STRING_QUERY_KEYS = [
   "updatedFrom",
@@ -1724,6 +1735,60 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Whether the person can share a chat with a read-only link here, and their
+   * live link for it (`link: null` when they haven't shared it).
+   */
+  async getSessionShareLink(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionShareLinkState> {
+    return await this.requestJson<SessionShareLinkState>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /**
+   * Share a chat the person started with a read-only link: anyone holding it
+   * reads the conversation as it is now (the person's messages and the
+   * replies, never tool details or files), without signing in. Calling it
+   * again refreshes the same link with the newest messages.
+   */
+  async createSessionShareLink(workspaceId: string, sessionId: string): Promise<SessionShareLink> {
+    return await this.requestJson<SessionShareLink>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /** Stop sharing a chat: its link stops working at once. */
+  async revokeSessionShareLink(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<{ revoked: boolean }> {
+    return await this.requestJson<{ revoked: boolean }>(
+      "DELETE",
+      `${sessionPath(workspaceId, sessionId)}/share-link`,
+    );
+  }
+
+  /** The person's live share links in a workspace, newest first. */
+  async listSessionShareLinks(workspaceId: string): Promise<SessionShareLinkList> {
+    return await this.requestJson<SessionShareLinkList>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/share-links`,
+    );
+  }
+
+  /** Read a shared chat by its share id, as anyone holding the link does. */
+  async getSharedSession(shareId: string): Promise<SharedSession> {
+    return await this.requestJson<SharedSession>(
+      "GET",
+      `/v1/shared-sessions/${encodeURIComponent(shareId)}`,
+    );
+  }
+
   /** Owner-only preview: what changing the audience would stop and what would still refuse it. */
   async previewSessionVisibilityChange(
     workspaceId: string,
@@ -1995,6 +2060,16 @@ export class OpenGeniClient {
     summary = false,
   ): Promise<SessionListResponse | SessionListEntryResponse> {
     const search = options.search?.trim();
+    if (options.sessionIds !== undefined && options.sessionIds.length === 0) {
+      // An empty selection matches nothing; the server requires at least one id.
+      const empty = {
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        sessionIdsApplied: true as const,
+      };
+      return summary ? { ...empty, projection: "summary" } : empty;
+    }
     let result: SessionListResponse | SessionListEntryResponse | Session[];
     try {
       const query: Record<string, string> = {
@@ -2020,6 +2095,10 @@ export class OpenGeniClient {
       if (options.mineOnly) query.mineOnly = "true";
       if (options.includePinned === false) query.includePinned = "false";
       if (options.archivedOnly) query.archivedOnly = "true";
+      if (options.sessionIds !== undefined) {
+        // An empty selection is answered locally below: it matches nothing.
+        query.sessionIds = options.sessionIds.join(",");
+      }
       if (options.siteConversations) query.siteConversations = options.siteConversations;
       result = await this.requestJson<SessionListResponse | SessionListEntryResponse | Session[]>(
         "GET",
@@ -2082,6 +2161,8 @@ export class OpenGeniClient {
       throw unsupportedSessionPage("read-only session filtering");
     if (options.mineOnly && response.mineOnly !== true)
       throw unsupportedSessionPage("your-sessions filtering");
+    if (options.sessionIds !== undefined && response.sessionIdsApplied !== true)
+      throw unsupportedSessionPage("session id filtering");
     if (filtered && response.filtersApplied !== true) {
       throw unsupportedSessionPage("filtered session lists");
     }

@@ -108,7 +108,7 @@ export function KnowledgePage({
 
   const nav = useKnowledgeNavigation(workspaceId);
   const navigate = useNavigate();
-  const [library, setLibrary] = useState<LibraryView>(() => initialLibraryView(personal));
+  const [library, setLibrary] = useState<LibraryView>(() => initialLibraryView());
   const [refresh, setRefresh] = useState(0);
   const changed = useCallback(() => setRefresh((value) => value + 1), []);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -149,18 +149,14 @@ export function KnowledgePage({
       key ? nav.openProposal(key, { replace }) : nav.showTab("review", { replace }),
     onChanged: changed,
   });
-  const shared = useLearningDefaults(workspaceId, personal ? "personal" : "workspace");
+  const shared = useLearningDefaults(workspaceId, "workspace");
   const instructions = useWorkspaceInstructions(workspaceId);
   const archive = useArchiveKnowledge(workspaceId, changed);
 
   const createScope: KnowledgeEntryScope =
-    library.scope !== "all" &&
-    (library.scope !== "organization" || canWriteOrganization) &&
-    !(personal && library.scope !== "personal")
+    library.scope !== "all" && (library.scope !== "organization" || canWriteOrganization)
       ? library.scope
-      : personal
-        ? "personal"
-        : "workspace";
+      : "workspace";
 
   const entryLink = useCallback(
     (id: string) => `/workspaces/${workspaceId}/state?entry=${encodeURIComponent(id)}`,
@@ -334,7 +330,6 @@ export function KnowledgePage({
         <AddKnowledgePage
           workspaceId={workspaceId}
           workspaceName={workspace?.name ?? "this workspace"}
-          personal={personal}
           canWriteOrganization={canWriteOrganization}
           defaultScope={createScope}
           {...(search.collection ? { collectionId: search.collection } : {})}
@@ -501,7 +496,6 @@ export function KnowledgePage({
             onUpload={() => setUploadOpen(true)}
             {...(canEdit ? { onNewCollection: () => setCollectionOpen(true) } : {})}
             onEmptyChange={setLibraryEmpty}
-            personal={personal}
           />
         </LineTabsContent>
         <LineTabsContent value="instructions">
@@ -538,7 +532,6 @@ export function KnowledgePage({
           onOpenChange={setUploadOpen}
           workspaceId={workspaceId}
           workspaceName={workspace?.name ?? "this workspace"}
-          personal={personal}
           canWriteOrganization={canWriteOrganization}
           defaultScope={createScope}
           onUploaded={() => {

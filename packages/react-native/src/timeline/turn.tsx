@@ -20,10 +20,9 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Platform, Pressable, Text, View, type TextStyle } from "react-native";
+import { ActivityIndicator, Platform, Pressable, Text, View, type TextStyle } from "react-native";
 import Animated, { FadeIn, FadeInDown, FadeOut, FadeOutUp } from "react-native-reanimated";
 import { ActivityRow } from "./activity";
-import { ThinkingOrb } from "./thinking-orb";
 import { Icon } from "./icon";
 import { PulseDot, ShimmerText, ROW_MIN_HEIGHT, useReleaseFollow } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
@@ -485,7 +484,7 @@ export interface PreparingProps {
   slow: boolean;
 }
 
-/** The web GenieLoading: a visual (orb by default; hosts supply a character) + rotating copy. */
+/** Quiet startup feedback, replaced by useful output rather than competing with it. */
 export function PreparingState({
   startedAt,
   phase,
@@ -502,36 +501,41 @@ export function PreparingState({
     () => nativeLoadingPhrases(t, m.loadingPhrases, phase),
     [t, m.loadingPhrases, phase],
   );
-  const [index, setIndex] = useState(() => Math.floor(Math.random() * phrases.length));
   const [slow, setSlow] = useState(false);
   useEffect(() => {
-    const update = () => {
-      setSlow(Date.now() - Date.parse(startedAt) >= 30_000);
-      setIndex(Math.floor(Math.random() * phrases.length));
-    };
-    const timer = setInterval(update, 5_000);
+    const elapsed = Date.now() - Date.parse(startedAt);
+    const remaining = Number.isFinite(elapsed) ? Math.max(0, 30_000 - elapsed) : 30_000;
+    setSlow(remaining === 0);
+    const timer = setTimeout(() => setSlow(true), remaining);
+    return () => clearTimeout(timer);
+  }, [startedAt]);
+  const [phraseIndex, setPhraseIndex] = useState(0);
+  useEffect(() => {
+    setPhraseIndex(0);
+    // The stock status is stable. Keep a host's explicit phrase sequence working.
+    if (phrases.length < 2) return;
+    const timer = setInterval(() => setPhraseIndex((index) => index + 1), 5_000);
     return () => clearInterval(timer);
-  }, [startedAt, phrases]);
+  }, [phrases]);
+  // A long start says so, rather than repeating the same status indefinitely.
   const phrase = slow
     ? phase === "waiting"
       ? m.stillWaiting
       : m.longerThanUsual
-    : (phrases[index % phrases.length] ?? "");
+    : (phrases[phraseIndex % phrases.length] ?? m.working);
   if (render) return <>{render({ startedAt, phase, phrase, slow })}</>;
   return (
     <View
       style={{
         flexDirection: "row",
         alignItems: "center",
-        gap: 14,
-        minHeight: 88,
+        gap: 8,
+        minHeight: 44,
         paddingVertical: 12,
       }}
     >
-      <ThinkingOrb />
-      <Animated.Text
-        key={phrase}
-        entering={FadeIn.duration(650)}
+      <ActivityIndicator size="small" color={theme.colors["fg-muted"]} />
+      <Text
         style={{
           ...fontStyle(theme),
           fontSize: theme.size.sm,
@@ -540,7 +544,7 @@ export function PreparingState({
         }}
       >
         {phrase}
-      </Animated.Text>
+      </Text>
     </View>
   );
 }

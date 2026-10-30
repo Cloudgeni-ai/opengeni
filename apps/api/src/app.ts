@@ -126,6 +126,7 @@ import {
   resolveSessionAdminAuthority,
   sessionStartedByPerson,
   rlsContextForWorkspace,
+  withSubscriptionAccountAdministrators,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
@@ -216,6 +217,7 @@ import {
   createUserPresenceRecorder,
   registerProductUsageMetricBaselines,
   stampPersonalApiKeyRequest,
+  resolveAccountAdminAuthorizationStamp,
   verifiedDelegatedHumanAuthorizationForRequest,
   browserExtension,
 } from "@opengeni/core";
@@ -369,6 +371,7 @@ import { registerAutomationTemplateRoutes } from "./routes/automation-templates"
 import { registerBotTemplateRoutes } from "./routes/bot-templates";
 import { registerRecordingRoutes } from "./routes/recordings";
 import { registerSessionRoutes } from "./routes/sessions";
+import { registerSessionShareLinkRoutes } from "./routes/session-share-links";
 import {
   archivedSessionImportErrorResponse,
   isSessionHistoryImportRequest,
@@ -1150,6 +1153,17 @@ export function createAppComposition(deps: AppDependencies): {
   app.use("/v1/*", async (c, next) => {
     await stampPersonalApiKeyRequest(c.req.raw, deps);
     await next();
+  });
+
+  // Subscription administration accepts the account administrators this
+  // request authenticated as (configured key, account-scoped key, signed
+  // delegation, organization admin). The database records the proof per
+  // transaction; nothing is resolved unless a subscription writer asks.
+  app.use("/v1/*", async (c, next) => {
+    await withSubscriptionAccountAdministrators(
+      (input) => resolveAccountAdminAuthorizationStamp(c, deps, input),
+      next,
+    );
   });
 
   app.use("/v1/*", async (c, next) => {
@@ -2500,6 +2514,9 @@ export function createAppComposition(deps: AppDependencies): {
   // only classifies the session module's own paths.
   registerInboxRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  // After the session module, so its fail-closed middleware authorizes the
+  // per-chat share-link routes like every other session route.
+  registerSessionShareLinkRoutes(app, routeDeps);
   registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
