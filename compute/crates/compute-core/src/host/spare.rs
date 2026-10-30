@@ -43,6 +43,17 @@ pub(super) struct Spares {
     next: u64,
 }
 
+/// What creates claiming spare VMs, such as every ready sandbox a host
+/// keeps, would book beyond what those book already; see
+/// [`Host::spare_fits`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Claims {
+    /// Bytes of the admission budget.
+    pub memory: u64,
+    /// Millicores of the processor budget.
+    pub cpu: u64,
+}
+
 impl Spares {
     /// Bytes they hold, all counted against the admission budget.
     pub(super) fn held(&self) -> u64 {
@@ -186,13 +197,7 @@ impl Host {
     /// [`crate::Input::Spare`] at once to book what it takes.
     #[must_use]
     pub fn spare_room(&self) -> Option<u64> {
-        let budget = self
-            .policy
-            .admission
-            .zip(self.capacity())
-            .map(|(admission, capacity)| {
-                u64::try_from(capacity.headroom() - i128::from(admission.buffer)).unwrap_or(0)
-            });
+        let budget = self.budget_above_buffer();
         let watermark = self
             .policy
             .memory
@@ -213,18 +218,36 @@ impl Host {
         Some(if waiting || held { 0 } else { room })
     }
 
+    /// Bytes of the admission budget free above its buffer, or `None`
+    /// without admission.
+    fn budget_above_buffer(&self) -> Option<u64> {
+        self.policy
+            .admission
+            .zip(self.capacity())
+            .map(|(admission, capacity)| {
+                u64::try_from(capacity.headroom() - i128::from(admission.buffer)).unwrap_or(0)
+            })
+    }
+
     /// Whether a new spare VM that takes `bytes` of memory, may write
     /// `disk` to local disk and books `cpu` millicores while it comes up
     /// fits now: within [`Self::spare_room`], within what the disk can
     /// still book, nothing before its first reading, and within the
-    /// processor time free, none while a wake waits.
+    /// processor time free, none while a wake waits. The admission budget
+    /// above its buffer and the processor budget also keep room for
+    /// `claims`, what creates claiming spare VMs, such as every ready
+    /// sandbox kept and the new one, would book beyond what those book
+    /// already: a spare never takes the room a claim of one kept needs.
     #[must_use]
-    pub fn spare_fits(&self, bytes: u64, disk: DiskSpace, cpu: u64) -> bool {
+    pub fn spare_fits(&self, bytes: u64, disk: DiskSpace, cpu: u64, claims: Claims) -> bool {
         self.spare_room().is_none_or(|room| room >= bytes)
-            && self.disk_shortage(disk).is_none()
             && self
-                .cpu_capacity()
-                .is_none_or(|capacity| self.refused.is_empty() && capacity.free() >= cpu)
+                .budget_above_buffer()
+                .is_none_or(|room| room >= bytes.saturating_add(claims.memory))
+            && self.disk_shortage(disk).is_none()
+            && self.cpu_capacity().is_none_or(|capacity| {
+                self.refused.is_empty() && capacity.free() >= cpu.saturating_add(claims.cpu)
+            })
     }
 
     /// Asks ready spare VMs to end, oldest first, until they free `needed`

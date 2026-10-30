@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use compute_core::{DiskSpace, Input};
+use compute_core::{Claims, DiskSpace, Input};
 use compute_engine::Engine;
 use tokio::time::Instant;
 
@@ -358,9 +358,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.save_copies,
             SAVE_EXTRA,
         );
+        // A build keeps no room for claims of ready sandboxes: a template
+        // serves every create of its shape, and ready ones are the first
+        // ended when a wake needs room.
         if !disk.as_ref().is_ok_and(|disk| {
             self.core
-                .spare_fits(shape.bytes(), *disk, shape.cpu_millis())
+                .spare_fits(shape.bytes(), *disk, shape.cpu_millis(), Claims::default())
         }) {
             if let Some(warm) = &mut self.warm {
                 let problem = match &disk {

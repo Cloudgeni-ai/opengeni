@@ -60,10 +60,14 @@ sandboxes created at once all pay it at the same time.
   ([14](0014-requests-limits-and-admission.md)): the decision core counts
   each against the admission budget, and a fill or build starts only in
   room the core says no wake wants, so a fill and a wake never take the
-  same memory. When a wake, the buffer or memory pressure needs room, the
-  core ends ready clones first, oldest first. They fill a few at a time and
-  stop when sandbox users run out. Status shows their count and resident
-  memory per shape.
+  same memory. A fill also leaves room in the budget, above its buffer,
+  for creates to claim every ready clone kept, itself included, each at
+  its whole shape less what it holds: a fill never takes the room a claim
+  of one kept already needs, so overlapping creates each claim one, and a
+  pool keeps no more clones than creates could claim. When a wake, the
+  buffer or memory pressure needs room, the core ends ready clones first,
+  oldest first. They fill a few at a time and stop when sandbox users run
+  out. Status shows their count and resident memory per shape.
 - A fill is booked by what it will hold, not its whole shape: the bytes of
   the template's memory image that are not zeros (counted in whole 256 KiB
   chunks when the template is built or found), plus 64 MiB for the VMM and
