@@ -251,6 +251,8 @@ type OAuthStatePayload = {
    * generic account identity. Absent on older states and non-OIDC servers. */
   oidcUserinfoEndpoint?: string;
   oidcJwksUri?: string;
+  /** Sent with an OpenID Connect request; a returned id_token must carry it. */
+  oidcNonce?: string;
   clientRegistrationMethod: OAuthClientRegistration["method"];
   tokenEndpointAuthMethod: OAuthClientRegistration["tokenEndpointAuthMethod"];
   resourceParameterSupported: boolean;
@@ -619,16 +621,27 @@ async function startMcpOAuthWithinDeadline(
     discovery.mode === "rfc9728_protected_resource" && profile.sendResourceParameter;
   const resource = discovery.resource;
   const verifier = randomPkceVerifier();
+  // Generic OpenID Connect identity: only where nothing else identifies the
+  // account and the authorization server itself advertises OpenID Connect.
+  const oidc =
+    profile.requestedScopes || profileIdentifiesAccounts(profile, mcpUrl)
+      ? null
+      : await advertisedOidc(discovery.as, settings, deadline.signal);
   // A profile's exact scope override wins outright: the reviewed connector
   // never lets a caller widen the capability contract. An incremental profile
   // adds access only when reconnecting an existing account.
-  const authorizeScopes = chooseProfileAuthorizeScopes(profile, {
+  const baseScopes = chooseProfileAuthorizeScopes(profile, {
     requested: context.payload.requestedScopes,
     challenged: discovery.challenge.scope,
     supported: discovery.prm.scopesSupported,
     authorizationServerScopesSupported: stringArray(discovery.as.raw.scopes_supported),
     ...(existing ? { reconnectGrantedScopes: existing.grantedScopes } : {}),
   });
+  // Asking for "openid" (and "email") lets the server name the account. An empty
+  // scope request is left alone: on some servers it means every default scope.
+  const authorizeScopes =
+    oidc && baseScopes.length ? uniqueStrings([...baseScopes, ...oidc.scopes]) : baseScopes;
+  const oidcNonce = authorizeScopes.includes("openid") && oidc ? randomPkceVerifier() : undefined;
   const client = await deadline.run("client_registration", (signal) =>
     registerOAuthClient(
       db,
@@ -694,7 +707,8 @@ async function startMcpOAuthWithinDeadline(
         }
       : {}),
     authorizationServerMetadataUrl: discovery.provenance.authorizationServerMetadataUrl,
-    ...advertisedOidcEndpoints(discovery.as.raw, settings),
+    ...(oidc?.endpoints ?? {}),
+    ...(oidcNonce ? { oidcNonce } : {}),
     clientRegistrationMethod: client.method,
     tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
     resourceParameterSupported,
@@ -738,7 +752,14 @@ async function startMcpOAuthWithinDeadline(
     verifier,
     scopes: authorizeScopes,
     resourceParameterSupported,
-    ...(profile.extraAuthorizeParams ? { extraParams: profile.extraAuthorizeParams } : {}),
+    ...(profile.extraAuthorizeParams || oidcNonce
+      ? {
+          extraParams: {
+            ...profile.extraAuthorizeParams,
+            ...(oidcNonce ? { nonce: oidcNonce } : {}),
+          },
+        }
+      : {}),
   });
   return OAuthStartResponse.parse({
     state,
@@ -2294,6 +2315,7 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   const authorizationServerMetadataUrl = stringValue(payload.authorizationServerMetadataUrl);
   const oidcUserinfoEndpoint = stringValue(payload.oidcUserinfoEndpoint);
   const oidcJwksUri = stringValue(payload.oidcJwksUri);
+  const oidcNonce = stringValue(payload.oidcNonce);
   if (
     encodedDiscoveryMode &&
     (!authorizationServerMetadataUrl ||
@@ -2403,6 +2425,7 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     ...(oidcJwksUri
       ? { oidcJwksUri: oauthEndpointUrl(oidcJwksUri, settings, "OpenID Connect JWKS") }
       : {}),
+    ...(oidcNonce ? { oidcNonce } : {}),
     clientRegistrationMethod: registrationMethod(payload.clientRegistrationMethod),
     tokenEndpointAuthMethod: tokenAuthMethod(stringValue(payload.tokenEndpointAuthMethod), false),
     // States minted before provider-specific compatibility was introduced used
@@ -3080,23 +3103,82 @@ function advertisedOidcEndpoints(
   };
 }
 
+/** A profile or reviewed verifier already identifies this connection's account. */
+function profileIdentifiesAccounts(
+  profile: OAuthProviderProfile | null | undefined,
+  mcpUrl: string,
+): boolean {
+  return Boolean(
+    profile?.accountIdentityMetadataKeys ||
+    profile?.localToolVerification ||
+    accountIdentityVerifierFor(mcpUrl),
+  );
+}
+
+const OIDC_DISCOVERY_MAX_MS = 3_000;
+
+/**
+ * The OpenID Connect scopes and endpoints an authorization server advertises:
+ * "openid" (plus "email" when listed) and its userinfo endpoint or signing keys.
+ * Some servers publish the keys only in their OpenID configuration, which is
+ * read once, bounded, and only when it names the same issuer. Never fatal.
+ * Exported for tests.
+ */
+export async function advertisedOidc(
+  as: AuthorizationServerMetadata,
+  settings: Settings,
+  outer: AbortSignal,
+): Promise<{
+  scopes: string[];
+  endpoints: { oidcUserinfoEndpoint?: string; oidcJwksUri?: string };
+} | null> {
+  const supported = stringArray(as.raw.scopes_supported);
+  if (!supported.includes("openid")) return null;
+  let endpoints = advertisedOidcEndpoints(as.raw, settings);
+  if (!endpoints.oidcUserinfoEndpoint && !endpoints.oidcJwksUri) {
+    const signal = AbortSignal.any([outer, AbortSignal.timeout(OIDC_DISCOVERY_MAX_MS)]);
+    const issuer = new URL(as.issuer);
+    const path = issuer.pathname.replace(/\/+$/u, "");
+    for (const url of uniqueStrings([
+      `${as.issuer.replace(/\/+$/u, "")}/.well-known/openid-configuration`,
+      `${issuer.origin}/.well-known/openid-configuration${path}`,
+    ])) {
+      try {
+        const fetched = await fetchOAuthMetadata(url, settings, signal);
+        if (fetched.status !== "present" || fetched.document.issuer !== as.issuer) continue;
+        endpoints = advertisedOidcEndpoints(fetched.document, settings);
+        break;
+      } catch {
+        if (signal.aborted) break;
+      }
+    }
+  }
+  if (!endpoints.oidcUserinfoEndpoint && !endpoints.oidcJwksUri) return null;
+  return {
+    scopes: ["openid", ...(supported.includes("email") ? ["email"] : [])],
+    endpoints,
+  };
+}
+
 /**
  * Whether this sign-in can identify its account through OpenID Connect: no
  * profile or reviewed verifier identifies it, the server advertised userinfo or
- * signing keys, and the grant includes "openid".
+ * signing keys, and "openid" was requested or granted (a server may leave it
+ * out of the scopes it reports). Exported for tests.
  */
-function oidcIdentityEligible(
-  state: Pick<OAuthStatePayload, "mcpUrl" | "oidcUserinfoEndpoint" | "oidcJwksUri">,
+export function oidcIdentityEligible(
+  state: Pick<
+    OAuthStatePayload,
+    "mcpUrl" | "oidcUserinfoEndpoint" | "oidcJwksUri" | "authorizeScopes"
+  >,
   profile: OAuthProviderProfile | null | undefined,
   scopes: readonly string[],
 ): boolean {
-  if (
-    profile?.accountIdentityMetadataKeys ||
-    profile?.localToolVerification ||
-    accountIdentityVerifierFor(state.mcpUrl)
-  )
-    return false;
-  return scopes.includes("openid") && Boolean(state.oidcUserinfoEndpoint || state.oidcJwksUri);
+  if (profileIdentifiesAccounts(profile, state.mcpUrl)) return false;
+  return (
+    (scopes.includes("openid") || state.authorizeScopes.includes("openid")) &&
+    Boolean(state.oidcUserinfoEndpoint || state.oidcJwksUri)
+  );
 }
 
 const ID_TOKEN_ALGORITHMS = [
@@ -3132,7 +3214,7 @@ function oidcClaimsIdentity(claims: Record<string, unknown>): Record<string, str
 /** An id_token signed by the issuer's advertised keys, for this client, unexpired. */
 async function verifiedIdTokenIdentity(
   settings: Settings,
-  state: Pick<OAuthStatePayload, "issuer" | "clientId" | "oidcJwksUri">,
+  state: Pick<OAuthStatePayload, "issuer" | "clientId" | "oidcJwksUri" | "oidcNonce">,
   idToken: string,
   signal: AbortSignal,
 ): Promise<Record<string, string>> {
@@ -3157,6 +3239,9 @@ async function verifiedIdTokenIdentity(
     audience: state.clientId,
     algorithms: ID_TOKEN_ALGORITHMS,
   });
+  // A nonce we sent must come back, so an id_token from another sign-in can't be replayed.
+  if (state.oidcNonce && payload.nonce !== state.oidcNonce)
+    throw new Error("OpenID Connect account verification failed");
   return oidcClaimsIdentity(payload as Record<string, unknown>);
 }
 
@@ -3168,7 +3253,10 @@ async function verifiedIdTokenIdentity(
  */
 export async function oidcAccountIdentity(
   settings: Settings,
-  state: Pick<OAuthStatePayload, "issuer" | "clientId" | "oidcUserinfoEndpoint" | "oidcJwksUri">,
+  state: Pick<
+    OAuthStatePayload,
+    "issuer" | "clientId" | "oidcUserinfoEndpoint" | "oidcJwksUri" | "oidcNonce"
+  >,
   token: Pick<TokenResponse, "accessToken" | "tokenType" | "raw">,
   budgetMs: number,
   outer: AbortSignal,
@@ -3308,12 +3396,30 @@ async function verifyMcpToolsListNonFatal(
     const profile = builtInOAuthProfileFor(state);
     if (profile?.localToolVerification?.required || profile?.remoteToolVerification) throw staged;
     logOAuthVerificationWarning(observability, staged, state);
+    // OpenID Connect identity comes from the token response or the authorization
+    // server, so a failed tools check doesn't stop it from naming the account.
+    let providerIdentity: Record<string, string> | undefined;
+    if (oidc && !deadline.signal.aborted) {
+      const identityCheck = await oidcAccountIdentity(
+        settings,
+        state,
+        token,
+        Math.min(IDENTITY_MAX_MS, deadline.remainingMs() - IDENTITY_RESERVE_MS),
+        deadline.signal,
+      );
+      providerIdentity = identityCheck.identity;
+      if (identityCheck.failure)
+        observability?.warn("MCP OAuth account identity stayed unknown", {
+          reason: identityCheck.failure,
+        });
+    }
     return {
       metadata: {
         status: "failed",
         checkedAt: new Date().toISOString(),
         reason: staged.reason,
       },
+      ...(providerIdentity ? { providerIdentity } : {}),
       ...(oidc ? { identityMethod: "oidc" as const } : {}),
       ...(grantRejected ? { connectionStatus: "needs_reauth" as const } : {}),
     };

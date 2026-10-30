@@ -7,7 +7,12 @@ import {
   connectionAccountIdentityState,
   decideOAuthAccountConnection,
 } from "../src/integrations/oauth-account-identity";
-import { mcpToolAccountIdentity, oidcAccountIdentity } from "../src/integrations/oauth-client";
+import {
+  advertisedOidc,
+  mcpToolAccountIdentity,
+  oidcAccountIdentity,
+  oidcIdentityEligible,
+} from "../src/integrations/oauth-client";
 import {
   OFFICIAL_DRIVE_MCP_URL,
   OFFICIAL_GMAIL_MCP_URL,
@@ -414,6 +419,9 @@ describe("generic OpenID Connect identity", () => {
   let base: string;
   let userinfo: () => Response | Promise<Response> = () => Response.json({});
   let userinfoCalls = 0;
+  let openidConfiguration: (path: string) => Response = () =>
+    new Response("missing", { status: 404 });
+  const configurationReads: string[] = [];
   let keys: Awaited<ReturnType<typeof generateKeyPair>>;
   let jwks: Record<string, unknown>;
   beforeAll(async () => {
@@ -430,6 +438,10 @@ describe("generic OpenID Connect identity", () => {
           if (request.headers.get("authorization") !== "Bearer access-token")
             return new Response("no", { status: 401 });
           return await userinfo();
+        }
+        if (path.includes("/.well-known/openid-configuration")) {
+          configurationReads.push(path);
+          return openidConfiguration(path);
         }
         return new Response("missing", { status: 404 });
       },
@@ -450,7 +462,7 @@ describe("generic OpenID Connect identity", () => {
     raw,
   });
   const run = (
-    overrides: Partial<ReturnType<typeof state>> = {},
+    overrides: Partial<ReturnType<typeof state>> & { oidcNonce?: string } = {},
     raw: Record<string, unknown> = {},
     budgetMs = 2_000,
   ) =>
@@ -461,6 +473,20 @@ describe("generic OpenID Connect identity", () => {
       budgetMs,
       new AbortController().signal,
     );
+  const authorizationServer = (issuer: string, raw: Record<string, unknown>) =>
+    ({
+      issuer,
+      authorizationServer: issuer,
+      authorizationEndpoint: `${base}/authorize`,
+      tokenEndpoint: `${base}/token`,
+      clientIdMetadataDocumentSupported: false,
+      tokenEndpointAuthMethodsSupported: ["none"],
+      codeChallengeMethodsSupported: ["S256"],
+      raw: { issuer, ...raw },
+      metadataUrl: `${base}/.well-known/oauth-authorization-server`,
+    }) satisfies Parameters<typeof advertisedOidc>[0];
+  const discover = (issuer: string, raw: Record<string, unknown>) =>
+    advertisedOidc(authorizationServer(issuer, raw), settings, new AbortController().signal);
   const idToken = (claims: Record<string, unknown>, audience = "client-1") =>
     new SignJWT(claims)
       .setProtectedHeader({ alg: "ES256", kid: "k1" })
@@ -524,6 +550,96 @@ describe("generic OpenID Connect identity", () => {
     expect(await run({ oidcUserinfoEndpoint: undefined }, { id_token: forged })).toEqual({
       failure: "id_token_invalid_identity",
     });
+  });
+
+  test("an id_token must carry the nonce this sign-in sent", async () => {
+    userinfoCalls = 0;
+    userinfo = () => Response.json({ sub: "user-42" });
+    const withNonce = { id_token: await idToken({ sub: "user-7", nonce: "nonce-1" }) };
+    expect(await run({ oidcNonce: "nonce-1" }, withNonce)).toEqual({
+      identity: { oidcSubject: "user-7" },
+    });
+    expect(userinfoCalls).toBe(0);
+    const withoutNonce = { id_token: await idToken({ sub: "user-7" }) };
+    for (const raw of [withNonce, withoutNonce]) {
+      expect(await run({ oidcNonce: "nonce-2", oidcUserinfoEndpoint: undefined }, raw)).toEqual({
+        failure: "id_token_invalid_identity",
+      });
+      // Falls back to userinfo for the identity.
+      expect(await run({ oidcNonce: "nonce-2" }, raw)).toEqual({
+        identity: { oidcSubject: "user-42" },
+      });
+    }
+  });
+
+  test("OpenID Connect scopes are requested only where the server advertises them", async () => {
+    configurationReads.length = 0;
+    // Advertised in the authorization server metadata itself: no extra lookup.
+    expect(
+      await discover(`${base}/`, {
+        scopes_supported: ["read", "openid", "email", "profile"],
+        jwks_uri: `${base}/jwks`,
+      }),
+    ).toEqual({ scopes: ["openid", "email"], endpoints: { oidcJwksUri: `${base}/jwks` } });
+    expect(configurationReads).toEqual([]);
+    // Never added where "openid" isn't advertised, even with signing keys.
+    expect(
+      await discover(`${base}/`, {
+        scopes_supported: ["read", "email"],
+        jwks_uri: `${base}/jwks`,
+        userinfo_endpoint: `${base}/userinfo`,
+      }),
+    ).toBeNull();
+    expect(await discover(`${base}/`, { jwks_uri: `${base}/jwks` })).toBeNull();
+  });
+
+  test("signing keys published only in the OpenID configuration need the same issuer", async () => {
+    const issuer = `${base}/tenant`;
+    openidConfiguration = (path) =>
+      path === "/tenant/.well-known/openid-configuration"
+        ? Response.json({ issuer, jwks_uri: `${base}/jwks`, userinfo_endpoint: `${base}/userinfo` })
+        : new Response("missing", { status: 404 });
+    configurationReads.length = 0;
+    expect(await discover(issuer, { scopes_supported: ["openid"] })).toEqual({
+      scopes: ["openid"],
+      endpoints: { oidcUserinfoEndpoint: `${base}/userinfo`, oidcJwksUri: `${base}/jwks` },
+    });
+    expect(configurationReads).toEqual(["/tenant/.well-known/openid-configuration"]);
+    // The RFC 8414 path-insert form is tried too.
+    openidConfiguration = (path) =>
+      path === "/.well-known/openid-configuration/tenant"
+        ? Response.json({ issuer, jwks_uri: `${base}/jwks` })
+        : new Response("missing", { status: 404 });
+    expect(await discover(issuer, { scopes_supported: ["openid", "email"] })).toEqual({
+      scopes: ["openid", "email"],
+      endpoints: { oidcJwksUri: `${base}/jwks` },
+    });
+    // Another issuer's configuration, a broken one, or none at all: no OpenID Connect.
+    openidConfiguration = () =>
+      Response.json({ issuer: "https://elsewhere.example.test", jwks_uri: `${base}/jwks` });
+    expect(await discover(issuer, { scopes_supported: ["openid"] })).toBeNull();
+    openidConfiguration = () => new Response("down", { status: 503 });
+    expect(await discover(issuer, { scopes_supported: ["openid"] })).toBeNull();
+    openidConfiguration = () => new Response("missing", { status: 404 });
+    expect(await discover(issuer, { scopes_supported: ["openid"] })).toBeNull();
+  });
+
+  test("identity is read when openid was requested, even if the grant doesn't list it", () => {
+    const signIn = (authorizeScopes: string[], mcpUrl = "https://mcp.example.test/mcp") => ({
+      mcpUrl,
+      oidcJwksUri: `${base}/jwks`,
+      authorizeScopes,
+    });
+    expect(oidcIdentityEligible(signIn(["read", "openid"]), null, ["read"])).toBe(true);
+    expect(oidcIdentityEligible(signIn(["read"]), null, ["read", "openid"])).toBe(true);
+    expect(oidcIdentityEligible(signIn(["read"]), null, ["read"])).toBe(false);
+    expect(
+      oidcIdentityEligible({ ...signIn(["openid"]), oidcJwksUri: undefined }, null, ["openid"]),
+    ).toBe(false);
+    // A reviewed verifier owns identity for its service.
+    expect(oidcIdentityEligible(signIn(["openid"], "https://mcp.linear.app/mcp"), null, [])).toBe(
+      false,
+    );
   });
 });
 

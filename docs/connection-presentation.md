@@ -125,17 +125,26 @@ Identity comes from the first of these that applies to the connection:
   | Asana (`/v2/mcp`) | `get_me` tool | `asanaUserId` | email, name |
   | Stripe | `get_stripe_account_info` tool | `stripeAccountId` | email, account name |
 
-- Generic OpenID Connect, when nothing above applies, `openid` was granted and
-  the authorization server's metadata advertises a `jwks_uri` or
-  `userinfo_endpoint`. A token response `id_token` is used when its signature
-  (asymmetric algorithms only), issuer, audience (our client id) and expiry
-  verify; otherwise userinfo is called with the access token. The identity is
-  the issuer-scoped `sub` (`oidcSubject`); `email` and `name` are only labels.
-  The connection records `accountIdentityMethod: "oidc"`. Today this covers
-  services such as PostHog, Zapier, Vercel, Mobbin and PagerDuty.
+- Generic OpenID Connect, when nothing above applies and the authorization
+  server advertises `openid` in its `scopes_supported`. The sign-in then asks
+  for `openid` (and `email` when advertised) on top of its normal scopes, with
+  a fresh `nonce`; an empty scope request is left alone, and the scopes are
+  never added where the server doesn't advertise them. The server's
+  `jwks_uri` and `userinfo_endpoint` come from its metadata or, when only its
+  OpenID configuration lists them, from `/.well-known/openid-configuration`
+  (read once, bounded, and only if it names the same issuer). A token response
+  `id_token` is used when its signature (asymmetric algorithms only), issuer,
+  audience (our client id), expiry and nonce verify; otherwise userinfo is
+  called with the access token. The identity is the issuer-scoped `sub`
+  (`oidcSubject`); `email` and `name` are only labels. The connection records
+  `accountIdentityMethod: "oidc"`. Today this covers PostHog, Zapier, Vercel,
+  Mobbin, PagerDuty and Dropbox. Linear also offers OpenID Connect but keeps its
+  reviewed `get_user` adapter, so its identity keys stay the same.
 
 Identity reads run after the normal tool verification with the new token,
-within a short budget that keeps time for saving the connection. Every read is
+within a short budget that keeps time for saving the connection. OpenID Connect
+identity is read even when the tool verification fails, since it doesn't
+depend on the MCP server. Every read is
 non-fatal: a failure leaves the identity unknown and is logged with a
 secret-free reason (`tool_missing`, `tool_error`, `timeout`, `budget_exhausted`,
 `invalid_identity`, `userinfo_http_<status>`, `id_token_<reason>`). A reconnect
