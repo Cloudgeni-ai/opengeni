@@ -305,22 +305,26 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
       }
       if (!completed) {
         const transactionSecret = requireTransactionSecret(context, body.transactionId);
-        completed = await authenticateAndAdoptManagedAuthSession({
-          db: deps.db,
-          adapter: available.adapter,
-          isolatedHeaders: isolatedManagedAuthHeaders(context.req.raw),
-          authority,
-          csrfHash: managedAuthCsrfHash(authority),
-          operationId: body.operationId,
-          requestDigest,
-          expectedGeneration: body.expectedGeneration,
-          expectedActorEpoch: actorEpoch,
-          transactionId: body.transactionId,
-          transactionSecret,
-          email: body.email,
-          password: body.password,
-          mode: deps.settings.managedAuthSessionSetMode,
-        });
+        try {
+          completed = await authenticateAndAdoptManagedAuthSession({
+            db: deps.db,
+            adapter: available.adapter,
+            isolatedHeaders: isolatedManagedAuthHeaders(context.req.raw),
+            authority,
+            csrfHash: managedAuthCsrfHash(authority),
+            operationId: body.operationId,
+            requestDigest,
+            expectedGeneration: body.expectedGeneration,
+            expectedActorEpoch: actorEpoch,
+            transactionId: body.transactionId,
+            transactionSecret,
+            email: body.email,
+            password: body.password,
+            mode: deps.settings.managedAuthSessionSetMode,
+          });
+        } catch (error) {
+          throw emailPasswordSignInRefusal(error) ?? error;
+        }
       }
       deleteCookie(context, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE, transactionCookieOptions(deps));
       await mirrorCurrentSelection(context, deps, authority);
@@ -333,7 +337,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         }),
       );
     } catch (error) {
-      throwHttp(emailPasswordSignInRefusal(error) ?? error, context);
+      throwHttp(error, context);
     }
   });
 
@@ -1140,6 +1144,8 @@ function emailPasswordSignInRefusal(error: unknown): ApiHttpError | null {
   switch (refused.code) {
     case "INVALID_EMAIL":
     case "INVALID_EMAIL_OR_PASSWORD":
+    case "PASSWORD_TOO_LONG":
+    case "PASSWORD_TOO_SHORT":
       return managedAuthApiError(401, "invalid_credentials", { cause: error });
     case "EMAIL_NOT_VERIFIED":
       return managedAuthApiError(403, "email_not_verified", { cause: error });

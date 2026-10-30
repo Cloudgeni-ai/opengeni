@@ -54,7 +54,11 @@ function oneCookie(response: Response, name: string): string {
   return value.split(";", 1)[0]!;
 }
 
-function app(mode: "dual" | "broker", allowedUserEmails: string[]) {
+function app(
+  mode: "dual" | "broker",
+  allowedUserEmails: string[],
+  { requireEmailVerification = false }: { requireEmailVerification?: boolean } = {},
+) {
   return createApp({
     settings: testSettings({
       databaseUrl: shared!.adminUrl,
@@ -62,7 +66,7 @@ function app(mode: "dual" | "broker", allowedUserEmails: string[]) {
       managedAuthSessionSetMode: mode,
       betterAuthSecret: "managed-session-set-refusal-secret-at-least-32-bytes",
       publicBaseUrl: "http://opengeni.test",
-      managedAuthRequireEmailVerification: false,
+      managedAuthRequireEmailVerification: requireEmailVerification,
       allowedUserEmails,
     }),
     db: client!.db,
@@ -175,6 +179,16 @@ for (const mode of ["dual", "broker"] as const) {
       expect(after.slots).toEqual([]);
     }, 60_000);
 
+    test("a password longer than any account can have is wrong credentials too", async () => {
+      if (!shared || !client) return;
+      const { completion, after } = await addAccount(app(mode, [kept]), kept, "x".repeat(200));
+      expect(await refusal(completion)).toEqual({
+        status: 401,
+        managedAuthCode: "invalid_credentials",
+      });
+      expect(after.slots).toEqual([]);
+    }, 60_000);
+
     test("an address the deployment doesn't allow is told so, whatever the password", async () => {
       if (!shared || !client) return;
       const target = app(mode, [kept]);
@@ -202,6 +216,20 @@ for (const mode of ["dual", "broker"] as const) {
       expect(after.slots).toEqual([]);
     }, 60_000);
 
+    test("an unverified address is told to verify it where the deployment requires that", async () => {
+      if (!shared || !client) return;
+      const { completion, after } = await addAccount(
+        app(mode, [kept, unverified], { requireEmailVerification: true }),
+        unverified,
+        PASSWORD,
+      );
+      expect(await refusal(completion)).toEqual({
+        status: 403,
+        managedAuthCode: "email_not_verified",
+      });
+      expect(after.slots).toEqual([]);
+    }, 60_000);
+
     test("an allowed address with the right password is still added", async () => {
       if (!shared || !client) return;
       const { completion, after } = await addAccount(app(mode, [kept]), kept, PASSWORD);
@@ -218,7 +246,9 @@ for (const mode of ["dual", "broker"] as const) {
         "wrong-password-123",
         PASSWORD,
       );
-      expect(earlier.map((response) => response.status)).toEqual([401]);
+      expect(await Promise.all(earlier.map(refusal))).toEqual([
+        { status: 401, managedAuthCode: "invalid_credentials" },
+      ]);
       expect(completion.status).toBe(200);
       expect(after.slots).toHaveLength(1);
     }, 60_000);

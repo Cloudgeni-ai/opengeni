@@ -42,6 +42,8 @@ export function accountAuthFailureMessage(error: unknown): string {
       return "Verify your email before signing in.";
     case "sign_in_refused":
       return "This account can't sign in right now.";
+    case "login_transaction_rate_limited":
+      return "Too many attempts. Wait a few minutes, then try again.";
     default:
       return ACCOUNT_AUTH_FAILED_MESSAGE;
   }

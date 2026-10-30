@@ -295,7 +295,7 @@ test("a team invitation for an unapproved address says the invitation alone can'
       "an invitation to Acme Labs doesn't give new@example.test access on its own",
     );
     expect(notice!.textContent).toContain(
-      "Ask your admin for access, then open your invitation link again.",
+      "Ask the admin of this service to allow new@example.test, then open your invitation link again.",
     );
     expect(notice!.textContent).not.toContain("open the invitation link from your email");
   } finally {
