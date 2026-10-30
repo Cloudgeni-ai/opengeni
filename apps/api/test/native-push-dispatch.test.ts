@@ -46,6 +46,23 @@ describe("native push presentation", () => {
     expect(nativePushCategory(payload)).toBe(undefined);
   });
 
+  test("an MCP server's question shows as the question and opens the app", () => {
+    const confirmation = {
+      ...payload,
+      eventType: "session.requiresAction",
+      body: "Messages asks: Send “On my way” to Design team?",
+      serverQuestionKind: "confirm" as const,
+    };
+    expect(nativePushAlert(confirmation).body).toBe(
+      "Messages asks: Send “On my way” to Design team?",
+    );
+    // No lock-screen Approve: it could answer a question asked after the push.
+    expect(nativePushCategory(confirmation)).toBe(undefined);
+    expect(nativePushCategory({ ...confirmation, serverQuestionKind: "form" })).toBe(undefined);
+    const { serverQuestionKind: _kind, ...ordinary } = confirmation;
+    expect(nativePushCategory(ordinary)).toBe("og.approval");
+  });
+
   test("a secret question push is title-only with no inline answer action (AC-5)", () => {
     const secret = {
       ...payload,

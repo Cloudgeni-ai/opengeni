@@ -26,6 +26,7 @@ import {
 
 import { normalizeProtocolJsonValue } from "./protocol-json";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
+import { mcpElicitationApproval, mcpInputRequestOf } from "./mcp-input-requests";
 import {
   isInternalGenericDispatchRegistrationItem,
   isOpeningToolLoadResponse,
@@ -986,7 +987,14 @@ export function serializeApprovals(interruptions: unknown[]): unknown[] {
           interruptionToolName(item),
         ),
     )
-    .map(serializeApprovalInterruption);
+    .map((item) => {
+      const serialized = serializeApprovalInterruption(item);
+      // A call paused by its MCP server's question carries that question.
+      const request = mcpInputRequestOf(item);
+      return request && serialized && typeof serialized === "object"
+        ? { ...serialized, elicitation: mcpElicitationApproval(request) }
+        : serialized;
+    });
   return normalizeProtocolJsonValue(approvals, '$["approvals"]');
 }
 

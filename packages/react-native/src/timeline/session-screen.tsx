@@ -548,10 +548,11 @@ function SessionScreenBody({
               <ApprovalStrip
                 approvals={approvals}
                 messages={approvalMessages}
-                onDecide={(id, decision) =>
-                  (decision === "approve" ? control.approve(id) : control.reject(id)).then(
-                    () => undefined,
-                  )
+                onDecide={(id, decision, answer) =>
+                  (decision === "approve"
+                    ? control.approve(id, undefined, answer)
+                    : control.reject(id)
+                  ).then(() => undefined)
                 }
               />
             ) : null}

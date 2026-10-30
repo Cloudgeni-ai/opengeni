@@ -452,8 +452,15 @@ export type CredentialProviderRequest = {
    * so `sessionId`, `rootSessionId`, `turnId` and `attemptId` are the nil
    * UUID. Answer it as you would a run in this workspace (Opengeni shows only
    * the names of what you return, never the values), or `not_applicable`.
+   *
+   * `event_subscription` signs in a workspace event source that listens to
+   * an MCP server by URL. It is not a run either: the run ids are the nil
+   * UUID, `mcpServers` names the one server, and `eventSubscription` names
+   * the source. Return `mcp` headers for that URL, or `not_applicable`.
    */
-  purpose: "provision" | "renewal" | "test";
+  purpose: "provision" | "renewal" | "test" | "event_subscription";
+  /** Set for, and only for, `purpose: "event_subscription"`. */
+  eventSubscription?: { sourceId: string; serverUrl: string };
   forceRefresh: boolean;
   accountId: string;
   workspaceId: string;

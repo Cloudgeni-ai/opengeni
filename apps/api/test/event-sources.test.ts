@@ -45,7 +45,11 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { dispatchDueEventTriggers } from "../src/event-trigger-dispatch";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
-import { pumpDueEventSourceFeeds, pumpDueMcpEventSubscriptions } from "@opengeni/core";
+import {
+  addMcpEventSource,
+  pumpDueEventSourceFeeds,
+  pumpDueMcpEventSubscriptions,
+} from "@opengeni/core";
 
 let shared: SharedTestDatabase;
 let db: DbClient;
@@ -1498,6 +1502,85 @@ describe("MCP event sources", () => {
       ],
     });
     expect(twoTypes.status).toBe(422);
+  });
+
+  test("a workspace source listens by URL, signed in by the credential provider", async () => {
+    const f = await mcpFixture();
+    const protectedServer = startFakeMcpEventsServer({
+      eventTypes: [TICKET_CREATED],
+      bearerToken: "listen-token",
+    });
+    fakes.push(protectedServer);
+    const serverUrl = "https://events.example/mcp";
+    // A person who is not an admin can't add one.
+    const asMember = await f.app.request(f.sources, {
+      method: "POST",
+      headers: f.owner.headers,
+      body: JSON.stringify({ kind: "mcp", serverId: "product-events", url: serverUrl }),
+    });
+    expect(asMember.status).toBe(403);
+
+    const provider = await f.app.request(`/v1/workspaces/${f.workspace.id}/credential-provider`, {
+      method: "PUT",
+      headers: f.service,
+      body: JSON.stringify({ url: "https://provider.example/credentials" }),
+    });
+    expect(provider.status).toBe(201);
+    const asked: Array<Record<string, any>> = [];
+    const network = {
+      // Any source's https URL reaches the local fake server.
+      fetch: async (url: string | URL, init?: RequestInit) =>
+        await fetch(String(url).replace(/^https:\/\/[^/]+\/mcp/, protectedServer.url), init),
+      providerFetch: (async (_url: string | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        asked.push(body);
+        return Response.json({
+          status: "ok",
+          mcp: [
+            {
+              url: body.eventSubscription.serverUrl,
+              headers: { Authorization: "Bearer listen-token" },
+            },
+          ],
+        });
+      }) as never,
+    };
+    const add = async (url: string) =>
+      await addMcpEventSource({
+        db: db.db,
+        settings: f.settings,
+        accountId: f.workspace.accountId,
+        workspaceId: f.workspace.id,
+        createdBySubjectId: "service:product",
+        ownerSubjectId: null,
+        serverId: "product-events",
+        url,
+        ...network,
+      });
+    const source = await add(serverUrl);
+    expect(source).toMatchObject({
+      kind: "mcp",
+      ownerSubjectId: null,
+      visibility: "workspace",
+      mcpServerUrl: serverUrl,
+      connectionId: null,
+    });
+    expect(asked[0]).toMatchObject({
+      purpose: "event_subscription",
+      eventSubscription: { serverUrl },
+      mcpServers: [{ id: "product-events", url: serverUrl }],
+    });
+    // Adding it again returns the same source; another URL for the same id conflicts.
+    expect((await add(serverUrl)).id).toBe(source.id);
+    await expect(add("https://other.example/mcp")).rejects.toMatchObject({ status: 409 });
+
+    const listed = await f.json(
+      await f.app.request(`${f.sources}/${source.id}`, { headers: f.owner.headers }),
+    );
+    expect(listed.source ?? listed).toMatchObject({
+      visibility: "workspace",
+      mcp: { serverId: "product-events", connectionId: null, url: serverUrl },
+    });
   });
 
   test("a server that offers events is ready to use: its first use adds the person's source", async () => {

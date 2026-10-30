@@ -144,6 +144,33 @@ fn id(n: usize) -> Id {
     Id(SandboxId((0x6e5 << 64) | n as u128))
 }
 
+/// The last lines of an agent's log, without colours or the frames of a
+/// backtrace.
+fn log_end(log: &Path) -> String {
+    let text = std::fs::read_to_string(log).unwrap_or_else(|error| format!("unreadable: {error}"));
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // A colour: ESC [ ... m.
+            chars.by_ref().find(|&c| c == 'm');
+        } else {
+            plain.push(c);
+        }
+    }
+    let lines: Vec<&str> = plain
+        .lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            !line.starts_with("at ")
+                && !line
+                    .split_once(':')
+                    .is_some_and(|(frame, _)| frame.chars().all(|c| c.is_ascii_digit()))
+        })
+        .collect();
+    lines[lines.len().saturating_sub(40)..].join("\n")
+}
+
 /// One agent on its own state root, copying new disks from one image.
 struct Host {
     root: PathBuf,
@@ -168,7 +195,7 @@ impl Host {
             .filter(|_| !extra.contains(&"--memory-profile"))
             .map(|name| vec!["--memory-profile".to_owned(), name])
             .unwrap_or_default();
-        let child = Command::new(env!("CARGO_BIN_EXE_compute-host"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_compute-host"))
             .arg("--socket")
             .arg(&socket)
             .arg("serve")
@@ -195,7 +222,17 @@ impl Host {
         let client = Client::new(&socket);
         let deadline = Instant::now() + Duration::from_secs(60);
         while !(socket.exists() && client.call(&Request::Status).await.is_ok()) {
-            assert!(Instant::now() < deadline, "the agent never came up");
+            // An agent that ended, or never answers, says why in its log.
+            let ended = child.try_wait().unwrap();
+            assert!(
+                ended.is_none() && Instant::now() < deadline,
+                "the agent never came up ({}); the end of its log:\n{}",
+                ended.map_or_else(
+                    || "no answer in 60 s".to_owned(),
+                    |status| status.to_string()
+                ),
+                log_end(&root.join("agent.log")),
+            );
             sleep(Duration::from_millis(20)).await;
         }
         Self {

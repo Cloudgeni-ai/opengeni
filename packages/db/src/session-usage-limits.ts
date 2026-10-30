@@ -153,6 +153,29 @@ export function projectSessionUsageLimitState(raw: unknown): SessionUsageLimit {
     freeCalls: num("freeCalls"),
     unpricedCalls: num("unpricedCalls"),
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : null,
+    ...(projectSessionUsageLimitWindow(value.window) ?? {}),
+  };
+}
+
+/** The recurring window, projected only when the limit has one. */
+function projectSessionUsageLimitWindow(raw: unknown): Pick<SessionUsageLimit, "window"> | null {
+  if (raw === undefined || raw === null) return null;
+  const value = raw as Record<string, unknown>;
+  if (
+    value.period !== "day" ||
+    typeof value.timeZone !== "string" ||
+    typeof value.startedAt !== "string" ||
+    typeof value.resetsAt !== "string"
+  ) {
+    throw new Error("Session usage limit window is malformed");
+  }
+  return {
+    window: {
+      period: "day",
+      timeZone: value.timeZone,
+      startedAt: value.startedAt,
+      resetsAt: value.resetsAt,
+    },
   };
 }
 
@@ -426,6 +449,8 @@ export type SessionUsageLimitWriteActor = {
 type SessionUsageLimitSetInput = Scope & {
   sessionId: string;
   limitMicros: number | null;
+  /** Recurring window: omitted keeps the current one, null removes it. */
+  window?: { period: "day"; timeZone: string } | null;
   expectedVersion: number;
   operationId: string;
   actor: SessionUsageLimitWriteActor;
@@ -462,6 +487,7 @@ async function runSetCommand(
     limitMicros: input.limitMicros,
     expectedVersion: input.expectedVersion,
     operationId: input.operationId,
+    ...(input.window !== undefined ? { window: input.window } : {}),
     actorSubjectId: input.actor.subjectId,
     actorType: input.actor.type,
     producerEnabled: input.producerEnabled,
