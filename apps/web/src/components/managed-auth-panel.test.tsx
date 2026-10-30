@@ -292,10 +292,10 @@ test("a team invitation for an unapproved address says the invitation alone can'
     expect(notice).not.toBeNull();
     expect(notice!.textContent).toContain("Ask for your email to be allowed");
     expect(notice!.textContent).toContain(
-      "an invitation to Acme Labs doesn't approve new@example.test on its own",
+      "an invitation to Acme Labs doesn't give new@example.test access on its own",
     );
     expect(notice!.textContent).toContain(
-      "Ask whoever runs this service to allow new@example.test",
+      "Ask your admin for access, then open your invitation link again.",
     );
     expect(notice!.textContent).not.toContain("open the invitation link from your email");
   } finally {
@@ -496,7 +496,9 @@ test("an address that is not approved for the service gets who to ask, not a ret
     expect(host.textContent).toContain(
       "new@example.test isn't on this service's list of approved email addresses.",
     );
-    expect(host.textContent).toContain("Ask whoever runs this service to allow your email address");
+    expect(host.textContent).toContain(
+      "This email can't create an account here. Ask your admin for access.",
+    );
     expect(host.textContent).not.toContain("Couldn't create account");
     expect(host.textContent).not.toContain("try again");
     // Nothing to resubmit: no form fields, submit button or provider buttons.

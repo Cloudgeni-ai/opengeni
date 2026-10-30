@@ -154,4 +154,61 @@ describe("isolated browser account authentication", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("says an address isn't allowed instead of asking to check the credentials", async () => {
+    const originalFetch = globalThis.fetch;
+    const refusals = [
+      { status: 403, code: "sign_in_email_not_allowed" },
+      { status: 401, code: "invalid_credentials" },
+    ];
+    let attempt = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url =
+        input instanceof Request ? input.url : input instanceof URL ? input.toString() : input;
+      if (new URL(url, "https://opengeni.test").pathname === "/v1/config/client") {
+        return Response.json({
+          auth: { mode: "managedSession", session: "cookie", socialProviders: [] },
+        });
+      }
+      if ((init?.method ?? "GET") === "GET") return Response.json(projection("1"));
+      const refusal = refusals[attempt++]!;
+      return Response.json(
+        {
+          error: {
+            status: refusal.status,
+            code: refusal.status === 401 ? "unauthenticated" : "forbidden",
+            message: refusal.code,
+            retryable: false,
+            details: { managedAuthCode: refusal.code },
+          },
+        },
+        { status: refusal.status },
+      );
+    }) as typeof fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<AccountAuthRoute transactionId={TRANSACTION_ID} />));
+      const email = container.querySelector<HTMLInputElement>("#account-auth-email")!;
+      const password = container.querySelector<HTMLInputElement>("#account-auth-password")!;
+      const submit = async () => {
+        await enter(email, "removed@example.test");
+        await enter(password, "correct horse battery staple");
+        await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+        await flush();
+        return container.querySelector('[role="alert"]')?.textContent;
+      };
+
+      expect(await submit()).toBe("This email can't sign in here. Ask your admin for access.");
+      expect(await submit()).toBe(
+        "Authentication did not complete. Check the credentials and try again.",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

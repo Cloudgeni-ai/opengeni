@@ -21,8 +21,31 @@ import {
 import { readOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
 import { readSignInCallbackError } from "@/lib/sign-in-feedback";
 import { signupAttribution } from "@/lib/signup-attribution";
+import { SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE } from "@/lib/signups-paused";
 
 const browserAccountsApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
+
+const ACCOUNT_AUTH_FAILED_MESSAGE =
+  "Authentication did not complete. Check the credentials and try again.";
+
+/**
+ * What the add-account window says when email/password completion fails. A
+ * refusal the server could name gets its own message, because retrying the
+ * same credentials can't help; everything else keeps the generic message.
+ */
+export function accountAuthFailureMessage(error: unknown): string {
+  if (!(error instanceof BrowserAccountsApiError)) return ACCOUNT_AUTH_FAILED_MESSAGE;
+  switch (error.code) {
+    case "sign_in_email_not_allowed":
+      return SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE;
+    case "email_not_verified":
+      return "Verify your email before signing in.";
+    case "sign_in_refused":
+      return "This account can't sign in right now.";
+    default:
+      return ACCOUNT_AUTH_FAILED_MESSAGE;
+  }
+}
 
 export function AccountAuthRoute({
   transactionId,
@@ -169,7 +192,7 @@ export function AccountAuthRoute({
         completionAttempt.current = null;
       }
       setPassword("");
-      setError(caught instanceof Error ? caught.message : "Authentication failed");
+      setError(accountAuthFailureMessage(caught));
     } finally {
       setBusy(false);
     }
@@ -219,7 +242,7 @@ export function AccountAuthRoute({
         setSignupChallengeToken(undefined);
         setChallengeReset((value) => value + 1);
       }
-      setError(caught instanceof Error ? caught.message : "Authentication failed");
+      setError(accountAuthFailureMessage(caught));
       setSocialBusy(null);
     }
   }
@@ -327,7 +350,7 @@ export function AccountAuthRoute({
         </div>
         {error ? (
           <p role="alert" className="mt-3 text-sm text-status-failed">
-            Authentication did not complete. Check the credentials and try again.
+            {error}
           </p>
         ) : null}
         <div className="mt-5 grid gap-2 sm:grid-cols-2">

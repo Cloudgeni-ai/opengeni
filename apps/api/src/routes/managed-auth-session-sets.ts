@@ -75,6 +75,8 @@ import { ApiHttpError } from "../http/api-error";
 import { trustedBrowserOrigins } from "../http/browser-mutation-origin";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import { ManagedAuthEmailThrottleError } from "../auth/managed-auth-rate-limits";
+import { managedAuthRefusal } from "../auth/managed-passkeys";
+import { MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE } from "@opengeni/contracts";
 import { z } from "zod";
 
 const ManagedAuthSocialStartReceipt = z
@@ -331,7 +333,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         }),
       );
     } catch (error) {
-      throwHttp(error, context);
+      throwHttp(emailPasswordSignInRefusal(error) ?? error, context);
     }
   });
 
@@ -1118,6 +1120,34 @@ async function mirrorCurrentSelection(
 
 function appendCookies(context: Context, cookies: readonly string[]): void {
   for (const cookie of cookies) context.header("set-cookie", cookie, { append: true });
+}
+
+/**
+ * Email/password completion asks Better Auth to sign the person in, and Better
+ * Auth refuses with an APIError: a wrong email or password, an unverified
+ * email, an address the deployment doesn't allow, or a session its hooks
+ * declined. Those are answers about the sign-in, so they get a typed 4xx the
+ * add-account window can explain instead of escaping as a 500. The per-email
+ * throttle keeps its own mapping in {@link throwHttp}, and a provider 5xx stays
+ * a server failure.
+ */
+function emailPasswordSignInRefusal(error: unknown): ApiHttpError | null {
+  if (error instanceof ManagedAuthEmailThrottleError) return null;
+  const refused = managedAuthRefusal(error);
+  if (!refused) return null;
+  const status = (error as { statusCode?: unknown }).statusCode;
+  if (typeof status !== "number" || status < 400 || status >= 500) return null;
+  switch (refused.code) {
+    case "INVALID_EMAIL":
+    case "INVALID_EMAIL_OR_PASSWORD":
+      return managedAuthApiError(401, "invalid_credentials", { cause: error });
+    case "EMAIL_NOT_VERIFIED":
+      return managedAuthApiError(403, "email_not_verified", { cause: error });
+    case MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE:
+      return managedAuthApiError(403, "sign_in_email_not_allowed", { cause: error });
+    default:
+      return managedAuthApiError(403, "sign_in_refused", { cause: error });
+  }
 }
 
 function throwHttp(error: unknown, context?: Context): never {
