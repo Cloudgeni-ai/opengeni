@@ -5,7 +5,8 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { get as httpGet } from "node:http";
+import { existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -18,6 +19,8 @@ import {
   type SiteHostMapRecord,
 } from "@opengeni/contracts";
 import { Miniflare } from "miniflare";
+import { SITE_FRAME_MAX_BYTES } from "../src/frame-stream";
+import { siteFrameDocument } from "../src/version";
 import { TEST_SECRET, verifyGatewaySignature } from "./helpers";
 
 /** The fake API listens on an ephemeral port unless one is configured. */
@@ -29,6 +32,30 @@ const SESSION = "site-session-token-0123456789abcdefghijklmnop";
 const NO_ACCESS_SESSION = "site-session-token-noaccess-0123456789abcdef";
 const CODE = "one-time-code-0123456789abcdef";
 const RATE_LIMIT = 20;
+/** A page the fake API sends in two parts, the second only when the test says so. */
+const STREAM_VERSION = "77777777-7777-4777-8777-777777777777";
+/** A large page, like a Site with its screenshots and videos inlined. */
+const BIG_VERSION = "88888888-8888-4888-8888-888888888888";
+/** A page whose declared size is over the gateway's limit. */
+const HUGE_VERSION = "99999999-9999-4999-8999-999999999999";
+const CLIENT_TAG = '<script src="/__opengeni/site-tools/client.js"></script>';
+/** About 24 MB of multi-byte text: several copies of it would not fit a Worker's memory as one string. */
+const BIG_HTML = `<!doctype html><html><head><title>Big</title>${CLIENT_TAG}</head><body>${"<p>Opengeni — screenshot data 日本語 😀 QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=</p>\n".repeat(280_000)}<p>The end</p></body></html>`;
+let hugeDir: string | null = null;
+
+/** Path of a sparse file one byte over the gateway's page limit. */
+function hugePage(): string {
+  hugeDir ??= mkdtempSync(join(tmpdir(), "site-gateway-huge-"));
+  const path = join(hugeDir, "page.html");
+  if (!existsSync(path)) {
+    writeFileSync(path, "<!doctype html><p>never finished");
+    truncateSync(path, SITE_FRAME_MAX_BYTES + 1);
+  }
+  return path;
+}
+
+/** Resolves the streamed page's second part. */
+let releaseStream: () => void = () => undefined;
 
 type Received = {
   method: string;
@@ -66,6 +93,9 @@ const RECORDS = new Map<string, SiteHostMapRecord>(
     record("hidden", { noindex: true }),
     record("limit"),
     record("counted", { siteId: "66666666-6666-4666-8666-666666666666" }),
+    record("stream", { siteId: "77777777-0000-4000-8000-000000000001", versionId: STREAM_VERSION }),
+    record("big", { siteId: "88888888-0000-4000-8000-000000000001", versionId: BIG_VERSION }),
+    record("huge", { siteId: "99999999-0000-4000-8000-000000000001", versionId: HUGE_VERSION }),
   ].map((entry) => [entry.hostname, entry]),
 );
 
@@ -157,6 +187,30 @@ async function fakeApi(request: Request): Promise<Response> {
       return json({ error: { code: "forbidden" } }, { status: 403 });
     if (site.access !== "public" && session !== SESSION)
       return json({ error: { code: "site_sign_in_required" } }, { status: 401 });
+    if (suffix === `/versions/${STREAM_VERSION}/html`) {
+      const released = new Promise<void>((done) => {
+        releaseStream = done;
+      });
+      const encoder = new TextEncoder();
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(encoder.encode("<!doctype html><html><body><p>First part</p>"));
+            await released;
+            controller.enqueue(encoder.encode("<p>Second part</p></body></html>"));
+            controller.close();
+          },
+        }),
+        { headers: { "content-type": "text/html; charset=utf-8" } },
+      );
+    }
+    if (suffix === `/versions/${BIG_VERSION}/html`)
+      return new Response(BIG_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
+    if (suffix === `/versions/${HUGE_VERSION}/html`)
+      // A sparse file: its real Content-Length, without the bytes in memory or on disk.
+      return new Response(Bun.file(hugePage()), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
     if (suffix !== `/versions/${VERSION}/html` && suffix !== `/versions/${OLD_VERSION}/html`)
       return new Response(null, { status: 404 });
     return new Response(
@@ -266,6 +320,8 @@ function lastTo(suffix: string): Received | undefined {
 }
 
 async function shutdown(): Promise<void> {
+  if (hugeDir) rmSync(hugeDir, { recursive: true, force: true });
+  hugeDir = null;
   await mf?.dispose();
   mf = null;
   server?.stop(true);
@@ -668,6 +724,97 @@ describe("site gateway in workerd", () => {
     expect(await gone.text()).not.toContain("Hello Site");
   });
 
+  test("Site HTML streams through: the first bytes arrive before the page has", async () => {
+    // Over plain HTTP: Bun's fetch (and so dispatchFetch) holds small chunked
+    // bodies back, which would hide whether the gateway streams.
+    const base = new URL(await mf!.ready);
+    const url = siteUrl("stream", `/_og/v/${STREAM_VERSION}`);
+    const chunks: string[] = [];
+    let sawFirst!: () => void;
+    const first = new Promise<void>((done) => {
+      sawFirst = done;
+    });
+    let status = 0;
+    const finished = new Promise<void>((done, reject) => {
+      const request = httpGet(
+        {
+          host: base.hostname,
+          port: base.port,
+          path: `/_og/v/${STREAM_VERSION}`,
+          headers: { ...FRAME, host: `stream.${DOMAIN}`, "MF-Original-URL": url },
+        },
+        (response) => {
+          status = response.statusCode ?? 0;
+          response.setEncoding("utf8");
+          response.on("data", (chunk: string) => {
+            chunks.push(chunk);
+            if (chunks.join("").includes("First part")) sawFirst();
+          });
+          response.on("end", () => done());
+          response.on("error", reject);
+        },
+      );
+      request.on("error", reject);
+    });
+    try {
+      // A gateway that read the whole page before answering sends nothing here.
+      const arrived = await Promise.race([
+        first.then(() => true),
+        Bun.sleep(10_000).then(() => false),
+      ]);
+      expect(arrived).toBe(true);
+      expect(status).toBe(200);
+      expect(chunks.join("")).not.toContain("Second part");
+    } finally {
+      releaseStream();
+    }
+    await finished;
+    expect(chunks.join("")).toBe(
+      siteFrameDocument(
+        "<!doctype html><html><body><p>First part</p><p>Second part</p></body></html>",
+      ),
+    );
+  }, 30_000);
+
+  test("a large Site page is served whole and exact, and edge-cached", async () => {
+    const expected = siteFrameDocument(BIG_HTML);
+    const first = await get("big", `/_og/v/${BIG_VERSION}`, { headers: FRAME });
+    expect(first.status).toBe(200);
+    expect(first.headers.get("x-opengeni-site-cache")).toBe("MISS");
+    const etag = first.headers.get("etag")!;
+    expect(etag).toMatch(/^"[0-9a-f]{32}"$/u);
+    const body = await first.text();
+    expect(body.length).toBe(expected.length);
+    expect(body === expected).toBe(true);
+    expect(body).not.toContain("/__opengeni/site-tools/client.js");
+    let second = await get("big", `/_og/v/${BIG_VERSION}`, { headers: FRAME });
+    for (
+      let attempt = 0;
+      attempt < 40 && second.headers.get("x-opengeni-site-cache") !== "HIT";
+      attempt += 1
+    ) {
+      await second.body?.cancel();
+      await Bun.sleep(100);
+      second = await get("big", `/_og/v/${BIG_VERSION}`, { headers: FRAME });
+    }
+    expect(second.headers.get("x-opengeni-site-cache")).toBe("HIT");
+    expect(second.headers.get("etag")).toBe(etag);
+    expect((await second.text()) === expected).toBe(true);
+  }, 60_000);
+
+  test("a Site page over the size limit gets a clear page in the frame, not a Worker error", async () => {
+    const response = await get("huge", `/_og/v/${HUGE_VERSION}`, { headers: FRAME });
+    expect(response.status).toBe(502);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("etag")).toBeNull();
+    expect(response.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+    expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+    const html = await response.text();
+    expect(html).toContain("<h1>Site too large</h1>");
+    expect(html).toContain("257 MB, more than the 256 MB a Site page can be");
+    expect(html).not.toContain("never finished");
+  });
+
   test("browsers that send no Fetch Metadata still get the sandboxed Site HTML", async () => {
     const response = await get("pub", `/_og/v/${VERSION}`);
     expect(response.status).toBe(200);
@@ -891,6 +1038,38 @@ describe("site gateway in workerd", () => {
       message: "Asks for passwords",
       contactEmail: null,
     });
+  });
+
+  test("a report body over the cap is refused without reading it all, length or not", async () => {
+    const form = await get("pub", "/_og/report");
+    await form.text();
+    const visitor = cookiePair(
+      setCookies(form).find((cookie) => cookie.startsWith("__Host-og_v="))!,
+    );
+    const chunk = new TextEncoder().encode(`message=${"a".repeat(8 * 1024)}`);
+    let sent = 0;
+    // A chunked body that declares no length and would go on for a long time.
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        sent += 1;
+        if (sent > 10_000) controller.close();
+        else controller.enqueue(chunk);
+      },
+    });
+    const response = await mf!.dispatchFetch(siteUrl("pub", "/_og/report"), {
+      method: "POST",
+      body: body as unknown as string,
+      duplex: "half",
+      headers: {
+        cookie: visitor,
+        origin: `https://pub.${DOMAIN}`,
+        "content-type": "application/x-www-form-urlencoded",
+        "MF-Original-URL": siteUrl("pub", "/_og/report"),
+      },
+    } as Parameters<Miniflare["dispatchFetch"]>[1]);
+    expect(response.status).toBe(413);
+    expect(await response.text()).toContain("Report too long");
+    expect(sent).toBeLessThan(10_000);
   });
 
   test("the human check is off without Turnstile configuration", async () => {

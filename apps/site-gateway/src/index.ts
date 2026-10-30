@@ -61,6 +61,38 @@ function isApiPath(pathname: string): boolean {
   return pathname === SITE_GATEWAY_API_PREFIX || pathname.startsWith(`${SITE_GATEWAY_API_PREFIX}/`);
 }
 
+/**
+ * An error the gateway did not expect: a plain Opengeni page (or JSON error
+ * on the Site API) instead of Cloudflare's raw "Worker threw exception" page.
+ */
+export function unexpectedErrorResponse(request: Request, env: GatewayEnv): Response {
+  const url = new URL(request.url);
+  const environment = env.ENVIRONMENT?.trim().toLowerCase();
+  const hsts = environment !== "development" && environment !== "test";
+  if (isApiPath(url.pathname))
+    return jsonError(
+      500,
+      {
+        code: "site_gateway_error",
+        message: "Something went wrong. Try again shortly",
+        retryable: true,
+      },
+      { noindex: true, hsts },
+    );
+  return messagePage(
+    {
+      hsts,
+      frameable:
+        url.pathname.startsWith(`${SITE_GATEWAY_VERSION_PREFIX}/`) && isFrameLoad(request)
+          ? "self"
+          : "none",
+    },
+    500,
+    "Something went wrong",
+    "This Site couldn't be shown. Try again in a moment.",
+  );
+}
+
 export async function handleRequest(
   request: Request,
   env: GatewayEnv,
@@ -198,7 +230,12 @@ export async function handleRequest(
 }
 
 export default {
-  fetch(request: Request, env: GatewayEnv, ctx: WaitUntil): Promise<Response> {
-    return handleRequest(request, env, ctx);
+  async fetch(request: Request, env: GatewayEnv, ctx: WaitUntil): Promise<Response> {
+    try {
+      return await handleRequest(request, env, ctx);
+    } catch (error) {
+      console.error("site-gateway: unexpected error", error);
+      return unexpectedErrorResponse(request, env);
+    }
   },
 };
