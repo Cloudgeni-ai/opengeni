@@ -212,9 +212,12 @@ impl Host {
                 .into_iter()
                 .filter(|step| needs_memory(*step))
                 .any(|step| !self.queues[step.index()].is_empty());
-        let held = self
-            .memory_levels()
-            .is_some_and(|levels| levels.short || levels.held_back > 0 || levels.over_bound > 0);
+        let held = self.memory_levels().is_some_and(|levels| {
+            levels.short
+                || levels.held_back > 0
+                || levels.over_bound > 0
+                || levels.bringing_down > 0
+        });
         Some(if waiting || held { 0 } else { room })
     }
 

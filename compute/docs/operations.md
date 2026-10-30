@@ -992,7 +992,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   sandboxes may keep and how many it holds back (`compute.memory.level`,
   `.held_back`), how many the kernel cannot hold to their bound while the
   host is pressed, such as sandboxes full of data that does not compress
-  (`compute.memory.over_bound`), what sandboxes being put to sleep and
+  (`compute.memory.over_bound`), how many it is still bringing down to it
+  then, slow to start because it ages a VM's pages before it compresses
+  any (`compute.memory.bringing_down`; a sandbox counts there for up to a
+  minute without coming down before it counts over its bound and its
+  guest is shrunk), what sandboxes being put to sleep and
   spares ending are giving back (`compute.memory.relief`, which the levels
   count as available), the shortfall even with everyone at their request
   and that counted, which guests are shrunk for
