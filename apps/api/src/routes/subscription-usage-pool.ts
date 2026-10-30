@@ -2,7 +2,7 @@ import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import { readSubscriptionUsagePool, resolveNamedManagedPersonalWorkspaceGrant } from "@opengeni/db";
 import { SubscriptionUsagePoolsResponse } from "@opengeni/contracts";
 import type { Hono } from "hono";
-import { requireOrganizationCodexHuman } from "./codex";
+import { requireOrganizationSubscriptionAdministrator } from "./codex";
 import { requirePrivateSubscriptionHuman } from "./subscription-pool-access";
 
 /** Cached observations only; provider checks stay on the page's existing Refresh path. */
@@ -23,7 +23,7 @@ export function registerSubscriptionUsagePoolRoutes(app: Hono, deps: ApiRouteDep
   }
   app.get("/v1/organizations/:organizationId/subscription-usage-pools", async (c) => {
     const accountId = c.req.param("organizationId");
-    const human = await requireOrganizationCodexHuman(c, deps, accountId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, accountId);
     return c.json(await read({ accountId, workspaceId: null, subjectId: human.subjectId }));
   });
   app.get("/v1/workspaces/:workspaceId/subscription-usage-pools", async (c) => {

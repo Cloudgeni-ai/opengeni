@@ -57,6 +57,8 @@ export type TurnSettleInput = {
   suppressGoalContinuation?: boolean;
   allowanceGoalPause?: ApplySessionTurnSettlementInput["allowanceGoalPause"];
   consumeRequestedCompactionFailure?: boolean;
+  /** Drop a pending `proactive` compaction request with this settlement. */
+  dropProactiveCompactionRequest?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
   notStartedToolCallIds?: readonly string[];
 };

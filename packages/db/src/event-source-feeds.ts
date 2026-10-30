@@ -291,3 +291,110 @@ export async function listWorkspaceRecordingEventsForSource(
     };
   });
 }
+
+/** One fact about what happened in Opengeni itself, as the reading person may see it. */
+export type WorkspaceActivityEvent = {
+  id: string;
+  type: string;
+  occurredAt: Date;
+  createdAt: Date;
+  sessionId: string | null;
+  turnId: string | null;
+  subjectId: string | null;
+  automationId: string | null;
+  automationRunId: string | null;
+  chainDepth: number;
+  data: Record<string, unknown>;
+  /** The chat's title, when the reader may see the chat and it has one. */
+  chatTitle: string | null;
+  /** The causing automation's name, when the reader may see it. */
+  automationName: string | null;
+  /** How the workspace names the person the turn ran for. */
+  subjectLabel: string | null;
+};
+
+export type WorkspaceActivityEventsRead = {
+  events: WorkspaceActivityEvent[];
+  /** The database clock when it read, the next read's position. */
+  readAt: Date;
+};
+
+/**
+ * Migration 1105. The activity facts (chats finishing, failing, waiting;
+ * usage thresholds) a person may see that a source has not stored yet,
+ * oldest first, written after `since`. It reads as that person, so row
+ * security keeps out other people's private chats and usage, exactly as
+ * chat history does. Like recording events, facts are stamped when written,
+ * so callers look back and rely on the "not stored yet" filter.
+ */
+export async function listWorkspaceActivityEventsForSource(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sourceId: string;
+    subjectId: string;
+    since: Date;
+    limit: number;
+  },
+): Promise<WorkspaceActivityEventsRead> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const rows = await rawRows<{
+      id: string;
+      type: string;
+      occurred_at: Date | string;
+      created_at: Date | string;
+      session_id: string | null;
+      turn_id: string | null;
+      subject_id: string | null;
+      automation_id: string | null;
+      automation_run_id: string | null;
+      chain_depth: number;
+      data: Record<string, unknown>;
+      chat_title: string | null;
+      automation_name: string | null;
+      subject_label: string | null;
+    }>(
+      tx,
+      sql`select fact.id, fact.type, fact.occurred_at, fact.created_at, fact.session_id,
+          fact.turn_id, fact.subject_id, fact.automation_id, fact.automation_run_id,
+          fact.chain_depth, fact.data, chat.title as chat_title, task.name as automation_name,
+          member.subject_label
+        from workspace_activity_events fact
+        left join sessions chat
+          on chat.workspace_id = fact.workspace_id and chat.id = fact.session_id
+        left join scheduled_tasks task
+          on task.workspace_id = fact.workspace_id and task.id = fact.automation_id
+        left join workspace_memberships member
+          on member.workspace_id = fact.workspace_id and member.subject_id = fact.subject_id
+        where fact.workspace_id = ${input.workspaceId}
+          and fact.created_at > ${input.since.toISOString()}::timestamptz
+          and not exists (
+            select 1 from inbound_events stored
+            where stored.source_id = ${input.sourceId}::uuid and stored.stream_key = ''
+              and stored.external_id = fact.id::text)
+        order by fact.created_at, fact.id
+        limit ${Math.max(1, Math.min(input.limit, 500))}`,
+    );
+    const [clock] = await rawRows<{ now: Date | string }>(tx, sql`select clock_timestamp() as now`);
+    const asDate = (value: Date | string) => (value instanceof Date ? value : new Date(value));
+    return {
+      events: rows.map((row) => ({
+        id: row.id,
+        type: row.type,
+        occurredAt: asDate(row.occurred_at),
+        createdAt: asDate(row.created_at),
+        sessionId: row.session_id,
+        turnId: row.turn_id,
+        subjectId: row.subject_id,
+        automationId: row.automation_id,
+        automationRunId: row.automation_run_id,
+        chainDepth: Number(row.chain_depth),
+        data: row.data,
+        chatTitle: row.chat_title,
+        automationName: row.automation_name,
+        subjectLabel: row.subject_label,
+      })),
+      readAt: asDate(clock!.now),
+    };
+  });
+}
