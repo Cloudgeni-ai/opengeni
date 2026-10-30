@@ -169,6 +169,20 @@ describe("nextBatch", () => {
     expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([3]);
   });
 
+  test("a retested group runs its CI change alone first and keeps the rest together", () => {
+    const pulls = [pull(1), pull(2), pull(3, { controlPlane: true }), pull(4)];
+    const first = nextBatch(pulls, [[1, 2, 3, 4]], NOW, DEFAULT_SETTINGS);
+    expect(first).toMatchObject({ kind: "build", pending: [[1, 2, 4]] });
+    expect(first?.kind === "build" && first.members.map((p) => p.number)).toEqual([3]);
+    const rest = nextBatch(
+      pulls.filter((p) => p.number !== 3),
+      [[1, 2, 4]],
+      NOW,
+      DEFAULT_SETTINGS,
+    );
+    expect(rest?.kind === "build" && rest.members.map((p) => p.number)).toEqual([1, 2, 4]);
+  });
+
   test("keeps PRs that add the same numbered file out of one batch", () => {
     const slot = "packages/db/drizzle/1072";
     const action = nextBatch(
