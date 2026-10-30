@@ -519,7 +519,6 @@ export function SessionHeader({
                 <StatusPill
                   className="border-border bg-surface text-fg-muted"
                   data-session-wait-badge=""
-                  dot={<span aria-hidden className="size-1.5 shrink-0 rounded-full bg-current" />}
                 >
                   Waiting
                 </StatusPill>

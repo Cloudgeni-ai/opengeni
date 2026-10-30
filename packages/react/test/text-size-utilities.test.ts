@@ -18,8 +18,13 @@ const require = createRequire(import.meta.url);
 /** Names that only make sense as a font size, with or without the `og-` prefix. */
 const SIZE_SHAPED =
   /^text-(?:og-)?(?:\d*x[sl]|sm|base|md|lg|control|menu|composer(?:-[\w]+)?|caption|label|body|title|heading|display|tiny|small|medium|large)$/;
-/** A whole class token, optionally behind variants such as `sm:` or `hover:`. */
-const CLASS_TOKEN = /(?<=^|[\s"'`{}])(?:[\w[\]&>:@*.-]+:)?!?(text-[a-z0-9][\w-]*)(?=$|[\s"'`{}])/g;
+/**
+ * A whole class token, optionally behind variants (`sm:`, `group-hover/row:`,
+ * `data-[size=sm]:`) and with an optional line height or important suffix
+ * (`text-sm/6`, `text-sm!`).
+ */
+const CLASS_TOKEN =
+  /(?<=^|[\s"'`{}])(?:[\w[\]&>:@*.=/%-]+:)?!?(text-[a-z0-9][\w-]*)(?:\/[\w.[\]-]+)?!?(?=$|[\s"'`{}])/g;
 
 async function definedTextSizes(): Promise<Set<string>> {
   const stylesheets = [
@@ -60,12 +65,18 @@ describe("text size utilities", () => {
         defined,
       ),
     ).toEqual(["text-control", "text-og-lg"]);
+    expect(
+      unknownTextSizeClasses(
+        "data-[size=sm]:text-og-xl group-hover/row:text-tiny text-caption! text-og-label/5 text-sm/6 @[30rem]/decision:text-og-sm",
+        defined,
+      ),
+    ).toEqual(["text-og-xl", "text-tiny", "text-caption", "text-og-label"]);
   });
 
-  test("every text size class in packages/react/src is defined by a theme", async () => {
+  test("every text size class in packages/react source and demos is defined by a theme", async () => {
     const defined = await definedTextSizes();
     const offenders: string[] = [];
-    for await (const file of new Glob("src/**/*.{ts,tsx}").scan(packageRoot)) {
+    for await (const file of new Glob("{src,demo}/**/*.{ts,tsx}").scan(packageRoot)) {
       if (file.includes("visualization-assets")) continue;
       const source = await readFile(join(packageRoot, file), "utf8");
       for (const utility of unknownTextSizeClasses(source, defined)) {

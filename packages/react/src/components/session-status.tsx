@@ -100,8 +100,11 @@ export function SessionStatus({ status, label, size = "md", className }: Session
 
 export type StatusPillProps = ComponentPropsWithoutRef<"span"> & {
   size?: "sm" | "md" | undefined;
-  /** Leading dot. Size it with the pill (`size-1` for sm, `size-1.5` for md). */
-  dot: ReactNode;
+  /**
+   * Leading dot. Defaults to a still dot in the text colour, sized for the
+   * pill. A replacement should use the same size (`size-1` sm, `size-1.5` md).
+   */
+  dot?: ReactNode;
   /** Colour classes (text, border, background). Geometry and type come from the pill. */
   className?: string | undefined;
 };
@@ -121,7 +124,15 @@ export function StatusPill({ size = "md", dot, className, children, ...rest }: S
         className,
       )}
     >
-      {dot}
+      {dot ?? (
+        <span
+          aria-hidden
+          className={cn(
+            "relative inline-flex shrink-0 rounded-full bg-current",
+            size === "sm" ? "size-1" : "size-1.5",
+          )}
+        />
+      )}
       {children}
     </span>
   );

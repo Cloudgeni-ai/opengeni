@@ -367,7 +367,10 @@ describe("responsive production session header", () => {
       expect(await waiting.innerText()).toBe("Waiting");
       await captureStatusPill(page, "waiting");
       // Only the colour may differ: the pill's geometry and type match exactly.
-      expect(await statusPillMetrics(waiting)).toEqual(runningMetrics);
+      const { color: waitingColor, ...waitingShape } = await statusPillMetrics(waiting);
+      const { color: runningColor, ...runningShape } = runningMetrics;
+      expect(waitingShape).toEqual(runningShape);
+      expect(waitingColor).not.toBe(runningColor);
     } finally {
       await context.close();
     }
@@ -521,7 +524,7 @@ describe("responsive production session header", () => {
         await page.getByRole("navigation", { name: "Session ancestry" }).waitFor();
 
         await page.screenshot({
-          path: `/tmp/session-header-${screenshotPhase}-${matrixCase.name}.png`,
+          path: `${screenshotDir}/session-header-${screenshotPhase}-${matrixCase.name}.png`,
           fullPage: true,
           animations: "disabled",
         });
@@ -599,7 +602,7 @@ describe("responsive production session header", () => {
         await assertHeaderKeyboardOrder(page);
         await expectNoAxeViolations(page, ["header"]);
         await page.screenshot({
-          path: `/tmp/session-header-${screenshotPhase}-phone-320-${state}.png`,
+          path: `${screenshotDir}/session-header-${screenshotPhase}-phone-320-${state}.png`,
           fullPage: true,
           animations: "disabled",
         });
@@ -636,7 +639,7 @@ describe("responsive production session header", () => {
       expect(metrics.offscreenControls).toEqual([]);
       expect(metrics.headerOverflow).toBe(false);
       await page.screenshot({
-        path: `/tmp/session-header-${screenshotPhase}-phone-safe-area.png`,
+        path: `${screenshotDir}/session-header-${screenshotPhase}-phone-safe-area.png`,
         fullPage: true,
         animations: "disabled",
       });
@@ -685,7 +688,7 @@ describe("responsive production session header", () => {
         expect(await menu.getByRole("menuitem", { name, exact: true }).isVisible()).toBe(true);
       }
       await page.screenshot({
-        path: `/tmp/session-header-${screenshotPhase}-phone-menu.png`,
+        path: `${screenshotDir}/session-header-${screenshotPhase}-phone-menu.png`,
         animations: "disabled",
       });
       await menu.getByRole("menuitem", { name: "Find", exact: true }).click();
@@ -695,7 +698,7 @@ describe("responsive production session header", () => {
         timeoutMs: 3_000,
       });
       await page.screenshot({
-        path: `/tmp/session-header-${screenshotPhase}-phone-find.png`,
+        path: `${screenshotDir}/session-header-${screenshotPhase}-phone-find.png`,
         animations: "disabled",
       });
       await page.keyboard.press("Escape");
@@ -883,6 +886,8 @@ async function statusPillMetrics(pill: ReturnType<Page["locator"]>) {
     const style = getComputedStyle(element);
     const dot = element.firstElementChild?.getBoundingClientRect();
     return {
+      color: style.color,
+      fontFamily: style.fontFamily,
       fontSize: style.fontSize,
       lineHeight: style.lineHeight,
       fontWeight: style.fontWeight,
