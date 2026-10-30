@@ -1,9 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
+  acquireOwnerMigratedTestDatabase,
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import { createDb, type DbClient } from "../src/database";
+import { migrate } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
 import {
   assertRuntimeDatabasePosture,
   evaluateRuntimeDatabasePosture,
@@ -102,3 +105,45 @@ realTest("retiring schema does not relax the live vault contract", async () => {
     );
   }
 });
+
+realTest(
+  "role reprovisioning tolerates the retired routine but readiness still requires the full table contract",
+  async () => {
+    const owned = await acquireOwnerMigratedTestDatabase("retired-variable-set-role-grants");
+    if (!owned) throw new Error("Real PostgreSQL is required for retired role grants");
+    let runtime: DbClient | null = null;
+    try {
+      await migrate(owned.ownerUrl);
+      const [population] = await owned.admin<{ present: boolean }[]>`
+      select exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'public' and c.relname = any(${RETIRING_FEATURE_TABLES.variableSets}::text[])) as present`;
+      await owned.admin`drop function if exists scheduled_variable_set_expected_generation_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid) restrict`;
+      await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword });
+      const appUrl = new URL(owned.ownerUrl);
+      appUrl.username = "opengeni_app";
+      appUrl.password = owned.appPassword;
+      runtime = createDb(appUrl.toString(), { max: 1 });
+      if (population!.present) {
+        await expect(
+          assertRuntimeDatabasePosture(runtime.db, { rlsStrategy: "force" }),
+        ).rejects.toThrow("scheduled_variable_set_expected_generation_for_attempt");
+      } else {
+        await assertRuntimeDatabasePosture(runtime.db, { rlsStrategy: "force" });
+      }
+      await owned.admin.unsafe(
+        `DROP TABLE IF EXISTS ${RETIRING_FEATURE_TABLES.variableSets.join(", ")} CASCADE`,
+      );
+      for (const signature of RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.filter((name) =>
+        name.includes("variable_set"),
+      )) {
+        await owned.admin.unsafe(`DROP FUNCTION IF EXISTS ${signature} CASCADE`);
+      }
+      await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword });
+      await assertRuntimeDatabasePosture(runtime.db, { rlsStrategy: "force" });
+    } finally {
+      await runtime?.close();
+      await owned.release();
+    }
+  },
+  180_000,
+);
