@@ -853,6 +853,12 @@ const SettingsSchema = z.object({
   // pauses event dispatch; stored sources, triggers and events are kept.
   // Env: OPENGENI_EVENT_TRIGGERS_ENABLED.
   eventTriggersEnabled: EnvBoolean.default(false),
+  // The deepest chain of automations waking each other through Opengeni's own
+  // events: a run is one level deeper than the deepest event it carries, and
+  // events that would start a deeper run are left out. It stops accidental
+  // loops; it is not meant to be tuned.
+  // Env: OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH.
+  automationMaxChainDepth: z.coerce.number().int().min(1).max(100).default(3),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -868,6 +874,12 @@ const SettingsSchema = z.object({
   // when absent, retain the deployment-level window-minus-reserved-output
   // behavior.
   contextEffectiveWindowTokens: z.coerce.number().int().positive().optional(),
+  // Env: OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED. When a human/API turn in a
+  // root session ends at its automatic compaction threshold, request the
+  // checkpoint right away (labeled proactive) so it runs while the person is
+  // away instead of in front of their next message. Off restores compaction
+  // only at the next model boundary.
+  idleContextCompactionEnabled: EnvBoolean.default(true),
   // Proactive compaction threshold as a ratio of the model context window.
   // Defaults to 90%: compact as late as possible — retained context beats early
   // headroom now that per-model windows are declared honestly (input-effective,
@@ -5795,9 +5807,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sessionUsageLimitsEnabled: optional("OPENGENI_SESSION_USAGE_LIMITS_ENABLED"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
     eventTriggersEnabled: optional("OPENGENI_EVENT_TRIGGERS_ENABLED"),
+    automationMaxChainDepth: optional("OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),
+    idleContextCompactionEnabled: optional("OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED"),
     contextCompactionThresholdRatio: optional("OPENGENI_COMPACTION_THRESHOLD_RATIO"),
     contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
     contextAutoCompactThresholdTokens: optional("OPENGENI_CONTEXT_AUTO_COMPACT_THRESHOLD_TOKENS"),
@@ -6479,10 +6493,13 @@ const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "editable_artifact_export_status",
 ];
 
-/** Tools that read event sources and events; they exist only where event triggers run. */
+/** Tools for event sources and events; they exist only where event triggers run. */
 const EVENT_TRIGGER_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "event_sources_list",
   "events_get",
+  "event_sources_create_webhook",
+  "event_sources_update",
+  "event_sources_delete",
 ];
 
 /**

@@ -51,6 +51,7 @@ import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
 import { AccountMenuButton, WorkspaceSwitcherTitle } from "@/workspace-switcher";
 import { openOnWeb, webPaths } from "@/web-links";
+import { rememberPendingPrompt } from "@/pending-prompt";
 
 export default function HomeScreen() {
   return (
@@ -245,6 +246,7 @@ function Home() {
     const text = draft.trim();
     if (!workspaceId || !canCreate) return;
     setCreating(true);
+    const sentAt = new Date().toISOString();
     try {
       // The exact snapshot being sent; acknowledged once the session exists.
       const flushed = await draftSync.flushForSend().catch(() => null);
@@ -261,6 +263,11 @@ function Home() {
         ...(chosen.excludedMcpServerIds
           ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
           : {}),
+        resources: [...chosen.resources, ...attachments.readyResources],
+      });
+      rememberPendingPrompt(client, workspaceId, created.id, {
+        text: text || "See the attached files.",
+        sentAt,
         resources: [...chosen.resources, ...attachments.readyResources],
       });
       if (flushed) await draftSync.acknowledgeConsumed(flushed).catch(() => null);

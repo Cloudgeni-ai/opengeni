@@ -202,9 +202,14 @@ export type ToolCallItem = {
   /**
    * Set while the call waits for a person's approval (`session.requiresAction`
    * names it): it has not run yet, so rows say so instead of "Done". Cleared
-   * when its output arrives or the turn ends.
+   * when the person decides, its output arrives or the turn ends.
    */
   awaitingApproval?: true | undefined;
+  /**
+   * This call's approval was rejected, so it never ran: by the person when
+   * asked, or automatically (Opengeni refused it, or the approval expired).
+   */
+  approvalRejected?: "person" | "automatic" | undefined;
   occurredAt: string;
   /** Canonical textual projection of the settled tool output. */
   annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
@@ -461,6 +466,17 @@ export type NoticeItem = {
   text: string;
   /** An approval wait (`session.requiresAction`), independent of its display text. */
   approval?: true;
+  /**
+   * The actions an approval wait asks about, with the request's display title
+   * when it carried one, and the person's answer once `user.approvalDecision`
+   * recorded it. Presentation only.
+   */
+  approvalActions?: Array<{
+    id: string;
+    title: string | null;
+    /** automatic_reject: Opengeni declined it, not the person. */
+    decision?: "approve" | "reject" | "automatic_reject";
+  }>;
   /** Presentation-only evidence that a historical approval wait resumed. */
   resolvedAt?: string;
   /**

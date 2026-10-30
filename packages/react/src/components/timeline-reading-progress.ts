@@ -12,8 +12,9 @@ export function useReadingProgress(
   projected: TimelineGroup[],
   pinned: boolean,
   scroller: HTMLElement | null,
+  answeredCard: HTMLElement | null = null,
 ) {
-  const following = pinned && !timelineHasReader(scroller);
+  const following = pinned && !timelineHasReader(scroller, answeredCard);
   const previous = useRef<TimelineGroup[]>([]);
   const [released, setReleased] = useState<ReadonlySet<string>>(() => new Set());
   const groups = useMemo(() => {

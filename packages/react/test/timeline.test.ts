@@ -1869,6 +1869,33 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("a voice handoff's fixed notice reads in the host's language", () => {
+    // The stored text is an English notice, not something the person said.
+    reset();
+    const context =
+      "<realtime_delegation>\n  <transcript_delta>user: sjekk timene</transcript_delta>\n</realtime_delegation>";
+    const norwegian = createOpenGeniText({
+      locale: "nb",
+      messages: {
+        "timeline.projection.voiceSessionEnded":
+          "Taleøkten er avsluttet. Resten av samtalen ble sendt til agenten.",
+      },
+    });
+    const [message] = buildTimeline(norwegian, [
+      event("user.message", {
+        text: "Voice session ended. Remaining conversation context was sent to the agent.",
+        presentation: { kind: "realtime_voice_handoff", context },
+      }),
+    ]) as UserMessageItem[];
+    expect(message).toMatchObject({
+      text: "Taleøkten er avsluttet. Resten av samtalen ble sendt til agenten.",
+      annotationSource: {
+        text: "Taleøkten er avsluttet. Resten av samtalen ble sendt til agenten.",
+      },
+      presentation: { kind: "realtime_voice_handoff", context },
+    });
+  });
+
   test("a delta after a tool call starts a new message instead of appending", () => {
     reset();
     const items = buildTimeline(englishText, [
@@ -2719,6 +2746,32 @@ describe("buildTimeline", () => {
     expect(compactionSkipTitle(englishText, "summarization_failed")).toBe(
       "Couldn’t compact conversation history",
     );
+  });
+
+  test("settles an idle checkpoint dropped for capacity as postponed, not failed", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("session.context.compaction.requested", { trigger: "proactive" }),
+      event("session.context.compaction.skipped", {
+        reason: "capacity_unavailable",
+        trigger: "proactive",
+      }),
+    ]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "context-compaction",
+        phase: "skipped",
+        trigger: "proactive",
+        skipReason: "capacity_unavailable",
+      }),
+    ]);
+    const projected = items[0];
+    if (projected?.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(compactionSkipTitle(englishText, projected.skipReason)).toBe("Compaction postponed");
+    expect(compactionSkipSubtitle(englishText, projected.skipReason)).toBe(
+      "No subscription capacity right now. It runs with your next message if still needed.",
+    );
+    expect(compactionFailureDetails(englishText, projected)).toBeNull();
   });
 
   test("shows a terminal compaction-summary failure without claiming history changed", () => {

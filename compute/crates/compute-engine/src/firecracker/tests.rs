@@ -376,6 +376,11 @@ async fn a_busy_executor_does_not_spend_a_frozen_vmms_time() {
 
 /// Makes a group's `memory.pressure` report its processes waiting for
 /// memory all the time, as when the kernel slows them, until dropped.
+/// It reports them far ahead of the clock, so that any one report between
+/// two looks covers all the time between them: a writer the test machine
+/// holds up for a while, or a write the disk is slow to take, still shows
+/// the group waiting all along. The first report is there before it
+/// returns.
 struct Waiting {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     writer: Option<std::thread::JoinHandle<()>>,
@@ -386,23 +391,26 @@ impl Waiting {
         use std::sync::atomic::{AtomicBool, Ordering};
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let (group, stopped) = (group.to_owned(), std::sync::Arc::clone(&stop));
+        let started = std::time::Instant::now();
+        let report = move |group: &Path| {
+            // A thousand times the time passed.
+            let total = started.elapsed().as_micros() * 1_000;
+            let next = group.join("memory.pressure.next");
+            fs::write(
+                &next,
+                format!(
+                    "some avg10=100.00 avg60=100.00 avg300=100.00 total={total}\n\
+                     full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+                ),
+            )
+            .unwrap();
+            fs::rename(&next, group.join("memory.pressure")).unwrap();
+        };
+        report(&group);
         let writer = std::thread::spawn(move || {
-            let started = std::time::Instant::now();
             while !stopped.load(Ordering::Relaxed) {
-                // Ahead of the clock, so no look finds less than all of
-                // its time waited.
-                let total = started.elapsed().as_micros() * 2;
-                let next = group.join("memory.pressure.next");
-                fs::write(
-                    &next,
-                    format!(
-                        "some avg10=100.00 avg60=100.00 avg300=100.00 total={total}\n\
-                         full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
-                    ),
-                )
-                .unwrap();
-                fs::rename(&next, group.join("memory.pressure")).unwrap();
                 std::thread::sleep(Duration::from_millis(5));
+                report(&group);
             }
         });
         Self {

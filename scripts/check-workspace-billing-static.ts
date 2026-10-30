@@ -342,6 +342,11 @@ export function checkMcpDefaults(file: string, text: string, out: Finding[]): vo
 }
 
 function isSourceLike(file: string): boolean {
+  // Historical release notes describe removed routes; they are not live defaults
+  // or current usage guidance. Keep other Markdown, source and config checked.
+  if (/(^|\/)CHANGELOG\.md$/.test(file.replace(/\\/g, "/"))) {
+    return false;
+  }
   return /\.(ts|tsx|js|jsx|yaml|yml|json|md|example)$/.test(file);
 }
 
