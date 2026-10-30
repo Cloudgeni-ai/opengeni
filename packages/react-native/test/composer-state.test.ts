@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "@opengeni/react/timeline-model";
 import { createOpenGeniText } from "@opengeni/react/messages";
 import {
   composerAlternateSend,
@@ -61,9 +60,9 @@ describe("composer alternate send", () => {
 });
 
 describe("native loading phrases", () => {
-  test("built-in copy per phase by default", () => {
-    expect(nativeLoadingPhrases(t, [], "preparing")).toEqual(GENIE_PREPARING_PHRASES(t));
-    expect(nativeLoadingPhrases(t, [], "waiting")).toEqual(GENIE_WAITING_PHRASES(t));
+  test("one plain status survives both startup phases", () => {
+    expect(nativeLoadingPhrases(t, [], "preparing")).toEqual(["Working"]);
+    expect(nativeLoadingPhrases(t, [], "waiting")).toEqual(["Working"]);
   });
 
   test("a host's phrases replace both phases, as on web", () => {

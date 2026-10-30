@@ -9,7 +9,7 @@ import {
   ensureSessionWorkspaceGovernance,
   sessionHasToolRouterHistory,
   SUBSCRIPTION_CORE_XAI,
-  turnCanChangeWorkspaceSettings,
+  turnWorkspaceSettingsAccess,
 } from "@opengeni/db";
 import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
@@ -69,6 +69,7 @@ import {
   resolveAgentToolFamilies,
   type VideoGenerationPolicy,
 } from "@opengeni/contracts";
+import { sessionStartedUnattended, sessionUnattendedNow } from "./unattended";
 
 import {
   structuredToolTransportForTurn,
@@ -90,7 +91,11 @@ import type {
   SandboxRuntimeState,
 } from "./turn-context";
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
-import { configuredToolDecisionModel, recordToolDecisionUsage } from "./tool-discovery";
+import {
+  configuredToolDecisionModel,
+  configuredToolMeaningRanker,
+  recordToolDecisionUsage,
+} from "./tool-discovery";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 import { turnWebSearchPlan } from "./web-search";
@@ -586,8 +591,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               turn.initiatingHumanSubjectId ??
               (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : "")
             ).startsWith("external_user:"),
-            canChangeSettings: () =>
-              turnCanChangeWorkspaceSettings(db, {
+            settingsAccess: () =>
+              turnWorkspaceSettingsAccess(db, {
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
@@ -754,6 +759,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             provider: turnExecutionPolicy.providerId,
             backend: activeSandboxBackend ?? groupBoxBackend,
             publish: eventing.publish,
+            publishInBackground: eventing.publishInBackground,
           },
           (measure) =>
             measure("client_publication", () =>
@@ -817,6 +823,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(textVerbosity ? { textVerbosity } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
+        // Frozen at create: what the model is told and which tools it has.
+        ...(sessionStartedUnattended(session) ? { unattended: true } : {}),
+        // The current setting: approvals and questions are refused, not awaited.
+        ...(sessionUnattendedNow(session) ? { unattendedNow: true } : {}),
         secrets: {
           referencesEnabled: secretsCapabilityEnabled(session.agent),
           // Same rule as the vault context (0739) and session authorization:
@@ -916,6 +926,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // session's MCP allow-list; the effective context window drives the
         // compaction threshold.
         hostedWebSearch,
+        ...(resolvedModel?.configured.hostedWebSearchContextSize === undefined
+          ? {}
+          : { hostedWebSearchContextSize: resolvedModel.configured.hostedWebSearchContextSize }),
         ...imageGenerationOption,
         ...videoGenerationOption,
         lazyToolTransport,
@@ -940,6 +953,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               usage,
               requestId,
               processingResidency: decisionModelProcessingResidency(runSettings),
+            }),
+        }),
+        toolSearchMeaningRanker: configuredToolMeaningRanker({
+          settings: runSettings,
+          onError: (error) =>
+            observability.warn("Tool search meaning ranking is unavailable; using keywords", {
+              error: error instanceof Error ? error.message : String(error),
             }),
         }),
         ...(eventing.toolPreparationReady

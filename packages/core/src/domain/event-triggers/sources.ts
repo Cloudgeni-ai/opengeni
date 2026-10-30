@@ -1,16 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import type {
-  ParsedCreateEventSourceRequest,
-  CreateEventSourceResponse,
-  EventDelivery,
-  EventSource,
-  EventTypeDescriptor,
-  ParsedSendTestEventRequest,
-  SendTestEventResponse,
-  UpdateEventSourceRequest,
-  WebhookEventAdapter,
-  WebhookFormat,
+import {
+  currentWebhookAdapter,
+  type ParsedCreateEventSourceRequest,
+  type CreateEventSourceResponse,
+  type EventDelivery,
+  type EventSource,
+  type EventTypeDescriptor,
+  type ParsedSendTestEventRequest,
+  type SendTestEventResponse,
+  type UpdateEventSourceRequest,
+  type WebhookFormat,
 } from "@opengeni/contracts";
 import {
   createEventSource,
@@ -40,7 +40,7 @@ import {
   type DeliveryOutcome,
 } from "./delivery-intake";
 import { webhookEventTypeCatalog } from "./event-type-catalog";
-import { eventStatusReason } from "./status-reason";
+import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
 import {
   createGitHubEventSource,
   githubSourceEventTypes,
@@ -57,8 +57,8 @@ import { workspaceDeliveryEvents, workspaceEventTypeCatalog } from "./workspace-
 import { createWorkspaceEventSource } from "./workspace-source";
 import {
   withMcpEventSourceClient,
-  McpEventSourceUnavailableError,
   mcpServerDisplayName,
+  type McpEventSourceClientDeps,
   type McpEventsFetch,
 } from "./mcp-event-source-client";
 import { mcpDeliveryEvents, receiveMcpEventWebhook } from "./mcp-event-subscriptions";
@@ -70,7 +70,11 @@ import {
   McpServerWithoutEventsError,
 } from "./mcp-event-types";
 import { serverOffersMcpEvents } from "./mcp-events-protocol";
-import { generateStandardWebhookSecret, standardWebhookSecretKey } from "./webhook-signatures";
+import {
+  ed25519PublicKey,
+  generateStandardWebhookSecret,
+  standardWebhookSecretKey,
+} from "./webhook-signatures";
 import { eventSourceWebhookUrl } from "./webhook-url";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -155,7 +159,11 @@ export function eventSourceForClient(source: EventSourceRecord, baseUrl: string)
     awaitingSigningSecret: source.kind === "webhook" && source.secretEncrypted === null,
     mcp:
       source.kind === "mcp" && source.mcpServerId
-        ? { serverId: source.mcpServerId, connectionId: source.connectionId }
+        ? {
+            serverId: source.mcpServerId,
+            connectionId: source.connectionId,
+            ...(source.mcpServerUrl ? { url: source.mcpServerUrl } : {}),
+          }
         : null,
     lastDeliveryAt: source.lastDeliveryAt?.toISOString() ?? null,
     createdAt: source.createdAt.toISOString(),
@@ -192,8 +200,10 @@ export async function createEventSourceForViewer(
     const source = await addMcpEventSource({
       ...input,
       ownerSubjectId: input.viewer.subjectId,
+      viewerIsAdmin: input.viewer.admin,
       serverId: request.serverId,
       connectionId: request.connectionId,
+      url: request.url,
       name: request.name,
     });
     return { source: eventSourceForClient(source, input.baseUrl) };
@@ -229,10 +239,15 @@ export async function createEventSourceForViewer(
     });
   }
   const key = requireEncryptionKey(input.settings);
-  const generated = request.adapter === "standard" ? generateStandardWebhookSecret() : null;
+  // `linear` and `sentry` are older names for a custom webhook with that preset.
+  const { adapter, format } = currentWebhookAdapter({
+    adapter: request.adapter,
+    format: request.format ?? null,
+  });
+  const generated = adapter === "standard" ? generateStandardWebhookSecret() : null;
   const secret = generated ?? request.signingSecret;
   if (request.signingSecret !== undefined) {
-    assertSecretFitsFormat(request.signingSecret, request.format ?? null);
+    assertSecretFitsFormat(request.signingSecret, format);
   }
   // A workspace-level caller owns nothing, so its sources are the workspace's.
   const owner = input.viewer.subjectId;
@@ -241,8 +256,8 @@ export async function createEventSourceForViewer(
     workspaceId: input.workspaceId,
     createdBySubjectId: input.createdBySubjectId,
     kind: "webhook",
-    adapter: request.adapter,
-    ...(request.adapter === "custom" && request.format ? { format: request.format } : {}),
+    adapter: adapter ?? "standard",
+    ...(adapter === "custom" && format ? { format } : {}),
     name: request.name,
     ownerSubjectId: owner,
     visibility: owner === null ? "workspace" : request.visibility,
@@ -250,7 +265,7 @@ export async function createEventSourceForViewer(
     // the URL, so a source without one waits, blocked, until it is pasted.
     ...(secret
       ? { secretEncrypted: encryptEnvironmentValue(key, secret) }
-      : { status: "blocked" as const, statusReason: awaitingSecretReason(request.adapter) }),
+      : { status: "blocked" as const, statusReason: awaitingSecretReason(format) }),
   });
   return {
     source: eventSourceForClient(source, input.baseUrl),
@@ -258,14 +273,31 @@ export async function createEventSourceForViewer(
   };
 }
 
-const PASTED_WEBHOOK_APPS: Partial<Record<WebhookEventAdapter, string>> = {
+/** Apps whose preset names them in the "paste the secret" reason. */
+const PRESET_APP_NAMES: Record<string, string> = {
   linear: "Linear",
   sentry: "Sentry",
+  tailscale: "Tailscale",
 };
 
-/** Why a pasted webhook waits: the sending app's secret is not pasted yet. */
-function awaitingSecretReason(adapter: WebhookEventAdapter): EventStatusReason {
-  const app = PASTED_WEBHOOK_APPS[adapter];
+/** Why a pasted webhook waits: the sending app's secret or key is not pasted yet. */
+function awaitingSecretReason(format: WebhookFormat | null): EventStatusReason {
+  const app =
+    format?.preset && Object.hasOwn(PRESET_APP_NAMES, format.preset)
+      ? PRESET_APP_NAMES[format.preset]
+      : undefined;
+  if (format?.signature.scheme === "ed25519") {
+    return eventStatusReason(
+      "awaiting_secret",
+      "Paste the public key the app shows for its webhooks. Until then its deliveries are refused.",
+    );
+  }
+  if (format?.signature.scheme === "url_token") {
+    return eventStatusReason(
+      "awaiting_secret",
+      "Set the secret the address carries. Until then its deliveries are refused.",
+    );
+  }
   return eventStatusReason(
     "awaiting_secret",
     app
@@ -274,17 +306,39 @@ function awaitingSecretReason(adapter: WebhookEventAdapter): EventStatusReason {
   );
 }
 
-/** A Standard Webhooks app signs with a `whsec_` secret; any other secret could never verify. */
+/**
+ * A Standard Webhooks app signs with a `whsec_` secret, and an Ed25519 one
+ * with a key pair whose public key is the secret; any other value could never
+ * verify. A secret in the webhook address must be long and URL-safe.
+ */
 function assertSecretFitsFormat(secret: string, format: WebhookFormat | null): void {
   if (format?.signature.scheme === "standard_webhooks" && !standardWebhookSecretKey(secret)) {
     throw new HTTPException(422, {
       message: "This app signs with Standard Webhooks, so its secret starts with whsec_",
     });
   }
+  if (format?.signature.scheme === "ed25519" && !ed25519PublicKey(secret)) {
+    throw new HTTPException(422, {
+      message:
+        "This app signs with Ed25519, so its secret is the app's public key: 32 bytes in hex or base64, or a PEM public key",
+    });
+  }
+  // The address carries this secret as it is, so it must be long and need no
+  // escaping there.
+  if (format?.signature.scheme === "url_token" && !/^[A-Za-z0-9._~-]{24,}$/u.test(secret)) {
+    throw new HTTPException(422, {
+      message:
+        "This secret goes in the webhook address, so it must be at least 24 letters, digits, '-', '_', '.' or '~'",
+    });
+  }
 }
 
 /** Network access for MCP sources; tests replace the transport. */
-export type McpEventSourceNetwork = { fetch?: McpEventsFetch };
+export type McpEventSourceNetwork = {
+  fetch?: McpEventsFetch;
+  /** Replaces the credential provider transport, for tests. */
+  providerFetch?: McpEventSourceClientDeps["providerFetch"];
+};
 
 /**
  * The deployment's GitHub App webhook settings, for GitHub sources. Null when
@@ -298,10 +352,7 @@ export type GitHubEventSourceAccess = { githubApp?: GitHubAppWebhookPort | null 
  */
 export function mcpSourceHttpError(error: unknown, serverName: string): HTTPException {
   if (error instanceof HTTPException) return error;
-  if (
-    error instanceof McpEventSourceUnavailableError ||
-    error instanceof McpServerWithoutEventsError
-  ) {
+  if (error instanceof EventSourceBlockedError) {
     return new HTTPException(422, { message: error.message });
   }
   const message = errorMessage(error);
@@ -314,6 +365,10 @@ export function mcpSourceHttpError(error: unknown, serverName: string): HTTPExce
  * An MCP source listens to one connector with its creator's own sign-in, so
  * it is always private to that person. The server must offer events. Adding
  * it again returns the source the person already has.
+ *
+ * With `url`, it is the workspace's source instead: it listens to that server
+ * signed in by the workspace credential provider, has no owner, and only a
+ * workspace-level caller or an admin adds it.
  */
 export async function addMcpEventSource(
   input: {
@@ -323,15 +378,24 @@ export async function addMcpEventSource(
     workspaceId: string;
     createdBySubjectId: string;
     ownerSubjectId: string | null;
+    viewerIsAdmin?: boolean | undefined;
     serverId: string;
     connectionId?: string | undefined;
+    url?: string | undefined;
     name?: string | undefined;
   } & McpEventSourceNetwork,
 ): Promise<EventSourceRecord> {
-  const owner = input.ownerSubjectId;
-  if (!owner) {
+  const url = input.url ?? null;
+  if (url !== null && input.ownerSubjectId !== null && !input.viewerIsAdmin) {
+    throw new HTTPException(403, {
+      message: "Only a workspace admin can add a workspace MCP source that listens by URL",
+    });
+  }
+  const owner = url === null ? input.ownerSubjectId : null;
+  if (url === null && !owner) {
     throw new HTTPException(422, {
-      message: "An MCP event source listens with a person's own sign-in. Create it as that person.",
+      message:
+        "An MCP event source listens with a person's own sign-in. Create it as that person, or give the server's url.",
     });
   }
   const target = {
@@ -340,12 +404,18 @@ export async function addMcpEventSource(
     workspaceId: input.workspaceId,
     ownerSubjectId: owner,
     mcpServerId: input.serverId,
-    connectionId: input.connectionId ?? null,
+    connectionId: url === null ? (input.connectionId ?? null) : null,
+    mcpServerUrl: url,
   };
   let connection: { name: string; connectionId: string | null };
   try {
     connection = await withMcpEventSourceClient(
-      { db: input.db, settings: input.settings, ...(input.fetch ? { fetch: input.fetch } : {}) },
+      {
+        db: input.db,
+        settings: input.settings,
+        ...(input.fetch ? { fetch: input.fetch } : {}),
+        ...(input.providerFetch ? { providerFetch: input.providerFetch } : {}),
+      },
       target,
       async (client, { server, connectionId }) => {
         const name = mcpServerDisplayName(server);
@@ -358,17 +428,23 @@ export async function addMcpEventSource(
   } catch (error) {
     throw mcpSourceHttpError(error, input.serverId);
   }
-  const { source } = await createEventSource(input.db, {
+  const { source, created } = await createEventSource(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     createdBySubjectId: input.createdBySubjectId,
     kind: "mcp",
     name: input.name ?? connection.name,
     ownerSubjectId: owner,
-    visibility: "private",
+    visibility: url === null ? "private" : "workspace",
     mcpServerId: input.serverId,
+    mcpServerUrl: url,
     connectionId: connection.connectionId,
   });
+  if (!created && url !== null && source.mcpServerUrl !== url) {
+    throw new HTTPException(409, {
+      message: `The workspace already listens to "${input.serverId}" at another URL. Delete that source first.`,
+    });
+  }
   forgetMcpSourceEventTypes(source.id);
   return source;
 }
@@ -515,6 +591,8 @@ export async function receiveEventWebhook(input: {
   routeId: string;
   headers: Headers;
   body: Uint8Array;
+  /** The address's query, for an app that sends its secret there. Never stored. */
+  query?: URLSearchParams;
   receivedAt?: Date;
 }): Promise<WebhookIntakeResult> {
   if (!eventTriggersEnabled(input.settings)) return { outcome: "not_found" };
@@ -546,6 +624,7 @@ export async function receiveEventWebhook(input: {
         ),
         headers: input.headers,
         body: input.body,
+        ...(input.query ? { query: input.query } : {}),
         nowSeconds: receivedAt.getTime() / 1000,
       })
     : ({ ok: false, reason: "No signing secret yet: paste the one the app shows" } as const);

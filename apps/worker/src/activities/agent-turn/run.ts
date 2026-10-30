@@ -1,4 +1,5 @@
 import { withClaudeConnectionCredential } from "@opengeni/config";
+import { unboundGitHubRepositoryResources } from "@opengeni/core";
 import {
   getSessionAuthorityProjection,
   canSpendSubscriptionCoreCodexExtraCredits,
@@ -80,6 +81,7 @@ import {
 } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { ToolResultSpill } from "./tool-result-spill";
+import { attendanceChangeNote } from "./unattended";
 import { createEagerOwnedSandboxSetup, hasEagerOwnedSandboxSetup } from "./owned-sandbox-setup";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
@@ -1513,6 +1515,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // an unusable bound repository stays bare and is reported visibly.
           const hasCredentialProvider =
             activeSandboxBackend !== "selfhosted" &&
+            // This flag only controls inferred bindings for bare GitHub
+            // repositories. No matching resource means no consumer of the
+            // provider configuration; actual credential minting keeps its
+            // own live provider/authority checks below.
+            unboundGitHubRepositoryResources(claimedTurnResources).length > 0 &&
             (
               await waitForTurnOperation(
                 getWorkspaceCredentialProvider(db, {
@@ -2198,6 +2205,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               unavailableSandboxFilesNote,
               runCredentialsNote,
               mcpAvailabilityNote,
+              attendanceNote: attendanceChangeNote(session),
               knowledgeSourcePreparationNote,
               fileAuthoritySubjectId,
               activeSandboxBackend,

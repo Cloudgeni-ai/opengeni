@@ -185,9 +185,16 @@ const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelCatalogProviderKind>
 export function useOrganizationModelAccounts({
   organizationId,
   enabled,
+  gatewaysEnabled = enabled,
 }: {
   organizationId: string | undefined;
   enabled: boolean;
+  /**
+   * The organization's keys (gateways and direct providers) are read through
+   * an owner's or admin's membership; an account administrator without one
+   * (a key or service) manages only the subscription accounts.
+   */
+  gatewaysEnabled?: boolean;
 }) {
   const { client, clientConfig } = useAppContext();
   const claudeEnabled = clientConfig.claudeSubscriptionEnabled === true;
@@ -213,7 +220,7 @@ export function useOrganizationModelAccounts({
     client,
     organizationId: orgId,
     providerKind: ORGANIZATION_KIND[id],
-    enabled: enabled && on,
+    enabled: gatewaysEnabled && on,
     azureDeploymentIdentity: clientConfig.azureOpenAIDeploymentIdentity === true,
   });
   const orgGateways: Record<GatewayId, ProviderConnection> = {
@@ -265,6 +272,7 @@ export function WorkspaceModelsPageBody({
   canAdministerWorkspace,
   canManageConnections,
   canManageOrganizationModels,
+  organizationPeopleAdministrator = canManageOrganizationModels,
   account,
   view,
   onConnectionChange,
@@ -279,7 +287,7 @@ export function WorkspaceModelsPageBody({
   workspacesError?: boolean;
   workspaceId: string;
   workspaceName: string;
-  /** A Personal workspace: private to one person, and organization API keys don't reach it. */
+  /** A Personal workspace: private to one person. */
   personal?: boolean;
   /** The organization that owns the workspace. */
   organizationId?: string | undefined;
@@ -298,6 +306,12 @@ export function WorkspaceModelsPageBody({
   canManageConnections: boolean;
   /** Organization owners and admins: connect for everyone, and manage the organization's accounts. */
   canManageOrganizationModels: boolean;
+  /**
+   * An owner or admin acting as a person: also the organization's model
+   * defaults. False for an account administrator without a person (a key or
+   * service), which manages the subscription accounts only.
+   */
+  organizationPeopleAdministrator?: boolean;
   account: string | undefined;
   view: ModelsView | undefined;
   onConnectionChange: () => void;
@@ -322,6 +336,7 @@ export function WorkspaceModelsPageBody({
   };
   const labels = modelsScopeLabels(organizationName, personal, workspaceName);
   const organizationAdmin = canManageOrganizationModels && Boolean(organizationId);
+  const organizationPeopleAdmin = organizationPeopleAdministrator && Boolean(organizationId);
   const here = useMemo(() => ({ id: workspaceId, personal }), [workspaceId, personal]);
 
   /* This workspace's view of every provider. */
@@ -404,7 +419,10 @@ export function WorkspaceModelsPageBody({
   const catalog = useWorkspaceModelCatalog(workspaceId);
   const credits = useOpenGeniCredits(organizationId);
   // What every workspace follows until it changes it: owners and admins only.
-  const organizationDefaults = useOrganizationModelDefaults(organizationId, organizationAdmin);
+  const organizationDefaults = useOrganizationModelDefaults(
+    organizationId,
+    organizationPeopleAdmin,
+  );
   // On a workspace's page too: its rules name the default each would go back to.
   const accountRules = useModelAccountSettingsOverview(organizationId, organizationAdmin);
   const workspaceAccountRules = useWorkspaceModelAccountSettings(
@@ -818,7 +836,6 @@ export function WorkspaceModelsPageBody({
         grok={grok.unavailable ? "hidden" : "available"}
         claude={claudeEnabled ? "available" : "hidden"}
         gateways={onlyMe ? undefined : gateways}
-        personal={personal}
         backLabel={listLabel}
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect:${provider}`)}
@@ -827,15 +844,7 @@ export function WorkspaceModelsPageBody({
     );
   } else if (view === "connect" || view === "connect-workspace") {
     // Owners and admins connect for the organization and choose the
-    // workspaces on the next step. An organization key can't reach a
-    // Personal workspace, so there a key goes to this workspace instead,
-    // like a member's own key here.
-    const workspaceKeys: readonly GatewayId[] =
-      workspacePage && personal && canManageWorkspaceKeys
-        ? PERSONAL_WORKSPACE_KEYS
-        : NO_WORKSPACE_KEYS;
-    const pickerGateways = { ...orgGateways };
-    for (const id of workspaceKeys) pickerGateways[id] = gateways[id];
+    // workspaces, Personal workspaces included, on the next step.
     page = (
       <ConnectPickerPage
         target="organization"
@@ -844,20 +853,10 @@ export function WorkspaceModelsPageBody({
         codexAvailable
         grok={orgGrok.unavailable ? "not_enabled" : "available"}
         claude={claudeEnabled ? "available" : "hidden"}
-        gateways={pickerGateways}
-        workspaceKeys={workspaceKeys}
-        personal={workspacePage && personal}
+        gateways={orgGateways}
         onClose={backToList}
-        onPick={(provider) =>
-          nav.openView(
-            (workspaceKeys as readonly string[]).includes(provider)
-              ? `connect:${provider}`
-              : `connect-org:${provider}`,
-          )
-        }
-        onOpenConnected={(provider) =>
-          nav.openAccount(accountKey("gateway", provider, !workspaceKeys.includes(provider)))
-        }
+        onPick={(provider) => nav.openView(`connect-org:${provider}`)}
+        onOpenConnected={(provider) => nav.openAccount(accountKey("gateway", provider, true))}
       />
     );
   } else if (
@@ -883,7 +882,6 @@ export function WorkspaceModelsPageBody({
     const fields = (
       <>
         <ConnectAudienceFields
-          kind={accessKind}
           organizationName={organizationName}
           here={connectHere}
           workspaces={orgWorkspaces.workspaces}
@@ -893,26 +891,6 @@ export function WorkspaceModelsPageBody({
           onChange={(next) => setAudiences((current) => ({ ...current, [provider]: next }))}
           disabled={signingIn}
         />
-        {workspacePage &&
-        personal &&
-        canManageConnections &&
-        provider !== "openai" &&
-        provider !== "azure_openai" &&
-        (GATEWAYS as readonly string[]).includes(provider) ? (
-          // An organization key can't reach a Personal workspace, so a key for
-          // your own chats here is connected for this workspace instead.
-          <p className="m-0 text-sm leading-5 text-fg-muted">
-            To use a key in your Personal workspace,{" "}
-            <button
-              type="button"
-              className="font-medium text-fg underline underline-offset-2 pointer-coarse:py-2"
-              onClick={() => nav.openView(`connect:${provider}`)}
-            >
-              connect it for your Personal workspace
-            </button>{" "}
-            instead.
-          </p>
-        ) : null}
       </>
     );
     const blockedReason = audienceBlockedReason(audience);
@@ -1091,7 +1069,7 @@ export function WorkspaceModelsPageBody({
     );
   } else if ((view === "compaction" || view === "allowed-models") && !workspacePage) {
     // Opened from the organization's list: the defaults every workspace follows.
-    page = !organizationAdmin ? (
+    page = !organizationPeopleAdmin ? (
       <DetailPage
         back={{ label: "Models", onClick: backToList }}
         className={FLUSH_DETAIL_PAGE_CLASS}
@@ -1105,7 +1083,7 @@ export function WorkspaceModelsPageBody({
       <ModelCompactionPage
         key={`organization:${orgId}`}
         workspaceId={anchorWorkspaceId}
-        canManage={organizationAdmin}
+        canManage={organizationPeopleAdmin}
         onClose={backToList}
         organizationName={organizationName}
         organizationDefaults={organizationDefaults}
@@ -1114,7 +1092,7 @@ export function WorkspaceModelsPageBody({
       <AllowedModelsFormPage
         key={`organization-allowed:${orgId}:${revision}`}
         workspaceId={anchorWorkspaceId}
-        canManage={organizationAdmin}
+        canManage={organizationPeopleAdmin}
         onClose={backToList}
         organizationName={organizationName}
         organizationDefaults={organizationDefaults}
@@ -1267,7 +1245,7 @@ export function WorkspaceModelsPageBody({
         <OrganizationModelsList
           client={client}
           organizationId={organizationId}
-          organizationDefaults={organizationAdmin ? organizationDefaults : null}
+          organizationDefaults={organizationPeopleAdmin ? organizationDefaults : null}
           accountRules={organizationAdmin ? accountRules : null}
           modelLabel={(id) => catalog.models.find((model) => model.id === id)?.label ?? id}
           onEditAllowed={() => nav.openView("allowed-models")}
@@ -1453,7 +1431,7 @@ export function WorkspaceModelsPageBody({
               <>
                 {workspacePage ? (
                   <Section
-                    title="OpenAI and Azure OpenAI"
+                    title="OpenAI, Azure OpenAI and compatible endpoints"
                     description="Use your own API key for models in this workspace."
                   >
                     <DirectModelProviderConnections
@@ -1576,9 +1554,8 @@ function modelCount(count: number): string {
 
 /**
  * An organization API key on this workspace's list, for people who manage
- * it. "Not available here" when its "Available in" leaves this workspace out;
- * "Shared workspaces only" on a Personal workspace (organization keys serve
- * shared workspaces only).
+ * it. "Not available here" when its "Available in" leaves this workspace
+ * out, a Personal workspace included.
  */
 function OrganizationGatewayRow({
   state,
@@ -1600,13 +1577,7 @@ function OrganizationGatewayRow({
     <ProviderConnectionRow
       state={state}
       scope={organizationReachLabel(labels, access.data)}
-      setAside={
-        reaches === false
-          ? workspace.personal
-            ? "Shared workspaces only"
-            : "Not available here"
-          : null
-      }
+      setAside={reaches === false ? "Not available here" : null}
       onOpen={onOpen}
     />
   );
@@ -1688,7 +1659,7 @@ function workspaceOwnedNote(
     return `This account will belong to ${here} only. Use it for Codex Apps or to redeem usage limit resets. To share an account with other workspaces, connect it from Connect provider.`;
   }
   if (where.personal && provider !== "supergrok" && provider !== "claude_subscription") {
-    return "This key will belong to your Personal workspace, so only you use it. Organization API keys can't be used in Personal workspaces.";
+    return "This key will belong to your Personal workspace, so only you use it.";
   }
   if (where.personal && provider === "supergrok") {
     return "This account will be yours: it pays for your work in your Personal workspace and in chats you keep to yourself.";
@@ -1712,7 +1683,7 @@ function WorkspaceKeyFootnote({
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
       <p className="m-0 min-w-0 flex-1 basis-64 text-sm leading-5 text-fg-muted">
         {personal
-          ? `Organization API keys can't be used in Personal workspaces. To use ${title} in yours, connect a key for it.`
+          ? `To pay with your own ${title} key, connect one just for your Personal workspace.`
           : `A team that pays with its own ${title} key can connect one just for ${workspaceName}.`}
       </p>
       <RowButton onClick={onConnect}>
@@ -1920,19 +1891,6 @@ type ConnectChoice =
   | "openai"
   | "azure_openai";
 
-const NO_WORKSPACE_KEYS: readonly GatewayId[] = [];
-/**
- * The keys a Personal workspace holds itself. Organization keys can't reach a
- * Personal workspace, so on its page these connect for it. OpenAI and Azure
- * OpenAI have no Models key of a workspace's own.
- */
-const PERSONAL_WORKSPACE_KEYS: readonly WorkspaceGatewayId[] = [
-  "anthropic",
-  "openrouter",
-  "opper",
-  "vercel",
-];
-
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
  * opens that provider's own connect step; a provider that is already
@@ -1940,7 +1898,6 @@ const PERSONAL_WORKSPACE_KEYS: readonly WorkspaceGatewayId[] = [
  * stays in the list, disabled, so people know it exists.
  */
 export function ConnectPickerPage({
-  target,
   title,
   subtitle,
   codexAvailable,
@@ -1948,8 +1905,6 @@ export function ConnectPickerPage({
   grok,
   claude = "hidden",
   gateways,
-  workspaceKeys = NO_WORKSPACE_KEYS,
-  personal = false,
   backLabel = "Models",
   onClose,
   onPick,
@@ -1970,17 +1925,12 @@ export function ConnectPickerPage({
   grok: "available" | "not_enabled" | "not_in_personal" | "hidden";
   claude?: "available" | "hidden";
   gateways?: Partial<Record<GatewayId, ProviderConnection>> | undefined;
-  /** Keys that connect for this workspace, not the organization. */
-  workspaceKeys?: readonly GatewayId[];
-  /** In a Personal workspace, organization keys serve shared workspaces only. */
-  personal?: boolean;
   backLabel?: string;
   onClose: () => void;
   onPick: (provider: ConnectChoice) => void;
   /** Opens a provider that is already connected. */
   onOpenConnected?: ((provider: GatewayId) => void) | undefined;
 }) {
-  const keysSkipPersonal = target === "organization" && personal;
   const choices: ProviderConnectChoice[] = [
     ...(codexAvailable
       ? [
@@ -2025,11 +1975,6 @@ export function ConnectPickerPage({
               id === "anthropic" || id === "claude_subscription"
                 ? gateways[id]!.config.summary
                 : providerPaymentSummary(id, gateways[id]!.config.title),
-            note: !keysSkipPersonal
-              ? undefined
-              : workspaceKeys.includes(id)
-                ? "For your Personal workspace"
-                : "Not used in Personal workspaces",
             connected: gateways[id]!.connected,
           }),
         )

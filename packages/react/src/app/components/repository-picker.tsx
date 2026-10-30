@@ -136,6 +136,11 @@ export type RepositoryContextPickerProps = {
   org: string;
   pending: boolean;
   repoBusy: boolean;
+  /**
+   * The workspace's GitHub status or repository list failed to load and no
+   * earlier list is shown. The menu says so instead of offering setup.
+   */
+  githubLoadFailed?: boolean | undefined;
   githubAppBusy: boolean;
   onRefresh: () => Promise<void>;
   /** Passive open refresh. Caller owns provider-sync permissions and throttling. */
@@ -220,9 +225,10 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
     props.installUrl,
     props.setupMode,
   );
+  const loadFailed = props.githubLoadFailed === true && !hasRepos && !props.repoBusy;
   const canRefresh =
     props.refreshAllowed !== false &&
-    (bindingPresentation.canRefresh || props.personalGitHubStatus?.enabled === true);
+    (bindingPresentation.canRefresh || loadFailed || props.personalGitHubStatus?.enabled === true);
   async function refreshList() {
     if (!canRefresh || props.repoBusy || refreshBusy) return;
     setRefreshBusy(true);
@@ -584,7 +590,16 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             )
           ) : null}
 
-          {props.status === "disabled" ? (
+          {loadFailed ? (
+            <div className="px-2.5 py-2" role="status">
+              <p className="text-sm text-fg">Couldn't load GitHub</p>
+              <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">
+                {canRefresh
+                  ? "Refresh the list to try again."
+                  : "Your repositories show here once it loads."}
+              </p>
+            </div>
+          ) : props.status === "disabled" ? (
             <div>
               {emptyNote}
               {setupHasActions ? (
@@ -921,7 +936,8 @@ export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
           <span
             className={cn(
               "size-1.5 shrink-0 rounded-full",
-              bindingPresentation.healthy || personalGitHubActive
+              (bindingPresentation.healthy && props.githubLoadFailed !== true) ||
+                personalGitHubActive
                 ? "bg-status-idle"
                 : "bg-status-waiting",
             )}

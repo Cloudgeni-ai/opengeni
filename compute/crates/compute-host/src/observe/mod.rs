@@ -28,8 +28,8 @@ mod trace;
 pub use event::{Event, Severity, Value, unix_nanos_now};
 pub use export::ExportConfig;
 pub use metrics::{
-    Alarm, CanaryOutcome, CanaryPath, Cause, DropReason, Gauges, Metrics, RequestKind, Signal,
-    level_index, level_name, outcome_name, result_name,
+    Alarm, CanaryOutcome, CanaryPath, Cause, DropReason, Gauges, Metrics, RequestKind,
+    ShrinkOutcome, Signal, level_index, level_name, outcome_name, result_name, stall_index,
 };
 pub use trace::TraceContext;
 
@@ -127,6 +127,16 @@ impl Observer {
     pub fn alarm(&self, alarm: Alarm, event: Event) {
         self.metrics.alarm(alarm);
         self.emit(event.with("compute.alarm", alarm.name()));
+    }
+
+    /// Counts `alarm` `times` over and emits one event for them all.
+    pub fn alarms(&self, alarm: Alarm, times: u64, event: Event) {
+        self.metrics.alarm_times(alarm, times);
+        self.emit(
+            event
+                .with("compute.alarm", alarm.name())
+                .with("compute.count", times),
+        );
     }
 
     /// The host's metrics.

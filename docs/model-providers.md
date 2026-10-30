@@ -75,6 +75,17 @@ billing ledger. Both retain 30 days with bounded maintenance deletes; reads use
 14 days to support same-hours comparisons. The public read returns no call rows,
 session identities, monetary amounts or absolute units.
 
+The forecast samples usage from a five-minute slot's first reading to the first
+reading two or more slots later, and restarts the sample at any change. So the
+history read returns only each window's first and last reading, every reading
+that differs from the one before it, and each five-minute slot's first reading.
+It returns calls as totals per stretch between two returned readings and UTC
+hour, with their count. Its size follows how often usage changes, not how many
+model calls ran: at most about one reading per window and one total per account
+for every five minutes of activity, plus the changes. The forecast from it
+equals the forecast from every row, except that a total's calls are capped at
+their average size when the forecast damps call-size outliers.
+
 `model_call_facts.connection_id` is the canonical account ID used by Codex and
 Claude Models lists, in both scopes. Facts have no age-based prune job, but writes
 are best-effort; old unattributed facts, deleted workspaces and deleted accounts
@@ -226,7 +237,7 @@ singleton owns membership.
 ### Customer OpenAI and Azure OpenAI keys
 
 The web console offers **OpenAI** and **Azure OpenAI** in the model step after
-organization setup and in **Workspace settings → Models → OpenAI and Azure OpenAI**. OpenAI
+organization setup and in **Workspace settings → Models → OpenAI, Azure OpenAI and compatible endpoints**. OpenAI
 asks for an API key, with the model preselected and an optional Change model
 control. Azure asks for an API key, resource endpoint
 (`https://RESOURCE.openai.azure.com` or its `/openai/v1` URL), and deployment
@@ -260,6 +271,63 @@ key for that turn. Revocation or an identity mismatch fails closed. Missing
 customer connections never fall back to deployment credentials. Customer routes
 use conservative text/function capabilities; hosted tools and reasoning controls
 are not enabled implicitly for an arbitrary Azure deployment name.
+
+#### A workspace's own OpenAI-compatible endpoint
+
+**Workspace settings → Models** also offers **Connect an OpenAI-compatible
+endpoint**, for any provider or self-run server whose API follows OpenAI's Chat
+Completions or Responses format. It asks for an optional name, the API's HTTPS
+base URL (such as `https://api.example.com/v1`; a pasted `/chat/completions`
+or `/responses` path is trimmed), an API key, the model ID exactly as the
+provider lists it under `/models` (IDs such as `org/model:tag` are accepted),
+and the API format (Chat Completions by default, or Responses). Connect each
+model you want to use as its own connection.
+
+It is the same workspace-owned rail as OpenAI and Azure OpenAI above, with
+`credentialRole: "direct_openai_compatible"` and
+`directModelProvider: { provider: "openai_compatible", baseUrl, model, api?, label? }`.
+`providerDomain` must be the base URL's host. Over the API:
+
+```json
+{
+  "providerDomain": "api.example.com",
+  "kind": "api_key",
+  "subjectId": null,
+  "credential": { "apiKey": "<the provider key>" },
+  "grantedScopes": [],
+  "operationId": "<uuid>",
+  "verifyModelAccess": true,
+  "metadata": {
+    "credentialRole": "direct_openai_compatible",
+    "credentialLabel": "Example",
+    "directModelProvider": {
+      "provider": "openai_compatible",
+      "baseUrl": "https://api.example.com/v1",
+      "model": "example-model",
+      "api": "chat",
+      "label": "Example"
+    }
+  }
+}
+```
+
+The setup check sends one short message (32 output tokens maximum, no tools)
+to `/chat/completions` or `/responses`. Because the URL is chosen by the
+workspace, the check and every model request resolve its host once, refuse
+private and special-use addresses (operators can allow private targets with
+the existing private integration targets setting), pin the connection to the
+vetted addresses, and never follow redirects. The base URL must be HTTPS with
+no credentials, query, or fragment, and IP literals and single-label or
+`.local`/`.internal` hosts are refused when the connection is saved.
+
+Model IDs are `workspace-compatible-<connection id>/<version>/<model>`. The key
+is sent only to that base URL and only for that workspace's turns. Usage is
+billed by the provider and uses no Opengeni credits. The route gets the
+conservative text, function-calling and SSE capabilities every compatible API
+shares; no hosted tools, reasoning controls or images are assumed, the model
+SDK does not retry a failed request on its own, and no price is inferred from
+the model ID. Its residency is recorded as unknown, so deployments that
+require EU-only inference refuse these routes.
 
 #### Organization OpenAI and Azure OpenAI
 
@@ -298,9 +366,9 @@ not connected) and save nothing. Products are
 kind `direct-azure-organization`), use Responses with the `azure-openai` wire
 profile with reasoning controls (the same default and allowed efforts as the
 built-in provider), no hosted web search, and send the key as Azure's `api-key` header on
-`<endpoint>/responses`. They inherit into current and future shared workspaces
-only (Personal workspaces stay local, by the same RLS rule as the other
-organization API-key rails), are billed to the organization's Azure account with
+`<endpoint>/responses`. They inherit into current and future workspaces,
+Personal workspaces included (the same reach rule as the other organization
+API-key rails), are billed to the organization's Azure account with
 no Opengeni credits, and are narrowed by
 `/v1/organizations/:id/model-connections/azure_openai/current/access`. The
 workspace catalog reads the endpoint without decrypting; the worker loads the
@@ -370,8 +438,11 @@ provider hook `apps/web/src/components/organization-model-provider-connection.ts
 | Codex ChatGPT subscription   | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED`         | Responses        | `codex/…` after the workspace connection is ready                 |
 | SuperGrok / xAI subscription | `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED`     | Responses        | `supergrok/…` after the workspace connection is ready             |
 
-Workspace BYOK for an arbitrary OpenAI-compatible server is not a registry
-switch. Voice input, image, and video use separate provider settings.
+A workspace connects its own OpenAI-compatible server through the encrypted
+workspace connection described in
+[A workspace's own OpenAI-compatible endpoint](#a-workspaces-own-openai-compatible-endpoint),
+not through this registry. Voice input, image, and video use separate provider
+settings.
 
 ### Compatibility
 
@@ -727,7 +798,7 @@ derives both from the provider kind:
 | Workspace OpenRouter                 | workspace connection          | workspace              | external         |
 | Deployment Opper                     | deployment                    | deployment             | Opengeni credits |
 | Workspace Opper                      | workspace connection          | workspace              | external         |
-| Workspace OpenAI / Azure OpenAI       | workspace connection          | workspace              | external         |
+| Workspace OpenAI / Azure OpenAI / OpenAI-compatible | workspace connection | workspace | external |
 | Organization Vercel AI Gateway      | organization connection       | organization           | external         |
 | Organization OpenRouter             | organization connection       | organization           | external         |
 | Organization Opper                  | organization connection       | organization           | external         |
@@ -745,8 +816,10 @@ deployment names). Active products use `organization-gateway/`,
 `organization-openrouter/`, `organization-opper/`, `organization-openai/`, or
 `organization-azure-openai/`,
 are externally billed to
-the organization provider account, and inherit into current and future shared
-workspaces only. Canonical Personal workspaces remain local. Workspace provider
+the organization provider account, and inherit into current and future
+workspaces of the organization, Personal workspaces included, narrowed by each
+connection's "Available in" (migration 1092; never another organization's
+workspaces). Workspace provider
 connections coexist under their existing IDs; no payer rail falls back or
 migrates implicitly.
 
@@ -1215,8 +1288,8 @@ model definition, so Opengeni never calls Opper `GET /models` at runtime:
 
 Organization owners/admins connect Opper once (`OrganizationModelProviderKind`
 `opper`) and curate exact ids. `organization-opper/<upstream>` products inherit
-into current and future shared workspaces only; Personal workspaces stay local,
-and per-connection access policies (`/model-connections/opper/...`) narrow
+into current and future workspaces, Personal workspaces included, and
+per-connection access policies (`/model-connections/opper/...`) narrow
 models and workspaces exactly as for OpenRouter.
 
 ### Runtime quirks
@@ -1470,6 +1543,25 @@ the session uses workspace defaults or an explicit/inherited MCP policy.
 Changing a session's connected or Opengeni tools therefore cannot silently
 disable web search.
 
+Registry models may set `hostedWebSearchContextSize` to `low`, `medium`, or
+`high` for Responses routes that support `search_context_size` and have hosted
+web search enabled. Configuration rejects the setting for other APIs or a
+disabled hosted-search capability, rather than changing a route's execution
+digest for an option that its adapter cannot use. The worker
+passes this static route setting to the hosted search tool. Omission preserves
+the SDK's current `medium` default byte-for-byte; it does not add a new field
+to the executable definition. The option neither enables search nor changes
+reasoning effort, tool choice, evidence includes, or answer-length policy.
+There is no session override or automatic lookup-turn classifier. Other
+provider adapters are not claimed to support this Responses-specific budget.
+
+An explicit size participates in the model definition digest. Finish accepted
+turns before changing the route: a turn accepted with another size fails the
+existing definition-mismatch check rather than silently changing its tools
+on a later request. Changing the size can invalidate the provider's tool-prefix
+cache for new turns. A smaller context can omit useful evidence or cause extra
+searches; compare latency, token usage and answer quality before enabling it.
+
 Claude models use Anthropic's server-side search through the same hosted
 capability (see [web search](web-search.md#claudes-server-side-search)).
 Models without hosted search (Gemini, DeepSeek, GLM and other registry models)
@@ -1489,7 +1581,9 @@ hosted client `tool_search`, `tool_list`, native search output definitions and
 direct function calls. `generic_dispatch` retains ordinary search/list/invoke
 controls. Ranked discovery loads the strongest match per explicit query clause;
 generic receipts also return compact alternatives. Native search outputs cannot
-carry compact suggestions, so use `tool_list` to browse alternatives. Exact ties,
+carry compact suggestions, so a search that neither names a tool nor matches one
+clearly is followed by a developer note listing its unloaded close candidates
+and any unresolved exact names. Exact ties,
 operation-only queries and no matches disclose no schemas. Exact
 `names` loads complete schemas. An optional decision model handles ambiguous
 searches from a wider candidate set; strong lexical matches skip inference.

@@ -489,6 +489,9 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   scheduled_task_runs_list: "schedules",
   event_sources_list: "schedules",
   events_get: "schedules",
+  event_sources_create_webhook: "schedules",
+  event_sources_update: "schedules",
+  event_sources_delete: "schedules",
 
   artifacts_list: "artifacts",
   artifacts_get_source: "artifacts",
@@ -828,6 +831,7 @@ export const AGENT_PROMPT_MODULE_IDS = [
   "secrets",
   "admin",
   "attachments",
+  "unattended",
 ] as const;
 export const AgentPromptModuleId = /* @__PURE__ */ defineSchema(() =>
   z.enum(AGENT_PROMPT_MODULE_IDS),
@@ -852,6 +856,7 @@ export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, st
   secrets: "Secrets",
   admin: "Integration setup",
   attachments: "Attached files",
+  unattended: "Unattended session",
 };
 
 /** The prompt module each capability owns; capabilities absent here own none. */

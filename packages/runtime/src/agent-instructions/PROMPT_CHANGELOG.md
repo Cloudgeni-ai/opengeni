@@ -1,5 +1,96 @@
 # Modular prompt changelog
 
+Chats that start unattended through their setting say so from the first
+request, and nothing a chat started with changes later. A chat that a scheduled
+task or event trigger starts unattended (by default, or because the task says
+so) gets the same unattended paragraph and tool list as a session created with
+`unattended: true`; that it started unattended is frozen at create. The **Work
+without me** switch, and a person writing in an automation's chat, change only
+whether approvals and questions wait for a person, never the instructions or
+tools an earlier request already sent. So a chat switched to unattended after
+it started keeps `request_human_input` and `interaction_request_human`, and a
+call to either returns at once with the tool result "Not sent: this chat is now
+set to work without a person, so no one will answer until the task ends.
+Settle open choices with the most conventional option and continue. Do not take
+anything destructive, outside the workspace or needing authority you were not
+given; list it, with any step only a person can take, among the steps left for
+a person." (about 330 bytes, appended as that call's result like the approval
+refusal). When a turn's attendance differs from how the chat started, that
+turn's input (not the system prompt) carries an `[Opengeni attendance]` note:
+the unattended paragraph itself when the chat was switched to work without a
+person, or "A person is now present in this chat and will see and can answer
+questions, so the unattended-session guidance no longer applies. Follow the
+ordinary guidance on when to ask, asking in your reply." when a chat that
+started unattended has a person again (about 200 bytes). Its approvals then
+wait for that person. Interactive chats, and chats whose setting matches how
+they started, get no note and keep their bytes.
+
+Unattended sessions say so. A session created with `unattended: true` (no
+person will see or answer a question until the task ends) adds one paragraph,
+in the legacy CORE and as the last modular module (`unattended`, "# Unattended
+session"): asking, or waiting for human input, ends the work unanswered, so
+where any guidance says to ask, settle open choices with the most conventional
+option and finish the reversible work inside the workspace; never take or stand
+in for a step only a person can take, and leave it undone with anything
+destructive, outside the workspace or needing authority not given; end with
+the result, the assumptions made and the steps left for a person. Such a
+session is not given `request_human_input` or `interaction_request_human`, so
+the modular prompt also drops the clauses that offer them. A setup check of the
+general Autonomy principle alone still saw headless runs end with a question,
+because nothing told the model that no one would answer. Interactive sessions
+keep their bytes; the legacy lock adds an `unattended` case.
+
+A voice handoff answers in the user's language. When a person ends a realtime
+voice session, the remaining transcript reaches the agent as a message whose
+`<input>` is a fixed English note about the handoff. That note gains one last
+sentence (about 85 bytes): "Reply in the language the user spoke in the
+transcript, not the language of this note." Before, when the handoff was the
+only person message in a chat, the agent sometimes answered in English a
+person who spoke another language, following the note instead of the
+transcript. No system
+prompt or tool text changes, and earlier messages are unaffected. The
+timeline also shows the handoff's stored notice, "Voice session ended…", in
+the reader's language instead of always in English.
+
+Tool search returns the right tool on every route. No system prompt or tool
+description text changes; what changes is what a `tool_search` result carries,
+always appended after that result, so nothing an earlier request sent changes.
+
+- Native routes (OpenAI/Azure Responses and Codex) carry only loaded
+  definitions, so the candidates the generic output lists were dropped, and a
+  search that loaded nothing read as "No matching tools found". A developer
+  message right after the result now lists what the search did not load:
+  `No authorized tool is named "<name>".` for requested names no authorized
+  tool has, then `Close candidates this search did not load:` (or
+  `No tool loaded. Close candidates:`), one `- name: preview` line per
+  candidate with the 160-character preview `tool_list` shows, and
+  `Load one that fits with tool_search names:["<exact name>"] and query:"".`
+- A search that names or clearly matches a tool every request already carries
+  (such as `request_human_input` or `exec_command`) adds `alreadyAvailable`:
+  `<name> is already in your tool list; call it directly.`, instead of listing
+  it as unavailable.
+- Names resolve in the forms agents write them: the full model name, the
+  published `server.tool` form, and `projects.search`, `projects_search` or
+  `projects-search`, including for tools whose model names are shortened digest
+  aliases. A name several shortened aliases could stand for becomes candidates
+  instead of loading all of them.
+- A query is split into its requests (semicolons or new lines). Without a
+  decision model, the best candidate for each request is loaded and the next
+  ones listed; before, only a single clear keyword match was loaded. With one,
+  every candidate it judges to belong to the requested actions is loaded, with
+  no cap below the search's `limit`, the next candidates are listed when the
+  choice was unclear, and the keyword shortcut past the decision model is
+  removed. A search never comes back empty while candidates exist.
+- When the deployment has a document embedding model, ranking matches meaning
+  as well as keywords.
+- A load by exact name now carries the once-per-turn `connectedAccounts`
+  notice, and every tool a result shows, loaded or listed, counts as shown for
+  it, so loading Gmail tools after browsing a group still names Outlook Mail.
+  With several accounts of one connector, ranking reads past each tool's
+  `Account: … Use only this account…` first line (the same tool ranks the same
+  with or without it), and previews read `Account: <label>.` then the tool's
+  own text instead of being cut inside the account guidance.
+
 A blocked routine, reversible step no longer ends the turn with a question.
 Autonomy and persistence adds one general principle: take the conventional
 default without changing user or machine configuration, say which default was

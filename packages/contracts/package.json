@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.5.1",
+  "version": "6.1.1",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -25,6 +25,14 @@
     "./automation-templates": {
       "types": "./src/automation-templates.ts",
       "default": "./src/automation-templates.ts"
+    },
+    "./mcp-elicitation": {
+      "types": "./src/mcp-elicitation.ts",
+      "default": "./src/mcp-elicitation.ts"
+    },
+    "./mcp-elicitation-model": {
+      "types": "./src/mcp-elicitation-model.ts",
+      "default": "./src/mcp-elicitation-model.ts"
     },
     "./prepared-mcp-setup": {
       "types": "./src/prepared-mcp-setup.ts",
@@ -334,6 +342,7 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
+    "entities": "^7.0.1",
     "yaml": "2.9.0",
     "zod": "^4.2.1"
   },

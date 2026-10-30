@@ -33,6 +33,7 @@ import { Field, TextArea } from "../../../ui/field";
 import { Notice } from "../../../ui/notice";
 import { RelativeTime } from "../../../ui/relative-time";
 import { KeepActiveSetting, sessionReadOnlyArchive } from "./session-retention";
+import { UnattendedSetting } from "./session-unattended-setting";
 import { SessionUsageLimitSection } from "./session-usage-limit-section";
 import { useAppContext } from "../../app-context";
 import {
@@ -49,7 +50,6 @@ import {
   type AgentCapabilityDraft,
 } from "../../lib/agent-capabilities";
 import { chatLearningScope } from "../../lib/chat-learning-scope";
-import { isPersonalWorkspace } from "../../lib/managed-self-context";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { sessionUsageLimitCapability } from "../../lib/session-usage-limit";
 import { cn } from "../../lib/utils";
@@ -117,10 +117,7 @@ export function AgentConfigurationPanel(props: {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRegion = useRef<HTMLDivElement>(null);
-  const learningScope = chatLearningScope(
-    session,
-    isPersonalWorkspace(workspace, context.managedSelfContext),
-  );
+  const learningScope = chatLearningScope(session);
   // This chat's Agent learning: shown inside Skills and Knowledge, saved with them.
   const learning = useLearningSettings({
     workspaceId: session.workspaceId,
@@ -370,6 +367,12 @@ export function AgentConfigurationPanel(props: {
                   learningModes={learning.modes}
                 />
               </PanelSection>
+              {/* Absent on servers without unattended chats. */}
+              {session.unattended !== undefined && !sessionReadOnlyArchive(session) ? (
+                <PanelSection id={`${sectionId}-autonomy`} title="Autonomy">
+                  <UnattendedSetting session={session} onSaved={props.onReloadSession} />
+                </PanelSection>
+              ) : null}
               {context.clientConfig.sessionArchive && !sessionReadOnlyArchive(session) ? (
                 <PanelSection id={`${sectionId}-storage`} title="Storage">
                   <KeepActiveSetting

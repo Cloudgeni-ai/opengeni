@@ -5,6 +5,8 @@ import {
   sessionAdmissionApprovedElsewhereCopy,
   sessionAdmissionCopy,
   useSessionStart,
+  useSessionStartupTimeline,
+  type PendingPrompt,
   type AgentMessageItem,
   type AuthNeededItem,
   type UserMessageItem,
@@ -79,6 +81,8 @@ export interface NativeSessionScreenProps extends Omit<
   "items" | "events" | "status" | "trailing"
 > {
   controller: OpenGeniNativeSessionController;
+  /** The submitted first message, until its durable history is available. */
+  pendingPrompt?: PendingPrompt | null | undefined;
   /** Composer slots (products add their own actions/options here). */
   composer?:
     | Partial<
@@ -240,6 +244,7 @@ class SessionScreenBoundary extends Component<
 
 function SessionScreenBody({
   controller,
+  pendingPrompt,
   composer: composerSlots,
   trailing,
   topBar,
@@ -281,10 +286,19 @@ function SessionScreenBody({
   const followLatest = useCallback(() => setFollowLatestSignal((value) => value + 1), []);
   // The composer floats over the conversation; its occupied height insets the timeline.
   const [composerHeight, setComposerHeight] = useState(120);
-  const items = useMemo(
+  const conversation = useMemo(
     () => conversationTimeline(controller.timeline, queue, composer),
     [controller.timeline, queue, composer],
   );
+  const items = useSessionStartupTimeline(conversation, {
+    session: controller.session.session,
+    events: controller.events,
+    optimisticMessages: composer.optimisticMessages,
+    hasNewer: false,
+    queue: queue.snapshot,
+    pendingPrompt,
+    historyReady: controller.initialHistoryReady ?? !controller.initialLoading,
+  });
   const stockAuthNeeded = useNativeInChatConnect({
     client,
     workspaceId: controller.workspaceId,
@@ -534,10 +548,11 @@ function SessionScreenBody({
               <ApprovalStrip
                 approvals={approvals}
                 messages={approvalMessages}
-                onDecide={(id, decision) =>
-                  (decision === "approve" ? control.approve(id) : control.reject(id)).then(
-                    () => undefined,
-                  )
+                onDecide={(id, decision, answer) =>
+                  (decision === "approve"
+                    ? control.approve(id, undefined, answer)
+                    : control.reject(id)
+                  ).then(() => undefined)
                 }
               />
             ) : null}

@@ -25,7 +25,11 @@ import {
   type TimelineGroup,
   type TimelineItem,
 } from "@opengeni/react/session";
-import { sessionAdmissionBlocked, type SessionDisplayStatus } from "@opengeni/react/timeline-model";
+import {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  type SessionDisplayStatus,
+} from "@opengeni/react/timeline-model";
 import {
   nativeComposerAttachmentCallbacks,
   useNativeFileAttachments,
@@ -62,6 +66,7 @@ export interface OpenGeniNativeSessionController {
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
   sessionStatus: SessionStatus | null;
   initialLoading: boolean;
+  initialHistoryReady?: boolean | undefined;
   hasOlder: boolean;
   loadingOlder: boolean;
   loadOlder(): Promise<boolean>;
@@ -163,9 +168,15 @@ export function useOpenGeniNativeSession(input: {
     events: events.events,
     effectiveControl: queue.effectiveControl,
     // As on web: while a turn runs or prompts wait, a Send shows in the queue
-    // at once instead of flashing as a chat bubble before it is queued.
+    // at once instead of flashing as a chat bubble before it is queued. A turn
+    // parked on a usage limit is replaced by the Send, which starts at once.
     sendDestination: () =>
-      (session.session?.activeTurnId ?? null) !== null || queue.queue.length > 0 ? "queue" : "chat",
+      promptSendDestination({
+        status: session.session?.status,
+        activeTurnId: session.session?.activeTurnId,
+        queuedPrompts: queue.queue.length,
+        admissionBlock: session.session?.admissionBlock,
+      }),
     busySend: input.busySend,
     offerQueue: input.offerQueue,
     sendExtras: () => ({ resources: attachments.readyResources }),
@@ -259,6 +270,7 @@ export function useOpenGeniNativeSession(input: {
     admissionBlocked,
     displayStatus: admissionBlocked ? "blocked" : sessionStatus,
     initialLoading: events.initialLoading || session.loading,
+    initialHistoryReady: events.initialHistoryReady,
     hasOlder: events.hasOlder,
     loadingOlder: events.loadingOlder,
     loadOlder: events.loadOlder,

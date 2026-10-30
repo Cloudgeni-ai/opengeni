@@ -9,6 +9,7 @@ import {
 } from "@opengeni/db";
 import {
   SCHEDULED_SLACK_BOT_POSTING_TOOLS,
+  SessionSkills,
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
   scheduledOccurrencePayloadUtf8Bytes,
@@ -152,7 +153,9 @@ import {
   creationInitiatorForGrant,
   modelUnavailableHttpException,
   settingsWithSessionMcpServerMetadata,
+  validateSessionMcpServersForCreate,
 } from "./sessions";
+import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import {
   hasReservedOpenGeniSlackBotSessionMetadata,
   validateOpenGeniSlackBotConnectionSelection,
@@ -486,10 +489,8 @@ export async function createValidatedScheduledTask(input: {
       message: "Personal source tasks create a private session for each run",
     });
   if (learning) {
-    const workspace = await requireWorkspace(input.db, input.grant.workspaceId);
     const destination =
       knowledgeAction?.destination.kind === "personal" ||
-      workspace.kind === "personal" ||
       target?.tenancy?.visibility === "private" ||
       target?.memoryScope === "user"
         ? "personal"
@@ -587,6 +588,12 @@ export async function createValidatedScheduledTask(input: {
     ? agentConfig
     : withScheduledTaskPins(agentConfig, requestedPins, requestedPinsRequired);
   const creationInitiator = scheduledTaskInitiatorForGrant(input.grant);
+  const creatorLocked = "creatorLocked" in input.payload && input.payload.creatorLocked === true;
+  if (creatorLocked && creationInitiator.actor)
+    throw new HTTPException(422, {
+      message:
+        "An agent can't lock a schedule to itself. Lock it from the app or key that manages it.",
+    });
   const captureLinkAuthority = prepareExternalLinkTaskAdmission(
     input.authorization,
     creationInitiator.actor,
@@ -692,6 +699,7 @@ export async function createValidatedScheduledTask(input: {
           : {}),
         rigId,
         metadata: input.payload.metadata,
+        ...(creatorLocked ? { creatorLocked } : {}),
         ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
       });
       await recordScheduledTaskAccountChoiceChanges(transaction, {
@@ -965,10 +973,17 @@ export async function assertScheduledTaskMutationOwner(
     ...(writer.context ? { createdByContext: writer.context } : {}),
     createdByActor: writer.actor ?? null,
   });
-  if (!matches)
+  if (!matches) {
+    const task = await getScheduledTask(db, grant.workspaceId, taskId);
+    if (task?.creatorLocked)
+      throw new HTTPException(403, {
+        message:
+          "This schedule is locked to the app or key that created it, so only that creator can change, run or delete it. A workspace admin can pause it.",
+      });
     throw new HTTPException(403, {
       message: "Only the schedule owner can change or run it. Copy it to create your own schedule.",
     });
+  }
 }
 
 /**
@@ -2632,7 +2647,6 @@ async function validateScheduledTaskAgentConfig(input: {
           )
         : null;
     const privateDestination =
-      workspace.kind === "personal" ||
       (target?.visibility === "user_private" &&
         target.ownerSubjectId === fileActor.privateFileOwnerSubjectId) ||
       (target?.memoryScope === "user" &&
@@ -2660,6 +2674,18 @@ async function validateScheduledTaskAgentConfig(input: {
     );
   }
   const requestedMaxDepth = input.payload.agentConfig.maxNestedAgentDepth;
+  // Servers attached to each chat the task starts pass the same checks as a
+  // session-create attach. They carry no static headers.
+  const mcpServers = input.payload.agentConfig.mcpServers;
+  if (mcpServers?.length && !unchangedCreationField("mcpServers")) {
+    validateSessionMcpServersForCreate(runtimeSettings, input.grant, mcpServers);
+    for (const server of mcpServers) {
+      await assertMcpCredentialContentFlowAllowed(input.db, {
+        target: { accountId: input.grant.accountId, workspaceId: input.workspaceId },
+        url: server.url,
+      });
+    }
+  }
   if (requestedMaxDepth !== undefined && !unchangedCreationField("maxNestedAgentDepth")) {
     const workspaceMaxDepth = workspace.settings.maxNestedAgentDepth;
     const deploymentPolicy = await getNestedAgentDepthDeploymentPolicy(input.db);
@@ -2677,8 +2703,20 @@ async function validateScheduledTaskAgentConfig(input: {
     }
   }
   const { toolPolicy: _requestedToolPolicy, ...requestedConfig } = input.payload.agentConfig;
+  // Inline Skills are validated like a session create's and stored normalized.
+  let skills: ScheduledTaskAgentConfig["skills"];
+  if (requestedConfig.skills !== undefined) {
+    const parsed = SessionSkills.safeParse(requestedConfig.skills);
+    if (!parsed.success) {
+      throw new HTTPException(422, {
+        message: `agentConfig.skills is invalid: ${parsed.error.issues[0]?.message ?? "invalid Skill"}`,
+      });
+    }
+    skills = parsed.data;
+  }
   const validated = {
     ...requestedConfig,
+    ...(skills !== undefined ? { skills } : {}),
     ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     ...(model === undefined || model === null ? {} : { model }),
     prompt,

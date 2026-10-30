@@ -44,6 +44,17 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events/stream` (SSE; backfills from Postgres by event sequence)
 - `POST /v1/workspaces/:workspaceId/sessions/:sessionId/events`
 
+`GET /v1/workspaces/:workspaceId/sessions?view=page&sessionIds=<id>,<id>`
+selects up to 200 known sessions (SDK: `listSessionSummaryPage(workspaceId,
+{ sessionIds })`). It narrows the caller's ordinary list: private sessions of
+other people, archived rows (unless `archiveStatus=all`) and every other filter,
+including `search`, still apply, and the response carries
+`sessionIdsApplied: true`. With `projection=summary` each row also has
+`activeTurnId` and `latestTurn` (`id`, `status`, `startedAt`, `finishedAt`): the
+last queued turn, else the executing turn, else the most recently finished one.
+Hosts that keep their own record of a chat read its title and state this way
+instead of copying events.
+
 `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/retention` with
 `{ "keepLive": true | false }` exempts a session from the idle-session archive
 (`sessions:control`; 409 `SESSION_ARCHIVED_READ_ONLY` once archived). Session
@@ -54,6 +65,59 @@ the archive state); messages to an archived session return 409
 `GET /v1/config/client` reports `sessionArchive: { enabled, idleDays }` when the
 deployment archives idle sessions. See
 [`session-storage-lifecycle.md`](session-storage-lifecycle.md).
+
+Session create accepts `unattended: true` for a session no person will follow
+until its task ends, such as an API automation or another headless run. The
+agent is told that a question would end the work unanswered, so it settles open
+choices with the most conventional option, does the reversible work, leaves
+steps only a person can take undone and reports its assumptions and those
+steps. Tools that wait for a person (`request_human_input`,
+`interaction_request_human`) are not offered. A call that needs someone's
+approval under the workspace's tool permissions is not run and not approved:
+it returns at once with an error result saying nobody can approve it in an
+unattended session, so the agent works around it and lists it as a step left
+for a person. Permissions and approval policy stay exactly as configured; no
+approval request is opened for the refused call. The setting is recorded at
+create under the reserved `_opengeniUnattended` metadata key (session create
+ignores a caller-supplied value for it). It is not inherited by child
+sessions, a fork of the session is attended (a person makes it to continue the
+work), and a keyed retry that changes it is an idempotency conflict. Omitted or
+`false` keeps the ordinary interactive behavior.
+
+Session reads include `unattended`, whether the next turns run unattended.
+`PUT /v1/workspaces/:workspaceId/sessions/:id/unattended` with
+`{ "unattended": true | false }` turns it on or off from the next turn (the
+chat's **Work without me** switch in the Agent tab uses the same call; SDK
+`updateSessionUnattended`). The switch changes only whether a person is waited
+for: while it is on, a call that needs approval is refused as above, and a
+question or hand-off to a person returns at once with a result saying no one
+will answer. The system instructions and tool list follow how the chat
+started and never change mid-chat, so earlier requests stay cacheable: a chat
+that started unattended (the create option, or a scheduled or event-triggered
+chat that started unattended) keeps the unattended instructions and has no tool
+that waits for a person, and a chat that started attended keeps both tools.
+Each turn whose setting differs from how the chat started carries a short note
+in that turn's input instead: the unattended guidance when the chat was
+switched to work without a person, or that a person is now present and can
+answer when a chat that started unattended is attended again (the agent then
+asks in its reply). A
+turn already waiting for a person's answer resumes attended when that answer
+arrives. It needs `sessions:control`, returns the session, and returns 409
+`SESSION_ARCHIVED_READ_ONLY` for an archived session. A fork keeps this switch.
+
+Chats that a scheduled task or event trigger starts are unattended by default,
+because no person answers during the run. A task sets `agentConfig.unattended`
+to choose explicitly; a task that sets `agentConfig.approvalTimeoutSeconds`
+without it stays attended, since its owner chose to answer its approvals. A
+task that posts into an existing chat follows that chat.
+
+Explicit choices win: the create option, the switch (or its API call) and a
+task's own `agentConfig.unattended` stay until someone changes them. Only the
+automatic default for scheduled and event-triggered chats ends by itself:
+when a person sends a message in the chat from the web app, Slack or a voice
+call, the chat runs attended from that message on (its approvals wait for that
+person; its instructions stay as the chat started). Messages sent with an API
+key, from an embedding product or by another agent do not change it.
 
 Session goals support `GET`, `PATCH`, and idempotent `DELETE` on
 `/v1/workspaces/:workspaceId/sessions/:id/goal`; `GET` 404s for a goal-less

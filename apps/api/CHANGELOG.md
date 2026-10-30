@@ -1,5 +1,240 @@
 # @opengeni/api-router
 
+## 6.1.1
+
+### Minor Changes
+
+- 0422c7b: Connecting Gmail now asks Google only to read mail. When an agent later needs to draft, send or organize mail, the chat shows "Give Gmail more access" with an Allow button, which reconnects the same account and asks only for the missing permission; everything already allowed stays. Once the account holds that access, the agent carries on by itself, the same way it does after a first connection. Every Gmail tool stays in the agent's tool list; a tool the account cannot use yet stops before anything runs and before any approval card. Accounts connected earlier keep their access.
+
+  Connect begin requests accept an optional `requestedScopes` list for a reconnect (`reconnectAccountId` is required with it), and OAuth provider profiles can declare `incrementalScopes` that are asked for only when requested or already granted. The connection token resolver now returns `grantedScopes` for every OAuth credential. The capability continuation request also accepts `{ connectionId }`: after a reconnect from an account's own card, the chat continues once that account is active and holds the scopes the card asked for.
+
+### Patch Changes
+
+- 9552358: Managed authentication now runs on Better Auth 1.7.14 (from 1.6.26), the line that receives Better Auth's security fixes. The account schema is unchanged, so there is no migration. Deployments that set `OPENGENI_BETTER_AUTH_ALLOWED_HOSTS` keep resolving the public host from `x-forwarded-host`, which 1.7 no longer trusts by default; the host must still be one of the allowed hosts. Two 1.7 defaults are turned off so authentication behaves as before: auth writes stay outside a database transaction (otherwise a password sign-up without email verification failed, because the new user was not yet visible when its first session was admitted), and auth requests no longer wait on a schema introspection of the database (a test checks the migrated schema against Better Auth's instead).
+- Updated dependencies [9552358]
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/core@6.1.0
+  - @opengeni/contracts@6.1.0
+  - @opengeni/runtime@6.1.0
+  - @opengeni/db@6.1.0
+  - @opengeni/artifact-tool@6.1.0
+  - @opengeni/capabilities@6.1.0
+  - @opengeni/codemode@6.1.0
+  - @opengeni/codex@6.1.0
+  - @opengeni/config@6.1.0
+  - @opengeni/documents@6.1.0
+  - @opengeni/events@6.1.0
+  - @opengeni/github@6.1.0
+  - @opengeni/interaction@6.1.0
+  - @opengeni/observability@6.1.0
+  - @opengeni/storage@6.1.0
+  - @opengeni/tool-gateway@6.1.0
+  - @opengeni/vaults@6.1.0
+  - @opengeni/vaults-bitwarden@6.1.0
+  - @opengeni/vaults-keeper@6.1.0
+  - @opengeni/vaults-onepassword@6.1.0
+  - @opengeni/vaults-protonpass@6.1.0
+  - @opengeni/agent-proto@6.1.0
+  - @opengeni/network@6.1.0
+  - @opengeni/xai-subscription@6.1.0
+
+## 6.0.2
+
+### Minor Changes
+
+- e8bc121: EU-only content stays in EU-only workspaces. A session reaching another workspace (session tools given a `workspaceId`, or `admin_action_call` naming one by id or by external identity) is refused when it would bring an EU-only workspace's content into a workspace that isn't EU-only, or carry an EU-only session's messages or changes there; nothing runs when the setting can't be read. API routes answer such a refusal with the new error code `region_restricted` (HTTP 422). New `@opengeni/db` exports: `assertWorkspaceContentFlowAllowed`, `assertWorkspaceContentExchangeAllowed`, `assertOrganizationContentFlowAllowed`, `assertOrganizationContentExchangeAllowed`, `workspaceContentFlowEnd` and `WorkspaceContentFlowRefusedError`.
+
+  Opengeni's own MCP endpoints added to a workspace as a remote MCP server get the calling workspace in an opaque, encrypted `x-opengeni-calling-workspace` header, sent for Opengeni's own host however it is spelled and for any request carrying an Opengeni API key or MCP OAuth token. Each MCP endpoint refuses a call beyond the handshake before it runs unless content may go both ways between the calling workspace and what it reached, and one middleware on `/v1/mcp` and every `/v1/workspaces/:workspaceId/mcp` endpoint fails closed when an endpoint skipped that check. MCP OAuth consent for Opengeni's own client, and saving an Opengeni API key as an MCP credential, are checked both ways too. New `@opengeni/contracts` exports: `OPENGENI_CALLING_WORKSPACE_HEADER`, `signCallingWorkspaceProof` and `verifyCallingWorkspaceProof`; new `@opengeni/runtime/calling-workspace` entry point; new `@opengeni/core` export `assertMcpCredentialContentFlowAllowed`.
+
+- 449bcae: An MCP server can now ask the person a question in the middle of a tool call (MCP form elicitation, revision 2026-07-28, multi round-trip): a confirmation or a form to fill in. Model calls to third-party MCP servers declare that they can answer forms (form mode only; URL mode is not offered, and a server that asks for a page anyway ends the call with an error result). When the server answers `input_required`, the call pauses as an approval of the same call, the person answers in the approval card (possibly hours later, including in unattended runs), and the call is retried with the answer and the server's byte-exact `requestState`. Declining is sent to the server too (`action: "decline"`), so it can release what it was holding and finish the call its own way; the model then sees the server's result followed by a short note that the person declined. The model never sees the question or the answers. `session.requiresAction` approvals carry a new `elicitation` field (`{ server, round, requests }`); `user.approvalDecision` takes `content` and `elicitationRound`. Approving an approval with `elicitation` requires `elicitationRound` to be the current question's round, and the API checks `content` against the server's form (422 with the reason otherwise), so a stale card or a surface that never showed the question cannot answer a newer one. The question shows on every approval surface: the session card (web and native), the inbox (the question as the title; Allow for a short confirmation, Answer for a form), phone push ("<server> asks: …", opening the app, with no lock-screen actions) and private Slack cards (Allow for a confirmation, a link to answer a form in Opengeni). Connector action records gain `input_round`, so a tool with an Ask policy or saved rule can be asked more than once and answered in a later worker attempt. New exports: the `McpElicitation*` schemas, `MCP_ELICITATION_MAX_ROUNDS` and helpers in `@opengeni/contracts` (also at `@opengeni/contracts/mcp-elicitation`), and their types including `McpElicitationAnswer` in `@opengeni/sdk`; `InboxItem.serverQuestion` (`{ server, kind, round }`); `sendApprovalDecision` accepts `content` and `elicitationRound`; React `ApprovalSurface` renders the question and passes `{ content, elicitationRound }` to `onApprove` as its second argument, and `McpElicitationRequest` is exported from `@opengeni/react/session-ui`; React Native `ApprovalStrip`'s `onDecide` receives the same answer as its third argument; `@opengeni/testing/mcp-elicitation-server` is a fake server for client tests. See `docs/mcp-elicitation.md`.
+- 047bf8c: A Personal workspace now learns and keeps files like a shared workspace. Its workspace chats, scheduled tasks and Site guest chats save Knowledge, Skills and instructions to the Personal workspace's own Workspace layer under its modes, and its files and Sites follow the chat's audience. Only me chats still learn for their person. Nobody but the owner can be in a Personal workspace, so its Workspace layer stays private to them; organization admins, other members and other workspaces still cannot reach it. As in a shared workspace, a workspace chat there doesn't read the owner's Personal Knowledge or Only me files, and the files it makes are Workspace files; existing workspace chats and schedules there no longer read the owner's earlier Personal Knowledge or Only me files, and a schedule there takes Only me files only for an Only me target chat. Migration 1095 copies the owner's Personal learning modes, and their chat and task overrides from that workspace, to its Workspace layer when it has none, and existing personal data is unchanged: the owner and their Only me chats keep it. The Agent learning page in a Personal workspace shows its Workspace layer beside "Your private chats". Publishing an Only me Site no longer silently shares it; share it first, as in any workspace.
+- 6c5a6b5: Projects get a profile like a chat's: a description and an avatar (an emoji, icon or letters on a colour, or a workspace image). The avatar replaces the folder icon in the sidebar, the new-chat project picker and the Move to project lists, and pointing at a project shows its description. **Edit project…** in the project's menu replaces **Rename project** and opens the same dialog as a chat's **Edit profile…**. `Channel` gains `avatar`, `POST`/`PATCH /v1/workspaces/:workspaceId/channels` accept it, and agents set it with `project_create` and `project_update`. Changing it needs the same permission as a rename, and an image avatar must be shared with the workspace.
+- 942fcc1: Workspace owners and admins can remove a secret from stored session history with `POST /v1/workspaces/:workspaceId/secret-redactions`. Choose sessions (optionally with their descendants) and match either a vault reference, whose value is read in memory only and never returned, logged or audited (this also needs `secrets:use` on the item), or built-in patterns: URL passwords, optionally for named hosts only, and GitHub tokens. Every stored copy, including archived sessions' long-term storage, is replaced by `[redacted: <reference or kind>]`. `dryRun` counts without changing anything, a second run is a no-op, and the response and audit event carry counts only. New contract exports: `SecretRedactionRequest`, `SecretRedactionResponse`, `SecretRedactionMatch`, `SecretRedactionPattern` and `SecretRedactionCounts`. `@opengeni/storage` now exports `writeCompressedJsonLines`, `readCompressedJsonLines` and the `WorkspaceArchiveSpool` type.
+- ac2e841: A Microsoft Teams 1:1 chat with the bot now lands in the sender's own Personal workspace, as a Slack bot DM already does, while Personal workspaces are on and they can start chats there. Otherwise it stays in the installation's shared workspace. The Personal workspace comes from the sender's active organization membership, never from Teams. Channels and group chats stay in the shared workspace. An existing 1:1 chat stays where it is; the next message starts a fresh chat in the Personal workspace, and turning Personal workspaces off returns to the earlier one. The bot's installation and the person's Teams link stay in the shared workspace, so losing access there still stops the chat. Migration 1097 adds `teams_bot_routes.session_workspace_id`.
+
+### Patch Changes
+
+- 9dc0923: When an agent acting for a person asks for something outside the access the person gave its connection, the refusal now reads "This agent's access doesn't cover this action." instead of naming the raw permission. The permission is still in the error details (`details.permission`), and refusal metrics classify it.
+- 907e806: App action search now matches a verb and its noun, so "invite" finds the organization invitation actions (it found nothing before). Adding a workspace member, inviting someone to the organization and changing who in the workspace can see a chat now carry plain descriptions that point to `createSessionShareLink` for letting one person, such as family or a friend, read one chat.
+
+  The bundled product-help guide no longer says that sharing a chat needs the other person in the workspace. Letting someone read a chat now uses a share link, explained in one plain sentence, and working together in the same chats keeps the invite path.
+
+- e1ebd25: A browser session in the person's own Chrome that continues after being idle, or after its controller restarted, no longer opens a blank tab in the person's window when none of its tabs are left. It carries on in the tab it was using, or in another tab it opened that is still open, and otherwise has no tab until it opens one. Its tools then never pick one of the person's tabs by themselves: they say the session has no tab of its own and to open one, or to name one of the person's tabs. The API tells browserd it can take a session with no tab, so browserd and the API can be deployed in either order.
+- b1cffc3: Record an audit event for every successful model subscription and connector disconnect, naming who disconnected it, what, where, and whether it came from the app, an API key or an agent.
+- 073127d: A session parked in `wait_for_input` now resumes as soon as its background command's result is settled, instead of on the wake dispatcher's next 10-second sweep. Terminal background-command settlement returns the wake it commits. Its callers signal the session workflow after commit, concurrently and for at most 5 seconds: a Connected Machine's pushed completion, in-turn, API and reaper retained-process settlement, the selfhosted reaper, and lost or contained sandbox boxes. The dispatcher still delivers any wake a caller could not signal. Local Temporal (`docker compose` and the native dev stack) now serves each task queue from one partition, so queued turns start in the order they were queued. Start an existing local stack with no queued work, or reset its Temporal state, so no backlog is left in the removed partitions.
+- d4fd76d: A managed browser that was stopped (for example after going unused for 10 minutes) and relaunched now tells the agent so on the tabs it reopened. Chrome reopens those tabs at the same URLs and they keep their IDs, but each page loaded again, so text typed into it, a dialog it had open and anything else it held only in memory are gone. Before, nothing said this: an agent that came back to the tab saw an emptied page with no explanation.
+
+  The first observation of a reopened tab that the agent's own tools receive (browser_observe, the page after a browser_act, or a tab selected with browser_tabs) now carries a new optional `notice` field on `BrowserObservation`, shown to the model right after the tab line, for example: "This browser was stopped after going unused for 10 minutes and relaunched on its next call, so this tab's page reloaded: anything typed, selected or opened on it before then that the page did not save is gone." It is given once. Nothing is refused because of it: an element reference from before the reload already fails as stale, and anything else the agent does runs on the page as it now is, with the notice in the result. A caller receives notices only when it asks with the new `notices=1` query parameter (`BROWSER_OBSERVATION_NOTICES_PARAMETER`), which the API sends only for an agent's own requests, so a person watching the browser, an auth check or an API client neither sees the notice nor uses it up. Browser controllers that predate it ignore the parameter, and callers that do not send it never receive the field.
+
+  Every tab a relaunched browser reopened now answers. Chrome loads the pages of only the first few tabs it restores and leaves the rest without a renderer until they are used, which browserd reported as "This browser tab crashed", so with five or more tabs the later ones could not be used after a relaunch. browserd now starts such a tab's page the first time it is used, in the background and without switching to it, and waits briefly for it to load.
+
+  A tab showing the browser's error page (its last load failed) now also keeps its ID across a relaunch. Chrome reopens such a tab at the address it failed to load, not at its error page, so browserd now records and matches it under that address, read from the tab's history when the browser stops. Before, the tab was reported as replaced and reappeared under a new ID. Tab lists still show the error page's URL while the tab shows it.
+
+- 67b4f88: Desktop download links (`/desktop/latest/<file>` and `/desktop/latest`) keep working when GitHub's REST API rate limit is used up. The server now lists the `desktop-v` tags over Git's smart HTTP protocol, the way `git ls-remote` does, which is not counted against the REST API's 60 requests an hour per IP address. The REST API remains a fallback. Previously, a server that shared its outbound address with other GitHub API callers could answer every desktop download with 503.
+- 9abe3cc: Fiken, the Opengeni Slack bot and X/Reddit "Connect only for me" now connect in a person's own Personal workspace. A Personal workspace has no workspace membership row, so an OAuth callback finds its owner only through the signed personal-owner claim. The Fiken and Slack bot start routes never signed that claim, and the X/Reddit callback started from a chat re-checked with a plain membership lookup, so all three refused the owner after the provider consent screen (Fiken returned `fiken=error&reason=callback_failed`, the Slack bot `slack=error`, X/Reddit `not_authorized`).
+
+  Every OAuth/install start that names its owner now signs the owner fields through one helper whose claim argument is required. The owner type that callbacks re-check makes the claim required too, so leaving it out no longer compiles. Every callback re-checks its owner through the shared authority check instead of a bare membership lookup, and a source test keeps new connectors on both paths. Ownership is unchanged: Fiken and the Slack bot stay workspace-owned, and X/Reddit "Connect only for me" stays personal. Because the chat-started X/Reddit callback now uses that shared check, it also accepts a workspace connection started with an API key, as the Connect flow already did.
+
+  A Fiken or Slack bot state signed before this change carries no claim, so it is still refused in a Personal workspace; restart the connection after the upgrade. Shared workspaces are unaffected.
+
+  Fiken OAuth states now carry their own kind, and the Fiken callback refuses a signed state of another kind. Before, a person's own Slack bot install state replayed into the Fiken callback was accepted as a Fiken state. A refused or expired owner claim, for example after the person is suspended between consent and callback, still fails before any provider call.
+
+- 37538aa: Meetings get their notes written automatically. When a meeting's transcript is ready, Opengeni starts one chat for the meeting's owner (Only me for an Only me meeting, a workspace chat for a shared one) that writes the notes: an overview, topics, decisions and action items, with speakers and people linked as `speaker:` and `person:` mentions. The chat can only read that one meeting and save its notes, and nobody can widen it later. It runs on the workspace's shared Codex or Claude subscription accounts like other background work, and doesn't start when no subscription account can serve it, so it never spends credits or an API key. It never writes over saved notes and steps aside when the owner has their own automation for ready transcripts. Admins can turn it off with "Write notes after each meeting" in the meeting settings (`settings.recordings.autoSummary: false`). `meeting_read` now gives each speaker's label, and the "Meeting notes" template asks for the same format.
+- a1a060b: Google Drive and Atlassian connections now record which account they belong to. Connecting the same account again reuses the existing connection, a different account can be added alongside it, and both are labelled with the account's email. Before, a second Drive or Atlassian account was refused because the account could not be told apart. An existing Drive or Atlassian connection needs one reconnect before a second account can be added.
+- 7c481a8: Connecting a personal account again from another workspace reuses the account you already connected instead of adding a second connection for the same mailbox or login. Personal accounts are available in every workspace you belong to, but the duplicate check only looked at the workspace you connected from. Each reconnect from elsewhere added a copy without your saved tool approvals, and the agent could pick that copy and ask before every action again. Turning on a connector with your own account also accepts an account you connected in another of your workspaces.
+- 8e0b7e2: Organization model API keys (Vercel AI Gateway, OpenRouter, Opper, OpenAI, Azure OpenAI, Anthropic, and ElevenLabs for voice) now reach Personal workspaces like the organization's subscriptions do. A key available in every workspace serves everyone's Personal workspace too, and "Only selected workspaces" has the same Personal workspaces switch; the model access response reports `personalWorkspacesSupported: true` for every organization connection. Keys never reach another organization's workspaces, and each workspace's Allowed models still apply. Rolling migration `1094_organization_model_keys_reach_personal.sql` widens the organization provider scope to Personal workspaces of the same organization and keeps the previous reach of keys limited to selected workspaces (their Personal switch is stored off).
+
+  Billing note: when the organization's default model runs on an organization key, Personal chats and schedules with no saved default model of their own now use it too, so they bill that organization provider account instead of credits or a subscription.
+
+- a2d28b5: In a Personal workspace, Connect provider now opens the key form for that workspace for OpenRouter, Vercel AI Gateway, Opper and Anthropic, as it already did from an organization key's page; organization keys can't be used there. Sandbox environment versions and changes, and Site Data records, now show the person's name (or "you") instead of a raw `user:user:<id>`. New sandbox environment versions record the person's subject once (`user:<id>`); older versions still show the right name. Site Data owners keep their documented form. Removes the unused Site agent member SQL tool list and corrects a stale comment about Site agent workspace tools.
+- 36c1fea: GitHub status checks that run on their own (when the app loads or its window comes back into focus) no longer show a "GitHub status unavailable" toast when they fail. Where GitHub is used, the failure shows in place instead: the repository picker says GitHub couldn't load and offers **Refresh list** (rather than "No repositories" and setup), and the GitHub card and integration page show it with **Retry**. The check also runs again on its own when the window comes back into focus or the connection returns, and, when Opengeni is briefly unreachable (a deploy or a network drop), it tries again by itself with a growing pause until Opengeni answers. The person's own GitHub status and the workspace MCP tools, loaded with every workspace view including chats, do the same: a deploy no longer pops "Your GitHub account is unavailable" or "Couldn't load workspace MCP tools", and their other failures show one toast that a repeat replaces. A refresh or retry the person starts still shows one toast, and repeated failures replace it rather than stacking. `refreshGitHub` and `refreshPersonalGitHub` accept `userInitiated`.
+
+  Reading a workspace's GitHub repositories no longer asks GitHub every time: the API reuses GitHub's repository list for a minute, shares one GitHub call between concurrent reads, and keeps answering with the last good list for up to 30 minutes while GitHub has an outage (not when the installation or configuration is gone). A list fetched before the workspace last connected GitHub is never reused, and connecting again reads GitHub's list fresh. Syncing repositories still asks GitHub and reports its failure. Which repositories the workspace may use is still checked on every read. When GitHub refuses the connected installation (401, 403 or 404 rather than an outage), listing or syncing repositories now answers 409 asking to reconnect GitHub instead of a 502, so clients don't keep retrying it.
+
+- 676426c: Connected machines can renew their credentials again. Recording a machine's promotion proof decoded its install key with PostgreSQL's strict base64 decoder, but agents send that key as unpadded base64 (43 characters), which PostgreSQL rejects, so every `POST /v1/enrollments/renew` failed with a 500. Machines whose credentials had expired stayed offline, and connecting a new machine failed at its first proof. The key is now padded (and URL-safe characters translated) before it is hashed, giving the same hash as before for padded keys.
+- fb41dfd: Known secret values are masked before they are stored or shown to the model. Each agent attempt remembers the values its secret references resolve to, the credentials Opengeni injects (Codemode bearer, git and broker tokens, host run credentials, MCP header values) and, best effort, the hosted vault values the session tree used before. Tool results, tool-call arguments, model input, context compaction, model-context snapshots and stored conversation text (events, history, messages, goals, notes, run state) replace a known value, and its JSON-escaped, percent-encoded and base64 forms, with the reference that resolved it. Values shorter than 8 characters are left alone, and masking never fails a tool call or a turn. The pure matchers (`SecretValueMemory`, `compileSecretValueMasks`, `maskSecretValues`, `maskSecretValuesInText`) are exported from `@opengeni/contracts`.
+- 4246602: Add a SharePoint integration for work and school Microsoft 365 accounts: search SharePoint content, find sites, browse document libraries and read files, read lists, and add or update list items with review. Microsoft Search is a reviewed read limited to file, list and site results, so searching never asks for approval and cannot reach mail, calendar or chats. Reviewed read-only overrides are part of the revision identity. OneDrive and Outlook Contacts consent screens now label only the permissions they actually request. The Atlassian and Google Drive catalog entries are marked as verified vendor-hosted servers, and Atlassian gets consent copy and admin guidance for allowing the Opengeni domain.
+- b0f7062: Signing up on a deployment that restricts accounts to `allowedUserEmails` with an address that isn't on the list now returns `403 { code: "SIGNUP_EMAIL_NOT_ALLOWED" }` (exported as `MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE`) instead of the generic `FAILED_TO_CREATE_USER`, and a refused provider sign-up redirects with `error=signup_email_not_allowed`. The sign-in page uses it to say that only approved email addresses can sign up and to ask whoever runs the service to allow theirs (a team invitation doesn't approve an address), in place of a "try again" that couldn't succeed. The create-account subtitle no longer speaks only to developers.
+- 0f77b2d: The chat beside a Site in the console's Site view is now the regular chat: the same composer, messages and status row as a chat on its own page, without the session panel. Screenshots and files can be pasted or dropped into it (a drop anywhere on the chat, or on the Site beside it, attaches to the chat instead of going to the Site's frame), and it has the attach button, dictation, voice, the model chip, the queue and steer row, find and fork. A new conversation started there uses the regular composer too, including attachments and voice-first start. The chat can move to the left of the Site from its ⋯ menu (Move chat to left or right); the side is remembered per person with its width and hidden state, and stays on the right by default. The API accepts file attachments on a new conversation created from the console's Site view (the Site's id and version without a frame marker); Site code still can't attach anything.
+- e4f699c: The Slack bot starts a turn in a channel or channel thread only when it is mentioned; a bot DM still answers every message. An untagged message in a thread that already has an Opengeni session no longer starts a turn or calls Slack: it is only recorded, and the next mention in that thread continues the same session with the untagged messages since the previous invocation attached as model context (`listSlackThreadMessagesSinceLastInvocation`, rolling migration `1013_slack_inbox_thread_context_index`). The exact reply `stop` still pauses a mapped thread with or without a mention. A turn can now end without posting: a final response of exactly `NO_REPLY` settles the Slack task with no message. The Slack session instructions ask for short replies by default, and channel copy (hint, failure, billing and input prompts, the reaction start line and `info` card) says to mention Opengeni to continue. No setting existed for the previous answer-every-thread-reply behavior, so none is kept.
+- 5c4f5b0: Account administrators without an organization membership (a deployment's configured access key, an account-scoped key or a signed delegation with `account:admin`) can administer the organization's subscription accounts again: connect, reconnect, rename, settings, access and disconnect for Codex, SuperGrok and Claude, in the API and on Organization > Models. Migrations 1103 (rolling) and 1104 let the API record its verified `account:admin` proof for one transaction, and the organization-administrator check accepts it for that subject and account only. The recording routine is created without runtime EXECUTE. A follow-up release grants it, as with any new runtime definer, and that is when the database starts honouring the proof. A workspace owner key can also remove its own workspace's account, starting with this release.
+- 8bad70d: Show Teams setup and account linking as readable buttons instead of exposing long, unclickable proof URLs in chat messages.
+- 5cab358: Preserve WebAuthn backup eligibility and backup state when importing vaulted passkeys into managed Chromium. Bitwarden, Vaultwarden and Proton Pass passkeys now retain the flags their authenticators used at registration, preventing relying parties from rejecting an otherwise correctly signed assertion. Hosted registrations retain their own flags. Negotiate flag support before sending it, keeping older controllers and APIs compatible with the original sync format.
+- Updated dependencies [907e806]
+- Updated dependencies [f252d90]
+- Updated dependencies [205b05a]
+- Updated dependencies [e1ebd25]
+- Updated dependencies [b1cffc3]
+- Updated dependencies [83ed5c0]
+- Updated dependencies [073127d]
+- Updated dependencies [44ba53b]
+- Updated dependencies [9a450e3]
+- Updated dependencies [202e3fd]
+- Updated dependencies [c7e16f0]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [d8a1b83]
+- Updated dependencies [4d88263]
+- Updated dependencies [aa6b340]
+- Updated dependencies [765e264]
+- Updated dependencies [df7dd0d]
+- Updated dependencies [3ef97dc]
+- Updated dependencies [12b773f]
+- Updated dependencies [050ca2f]
+- Updated dependencies [86c3295]
+- Updated dependencies [7f627c9]
+- Updated dependencies [3742a21]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [dfc7190]
+- Updated dependencies [7bb4ea9]
+- Updated dependencies [d25f0d4]
+- Updated dependencies [9abe3cc]
+- Updated dependencies [ad1dc82]
+- Updated dependencies [089abc5]
+- Updated dependencies [09972b5]
+- Updated dependencies [8b06d0a]
+- Updated dependencies [54f07b1]
+- Updated dependencies [f249828]
+- Updated dependencies [a6004c8]
+- Updated dependencies [7b98d86]
+- Updated dependencies [cebc433]
+- Updated dependencies [ac9aeba]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [28a87b9]
+- Updated dependencies [449bcae]
+- Updated dependencies [37538aa]
+- Updated dependencies [6e33a98]
+- Updated dependencies [bd7200d]
+- Updated dependencies [d9df3db]
+- Updated dependencies [0230e1a]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [755adaf]
+- Updated dependencies [a02dca4]
+- Updated dependencies [8b727bf]
+- Updated dependencies [a1a060b]
+- Updated dependencies [7c481a8]
+- Updated dependencies [b5e61c5]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [8e0b7e2]
+- Updated dependencies [a2d28b5]
+- Updated dependencies [3b411ff]
+- Updated dependencies [840d3fc]
+- Updated dependencies [d166d88]
+- Updated dependencies [047bf8c]
+- Updated dependencies [f74d748]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6833d1b]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [bdac9fc]
+- Updated dependencies [a133a9d]
+- Updated dependencies [676426c]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [46f1de4]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [fd80817]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [4246602]
+- Updated dependencies [c47b489]
+- Updated dependencies [b0f7062]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [e4f699c]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [5c4f5b0]
+- Updated dependencies [ac2e841]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [7148073]
+- Updated dependencies [c21b3f6]
+- Updated dependencies [05a3728]
+- Updated dependencies [067d06b]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [af0437b]
+- Updated dependencies [149a15c]
+  - @opengeni/runtime@6.0.0
+  - @opengeni/contracts@6.0.0
+  - @opengeni/db@6.0.0
+  - @opengeni/core@6.0.0
+  - @opengeni/codemode@6.0.0
+  - @opengeni/config@6.0.0
+  - @opengeni/observability@6.0.0
+  - @opengeni/documents@6.0.0
+  - @opengeni/capabilities@6.0.0
+  - @opengeni/tool-gateway@6.0.0
+  - @opengeni/storage@6.0.0
+  - @opengeni/vaults@6.0.0
+  - @opengeni/vaults-bitwarden@6.0.0
+  - @opengeni/vaults-protonpass@6.0.0
+  - @opengeni/artifact-tool@6.0.0
+  - @opengeni/codex@6.0.0
+  - @opengeni/events@6.0.0
+  - @opengeni/github@6.0.0
+  - @opengeni/interaction@6.0.0
+  - @opengeni/vaults-keeper@6.0.0
+  - @opengeni/vaults-onepassword@6.0.0
+  - @opengeni/agent-proto@6.0.0
+  - @opengeni/network@6.0.0
+  - @opengeni/xai-subscription@6.0.0
+
 ## 5.5.1
 
 ### Minor Changes

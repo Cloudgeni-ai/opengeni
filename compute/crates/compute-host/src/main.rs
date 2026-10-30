@@ -33,7 +33,9 @@ use tokio::signal::unix::SignalKind;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 use crate::bench::{BenchArgs, bench, exec};
-use crate::policy::{guarantee_vm_processors, host_policy, limit_vm_memory, processor_share};
+use crate::policy::{
+    guarantee_vm_processors, host_policy, limit_vm_memory, memory_total_mib, processor_share,
+};
 
 /// How long a template's freshly booted guest may take to become ready.
 const TEMPLATE_READY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -102,6 +104,15 @@ enum Command {
     /// host's lease runs out, whatever happens to the agent. Run it as a
     /// service of its own, before the agent.
     Guard(fleet_cli::GuardArgs),
+    /// The guard service's stop hook on a machine the host shares (its
+    /// `ExecStopPost=`, ADR 26): unless the guard was handed over, kill
+    /// every VM, as a reset of the machine would, and restart the agent if
+    /// it runs.
+    GuardStopped(fleet_cli::GuardStoppedArgs),
+    /// Hand the guard over to the installed release's: mark the hand-over
+    /// and restart the guard's service. On a machine the host shares, the
+    /// guard's stop hook then leaves the VMs to the new guard (ADR 26).
+    HandOverGuard(fleet_cli::HandOverArgs),
     /// Delete the chunks and manifests in object storage that no sandbox's
     /// stored copy names any more, on any host. Run on a schedule, such as
     /// daily; safe while agents archive. Without `--delete`, only reports.
@@ -242,6 +253,16 @@ struct ServeArgs {
     /// A step concurrency limit such as `restore=32`; repeatable.
     #[arg(long = "limit", value_parser = parse_limit)]
     limits: Vec<(Step, u32)>,
+    /// Host memory the sandboxes may use at most, on a host that shares
+    /// its memory with VMs or services beside compute: the capacity, the
+    /// watermarks and the most the VMs may ever hold together come from
+    /// it in place of the host's memory, so they never take what the
+    /// others were promised. Defaults to `COMPUTE_MEMORY_TOTAL_MIB` where
+    /// that is set and not empty (a fleet host's `host.env`, which a
+    /// shared machine must set it in: ADR 26), else all of the host's
+    /// memory.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    memory_total_mib: Option<u64>,
     /// Push idle sandboxes deeper when available memory drops below this,
     /// then ask sandboxes in use above their request to give memory back.
     /// Given with `--memory-high-mib` or not at all. Defaults on 4 KiB
@@ -680,9 +701,23 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
         Command::Bench(args) => bench(&client, &args).await,
         Command::BuildImage(args) => compute_host::rootfs::build(*args).await,
         Command::Guard(args) => guard(args.config(), guard_log.as_ref()).await,
+        Command::GuardStopped(args) => {
+            let hook = args.hook();
+            tokio::task::spawn_blocking(move || compute_host::fleet::guard_stopped(&hook)).await?
+        }
+        Command::HandOverGuard(args) => {
+            tokio::task::spawn_blocking(move || args.hand_over()).await?
+        }
         Command::Sweep { store, delete } => {
             let chunked = Chunked::from_url(&store)?
                 .with_context(|| format!("{store} is not an object storage URL"))?;
+            // A sweep fences every pointer, on condition: the store must
+            // enforce conditions. A fleet's sweep runs from its control
+            // service, which keeps the pointers.
+            chunked
+                .check_pointers()
+                .await
+                .with_context(|| format!("{store} cannot keep pointers"))?;
             let report = chunked.sweep(delete).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
@@ -756,6 +791,10 @@ async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     tracing::info!(?threads, "thread counts");
     let memory_profile = args.memory_profile.map_or_else(chosen_memory_profile, Ok)?;
     let sample_every = Duration::from_secs(1);
+    args.memory_total_mib = memory_total_mib(
+        args.memory_total_mib,
+        std::env::var("COMPUTE_MEMORY_TOTAL_MIB").ok().as_deref(),
+    )?;
     let mut policy = host_policy(&args, memory_profile, sample_every)?;
     let share = processor_share(&args, &policy);
     let engine = Firecracker::new(FirecrackerConfig {
@@ -767,7 +806,7 @@ async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
     .with_memory_profile(memory_profile)
     .with_context(|| format!("memory profile {memory_profile}"))?;
-    let engine = limit_vm_memory(engine, memory_profile, &policy)?;
+    let engine = limit_vm_memory(engine, memory_profile, &policy, args.memory_total_mib)?;
     let processor_share = guarantee_vm_processors(share, &mut policy)?;
     readying::ready(memory_profile, memory_profile.compress && !args.no_compress)?;
     let about = describe(memory_profile, &args.base_image);
@@ -914,7 +953,14 @@ async fn run_with_store(
             .with_compress_threads(threads.compress)
             .with_watch(Arc::new(StoreAlarms(config.observer.clone())));
         if let Some((fleet, prepared)) = fleet {
-            let leased = Leased::new(chunked, prepared.gate.clone());
+            // The control service keeps a fleet's pointers (ADR 25), and
+            // what the host stores is named by the fleet's clock it tells.
+            let pointers = fleet.pointers(&prepared.gate)?;
+            let clock = pointers.clock();
+            let leased = Leased::new(
+                chunked.with_pointers(Arc::new(pointers)).with_clock(clock),
+                prepared.gate.clone(),
+            );
             return run_agent(
                 config,
                 engine,
@@ -925,6 +971,10 @@ async fn run_with_store(
             )
             .await;
         }
+        chunked
+            .check_pointers()
+            .await
+            .with_context(|| format!("{store} cannot keep this host's pointers"))?;
         return run_agent(config, engine, chunked, socket, canary, None).await;
     }
     anyhow::ensure!(

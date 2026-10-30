@@ -19,8 +19,6 @@ import {
   ManagedPasskeyError,
   managedPasskeyRelyingParty,
   managedPasskeysAvailable,
-  managedPasskeyStorageGranted,
-  refreshManagedPasskeyStorageGrant,
   startManagedPasskeyRegistration,
   startManagedPasskeySignIn,
   verifyManagedPasskeyRegistration,
@@ -50,36 +48,18 @@ import {
 const SIGN_IN_PER_MINUTE = 30;
 const SIGN_UP_PER_MINUTE = 5;
 
-/**
- * Whether this deployment offers passkey sign-in in the browser, as of the
- * last passkey storage grant check; call `refreshManagedPasskeysOffered` first
- * on a request path.
- */
-export function managedPasskeySignInOffered(deps: Pick<ApiRouteDeps, "settings" | "db">): boolean {
+/** Whether this deployment offers passkey sign-in in the browser. */
+export function managedPasskeySignInOffered(deps: Pick<ApiRouteDeps, "settings">): boolean {
   return (
     deps.settings.productAccessMode === "managed" &&
     deps.settings.managedAuthSessionSetMode === "legacy" &&
-    managedPasskeysAvailable(deps.settings) &&
-    managedPasskeyStorageGranted(deps.db)
-  );
-}
-
-/** Rechecks the passkey storage grant (at most once a minute) when passkeys could be offered. */
-export async function refreshManagedPasskeysOffered(
-  deps: Pick<ApiRouteDeps, "settings" | "db">,
-): Promise<void> {
-  if (
-    deps.settings.productAccessMode === "managed" &&
-    deps.settings.managedAuthSessionSetMode === "legacy" &&
     managedPasskeysAvailable(deps.settings)
-  ) {
-    await refreshManagedPasskeyStorageGrant(deps.db);
-  }
+  );
 }
 
 /** Whether new accounts may be created with only a passkey right now. */
 export function managedPasskeySignUpOffered(
-  deps: Pick<ApiRouteDeps, "settings" | "db">,
+  deps: Pick<ApiRouteDeps, "settings">,
   newSignupsOpen: boolean,
 ): boolean {
   return (
@@ -192,7 +172,6 @@ export function registerManagedPasskeyRoutes(
   const base = "/v1/auth/passkey";
   app.use(`${base}/*`, async (context, next) => {
     context.header("cache-control", "no-store");
-    await refreshManagedPasskeysOffered(deps);
     if (!deps.managedAuth || !managedPasskeySignInOffered(deps)) {
       return refusal(404, "PASSKEY_UNAVAILABLE", "Passkey sign-in isn't available here");
     }
@@ -314,12 +293,15 @@ export function registerManagedPasskeyRoutes(
       try {
         user = await runManagedAuthProvider("passkey", () =>
           runWithSignupChallenge(ceremony.signupChallengeVerified === true, () =>
-            internal.createUser({
-              id: userId,
-              email: passkeyOnlyAccountEmail(userId),
-              name: ceremony.name ?? "Passkey user",
-              emailVerified: true,
-            }),
+            internal.createUser(
+              {
+                id: userId,
+                email: passkeyOnlyAccountEmail(userId),
+                name: ceremony.name ?? "Passkey user",
+                emailVerified: true,
+              },
+              { method: "passkey" },
+            ),
           ),
         );
       } catch (error) {

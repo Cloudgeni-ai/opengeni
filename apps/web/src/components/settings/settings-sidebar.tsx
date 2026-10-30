@@ -475,7 +475,7 @@ export function SettingsShell({
       </Sheet>
     </header>
   ) : (
-    <div className="min-h-0 min-w-0 border-r border-border">
+    <div data-shell-rail className="min-h-0 min-w-0 border-r border-border">
       <SettingsRail {...railProps} className="border-r-0" />
     </div>
   );
@@ -499,7 +499,7 @@ export function SettingsShell({
   );
 
   return (
-    <div className={SETTINGS_SHELL_CLASS}>
+    <div data-window-frame className={SETTINGS_SHELL_CLASS}>
       {navigation}
       {/* A labelled region: the app shell already provides the one <main>. */}
       <section

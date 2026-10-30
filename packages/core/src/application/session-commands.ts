@@ -47,6 +47,7 @@ import {
   steerAgentSessionInTransaction,
   steerQueuedTurnInTransaction,
   workspaceControlRequestLockTimeoutMs,
+  withEffectiveComposerDraftPolicy,
   withWorkspaceRls,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectRls,
@@ -675,6 +676,7 @@ function composerDraft(
     model: row.model,
     reasoningEffort: row.reasoningEffort as ComposerDraft["reasoningEffort"],
     latencyMode: row.latencyMode as ComposerDraft["latencyMode"],
+    policyFollowsSession: row.policyFollowsSession,
     sourceTurnId: row.sourceTurnId,
     sourceTurnVersion: row.sourceTurnVersion,
     updatedAt: row.updatedAt.toISOString(),
@@ -1170,12 +1172,15 @@ export async function getHumanComposerDraft(
     deps.db,
     context.workspaceId,
     context.subjectId,
-    (scoped) =>
-      getComposerDraftInTransaction(scoped, {
-        workspaceId: context.workspaceId,
-        sessionId: context.sessionId,
-        subjectId: context.subjectId,
-      }),
+    async (scoped) =>
+      withEffectiveComposerDraftPolicy(
+        scoped,
+        await getComposerDraftInTransaction(scoped, {
+          workspaceId: context.workspaceId,
+          sessionId: context.sessionId,
+          subjectId: context.subjectId,
+        }),
+      ),
   );
   const mapped = composerDraft(row);
   if (mapped) return mapped;
@@ -1189,6 +1194,7 @@ export async function getHumanComposerDraft(
     model: session.model,
     reasoningEffort: session.reasoningEffort,
     latencyMode: session.latencyMode,
+    policyFollowsSession: true,
     sourceTurnId: null,
     sourceTurnVersion: null,
     updatedAt: null,

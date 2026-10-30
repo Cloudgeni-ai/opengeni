@@ -30,7 +30,7 @@ import type { createRuntimeBatcher, startActivityHeartbeat } from "../streaming"
 import type { RunAgentTurnResult } from "../types";
 import type { TurnOutcome } from "../../observability-metrics";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
-import type { TurnEventPublisher } from "./model-usage";
+import type { TurnBackgroundEventPublisher, TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
 import { InitialModelWireDispatchClock } from "./model-wire-dispatch";
 
@@ -57,6 +57,8 @@ export type TurnSettleInput = {
   suppressGoalContinuation?: boolean;
   allowanceGoalPause?: ApplySessionTurnSettlementInput["allowanceGoalPause"];
   consumeRequestedCompactionFailure?: boolean;
+  /** Drop a pending `proactive` compaction request with this settlement. */
+  dropProactiveCompactionRequest?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
   notStartedToolCallIds?: readonly string[];
 };
@@ -173,6 +175,10 @@ export type EventingState = {
   codemodeDispatcher: CodemodeAttemptDispatcher | null;
   toolCancellationFenceRef: { current: TurnToolCancellationFence | null };
   publish: TurnEventPublisher | null;
+  /** Startup progress receipts that nothing awaits; ordered before later appends. */
+  publishInBackground: TurnBackgroundEventPublisher | null;
+  /** Settles once every background receipt issued so far has finished; never rejects. */
+  backgroundEventsSettled: (() => Promise<void>) | null;
   settle: TurnSettleFn | null;
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
@@ -371,6 +377,8 @@ export function createTurnContext(input: {
       codemodeDispatcher: null,
       toolCancellationFenceRef: { current: null },
       publish: null,
+      publishInBackground: null,
+      backgroundEventsSettled: null,
       settle: null,
       turnStartedPublished: false,
       stream: undefined,

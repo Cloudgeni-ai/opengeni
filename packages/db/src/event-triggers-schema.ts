@@ -45,6 +45,9 @@ export const eventSources = pgTable(
     secretEncrypted: text("secret_encrypted"),
     externalKey: text("external_key"),
     mcpServerId: text("mcp_server_id"),
+    // Migration 1103: a workspace MCP source listens to this URL, signed in
+    // by the workspace credential provider; null for a connector source.
+    mcpServerUrl: text("mcp_server_url"),
     connectionId: uuid("connection_id"),
     lastDeliveryAt: timestamp("last_delivery_at", { withTimezone: true }),
     createdBySubjectId: text("created_by_subject_id").notNull(),
@@ -145,6 +148,8 @@ export const inboundEvents = pgTable(
     data: jsonb("data").$type<Record<string, unknown>>().notNull().default({}),
     dataTruncated: boolean("data_truncated").notNull().default(false),
     gapBefore: boolean("gap_before").notNull().default(false),
+    // Migration 1105: 0, or the chain depth of the automation run that caused it.
+    chainDepth: smallint("chain_depth").notNull().default(0),
   },
   (table) => ({
     external: uniqueIndex("inbound_events_external_uq")
@@ -203,6 +208,35 @@ export const scheduledTaskEventSettings = pgTable("scheduled_task_event_settings
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Migration 1105: what happens in Opengeni itself (chats finishing, failing,
+// waiting; usage thresholds), written by database triggers and kept 24 hours
+// for the "This workspace" feed. Row security decides who sees each fact.
+export const workspaceActivityEvents = pgTable(
+  "workspace_activity_events",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    id: uuid("id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    type: text("type").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    sessionId: uuid("session_id"),
+    turnId: uuid("turn_id"),
+    subjectId: text("subject_id"),
+    automationId: uuid("automation_id"),
+    automationRunId: uuid("automation_run_id"),
+    chainDepth: smallint("chain_depth").notNull().default(0),
+    data: jsonb("data").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    feed: index("workspace_activity_events_feed_idx").on(
+      table.workspaceId,
+      table.createdAt,
+      table.id,
+    ),
+  }),
+);
 
 export const scheduledTaskEventOccurrences = pgTable("scheduled_task_event_occurrences", {
   id: uuid("id").primaryKey().defaultRandom(),

@@ -1,5 +1,38 @@
-import type { ToolActionReview } from "@opengeni/contracts";
+import {
+  mcpElicitationKind,
+  type McpElicitationApprovalRequest,
+  type McpElicitationKind,
+  type ToolActionReview,
+} from "@opengeni/contracts";
 import type { SlackMessageBlock } from "./slack-bot";
+
+/**
+ * An MCP server's question, as plain text from the approval event itself so a
+ * replayed post has the same bytes. Slack answers a plain confirmation when it
+ * is short enough to show whole. Anything to fill in is answered in the
+ * session, because a Slack form needs a modal opened within three seconds of
+ * the click and decisions here go through the durable action queue.
+ */
+export function slackServerQuestion(question: McpElicitationApprovalRequest): {
+  block: SlackMessageBlock;
+  kind: McpElicitationKind;
+  answerableInSlack: boolean;
+} {
+  const text = [
+    `${question.server} asks:`,
+    ...question.requests.map((request) => request.message.trim()).filter(Boolean),
+  ].join("\n");
+  const fits = text.length <= 2800;
+  const kind = mcpElicitationKind(question);
+  return {
+    block: {
+      type: "section",
+      text: { type: "plain_text", text: fits ? text : `${text.slice(0, 2799)}…` },
+    },
+    kind,
+    answerableInSlack: fits && kind === "confirm",
+  };
+}
 
 /** Shared review facts, projected only into a proven private bot conversation. */
 export function slackToolReviewCanDecide(review: ToolActionReview): boolean {

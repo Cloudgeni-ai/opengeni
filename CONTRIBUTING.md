@@ -39,6 +39,10 @@ bun run typecheck
 bun run test:unit
 ```
 
+`bun run test:unit` stops at the first failing file and reports how many files it
+skipped. To run every unit test file and get a list of all failures, use
+`bun run test:unit:all`.
+
 For broader changes that touch persistence, orchestration, sandboxing, or the web/API boundary, also run:
 
 ```bash

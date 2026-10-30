@@ -176,7 +176,6 @@ mock.module("../components/artifacts/site-settings", () => ({
       isAdmin: false,
       manageData: true,
       workspaceName: "Acme",
-      showAudience: true,
       publication: {
         load: { state: "none" },
         reload: async () => {},
@@ -1027,7 +1026,6 @@ test("an unpublished Site offers Publish, which opens its publish form beside th
     workspaceName: "Acme",
     canManage: true,
     isAdmin: false,
-    personalWorkspace: false,
     site: { title: "Opengeni usage" },
     load: { state: "none" },
   });

@@ -1,5 +1,14 @@
 # @opengeni/decisions
 
+## 6.1.1
+
+## 6.0.2
+
+### Patch Changes
+
+- 86c3295: Decision models (tool-search selection and code search) can run on an Azure OpenAI resource that has key sign-in turned off. Set `OPENGENI_DECISION_MODEL_AUTH=deployment_identity` with provider `openai`, the deployment name and the resource's v1 base URL, and requests are signed with a cached Microsoft Entra token for the deployment's own identity. `createHttpDecisionModel` accepts an access-token function in place of a static key, and drops a token the provider rejects.
+- 7148073: Tool search retries its decision model once, after a 250 ms pause, when the provider answers with a rate limit, a server error or an expired sign-in, or the connection drops. Both attempts stay inside the search's 5-second selection deadline, so a brief provider hiccup no longer turns a search into a keyword-only result. Invalid answers, billing and permission refusals are not retried. A dropped connection to a decision provider now carries the error code `request_failed`.
+
 ## 5.5.1
 
 ## 5.4.2

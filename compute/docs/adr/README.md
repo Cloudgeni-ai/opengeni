@@ -22,13 +22,16 @@ old one; old records stay as history.
 | 14 | [Requests, limits and admission](0014-requests-limits-and-admission.md) | Accepted |
 | 15 | [Placement and moving sandboxes between hosts](0015-placement-and-moves-between-hosts.md) | Accepted, built by 18 |
 | 16 | [Observability: wide events, small metrics, zero alarms](0016-observability.md) | Proposed |
-| 17 | [Sweeping the chunks no copy names](0017-sweeping-unnamed-chunks.md) | Accepted |
+| 17 | [Sweeping the chunks no copy names](0017-sweeping-unnamed-chunks.md) | Accepted, safety by 25 |
 | 18 | [The fleet: one service, leases in Postgres, fences on every write](0018-the-control-service-leases-and-fences.md) | Accepted, in progress |
 | 19 | [An E2B-compatible front door and our own guest init](0019-e2b-compatible-front-door-and-guest-init.md) | Accepted, in progress |
 | 20 | [Opengeni runs on compute through its e2b backend](0020-opengeni-runs-on-compute-through-its-e2b-backend.md) | Superseded by 21 for Opengeni |
 | 21 | [Opengeni runs natively: its machine agent in every sandbox, behind the host's link](0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md) | Accepted |
 | 22 | [Templates saved from sandboxes](0022-templates-saved-from-sandboxes.md) | Accepted |
 | 23 | [GitHub Actions runner pools: a fresh sandbox per job](0023-github-actions-runner-pools.md) | Accepted |
+| 24 | [Busy sandboxes are slowed, never frozen, and the host never runs out](0024-busy-sandboxes-are-slowed-never-frozen.md) | Accepted |
+| 25 | [Pointers live in the control service, and stored objects carry their day](0025-pointers-in-the-control-service-and-objects-by-day.md) | Accepted |
+| 26 | [A host that shares its machine](0026-a-host-that-shares-its-machine.md) | Accepted |
 
 ## Format
 

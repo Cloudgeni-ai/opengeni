@@ -1079,6 +1079,9 @@
 :where(.og-root).left-\[38\%\],:where(.og-root) .left-\[38\%\] {
     left: 38%;
   }
+:where(.og-root).left-\[84px\],:where(.og-root) .left-\[84px\] {
+    left: 84px;
+  }
 :where(.og-root).isolate,:where(.og-root) .isolate {
     isolation: isolate;
   }
@@ -1108,6 +1111,9 @@
   }
 :where(.og-root).z-\[35\],:where(.og-root) .z-\[35\] {
     z-index: 35;
+  }
+:where(.og-root).z-\[46\],:where(.og-root) .z-\[46\] {
+    z-index: 46;
   }
 :where(.og-root).z-\[60\],:where(.og-root) .z-\[60\] {
     z-index: 60;
@@ -1196,8 +1202,14 @@
 :where(.og-root).-mx-2,:where(.og-root) .-mx-2 {
     margin-inline: calc(var(--spacing) * -2);
   }
+:where(.og-root).-mx-2\.5,:where(.og-root) .-mx-2\.5 {
+    margin-inline: calc(var(--spacing) * -2.5);
+  }
 :where(.og-root).-mx-3,:where(.og-root) .-mx-3 {
     margin-inline: calc(var(--spacing) * -3);
+  }
+:where(.og-root).mx-0,:where(.og-root) .mx-0 {
+    margin-inline: calc(var(--spacing) * 0);
   }
 :where(.og-root).mx-1,:where(.og-root) .mx-1 {
     margin-inline: calc(var(--spacing) * 1);
@@ -1584,6 +1596,9 @@
   }
 :where(.og-root).\!h-auto,:where(.og-root) .\!h-auto {
     height: auto !important;
+  }
+:where(.og-root).h-\(--og-window-bar-height\),:where(.og-root) .h-\(--og-window-bar-height\) {
+    height: var(--og-window-bar-height);
   }
 :where(.og-root).h-0,:where(.og-root) .h-0 {
     height: calc(var(--spacing) * 0);
@@ -5249,6 +5264,9 @@
 :where(.og-root).whitespace-pre,:where(.og-root) .whitespace-pre {
     white-space: pre;
   }
+:where(.og-root).whitespace-pre-line,:where(.og-root) .whitespace-pre-line {
+    white-space: pre-line;
+  }
 :where(.og-root).whitespace-pre-wrap,:where(.og-root) .whitespace-pre-wrap {
     white-space: pre-wrap;
   }
@@ -7578,6 +7596,16 @@
       }
     }
   }
+:where(.og-root).hover\:bg-og-surface-1\/80,:where(.og-root) .hover\:bg-og-surface-1\/80 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--og-color-surface-1);
+        @supports (color: color-mix(in lab, red, red)) {
+          background-color: color-mix(in oklab, var(--og-color-surface-1) 80%, transparent);
+        }
+      }
+    }
+  }
 :where(.og-root).hover\:bg-og-surface-2,:where(.og-root) .hover\:bg-og-surface-2 {
     &:hover {
       @media (hover: hover) {
@@ -8998,6 +9026,11 @@
 :where(.og-root).aria-pressed\:opacity-100,:where(.og-root) .aria-pressed\:opacity-100 {
     &[aria-pressed="true"] {
       opacity: 100%;
+    }
+  }
+:where(.og-root).aria-\[invalid\=true\]\:border-og-status-failed,:where(.og-root) .aria-\[invalid\=true\]\:border-og-status-failed {
+    &[aria-invalid="true"] {
+      border-color: var(--og-color-status-failed);
     }
   }
 :where(.og-root).aria-\[invalid\=true\]\:border-og-status-failed\/60,:where(.og-root) .aria-\[invalid\=true\]\:border-og-status-failed\/60 {
@@ -12673,6 +12706,11 @@
       min-width: calc(var(--spacing) * 11);
     }
   }
+:where(.og-root).\[\@media\(pointer\:coarse\)\]\:py-2\.5,:where(.og-root) .\[\@media\(pointer\:coarse\)\]\:py-2\.5 {
+    @media (pointer:coarse) {
+      padding-block: calc(var(--spacing) * 2.5);
+    }
+  }
 /*! tailwindcss v4.2.4 | MIT License | https://tailwindcss.com */
 :where(.og-root) {
   color-scheme: var(--_og-color-scheme, dark);
@@ -13128,6 +13166,9 @@
 }
 :where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
   font-weight: 500;
+}
+:where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-copy:focus,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy:focus {
+  outline: none;
 }
 :where(.og-root).og-session-capability-setup fieldset,:where(.og-root) .og-session-capability-setup fieldset {
   display: grid;
@@ -14591,6 +14632,9 @@
 :where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-copy,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy {
   font-weight: 500;
 }
+:where(.og-root).og-session-capability-shell[data-state="complete"] .og-session-capability-copy:focus,:where(.og-root) .og-session-capability-shell[data-state="complete"] .og-session-capability-copy:focus {
+  outline: none;
+}
 :where(.og-root).og-session-capability-setup fieldset,:where(.og-root) .og-session-capability-setup fieldset {
   display: grid;
   gap: 10px;
@@ -15983,6 +16027,17 @@
 }
 :where(.og-root).og-connect-setup .og-connect-setup-primary:hover:not(:disabled),:where(.og-root) .og-connect-setup .og-connect-setup-primary:hover:not(:disabled) {
   background: var(--_og-color-primary-hover);
+}
+:where(.og-root).og-connect-setup a.og-connect-setup-primary,:where(.og-root) .og-connect-setup a.og-connect-setup-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-height: 2.75rem;
+  padding: .5rem .75rem;
+  border-width: 1px;
+  border-style: solid;
+  text-decoration: none;
 }
 :where(.og-root).og-connect-setup .og-connect-setup-secondary,:where(.og-root) .og-connect-setup .og-connect-setup-secondary {
   display: flex;

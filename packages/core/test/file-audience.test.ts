@@ -3,7 +3,7 @@ import type { Database } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
 import {
-  FILE_PERSONAL_WORKSPACE_MESSAGE,
+  FILE_OWNER_REQUIRED_MESSAGE,
   FILE_PRIVATE_OWNER_MESSAGE,
   changeFileVisibility,
   fileAccessFor,
@@ -55,7 +55,7 @@ describe("a new file's audience", () => {
     ).toEqual({ privateOwnerSubjectId: null, ownerSubjectId: "user:ada" });
   });
 
-  test("Only me needs a person, and a personal workspace keeps everything private", async () => {
+  test("Only me needs a person, and a personal workspace follows the same rule", async () => {
     await expect(
       resolveNewFileAudience({
         db,
@@ -74,6 +74,26 @@ describe("a new file's audience", () => {
         chatOwner: null,
         person: "user:ada",
         requested: "workspace",
+      }),
+    ).toEqual({ privateOwnerSubjectId: null, ownerSubjectId: "user:ada" });
+    expect(
+      await resolveNewFileAudience({
+        db,
+        settings,
+        workspace: personal,
+        chatOwner: null,
+        person: "user:ada",
+        requested: undefined,
+      }),
+    ).toEqual({ privateOwnerSubjectId: null, ownerSubjectId: "user:ada" });
+    expect(
+      await resolveNewFileAudience({
+        db,
+        settings,
+        workspace: personal,
+        chatOwner: "user:ada",
+        person: "user:ada",
+        requested: undefined,
       }),
     ).toEqual({ privateOwnerSubjectId: "user:ada", ownerSubjectId: "user:ada" });
   });
@@ -107,13 +127,25 @@ describe("who can open a file", () => {
           file: { scope: "personal", ownerSubjectId: null },
         })
       ).whoCanOpen,
-    ).toBe("Only its owner can open this file; it is in a personal workspace.");
+    ).toBe(
+      "Only its owner can open this file. Anyone else who opens its link is told it is private.",
+    );
+    expect(
+      (
+        await fileAccessFor(db, {
+          workspace: { name: "Mine", kind: "personal" },
+          file: { scope: "workspace", ownerSubjectId: null },
+        })
+      ).whoCanOpen,
+    ).toBe(
+      "Everyone in the personal workspace “Mine” can open this file; only its owner is in it.",
+    );
     expect(fileVisibility({ scope: "personal" })).toBe("private");
     expect(fileVisibility({ scope: "workspace" })).toBe("workspace");
   });
 });
 
-test("a personal workspace has nobody to share a file with", async () => {
+test("a file in a personal workspace changes audience by the same owner rule", async () => {
   const refused = await changeFileVisibility({
     db,
     settings,
@@ -125,11 +157,11 @@ test("a personal workspace has nobody to share a file with", async () => {
       principalKind: "human_session",
     },
     workspace: personal,
-    person: "user:ada",
+    person: null,
     fileId: "22222222-2222-4222-8222-222222222222",
     visibility: "workspace",
   }).catch((error: unknown) => error);
   expect(refused).toBeInstanceOf(HTTPException);
-  expect((refused as HTTPException).status).toBe(422);
-  expect((refused as HTTPException).message).toBe(FILE_PERSONAL_WORKSPACE_MESSAGE);
+  expect((refused as HTTPException).status).toBe(403);
+  expect((refused as HTTPException).message).toBe(FILE_OWNER_REQUIRED_MESSAGE);
 });
