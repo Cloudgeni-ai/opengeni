@@ -49,6 +49,7 @@ mod fetch;
 mod handle;
 mod holds;
 mod link;
+mod lost;
 mod observe;
 mod owners;
 mod ready;
