@@ -23,6 +23,7 @@ export type SessionListEntryInput = Omit<
   | "archiveVersion"
   | "description"
   | "avatar"
+  | "latestTurn"
 > & {
   /** Absent from older servers' rows and SDK-projected sessions. */
   description?: string | null | undefined;
@@ -60,6 +61,7 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     workspaceId: session.workspaceId,
     accountId: session.accountId,
     status: session.status,
+    activeTurnId: session.activeTurnId,
     backgroundCommandActivity: session.backgroundCommandActivity,
     hasSchedules: session.hasSchedules,
     hasUpcomingSchedules: session.hasUpcomingSchedules,

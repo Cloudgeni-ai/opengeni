@@ -2238,9 +2238,29 @@ a few seconds for it. A tab blocked by a dialog its page opened while no agent
 held the browser is left as it is for the person, and the session continues in
 a new tab.
 
-An attached tab's debugger disconnect invalidates its cached target, document,
-frame and element authority without restarting Chrome or changing other tabs.
-A later read can reattach the same surviving tab with fresh fences. Chrome's
+An attached tab's debugger disconnect ends that attachment's commands and
+controls without restarting Chrome or changing other tabs. A later call can
+reattach the same surviving tab: if it still shows the same document (same
+main-frame frame and loader ids), its target, document, frame and element
+authority carry over, so an observation made just before still holds; a new
+document gets fresh fences. Chrome ends debugging of a tab whenever another
+extension adds a frame of its own page (a password manager's inline menu); the
+extension removes such frames. A frame created blank and then loaded with the
+other extension's page, which its address does not show, is removed only when
+it is the one place the tab can hold that page. Chrome's debugging targets
+show other extensions' pages only for the whole browser, not per tab, and
+Chrome does not list every frame of a page to the extension (`webNavigation`
+omits other extensions' pages and some of the page's own, such as a data: page
+a blank frame was pointed at by script). So the frame must be the tab's only
+frame the extension cannot see into, hold no frames of its own, and every
+frame Chrome does list must have run the extension's script; the page must
+add no frame while the extension searches, hold no other extension's page
+found by its address, and Chrome's targets must hold another extension's page.
+Otherwise (the page also holds an error page, say, a data: frame of its own, a
+site the person took the extension's access from, or keeps adding frames) no
+frame is removed, the call fails saying the frame could not be
+removed, and the tab can be debugged again once the menu closes, still holding
+earlier observations of the same document. Chrome's
 `canceled_by_user` disconnect requires reconnecting the profile; it is never
 silently overridden. Detachment during pending input or other possible effects preserves an unknown
 outcome and blocks automatic reattachment until the profile reconnects. A late
