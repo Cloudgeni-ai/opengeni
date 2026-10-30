@@ -91,6 +91,7 @@ export const SECTION_KEYS = [
   // Selection
   "setting-row",
   "own-where-it-works",
+  "my-things",
   "switch",
   "segmented-control",
   "choice-cards",
@@ -398,6 +399,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       "Your own login, model plan or machine: each workspace you belong to, with a switch for your own messages there.",
     usedOn: "Connector page, model plan page, machine page",
     load: () => import("./own-where-it-works"),
+  },
+  {
+    key: "my-things",
+    group: "Selection",
+    title: "My things",
+    purpose:
+      "Every one of your own logins, model plans and machines in the organization, each with where it works.",
+    usedOn: "Settings › Your account › My things",
+    load: () => import("./my-things"),
   },
   {
     key: "switch",

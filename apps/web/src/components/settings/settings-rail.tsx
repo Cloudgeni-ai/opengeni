@@ -9,6 +9,7 @@ import { t } from "@opengeni/react/app/lib/console-text";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3Icon,
+  CircleUserRoundIcon,
   CodeIcon,
   ContainerIcon,
   GaugeIcon,
@@ -92,6 +93,11 @@ export const WORKSPACE_SETTINGS_COPY: Record<
     title: "Agent learning",
     description: () => "What agents can change on their own, and what waits for your OK.",
   },
+  mine: {
+    title: "My things",
+    description: ({ organization }) =>
+      `Your own logins, model plans and machines in ${organization}, and the workspaces where each works for your own messages.`,
+  },
 };
 
 const SECTION_ICONS = {
@@ -102,6 +108,7 @@ const SECTION_ICONS = {
   learning: GraduationCapIcon,
   "api-keys": KeyRoundIcon,
   developer: CodeIcon,
+  mine: CircleUserRoundIcon,
 } as const;
 
 // Agent learning sits with the workspace's own settings. A Personal workspace
@@ -182,7 +189,10 @@ function splitIntoGroups(groups: SettingsRailSection["groups"][number]["items"][
 export function settingsRailItemId(location: SettingsLocation): string | null {
   switch (location.kind) {
     case "settings":
-      return `workspace:${location.section ?? "general"}`;
+      // My things opens through a workspace, but it is the person's own page.
+      return location.section === "mine"
+        ? "account:mine"
+        : `workspace:${location.section ?? "general"}`;
     case "page":
       return `workspace:${location.target}`;
     case "organization":
@@ -442,13 +452,32 @@ export function useSettingsRail(input: {
   }
 
   if (context.clientConfig.auth.mode === "managedSession") {
-    // Your account opens outside workspace settings; its back link returns here.
+    // Your account's Security opens outside workspace settings; its back link
+    // returns here. My things opens through this workspace: your own things
+    // belong to you in its organization.
+    const myThingsWorkspaceId = managedWorkspace ? null : (workspace?.id ?? null);
     sections.push({
       id: "account",
       label: "Your account",
       groups: [
         {
           items: [
+            ...(myThingsWorkspaceId
+              ? [
+                  {
+                    id: "account:mine",
+                    label: WORKSPACE_SETTINGS_COPY.mine.title,
+                    icon: SECTION_ICONS.mine,
+                    link: (
+                      <Link
+                        to="/workspaces/$workspaceId/settings"
+                        params={{ workspaceId: myThingsWorkspaceId }}
+                        search={{ section: "mine" }}
+                      />
+                    ),
+                  },
+                ]
+              : []),
             {
               id: "account:security",
               label: "Security",
@@ -497,6 +526,9 @@ export function useSettingsRail(input: {
     organizationSection,
     scopeOf: (at) => {
       if (at.kind === "account") return "Your account";
+      if (at.kind === "settings" && at.section === "mine") {
+        return organizationName ? `Your account · ${organizationName}` : "Your account";
+      }
       if (at.kind === "organization") {
         return organizationName ? `Organization · ${organizationName}` : "Organization";
       }

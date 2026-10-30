@@ -240,6 +240,12 @@ function OperationalWorkspaceSettingsRoute({
         <WorkspaceApiKeysPage key={workspaceId} workspaceId={workspaceId} keyParam={apiKey} />
       ) : null}
 
+      {section === "mine" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading your things" />}>
+          <LazyMyThings key={workspaceId} client={context.client} workspaceId={workspaceId} />
+        </Suspense>
+      ) : null}
+
       {section === "developer" ? (
         <Suspense fallback={<SettingsRowsFallback label="Loading developer settings" />}>
           <LazyWorkspaceDeveloperSettings
@@ -1024,6 +1030,11 @@ const LazyAgentLearningSettingsPage = lazy(async () => {
 const LazyWorkspaceUsagePage = lazy(async () => {
   const module = await import("@/components/usage/workspace-usage-page");
   return { default: module.WorkspaceUsagePage };
+});
+
+const LazyMyThings = lazy(async () => {
+  const module = await import("@opengeni/react/app/components/my-things");
+  return { default: module.MyThings };
 });
 
 const LazyWorkspaceDeveloperSettings = lazy(async () => {

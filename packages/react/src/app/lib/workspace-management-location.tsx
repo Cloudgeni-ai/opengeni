@@ -14,7 +14,9 @@ export type WorkspaceSettingsSection =
   | "usage"
   | "api-keys"
   | "developer"
-  | "learning";
+  | "learning"
+  /** My things: your own logins, plans and machines in the organization. Listed under Your account. */
+  | "mine";
 
 /**
  * Older `?section=` values. They keep working: Members is now Access, Danger
@@ -30,6 +32,7 @@ export const WORKSPACE_SETTINGS_SECTIONS: readonly WorkspaceSettingsSection[] = 
   "api-keys",
   "developer",
   "learning",
+  "mine",
 ];
 
 const WORKSPACE_PAGE_TARGETS = [
