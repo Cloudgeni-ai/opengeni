@@ -4020,6 +4020,11 @@ export const DelegatedAccessTokenPayload = /* @__PURE__ */ defineSchema(() =>
       // attempt still owns the signed turn.
       attemptId: primitives.optionalUuid,
       executionGeneration: z.number().int().positive().optional(),
+      // The machine whose process holds this token, when it is not the
+      // session's active sandbox: a `run_on` exec on another enrolled machine.
+      // Tools that take a path in "this" workspace resolve it there. Older
+      // verifiers ignore it and fall back to the active sandbox.
+      executionSandboxId: primitives.optionalUuid,
       exp: primitives.positiveInteger,
     })
     .superRefine((payload, ctx) => {
@@ -4048,6 +4053,13 @@ export const DelegatedAccessTokenPayload = /* @__PURE__ */ defineSchema(() =>
           code: z.ZodIssueCode.custom,
           path: ["principalKind"],
           message: "nested-agent depth claims require an agent_attempt principal",
+        });
+      }
+      if (payload.executionSandboxId !== undefined && payload.principalKind !== "agent_attempt") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["executionSandboxId"],
+          message: "executionSandboxId requires an agent_attempt principal",
         });
       }
       if (
