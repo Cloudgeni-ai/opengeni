@@ -403,7 +403,7 @@ function RecordingTitle({ recorder }: { recorder: MeetingRecorder }) {
           title ? "text-fg" : "text-fg-muted",
         )}
       >
-        {title ?? msg("meetings.recorderPanel.namedForYouWhenItEnds")}
+        {title ?? msg("meetings.recorderPanel.namedForYou")}
       </p>
       <Button
         type="button"

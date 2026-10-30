@@ -583,6 +583,32 @@ describe("RecordingUploader", () => {
     expect(server.state.titles).toEqual([]);
   });
 
+  test("a server from before title sources still gets the app's title", async () => {
+    const server = fakeServer();
+    const create0 = server.client.createRecording.bind(server.client);
+    server.client.createRecording = async (...args: Parameters<typeof create0>) => {
+      if (args[1].titleSource !== undefined) {
+        throw Object.assign(new Error("Unrecognized key: titleSource"), {
+          status: 400,
+          retryable: false,
+          details: { code: "invalid_request" },
+        });
+      }
+      return await create0(...args);
+    };
+    const { uploader } = uploaderFor(server);
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create: { ...create, title: "Zoom meeting", titleSource: "app" },
+    });
+    await uploader.addChunk(await testChunk(0, 0, "a"));
+    const status = await uploader.finish(RECORDING);
+    expect(status.failed).toBeNull();
+    expect(status.finalized).toBe(true);
+    expect(server.state.createdTitle).toBe("Zoom meeting");
+  });
+
   test("a name someone typed is sent as theirs and never replaced by the server's", async () => {
     const server = fakeServer();
     server.state.calendarTitle = "Quarterly planning with Acme";

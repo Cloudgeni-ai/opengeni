@@ -172,6 +172,25 @@ describe("recording title sources", () => {
     expect((await name(scope, dictation.id, "Named", "conversation")).renamed).toBe(false);
   });
 
+  test("a rename that doesn't say where it came from, as a previous release's, is a person's", async () => {
+    if (!client) return;
+    const scope = await workspace();
+    const recording = await meeting(scope);
+    await shared!.admin`update recordings set title = 'Board prep' where id = ${recording.id}`;
+    expect(await getRecording(client.db, { ...scope, recordingId: recording.id })).toMatchObject({
+      title: "Board prep",
+      titleSource: "person",
+    });
+    expect((await name(scope, recording.id, "Generated", "conversation")).renamed).toBe(false);
+    // A change that leaves the title alone leaves its source alone.
+    const unnamed = await meeting(scope);
+    await shared!
+      .admin`update recordings set title = title, metadata = '{"x":1}' where id = ${unnamed.id}`;
+    expect((await getRecording(client.db, { ...scope, recordingId: unnamed.id })).titleSource).toBe(
+      "default",
+    );
+  });
+
   test("the column accepts only known sources", async () => {
     if (!client) return;
     const scope = await workspace();

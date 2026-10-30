@@ -535,9 +535,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
           .describe("The notes' revision from meeting_read, or 0 when it showed none."),
         title: z
           .string()
-          .trim()
-          .min(1)
-          .max(120)
+          .max(1_000)
           .optional()
           .describe(
             'A short name for the meeting saying what it was about, in the language it was held in, such as "Q3 pricing review with Acme". Kept only while the meeting has no name from a person or a calendar event.',
@@ -574,15 +572,19 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
           sessionId,
         });
         // Named from the conversation only over a date or app name; a
-        // person's or a calendar event's name stays.
-        const named = request.title
+        // person's or a calendar event's name stays. The notes are saved
+        // whatever happens to the name: a blank one is ignored, a long one
+        // shortened, and a failure only means the name isn't used.
+        const named = request.title?.trim()
           ? await nameRecording(deps.db, {
               ...who,
               recordingId: request.meetingId,
               title: request.title,
               source: "conversation",
-            })
-          : null;
+            }).catch(() => ({ renamed: false }))
+          : request.title === undefined
+            ? null
+            : { renamed: false };
         return json({
           saved: true,
           revision: saved.revision,

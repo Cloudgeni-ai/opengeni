@@ -33,16 +33,22 @@ export type MeetingCalendarEvent = {
   end: Date;
   /** All-day events, out of office, focus time and working location are not meetings. */
   meeting: boolean;
-  /** Private or confidential: its name must not reach a meeting others may see. */
+  /** Private, personal or confidential: its name must not reach a meeting others may see. */
   private: boolean;
   /** The owner declined it, or it was cancelled. */
   declined: boolean;
+  /**
+   * The owner hasn't answered the invitation. Such an event still names a
+   * meeting, but one they accepted or organized comes first: an unanswered
+   * one may be an invitation nobody expected.
+   */
+  unanswered?: boolean;
 };
 
 /**
  * The event a recording that started at `at` is most likely of: one under
- * way or about to start, the one whose start is nearest, then the shorter.
- * Null when none fits.
+ * way or about to start; one the owner answered first, then the one whose
+ * start is nearest, then the shorter. Null when none fits.
  */
 export function meetingEventAt(
   events: readonly MeetingCalendarEvent[],
@@ -61,6 +67,7 @@ export function meetingEventAt(
   );
   fitting.sort(
     (a, b) =>
+      Number(a.unanswered === true) - Number(b.unanswered === true) ||
       Math.abs(a.start.getTime() - time) - Math.abs(b.start.getTime() - time) ||
       a.end.getTime() - a.start.getTime() - (b.end.getTime() - b.start.getTime()),
   );
@@ -106,6 +113,7 @@ export function googleCalendarEvents(body: unknown): MeetingCalendarEvent[] {
         meeting: !allDay && (eventType === "default" || eventType === "fromGmail"),
         private: item.visibility === "private" || item.visibility === "confidential",
         declined: item.status === "cancelled" || self?.responseStatus === "declined",
+        unanswered: self?.responseStatus === "needsAction",
       },
     ];
   });
@@ -144,8 +152,12 @@ export function graphCalendarEvents(body: unknown): MeetingCalendarEvent[] {
         end,
         meeting:
           item.isAllDay !== true && item.showAs !== "oof" && item.showAs !== "workingElsewhere",
-        private: item.sensitivity === "private" || item.sensitivity === "confidential",
+        private:
+          item.sensitivity === "private" ||
+          item.sensitivity === "personal" ||
+          item.sensitivity === "confidential",
         declined: item.isCancelled === true || item.responseStatus?.response === "declined",
+        unanswered: item.responseStatus?.response === "notResponded",
       },
     ];
   });
@@ -162,8 +174,11 @@ export function meetingCalendarConnections(
     const domain = connection.providerDomain.toLowerCase();
     if (domain === GOOGLE_CALENDAR_PROVIDER_DOMAIN) return input.googleCalendarEnabled;
     if (domain === MICROSOFT_GRAPH_PROVIDER_DOMAIN) {
+      // Scopes may be stored short ("Calendars.Read") or as a URL.
       return connection.grantedScopes.some((scope) =>
-        MICROSOFT_CALENDAR_SCOPES.has(scope.toLowerCase()),
+        MICROSOFT_CALENDAR_SCOPES.has(
+          scope.toLowerCase().replace(/^https:\/\/graph\.microsoft\.com\//u, ""),
+        ),
       );
     }
     return false;
@@ -181,6 +196,11 @@ export type MeetingCalendarLookup = {
   fetch: typeof fetch;
   googleCalendarEnabled: boolean;
   timeoutMs?: number;
+  /**
+   * Why a calendar couldn't be read, such as an HTTP status, so "why wasn't
+   * it named?" can be answered. Never carries a credential or an event.
+   */
+  onProblem?: (problem: { providerDomain: string; reason: string }) => void;
 };
 
 function eventsRequest(connection: ConnectionMetadataWithVerification, at: Date) {
@@ -224,6 +244,15 @@ export async function meetingCalendarTitle(
   input: { subjectId: string; at: Date },
 ): Promise<string | null> {
   const timeout = AbortSignal.timeout(lookup.timeoutMs ?? MEETING_CALENDAR_LOOKUP_TIMEOUT_MS);
+  let settled = false;
+  const problem = (providerDomain: string, reason: string) => {
+    if (settled) return;
+    try {
+      lookup.onProblem?.({ providerDomain, reason });
+    } catch {
+      // Reporting never changes the outcome.
+    }
+  };
   const read = async (): Promise<string | null> => {
     const connections = meetingCalendarConnections(await lookup.listConnections(), {
       subjectId: input.subjectId,
@@ -235,15 +264,26 @@ export async function meetingCalendarTitle(
         try {
           const request = eventsRequest(connection, input.at);
           const credential = await lookup.credentialHeaders(connection, request.url);
-          if (!credential || timeout.aborted) return [];
+          if (!credential) {
+            problem(connection.providerDomain, "credential unavailable");
+            return [];
+          }
+          if (timeout.aborted) return [];
           const response = await lookup.fetch(request.url, {
             headers: { ...credential, ...request.headers, Accept: "application/json" },
             redirect: "error",
             signal: timeout,
           });
-          if (!response.ok) return [];
+          if (!response.ok) {
+            problem(connection.providerDomain, `HTTP ${response.status}`);
+            return [];
+          }
           return request.parse(await response.json());
-        } catch {
+        } catch (error) {
+          // A lookup cut off by the time limit is reported once, below.
+          if (!timeout.aborted) {
+            problem(connection.providerDomain, error instanceof Error ? error.name : "failed");
+          }
           return [];
         }
       }),
@@ -252,12 +292,22 @@ export async function meetingCalendarTitle(
     return event ? calendarTitle(event.title) : null;
   };
   const expired = new Promise<null>((resolve) => {
-    timeout.addEventListener("abort", () => resolve(null), { once: true });
+    timeout.addEventListener(
+      "abort",
+      () => {
+        problem("*", "timed out");
+        resolve(null);
+      },
+      { once: true },
+    );
   });
   try {
     return await Promise.race([read(), expired]);
-  } catch {
+  } catch (error) {
+    problem("*", error instanceof Error ? error.name : "failed");
     return null;
+  } finally {
+    settled = true;
   }
 }
 
@@ -268,6 +318,7 @@ export function meetingCalendarLookup(input: {
   workspaceId: string;
   subjectId: string;
   fetch?: typeof fetch;
+  onProblem?: MeetingCalendarLookup["onProblem"];
 }): MeetingCalendarLookup {
   const resolve = buildConnectionTokenResolver(input.db, input.settings);
   return {
@@ -285,10 +336,12 @@ export function meetingCalendarLookup(input: {
           subjectScope: "subject",
         },
         destinationUrl: url,
+        credentialTarget: "http_api",
       });
       return result.status === "ok" ? result.headers : null;
     },
     fetch: input.fetch ?? fetch,
     googleCalendarEnabled: input.settings.googleCalendarEnabled === true,
+    ...(input.onProblem ? { onProblem: input.onProblem } : {}),
   };
 }

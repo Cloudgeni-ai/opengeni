@@ -491,6 +491,28 @@ describe("meeting tools", () => {
       }),
     ).toMatchObject({ isError: true, error: { code: "notes_changed" } });
     expect((await titleOf(stale)).titleSource).toBe("default");
+
+    // A name that can't be used never costs the notes: blank is ignored and
+    // a long one is shortened.
+    const blank = await scope.meeting({ visibility: "workspace" });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: blank,
+        notes: "Notes.",
+        expectedRevision: 0,
+        title: "   ",
+      }),
+    ).toEqual({ saved: true, revision: 1, titleUsed: false, isError: false });
+    const long = await scope.meeting({ visibility: "workspace" });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: long,
+        notes: "Notes.",
+        expectedRevision: 0,
+        title: "Roadmap ".repeat(60),
+      }),
+    ).toMatchObject({ saved: true, titleUsed: true });
+    expect((await titleOf(long)).title.length).toBeLessThanOrEqual(300);
   });
 
   test("the person's own Only me meetings from their other workspaces of the organization, never another organization's", async () => {

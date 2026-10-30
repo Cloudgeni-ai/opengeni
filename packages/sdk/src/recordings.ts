@@ -945,7 +945,21 @@ export class RecordingUploader {
     if (!recording.created) {
       const workspaceId = recording.workspaceId;
       const sent = recording.create;
-      const made = await guarded(() => client.createRecording(workspaceId, sent));
+      const made = await guarded(() => client.createRecording(workspaceId, sent)).catch(
+        async (error: unknown) => {
+          // A server from before titleSource refuses the field: the title
+          // is sent without it, as every title was then.
+          if (
+            !(error instanceof PermanentRecordingError) ||
+            error.status !== 400 ||
+            sent.titleSource === undefined
+          ) {
+            throw error;
+          }
+          const { titleSource: _unknownThere, ...older } = sent;
+          return await guarded(() => client.createRecording(workspaceId, older));
+        },
+      );
       recording = await this.mutate(recordingId, (current) => ({
         ...current,
         created: true,

@@ -19,7 +19,10 @@ export function meetingSummaryPrompt(input: {
   titleSource?: "person" | "calendar" | "conversation" | "app" | "default" | undefined;
 }): string {
   const named = input.titleSource !== "default" && input.titleSource !== "app";
-  const title = (named && input.title?.replace(/\s+/gu, " ").trim().slice(0, 300)) || null;
+  // A calendar title may come from whoever sent the invitation: it stays one
+  // quoted line of text, never a way out of its quotes.
+  const title =
+    (named && input.title?.replace(/\s+/gu, " ").replaceAll('"', "'").trim().slice(0, 300)) || null;
   const meeting = title ? `the meeting "${title}"` : "this meeting";
   return [
     `Write the notes for ${meeting} (meeting id ${input.recordingId}). Its transcript is ready.`,

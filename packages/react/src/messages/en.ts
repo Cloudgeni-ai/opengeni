@@ -2740,7 +2740,7 @@ export const englishMessages = {
   "meetings.recorderPanel.nameIt": "Name it",
   "meetings.recorderPanel.nameThisMeeting": "Name this meeting",
   "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting, or it's named for you",
-  "meetings.recorderPanel.namedForYouWhenItEnds": "Named for you when it ends",
+  "meetings.recorderPanel.namedForYou": "Named for you",
   "meetings.recorderPanel.newRecording": "New recording",
   "meetings.recorderPanel.noLiveTranscriptionProviderIs":
     "Live transcription isn't set up. Ask an admin to connect it.",

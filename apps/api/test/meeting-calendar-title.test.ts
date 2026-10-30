@@ -307,4 +307,91 @@ describe("the lookup", () => {
     expect(new URL(graphRequest.url).pathname).toBe("/v1.0/me/calendarView");
     expect(graphRequest.headers.Prefer).toBe('outlook.timezone="UTC"');
   });
+
+  test("says why a calendar couldn't be read, without the credential", async () => {
+    const problems: Array<{ providerDomain: string; reason: string }> = [];
+    const onProblem = (problem: { providerDomain: string; reason: string }) =>
+      void problems.push(problem);
+    await meetingCalendarTitle(
+      lookup({
+        onProblem,
+        fetch: (async () => new Response("no", { status: 401 })) as unknown as typeof fetch,
+      }).value,
+      { subjectId: owner, at },
+    );
+    await meetingCalendarTitle(lookup({ onProblem, credentialHeaders: async () => null }).value, {
+      subjectId: owner,
+      at,
+    });
+    expect(problems).toEqual([
+      { providerDomain: "calendarmcp.googleapis.com", reason: "HTTP 401" },
+      { providerDomain: "calendarmcp.googleapis.com", reason: "credential unavailable" },
+    ]);
+    // A lookup that worked reports nothing, even after its time is up.
+    problems.length = 0;
+    expect(
+      await meetingCalendarTitle(lookup({ onProblem, timeoutMs: 30 }).value, {
+        subjectId: owner,
+        at,
+      }),
+    ).toBe("Acme renewal");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(problems).toEqual([]);
+  });
+});
+
+describe("which invitations name a meeting", () => {
+  test("an event the owner answered comes before an invitation they haven't", () => {
+    const invitation = event({
+      title: "Unexpected invite",
+      start: new Date("2026-10-30T13:02:00Z"),
+      unanswered: true,
+    });
+    expect(meetingEventAt([invitation, event()], at)?.title).toBe("Acme renewal");
+    // Alone, an unanswered invitation still names the meeting.
+    expect(meetingEventAt([invitation], at)?.title).toBe("Unexpected invite");
+  });
+
+  test("Google's needsAction and Graph's notResponded are unanswered; Graph's personal events are private", () => {
+    const [google] = googleCalendarEvents({
+      items: [
+        {
+          summary: "Invite",
+          start: { dateTime: "2026-10-30T13:00:00Z" },
+          end: { dateTime: "2026-10-30T13:30:00Z" },
+          attendees: [{ self: true, responseStatus: "needsAction" }],
+        },
+      ],
+    });
+    expect(google?.unanswered).toBe(true);
+    const [notResponded, personal] = graphCalendarEvents({
+      value: [
+        {
+          subject: "Invite",
+          start: { dateTime: "2026-10-30T13:00:00" },
+          end: { dateTime: "2026-10-30T13:30:00" },
+          responseStatus: { response: "notResponded" },
+        },
+        {
+          subject: "Doctor",
+          sensitivity: "personal",
+          start: { dateTime: "2026-10-30T13:00:00" },
+          end: { dateTime: "2026-10-30T13:30:00" },
+          responseStatus: { response: "organizer" },
+        },
+      ],
+    });
+    expect(notResponded?.unanswered).toBe(true);
+    expect(personal).toMatchObject({ private: true, unanswered: false });
+  });
+
+  test("a Microsoft calendar scope stored as a URL counts", () => {
+    const graph = connection({
+      providerDomain: "graph.microsoft.com",
+      grantedScopes: ["https://graph.microsoft.com/Calendars.Read"],
+    });
+    expect(
+      meetingCalendarConnections([graph], { subjectId: owner, googleCalendarEnabled: false }),
+    ).toHaveLength(1);
+  });
 });

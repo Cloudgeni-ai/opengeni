@@ -14,3 +14,25 @@ ALTER TABLE recordings ADD COLUMN IF NOT EXISTS title_source text NOT NULL DEFAU
 ALTER TABLE recordings ADD CONSTRAINT recordings_title_source_chk
   CHECK (title_source IN ('person', 'calendar', 'conversation', 'app', 'default'))
   NOT VALID;
+
+-- A title that changes while its source doesn't is a person's. This
+-- release's renames and automatic names always set both, but a previous
+-- binary still serving during the rollout renames without the source, and a
+-- name it took from someone must not be replaced by an automatic one.
+CREATE OR REPLACE FUNCTION opengeni_private.recording_title_source_person_v1()
+RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $body$
+BEGIN
+  NEW.title_source := 'person';
+  RETURN NEW;
+END $body$;
+REVOKE ALL ON FUNCTION opengeni_private.recording_title_source_person_v1() FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS recordings_title_source_person_v1 ON recordings;
+CREATE TRIGGER recordings_title_source_person_v1
+  BEFORE UPDATE OF title ON recordings
+  FOR EACH ROW WHEN (
+    NEW.title IS DISTINCT FROM OLD.title
+    AND NEW.title_source IS NOT DISTINCT FROM OLD.title_source
+  )
+  EXECUTE FUNCTION opengeni_private.recording_title_source_person_v1();

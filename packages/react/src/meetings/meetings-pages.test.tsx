@@ -1857,7 +1857,7 @@ describe("Live transcript", () => {
     } as unknown as Parameters<typeof RecorderPanel>[0]["recorder"];
     const view = await render(<RecorderPanel recorder={recorder} />);
     try {
-      expect(view.container.textContent).toContain("Named for you when it ends");
+      expect(view.container.textContent).toContain("Named for you");
       const nameIt = [...view.container.querySelectorAll("button")].find(
         (button) => button.textContent?.trim() === "Name it",
       )!;

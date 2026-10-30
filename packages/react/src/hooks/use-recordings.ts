@@ -411,6 +411,10 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       const merged = {
         ...optionsRef.current,
         ...overrides,
+        // A title given at start is the person's unless the start says otherwise.
+        ...(overrides.title !== undefined && overrides.titleSource === undefined
+          ? { titleSource: undefined }
+          : {}),
         // A start can set one transcription option, such as the language, and
         // keep the rest the hook was given.
         ...(overrides.transcription
