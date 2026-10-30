@@ -129,12 +129,12 @@ export const recordingTracks = pgTable(
     liveModel: text("live_model"),
     liveStreamedMilliseconds: integer("live_streamed_milliseconds").notNull().default(0),
     liveCostUsdMicros: bigint("live_cost_usd_micros", { mode: "number" }),
-    // Migration 1103. How far the track's streamed audio is charged in credits,
+    // Migration 1112. How far the track's streamed audio is charged in credits,
     // and that audio's list price (never counted by a usage allowance); null
     // until a charged append first sets them.
     liveChargedMilliseconds: integer("live_charged_milliseconds"),
     liveChargedCostUsdMicros: bigint("live_charged_cost_usd_micros", { mode: "number" }),
-    // Migration 1103. Live sessions granted for the track, measured per session
+    // Migration 1112. Live sessions granted for the track, measured per session
     // against the audio the recorder reports (see recording-live.ts).
     liveGrants: integer("live_grants"),
     liveGrantedAt: timestamp("live_granted_at", { withTimezone: true }),
@@ -143,7 +143,7 @@ export const recordingTracks = pgTable(
     liveCoveredMilliseconds: bigint("live_covered_milliseconds", { mode: "number" }),
     liveUnbackedMilliseconds: bigint("live_unbacked_milliseconds", { mode: "number" }),
     liveUnreportedGrants: integer("live_unreported_grants"),
-    // Migration 1103. What the track's open session could still stream,
+    // Migration 1112. What the track's open session could still stream,
     // counted up front against the person's day, and the hour it was counted in.
     liveProvisionalMilliseconds: bigint("live_provisional_milliseconds", { mode: "number" }),
     liveProvisionalHour: timestamp("live_provisional_hour", { withTimezone: true }),
@@ -159,7 +159,7 @@ export const recordingTracks = pgTable(
   ],
 );
 
-// Migration 1103. Live transcript time no reported audio accounts for
+// Migration 1112. Live transcript time no reported audio accounts for
 // (provisional time of open sessions included), and live audio charged in
 // credits, per person (`api_key` for every API key of the workspace together)
 // and hour, for the daily bound (see recording-live.ts). RLS: own rows only.
