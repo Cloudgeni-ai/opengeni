@@ -80,6 +80,7 @@ import {
 } from "./session-usage-custody";
 import { providerRecoveryCountFromMetadata, isWorkerShutdownCancellation } from "./errors";
 import { throwIfTurnOperationCancelled, waitForTurnOperation } from "./sandbox-provision";
+import { sessionForAttempt } from "./unattended";
 import type { SessionUsageLimitReachedRefusal, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import type {
   AttemptIdentityState,
@@ -955,7 +956,10 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   return {
     ok: {
       turn,
-      session,
+      session: sessionForAttempt(
+        session,
+        Boolean(humanInputResume || interactionInterventionResume),
+      ),
       installedApiIntegrations,
       capabilityServerCategories,
       credentialSubjectId,

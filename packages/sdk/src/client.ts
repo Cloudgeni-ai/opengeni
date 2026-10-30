@@ -643,6 +643,7 @@ import type {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionRetentionRequest,
+  UpdateSessionUnattendedRequest,
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
@@ -1922,6 +1923,7 @@ export class OpenGeniClient {
         query: request.query,
         ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
         ...(request.groupBy !== undefined ? { groupBy: request.groupBy } : {}),
+        ...(request.order !== undefined ? { order: request.order } : {}),
         ...(request.archiveStatus !== undefined ? { archiveStatus: request.archiveStatus } : {}),
         ...(request.limit !== undefined ? { limit: String(request.limit) } : {}),
         ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
@@ -2354,6 +2356,23 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/retention`,
+      request,
+    );
+  }
+
+  /**
+   * Turn a chat's unattended mode on or off ("work without me"). Applies from
+   * the next turn and is an explicit choice: a person's later message does not
+   * change it. Fails with 409 SESSION_ARCHIVED_READ_ONLY once archived.
+   */
+  async updateSessionUnattended(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionUnattendedRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/unattended`,
       request,
     );
   }

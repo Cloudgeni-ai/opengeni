@@ -55,6 +55,7 @@ import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   ApiIntegrationOAuthStartRequest,
   DirectModelProviderMetadata,
+  directModelBaseUrl,
   ConnectionResponse,
   CreateConnectionRequest,
   FikenInstallRequest,
@@ -134,6 +135,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import { ATLASSIAN_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/atlassian-native-retirement";
 import { GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/google-drive-native-retirement";
+import { pinnedFetch } from "@opengeni/network";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
@@ -299,9 +301,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       String(payload.metadata?.credentialRole ?? "").startsWith("direct_")
     ) {
       const config = DirectModelProviderMetadata.safeParse(payload.metadata?.directModelProvider);
-      const domain = config.success
-        ? new URL(config.data.endpoint ?? "https://api.openai.com/v1").hostname
-        : null;
+      const domain = config.success ? new URL(directModelBaseUrl(config.data)).hostname : null;
       if (
         !config.success ||
         payload.subjectId !== null ||
@@ -315,7 +315,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ) {
         throw new HTTPException(422, {
           message:
-            "Invalid OpenAI or Azure OpenAI connection: provide a key, model, and official provider endpoint",
+            "Invalid model connection: provide a key, a model, and the provider’s endpoint (an official OpenAI or Azure OpenAI endpoint, or a public HTTPS base URL for an OpenAI-compatible API)",
         });
       }
       payload.metadata = { ...payload.metadata, directModelProvider: config.data };
@@ -325,12 +325,19 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         await verifyDirectModelAccess(
           config.data,
           payload.credential.apiKey as string,
-          deps.directModelFetch,
+          deps.directModelFetch ??
+            (config.data.provider === "openai_compatible"
+              ? (((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+                  pinnedFetch(input as string | URL | Request, init, settings, {
+                    label: "Model endpoint",
+                    requireHttpsOutsideLocalTest: true,
+                  })) as typeof fetch)
+              : undefined),
         );
       }
     } else if (payload.verifyModelAccess) {
       throw new HTTPException(422, {
-        message: "Model checks require an OpenAI or Azure OpenAI connection",
+        message: "Model checks require a model provider connection",
       });
     }
     const directModelKey = payload.metadata?.directModelProvider !== undefined;
@@ -1018,8 +1025,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             String(payload.metadata?.credentialRole ?? "").startsWith("direct_")
           ) {
             throw new HTTPException(422, {
-              message:
-                "Disconnect and reconnect OpenAI or Azure OpenAI to replace its key or deployment",
+              message: "Disconnect and reconnect this model connection to replace its key or model",
             });
           }
           // Model-key rotation owns an advisory -> credential-row prefix. Do

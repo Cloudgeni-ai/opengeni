@@ -148,6 +148,7 @@ import {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionRetentionRequest,
+  UpdateSessionUnattendedRequest,
   SetSessionUsageLimitRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
@@ -404,6 +405,7 @@ import {
   updateSessionSkills,
   updateSessionProfile,
   setSessionRetention,
+  setSessionUnattended,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
@@ -2809,6 +2811,42 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           code: "SESSION_ARCHIVED_READ_ONLY",
           message:
             "This session is already archived, so its keep-live setting can no longer change.",
+        },
+        409,
+      );
+    }
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccess,
+    );
+    if (!session) throw new HTTPException(404, { message: "session not found" });
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
+  // "Work without me": turn a chat's unattended mode on or off from its next
+  // turn. An explicit choice that a person's later message does not change.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/unattended", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = await parseRequestJson(c, UpdateSessionUnattendedRequest);
+    const { result, relatedSessionAccess } = await setSessionUnattended(
+      deps,
+      grant,
+      sessionId,
+      payload.unattended,
+    );
+    if (result.status === "not_found") {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    if (result.status === "archived") {
+      return c.json(
+        {
+          code: "SESSION_ARCHIVED_READ_ONLY",
+          message: "This session is archived, so whether it runs unattended can no longer change.",
         },
         409,
       );
@@ -5926,6 +5964,8 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/attention" && verb === "PUT") return "session.attention.write";
   if (suffix === "/archive" && verb === "PUT") return "session.archive.write";
   if (suffix === "/retention" && verb === "PUT") return "session.retention.write";
+  // Changes what the agent may ask and wait for, like its tools.
+  if (suffix === "/unattended" && verb === "PUT") return "session.tool_policy.write";
   // Task usage limit: read with the session; change as a control write
   // (the route additionally admits only a person or the host server key).
   if (suffix === "/usage-limit") {
