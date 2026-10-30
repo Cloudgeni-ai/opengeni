@@ -881,5 +881,131 @@ AS $function$
     $function$
 
 $create$, data_schema);
+  EXECUTE format($create$
+CREATE OR REPLACE FUNCTION opengeni_private.subscription_codex_apps_designation_target(p_account_id uuid, p_workspace_id uuid)
+ RETURNS SETOF %1$I.subscription_connections
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'pg_catalog', %1$I, 'opengeni_private', 'pg_temp'
+AS $function$
+    DECLARE
+      designated uuid;
+      target subscription_connections%%ROWTYPE;
+      in_scope boolean := false;
+    BEGIN
+      IF p_account_id IS NULL OR p_workspace_id IS NULL
+        OR p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
+        OR p_workspace_id IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '')::uuid
+      THEN RETURN; END IF;
+      IF NOT coalesce(
+        opengeni_private.subscription_provider_cutover_committed('codex'), false
+      ) THEN RETURN; END IF;
+
+      SELECT designation.connection_id INTO designated
+      FROM subscription_apps_designations designation
+      WHERE designation.account_id = p_account_id
+        AND designation.workspace_id = p_workspace_id;
+      IF designated IS NULL THEN RETURN; END IF;
+
+      -- The designation write policy already proved scope when it was
+      -- written; this exposes exactly that row to this function's reads and
+      -- is removed before returning.
+      INSERT INTO opengeni_private.subscription_runtime_capabilities (
+        backend_pid, transaction_id, capability_kind, account_id, workspace_id, connection_id
+      ) VALUES (
+        pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(),
+        'designation_management', p_account_id, p_workspace_id, designated
+      ) ON CONFLICT (backend_pid, transaction_id, capability_kind, account_id, connection_id)
+        DO NOTHING;
+
+      SELECT connection.* INTO target
+      FROM subscription_connections connection
+      WHERE connection.account_id = p_account_id AND connection.id = designated
+        AND connection.provider = 'codex' AND connection.kind = 'subscription'
+        AND connection.ownership = 'shared';
+      IF FOUND THEN
+        in_scope := target.scope_kind = 'organization'
+          OR (target.scope_kind = 'workspaces' AND EXISTS (
+            SELECT 1 FROM subscription_connection_workspaces assignment
+            WHERE assignment.account_id = target.account_id
+              AND assignment.connection_id = target.id
+              AND assignment.workspace_id = p_workspace_id
+          ));
+      END IF;
+
+      DELETE FROM opengeni_private.subscription_runtime_capabilities capability
+      WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+        AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+        AND capability.capability_kind = 'designation_management'
+        AND capability.account_id = p_account_id
+        AND capability.workspace_id = p_workspace_id
+        AND capability.connection_id = designated;
+      IF NOT in_scope THEN RETURN; END IF;
+      -- Never more than read_subscription_codex_apps_credential exposes:
+      -- credential material only for a usable connection.
+      IF target.status IS DISTINCT FROM 'active' THEN
+        target.credential_encrypted := NULL;
+      END IF;
+      RETURN NEXT target;
+    END
+    $function$
+
+$create$, data_schema);
+
+  EXECUTE format($create$
+CREATE OR REPLACE FUNCTION opengeni_private.subscription_codex_reset_authority(p_account_id uuid, p_workspace_id uuid, p_connection_id uuid, p_subject_id text)
+ RETURNS TABLE(status text, authorized boolean)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'pg_catalog', %1$I, 'opengeni_private', 'pg_temp'
+AS $function$
+    DECLARE
+      target subscription_connections%%ROWTYPE;
+      locked boolean := false;
+    BEGIN
+      IF p_account_id IS NULL OR p_workspace_id IS NULL OR p_connection_id IS NULL
+        OR p_subject_id IS NULL
+        OR p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id', true), '')::uuid
+        OR p_workspace_id IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id', true), '')::uuid
+        OR p_subject_id IS DISTINCT FROM nullif(current_setting('opengeni.subject_id', true), '')
+      THEN RETURN; END IF;
+      IF NOT coalesce(
+        opengeni_private.subscription_provider_cutover_committed('codex'), false
+      ) THEN RETURN; END IF;
+      -- A connection the requesting workspace manages (its administrators or
+      -- an organization administrator), or an organization-managed one (an
+      -- organization administrator only). Read under the caller's own
+      -- row-level security.
+      SELECT connection.* INTO target
+      FROM subscription_connections connection
+      WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
+        AND connection.provider = 'codex' AND connection.kind = 'subscription'
+        AND connection.ownership = 'shared'
+        AND (connection.managed_by_workspace_id = p_workspace_id
+          OR connection.managed_by_workspace_id IS NULL);
+      IF NOT FOUND THEN RETURN; END IF;
+      -- FOR SHARE also applies the connection's UPDATE policies, which admit
+      -- exactly an organization administrator or an administrator of the
+      -- managing workspace; anyone else gets no lock and no authority.
+      PERFORM 1 FROM subscription_connections connection
+      WHERE connection.account_id = p_account_id AND connection.id = p_connection_id
+      FOR SHARE;
+      locked := FOUND;
+      status := target.status;
+      authorized := locked AND (
+        opengeni_private.subscription_organization_admin(p_account_id)
+        OR (target.managed_by_workspace_id = p_workspace_id AND EXISTS (
+          SELECT 1 FROM workspace_memberships manager
+          WHERE manager.account_id = p_account_id
+            AND manager.workspace_id = p_workspace_id
+            AND manager.subject_id = p_subject_id
+            AND opengeni_private.workspace_membership_administers(manager.role, manager.permissions)
+        ))
+      );
+      RETURN NEXT;
+    END
+    $function$
+
+$create$, data_schema);
 END
 $install$;

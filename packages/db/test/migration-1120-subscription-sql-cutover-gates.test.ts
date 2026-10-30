@@ -20,6 +20,8 @@ const names = [
   "recover_subscription_core_connection_health",
   "subscription_core_acceptance_authority_v2",
   "subscription_core_task_authority_v2",
+  "subscription_codex_apps_designation_target",
+  "subscription_codex_reset_authority",
 ];
 const realDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
@@ -68,7 +70,7 @@ beforeAll(async () => {
   });
   accountId = access.defaultAccountId!;
   before = await definitions();
-  expect(before).toHaveLength(6);
+  expect(before).toHaveLength(8);
   expect(before.every((routine) => routine.body.includes("subscription_provider_cutovers"))).toBe(
     true,
   );
@@ -129,13 +131,17 @@ describe.skipIf(!realDatabase)("retire subscription SQL cutover switches", () =>
     }
   }, 180_000);
 
-  test("a completed predecessor retires exactly the six SQL switch reads without widening posture", async () => {
+  test("a completed predecessor retires all eight live SQL switch reads without widening posture", async () => {
     await migrate(owned!.ownerUrl);
     const after = await definitions();
-    expect(after).toHaveLength(6);
+    expect(after).toHaveLength(8);
     for (const routine of after) {
       expect(routine.body).not.toContain("subscription_provider_cutovers");
-      expect(routine.body).toContain("subscription_provider_cutover_committed(p_provider)");
+      expect(routine.body).toContain(
+        routine.name.startsWith("subscription_codex_")
+          ? "subscription_provider_cutover_committed('codex')"
+          : "subscription_provider_cutover_committed(p_provider)",
+      );
     }
     await assertRuntimeDatabasePosture(client!.db, {
       rlsStrategy: "force",
