@@ -165,43 +165,20 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
       keywords: ["new session defaults", "default agent", "instructions"],
       search: { view: "agent-defaults" },
     },
-    {
-      label: "Agent activity",
-      keywords: ["pause agents", "resume agents", "stop"],
-    },
-    {
-      label: "Default machine",
-      keywords: ["computer", "runs on", "new session", "schedule"],
-    },
+    { label: "Agent activity", keywords: ["pause agents", "resume agents", "stop"] },
+    { label: "Default machine", keywords: ["computer", "runs on", "new session", "schedule"] },
     { label: "Sandbox environment", keywords: ["default sandbox", "rig"] },
     { label: "Sandbox image", keywords: ["docker", "container"] },
-    {
-      label: "Voice input",
-      keywords: ["transcription", "dictation", "microphone", "speech"],
-    },
+    { label: "Voice input", keywords: ["transcription", "dictation", "microphone", "speech"] },
     { label: "Video generation", keywords: ["video"] },
-    {
-      label: "Use connected apps automatically",
-      keywords: ["integrations", "tools"],
-    },
-    {
-      label: "Delete workspace",
-      keywords: ["remove workspace", "danger zone"],
-    },
+    { label: "Use connected apps automatically", keywords: ["integrations", "tools"] },
+    { label: "Delete workspace", keywords: ["remove workspace", "danger zone"] },
   ],
   "workspace:access": [
-    {
-      label: "Add people",
-      keywords: ["invite", "share workspace"],
-      search: { view: "add" },
-    },
+    { label: "Add people", keywords: ["invite", "share workspace"], search: { view: "add" } },
   ],
   "workspace:api-keys": [
-    {
-      label: "Create API key",
-      keywords: ["new key", "token"],
-      search: { key: "new" },
-    },
+    { label: "Create API key", keywords: ["new key", "token"], search: { key: "new" } },
   ],
   // Only in the desktop app, like its page: dictating into any app with a shortcut.
   "workspace:/workspaces/$workspaceId/computer-use": [
@@ -222,18 +199,8 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
       keywords: ["meetings", "record meetings", "call recording", "zoom", "teams"],
     },
   ],
-  "workspace:usage": [
-    {
-      label: "Member limits",
-      keywords: ["member budget", "per person limit", "spend limit"],
-    },
-  ],
   "workspace:developer": [
-    {
-      label: "Add webhook",
-      keywords: ["events", "callback"],
-      search: { view: "new-webhook" },
-    },
+    { label: "Add webhook", keywords: ["events", "callback"], search: { view: "new-webhook" } },
     {
       label: "Credential provider",
       keywords: ["run credentials"],
@@ -241,18 +208,10 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
     },
   ],
   "organization:people": [
-    {
-      label: "Invite people",
-      keywords: ["add members", "invitation"],
-      search: { view: "invite" },
-    },
+    { label: "Invite people", keywords: ["add members", "invitation"], search: { view: "invite" } },
   ],
   "organization:workspaces": [
-    {
-      label: "New workspace",
-      keywords: ["create workspace"],
-      search: { view: "new-workspace" },
-    },
+    { label: "New workspace", keywords: ["create workspace"], search: { view: "new-workspace" } },
   ],
   "organization:agents": [
     {
@@ -267,15 +226,10 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
   "organization:billing": [
     { label: "Add credits", keywords: ["buy credits", "top up", "payment"] },
     { label: "Promo code", keywords: ["coupon", "redeem", "discount"] },
-    {
-      label: "Invoices and payment details",
-      keywords: ["receipts", "payment method", "card"],
-    },
-    {
-      label: "Workspace budgets",
-      keywords: ["budget", "spend limit", "monthly"],
-    },
-    { label: "Plan limits", keywords: ["plan", "quota"] },
+    { label: "Invoices and payment details", keywords: ["receipts", "payment method", "card"] },
+    { label: "Workspace budgets", keywords: ["budget", "spend limit", "monthly"] },
+    // On a workspace's budget page, under Workspace budgets.
+    { label: "Member limits", keywords: ["member budget", "per person limit", "spend limit"] },
   ],
   "organization:developer": [
     {
@@ -303,10 +257,7 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
         "data location",
       ],
     },
-    {
-      label: "Personal workspaces",
-      keywords: ["private workspace", "chats and automations"],
-    },
+    { label: "Personal workspaces", keywords: ["private workspace", "chats and automations"] },
     {
       label: "Only me chats and automations",
       keywords: ["private chats", "private automations", "visibility"],
@@ -315,37 +266,22 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
       label: "New chats and automations",
       keywords: ["default visibility", "who can see", "sharing"],
     },
-    {
-      label: "Admins see Only me automations",
-      keywords: ["private automations", "visibility"],
-    },
+    { label: "Admins see Only me automations", keywords: ["private automations", "visibility"] },
     {
       label: "Actions in chat",
       keywords: ["agents", "confirm", "invite", "share", "settings in chat"],
     },
-    {
-      label: "Full access for agent sessions",
-      keywords: ["agents", "admin", "elevate"],
-    },
+    { label: "Full access for agent sessions", keywords: ["agents", "admin", "elevate"] },
     {
       label: "Keep a removed person's data",
       keywords: ["data retention", "retention", "delete data", "removed people", "offboarding"],
     },
-    {
-      label: "Recovery contacts",
-      keywords: ["recovery", "lost access", "owners"],
-    },
+    { label: "Recovery contacts", keywords: ["recovery", "lost access", "owners"] },
   ],
   "account:security": [
     { label: "Password", keywords: ["change password", "sign in"] },
-    {
-      label: "Passkeys",
-      keywords: ["passkey", "face id", "touch id", "security key", "sign in"],
-    },
-    {
-      label: "Analytics preferences",
-      keywords: ["privacy", "tracking", "cookies"],
-    },
+    { label: "Passkeys", keywords: ["passkey", "face id", "touch id", "security key", "sign in"] },
+    { label: "Analytics preferences", keywords: ["privacy", "tracking", "cookies"] },
   ],
 };
 

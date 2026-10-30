@@ -106,9 +106,7 @@ describe("settings search", () => {
     });
     // A setting without one opens its page.
     const voice = entries.find((entry) => entry.label === "Voice input")!;
-    expect((voice.link.props as { search: unknown }).search).toEqual({
-      section: "general",
-    });
+    expect((voice.link.props as { search: unknown }).search).toEqual({ section: "general" });
   });
 
   test("finds the MCP setup by the words people use for it", () => {
