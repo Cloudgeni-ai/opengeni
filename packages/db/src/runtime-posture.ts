@@ -54,9 +54,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * control worker's content-free queued-turn hold summary (0988), the API's
  * inventory of browsers an agent session holds (1002), the only writer of
  * the EU-only inference setting and its history (1060), the secret history
- * scrub's reader and cell writer (1091) and the subscription
+ * scrub's reader and cell writer (1091), the subscription
  * account-administrator grant (1103), which records a request's verified
- * account:admin proof for one transaction. Each is
+ * account:admin proof for one transaction, and the lock-free read of a known
+ * external identity (1119). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -76,6 +77,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "grant_subscription_account_administrator(jsonb)",
+  "read_external_identity_v1(uuid, text, text)",
 ] as const;
 
 /**
@@ -97,7 +99,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * only they reach as pending. 1103 withholds the subscription
  * account-administrator grant; until it is granted, only organization
  * membership administrators administer the organization's subscription
- * accounts.
+ * accounts. 1119 withholds the lock-free external identity read; until it is
+ * granted, authenticating an external user takes the organization membership
+ * fence exclusively, as before.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -106,6 +110,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "grant_subscription_account_administrator(jsonb)",
+  "read_external_identity_v1(uuid, text, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -170,6 +175,10 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "session_history_items_repair_audit",
   ],
   "grant_subscription_account_administrator(jsonb)": ["organization_memberships"],
+  "read_external_identity_v1(uuid, text, text)": [
+    "external_identities",
+    "organization_memberships",
+  ],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -524,7 +533,6 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_external_identity_link_reference(uuid, uuid, text)",
   "get_external_identity_link_inventory_references(uuid, uuid[])",
   "ensure_external_identity(uuid, text, text)",
-  "read_external_identity(uuid, text, text)",
   "lookup_external_identity(uuid, text, text, text)",
   "prepare_external_workspace_membership_operation(jsonb)",
   "record_external_workspace_membership_operation(jsonb, jsonb)",
@@ -4373,22 +4381,19 @@ export function evaluateRuntimeDatabasePosture(
     } else if (
       [
         "ensure_external_identity(uuid, text, text)",
-        "read_external_identity(uuid, text, text)",
         "get_external_identity_link_reference(uuid, uuid, text)",
         "get_external_identity_link_inventory_references(uuid, uuid[])",
       ].includes(routine.name)
     ) {
       const names =
-        routine.name === "read_external_identity(uuid, text, text)"
-          ? ["external_identities", "organization_memberships"]
-          : routine.name !== "ensure_external_identity(uuid, text, text)"
-            ? ["external_identity_links", "external_identities", "organization_memberships"]
-            : [
-                "external_identities",
-                "organization_memberships",
-                "workspaces",
-                "workspace_inference_controls",
-              ];
+        routine.name !== "ensure_external_identity(uuid, text, text)"
+          ? ["external_identity_links", "external_identities", "organization_memberships"]
+          : [
+              "external_identities",
+              "organization_memberships",
+              "workspaces",
+              "workspace_inference_controls",
+            ];
       const missing = names.filter((name) => !tableByName.has(name));
       if (missing.length > 0) {
         violations.push(

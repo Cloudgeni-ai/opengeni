@@ -1228,8 +1228,9 @@ export async function acquireSharedTestDatabase(
  * EXECUTE on the personal-machine owner lookup (0978), the queued-turn hold
  * summary (0988), the held browser
  * routines (1002), the EU-only inference change function (1060) and the
- * secret history scrub's reader and cell writer (1091). Tests that exercise
- * them run as they will once they are granted.
+ * secret history scrub's reader and cell writer (1091), and the lock-free
+ * external identity read (1119). Tests that exercise them run as they will
+ * once they are granted.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
@@ -1248,6 +1249,8 @@ export async function grantDeferredRuntimeAccess(
     GRANT EXECUTE ON FUNCTION opengeni_private.update_organization_inference_residency_v1(
       uuid, text, text, boolean, bigint, uuid
     ) TO ${grantee};
+    GRANT EXECUTE ON FUNCTION opengeni_private.read_external_identity_v1(uuid, text, text)
+      TO ${grantee};
   `);
 }
 

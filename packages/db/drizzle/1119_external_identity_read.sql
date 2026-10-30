@@ -9,23 +9,27 @@
 -- the transaction's commit, and under load that is mostly time spent waiting
 -- for the busy API process to send it.
 --
--- read_external_identity reads an existing identity without locking it or
--- changing anything. The caller holds the same fence in shared mode, which
--- still orders the read against every membership lifecycle writer (they take
--- it exclusively) but not against other requests. It returns NULL when the
--- identity does not exist yet; the caller then provisions it through
--- ensure_external_identity under the exclusive fence, as before. An inactive
--- or inconsistent identity is refused exactly as ensure_external_identity
--- refuses it.
+-- opengeni_private.read_external_identity_v1 reads an existing identity
+-- without locking it or changing anything. The caller holds the same fence in
+-- shared mode, which still orders the read against every membership lifecycle
+-- writer (they take it exclusively) but not against other requests. It
+-- returns NULL when the identity does not exist yet; the caller then
+-- provisions it through ensure_external_identity under the exclusive fence, as
+-- before. An inactive or inconsistent identity is refused exactly as
+-- ensure_external_identity refuses it.
 --
--- A new routine that the previous release never calls.
+-- SECURITY DEFINER, owned by its tables' owner, never PUBLIC. As 0937
+-- explains, the previous release rejects a runtime EXECUTE grant on a definer
+-- it doesn't know, so this migration grants nothing: until a later migration
+-- grants EXECUTE, authentication keeps taking the fence exclusively. The
+-- previous release never calls the new function.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
-CREATE FUNCTION read_external_identity(p_account_id uuid, p_source text, p_external_id text) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path FROM CURRENT
-    AS $$
+CREATE FUNCTION opengeni_private.read_external_identity_v1(
+  p_account_id uuid, p_source text, p_external_id text
+)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   identity_row external_identities%ROWTYPE;
   membership_row organization_memberships%ROWTYPE;
@@ -59,5 +63,4 @@ EXCEPTION WHEN OTHERS THEN
   RAISE;
 END
 $$;
-
-REVOKE ALL ON FUNCTION read_external_identity(p_account_id uuid, p_source text, p_external_id text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.read_external_identity_v1(uuid, text, text) FROM PUBLIC;

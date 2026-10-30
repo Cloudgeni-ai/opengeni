@@ -92,7 +92,10 @@ revocation watermark while holding that fence **shared**, so it orders against
 every lifecycle writer and revoke (they hold it exclusively) without making an
 organization's concurrent requests authenticate one at a time. Only a first
 request for an unknown identity provisions it through `ensureExternalIdentity`
-under the exclusive fence. First-use membership
+under the exclusive fence. The read is a runtime definer that migration 1119
+creates withheld (the previous release rejects a runtime grant on a definer it
+does not know); until a later migration grants it, every request takes the
+exclusive path. First-use membership
 (`provisionExternalMemberOnFirstUse`, request entry only, never a fresh
 re-check) creates a missing shared-workspace row with the conversation defaults
 through `ensureExternalWorkspaceMemberOnFirstUse` in

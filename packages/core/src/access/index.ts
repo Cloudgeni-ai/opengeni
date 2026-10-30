@@ -36,6 +36,7 @@ import {
   StatedExternalMembershipLastAdminError,
   USER_ISOLATION_WORKSPACE_SOURCE_PREFIX,
   lockExternalWorkspaceMembershipLifecycle,
+  externalIdentityReadGranted,
   lockExternalWorkspaceMembershipLifecycleShared,
   readExternalIdentity,
   resolveExternalIdentityLink,
@@ -2096,8 +2097,10 @@ async function apiKeyAccessContext(
       // A known user reads its identity under the membership fence held
       // shared: ordered against every lifecycle writer and revoke (they hold
       // it exclusively), but not against the organization's other requests,
-      // which would otherwise authenticate one at a time.
+      // which would otherwise authenticate one at a time. Until the read is
+      // granted (a later release), every request takes the exclusive path.
       const known = await withAccountRls(deps.db, apiKey.accountId, async (tx) => {
+        if (!(await externalIdentityReadGranted(tx))) return null;
         await lockExternalWorkspaceMembershipLifecycleShared(tx, apiKey.accountId);
         const existing = await readExternalIdentity(tx, {
           accountId: apiKey.accountId,

@@ -124,11 +124,30 @@ export async function lockExternalWorkspaceMembershipLifecycleShared(
   );
 }
 
+const EXTERNAL_IDENTITY_READ = "opengeni_private.read_external_identity_v1(uuid, text, text)";
+
+/**
+ * Whether the runtime may call the lock-free external identity read yet. 1119
+ * creates it withheld: a release that does not know it rejects a runtime
+ * EXECUTE grant on it, so a later migration grants it once this release is the
+ * previous one. Until then authentication takes the fence exclusively, as
+ * before. A separate statement: EXECUTE is checked when a statement starts.
+ */
+export async function externalIdentityReadGranted(db: Pick<Database, "execute">): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(to_regprocedure(${EXTERNAL_IDENTITY_READ})::oid, 'EXECUTE')
+      as granted`,
+  );
+  return row?.granted === true;
+}
+
 /** An existing external identity, read without locking or changing it, or
  * null when it does not exist yet (provision it with ensureExternalIdentity
  * under the exclusive fence). An inactive identity is refused with 42501, as
  * ensureExternalIdentity refuses it. Caller holds the membership fence, at
- * least shared, in the same transaction and the account's RLS scope. */
+ * least shared, in the same transaction and the account's RLS scope, and has
+ * checked externalIdentityReadGranted. */
 export async function readExternalIdentity(
   tx: Database,
   input: {
@@ -143,7 +162,7 @@ export async function readExternalIdentity(
   });
   const [row] = await rawRows<{ result: unknown }>(
     tx,
-    sql`select read_external_identity(
+    sql`select opengeni_private.read_external_identity_v1(
     ${input.accountId}::uuid, ${reference.source}, ${reference.externalId}) as result`,
   );
   if (row?.result === null || row?.result === undefined) return null;

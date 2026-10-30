@@ -16,6 +16,7 @@ import {
 } from "@opengeni/core";
 import {
   acquireOwnerMigratedTestDatabase,
+  grantDeferredRuntimeAccess,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -639,7 +640,33 @@ describe("stated membership", () => {
   });
 });
 
+describe("authenticating a known external user before its read is granted", () => {
+  test("keeps taking the membership fence exclusively", async () => {
+    const org = await organization();
+    const externalId = `withheld-${crypto.randomUUID()}`;
+    expect((await org.request(externalId, CHAT)).status).toBe(200);
+    const fence = `organization-membership:${org.accountId}`;
+    let settled = false;
+    let pending!: Promise<Response>;
+    // A shared holder blocks the exclusive path the previous release takes.
+    await shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock_shared(hashtextextended(${fence}, 0))`;
+      pending = Promise.resolve(org.request(externalId, CHAT)).then((response) => {
+        settled = true;
+        return response;
+      });
+      await Bun.sleep(300);
+      expect(settled).toBe(false);
+    });
+    expect((await pending).status).toBe(200);
+  });
+});
+
 describe("authenticating a known external user", () => {
+  beforeAll(async () => {
+    await grantDeferredRuntimeAccess(shared.admin, appRole);
+  });
+
   test("does not queue behind the organization's other requests", async () => {
     const org = await organization();
     const externalId = `parallel-${crypto.randomUUID()}`;
