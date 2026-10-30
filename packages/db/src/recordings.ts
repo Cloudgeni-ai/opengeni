@@ -2156,11 +2156,26 @@ export function matchCarriedSpeakerLabels(
   next: readonly TimedLabel[],
   namedPreviousLabels: ReadonlySet<string>,
 ): Map<string, string> {
+  return overlapLabelMatches(next, previous, {
+    source: (label) => !isTrackSpeakerLabel(label),
+    target: (label) => namedPreviousLabels.has(label),
+  });
+}
+
+/**
+ * Which target label each source label overlaps most on the same track, when
+ * that covers at least half of the source label's speech.
+ */
+function overlapLabelMatches(
+  source: readonly TimedLabel[],
+  target: readonly TimedLabel[],
+  include: { source: (label: string) => boolean; target: (label: string) => boolean },
+): Map<string, string> {
   const speech = new Map<string, number>();
   const overlap = new Map<string, Map<string, number>>();
   const byTrack = new Map<number, TimedLabel[]>();
-  for (const segment of previous) {
-    if (!segment.speakerLabel || !namedPreviousLabels.has(segment.speakerLabel)) continue;
+  for (const segment of target) {
+    if (!segment.speakerLabel || !include.target(segment.speakerLabel)) continue;
     const track = segment.trackNumber ?? -1;
     const list = byTrack.get(track) ?? [];
     list.push(segment);
@@ -2169,17 +2184,19 @@ export function matchCarriedSpeakerLabels(
   for (const list of byTrack.values()) {
     list.sort((left, right) => left.startMilliseconds - right.startMilliseconds);
   }
-  const ordered = [...next].sort((left, right) => left.startMilliseconds - right.startMilliseconds);
+  const ordered = [...source].sort(
+    (left, right) => left.startMilliseconds - right.startMilliseconds,
+  );
   const cursor = new Map<number, number>();
   for (const segment of ordered) {
     const label = segment.speakerLabel;
-    if (!label || isTrackSpeakerLabel(label)) continue;
+    if (!label || !include.source(label)) continue;
     const length = Math.max(0, segment.endMilliseconds - segment.startMilliseconds);
     speech.set(label, (speech.get(label) ?? 0) + length);
     const track = segment.trackNumber ?? -1;
     const list = byTrack.get(track);
     if (!list) continue;
-    // Previous segments ending before this one starts can never overlap a
+    // Target segments ending before this one starts can never overlap a
     // later segment either, since both lists are ordered by start.
     let index = cursor.get(track) ?? 0;
     while (index < list.length && list[index]!.endMilliseconds <= segment.startMilliseconds) {
@@ -2208,6 +2225,73 @@ export function matchCarriedSpeakerLabels(
     if (best && total > 0 && best[1] * 2 >= total) matches.set(label, best[0]);
   }
   return matches;
+}
+
+/** `[text](speaker:label)` in a meeting's Markdown notes. */
+const NOTE_SPEAKER_LINK = /\[((?:\\.|[^\]\\])*)\]\(speaker:([^)\s]+)\)/gu;
+
+/**
+ * Point the speaker links in notes at other labels: a link whose label has a
+ * counterpart now names it, and any other becomes its plain link text, so a
+ * link never shows a voice it wasn't written about.
+ */
+export function relinkNoteSpeakers(body: string, labels: ReadonlyMap<string, string>): string {
+  return body.replace(NOTE_SPEAKER_LINK, (link, text: string, written: string) => {
+    let label = written;
+    try {
+      label = decodeURIComponent(written);
+    } catch {
+      // Not percent-encoded after all; keep it as written.
+    }
+    const next = labels.get(label);
+    if (next === undefined) return text;
+    return next === label ? link : `[${text}](speaker:${encodeURIComponent(next)})`;
+  });
+}
+
+/**
+ * Speaker links in notes name the labels of the version shown when they were
+ * written, and labels mean nothing across versions. When another version
+ * becomes current, each link moves to the voice its speech became (by
+ * overlapping speech, as names carry over; a capture's track label stays
+ * itself), and a voice with no counterpart becomes plain text. This is a new
+ * revision, so a save made against the old text is refused, but it keeps
+ * who wrote the notes and when.
+ */
+async function relinkNotesToVersion(
+  tx: Database,
+  recording: RecordingRow,
+  from: { versionId: string },
+  to: readonly TimedLabel[],
+): Promise<void> {
+  const where = and(
+    eq(schema.recordingNotes.workspaceId, recording.workspaceId),
+    eq(schema.recordingNotes.recordingId, recording.id),
+    eq(schema.recordingNotes.kind, "notes"),
+  );
+  const [notes] = await tx.select().from(schema.recordingNotes).where(where);
+  if (!notes || !notes.body.includes("](speaker:")) return;
+  const matches = overlapLabelMatches(await effectiveTimedLabels(tx, from.versionId), to, {
+    source: () => true,
+    target: () => true,
+  });
+  for (const segment of to) {
+    const label = segment.speakerLabel;
+    if (label && isTrackSpeakerLabel(label)) matches.set(label, label);
+  }
+  const body = relinkNoteSpeakers(notes.body, matches);
+  if (body === notes.body) return;
+  const [saved] = await tx
+    .update(schema.recordingNotes)
+    .set({ body, revision: notes.revision + 1 })
+    .where(and(where, eq(schema.recordingNotes.revision, notes.revision)))
+    .returning();
+  if (!saved) return;
+  await insertEvent(tx, recording, "recording.notes.updated", {
+    noteKind: "notes",
+    noteRevision: saved.revision,
+    sessionId: null,
+  });
 }
 
 /** Segments of a version with human speaker moves applied. */
@@ -2495,6 +2579,7 @@ export async function completeRecordingTranscriptVersion(
     if (assignments.size > 0) {
       await tx.insert(schema.recordingSpeakerAssignments).values([...assignments.values()]);
     }
+    if (previous) await relinkNotesToVersion(tx, recording, { versionId: previous.id }, ordered);
     // The live preview has done its job once a transcript is ready.
     await tx
       .delete(schema.recordingLiveSegments)
@@ -3091,6 +3176,14 @@ export async function setCurrentRecordingTranscriptVersion(
       .set({ isCurrent: true })
       .where(eq(schema.recordingTranscriptVersions.id, version.id))
       .returning();
+    if (previous) {
+      await relinkNotesToVersion(
+        tx,
+        recording,
+        { versionId: previous.id },
+        await effectiveTimedLabels(tx, version.id),
+      );
+    }
     await tx
       .update(schema.recordings)
       .set({ updatedAt: sql`clock_timestamp()` })
