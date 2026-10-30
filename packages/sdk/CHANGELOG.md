@@ -1,5 +1,183 @@
 # @opengeni/sdk
 
+## 6.0.2
+
+### Major Changes
+
+- accee33: Removed the deprecated surfaces that nothing uses any more:
+
+  - The first automation API (`/v1/workspaces/:workspaceId/automations/*`, `POST /v1/webhooks/automations/:endpointId`, `@opengeni/sdk/automations` and the `automationRunWorkflow`) and PR Review built on it (`/v1/workspaces/:workspaceId/pr-review/*`, the Opengeni Lens GitHub App connect flow, `@opengeni/sdk/pr-review` and the `OPENGENI_PR_REVIEW_GITHUB_*` settings). Automations are scheduled tasks with event triggers; pull-request review is one of their templates.
+  - Resumable transcription recordings (`/v1/workspaces/:workspaceId/transcription-recordings/*` and their SDK methods). Recordings and the live transcription stream replace them.
+  - The retired Knowledge search routes that only answered `410 gone`, and the "retired action" entries of the app action catalog.
+  - The deprecation-notice machinery: the API no longer sends `Deprecation`/`Sunset` headers and the SDK no longer has the `onDeprecation` option or `parseDeprecationNotice`.
+  - The response-header compatibility for SDKs up to 7.x: responses always carry `x-opengeni-api-contract`.
+
+- 399757b: Removed the retired Variable Set and environment fields. Vaults replaced Variable Sets in SDK 2.0.0, and nothing has used these fields since:
+
+  - Sessions, session create and fork requests, new-session drafts and scheduled tasks no longer carry `variableSetId`, `variableSetIds` or `environmentId`.
+  - Rig versions and rig create or edit requests no longer carry `defaultVariableSetIds`.
+  - Incident telemetry data routes name their vault and secrets directly (`{ kind: "vault", vaultName, secretNames }`), and the preflight reports `requiredVaultNames` and `requiredSecretNames`.
+  - The retired `variable-sets:*` and `environments:*` permissions in workspace roles, memberships, API keys and Slack access requests are rewritten to the matching `secrets:*` permissions.
+
+### Minor Changes
+
+- 44ba53b: Bots, finished. Bot templates now have a visibility: `workspace` (everyone who can open the workspace) or `private` (only the person who saved it). The template dialog has a "Who can use it" choice and private templates show an "Only me" chip. When an agent in an Only me chat saves itself with `bot_template_save`, the template is private; a run with no person behind it cannot save from an Only me chat. A `sourceSessionId` sent to `POST /bot-templates` must be a chat in the same workspace that the caller can open.
+
+  Marketplace plugins are listed in the integration catalogue (`kind: "plugin"`), so an agent can find one with `capability_catalog_search` and offer it through the same in-chat card it uses for connectors. The card shows the agent's reason, who made the plugin and what it adds, and the person reviews and installs it from there. Someone without permission to manage the workspace's plugins sees that a workspace admin has to install it, and the agent is told the same. `PluginDetails` takes `showIdentity={false}` for hosts that already show the plugin's name and logo.
+
+  In Slack, a bot chat with an avatar can post its replies under its own name and avatar. This uses the optional `chat:write.customize` scope, so a Slack admin must reinstall the app to grant it; without it, posts stay under the app's name. The avatar image comes from a new signed public route, `GET /v1/public/session-avatars/{token}.png`. The API image now includes an emoji font so emoji avatars render in that image.
+
+- f385091: A person can share a chat with a read-only link. The link opens a snapshot of the conversation exactly as the chat shows it (each person's messages under the name the chat shows for them, never an email, and the replies; queued messages that were deleted, edited or cancelled before they ran, images and links to the chat's own files left out) without signing in, and only while the person who shared it can still read the chat. The share page loads no third-party analytics that record its address and is never indexed. The person who started the chat creates, refreshes or stops it from the chat's Share… menu item or by asking the agent, which runs `createSessionShareLink` after one confirmation; `listSessionShareLinks` lists their links. `OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED=false` turns links off and stops existing ones opening. Member changes on a personal workspace now say that personal workspaces are private to their owner and point to a share link when that person can create one, instead of "missing permission: members:manage".
+- aa6b340: When the agent changes a chat's model (for example with `session_set_model`), the composer now shows the new model and the person's next message runs on it, instead of silently switching the chat back to the model the composer had loaded. A composer draft either holds the person's own pick or follows the chat's settings: `ComposerDraft.policyFollowsSession` says which, and while it is true the draft's `model`, `reasoningEffort` and `latencyMode` are the chat's current ones. `saveComposerDraft` and `submitComposerDraft` take those three fields together or not at all; without them the draft follows the chat and the message runs on its current settings. Picking a model, effort or speed in the composer still makes it the chat's setting when the message is sent, after which the composer follows the chat again. Composers on web, phone and embeds (`useComposer`) refresh on `session.model_settings.updated`, and `useComposer` exposes `sendPolicy`: the person's pick, or null while following. Clients that always send a model keep today's behaviour.
+- f2e1953: Turning on computer use in the desktop app no longer spins forever. When it is on but still not usable after a minute, the switch stops saying "Turning on…" and says why in one line: the server isn't accepting the computer's sign-in, the server can't see it yet, the agent isn't starting, another copy of the agent is in the way, or moving the agent into the app is taking too long, with the agent's own words below when it gave some, and **Try again**. Try again restarts an agent that is already running (its service, or the app's helper), so it signs in and connects right away instead of after its backoff. An agent that has stopped retrying because the server needs it connected again is a problem at once, and turning it on reconnects it. The app's own agent is no longer shown as on, and the menu bar no longer calls the computer available, while the server refuses its sign-in; a connection the agent stopped retrying is enrolled afresh on turning on, even while the server still lists it. `parseConnections` reads each connection's `authentication` state from `opengeni-agent connections`; `ThisComputerStatus` gains `waitingOn` and `waitingDetail`, and `ThisComputerErrorCode` gains `reconnect_required`; `useThisComputer` gains `stalled` and a `turnOnLimitMs` option; `@opengeni/react/this-computer` exports `computerUseStalledText`; `ComputerUseProblem` gains `stalled`.
+- 12b773f: Add credential profiles: an opt-in mapping from environment variable names to
+  secret references that Opengeni resolves for every command an agent runs and
+  adds to that command's environment, on Connected Machines and managed sandboxes
+  alike. Profiles are set for the workspace or for a chat (inherited by the chats
+  it starts) through `/v1/workspaces/:workspaceId/credential-profile`,
+  `/v1/workspaces/:workspaceId/sessions/:sessionId/credential-profile` and the
+  `secret_profile_get` / `secret_profile_set` agent tools. An optional git helper
+  lets git use `GH_TOKEN` for github.com over HTTPS without files or global config.
+- 1271da5: Cancel throws a dictation away. Cancel, Escape and the phone's cancel now delete the dictation under way, while it records or while it is being transcribed, so no composer offers it again. Before, speech longer than a few seconds was kept and the composer offered it later. A dictation an earlier page left only stops being retried when cancelled, and dictations that fail are still kept and offered as before.
+
+  The desktop app keeps a cancelled dictation's speech in Recent dictations, marked "Cancelled, not transcribed", to play or transcribe again there; the retry shortcut transcribes it and types it. `useVoiceInput` gives `onAudio` the cancelled copy with `cancelled: true`, the `cancelled` desktop dictation report carries its `audio`, and history entries have `cancelled: true` until they are transcribed again.
+
+  `useVoiceInput` has a new `setAside()` for interruptions other than the person's Cancel, such as live voice taking over or another chat opening: capture stops and the speech stays saved to insert later, as `cancel()` did before. The composer's cancel button reads "Discard dictation".
+
+- f6c6c0f: EU-only inference covers side features. Web search, image and video
+  generation, live voice, transcription, Knowledge embeddings and decision
+  models each have residency records; under EU only routes with an EU record
+  run, nothing falls back outside the EU, and switched-off features report
+  `region_restricted` (shown as "Not supported in EU"). Operators declare EU
+  routes with `OPENGENI_SIDE_FEATURE_RESIDENCY_JSON`, each for the one endpoint
+  (and, for Azure voice and transcription, the one deployment) it describes; a
+  declaration missing that deployment leaves the route unknown with a warning
+  rather than failing boot. Usage events record where each call ran. Under EU
+  the model transport admits only tools Opengeni executes itself.
+- dfc7190: Show EU-only inference in the app. Organization settings > Security & data has
+  an EU-only inference switch: members see it, owners and admins turn it on, and
+  turning it off is offered only when the API answers `canTurnOff`, after a
+  confirmation; without a recent sign-in it offers "Sign in again" first. In an
+  EU-only workspace, models and features the server switched
+  off (reason `region_restricted`) show "Not supported in EU" and can't be chosen
+  or turned on. The app reads this for the open workspace and again after a workspace switch
+  or a change to the setting. New SDK methods `getOrganizationInferenceResidency` and
+  `updateOrganizationInferenceResidency`, `ClientConfig.inferenceFeatures` and
+  `ClientModel.availability` types, and `@opengeni/react` helpers
+  `isRegionRestricted`, `regionRestrictedText` and `inferenceFeatureRestriction`.
+  The curated Opper model is labelled "Claude Opus 5.5": EU status comes from
+  residency records, never a name.
+- 09972b5: One mechanism reads every app's webhooks. Linear and Sentry are now presets of the custom webhook, like Tailscale, and their own adapters are gone: `WEBHOOK_FORMAT_PRESETS` has `linear`, `sentry` and `tailscale`, and sources stored with the `linear` or `sentry` adapter read as `custom` with that preset (`currentWebhookAdapter`, `webhookPresetOf`). Creating one with the older adapter still works and stores it as `custom`. A format can now say more:
+
+  - `signedContent` on `hmac_sha256` for apps that sign more than the body, such as `v0:{header:X-Request-Timestamp}:{body}`.
+  - An `ed25519` scheme, whose secret is the app's public key.
+  - A `url_token` scheme for apps that can't sign: the secret is part of the address, at least 24 URL-safe characters.
+  - `freshness`, which refuses deliveries whose send time is too old.
+  - A `type` joined from `parts`, lists of fallback paths for the text fields, and `actorKind` to tell people from bots.
+
+  Agents with `scheduled_tasks:manage` can add webhook sources themselves. `event_sources_create_webhook` takes a preset or a format and a signing secret, which can be a secret reference, and returns the address to give the app. `event_sources_update` and `event_sources_delete` change and remove sources. For a webhook source, `event_sources_list` with its `sourceId` now shows its format and last five deliveries. The event-triggers Skill explains how to write a format from an app's webhook docs.
+
+  A secret reference in those tools' `signingSecret` resolves to its value, and only there: the source keeps the secret encrypted, and a name or format next to it stays reference text. A reference that could not resolve is refused rather than stored.
+
+- cebc433: Question cards offer "Let the agent decide". On every ordinary question (never a secret, a Skill review or a secret approval; tool approvals stay human-only) one secondary action replaces Skip and settles the request as `{ outcome: "skipped", agentDecides: true }`, accepted even when the request does not allow an ordinary skip. The agent's tool result carries a note to make its own best choice and say in one sentence what it chose, and the settled card reads "You let the agent decide". On a sub-session's question shown in a parent chat, the action instead sends the parent's own agent a message naming the exact request; the card says "Your agent is deciding" and stays answerable, and the message shows what the agent decided once the sub-session's request settles. `HumanInputForm` takes `onLetAgentDecide` and `agentDeciding`, `HumanInputSurface` forwards them, and `humanInputAgentMayDecide` tells which requests qualify.
+
+  A sub-session's blocking question now also wakes a parent whose goal is completed (the goal is not reopened), so the parent agent can answer it before the person has to. Before, such a parent kept the notice unread and the person was the only one asked. Agents are told to answer a child's question from their task context before the person has to, and to do the agent work it asks for (such as starting a reviewer) and then answer. The `request_human_input` description tells a sub-session to message its parent agent, rather than ask the person, when what it needs is agent work.
+
+- c6ba725: Meetings no longer stay stuck. Finishing a recording that can't be paid for ends capture and fails its transcript with the reason, or, when nobody picked a model, transcribes it with one that needs no credits; a transcript that runs past its time budget (half an hour plus three times the audio, at most twelve hours) fails as `timed_out`. The meeting page names the fix for a refused transcript (transcribe with a model that needs no credits, add credits, or connect a model) and offers Transcribe again; says when this device is still uploading a meeting's audio, with Try again after a failure (`RecordingUploader.retry`, `useRecorder().retryUpload`); and no longer promises "a minute or two" for long meetings. A signed-in person's own Only me meetings now appear in the normal Meetings list of every workspace of their organization they belong to, their Personal workspace included, labelled with the workspace that stores them (`Recording.sourceWorkspace`), and open in place there for them and their agents when the request has the same access in the storing workspace; shared meetings, other people's and an app's own users' meetings stay in their workspace, and nothing crosses organizations.
+- a02dca4: Record where each agent-session model call that writes a model-call fact
+  (turns, compaction and session titles) was processed. Each fact and its durable
+  `agent.model.usage` event carry the serving route's residency claim
+  (geography, deployment type and regions, never evidence), facts rebuilt from
+  usage events keep it, and Insights calls expose each call's
+  `processingGeography` (undefined from servers older than this release). Calls
+  recorded before this change read as null; a new call whose route is not known
+  is recorded as unknown, and a stored eu claim that breaks the eu rules reads as
+  unknown.
+- 6c5a6b5: Projects get a profile like a chat's: a description and an avatar (an emoji, icon or letters on a colour, or a workspace image). The avatar replaces the folder icon in the sidebar, the new-chat project picker and the Move to project lists, and pointing at a project shows its description. **Edit project…** in the project's menu replaces **Rename project** and opens the same dialog as a chat's **Edit profile…**. `Channel` gains `avatar`, `POST`/`PATCH /v1/workspaces/:workspaceId/channels` accept it, and agents set it with `project_create` and `project_update`. Changing it needs the same permission as a rename, and an image avatar must be shared with the workspace.
+- ce001ee: Agents can mark one option of a question as recommended, ask a yes/no question whose two buttons use their own words (`confirm: true` with two options, the action first), and attach a short preview to each option, such as the exact text a choice would send. The web and phone question cards show a "Recommended" badge, the two decision buttons and the previews.
+- 71bcf11: A saved message that was sent for one of the person's machines no longer leaves the chat at a dead end after the chat moves to another of their machines. The chat now names the machine the message was sent for, offers "Run it on …" (move back, then one recheck), and explains how to send it again on the current machine instead of offering a recheck that can't pass. `SessionMachineAccess` gains `queuedTurnNotApprovedHere` and `queuedTurnApprovedMachines` (machine names only for the message's sender), and `@opengeni/react/session` exports the shared model. The generic "not approved for this chat" wording no longer tells the owner to ask the owner.
+- a744c56: Bots. Any chat can now have a one-line description and an avatar (an emoji, an icon, letters, or an image from the workspace) next to its title, which is its name. People set them from the chat header and the sidebar menu; the agent sets them with `set_session_title` and `set_other_session_title`. They are display-only and never sent to the model. `PATCH /sessions/{id}` accepts `description` and `avatar`, and `createSession` accepts `profile`.
+
+  Bot templates (`/bot-templates`) hold a name, description, avatar and setup instructions. Starting a bot from one opens a kept-live chat with the instructions as its first message, and the agent sets itself up from there. The agent can save itself as a template with the new `bot_template_save` tool, and templates export and import as `opengeni.bot-template` files. See `docs/bots.md`.
+
+- a895f0b: The session list can select known sessions by id: pass `sessionIds` (up to 200) to `listSessionPage` or `listSessionSummaryPage`. It narrows what the caller can already see and never widens it; search and the other filters still apply. Summary rows now also include `activeTurnId` and `latestTurn` (id, status, start and finish time), so a host can show a chat's state without reading its events.
+- ad1dc82: The session proxy's `resolve` can return `membership: { permissions }`. Every forwarded request then runs as `asUser(user, { source, membership })`, so the user's grant in the workspace matches the stated permissions, as with a server-side `asUser` client. Without it, the stored grant applies as before.
+- 670913f: Sites can have several pages and use links with query parameters. `site.location` gives a Site its own address (`path`, `search`, `hash`, `href` and parsed `params`), `site.navigate(to, { replace })` moves between the Site's own pages without reloading, and `site.onLocationChange` hears Back, Forward and links. On a published Site this is the real address, kept through sign-in including its `#hash`; in the console it is kept in the Site page's `?page=` parameter. Ordinary links to the Site's own pages now move the Site instead of failing inside its frame (`createOpenGeniSiteClient({ links: false })` opts out). Older hosts report no location.
+
+  Site SQL binds two more verified viewer values: `:viewer_access` (`member`, `invited`, `user` or `guest`) and `:viewer_email` (the verified email in lowercase, or NULL). `:viewer_kind` is unchanged.
+
+- 3aaf6ed: Site rows in sidebar projects move like chat rows. Their menu has the same "Move to project" list (Default takes the Site out of every project), and a Site row can be dragged onto a project. The move is shared, like a chat's project: the Site and its conversations in that project go to the new one, and the Site stays published and in Artifacts. New `PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/channel` (`updateSiteProject` in the SDK) needs `sessions:control` and control of every conversation that moves.
+- 77f483f: Sites can now run tools that need approval. When a Site you view in Opengeni calls one, for example Gmail "Send message", Opengeni asks you around the Site: what will happen, from which of your accounts and to whom, with Send and Cancel, plus "Always allow for this Site". The call always uses your own account. `createSiteToolBridge` accepts `confirmToolCall` and `connectForToolCall` for hosts that show this confirmation.
+- a1e75dc: An organization key acting as an external user can now state that user's workspace membership on each request: `asUser(id, { source, membership: { permissions } })`, or `membership` in the `x-opengeni-external-actor` value. Opengeni makes the stored grant in the request's shared workspace exactly those permissions before authorizing the request. It creates a missing member, writes only when the grant differs, and applies the external-members ceiling and last-administrator rules with their errors. Removing the member wins over requests already in flight. Without `membership`, the stored grant applies as before.
+
+### Patch Changes
+
+- 7a5395e: Workspace instructions can now be cleared. Saving empty text in Knowledge > Instructions (or creating and activating an instruction policy draft with empty content through the API or SDK) clears the policy: agents get no workspace instructions, the earlier versions stay in History, and any of them can be restored. Clearing also removes an instruction override saved in earlier workspace settings, so nothing applies again by surprise.
+- 0ba40f0: On macOS, typing into a browser's address bar in the background and pressing Enter now loads the page. The text used to be written through accessibility, which the address bar shows but never takes, so Enter loaded nothing while the batch reported success; it is now typed with keystrokes the browser does take. A `computer_act` batch whose raw input (a key press, or a press the driver could only send) went unconfirmed and that changed no element now says it may not have taken effect, as a single action does. Computer sessions report `targetFocus`, whether a focus action can bring a window forward, and `computer_open` lists "window focus" under what is not available where it cannot (CUA on Windows and Linux).
+
+  Pins CUA 944b1b7f (cu-browser-field-keys merged with cu-popup-options).
+
+- 37538aa: Meetings get their notes written automatically. When a meeting's transcript is ready, Opengeni starts one chat for the meeting's owner (Only me for an Only me meeting, a workspace chat for a shared one) that writes the notes: an overview, topics, decisions and action items, with speakers and people linked as `speaker:` and `person:` mentions. The chat can only read that one meeting and save its notes, and nobody can widen it later. It runs on the workspace's shared Codex or Claude subscription accounts like other background work, and doesn't start when no subscription account can serve it, so it never spends credits or an API key. It never writes over saved notes and steps aside when the owner has their own automation for ready transcripts. Admins can turn it off with "Write notes after each meeting" in the meeting settings (`settings.recordings.autoSummary: false`). `meeting_read` now gives each speaker's label, and the "Meeting notes" template asks for the same format.
+- 5a3ed41: Each person can now choose their own default machine in a shared workspace ("Your default machine" in workspace settings). The chats they start begin there, ahead of the workspace default, and any active machine they can use qualifies, including their own Only me machine. Nobody else sees the choice. Automations and agent-created chats keep following the workspace default, and when the chosen machine is removed or no longer available, the person's new chats fall back to the workspace default until they choose again. `GET`/`PUT /v1/workspaces/:workspaceId/my-default-execution-target` reads and saves it (`null` clears it), the new-session draft returns it as `memberDefaultExecutionTarget`, and the SDK adds `getMyDefaultExecutionTarget` and `setMyDefaultExecutionTarget`.
+- 60c6c56: `modelContextTools` (a session's opening tools) can now name an application's own MCP tools by the names its server publishes, not only Opengeni's first-party tools. A host whose chat opens on one of its records, such as an estimate, can have the first turn load the tools for that record before its first model request, as a tool search by name would, so the agent can use them without searching first. The session's tools, tool policy and first request's tool block are unchanged, and a name loads only if a server the session selects authorizes a tool by that name.
+- 3c0113c: Models a deployment lists under the same name now say what differs, so a person
+  never sees two choices they can't tell apart. When two routes of a model share a
+  name in the same picker group, a route whose residency record names its
+  processing geography gets it in brackets ("GPT-6.1 Sol" and "GPT-6.1 Sol (EU)");
+  twins in the same place get their connection's name instead ("Sonnet 4.6 (Your
+  OpenRouter)"). Models with a unique name, and organization and workspace copies
+  of one model, keep their plain name. The picker search, the trigger and the
+  Models settings view use the same names, and `list_models` shows the agent the
+  same name for such twins. The SDK's `ClientModel` type now includes the
+  `residency` record the server already sends; `@opengeni/sdk/model-picker-order`
+  exports `modelLabelDistinctions` and `@opengeni/react/model-policy` exports
+  `withDistinctLabels` for hosts that build their own picker rows. EU
+  status still comes only from residency records, never a name.
+- Updated dependencies [e1ebd25]
+- Updated dependencies [44ba53b]
+- Updated dependencies [d4fd76d]
+- Updated dependencies [f385091]
+- Updated dependencies [7a5395e]
+- Updated dependencies [aa6b340]
+- Updated dependencies [12b773f]
+- Updated dependencies [7f627c9]
+- Updated dependencies [e8bc121]
+- Updated dependencies [ecc876a]
+- Updated dependencies [f6c6c0f]
+- Updated dependencies [09972b5]
+- Updated dependencies [cebc433]
+- Updated dependencies [0ba40f0]
+- Updated dependencies [37538aa]
+- Updated dependencies [c6ba725]
+- Updated dependencies [5a3ed41]
+- Updated dependencies [a02dca4]
+- Updated dependencies [a1a060b]
+- Updated dependencies [60c6c56]
+- Updated dependencies [177de8d]
+- Updated dependencies [d166d88]
+- Updated dependencies [66d1e08]
+- Updated dependencies [6c5a6b5]
+- Updated dependencies [21856c5]
+- Updated dependencies [4b0dd0b]
+- Updated dependencies [3c0113c]
+- Updated dependencies [71bcf11]
+- Updated dependencies [942fcc1]
+- Updated dependencies [fb41dfd]
+- Updated dependencies [31e07a6]
+- Updated dependencies [a744c56]
+- Updated dependencies [a895f0b]
+- Updated dependencies [b0f7062]
+- Updated dependencies [670913f]
+- Updated dependencies [3aaf6ed]
+- Updated dependencies [0f77b2d]
+- Updated dependencies [77f483f]
+- Updated dependencies [a1e75dc]
+- Updated dependencies [5cab358]
+- Updated dependencies [35387c2]
+- Updated dependencies [149a15c]
+  - @opengeni/contracts@6.0.0
+  - @opengeni/connect@6.0.0
+
 ## 5.5.1
 
 ### Minor Changes
