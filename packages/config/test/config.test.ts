@@ -432,6 +432,14 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
+  test("idle context compaction defaults on and parses the opt-out", () => {
+    expect(withEnv({}, () => getSettings()).idleContextCompactionEnabled).toBe(true);
+    expect(
+      withEnv({ OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED: "false" }, () => getSettings())
+        .idleContextCompactionEnabled,
+    ).toBe(false);
+  });
+
   test("session usage limits producer flag defaults off and parses", () => {
     expect(withEnv({}, () => getSettings()).sessionUsageLimitsEnabled).toBe(false);
     expect(

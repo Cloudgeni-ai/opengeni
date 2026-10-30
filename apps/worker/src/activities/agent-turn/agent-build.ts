@@ -9,7 +9,7 @@ import {
   ensureSessionWorkspaceGovernance,
   sessionHasToolRouterHistory,
   SUBSCRIPTION_CORE_XAI,
-  turnCanChangeWorkspaceSettings,
+  turnWorkspaceSettingsAccess,
 } from "@opengeni/db";
 import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
@@ -590,8 +590,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               turn.initiatingHumanSubjectId ??
               (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : "")
             ).startsWith("external_user:"),
-            canChangeSettings: () =>
-              turnCanChangeWorkspaceSettings(db, {
+            settingsAccess: () =>
+              turnWorkspaceSettingsAccess(db, {
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,

@@ -7,6 +7,7 @@
  * own source when the form opens. Pure; text comes from the host's catalog.
  */
 import { AUTOMATION_TEMPLATE_NAME_MAX_LENGTH } from "@opengeni/contracts/automation-templates";
+import { webhookPresetOf } from "@opengeni/contracts/event-triggers";
 import type {
   AutomationTemplateEventSource,
   AutomationTemplateSchedule,
@@ -112,13 +113,39 @@ export function builtinAutomationTemplates(t: OpenGeniText): AutomationTemplate[
       ],
     },
     {
+      id: "automation-failed",
+      name: t("automations.template.automationFailed.name"),
+      description: t("automations.template.automationFailed.description"),
+      instructions: t("automations.template.automationFailed.instructions"),
+      when: t("automations.template.automationFailed.when"),
+      schedule: null,
+      triggers: [
+        {
+          source: { kind: "workspace" },
+          eventTypes: ["turn.failed"],
+          // Failed automation chats are Opengeni's own events: only chats an
+          // automation ran, and only the person's own automations.
+          includeOwnEvents: true,
+          conditions: [
+            { field: "data.automationRunId", op: "exists" },
+            { field: "data.startedByYou", op: "equals", value: true },
+          ],
+        },
+      ],
+    },
+    {
       id: "issue-triage",
       name: t("automations.template.issueTriage.name"),
       description: t("automations.template.issueTriage.description"),
       instructions: t("automations.template.issueTriage.instructions"),
       when: t("automations.template.issueTriage.when"),
       schedule: null,
-      triggers: [{ source: { kind: "webhook", adapter: "linear" }, eventTypes: ["Issue.create"] }],
+      triggers: [
+        {
+          source: { kind: "webhook", adapter: "custom", preset: "linear" },
+          eventTypes: ["Issue.create"],
+        },
+      ],
     },
     {
       id: "morning-brief",
@@ -184,7 +211,11 @@ export function automationTemplateOfSaved(saved: WorkspaceAutomationTemplate): A
 export function automationTemplateSourceChoice(
   source: AutomationTemplateEventSource,
 ): EventSourceChoice {
-  return eventSourceChoiceOf({ kind: source.kind, adapter: source.adapter ?? null });
+  return eventSourceChoiceOf({
+    kind: source.kind,
+    adapter: source.adapter ?? null,
+    format: source.preset ? { preset: source.preset } : null,
+  });
 }
 
 /** When a template runs, for its card: its own words, else its schedule or first trigger. */
@@ -259,10 +290,14 @@ export function automationTemplateSchedule(
 /** Whether `source` is of the kind a template trigger asks for. */
 export function eventSourceFitsTemplate(
   wanted: AutomationTemplateEventSource,
-  source: Pick<EventSource, "kind" | "adapter" | "mcp">,
+  source: Pick<EventSource, "kind" | "adapter" | "mcp"> & Partial<Pick<EventSource, "format">>,
 ): boolean {
   if (source.kind !== wanted.kind) return false;
-  if (wanted.kind === "webhook") return source.adapter === wanted.adapter;
+  if (wanted.kind === "webhook") {
+    const have = webhookPresetOf({ adapter: source.adapter, preset: source.format?.preset });
+    const want = webhookPresetOf(wanted);
+    return have.adapter === want.adapter && have.preset === want.preset;
+  }
   if (wanted.kind === "mcp") return source.mcp?.serverId === wanted.mcpServerId;
   return true;
 }
@@ -395,7 +430,12 @@ function templateSourceOf(
 ): AutomationTemplateEventSource | null {
   const shared = source?.visibility === "workspace" ? { sourceId: source.id } : {};
   if (kind === "webhook") {
-    return source?.adapter ? { kind, adapter: source.adapter, ...shared } : null;
+    if (!source?.adapter) return null;
+    const { adapter, preset } = webhookPresetOf({
+      adapter: source.adapter,
+      preset: source.format?.preset,
+    });
+    return { kind, adapter, ...(preset ? { preset } : {}), ...shared };
   }
   if (kind === "mcp") {
     return source?.mcp ? { kind, mcpServerId: source.mcp.serverId, ...shared } : null;

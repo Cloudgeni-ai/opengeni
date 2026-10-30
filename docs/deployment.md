@@ -25,7 +25,9 @@ migration, upgrade every API and worker, then set
 public webhook intake at `/v1/webhooks/events/:routeId` and event runs. While it
 is off, the intake answers 404, automations cannot be given event triggers, and
 no event runs start; stored deliveries and events still expire on schedule
-(delivery bodies after 7 days, events after 30). See
+(delivery bodies after 7 days, events after 30). Automations that wake each
+other through Opengeni's own events (migration 1105) stop after
+`OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH` levels, default 3. See
 [automations and events](design/automations-and-events.md).
 
 Webhook senders and the GitHub App are given addresses under

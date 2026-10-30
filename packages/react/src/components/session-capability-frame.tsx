@@ -1,9 +1,10 @@
 import { CheckIcon, InfoIcon, ShieldCheckIcon, XIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { containedPortal } from "../ui/portal-container";
-import { useRef, useState, type ReactNode, type RefObject } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useOpenGeniText } from "../messages/runtime";
+import { useTimelineAnswerFollow } from "./timeline-answer-follow";
 
 const DialogContainedPortal = containedPortal(Dialog.Portal);
 
@@ -99,7 +100,27 @@ export function SessionCapabilityFrame({
   const localCard = useRef<HTMLElement>(null);
   const buttonRef = opener ?? localOpener;
   const sectionRef = cardRef ?? localCard;
+  const rootRef = useRef<HTMLDivElement>(null);
   const portalStyle = usePortalTokenStyle(sectionRef.current);
+  // Finishing the card here is the person's answer and the agent continues
+  // from it: let the conversation follow that answer. Only a completion the
+  // person brought about in this card counts. A card that was already complete
+  // when it appeared, or whose saved completion loads after it appears while
+  // the person reads elsewhere, asks nothing.
+  const followAnswer = useTimelineAnswerFollow();
+  const wasComplete = useRef(complete);
+  const engaged = useRef(false);
+  useLayoutEffect(() => {
+    if (expanded || busy) engaged.current = true;
+  }, [expanded, busy]);
+  const engage = () => {
+    engaged.current = true;
+  };
+  useLayoutEffect(() => {
+    if (complete && !wasComplete.current && engaged.current && rootRef.current)
+      followAnswer?.(rootRef.current);
+    wasComplete.current = complete;
+  }, [complete, followAnswer]);
   const identity = (
     <>
       <Mark src={logo} name={name} />
@@ -111,7 +132,14 @@ export function SessionCapabilityFrame({
     </>
   );
   return (
-    <div className="og-session-capability">
+    // React bubbles the setup dialog's portaled events here too.
+    <div
+      ref={rootRef}
+      className="og-session-capability"
+      onPointerDownCapture={engage}
+      onClickCapture={engage}
+      onKeyDownCapture={engage}
+    >
       <section
         hidden={dialogOnly}
         style={dialogOnly ? { display: "none" } : undefined}
@@ -200,7 +228,8 @@ export function SessionCapabilityFrame({
               const target = buttonRef.current?.isConnected
                 ? buttonRef.current
                 : sectionRef.current;
-              if (target?.isConnected) target.focus();
+              // Keep the view where the conversation is; focus alone must not scroll.
+              if (target?.isConnected) target.focus({ preventScroll: true });
             }}
           >
             <div className="og-session-capability-dialog-header">

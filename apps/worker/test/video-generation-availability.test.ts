@@ -9,6 +9,8 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   createVideoGenerationToolAdapter,
   videoGenerationOffResult,
+  videoPolicyCardPrice,
+  type VideoSettingsAccess,
 } from "../src/activities/video-generation-availability";
 import type { VideoGenerationCredentialLease } from "../src/activities/video-generation-admission";
 
@@ -24,11 +26,14 @@ const offPolicy: VideoGenerationPolicy = {
   defaultModelId: null,
 };
 
-type Actor = { canChangeSettings: boolean; external: boolean };
-const ADMIN: Actor = { canChangeSettings: true, external: false };
-const MEMBER: Actor = { canChangeSettings: false, external: false };
-const EXTERNAL: Actor = { canChangeSettings: false, external: true };
-const EXTERNAL_ADMIN: Actor = { canChangeSettings: true, external: true };
+type Actor = { settingsAccess: VideoSettingsAccess; external: boolean };
+// An admin whose changes run without asking (a full-access chat).
+const ADMIN: Actor = { settingsAccess: "full_access", external: false };
+// An admin who confirms each change on a card in the chat.
+const CONFIRMING_ADMIN: Actor = { settingsAccess: "confirm", external: false };
+const MEMBER: Actor = { settingsAccess: null, external: false };
+const EXTERNAL: Actor = { settingsAccess: null, external: true };
+const EXTERNAL_ADMIN: Actor = { settingsAccess: "full_access", external: true };
 
 const managedSettings = (overrides: Parameters<typeof testSettings>[0] = {}) =>
   testSettings({
@@ -65,6 +70,70 @@ describe("video generation while it is off", () => {
         },
       },
     });
+  });
+
+  test("where a confirmation card asks, the agent runs the switch instead of asking twice", () => {
+    const result = videoGenerationOffResult({
+      settings: managedSettings(),
+      workspaceId: WORKSPACE_ID,
+      policy: offPolicy,
+      creditModelsAllowed: true,
+      actor: CONFIRMING_ADMIN,
+    });
+    expect(result.message).toBe(
+      "Video generation is off in this workspace. Opengeni credits can pay for it: a 5-second 480p clip costs $0.78 (720p: $1.75). If the person wants a video, run the app action in turnOn: its confirmation card asks them whether to turn video on for every chat in this workspace and shows the price, so don't ask them first. Then call this tool again. If you can't run it, they can turn it on in Settings.",
+    );
+    expect(result.turnOn?.body).toEqual({
+      expectedRevision: 7,
+      fundingSource: "opengeni_credits",
+      enabledModelIds: [SEEDANCE_2_5_MODEL_ID],
+      defaultModelId: SEEDANCE_2_5_MODEL_ID,
+    });
+    // Where credits are free, the card has no price to show.
+    expect(
+      videoGenerationOffResult({
+        settings: managedSettings({ billingMode: "disabled", usageLimitsMode: "none" }),
+        workspaceId: WORKSPACE_ID,
+        policy: offPolicy,
+        creditModelsAllowed: true,
+        actor: CONFIRMING_ADMIN,
+      }).message,
+    ).toBe(
+      "Video generation is off in this workspace. It can run on this deployment's video gateway, at no charge to this workspace. If the person wants a video, run the app action in turnOn: its confirmation card asks them whether to turn video on for every chat in this workspace, so don't ask them first. Then call this tool again. If you can't run it, they can turn it on in Settings.",
+    );
+  });
+
+  test("the card that turns credit-paid video on carries the same price", () => {
+    const turnOn = videoGenerationOffResult({
+      settings: managedSettings(),
+      workspaceId: WORKSPACE_ID,
+      policy: offPolicy,
+      creditModelsAllowed: true,
+      actor: CONFIRMING_ADMIN,
+    }).turnOn!;
+    const price = "A 5-second 480p clip costs $0.78 (720p: $1.75) in Opengeni credits.";
+    expect(videoPolicyCardPrice(managedSettings(), turnOn)).toBe(price);
+    expect(videoPolicyCardPrice(managedSettings(), JSON.stringify(turnOn))).toBe(price);
+    // Turning video off, another way to pay, another action, free credits, or an unknown model.
+    for (const [settings, call] of [
+      [
+        managedSettings(),
+        { ...turnOn, body: { ...turnOn.body, enabledModelIds: [], defaultModelId: null } },
+      ],
+      [
+        managedSettings(),
+        { ...turnOn, body: { ...turnOn.body, fundingSource: "workspace_gateway" } },
+      ],
+      [managedSettings(), { ...turnOn, id: "updateWorkspaceSettings" }],
+      [managedSettings({ billingMode: "disabled", usageLimitsMode: "none" }), turnOn],
+      [
+        managedSettings(),
+        { ...turnOn, body: { ...turnOn.body, enabledModelIds: ["x/y"], defaultModelId: "x/y" } },
+      ],
+      [managedSettings(), "{not json"],
+    ] as const) {
+      expect(videoPolicyCardPrice(settings, call)).toBeNull();
+    }
   });
 
   test("the price follows the deployment's configured credit rates", () => {
@@ -276,7 +345,7 @@ const prompt: GenerateVideoToolInput = { prompt: "a golden retriever on a beach 
 function adapterFor(
   readPolicy: () => Promise<VideoGenerationPolicy>,
   admit: Parameters<typeof createVideoGenerationToolAdapter>[0]["admit"],
-  canChangeSettings: () => Promise<boolean> = async () => true,
+  settingsAccess: () => Promise<VideoSettingsAccess> = async () => "full_access",
   options: { external?: boolean; settings?: ReturnType<typeof managedSettings> } = {},
 ) {
   const credentialReads: string[] = [];
@@ -285,7 +354,7 @@ function adapterFor(
     workspaceId: WORKSPACE_ID,
     creditModelsAllowed: true,
     external: options.external ?? false,
-    canChangeSettings,
+    settingsAccess,
     readPolicy,
     resolveCredential: async (policy) => {
       credentialReads.push(policy.fundingSource);
@@ -358,7 +427,7 @@ describe("video generation tools read live state on every call", () => {
   test("who can turn video on is read live, and only while video is off", async () => {
     let policy = offPolicy;
     let actorReads = 0;
-    let canChange = false;
+    let access: VideoSettingsAccess = null;
     const { adapter } = adapterFor(
       async () => policy,
       async () => ({
@@ -368,11 +437,11 @@ describe("video generation tools read live state on every call", () => {
       }),
       async () => {
         actorReads += 1;
-        return canChange;
+        return access;
       },
     );
     await expect(adapter.capabilities()).resolves.not.toHaveProperty("turnOn");
-    canChange = true;
+    access = "confirm";
     const off = await adapter.execute(prompt, { toolCallId: "call-video" });
     if (!("turnOn" in off) || !off.turnOn) throw new Error("expected a turn-on call");
     expect(actorReads).toBe(2);
@@ -420,7 +489,7 @@ describe("video generation tools read live state on every call", () => {
       },
       async () => {
         reads += 1;
-        return true;
+        return "confirm";
       },
       { settings: managedSettings({ environmentsEncryptionKey: undefined }) },
     );

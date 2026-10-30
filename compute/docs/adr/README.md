@@ -30,6 +30,7 @@ old one; old records stay as history.
 | 22 | [Templates saved from sandboxes](0022-templates-saved-from-sandboxes.md) | Accepted |
 | 23 | [GitHub Actions runner pools: a fresh sandbox per job](0023-github-actions-runner-pools.md) | Accepted |
 | 24 | [Busy sandboxes are slowed, never frozen, and the host never runs out](0024-busy-sandboxes-are-slowed-never-frozen.md) | Accepted |
+| 26 | [A host that shares its machine](0026-a-host-that-shares-its-machine.md) | Accepted |
 
 ## Format
 
