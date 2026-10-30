@@ -318,6 +318,12 @@ export function FeedbackDialog(props: {
             ) : null}
           </div>
         ) : null}
+        {props.reportContext ? (
+          <p className="text-xs text-fg-muted" data-feedback-included="">
+            To help fix what went wrong, your report also includes the page and chat you're on, the
+            app version, and the app's recent errors, requests and steps.
+          </p>
+        ) : null}
         {submissionError ? (
           <p role="alert" className="text-sm text-destructive">
             {submissionError}
