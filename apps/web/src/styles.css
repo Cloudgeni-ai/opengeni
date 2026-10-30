@@ -64,7 +64,10 @@ html[data-desktop] [data-window-drag] :is(a, button, input, select, textarea, la
    below it, so nothing shares a row with the controls. Linux keeps the
    system title bar.
 
-   macOS: as tall as the badge with even space above and below it.
+   macOS: as tall as the badge with even space above and below it, and the
+   traffic lights centred on it. The app sets the height the shell reports
+   (`applyDesktopWindowBar`), so the lights and the page's own bar controls
+   share one centre line with any shell.
    Windows: as tall as the caption buttons, which the browser reports (the
    window controls overlay); in full screen there are none, and no bar. */
 html[data-desktop="macos"] {
@@ -181,11 +184,15 @@ html[data-desktop="macos"] [data-shell-rail] + [data-canvas] {
    (`--og-window-bar-row-left`, kept by the shell) and one above it (46), so
    its buttons take clicks and its empty space moves the window like the bar.
    It never starts before --og-window-bar-row-start: past the sidebar toggle
-   (84px + 32px) and a small gap, so neither the toggle nor the traffic lights
-   are ever under it (beside the collapsed rail, or with no rail). Its two
-   lines for a sub-chat (16px + 28px) fit the bar. */
+   (from --og-window-bar-controls-left, 32px wide) and a small gap, so neither
+   the toggle nor the traffic lights are ever under it (beside the collapsed
+   rail, or with no rail). Its two lines for a sub-chat (16px + 28px) fit the
+   bar. The toggle starts 84 window points from the left at any page zoom
+   (`--og-window-zoom`, set with the bar's height), as the traffic lights
+   don't zoom. */
 html[data-desktop="macos"] {
-  --og-window-bar-row-start: 120px;
+  --og-window-bar-controls-left: calc(84px / var(--og-window-zoom, 1));
+  --og-window-bar-row-start: calc(var(--og-window-bar-controls-left) + 36px);
 }
 
 html[data-desktop="macos"] [data-window-bar-row] > [data-titlebar] {

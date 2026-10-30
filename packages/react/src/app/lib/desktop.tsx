@@ -5,6 +5,7 @@
  */
 import { OPENGENI_DESKTOP_APP_HEADER } from "@opengeni/contracts";
 import {
+  DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT,
   getDesktopBridge,
   hasDesktopCapability,
   type DesktopBridge,
@@ -112,12 +113,60 @@ declare global {
 }
 
 /**
+ * The height of the macOS app's window bar, where the shell centres the
+ * traffic lights, in CSS pixels at the page's zoom, or null for other
+ * platforms (and without the bridge, where the page keeps the current shell's
+ * 44px bar). The sidebar toggle and a chat's header are centred on the bar, so
+ * they line up with the lights. Shells that don't report it (0.1.33 and older)
+ * centre the lights on a 56px row.
+ */
+export function desktopWindowBarHeight(bridge: DesktopBridge | null): number | null {
+  if (bridge?.platform !== "macos") return null;
+  const reported = bridge.windowBarHeight;
+  const height =
+    typeof reported === "number" && Number.isFinite(reported) && reported > 0
+      ? reported
+      : DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT;
+  return height / desktopZoom(bridge);
+}
+
+/** The page's zoom factor in the desktop app (1 at 100%, and in shells that don't report it). */
+function desktopZoom(bridge: DesktopBridge | null): number {
+  let zoom = 1;
+  try {
+    zoom = bridge?.zoomFactor?.() ?? 1;
+  } catch {
+    // An older or failing shell: assume 100%.
+  }
+  return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+}
+
+/**
+ * Sizes the window bar (`--og-window-bar-height`) to the shell's and tells the
+ * page its zoom (`--og-window-zoom`), so the bar's controls keep their place
+ * in the window beside the traffic lights; kept up to date when the page zooms
+ * (which resizes its viewport). See `desktopWindowBarHeight`.
+ */
+export function applyDesktopWindowBar(root: HTMLElement, bridge: DesktopBridge | null): void {
+  const apply = () => {
+    const height = desktopWindowBarHeight(bridge);
+    if (height == null) return;
+    root.style.setProperty("--og-window-bar-height", `${height}px`);
+    root.style.setProperty("--og-window-zoom", String(desktopZoom(bridge)));
+  };
+  apply();
+  if (bridge?.platform === "macos")
+    root.ownerDocument.defaultView?.addEventListener("resize", apply);
+}
+
+/**
  * Before the first render: mark the document so the desktop layout applies
  * from the first frame (the window bar for the window controls, draggable title areas,
  * window materials), and let the shell navigate client-side.
  */
 export function installDesktopShell(navigate: (path: string) => void): void {
   if (desktopPlatform) document.documentElement.dataset.desktop = desktopPlatform;
+  applyDesktopWindowBar(document.documentElement, desktopBridge);
   if (!desktopBridge) return;
   window.__opengeniDesktopNavigate = (path: string) => {
     if (typeof path === "string" && path.startsWith("/") && !path.startsWith("//")) navigate(path);

@@ -7,10 +7,14 @@ import { startProcess } from "@opengeni/testing/process";
 
 import {
   expectWindowTop,
+  LEGACY_MAC_TRAFFIC_LIGHT_POSITION,
+  MAC_TRAFFIC_LIGHT_POSITION,
   MACOS_BAR_CONTROLS_LEFT,
   MACOS_BAR_ROW_LEFT,
   simulateWindowsTitleBar,
+  trafficLightCentre,
   WINDOW_BAR_HEIGHT,
+  windowBar,
   windowBarControls,
   windowBarRow,
 } from "./desktop-window-bar";
@@ -269,6 +273,82 @@ test("a chat's header is the macOS window bar's row", async () => {
         await page.getByRole("button", { name: "Collapse sidebar", exact: true }).waitFor();
       }
       expect(errors).toEqual([]);
+      await page.close();
+    }
+  }
+}, 240_000);
+
+test("the macOS sidebar toggle is centred on the traffic lights", async () => {
+  // The shell reports its bar (`?bar=`) and zoom (`?zoom=`); a shell that
+  // doesn't (0.1.33 and older) has the lights lower, on its old 56px row.
+  // Page pixels times the zoom are window points, where the lights are.
+  const shells = [
+    { bar: "44", zoom: 1, lights: MAC_TRAFFIC_LIGHT_POSITION },
+    { bar: "44", zoom: 1.25, lights: MAC_TRAFFIC_LIGHT_POSITION },
+    { bar: "44", zoom: 0.8, lights: MAC_TRAFFIC_LIGHT_POSITION },
+    { bar: "none", zoom: 1, lights: LEGACY_MAC_TRAFFIC_LIGHT_POSITION },
+  ];
+  const layouts = [
+    { width: 1280, view: "rail", rail: "open" },
+    { width: 1280, view: "rail", rail: "collapsed" },
+    { width: 800, view: "rail", rail: "collapsed" },
+    { width: 1280, view: "chat", rail: "open" },
+    { width: 1280, view: "chat", rail: "none" },
+    { width: 800, view: "chat", rail: "collapsed" },
+  ] as const;
+  for (const { bar, zoom, lights } of shells) {
+    const centre = trafficLightCentre(lights);
+    for (const { width, view, rail } of layouts) {
+      const page = await browser.newPage({ viewport: { width, height: 420 } });
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.goto(
+        `${url}?platform=macos&bar=${bar}&zoom=${zoom}${view === "chat" ? "&view=chat" : ""}${rail === "none" ? "&rail=none" : ""}`,
+      );
+      const where = `bar=${bar} zoom=${zoom} ${view} ${rail} ${width}px`;
+      // The bar is the lights' row: centred on them, top to bottom.
+      const ready =
+        view === "chat"
+          ? page.locator("[data-titlebar]").getByText("Ship the window bar")
+          : page.locator("[data-session-row]").first();
+      await ready.waitFor({ timeout: 90_000 });
+      expect((await windowBar(page))!.height * zoom, where).toBeCloseTo(centre * 2, 1);
+      // With no rail there is no sidebar toggle; the chat's header has the line.
+      let toggleRight = 0;
+      if (rail !== "none") {
+        const collapse = page.getByRole("button", { name: "Collapse sidebar", exact: true });
+        await collapse.waitFor();
+        if (rail === "collapsed") await collapse.click();
+        const toggle = page.getByRole("button", {
+          name: rail === "collapsed" ? "Expand sidebar" : "Collapse sidebar",
+          exact: true,
+        });
+        await toggle.waitFor();
+        const box = (await toggle.boundingBox())!;
+        const toggleCentre = (box.y + box.height / 2) * zoom;
+        expect(Math.abs(toggleCentre - centre), where).toBeLessThanOrEqual(0.5);
+        // Clear of the traffic lights and the sharing badge at any zoom.
+        expect(box.x * zoom, where).toBeCloseTo(MACOS_BAR_CONTROLS_LEFT, 1);
+        toggleRight = box.x + box.width;
+      }
+      if (view === "chat") {
+        // The chat's header shares the line, after the toggle.
+        const row = (await windowBarRow(page))!;
+        expect(row.left, where).toBeGreaterThanOrEqual(toggleRight);
+        const actions = row.buttons.find(({ label }) => label === "More session actions")!;
+        expect(
+          Math.abs(((actions.top + actions.bottom) / 2) * zoom - centre),
+          where,
+        ).toBeLessThanOrEqual(0.5);
+        expect(actions.clickable, where).toBe(true);
+      }
+      if (output) {
+        await page.screenshot({
+          path: `${output}/centre-${bar}-${zoom}-${view}-${rail}-${width}.png`,
+          clip: { x: 0, y: 0, width: 400, height: 80 },
+        });
+      }
+      expect(errors, where).toEqual([]);
       await page.close();
     }
   }

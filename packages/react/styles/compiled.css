@@ -1079,8 +1079,8 @@
 :where(.og-root).left-\[38\%\],:where(.og-root) .left-\[38\%\] {
     left: 38%;
   }
-:where(.og-root).left-\[84px\],:where(.og-root) .left-\[84px\] {
-    left: 84px;
+:where(.og-root).left-\[var\(--og-window-bar-controls-left\,84px\)\],:where(.og-root) .left-\[var\(--og-window-bar-controls-left\,84px\)\] {
+    left: var(--og-window-bar-controls-left,84px);
   }
 :where(.og-root).isolate,:where(.og-root) .isolate {
     isolation: isolate;

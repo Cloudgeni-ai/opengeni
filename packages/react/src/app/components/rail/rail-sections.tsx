@@ -69,7 +69,8 @@ const SIDEBAR_TOGGLE_IN_WINDOW_BAR = desktopPlatform === "macos";
 
 /**
  * Controls drawn in the desktop window bar, above the page and its drag
- * region (`z-[46]`, one above the bar's 45). Rendered into a host at the start
+ * region (`z-[46]`, one above the bar's 45), centred on the bar as the traffic
+ * lights are, from `--og-window-bar-controls-left`. Rendered into a host at the start
  * of the body, so no rail or canvas stacking context can put them under the
  * bar, and they come first in the tab order, as the bar comes first on screen.
  */
@@ -78,7 +79,7 @@ function WindowBarControls({ children }: { children: ReactNode }) {
   return createPortal(
     <div
       data-window-bar-controls
-      className="fixed left-[84px] top-0 z-[46] flex h-(--og-window-bar-height) items-center gap-1 [-webkit-app-region:no-drag] [app-region:no-drag]"
+      className="fixed left-[var(--og-window-bar-controls-left,84px)] top-0 z-[46] flex h-(--og-window-bar-height) items-center gap-1 [-webkit-app-region:no-drag] [app-region:no-drag]"
     >
       {children}
     </div>,
