@@ -242,8 +242,9 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 - **SUB-SEL-02** A connected personal account participates automatically in
   its owner's Personal workspace, and in another workspace only for its
   owner's own turns where they turned it on (D-53). An account added from a
-  shared workspace starts turned on there; its page in each workspace turns
-  it on or off, effective from the next accepted turn. Anywhere else it serves
+  shared workspace starts turned on there. Its page lists **Where it works**,
+  every workspace the owner belongs to in the organization with a switch for
+  each, effective from the next accepted turn. Anywhere else it serves
   only an explicit account choice. Live ownership, organization permission
   and accepted-turn personal authority remain required in every case (D-28).
   Already accepted work keeps its frozen pool; a new choice cannot grant it

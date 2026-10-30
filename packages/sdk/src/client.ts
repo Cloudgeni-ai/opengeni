@@ -579,6 +579,10 @@ import type {
   UserResourceGrantMutationResponse,
   UpdateGitHubActionPolicyRequest,
   RevokeUserResourceGrantResponse,
+  OwnResourceReachKind,
+  OwnResourceReachResponse,
+  SetOwnResourceReachRequest,
+  SetOwnResourceReachResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationAdministrationMembersResponse,
   ListOrganizationMemberNamesResponse,
@@ -6616,6 +6620,37 @@ export class OpenGeniClient {
     return await this.requestJson<RevokeUserResourceGrantResponse>(
       "DELETE",
       `/v1/workspaces/${workspaceId}/user-resource-authorities/grants/${grantId}?scope=user`,
+    );
+  }
+
+  /**
+   * "Where it works" for your own login, plan or machine: each workspace you
+   * belong to in its organization, and whether it works there for your own
+   * messages. Ask from any workspace where you can see it.
+   */
+  async getOwnResourceReach(
+    workspaceId: string,
+    resource: { resourceKind: OwnResourceReachKind; resourceId: string },
+  ): Promise<OwnResourceReachResponse> {
+    const query = new URLSearchParams({
+      resourceKind: resource.resourceKind,
+      resourceId: resource.resourceId,
+    });
+    return await this.requestJson<OwnResourceReachResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/own-resources/reach?${query.toString()}`,
+    );
+  }
+
+  /** Turn your own login, plan or machine on or off for your own messages in one workspace. */
+  async setOwnResourceReach(
+    workspaceId: string,
+    request: SetOwnResourceReachRequest,
+  ): Promise<SetOwnResourceReachResponse> {
+    return await this.requestJson<SetOwnResourceReachResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/own-resources/reach`,
+      request,
     );
   }
 

@@ -907,6 +907,23 @@ describe("MachineDetail — agent and connection", () => {
     expect(r.container.textContent).not.toContain("Command execution fails closed");
     await r.unmount();
   });
+
+  test("your own machine says where it works right under who can use it", async () => {
+    const m = machine({ sandboxId: "sh-own", state: "online", scope: "user" });
+    const r = await renderComponent(
+      <MachineDetail
+        machine={m}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        whereItWorks={<section data-where-it-works>Where it works</section>}
+      />,
+    );
+    await flush();
+    const audience = r.container.querySelector('[data-machine-audience="user"]');
+    expect(audience?.nextElementSibling?.hasAttribute("data-where-it-works")).toBe(true);
+    await r.unmount();
+  });
 });
 
 describe("MachinesDashboard", () => {

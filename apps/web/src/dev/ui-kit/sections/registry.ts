@@ -92,6 +92,7 @@ export const SECTION_KEYS = [
   "shared-overview",
   // Selection
   "setting-row",
+  "own-where-it-works",
   "switch",
   "segmented-control",
   "choice-cards",
@@ -413,6 +414,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       },
     ],
     load: () => import("./setting-row"),
+  },
+  {
+    key: "own-where-it-works",
+    group: "Selection",
+    title: "Where it works",
+    purpose:
+      "Your own login, model plan or machine: each workspace you belong to, with a switch for your own messages there.",
+    usedOn: "Connector page, model plan page, machine page",
+    load: () => import("./own-where-it-works"),
   },
   {
     key: "switch",

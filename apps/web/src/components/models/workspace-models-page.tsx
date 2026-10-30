@@ -465,6 +465,10 @@ export function WorkspaceModelsPageBody({
       onSelect={(id) => nav.openWorkspace(id)}
     />
   );
+  // Where your own subscriptions work for your own messages, chosen from this
+  // page: from your Personal workspace for everything listed there, and from a
+  // shared workspace for your own accounts listed with its accounts.
+  const ownReach = { workspaceId };
   const codexPlaces: CodexPlaces = {
     personal,
     workspaceName,
@@ -477,6 +481,7 @@ export function WorkspaceModelsPageBody({
       personal && organizationAdmin
         ? (id) => nav.openView("model-access", accountKey("codex", id, true))
         : undefined,
+    ownReach: personal ? ownReach : undefined,
     workspaceNameOf: sharedByName,
     removeFromWorkspace: removeShared?.("codex"),
     backToList,
@@ -500,6 +505,7 @@ export function WorkspaceModelsPageBody({
     sharePersonal: organizationAdmin
       ? (id) => nav.openView("model-access", accountKey("supergrok", id, true))
       : undefined,
+    ownReach: personal ? ownReach : undefined,
     workspaceName: sharedByName,
     removeFromWorkspace: removeShared?.("supergrok"),
     backToList,
@@ -525,6 +531,7 @@ export function WorkspaceModelsPageBody({
     sharePersonal: organizationAdmin
       ? (id) => nav.openView("model-access", accountKey("claude", id, true))
       : undefined,
+    ownReach: personal ? ownReach : undefined,
     workspaceName: sharedByName,
     removeFromWorkspace: removeShared?.("claude_subscription"),
     backToList,
@@ -546,15 +553,13 @@ export function WorkspaceModelsPageBody({
   // opened, reconnected and removed here. Their accounts are read through your
   // Personal workspace, which keeps them.
   const ownLabels = { ...labels, workspace: labels.user };
-  // Where your own subscription can be turned on for your messages.
-  const ownTurns = personal ? undefined : { workspaceId, workspaceName };
   // Signing one in again keeps it yours: the step opens with its account.
   const ownCodexPlaces: CodexPlaces = {
     ...codexPlaces,
     personal: true,
     scope: ownLabels,
     openConnect: () => nav.openView("connect:codex", account),
-    ownTurns,
+    ownReach,
     removeFromWorkspace: undefined,
   };
   const ownGrokPlaces: SuperGrokPlaces = {
@@ -563,14 +568,14 @@ export function WorkspaceModelsPageBody({
     openConnect: (id) =>
       nav.openView("connect:supergrok", id ? accountKey("supergrok", id) : account),
     sharePersonal: undefined,
-    ownTurns,
+    ownReach,
     removeFromWorkspace: undefined,
   };
   const ownClaudePlaces: ClaudePlaces = {
     ...claudePlaces,
     scope: ownLabels,
     sharePersonal: undefined,
-    ownTurns,
+    ownReach,
     removeFromWorkspace: undefined,
   };
   const ownCodexRows = {
