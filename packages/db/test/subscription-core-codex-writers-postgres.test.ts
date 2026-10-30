@@ -58,6 +58,7 @@ import { provisionRoles } from "../src/provision-roles";
 import {
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES,
   SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
   SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
   SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
@@ -1738,6 +1739,7 @@ describe.skipIf(!realDb)("Codex writers on the shared core (M3 PR 3b)", () => {
           ...SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
           ...SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
           ...SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
+          ...SUBSCRIPTION_ADMINISTRATION_OWNER_ROUTINES,
         ].sort(),
       );
       await disconnectDesignationCase();

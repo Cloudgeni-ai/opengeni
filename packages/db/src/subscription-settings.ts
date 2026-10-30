@@ -25,7 +25,8 @@ import {
 } from "@opengeni/subscriptions";
 import { sql } from "drizzle-orm";
 
-import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
+import { rawRows, withRlsContext, type Database } from "./database";
+import { setSubscriptionAdministrationSubject } from "./subscription-core/account-administrator";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import {
   readSubscriptionEffectiveSettings,
@@ -231,7 +232,10 @@ async function withOrganizationAdministrator<T>(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (tx) => {
-      await setSubjectRlsContext(tx, input.actorSubjectId);
+      await setSubscriptionAdministrationSubject(tx, {
+        accountId: input.organizationId,
+        subjectId: input.actorSubjectId,
+      });
       if (!(await isOrganizationAdministrator(tx, input.organizationId))) {
         throw new SubscriptionSettingsForbiddenError(
           "Only organization owners and admins can manage organization model account settings",
@@ -605,7 +609,7 @@ async function withWorkspaceSubject<T>(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      await setSubjectRlsContext(tx, input.subjectId);
+      await setSubscriptionAdministrationSubject(tx, input);
       return await use(tx);
     },
     SUBSCRIPTION_SETTINGS_TRANSACTION,

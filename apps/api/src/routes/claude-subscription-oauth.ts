@@ -14,7 +14,7 @@ import {
   completeClaudeSubscriptionOAuth,
   type ClaudeOAuthScope,
 } from "../claude-subscription-oauth";
-import { managedCookieHuman, requireOrganizationCodexHuman } from "./codex";
+import { managedCookieHuman, requireOrganizationSubscriptionAdministrator } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { requireClaudeCorePersonalWorkspace } from "../claude-subscription-core";
 import { parseRequestBody } from "../http/request-body";
@@ -44,7 +44,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
       .safeParse(c.req.param(organization ? "organizationId" : "workspaceId"));
     if (!id.success) throw new HTTPException(404, { message: "Scope not found" });
     if (organization) {
-      const human = await requireOrganizationCodexHuman(c, deps, id.data, {
+      const human = await requireOrganizationSubscriptionAdministrator(c, deps, id.data, {
         providerConsent: true,
       });
       return {

@@ -78,6 +78,41 @@ fn a_cgroup_write_that_fails_at_once_says_so() {
 }
 
 #[test]
+fn a_cgroup_write_whose_effect_cannot_be_read_meanwhile_says_how_it_went() {
+    // As a file being rewritten reads empty for a moment: looks that fail
+    // prove nothing, so the write's own result is what is told.
+    let unreadable = || Err(io::Error::from(io::ErrorKind::InvalidData));
+    let slow = |result: io::Result<()>| {
+        move || {
+            thread::sleep(Duration::from_millis(50));
+            result
+        }
+    };
+    write_until_applied(Duration::from_millis(5), slow(Ok(())), unreadable).unwrap();
+    let refused = write_until_applied(
+        Duration::from_millis(5),
+        slow(Err(io::Error::from(io::ErrorKind::InvalidInput))),
+        unreadable,
+    );
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn memory_high_set_over_and_over_reads_back_what_was_set_last() {
+    // Each setting writes on a thread of its own and is done once it shows,
+    // so a look may land while a write has emptied the file.
+    let dir = tempfile::tempdir().unwrap();
+    let group = Cgroup::at(dir.path());
+    fs::write(dir.path().join("memory.high"), "max\n").unwrap();
+    for round in 1..=200_u64 {
+        group.set_memory_high(Some(round << 30)).unwrap();
+        group.set_memory_high(None).unwrap();
+    }
+    group.set_memory_high(Some(3 << 30)).unwrap();
+    assert_eq!(group.memory_high().unwrap(), Some(3 << 30));
+}
+
+#[test]
 fn a_cgroup_write_the_kernel_holds_for_reclaim_is_not_waited_out() {
     // As an older kernel holds a write of `memory.high` below what the
     // group holds until it has reclaimed the difference, the limit
