@@ -830,7 +830,10 @@ before users move to compute from Modal:
   sandbox still names stays: identical content is shared.
 - **Where pointers live.** In a fleet the control service keeps them, in
   its database (`compute_pointers`); the sweep runs from the control image
-  (`compute-control sweep --store ... --delete`) with that database. A
+  (`compute-control sweep --store ... --delete`) with that database.
+  Upgrade the Helm chart together with the control image: the image no
+  longer carries `compute-host`, so an earlier chart's sweep job fails
+  against it rather than sweeping by the object store's pointers. A
   host on its own keeps them in its object store, which must enforce
   conditional writes (GCS, Azure, S3 itself; not Garage), and sweeps with
   `compute-host sweep`. When a fleet first runs a release that keeps them
