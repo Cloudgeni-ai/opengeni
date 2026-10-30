@@ -349,16 +349,27 @@ function customAdapter(format: WebhookFormat): WebhookAdapterDefinition {
  * The headers without any whose value carries the secret, such as a proxy's
  * copy of an address holding `?token=<secret>`. Intake reads and keeps only
  * these, so no format can store the secret in an event, an id or the log.
+ * Only a secret long enough to be unmistakable is matched (every `url_token`
+ * secret is); a short HMAC or token secret could occur in ordinary values.
  */
 export function withoutSecretHeaders(headers: Headers, secret: string | null): Headers {
-  if (!secret) return headers;
+  const needle = redactableSecret(secret);
+  if (!needle) return headers;
   let readable: Headers | null = null;
   for (const [name, value] of headers) {
-    if (!value.includes(secret)) continue;
+    if (!value.includes(needle)) continue;
     readable ??= new Headers(headers);
     readable.delete(name);
   }
   return readable ?? headers;
+}
+
+/** Secrets this short could appear by chance; `url_token` requires at least this. */
+export const REDACTABLE_SECRET_MIN_LENGTH = 24;
+
+/** The secret when it is long enough to redact safely, else null. */
+export function redactableSecret(secret: string | null): string | null {
+  return secret && secret.length >= REDACTABLE_SECRET_MIN_LENGTH ? secret : null;
 }
 
 function parseJsonOrNull(body: Uint8Array): unknown {

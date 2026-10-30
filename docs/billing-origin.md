@@ -80,7 +80,10 @@ inherit the origin of the chat they run in, never the credential's.
   each copy of the secret in the kept body with `[secret]` (an app echoing
   the address it posts to), and never uses an id holding the secret as the
   delivery's dedupe key. The kept size and digest describe the kept body.
-  This holds for every scheme's secret.
+  The match is on the raw secret, byte for byte, and only for secrets of at
+  least 24 characters (every `url_token` secret), so a short HMAC or token
+  secret that happens to occur in ordinary values doesn't redact them; an
+  escaped or encoded copy of a non-`url_token` secret isn't caught.
 - `credit_ledger_entries.usage_origin` records the origin each usage debit was
   charged under. The debit writers resolve it from the explicit input, the
   attribution metadata, the turn, then the ambient request scope.

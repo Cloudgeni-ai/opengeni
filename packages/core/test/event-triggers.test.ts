@@ -836,6 +836,17 @@ describe("webhook adapters", () => {
       ).toEqual({ ok: true, deliveryKey: null });
     });
 
+    test("a short HMAC secret that occurs in an ordinary header is not mistaken for a leak", () => {
+      // HMAC and token secrets may be as short as 8 characters, so they can
+      // occur by chance; only a secret of url_token length is redacted.
+      const short = "deploy01";
+      const headers = headersOf({ "x-delivery": `deploy01-run-7`, "x-request-id": "req_1" });
+      expect(withoutSecretHeaders(headers, short)).toBe(headers);
+      const long = "u3T9kq2LxP0wZ7vN4bC8yR1d";
+      const carrying = headersOf({ "x-delivery": `${long}-run-7`, "x-request-id": "req_1" });
+      expect([...withoutSecretHeaders(carrying, long).keys()]).toEqual(["x-request-id"]);
+    });
+
     test("a type joined from parts, fallback paths, a body send time and the actor's kind", () => {
       const adapter = custom({
         signature: { scheme: "token", header: "X-Token" },

@@ -52,7 +52,7 @@ import { eventMatchesTrigger } from "./matching";
 import { boundEvent, type NormalizedEventInput } from "./normalize";
 import { slackEventTypeCatalog } from "./slack-events";
 import { createSlackEventSource } from "./slack-source";
-import { webhookAdapterFor, withoutSecretHeaders } from "./webhook-adapters";
+import { redactableSecret, webhookAdapterFor, withoutSecretHeaders } from "./webhook-adapters";
 import { workspaceDeliveryEvents, workspaceEventTypeCatalog } from "./workspace-events";
 import { createWorkspaceEventSource } from "./workspace-source";
 import {
@@ -720,9 +720,10 @@ export async function receiveEventWebhook(input: {
  * UTF-8 is otherwise kept exactly.
  */
 function withoutSecret(body: Uint8Array, secret: string | null): Uint8Array {
-  if (!secret) return body;
+  const redacted = redactableSecret(secret);
+  if (!redacted) return body;
   const bytes = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
-  const needle = Buffer.from(secret, "utf8");
+  const needle = Buffer.from(redacted, "utf8");
   let found = bytes.indexOf(needle);
   if (found < 0) return body;
   const parts: Buffer[] = [];
