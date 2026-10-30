@@ -14,6 +14,7 @@ On a Linux host with KVM (bare metal, or a VM with nested virtualization):
 
 ```sh
 sudo bash host-setup.sh   # Firecracker, a guest kernel, an Ubuntu root filesystem, swap and zswap
+sudo bash host-boot.sh    # after each reboot: swap and zswap again
 ```
 
 ## Experiments

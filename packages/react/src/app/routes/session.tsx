@@ -320,6 +320,7 @@ import { isPersonalMachine, moveChatToMachine } from "../lib/move-chat-to-machin
 import type { MachineView } from "../../machines";
 import { useWorkspaceModelCatalog } from "../lib/use-workspace-model-catalog";
 import type {
+  McpElicitationAnswer,
   LineageNode,
   SessionRealtimeModel,
   UpdateSessionToolPolicyRequest,
@@ -1487,7 +1488,7 @@ export function SessionRoute({
             params: { workspaceId },
           }))
       }
-      onApprove={(approvalId) => approve(approvalId, "approve")}
+      onApprove={(approvalId, answer) => approve(approvalId, "approve", answer)}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
       onConnectGitHubApp={connectGitHubApp}
@@ -1566,11 +1567,16 @@ export function SessionRoute({
     <SessionStartupProvider session={session}>{routeView}</SessionStartupProvider>
   );
 
-  async function approve(approvalId: string, decision: "approve" | "reject") {
+  async function approve(
+    approvalId: string,
+    decision: "approve" | "reject",
+    answer?: McpElicitationAnswer,
+  ) {
     try {
       await context.client.sendApprovalDecision(workspaceId, sessionId, {
         approvalId,
         decision,
+        ...answer,
       });
     } catch (error) {
       toast.error("Couldn't submit the decision", {
@@ -2100,7 +2106,7 @@ function SessionChatPane(props: {
   /** Opens where a person can make a refused Skill, instruction, or Knowledge change. */
   onLearningRefusalOpen: (place: LearningRefusalPlace) => void;
   onNewSession: () => void;
-  onApprove: (approvalId: string) => Promise<void>;
+  onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   /** Opens workspace GitHub App setup in the route-level Connect dialog. */
@@ -2401,7 +2407,7 @@ function SessionChatPane(props: {
     }
   }, [props.session.status]);
   const decideApproval = useCallback(
-    async (approvalId: string, decision: "approve" | "reject") => {
+    async (approvalId: string, decision: "approve" | "reject", answer?: McpElicitationAnswer) => {
       if (approvalPending[approvalId] || approvalSettled[approvalId]) {
         return;
       }
@@ -2409,7 +2415,9 @@ function SessionChatPane(props: {
       // A failure propagates so the approval surface releases its fence and
       // the buttons stay live for a retry.
       try {
-        await (decision === "approve" ? props.onApprove(approvalId) : props.onReject(approvalId));
+        await (decision === "approve"
+          ? props.onApprove(approvalId, answer)
+          : props.onReject(approvalId));
         setApprovalSettled((current) => ({
           ...current,
           [approvalId]: decision,
@@ -3975,7 +3983,9 @@ function SessionChatPane(props: {
                                     onSelectedApprovalChange={setSelectedApprovalId}
                                     loadReview={loadToolReview}
                                     onViewDetails={viewToolReviewDetails}
-                                    onApprove={(approval) => decideApproval(approval.id, "approve")}
+                                    onApprove={(approval, answer) =>
+                                      decideApproval(approval.id, "approve", answer)
+                                    }
                                     onReject={(approval) => decideApproval(approval.id, "reject")}
                                   />
                                 )}

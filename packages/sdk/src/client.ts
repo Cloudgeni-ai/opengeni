@@ -3,7 +3,11 @@ import {
   recordObservedSessionSequence,
   SESSION_SEQUENCE_HEADER,
 } from "./session-sequence";
-import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+import type {
+  ComputerNativeCallRequest,
+  ComputerNativeReceipt,
+  McpElicitationContent,
+} from "@opengeni/contracts";
 import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
 import {
   currentMessageTimeZone,
@@ -171,6 +175,7 @@ import {
   OpenGeniSessionUsageLimitUnsupportedError,
   allowanceExhaustedFields,
   rejectsStartModeField,
+  sessionUsageLimitConfirmed,
   sessionUsageLimitNotConfirmed,
   sessionUsageLimitReachedFields,
   OpenGeniSecureContextRequiredError,
@@ -1512,7 +1517,7 @@ export class OpenGeniClient {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/usage-limit`,
       request,
     );
-    if (committed.limitMicros !== request.limitMicros) {
+    if (!sessionUsageLimitConfirmed(request, committed)) {
       throw sessionUsageLimitNotConfirmed(sessionId);
     }
     return committed;
@@ -3227,6 +3232,10 @@ export class OpenGeniClient {
       approvalId: string;
       decision: "approve" | "reject";
       message?: string;
+      /** Answers to the approval's `elicitation` forms; only with `approve`. */
+      content?: McpElicitationContent;
+      /** The `elicitation.round` this answers; required to approve one. */
+      elicitationRound?: number;
       clientEventId?: string;
     },
   ): Promise<SessionEvent> {

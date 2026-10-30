@@ -4,7 +4,10 @@
  */
 export const englishMessages = {
   "approvalSurface.actionsToReview": "Actions to review",
-  /** The button that answers an app action's question ("Invite … to your organization?"). */
+  /**
+   * The button that answers an app action's question ("Invite … to your organization?") or an
+   * MCP server's question that has nothing to fill in.
+   */
   "approvalSurface.allow": "Allow",
   "approvalSurface.approvalNeeded": "Approval needed",
   "approvalSurface.approveAction": "Approve action",
@@ -12,6 +15,8 @@ export const englishMessages = {
   "approvalSurface.backToReview": "Back to review",
   /** Declines an app action's question without running it. */
   "approvalSurface.cancel": "Cancel",
+  /** The empty choice of an MCP server's drop-down question. */
+  "approvalSurface.choose": "Choose…",
   "approvalSurface.couldnTLoadThisAction":
     "Couldn't load this action, so it can't be approved yet. You can still decline it.",
   "approvalSurface.decline": "Decline",
@@ -20,8 +25,15 @@ export const englishMessages = {
   "approvalSurface.loadingActionDetails": "Loading action details…",
   "approvalSurface.nextAction": "Next action",
   "approvalSurface.ofLength": "of {length}",
+  /** Marks a field an MCP server's question does not require. */
+  "approvalSurface.optional": "Optional",
   "approvalSurface.previousAction": "Previous action",
   "approvalSurface.reviewTheActionBeforeIt": "Review the action before it runs.",
+  /** Answers an MCP server's question that has fields to fill in. */
+  "approvalSurface.sendAnswer": "Send answer",
+  "approvalSurface.sendingAnswer": "Sending answer…",
+  /** Above an MCP server's question in the middle of a tool call, e.g. "Linear asks". */
+  "approvalSurface.serverAsks": "{server} asks",
   "approvalSurface.tryAgain": "Try again",
   "approvalSurface.viewFullDetails": "View full details",
   "approvalSurface.youDonTHaveAccess":
@@ -3520,6 +3532,10 @@ export const englishMessages = {
   "native.timeline.imageViewer.share": "Share",
   "native.timeline.inChatConnect.close": "Close",
   "native.timeline.inChatConnect.couldNotLoad": "Couldn't load this connection. Try again.",
+  /** Answers an MCP server's yes/no question from the inbox. */
+  "native.timeline.inbox.allow": "Allow",
+  "native.timeline.inbox.allowed": "Allowed",
+  "native.timeline.inbox.allowing": "Allowing…",
   "native.timeline.inbox.alreadyAnswered": "Already answered",
   "native.timeline.inbox.answer": "Answer",
   "native.timeline.inbox.answeredLabel": "Answered: {label}",
@@ -3558,6 +3574,8 @@ export const englishMessages = {
   "native.timeline.inbox.replies": "Replies",
   "native.timeline.inbox.reply": "Reply",
   "native.timeline.inbox.sending": "Sending…",
+  /** Who is asking, for an MCP server's question in the middle of a tool call, e.g. "Docs asks". */
+  "native.timeline.inbox.serverAsks": "{server} asks",
   "native.timeline.inbox.snooze": "Snooze",
   "native.timeline.inbox.snoozed": "Snoozed",
   "native.timeline.inbox.snoozeFor1Hour": "Snooze for 1 hour",

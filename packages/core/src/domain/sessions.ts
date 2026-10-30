@@ -750,7 +750,8 @@ export function settingsWithSessionMcpServerMetadata(
   return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromMetadata));
 }
 
-function validateSessionMcpServersForCreate(
+/** Session-create MCP server validation, shared by automations that start chats. */
+export function validateSessionMcpServersForCreate(
   settings: Settings,
   grant: AccessGrant,
   servers: SessionMcpServerInput[],
