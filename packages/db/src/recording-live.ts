@@ -58,10 +58,13 @@ function trackWhere(input: { workspaceId: string; recordingId: string; trackNumb
  * streaming, when it pauses and resumes, and before asking for another
  * session. Of the time up to a report of more audio, at most that audio plus
  * {@link LIVE_REPORT_GROWTH_SLACK_MILLISECONDS} (and at most
- * {@link LIVE_REPORT_GAP_MAX_MILLISECONDS}) counts as covered; the time up to
- * a report of no more audio (a pause, or a session that never connected)
- * doesn't. A session the recorder never reported on before asking for another
- * counts all its time up to that request as covered, and as unreported.
+ * {@link LIVE_REPORT_GAP_MAX_MILLISECONDS}) counts as covered for the track;
+ * the time up to a report of no more audio (a pause, or a session that never
+ * connected) doesn't. A session the recorder never reported on before asking
+ * for another counts all its time up to that request as covered, and as
+ * unreported. The slack is for the track's own bound only: toward the
+ * person's day (below), the reported audio is all that accounts for time, so
+ * reporting a trickle of audio leaves the rest of the time counted.
  *
  * A session can stream at most {@link LIVE_SESSION_MAX_MILLISECONDS} (the
  * providers end it then), so time counts only within the latest session's
@@ -73,21 +76,26 @@ function trackWhere(input: { workspaceId: string; recordingId: string; trackNumb
  * and an unreported session's time) is "unbacked": a provider session may
  * have been open, streaming audio nobody reported. It adds up per track, and
  * per person and workspace by the hour: the person may have at most
- * {@link LIVE_UNBACKED_DAILY_MAX_MILLISECONDS} of it in the last day, plus as
- * much as the audio charged in credits that day, so new recordings don't
- * reset the bound. A session counts all it could run up front, as the track's
- * provisional time, which each report or new request swaps for the time it
- * actually left unaccounted plus what it could still run: a session nobody
- * reports on costs its whole hour, and a refusal (which rolls the request
- * back) leaves it counted. A session the provider never started gives it
- * back. The person is the human behind the
- * request (a personal API key and a delegated session act as them); the
- * workspace's other API keys record no person, so they share one bound
- * ({@link liveBoundSubject}) and a new key doesn't reset it.
+ * {@link LIVE_UNBACKED_DAILY_MAX_MILLISECONDS} of it in the last day, plus
+ * {@link LIVE_UNBACKED_PER_CHARGED} times the audio charged in credits that
+ * day, so new recordings don't reset the bound, and a session is granted only
+ * if the day, with all it could run counted, stays within that. Starts are
+ * serialized per bound (an advisory lock), so a burst of them can't all read
+ * the same day; saves and releases never add to the day more than the
+ * session's provisional time they replace, so they need no lock. A session
+ * counts all it could run up front, as the track's provisional time, which
+ * each report or new request swaps for the time it actually left unaccounted
+ * plus what it could still run: a session nobody reports on costs its whole
+ * hour, and a refusal (which rolls the request back) leaves it counted. A
+ * session the provider never started gives it back. The person is the human
+ * behind the request (a personal API key and a delegated session act as
+ * them); the workspace's other API keys record no person, so they share one
+ * bound ({@link liveBoundSubject}) and a new key doesn't reset it.
  *
  * A track gets no more sessions once:
  * - {@link LIVE_UNREPORTED_GRANTS_MAX} of its sessions went unreported;
- * - the person's unbacked time reached its daily limit;
+ * - the person's unbacked time, with the new session's, would pass its daily
+ *   limit;
  * - it had {@link LIVE_GRANTS_FREE} sessions, one more for each
  *   {@link LIVE_GRANT_EARNED_PER_MILLISECONDS} of audio it reported, and at
  *   most {@link LIVE_GRANTS_MAX};
@@ -104,6 +112,16 @@ export const LIVE_BEHIND_SLACK_FRACTION = 0.25;
 export const LIVE_REPORT_GAP_MAX_MILLISECONDS = 3 * 60_000;
 export const LIVE_REPORT_GROWTH_SLACK_MILLISECONDS = 60_000;
 export const LIVE_UNBACKED_DAILY_MAX_MILLISECONDS = 4 * 60 * 60_000;
+/**
+ * How much unbacked time each millisecond of live audio charged in credits
+ * allows on top of {@link LIVE_UNBACKED_DAILY_MAX_MILLISECONDS}. A session
+ * counts its hour up front and a meeting's last sessions keep what they could
+ * still run, so a two-track meeting of m minutes leaves 2 × (60 − m) minutes
+ * counted and charges 2 × m: at six, meetings of about nine minutes or longer
+ * never use up the day, and free provider time stays at most the base plus
+ * six times what was paid.
+ */
+export const LIVE_UNBACKED_PER_CHARGED = 6;
 /** The longest a provider's realtime session runs (OpenAI and Azure: an hour). */
 export const LIVE_SESSION_MAX_MILLISECONDS = 60 * 60_000;
 
@@ -126,15 +144,19 @@ export function liveGrantRefusal(input: {
   streamedMilliseconds: number;
   /** Time counted against the reported audio (see above). */
   coveredMilliseconds: number;
-  /** The person's unbacked time in the last day, this track's included. */
+  /**
+   * The person's unbacked time in the last day once this session is granted:
+   * the track's latest session closed, and the new one's longest possible
+   * run counted.
+   */
   unbackedMilliseconds: number;
   /** The person's live audio charged in credits in the last day. */
   chargedMilliseconds: number;
 }): "live_grant_limit" | "live_streamed_behind" | null {
   if (input.unreportedGrants >= LIVE_UNREPORTED_GRANTS_MAX) return "live_grant_limit";
   if (
-    input.unbackedMilliseconds >=
-    LIVE_UNBACKED_DAILY_MAX_MILLISECONDS + input.chargedMilliseconds
+    input.unbackedMilliseconds >
+    LIVE_UNBACKED_DAILY_MAX_MILLISECONDS + LIVE_UNBACKED_PER_CHARGED * input.chargedMilliseconds
   ) {
     return "live_grant_limit";
   }
@@ -306,7 +328,8 @@ export async function startRecordingLiveTrack(
     const provisional = storedProvisional(current);
     // A session never reported on counts all its time, covered and
     // unbacked, and as unreported; a reported one counts the time since its
-    // last report as a report of no more audio would, but for the slack.
+    // last report as a report of no more audio would, but for the slack,
+    // which is the track's alone: the person's day counts all that time.
     const open = current.sinceCounted !== null;
     const reported = current.latestReported === true;
     const tail = open ? Math.max(0, Number(current.sinceCounted)) : 0;
@@ -316,17 +339,23 @@ export async function startRecordingLiveTrack(
     const unbacked = Number(current.unbacked ?? 0) + unbackedAdded;
     const unreported = (current.unreported ?? 0) + (open && !reported ? 1 : 0);
     if (input.bounded) {
-      // The person's day as it is once the latest session is closed: its
-      // provisional time (all it could still run) gives way to what it
-      // actually left unaccounted, which is never more. A refusal rolls this
-      // back and leaves the provisional time counted.
+      // One start at a time per bound, so a burst of starts can't all read
+      // the same day. Locks go recording, track, this, then the hours.
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`recording-live-day:${input.workspaceId}:${liveBoundSubject(input.subjectId)}`}, 0))`,
+      );
+      // The person's day once the latest session is closed (its provisional
+      // time, all it could still run, gives way to what it actually left
+      // unaccounted, which is never more) and the new one counts its hour.
+      // A refusal rolls this back and leaves the provisional time counted.
       const day = await boundDay(tx, input);
       const refusal = liveGrantRefusal({
         grants: current.grants ?? 0,
         unreportedGrants: unreported,
         streamedMilliseconds: Number(current.streamed),
         coveredMilliseconds: covered,
-        unbackedMilliseconds: day.unbacked - (provisional?.milliseconds ?? 0) + unbackedAdded,
+        unbackedMilliseconds:
+          day.unbacked - (provisional?.milliseconds ?? 0) + tail + LIVE_SESSION_MAX_MILLISECONDS,
         chargedMilliseconds: day.charged,
       });
       if (refusal) throw new RecordingConflictError(LIVE_GRANT_REFUSED_MESSAGE, refusal);
@@ -337,7 +366,7 @@ export async function startRecordingLiveTrack(
       await changeBoundDay(tx, recording, input, {
         refund: provisional,
         hour: current.hour,
-        unbacked: unbackedAdded + (input.bounded ? LIVE_SESSION_MAX_MILLISECONDS : 0),
+        unbacked: tail + (input.bounded ? LIVE_SESSION_MAX_MILLISECONDS : 0),
         charged: 0,
       });
     }
@@ -540,7 +569,8 @@ export async function appendRecordingLiveSegments(
     // Only audio charged in credits counts toward the person's day: the
     // session's provisional time gives way to what this gap left
     // unaccounted plus what the session could still run, and the charged
-    // audio adds to the day's allowance.
+    // audio adds to the day's allowance. Toward the day only the reported
+    // audio accounts for the gap (no slack), so a trickle of audio doesn't.
     const provisional = storedProvisional(before);
     const left =
       charge && gap !== null ? Math.round(Math.max(0, Number(before.sessionLeft ?? 0))) : 0;
@@ -548,7 +578,7 @@ export async function appendRecordingLiveSegments(
       await changeBoundDay(tx, recording, input, {
         refund: provisional,
         hour: before.hour,
-        unbacked: (charge && gap !== null ? gap - gapCovered : 0) + left,
+        unbacked: (charge && gap !== null ? gap - Math.min(gap, Math.max(0, grew)) : 0) + left,
         charged: charged ? charged.toMilliseconds - charged.fromMilliseconds : 0,
       });
     }

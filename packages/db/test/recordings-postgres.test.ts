@@ -2305,15 +2305,22 @@ describe("recordings and usage allowances", () => {
   test("a person's live time no reported audio accounts for is bounded across recordings, for a day", async () => {
     if (!client || !shared) return;
     const scope = await workspace();
-    // Each session streams half an hour, ended by a report of no new audio:
+    // Each session streams 29 minutes, ended by a report of no new audio:
     // per track that is far from its own limits, but each new recording
-    // adds to the person's day, and at four hours no more sessions start.
+    // adds to the person's day, and no session starts whose hour would take
+    // the day past four hours.
     const recordings = [];
     for (let index = 0; index < 3; index++) {
       const meeting = await liveMeeting(scope);
       recordings.push(meeting);
       for (let session = 0; session < 3; session++) {
-        if (index === 2 && session === 2) {
+        if (index === 2 && session === 1) {
+          const [day] = await shared.admin<{ unbacked: string }[]>`
+            select coalesce(sum(unbacked_milliseconds), 0)::text as unbacked
+            from recording_live_unbacked_hours where workspace_id = ${scope.workspaceId}`;
+          expect(Number(day!.unbacked) + LIVE_SESSION_MAX_MILLISECONDS).toBeGreaterThan(
+            LIVE_UNBACKED_DAILY_MAX_MILLISECONDS,
+          );
           await expect(meeting.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
           // Another track of the same recording is refused too.
           await expect(meeting.start(1)).rejects.toMatchObject(refused("live_grant_limit"));
@@ -2323,7 +2330,7 @@ describe("recordings and usage allowances", () => {
           break;
         }
         await meeting.start(0);
-        await meeting.elapse(30);
+        await meeting.elapse(29);
         await meeting.report(0);
       }
       // A last session the provider never started is taken back; the
@@ -2333,10 +2340,6 @@ describe("recordings and usage allowances", () => {
         await meeting.release(0);
       }
     }
-    const rows = await shared.admin<{ unbacked: string }[]>`
-      select coalesce(sum(live_unbacked_milliseconds), 0)::text as unbacked from recording_tracks
-      where recording_id in ${shared.admin(recordings.map((meeting) => meeting.recordingId))}`;
-    expect(Number(rows[0]!.unbacked)).toBeGreaterThanOrEqual(LIVE_UNBACKED_DAILY_MAX_MILLISECONDS);
     // Another person in another workspace isn't affected.
     await (await liveMeeting()).start(0);
     // A day later, the earlier recordings no longer count.
@@ -2373,12 +2376,12 @@ describe("recordings and usage allowances", () => {
   test("the workspace's API keys share one daily bound, so a new key doesn't reset it", async () => {
     if (!client || !shared) return;
     const scope = await workspace();
-    // A key's sessions, each streaming half an hour ended by a report of no
-    // new audio, reach the day's four hours.
+    // A key's sessions, each streaming 29 minutes ended by a report of no
+    // new audio, reach the day's four hours: the last's hour wouldn't fit.
     const first = await liveMeeting(scope, `api_key:${crypto.randomUUID()}`);
-    for (let session = 0; session < 8; session++) {
+    for (let session = 0; session < 7; session++) {
       await first.start(0);
-      await first.elapse(30);
+      await first.elapse(29);
       await first.report(0);
     }
     await expect(first.start(0)).rejects.toMatchObject(refused("live_grant_limit"));
@@ -2523,6 +2526,77 @@ describe("recordings and usage allowances", () => {
       await meeting.report(0);
     }
   });
+
+  test("honest short meetings all day, reported every minute, are never refused", async () => {
+    if (!client || !shared) return;
+    // Each meeting's sessions count their hour up front and keep what they
+    // could still run, but the audio charged allows six times as much.
+    for (const { minutes, tracks } of [
+      { minutes: 10, tracks: [0, 1] },
+      { minutes: 15, tracks: [0, 1] },
+      { minutes: 20, tracks: [0, 1] },
+      { minutes: 10, tracks: [0] },
+    ]) {
+      const scope = await workspace();
+      for (let index = 0; index < 12; index++) {
+        const meeting = await liveMeeting(scope);
+        for (const track of tracks) await meeting.start(track);
+        for (let minute = 0; minute < minutes; minute++) {
+          await meeting.elapse(1);
+          for (const track of tracks) await meeting.report(60_000, track);
+        }
+        for (const track of tracks) await meeting.report(0, track);
+        await meeting.elapse(10);
+      }
+    }
+  }, 180_000);
+
+  test("a recorder reporting a trickle of audio pays the rest of the time against the day", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    // An hour's session per recording, reporting a second of audio each
+    // minute: only that second accounts for the minute toward the day (the
+    // track's own slack doesn't), so the day fills a recording at a time.
+    let refusedAt: number | null = null;
+    for (let index = 0; index < 8 && refusedAt === null; index++) {
+      const meeting = await liveMeeting(scope);
+      try {
+        await meeting.start(0);
+      } catch (error) {
+        expect(error).toMatchObject(refused("live_grant_limit"));
+        refusedAt = index;
+        break;
+      }
+      for (let minute = 0; minute < 60; minute++) {
+        await meeting.elapse(1);
+        await meeting.report(1_000);
+      }
+    }
+    // Four hours, less the second each minute, plus six times the four
+    // minutes charged: a fifth recording's hour doesn't fit.
+    expect(refusedAt).toBe(4);
+  }, 180_000);
+
+  test("a burst of first sessions at once grants no more than one after another", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    const meetings = [];
+    for (let index = 0; index < 16; index++) meetings.push(await liveMeeting(scope));
+    const results = await Promise.allSettled(
+      meetings.map(async (meeting) => await meeting.start(0)),
+    );
+    // Four hours a day, an hour each: the same four as one after another.
+    expect(results.filter((result) => result.status === "fulfilled").length).toBe(4);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        expect(result.reason).toMatchObject(refused("live_grant_limit"));
+      }
+    }
+    const [day] = await shared.admin<{ unbacked: string }[]>`
+      select coalesce(sum(unbacked_milliseconds), 0)::text as unbacked
+      from recording_live_unbacked_hours where workspace_id = ${scope.workspaceId}`;
+    expect(Number(day!.unbacked)).toBe(LIVE_UNBACKED_DAILY_MAX_MILLISECONDS);
+  }, 60_000);
 
   test("an allowance that ignores unbilled usage doesn't count recordings", async () => {
     if (!client) return;

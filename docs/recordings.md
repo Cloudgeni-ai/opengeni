@@ -376,10 +376,11 @@ session. A track charged in credits is bounded by those reports, with time
 measured between them so a pause never counts:
 
 - Of the time up to a report of more audio, at most that audio plus a minute
-  counts (and at most 3 minutes), so a pause the recorder didn't report
-  doesn't count either; the time up to a report of no more audio (a pause, or
-  a session that never connected) doesn't, and a session never reported on
-  before the next request counts all its time up to that request.
+  counts against the track (and at most 3 minutes), so a pause the recorder
+  didn't report doesn't count either; the time up to a report of no more
+  audio (a pause, or a session that never connected) doesn't, and a session
+  never reported on before the next request counts all its time up to that
+  request.
 - A track gets no more sessions once that time is ahead of its reported
   audio by more than 10 minutes plus a quarter of it, once 4 of its sessions
   went unreported, or after 20 sessions plus one for every 5 minutes it
@@ -397,23 +398,29 @@ measured between them so a pause never counts:
   run stays counted, as the server can't tell a stopped recorder from one
   still streaming.
 - The rest of the time between reports, which no reported audio accounts
-  for (pauses, and sessions never reported on), adds up per person and
-  workspace, by the hour: once the person has 4 hours of it in the last 24
-  hours, plus as much as the live audio charged in credits in those hours,
-  none of their tracks gets another session until older hours drop out of
-  the day. The charged audio keeps an honest day of meetings going: a
-  half-hour meeting on two tracks leaves about an hour of its sessions
-  counted and adds about an hour of charged audio. New recordings don't reset it. The person is the human
-  behind the request; a personal API key or a delegated session acts as
-  them. Organization and workspace API keys record no person, so all of a
-  workspace's keys share one bound and a new key doesn't reset it (an
-  integration that records for its users should act as each user to get
-  each their own). Pauses inside a session count, as the server can't tell
+  for (pauses, sessions never reported on, and every minute beyond the
+  audio reported: the minute of slack is the track's alone, so a recorder
+  reporting a trickle of audio doesn't cover the time), adds up per person
+  and workspace, by the hour. A session is granted only if the person's
+  time in the last 24 hours, with the new session's hour counted, stays
+  within 4 hours plus six times the live audio charged in credits in those
+  hours; otherwise none of their tracks gets another session until older
+  hours drop out of the day. The charged audio keeps an honest day of
+  meetings going: a 10-minute meeting on two tracks leaves about 100
+  minutes of its sessions counted and charges 20 minutes, which allow 120
+  more, so meetings of about 9 minutes or longer never use the day up.
+  Session requests of the same person and workspace are handled one at a
+  time, so requests at the same moment can't run over the bound. New
+  recordings don't reset it. The person is the human behind the request; a
+  personal API key or a delegated session acts as them. Organization and
+  workspace API keys record no person, so all of a workspace's keys share
+  one bound and a new key doesn't reset it (an integration that records for
+  its users should act as each user to get each their own). Pauses inside a session count, as the server can't tell
   a pause from audio nobody reported while the provider session is open, so
-  a day with more than about 4 hours of such pauses (for example a dozen
-  20-minute pauses, each shorter than the session's hour) loses the live
-  preview for the rest of it; the recordings and their transcripts are
-  unaffected.
+  a day with more of such pauses than the bound allows (for example a dozen
+  20-minute pauses, each shorter than the session's hour, with little audio
+  between them) loses the live preview for the rest of it; the recordings
+  and their transcripts are unaffected.
 
 A refused grant is a 409 (`live_grant_limit` or `live_streamed_behind`, "The
 live transcript stopped for this track. The recording continues and is
@@ -428,8 +435,9 @@ session (up to the provider's hour) whose audio is only as metered as the
 recorder reports.
 
 - A modified client that reports its audio as paused (no more audio) while it
-  streams gets about 4 hours of unpaid audio a day per person and workspace
-  (at most an hour more in its last session) before the daily bound stops it.
+  streams gets at most 4 hours of unpaid audio a day per person and
+  workspace (plus six times any audio it paid for) before the daily bound
+  stops it.
 - The bound is per person and workspace, not per billing account: other
   people of the account (including each external user an organization key
   acts as), and the same person's other workspaces, each have their own 4
@@ -437,22 +445,21 @@ recorder reports.
   needs a SECURITY DEFINER database function, which a later release can add
   (granting a new definer function to the runtime takes two releases).
 - Pauses inside an open session (shorter than its hour) count, as the server
-  can't tell them from audio nobody reported: a day with more than about 4
-  hours of them, for example a dozen 20-minute pauses, loses the live
-  preview; the recordings and their transcripts are unaffected.
-- Sessions asked for at the same moment on different tracks each check the
-  bound before the other's time is added, so the day can run over by at most
-  one session per concurrent request.
+  can't tell them from audio nobody reported: a day with more of them than
+  the bound allows, for example a dozen 20-minute pauses with little audio
+  between them, loses the live preview; the recordings and their
+  transcripts are unaffected.
 - A client that asks for a new session while its earlier ones still run keeps
   each running up to the provider's hour, counted only until the next
   request, so parallel sessions are bounded only by a track's session limits
   (20, plus one per 5 minutes reported).
-- The day grows by the audio charged in credits, so a client that pays for
-  some audio gets as much again unaccounted: free provider time is at most
-  4 hours plus what was charged. Meetings shorter than half an hour leave
-  more of their sessions counted than they charge (a 10-minute meeting on
-  two tracks nets about 80 minutes), so a day of many very short live
-  meetings can still lose the live preview.
+- The day grows by six times the audio charged in credits, so a client that
+  pays for some audio gets six times as much unaccounted: free provider time
+  is at most 4 hours plus six times what was paid. Meetings shorter than
+  about 9 minutes still leave more of their sessions counted than their
+  charged audio allows (a 5-minute meeting on two tracks nets about 50
+  minutes), so a day of many very short live meetings can still lose the
+  live preview.
 - Only time of tracks charged in credits is stored per hour. Hours older than
   two days are removed on the person's next write in that workspace, not
   otherwise; they no longer count after a day either way.
