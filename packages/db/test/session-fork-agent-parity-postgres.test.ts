@@ -169,6 +169,10 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
     why: "a label read only while compact_requested is true",
     expected: ({ source }) => source.compact_request_trigger,
   },
+  search_records_as_input: {
+    why: "a fork starts on the original search-record form; it switches only once its own history allows",
+    expected: fresh(false),
+  },
   direct_control_state: { why: "its own controls", expected: fresh("active") },
   direct_pause_revision: { why: "its own controls", expected: fresh(null) },
   subtree_run_override_revision: { why: "its own controls", expected: fresh(null) },
