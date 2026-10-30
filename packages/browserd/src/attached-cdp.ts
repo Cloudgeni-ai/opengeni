@@ -1852,7 +1852,9 @@ const READ_ONLY_TAB_METHODS = new Set([
   "Page.getLayoutMetrics",
   "Page.getNavigationHistory",
   "Runtime.enable",
+  "Runtime.getProperties",
   "Runtime.releaseObject",
+  "Runtime.releaseObjectGroup",
 ]);
 
 function mayChangePageContent(method: string): boolean {

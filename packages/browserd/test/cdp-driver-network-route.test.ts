@@ -6,6 +6,7 @@ import {
   type BrowserCommandRunner,
   type CdpEvent,
 } from "../src";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 test.each(["chrome_internal", "intercepted_local"] as const)(
   "installs route emulation on about:blank before the first external navigation (%s)",
@@ -44,6 +45,8 @@ test.each(["chrome_internal", "intercepted_local"] as const)(
         options?: { sessionId?: string },
       ): Promise<T> {
         cdpCalls.push({ method, params, sessionId: options?.sessionId });
+        const probe = protectedFieldsProbeAnswer(method, params);
+        if (probe) return probe as T;
         switch (method) {
           case "Browser.getVersion":
             return { product: "Chrome/151.0.0.0", userAgent: "fixture" } as T;
@@ -354,6 +357,8 @@ test.each([
           ...(params ? { params } : {}),
           ...(options?.sessionId ? { sessionId: options.sessionId } : {}),
         });
+        const probe = protectedFieldsProbeAnswer(method, params);
+        if (probe) return probe as T;
         if (method === "Browser.getVersion") {
           return { product: "Chrome/151.0.0.0", userAgent: "fixture" } as T;
         }

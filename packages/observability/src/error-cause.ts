@@ -119,14 +119,19 @@ export function projectErrorCauseAttributes(
 ): ErrorCauseAttributes {
   const { causeName, causeCode, causeAgentCode, causeStatus, causeSqlState } = attributes;
   const driverFailed = causeName === "BrowserControlRequestError" && causeCode === "driver_failed";
-  const causeDriverClass = driverFailed
+  // A read that kept failing reports resource_unavailable with the driver's
+  // class and frame, as a driver failure does.
+  const driverDiagnosed =
+    driverFailed ||
+    (causeName === "BrowserControlRequestError" && causeCode === "resource_unavailable");
+  const causeDriverClass = driverDiagnosed
     ? interactionDriverErrorClass(attributes.causeDriverClass)
     : null;
-  const causeDriverFrame = driverFailed
+  const causeDriverFrame = driverDiagnosed
     ? interactionDriverFrame(attributes.causeDriverFrame)
     : null;
   const causeDriverMessage =
-    driverFailed &&
+    (driverFailed || causeDriverClass !== null) &&
     typeof attributes.causeDriverMessage === "string" &&
     attributes.causeDriverMessage.length <= 4_096
       ? redactInteractionDriverMessage(attributes.causeDriverMessage)
@@ -170,12 +175,15 @@ function classify(error: object, name: string | null): ErrorCauseAttributes {
     if (typeof code === "string" && PUBLIC_INTERACTION_ERROR_CODES.has(code)) {
       result.causeCode = code;
     }
-    if (code === "driver_failed") {
-      const diagnostic = parseInteractionDriverDiagnostic(ownValue(error, "diagnostic"));
-      if (diagnostic) {
-        result.causeDriverClass = diagnostic.errorClass;
-        if (diagnostic.frame) result.causeDriverFrame = diagnostic.frame;
-      }
+    const diagnostic =
+      code === "driver_failed" || code === "resource_unavailable"
+        ? parseInteractionDriverDiagnostic(ownValue(error, "diagnostic"))
+        : null;
+    if (diagnostic) {
+      result.causeDriverClass = diagnostic.errorClass;
+      if (diagnostic.frame) result.causeDriverFrame = diagnostic.frame;
+    }
+    if (code === "driver_failed" || diagnostic) {
       const message = ownValue(interactionError, "message");
       if (typeof message === "string" && message.length > 0 && message.length <= 8_192) {
         result.causeDriverMessage = redactInteractionDriverMessage(message);

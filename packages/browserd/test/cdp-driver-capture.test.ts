@@ -10,6 +10,7 @@ import {
   CdpProtocolError,
   type BrowserCommandRunner,
 } from "../src";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 const jpeg = Buffer.from([
   0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0, 0xff, 0xd9,
@@ -1286,6 +1287,7 @@ async function captureFixture(
         result = { data: data.toString("base64") };
       } else result = { data: data.toString("base64") };
     }
+    result = protectedFieldsProbeAnswer(command.method, command.params) ?? result;
     queueMicrotask(() =>
       socket.dispatchEvent(
         new MessageEvent("message", {

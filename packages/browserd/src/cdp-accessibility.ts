@@ -21,7 +21,17 @@ export type CdpAxNode = {
   childIds?: unknown;
   backendDOMNodeId?: unknown;
   frameId?: unknown;
+  /** Set by the driver on the node of an outermost protected element. */
+  protectedReason?: CdpProtectedReason;
 };
+
+/** Why a page element's value and text are withheld: a password or one-time
+ * code, payment details, or an explicitly private (or hidden) field. */
+export type CdpProtectedReason = "password" | "payment" | "private";
+
+export function isProtectedReason(value: unknown): value is CdpProtectedReason {
+  return value === "password" || value === "payment" || value === "private";
+}
 
 export type CdpAccessibilityEntry = {
   ref: string;
@@ -34,6 +44,11 @@ export type CdpAccessibilityEntry = {
   states: string[];
   actions: string[];
   nameSources: string[];
+  /** Set when the node is or sits in a protected element: its value, and
+   * any text of its own, are withheld. */
+  protectedReason?: CdpProtectedReason | null;
+  /** Set when protected text was taken out of the node's name. */
+  nameWithheld?: boolean;
 };
 
 export type CdpAccessibilitySnapshot = {
@@ -132,13 +147,19 @@ export function normalizeCdpAccessibilityTree(options: {
     refKeys.set(nodeId, key);
     return key;
   };
+  const protection = protectedContent(rawById);
   const entriesByNodeId = new Map<string, CdpAccessibilityEntry>();
   const usedRefs = new Set<string>();
   for (const [nodeId, node] of rawById) {
     if (node.ignored === true || roleValue(node) === "InlineTextBox") continue;
     const role = normalizedRole(roleValue(node));
-    const name = accessibleStringValue(node.name) || null;
-    const states = propertyStates(node.properties, node.value?.value);
+    const fullName = accessibleStringValue(node.name) || null;
+    const protectedReason = protection?.reasons.get(nodeId) ?? null;
+    const name =
+      protection && fullName !== null ? protection.shownName(nodeId, node, role) : fullName;
+    const states = propertyStates(node.properties, node.value?.value).filter(
+      (state) => protectedReason === null || !PROTECTED_STATE.test(state),
+    );
     const backendDOMNodeId = finitePositiveInteger(node.backendDOMNodeId);
     const ref = semanticRef(
       {
@@ -163,6 +184,8 @@ export function normalizeCdpAccessibilityTree(options: {
       states,
       actions: actionsForRole(role, states, backendDOMNodeId !== null),
       nameSources: nameSourceTokens(node.name?.sources),
+      ...(protectedReason ? { protectedReason } : {}),
+      ...(name !== fullName ? { nameWithheld: true } : {}),
     });
   }
   // The spin buttons of a native date/time input edit one part each and do
@@ -194,9 +217,15 @@ export function normalizeCdpAccessibilityTree(options: {
     if (raw) for (const childId of childIds(raw)) suppressSubtree(childId);
   };
   for (const [nodeId, entry] of entriesByNodeId) {
-    if (!isEditableControlRole(entry.role)) continue;
     const raw = rawById.get(nodeId);
     if (!raw) continue;
+    // A protected field shows as present and fillable, nothing of what it
+    // holds: a select's options and a date input's parts stay out.
+    if (entry.protectedReason && PROTECTED_FIELD_ROLES.has(roleValue(raw))) {
+      for (const childId of childIds(raw)) suppressSubtree(childId);
+      continue;
+    }
+    if (!isEditableControlRole(entry.role)) continue;
     // A native select's options are what an agent chooses from, so a short
     // option list stays visible under its non-editable combobox. Long lists
     // (countries, time zones) stay collapsed; select takes the label anyway.
@@ -226,7 +255,9 @@ export function normalizeCdpAccessibilityTree(options: {
     // Children are visited first. Chromium marks the document AND its focused
     // control focused; a later ancestor must not replace that exact control.
     if (entry.states.includes("focused") && focusedRef === null) focusedRef = entry.ref;
-    const description = accessibleStringValue(raw.description);
+    const description = protection
+      ? protection.shownDescription(nodeId, raw)
+      : accessibleStringValue(raw.description);
     // Pages can compute accessible names from arbitrarily long text (a whole
     // table cell or <pre> block). Clip to the semantic-node contract so one
     // long node cannot make the entire observation invalid.
@@ -235,7 +266,9 @@ export function normalizeCdpAccessibilityTree(options: {
       role: entry.role,
       ...(entry.name !== null ? { name: entry.name.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
       ...(description ? { description: description.slice(0, SEMANTIC_TEXT_MAX_CHARS) } : {}),
-      ...safeValue(raw, entry.role),
+      ...(entry.protectedReason
+        ? withheldValue(raw, entry.protectedReason)
+        : safeValue(raw, entry.role)),
       states: entry.states,
       actions: entry.actions,
       ...(children.length > 0 ? { children } : {}),
@@ -305,6 +338,212 @@ export function accessibilityContainer(
 }
 
 const EDITABLE_VALUE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
+
+/** Roles of a form field: a protected one keeps its label, so it can be found
+ * and filled, while what it holds is withheld. */
+const PROTECTED_FIELD_ROLES: ReadonlySet<string> = new Set([
+  "textbox",
+  "searchbox",
+  "combobox",
+  "listbox",
+  "spinbutton",
+  "slider",
+  "checkbox",
+  "radio",
+  "switch",
+  "Date",
+  "DateTime",
+  "InputTime",
+]);
+
+/** States that tell what a protected node holds (a link's address too). */
+const PROTECTED_STATE = /^(?:checked|pressed|selected|valuetext|url)(?:=|$)/u;
+
+/** A protected node shows that it holds something, never what: a field with
+ * a value, or a piece of text. */
+function withheldValue(
+  node: CdpAxNode,
+  reason: CdpProtectedReason,
+): { value?: { redacted: true; reason: CdpProtectedReason } } {
+  const raw = node.value?.value;
+  const holds =
+    (typeof raw === "number" && Number.isFinite(raw)) ||
+    stringValue(node.value) !== "" ||
+    (roleValue(node) === "StaticText" && accessibleStringValue(node.name) !== "");
+  return holds ? { value: { redacted: true, reason } } : {};
+}
+
+/**
+ * Which nodes of a tree are, or sit in, an element the driver marked
+ * protected, and the name each node may show. A protected node other than a
+ * form field shows no name. Any other name that Chromium computed from text
+ * that includes protected text (a button's contents, the label an
+ * aria-labelledby or a wrapping label names) is computed again from the
+ * public text alone. Null when the tree holds nothing protected.
+ */
+function protectedContent(rawById: ReadonlyMap<string, CdpAxNode>): {
+  reasons: ReadonlyMap<string, CdpProtectedReason>;
+  shownName(nodeId: string, node: CdpAxNode, role: string): string | null;
+  shownDescription(nodeId: string, node: CdpAxNode): string;
+} | null {
+  const reasons = new Map<string, CdpProtectedReason>();
+  const pending: Array<[string, CdpProtectedReason]> = [];
+  for (const [nodeId, node] of rawById) {
+    if (node.protectedReason) pending.push([nodeId, node.protectedReason]);
+  }
+  if (pending.length === 0) return null;
+  while (pending.length > 0) {
+    const [nodeId, reason] = pending.pop()!;
+    if (reasons.has(nodeId)) continue;
+    reasons.set(nodeId, reason);
+    for (const childId of childIds(rawById.get(nodeId) ?? {})) {
+      if (!reasons.has(childId))
+        pending.push([childId, rawById.get(childId)?.protectedReason ?? reason]);
+    }
+  }
+  const byBackendNode = new Map<string, string>();
+  for (const [nodeId, node] of rawById) {
+    const backendNodeId = finitePositiveInteger(node.backendDOMNodeId);
+    if (backendNodeId !== null)
+      byBackendNode.set(`${String(node.frameId)}\0${backendNodeId}`, nodeId);
+  }
+  // Whether a subtree holds protected text, leaving out the node a name is
+  // for (a wrapping label holds its own field).
+  const holdsProtected = (rootId: string, excludedId: string | null): boolean => {
+    const stack = [rootId];
+    const seen = new Set<string>();
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (id === excludedId || seen.has(id)) continue;
+      seen.add(id);
+      if (reasons.has(id)) return true;
+      stack.push(...childIds(rawById.get(id) ?? {}));
+    }
+    return false;
+  };
+  // Whether a subtree was read whole: a partial or budgeted read can leave
+  // out nodes, and a name taken from them cannot be shown to hold no
+  // protected text. The field itself is left out (a name never includes what
+  // it holds), and so are a text node's own parts.
+  const readWhole = (rootId: string, excludedId: string): boolean => {
+    const stack = [rootId];
+    const seen = new Set<string>();
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (id === excludedId || seen.has(id)) continue;
+      seen.add(id);
+      const node = rawById.get(id);
+      if (!node) return false;
+      if (roleValue(node) !== "StaticText") stack.push(...childIds(node));
+    }
+    return true;
+  };
+  // A subtree's public text, in order.
+  const publicText = (rootId: string, excludedId: string | null, parts: string[]): void => {
+    if (rootId === excludedId || reasons.has(rootId)) return;
+    const node = rawById.get(rootId);
+    if (!node) return;
+    if (roleValue(node) === "StaticText") {
+      const text = accessibleStringValue(node.name);
+      if (text) parts.push(text);
+      return;
+    }
+    for (const childId of childIds(node)) publicText(childId, excludedId, parts);
+  };
+  return {
+    reasons,
+    shownName(nodeId, node, role) {
+      const name = accessibleStringValue(node.name) || null;
+      if (name === null) return null;
+      if (reasons.has(nodeId) && !PROTECTED_FIELD_ROLES.has(role)) return null;
+      const source = nameSource(node.name?.sources);
+      if (!source) return name;
+      const relatedBackendIds = relatedBackendNodeIds(source);
+      const related = relatedBackendIds.flatMap((backendNodeId) => {
+        const relatedId = byBackendNode.get(`${String(node.frameId)}\0${backendNodeId}`);
+        return relatedId === undefined ? [] : [relatedId];
+      });
+      const fromContents = source.type === "contents";
+      // A protected field keeps its label only when the label was read whole.
+      if (
+        reasons.has(nodeId) &&
+        (related.length !== relatedBackendIds.length ||
+          !(fromContents
+            ? readWhole(nodeId, "")
+            : related.every((relatedId) => readWhole(relatedId, nodeId))))
+      ) {
+        return null;
+      }
+      const tainted = fromContents
+        ? holdsProtected(nodeId, null)
+        : related.some((relatedId) => holdsProtected(relatedId, nodeId));
+      if (!tainted) return name;
+      const parts: string[] = [];
+      if (fromContents) publicText(nodeId, null, parts);
+      else for (const relatedId of related) publicText(relatedId, nodeId, parts);
+      return parts.join(" ").replace(/\s+/gu, " ").trim() || null;
+    },
+    shownDescription(nodeId, node) {
+      const description = accessibleStringValue(node.description);
+      if (!description) return "";
+      // A protected node's description is withheld with its text.
+      if (reasons.has(nodeId)) return "";
+      // One taken from protected text (aria-describedby) is computed again
+      // from the public text it names.
+      const related = describedByBackendNodeIds(node.properties).flatMap((backendNodeId) => {
+        const relatedId = byBackendNode.get(`${String(node.frameId)}\0${backendNodeId}`);
+        return relatedId === undefined ? [] : [relatedId];
+      });
+      if (!related.some((relatedId) => holdsProtected(relatedId, nodeId))) return description;
+      const parts: string[] = [];
+      for (const relatedId of related) publicText(relatedId, nodeId, parts);
+      return parts.join(" ").replace(/\s+/gu, " ").trim();
+    },
+  };
+}
+
+/** The elements aria-describedby names, which a description is taken from. */
+function describedByBackendNodeIds(properties: unknown): number[] {
+  if (!Array.isArray(properties)) return [];
+  const property = properties.find(
+    (candidate) => isRecord(candidate) && candidate.name === "describedby",
+  );
+  return isRecord(property) ? relatedBackendNodeIds({ value: property.value }) : [];
+}
+
+/** The source Chromium took a node's name from: the first one listed with a
+ * value that a higher-priority source did not supersede. */
+function nameSource(sources: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(sources)) return null;
+  for (const source of sources) {
+    if (!isRecord(source) || source.superseded === true) continue;
+    if (isRecord(source.value) && source.value.value !== undefined && source.value.value !== "")
+      return source;
+  }
+  return null;
+}
+
+/** The DOM nodes a node's name was taken from (aria-labelledby, a label). */
+export function nameRelatedBackendNodeIds(node: CdpAxNode): number[] {
+  const source = nameSource(node.name?.sources);
+  return source ? relatedBackendNodeIds(source) : [];
+}
+
+/** The elements a name source took its text from (aria-labelledby, a label). */
+function relatedBackendNodeIds(source: Record<string, unknown>): number[] {
+  const ids: number[] = [];
+  for (const key of ["value", "attributeValue", "nativeSourceValue"]) {
+    const value = source[key];
+    if (!isRecord(value) || !Array.isArray(value.relatedNodes)) continue;
+    for (const related of value.relatedNodes) {
+      const backendNodeId = isRecord(related)
+        ? finitePositiveInteger(related.backendDOMNodeId)
+        : null;
+      if (backendNodeId !== null) ids.push(backendNodeId);
+    }
+  }
+  return ids;
+}
 
 function safeValue(
   node: CdpAxNode,

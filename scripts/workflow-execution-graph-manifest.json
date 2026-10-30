@@ -26,7 +26,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "9e5c37391a4b5d799ef6d3a3fb371bcc07c4d76913ce39e30397ce1a3c9817d6"
+      "sha256": "10ecafc36def82ece0659b7b01cbc9b5b0143c3aa4f344c2d120bd77c1e9294d"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",

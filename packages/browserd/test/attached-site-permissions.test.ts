@@ -8,6 +8,7 @@ import {
   type AttachedBrowserBridgeTransport,
 } from "../src/attached-cdp";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 const PAGE = "https://meet.example.test:8443/room/42?join=1";
 /** A tab the person had open before the session started. */
@@ -50,7 +51,11 @@ class SitePermissionBridge implements AttachedBrowserBridgeTransport {
       case "debugger.poll":
         return { events: [], cursor: 0, truncated: false } as T;
       case "debugger.command":
-        return { result: this.result(payload) } as T;
+        return {
+          result:
+            protectedFieldsProbeAnswer(String(payload.method), payload.params) ??
+            this.result(payload),
+        } as T;
       default:
         return {} as T;
     }
