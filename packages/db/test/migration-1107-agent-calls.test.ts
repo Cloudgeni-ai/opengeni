@@ -2,11 +2,9 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { sql } from "drizzle-orm";
 import {
   acquireOwnerMigratedTestDatabase,
-  grantDeferredRuntimeAccess,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import {
-  agentCallRoutinesGranted,
   appendSessionEvents,
   bootstrapWorkspace,
   claimAnsweredAgentCallForRealtimeInTransaction,
@@ -15,6 +13,7 @@ import {
   createSession,
   createWorkspaceWebhook,
   getAgentCall,
+  getNativePushDevice,
   placeAgentCall,
   registerNativePushDevice,
   settleAgentCall,
@@ -47,9 +46,6 @@ beforeAll(async () => {
   // Owner-run functions must work under FORCE RLS exactly as in production.
   await migrate(owned.ownerUrl);
   await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword, rlsStrategy: "force" });
-  // Provisioning withholds the call routines (DEFERRED_RUNTIME_PRIVATE_ROUTINES);
-  // the tests run as they will once a later migration grants them.
-  await grantDeferredRuntimeAccess(owned.admin);
   const appUrl = new URL(owned.ownerUrl);
   appUrl.username = "opengeni_app";
   appUrl.password = owned.appPassword;
@@ -192,36 +188,33 @@ describe("1107 agent calls", () => {
     }
   });
 
-  test("withheld for one release, native push keeps v1 and no phone takes calls", async () => {
+  test("1128 grants the routines 1107 withheld, without granting PUBLIC execution", async () => {
     if (!client) return;
     const source = await Bun.file(new URL(`../drizzle/${MIGRATION}`, import.meta.url)).text();
     expect(source).not.toMatch(/\bGRANT\s+EXECUTE\b/i);
-    const p = await person("withheld");
-    const authSessionId = await p.phone();
-    await owned!.admin.unsafe(`
-      REVOKE EXECUTE ON FUNCTION
-        opengeni_private.native_push_device_v2(text),
-        opengeni_private.register_native_push_device_v2(text, text, text, text, text, text[], text),
-        opengeni_private.claim_native_push_deliveries_v2(uuid, integer, integer),
-        opengeni_private.agent_call_device_count_v1(text, boolean),
-        opengeni_private.agent_call_ringing_v1(text),
-        opengeni_private.ring_agent_call_v1(uuid, boolean)
-      FROM opengeni_app`);
-    try {
-      expect(await agentCallRoutinesGranted(db())).toBe(false);
-      const device = await iPhone(authSessionId, ["call", "call_members", "failed"]);
-      expect(device.rules).toEqual(["failed"]);
-      expect(device.voipToken).toBeNull();
-      expect(await call(p)).toEqual({ placed: false, refusal: "no_phone" });
-      expect(await rings(authSessionId)).toHaveLength(0);
-      // The dispatcher keeps claiming through v1 (nothing is queued yet here).
-      expect(
-        await claimNativePushDeliveries(db(), { claimId: crypto.randomUUID(), limit: 1 }),
-      ).toEqual([]);
-    } finally {
-      await grantDeferredRuntimeAccess(owned!.admin);
+    for (const signature of [
+      "native_push_device_v2(text)",
+      "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+      "claim_native_push_deliveries_v2(uuid, integer, integer)",
+      "agent_call_device_count_v1(text, boolean)",
+      "agent_call_ringing_v1(text)",
+      "ring_agent_call_v1(uuid, boolean)",
+    ]) {
+      const [routine] = await owned!.admin`
+        select has_function_privilege('opengeni_app', p.oid, 'EXECUTE') as granted,
+          exists (
+            select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+            where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+          ) as public_execute
+        from pg_proc p where p.oid = ${`opengeni_private.${signature}`}::regprocedure`;
+      expect(routine).toEqual({ granted: true, public_execute: false });
     }
-    expect(await agentCallRoutinesGranted(db())).toBe(true);
+    const p = await person("granted");
+    const authSessionId = await p.phone();
+    const registered = await iPhone(authSessionId, ["call", "call_members", "failed"]);
+    expect([...registered.rules].sort()).toEqual(["call", "call_members", "failed"]);
+    expect(registered.voipToken).toBe("f".repeat(64));
+    expect(await getNativePushDevice(db(), authSessionId)).toEqual(registered);
   });
 
   test("call rules need a PushKit token on iOS, and teammates' calls need the person's own", async () => {

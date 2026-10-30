@@ -56,49 +56,13 @@ function textArray(values: readonly string[]) {
   )}]::text[]`;
 }
 
-/**
- * 1107's agent call routines and the native push v2 functions that carry the
- * iOS VoIP token. A later migration grants them all together.
- */
-const AGENT_CALL_ROUTINES = [
-  "opengeni_private.native_push_device_v2(text)",
-  "opengeni_private.register_native_push_device_v2(text, text, text, text, text, text[], text)",
-  "opengeni_private.claim_native_push_deliveries_v2(uuid, integer, integer)",
-  "opengeni_private.agent_call_device_count_v1(text, boolean)",
-  "opengeni_private.agent_call_ringing_v1(text)",
-  "opengeni_private.ring_agent_call_v1(uuid, boolean)",
-] as const;
-
-/**
- * Whether the runtime may call 1107's routines yet. False while their EXECUTE
- * grant is withheld (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES) or
- * they are absent; until then native push keeps its v1 functions and no phone
- * takes agent calls. A separate statement: EXECUTE is checked when a statement
- * starts, so a guard inside the calling statement would not avoid the error.
- */
-export async function agentCallRoutinesGranted(db: Pick<Database, "execute">): Promise<boolean> {
-  const [row] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`select bool_and(coalesce(
-        has_function_privilege(to_regprocedure(signature)::oid, 'EXECUTE'), false
-      )) as granted
-      from unnest(${textArray(AGENT_CALL_ROUTINES)}) as signature`,
-  );
-  return row?.granted === true;
-}
-
-const CALL_RULES: ReadonlySet<NativePushRule> = new Set(["call", "call_members"]);
-
 export async function getNativePushDevice(
   db: Database,
   authSessionId: string,
 ): Promise<NativePushDeviceRow | null> {
-  const granted = await agentCallRoutinesGranted(db);
   const [row] = await rawRows<DeviceRecord>(
     db,
-    granted
-      ? sql`select * from opengeni_private.native_push_device_v2(${authSessionId}::text)`
-      : sql`select * from opengeni_private.native_push_device_v1(${authSessionId}::text)`,
+    sql`select * from opengeni_private.native_push_device_v2(${authSessionId}::text)`,
   );
   return row ? device(row) : null;
 }
@@ -113,27 +77,20 @@ export async function registerNativePushDevice(
     token: string;
     rules: readonly NativePushRule[];
     /**
-     * iOS PushKit token; without it an iOS phone keeps no call rules. Until
-     * the agent call routines are granted, no phone keeps call rules.
+     * iOS PushKit token; without it an iOS phone keeps no call rules.
      */
     voipToken?: string | null | undefined;
   },
 ): Promise<NativePushDeviceRow> {
-  const granted = await agentCallRoutinesGranted(db);
-  const rules = granted ? input.rules : input.rules.filter((rule) => !CALL_RULES.has(rule));
+  const rules = input.rules;
   const ruleArray = rules.length > 0 ? textArray(rules) : sql`array[]::text[]`;
   const [row] = await rawRows<DeviceRecord>(
     db,
-    granted
-      ? sql`select * from opengeni_private.register_native_push_device_v2(
-          ${input.authSessionId}::text, ${input.platform}::text, ${input.appId}::text,
-          ${input.environment}::text, ${input.token}::text, ${ruleArray},
-          ${input.voipToken ?? null}::text
-        )`
-      : sql`select * from opengeni_private.register_native_push_device_v1(
-          ${input.authSessionId}::text, ${input.platform}::text, ${input.appId}::text,
-          ${input.environment}::text, ${input.token}::text, ${ruleArray}
-        )`,
+    sql`select * from opengeni_private.register_native_push_device_v2(
+      ${input.authSessionId}::text, ${input.platform}::text, ${input.appId}::text,
+      ${input.environment}::text, ${input.token}::text, ${ruleArray},
+      ${input.voipToken ?? null}::text
+    )`,
   );
   if (!row) throw new Error("Native push registration returned no row");
   return device(row);
@@ -224,7 +181,6 @@ export async function claimNativePushDeliveries(
   db: Database,
   input: { claimId: string; limit?: number; claimSeconds?: number },
 ): Promise<ClaimedNativePushDelivery[]> {
-  const granted = await agentCallRoutinesGranted(db);
   const limit = input.limit ?? 32;
   const claimSeconds = input.claimSeconds ?? 60;
   const rows = await rawRows<{
@@ -238,13 +194,9 @@ export async function claimNativePushDeliveries(
     attempts: number;
   }>(
     db,
-    granted
-      ? sql`select * from opengeni_private.claim_native_push_deliveries_v2(
-          ${input.claimId}::uuid, ${limit}::integer, ${claimSeconds}::integer
-        )`
-      : sql`select * from opengeni_private.claim_native_push_deliveries_v1(
-          ${input.claimId}::uuid, ${limit}::integer, ${claimSeconds}::integer
-        )`,
+    sql`select * from opengeni_private.claim_native_push_deliveries_v2(
+      ${input.claimId}::uuid, ${limit}::integer, ${claimSeconds}::integer
+    )`,
   );
   return rows.map((row) => ({
     deliveryId: row.delivery_id,

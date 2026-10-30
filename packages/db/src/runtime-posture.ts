@@ -104,9 +104,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * only they reach as pending. 1103 withholds the subscription
  * account-administrator grant; until it is granted, only organization
  * membership administrators administer the organization's subscription
- * accounts. 1107 withholds the agent call routines and the native push v2
- * functions that carry the iOS VoIP token; until they are granted, native push
- * keeps its v1 functions, no phone takes calls and agents cannot place one.
+ * accounts. 1107 withheld the agent call routines and the native push v2
+ * functions that carry the iOS VoIP token; 1128 grants them.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -115,12 +114,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "grant_subscription_account_administrator(jsonb)",
-  "native_push_device_v2(text)",
-  "register_native_push_device_v2(text, text, text, text, text, text[], text)",
-  "claim_native_push_deliveries_v2(uuid, integer, integer)",
-  "agent_call_device_count_v1(text, boolean)",
-  "agent_call_ringing_v1(text)",
-  "ring_agent_call_v1(uuid, boolean)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**

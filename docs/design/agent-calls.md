@@ -69,11 +69,18 @@ saying why the agent called, and the conversation lands in that chat.
 - `agent_calls`: id, workspace, session, callee and caller, caller label,
   reason, state, phones rung, deadline, answering phone, voice call id,
   timestamps. Workspace row-level security, owner-run functions for push.
-- Rollout: migration 1107 withholds the runtime's EXECUTE on its owner-run
+- Rollout: migration 1107 withheld the runtime's EXECUTE on its owner-run
   functions for one release (runtime posture `DEFERRED_RUNTIME_PRIVATE_ROUTINES`),
   because the previous release rejects a grant on a definer it does not know.
-  Until a later migration grants them, native push keeps its v1 functions,
-  call rules are dropped when a phone registers, and agents get `no_phone`.
+  Migration 1128 grants all six routines to every configured application
+  role; readiness now requires them. The current binary uses native push v2
+  directly and no longer drops call rules or returns `no_phone` just because
+  grants are withheld. The v1 SQL routines and their grants remain intact for
+  older binaries during a rolling deploy.
+  **Ordering:** 1128 can ship only after a production release containing 1107
+  (commit `d91058a8b8` or later) is pinned in
+  `scripts/runtime-posture-baseline.json`. Advance that pin in a separate PR;
+  a local compatibility run against 1107 is not a production release receipt.
 
 ## Products embedding Opengeni
 

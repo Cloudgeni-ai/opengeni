@@ -255,7 +255,12 @@ setting stays off. 1091 created the secret history scrub's reader and cell
 writer withheld; the scrub checks the grant once per run and reports the
 cells only they reach as pending until then. 1103 created the subscription
 account-administrator grant withheld, with the same caller check; its
-follow-up release grants it.
+follow-up release grants it. 1107 created the agent-call and native push v2
+functions withheld; 1128 grants all six to every configured application role
+and removes the privilege probes and v1 caller fallbacks. The v1 SQL functions
+and grants stay intact for rolling binaries. 1128 must follow a separate
+production baseline pin containing 1107 (`d91058a8b8` or later); a local test
+pin does not satisfy that release-ordering gate.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects
