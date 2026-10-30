@@ -1022,6 +1022,101 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     ]);
   });
 
+  test("the call heard from the speakers doesn't become someone on the microphone", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { diarizer: "ours" },
+    });
+    await updateWorkspaceSettings(client.db, recording.actor.workspaceId, {
+      recordings: { voiceprints: true },
+    });
+    const word = (text: string, start: number, end: number) => ({
+      text,
+      startMilliseconds: start,
+      endMilliseconds: end,
+      speaker: null,
+      spaceBefore: true,
+    });
+    // No headphones: the microphone hears the call a little late, and one
+    // misheard word of it ("gave") matches nothing in computer audio.
+    const provider = fakeProvider(async (request) => ({
+      languages: ["nor"],
+      audioMilliseconds: 4_000,
+      diarized: false,
+      words:
+        request.audio.fileName === "track-0.webm"
+          ? [
+              word("Takk.", 100, 400),
+              word("vi", 1_100, 1_600),
+              word("kommer", 1_600, 2_100),
+              word("på", 2_100, 2_600),
+              word("mandag", 2_600, 3_100),
+              word("gave", 3_200, 3_600),
+            ]
+          : [
+              word("Vi", 1_000, 1_500),
+              word("kommer", 1_500, 2_000),
+              word("på", 2_000, 2_500),
+              word("mandag.", 2_500, 3_000),
+            ],
+    }));
+    // Our diarizer hears the speakers' sound as a voice of its own on the
+    // microphone; what the echo left of it outlasts the person recording.
+    const ours: RecordingDiarizer = {
+      id: "test",
+      diarize: async (audio) =>
+        audio.fileName === "track-0.webm"
+          ? {
+              turns: [
+                { startMilliseconds: 0, endMilliseconds: 500, speaker: "A" },
+                { startMilliseconds: 1_000, endMilliseconds: 3_700, speaker: "E" },
+              ],
+              voices: [
+                { speaker: "A", speechMilliseconds: 5_000, embedding: [1, 0, 0] },
+                { speaker: "E", speechMilliseconds: 6_000, embedding: [0, 1, 0] },
+              ],
+              voiceModel: "test-voices",
+            }
+          : {
+              turns: [{ startMilliseconds: 900, endMilliseconds: 3_100, speaker: "S" }],
+              voices: [{ speaker: "S", speechMilliseconds: 6_000, embedding: [0, 0.9, 0.1] }],
+              voiceModel: "test-voices",
+            },
+    };
+    expect(
+      await activities(storage, provider, "key", ours).activities.transcribeRecordingVersion(
+        recording.input,
+      ),
+    ).toEqual({ outcome: "complete" });
+    const page = await getRecordingTranscriptPage(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+      versionId: recording.input.versionId,
+    });
+    expect(
+      page.segments.map((segment) => [
+        segment.speakerLabel,
+        page.speakers.find((speaker) => speaker.label === segment.speakerLabel)?.name,
+        segment.text,
+      ]),
+    ).toEqual([
+      ["track-0", "Ingrid Solberg", "Takk."],
+      ["speaker_0", "Speaker 1", "Vi kommer på mandag."],
+    ]);
+    // The echo keeps no voice of its own to suggest or learn from.
+    expect(
+      await shared!.admin<{ label: string; channel: string }[]>`
+        select speaker_label as label, channel from recording_speaker_voices
+        where version_id = ${recording.input.versionId} order by speaker_label`,
+    ).toEqual([
+      { label: "speaker_0", channel: "call" },
+      { label: "track-0", channel: "microphone" },
+    ]);
+  });
+
   test("a missing key fails the version; a provider outage is retried", async () => {
     if (!client) return;
     const storage = memoryStorage();

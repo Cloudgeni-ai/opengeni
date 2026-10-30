@@ -106,6 +106,9 @@ const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
 
 const opengeniPrivateSchema = pgSchema("opengeni_private");
 
+/** Who asked for a pending context compaction (`sessions.compact_request_trigger`). */
+export type CompactRequestTrigger = "operator" | "proactive";
+
 export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
 
 export type ConnectorActionPolicySnapshotEntry = {
@@ -5491,6 +5494,11 @@ export const sessions = pgTable(
     // a compaction, then clears it. A durable flag (not a transient signal) so
     // the trigger survives a worker restart and converges before the next turn.
     compactRequested: boolean("compact_requested").notNull().default(false),
+    // Who asked for the pending request (migration 1102): 'operator' for
+    // /compact, 'proactive' for the worker's idle checkpoint after a turn that
+    // reached the automatic threshold. NULL (older writers) reads as operator.
+    // Meaningful only while compactRequested is true.
+    compactRequestTrigger: text("compact_request_trigger").$type<CompactRequestTrigger>(),
     queueVersion: integer("queue_version").notNull().default(0),
     queueHeadPosition: bigint("queue_head_position", { mode: "number" }).notNull().default(0),
     queueTailPosition: bigint("queue_tail_position", { mode: "number" }).notNull().default(0),
@@ -9283,6 +9291,13 @@ export const composerDrafts = pgTable(
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
     latencyMode: text("latency_mode").notNull().default("standard"),
+    /**
+     * True while the person has not picked a model in this composer: reads
+     * then return the chat's current settings, so a change made elsewhere
+     * (for example by the agent) is what the next Send uses. The three
+     * columns above keep the settings the draft was last saved with.
+     */
+    policyFollowsSession: boolean("policy_follows_session").notNull().default(true),
     sourceTurnId: uuid("source_turn_id"),
     sourceTurnVersion: integer("source_turn_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

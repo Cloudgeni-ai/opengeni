@@ -7,10 +7,13 @@ current and future models; `[]` disables all turn models on that connection.
 The existing workspace model policy remains an additional ceiling.
 
 Organization administrators may assign each connection to all shared workspaces
-or selected shared workspaces. Codex and SuperGrok also have a separate Personal
-workspaces switch. Organization administration does not reveal individual
-Personal workspaces or grant access to their contents. Gateway inheritance keeps
-its existing shared-workspace boundary. Existing connections default to their
+or selected shared workspaces. Every organization connection, subscription or
+API key, also has a separate Personal workspaces switch (API keys since
+migration 1094, which also normalized their stored switch to the reach shown
+before: on for every workspace, off for a selected list). Organization administration does not reveal individual
+Personal workspaces or grant access to their contents. An organization gateway
+key follows the same rules: it reaches a Personal workspace only through its
+Personal workspaces switch. Existing connections default to their
 previous reach and unrestricted models.
 
 Migration `0424_model_connection_access.sql` adds policy columns to the existing
@@ -70,15 +73,14 @@ Personal workspace and, read-only, the accounts it can use. Only organization
 owners and admins add accounts; they connect organization accounts:
 the connect step asks which workspaces can use it, every workspace by default
 or "Only selected workspaces" (shared workspaces plus one all-or-nothing
-"Personal workspaces" choice, shown off with its reason for organization API
-keys), and saves that as the account's "Available in" right after connecting
+"Personal workspaces" choice), and saves that as the account's "Available in" right after connecting
 (`apps/web/src/components/models/connect-audience.tsx`; the connect routes
 take no policy, so it is a second request). Owning an account by one
 workspace is not a choice on that step, because it would read the same as
 "Only selected workspaces" with that workspace ticked; it is offered only where
 it is needed, explained there: Codex Apps (they need an account owned by the
-workspace), redeeming Codex usage limit resets, an API key in a Personal
-workspace (organization keys can't reach one) or for a team with its own key.
+workspace), redeeming Codex usage limit resets, or an API key a team (or
+one person, in their Personal workspace) pays for with its own key.
 Anyone else who can change a workspace's own account may sign it in again or
 replace its key, but not add one. Owners and admins also see the organization's accounts
 that don't reach this workspace, muted with the reason. Each account's own

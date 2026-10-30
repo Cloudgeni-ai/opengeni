@@ -10178,6 +10178,14 @@ export const ComposerDraft = /* @__PURE__ */ defineSchema(() =>
     model: primitives.nonEmptyString,
     reasoningEffort: ReasoningEffort,
     latencyMode: LatencyMode,
+    /**
+     * True when the draft has no model choice of its own: `model`,
+     * `reasoningEffort` and `latencyMode` are then the chat's current settings
+     * and follow every later change to them (for example by the agent). A
+     * client sends a model with this draft only after the person picks one.
+     * Servers from before this field send no value, which reads as false.
+     */
+    policyFollowsSession: primitives.boolean.default(false),
     sourceTurnId: primitives.nullableUuid,
     sourceTurnVersion: z.number().int().positive().nullable(),
     updatedAt: primitives.nullableString,
@@ -10228,6 +10236,22 @@ export const DeleteSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type DeleteSessionQueueItemRequest = z.infer<typeof DeleteSessionQueueItemRequest>;
 
+/** A composer policy is sent whole (the person's pick) or not at all (follow the chat). */
+function refineWholeComposerPolicy(
+  value: { model?: unknown; reasoningEffort?: unknown; latencyMode?: unknown },
+  context: z.RefinementCtx,
+): void {
+  const present = [value.model, value.reasoningEffort, value.latencyMode].filter(
+    (field) => field !== undefined,
+  ).length;
+  if (present === 0 || present === 3) return;
+  context.addIssue({
+    code: "custom",
+    message: "Send model, reasoningEffort and latencyMode together, or none of them",
+    path: ["model"],
+  });
+}
+
 export const SaveComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
   ComposerDraft.pick({
     text: true,
@@ -10236,7 +10260,12 @@ export const SaveComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
     model: true,
     reasoningEffort: true,
     latencyMode: true,
-  }).extend({ expectedRevision: primitives.nonnegativeInteger }),
+  })
+    // Omit all three to keep (or return) the draft to the chat's own
+    // settings; send them when the person picked a model in the composer.
+    .partial({ model: true, reasoningEffort: true, latencyMode: true })
+    .extend({ expectedRevision: primitives.nonnegativeInteger })
+    .superRefine(refineWholeComposerPolicy),
 );
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
@@ -10259,6 +10288,8 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
       reasoningEffort: true,
       latencyMode: true,
     })
+      // A draft that follows the chat's settings is submitted without them.
+      .partial({ model: true, reasoningEffort: true, latencyMode: true })
       .extend({
         expectedDraftRevision: primitives.positiveInteger,
         clientEventId: SessionOperationKey,
@@ -10273,7 +10304,8 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
 
         personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
       })
-      .superRefine(requireEstablishedPersonalResourceEpoch),
+      .superRefine(requireEstablishedPersonalResourceEpoch)
+      .superRefine(refineWholeComposerPolicy),
   ),
 );
 export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
