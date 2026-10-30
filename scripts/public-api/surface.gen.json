@@ -33048,7 +33048,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"recording.deleted\\\"\",\"\\\"recording.finished\\\"\",\"\\\"recording.notes.updated\\\"\",\"\\\"recording.speakers.updated\\\"\",\"\\\"recording.started\\\"\",\"\\\"recording.transcript.current_changed\\\"\",\"\\\"recording.transcript.failed\\\"\",\"\\\"recording.transcript.ready\\\"\",\"\\\"session.agentCall.ringing\\\"\",\"\\\"session.agentCall.settled\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.failed\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\"]"
+        "$": "enum=[\"\\\"recording.deleted\\\"\",\"\\\"recording.finished\\\"\",\"\\\"recording.notes.updated\\\"\",\"\\\"recording.speakers.updated\\\"\",\"\\\"recording.started\\\"\",\"\\\"recording.transcript.current_changed\\\"\",\"\\\"recording.transcript.failed\\\"\",\"\\\"recording.transcript.ready\\\"\",\"\\\"session.agentCall.ringing\\\"\",\"\\\"session.agentCall.settled\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.notification.posted\\\"\",\"\\\"session.notification.withdrawn\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\"]"
       }
     }
   },
