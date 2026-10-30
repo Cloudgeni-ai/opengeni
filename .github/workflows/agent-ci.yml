@@ -103,8 +103,8 @@ jobs:
           OPENGENI_CUA_E2E: "1"
           OPENGENI_CUA_PACKAGING_E2E: "1"
         run: |
-          bun test --timeout 120000 packages/browserd/test/cua-windows.e2e.test.ts
           bun test --timeout 120000 packages/browserd/test/cua-runtime-packaging.e2e.test.ts
+          bun test --timeout 120000 packages/browserd/test/cua-windows.e2e.test.ts
 
   native-command-supervisor:
     # Skip the main -> production promotion PR: its head already ran as a main push.
