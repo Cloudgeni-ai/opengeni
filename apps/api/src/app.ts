@@ -126,6 +126,7 @@ import {
   resolveSessionAdminAuthority,
   sessionStartedByPerson,
   rlsContextForWorkspace,
+  withSubscriptionAccountAdministrators,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
@@ -216,6 +217,7 @@ import {
   createUserPresenceRecorder,
   registerProductUsageMetricBaselines,
   stampPersonalApiKeyRequest,
+  resolveAccountAdminAuthorizationStamp,
   verifiedDelegatedHumanAuthorizationForRequest,
   browserExtension,
 } from "@opengeni/core";
@@ -413,7 +415,6 @@ import {
 import {
   managedPasskeySignInOffered,
   managedPasskeySignUpOffered,
-  refreshManagedPasskeysOffered,
   registerManagedPasskeyRoutes,
 } from "./routes/managed-passkeys";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
@@ -1153,6 +1154,17 @@ export function createAppComposition(deps: AppDependencies): {
     await next();
   });
 
+  // Subscription administration accepts the account administrators this
+  // request authenticated as (configured key, account-scoped key, signed
+  // delegation, organization admin). The database records the proof per
+  // transaction; nothing is resolved unless a subscription writer asks.
+  app.use("/v1/*", async (c, next) => {
+    await withSubscriptionAccountAdministrators(
+      (input) => resolveAccountAdminAuthorizationStamp(c, deps, input),
+      next,
+    );
+  });
+
   app.use("/v1/*", async (c, next) => {
     c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
     if (
@@ -1638,7 +1650,6 @@ export function createAppComposition(deps: AppDependencies): {
             },
           }
         : undefined;
-    await refreshManagedPasskeysOffered(deps);
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
@@ -1725,7 +1736,7 @@ export function createAppComposition(deps: AppDependencies): {
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(
-          deps,
+          deps.settings,
           deps.settings.productAccessMode === "managed"
             ? await managedAuthNewSignupsGate.signupsOpen()
             : true,
@@ -2778,19 +2789,15 @@ async function requireMcpAccessGrantAuthorization(
   return authorization;
 }
 
-function clientAuthConfig(
-  deps: Pick<AppDependencies, "settings" | "db">,
-  newSignupsEnabled: boolean,
-) {
-  const settings = deps.settings;
+function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabled: boolean) {
   if (settings.productAccessMode === "managed") {
     return {
       mode: "managedSession" as const,
       session: "cookie" as const,
       emailVerificationRequired: managedAuthRequiresEmailVerification(settings),
       newSignupsEnabled,
-      passkeySignIn: managedPasskeySignInOffered(deps),
-      passkeySignUp: managedPasskeySignUpOffered(deps, newSignupsEnabled),
+      passkeySignIn: managedPasskeySignInOffered({ settings }),
+      passkeySignUp: managedPasskeySignUpOffered({ settings }, newSignupsEnabled),
       ...(settings.signupChallengeEnabled
         ? { signupChallengeSiteKey: settings.signupChallengeSiteKey }
         : {}),

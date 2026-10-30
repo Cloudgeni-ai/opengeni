@@ -22,6 +22,11 @@ import { useNavigate } from "@tanstack/react-router";
    Organization settings > Models: who sees which part.
 
    - Owners and admins: every account and every workspace's model rules.
+   - An account administrator without a person (the deployment's access key,
+     or a service with account:admin): the organization's subscription
+     accounts (Codex, SuperGrok, Claude) and every workspace it can open.
+     Organization keys and organization defaults are read through a person's
+     organization membership, so they stay with owners and admins.
    - A workspace admin who isn't one: the workspaces they administer, and the
      accounts those workspaces use, read-only.
    - A member: their own Personal workspace, whose default model and Allowed
@@ -29,10 +34,10 @@ import { useNavigate } from "@tanstack/react-router";
      shared workspace where they manage connections opens too, to connect and
      manage their own subscriptions there ("Only me"); its models stay
      read-only.
-   - A key or service without a membership never gets here; the route says
-     who manages models instead (org-settings.tsx).
+   - Any other key or service never gets here; the route says who manages
+     models instead (org-settings.tsx).
 
-   Only owners and admins add accounts.
+   Only owners, admins and account administrators add accounts.
    -------------------------------------------------------------------------- */
 
 export function OrganizationModelsSection({
@@ -40,6 +45,7 @@ export function OrganizationModelsSection({
   organizationId,
   organizationName,
   administrator,
+  personAdministrator = administrator,
   administeredWorkspaceIds,
   workspace: requestedWorkspace,
   account: requestedAccount,
@@ -49,7 +55,10 @@ export function OrganizationModelsSection({
   anchorWorkspaceId: string;
   organizationId: string;
   organizationName: string;
+  /** Administers the organization's subscription accounts (owner, admin or account administrator). */
   administrator: boolean;
+  /** An owner or admin acting as a person: also organization keys and defaults. */
+  personAdministrator?: boolean;
   administeredWorkspaceIds: readonly string[];
   /** `?workspace=`: the workspace whose model page is open, or that a page was opened from. */
   workspace: string | undefined;
@@ -58,12 +67,15 @@ export function OrganizationModelsSection({
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const overview = useOrganizationWorkspaces(context.client, organizationId, administrator);
+  // The administration overview is a person's; an account administrator
+  // without one lists the shared workspaces it can open.
+  const overview = useOrganizationWorkspaces(context.client, organizationId, personAdministrator);
   // Kept here, above the per-workspace page, so moving between the list and a
   // workspace's page never drops a sign-in that is still going.
   const organizationAccounts = useOrganizationModelAccounts({
     organizationId,
     enabled: administrator && Boolean(organizationId),
+    gatewaysEnabled: personAdministrator && Boolean(organizationId),
   });
   // Old organization Models links name its accounts without the "org:" mark.
   const { account, view } = useMemo(
@@ -190,6 +202,7 @@ export function OrganizationModelsSection({
         "connections:write",
       )}
       canManageOrganizationModels={administrator}
+      organizationPeopleAdministrator={personAdministrator}
       account={account}
       view={view}
       onConnectionChange={() => undefined}

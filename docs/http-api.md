@@ -44,6 +44,17 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events/stream` (SSE; backfills from Postgres by event sequence)
 - `POST /v1/workspaces/:workspaceId/sessions/:sessionId/events`
 
+`GET /v1/workspaces/:workspaceId/sessions?view=page&sessionIds=<id>,<id>`
+selects up to 200 known sessions (SDK: `listSessionSummaryPage(workspaceId,
+{ sessionIds })`). It narrows the caller's ordinary list: private sessions of
+other people, archived rows (unless `archiveStatus=all`) and every other filter,
+including `search`, still apply, and the response carries
+`sessionIdsApplied: true`. With `projection=summary` each row also has
+`activeTurnId` and `latestTurn` (`id`, `status`, `startedAt`, `finishedAt`): the
+last queued turn, else the executing turn, else the most recently finished one.
+Hosts that keep their own record of a chat read its title and state this way
+instead of copying events.
+
 `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/retention` with
 `{ "keepLive": true | false }` exempts a session from the idle-session archive
 (`sessions:control`; 409 `SESSION_ARCHIVED_READ_ONLY` once archived). Session

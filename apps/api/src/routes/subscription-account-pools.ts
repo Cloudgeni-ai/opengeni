@@ -7,8 +7,10 @@ import {
   SubscriptionAccountToggleRequest,
   SubscriptionRotationSettingsRequest,
 } from "@opengeni/contracts";
-import { requireOrganizationCodexHuman } from "./codex";
-import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import {
+  requireOrganizationSubscriptionAdministrator,
+  requireOrganizationSubscriptionMutationOrigin,
+} from "./codex";
 import {
   coreOrganizationAccount,
   coreOrganizationAccounts,
@@ -64,9 +66,9 @@ export function registerSubscriptionAccountPoolRoutes(
   };
   const organizationActor = async (c: Context, mutation = false) => {
     requireEnabled();
-    if (mutation) requireSameOriginBrowserMutation(c, deps);
+    if (mutation) requireOrganizationSubscriptionMutationOrigin(c, deps);
     const organizationId = c.req.param("organizationId")!;
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     return { organizationId, actorSubjectId: human.subjectId };
   };
 

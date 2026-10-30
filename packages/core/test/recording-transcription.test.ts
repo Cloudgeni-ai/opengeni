@@ -228,6 +228,60 @@ describe("withRecorderVoice", () => {
     };
     expect(withRecorderVoice(track, "A")).toBe(track);
   });
+
+  test("a voice that was the speakers' echo is never the person recording, and its leftovers go", () => {
+    const track = withRecorderVoice(
+      {
+        trackNumber: 0,
+        recorder,
+        words: [
+          word("Takk", 0, 400, "A"),
+          word("skal", 1_000, 4_000, "E"),
+          word("Ja", 5_000, 5_300, "B"),
+          word("Kort", 6_000, 6_200, null),
+        ],
+        echoSpeakers: ["E"],
+      },
+      null,
+    );
+    expect(speakerOf(track)).toBe("A");
+    expect(track.words.map((item) => item.text)).toEqual(["Takk", "Ja", "Kort"]);
+  });
+
+  test("one voice stays the person recording's, echo or not", () => {
+    const words = [word("Takk", 0, 400, "E"), word("da", 500, 800, "E")];
+    const track = withRecorderVoice({ trackNumber: 0, recorder, words, echoSpeakers: ["E"] }, null);
+    expect(speakerOf(track)).toBeNull();
+    expect(track.words).toEqual(words);
+  });
+
+  test("when every voice is an echo, the one that spoke the most is the person recording", () => {
+    const track = withRecorderVoice(
+      {
+        trackNumber: 0,
+        recorder,
+        words: [word("Takk", 0, 2_000, "E1"), word("da", 3_000, 3_300, "E2")],
+        echoSpeakers: ["E1", "E2"],
+      },
+      null,
+    );
+    expect(speakerOf(track)).toBe("E1");
+    expect(track.words.map((item) => item.text)).toEqual(["Takk"]);
+  });
+
+  test("the remembered voice is the person recording even when it was marked as echo", () => {
+    const track = withRecorderVoice(
+      {
+        trackNumber: 0,
+        recorder,
+        words: [word("Hei", 0, 300, "A"), word("trenger", 3_000, 6_000, "B")],
+        echoSpeakers: ["A"],
+      },
+      "A",
+    );
+    expect(speakerOf(track)).toBe("A");
+    expect(track.words).toHaveLength(2);
+  });
 });
 
 describe("buildRecordingSegments", () => {
@@ -571,5 +625,51 @@ describe("withoutMicrophoneEchoes", () => {
     const only: RecordingTrackWords[] = [{ trackNumber: 0, recorder: null, words: microphone }];
     const [kept] = withoutMicrophoneEchoes(only, [{ trackNumber: 0, source: "microphone" }]);
     expect(kept).toBe(only[0]);
+  });
+
+  test("a voice that was almost all echo is the speakers, not someone in the room", () => {
+    const by = (speaker: string, words: RecordingTranscribedWord[]) =>
+      words.map((item) => ({ ...item, speaker }));
+    const [microphone] = withoutMicrophoneEchoes(
+      tracks(
+        [
+          // The call through the speakers, with a misheard bit the echo left behind.
+          ...by("E", said("vi kommer på mandag klokka åtte for å legge kabler", 1_100)),
+          ...by("E", said("en gave", 4_400)),
+          // The person recording and someone next to them.
+          ...by("A", said("jeg tar med nøkkelen og låser opp porten", 8_000)),
+          ...by("B", said("og jeg tar med kaffe", 12_000)),
+        ],
+        said("Vi kommer på mandag klokka åtte for å legge kabler", 1_000),
+      ),
+      sources,
+    );
+    expect(microphone!.echoSpeakers).toEqual(["E"]);
+    expect(text(microphone!)).toBe(
+      "en gave jeg tar med nøkkelen og låser opp porten og jeg tar med kaffe",
+    );
+
+    const segments = buildRecordingSegments([withRecorderVoice(microphone!, null)]);
+    expect(segments.map((segment) => [segment.speakerLabel, segment.text])).toEqual([
+      ["track-0", "jeg tar med nøkkelen og låser opp porten"],
+      ["speaker_0", "og jeg tar med kaffe"],
+    ]);
+  });
+
+  test("someone who says a few words along with the call is still a person", () => {
+    const [microphone] = withoutMicrophoneEchoes(
+      tracks(
+        [
+          ...said("vi kommer på", 1_100).map((item) => ({ ...item, speaker: "B" })),
+          ...said("og så tar vi en kaffe etterpå i kantina", 3_000).map((item) => ({
+            ...item,
+            speaker: "B",
+          })),
+        ],
+        said("Vi kommer på mandag", 1_000),
+      ),
+      sources,
+    );
+    expect(microphone!.echoSpeakers).toBeUndefined();
   });
 });

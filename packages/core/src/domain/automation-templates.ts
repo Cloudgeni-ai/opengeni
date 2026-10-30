@@ -1,6 +1,7 @@
 import {
   AutomationTemplateSchedule,
   AutomationTemplateTrigger,
+  webhookPresetOf,
   type ParsedCreateAutomationTemplateRequest,
   type ParsedUpdateAutomationTemplateRequest,
   type WorkspaceAutomationTemplate,
@@ -91,11 +92,17 @@ async function checkNamedSources(
     const { sourceId } = trigger.source;
     if (!sourceId) continue;
     const source = await getEventSource(db, workspaceId, sourceId);
+    const sameWebhook = (record: NonNullable<typeof source>) => {
+      if (record.kind !== "webhook") return trigger.source.adapter === undefined;
+      const have = webhookPresetOf({ adapter: record.adapter, preset: record.format?.preset });
+      const want = webhookPresetOf(trigger.source);
+      return have.adapter === want.adapter && have.preset === want.preset;
+    };
     const matches =
       source !== null &&
       source.visibility === "workspace" &&
       source.kind === trigger.source.kind &&
-      (source.adapter ?? undefined) === trigger.source.adapter &&
+      sameWebhook(source) &&
       (source.mcpServerId ?? undefined) === trigger.source.mcpServerId;
     if (!matches) {
       throw new HTTPException(422, {

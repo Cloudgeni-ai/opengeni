@@ -1166,6 +1166,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "scheduled_task_runs_list",
   "event_sources_list",
   "events_get",
+  "event_sources_create_webhook",
+  "event_sources_update",
+  "event_sources_delete",
   "slack_bot_list_channels",
   "slack_bot_search",
   "slack_bot_channel_history",
@@ -10177,6 +10180,14 @@ export const ComposerDraft = /* @__PURE__ */ defineSchema(() =>
     model: primitives.nonEmptyString,
     reasoningEffort: ReasoningEffort,
     latencyMode: LatencyMode,
+    /**
+     * True when the draft has no model choice of its own: `model`,
+     * `reasoningEffort` and `latencyMode` are then the chat's current settings
+     * and follow every later change to them (for example by the agent). A
+     * client sends a model with this draft only after the person picks one.
+     * Servers from before this field send no value, which reads as false.
+     */
+    policyFollowsSession: primitives.boolean.default(false),
     sourceTurnId: primitives.nullableUuid,
     sourceTurnVersion: z.number().int().positive().nullable(),
     updatedAt: primitives.nullableString,
@@ -10227,6 +10238,22 @@ export const DeleteSessionQueueItemRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type DeleteSessionQueueItemRequest = z.infer<typeof DeleteSessionQueueItemRequest>;
 
+/** A composer policy is sent whole (the person's pick) or not at all (follow the chat). */
+function refineWholeComposerPolicy(
+  value: { model?: unknown; reasoningEffort?: unknown; latencyMode?: unknown },
+  context: z.RefinementCtx,
+): void {
+  const present = [value.model, value.reasoningEffort, value.latencyMode].filter(
+    (field) => field !== undefined,
+  ).length;
+  if (present === 0 || present === 3) return;
+  context.addIssue({
+    code: "custom",
+    message: "Send model, reasoningEffort and latencyMode together, or none of them",
+    path: ["model"],
+  });
+}
+
 export const SaveComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
   ComposerDraft.pick({
     text: true,
@@ -10235,7 +10262,12 @@ export const SaveComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
     model: true,
     reasoningEffort: true,
     latencyMode: true,
-  }).extend({ expectedRevision: primitives.nonnegativeInteger }),
+  })
+    // Omit all three to keep (or return) the draft to the chat's own
+    // settings; send them when the person picked a model in the composer.
+    .partial({ model: true, reasoningEffort: true, latencyMode: true })
+    .extend({ expectedRevision: primitives.nonnegativeInteger })
+    .superRefine(refineWholeComposerPolicy),
 );
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
@@ -10258,6 +10290,8 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
       reasoningEffort: true,
       latencyMode: true,
     })
+      // A draft that follows the chat's settings is submitted without them.
+      .partial({ model: true, reasoningEffort: true, latencyMode: true })
       .extend({
         expectedDraftRevision: primitives.positiveInteger,
         clientEventId: SessionOperationKey,
@@ -10272,7 +10306,8 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
 
         personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
       })
-      .superRefine(requireEstablishedPersonalResourceEpoch),
+      .superRefine(requireEstablishedPersonalResourceEpoch)
+      .superRefine(refineWholeComposerPolicy),
   ),
 );
 export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
@@ -16174,6 +16209,8 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     contentArchivedOnly: z.literal(true).optional(),
     /** Explicit receipt for the started-or-messaged-by-you filter. */
     mineOnly: z.literal(true).optional(),
+    /** Explicit receipt for the `sessionIds` selection; older servers ignore it. */
+    sessionIdsApplied: z.literal(true).optional(),
     totals: SessionListTotals.optional(),
     /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
      * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */
@@ -16198,6 +16235,20 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
 );
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
 
+/**
+ * A listed session's newest turn in execution order: the last queued turn,
+ * else the turn currently executing, else the most recently finished turn.
+ */
+export const SessionListLatestTurn = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    id: primitives.uuid,
+    status: SessionTurnStatus,
+    startedAt: z.string().datetime().nullable(),
+    finishedAt: z.string().datetime().nullable(),
+  }),
+);
+export type SessionListLatestTurn = z.infer<typeof SessionListLatestTurn>;
+
 /** Compact list-only records; full Session and SessionSummary contracts are unchanged. */
 export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
   Session.pick({
@@ -16205,6 +16256,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     workspaceId: true,
     accountId: true,
     status: true,
+    activeTurnId: true,
     backgroundCommandActivity: true,
     hasSchedules: true,
     hasUpcomingSchedules: true,
@@ -16252,6 +16304,11 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
      */
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
+    /**
+     * Null when the session has no turn. Absent from older servers and from
+     * rows the SDK projects from full sessions; read turns for those.
+     */
+    latestTurn: SessionListLatestTurn.nullable().optional(),
   }),
 );
 export type SessionListEntry = z.infer<typeof SessionListEntry>;

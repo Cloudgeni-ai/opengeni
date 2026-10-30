@@ -66,7 +66,7 @@ for await (const event of og.streamEvents(workspaceId, session.id)) {
 }
 ```
 
-`og.asUser(externalUserId, { source })` returns a client that acts as one of your users. A user with no membership in the workspace is added on their first request with conversation permissions (the key needs `members:manage`).
+`og.asUser(externalUserId, { source })` returns a client that acts as one of your users. A user with no membership in the workspace is added on their first request with conversation permissions (the key needs `members:manage`). Pass `membership: { permissions }` to state the user's permissions on every request; Opengeni makes their grant match before authorizing it (see [External users](/reference/authentication#external-users)).
 
 | Area                         | Highlights                                                                                                                                                             |
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -102,7 +102,7 @@ console.log(members.length); // WorkspaceMember[]
 
 | Option                 | Purpose                                                                                                                                                                                                                               |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `resolve`              | Required. Returns `{ user, tenant }`, `{ user }`, or `{ user, workspaceId }`, or a `Response` to reject                                                                                                                               |
+| `resolve`              | Required. Returns `{ user, tenant }`, `{ user }`, or `{ user, workspaceId }`, or a `Response` to reject. Add `membership: { permissions }` to state the user's permissions on every forwarded request, as with `asUser`               |
 | `chats`                | `"private"` (default) or `"shared"`: who sees and shares chats                                                                                                                                                                        |
 | `authorizeMutation`    | Your CSRF check for non-GET requests. Without it, cross-site (`Sec-Fetch-Site`) and form-encoded mutations are refused                                                                                                                |
 | `authorizeSession`     | Optional product check that this user may open this session, run for its routes and for requests naming it in `x-opengeni-session-id`                                                                                                 |

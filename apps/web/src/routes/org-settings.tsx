@@ -172,6 +172,7 @@ export function OrgSettingsRoute({
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
     administrator,
+    modelsAdministrator,
     administeredWorkspaceIds,
     visibleSections,
   } = organizationSettingsAccess({
@@ -345,7 +346,8 @@ export function OrgSettingsRoute({
       params: { workspaceId },
       search: { section: "agents", ...(next.agent ? { agent: next.agent } : {}) },
     });
-  // Models is for signed-in people in this organization; a key or service gets a plain refusal.
+  // Models is for owners and admins, account administrators (a key or service
+  // with account:admin) and signed-in members; anyone else gets a plain refusal.
   const modelsRefused = requestedSection === "models" && !visibleSections.has("models");
 
   const subPage =
@@ -446,7 +448,8 @@ export function OrgSettingsRoute({
                 anchorWorkspaceId={workspaceId}
                 organizationId={accountId}
                 fallbackLabel={fallbackLabel}
-                administrator={administrator}
+                administrator={modelsAdministrator}
+                personAdministrator={administrator}
                 administeredWorkspaceIds={administeredWorkspaceIds}
                 workspace={workspace}
                 account={modelsAccount}
@@ -749,6 +752,7 @@ function OrganizationModelsSectionWithName({
   organizationId: string;
   fallbackLabel: string;
   administrator: boolean;
+  personAdministrator: boolean;
   administeredWorkspaceIds: readonly string[];
   workspace: string | undefined;
   account: string | undefined;

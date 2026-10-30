@@ -70,6 +70,31 @@ test("an exact name is the whole name in any case and spacing", () => {
   );
 });
 
+test("a Windows title bar does not offer set_value, though CUA lists its read-only value", () => {
+  const [titleBar, field] = projectElements(
+    [
+      {
+        element_index: 0,
+        element_token: "snapshot:0",
+        role: "TitleBar",
+        label: "Untitled - Notepad",
+        value: "Untitled - Notepad",
+        actions: ["set_value"],
+      },
+      {
+        element_index: 1,
+        element_token: "snapshot:1",
+        role: "Edit",
+        label: "Text Editor",
+        actions: ["set_value", "scroll"],
+      },
+    ],
+    "windows",
+  );
+  expect(titleBar!.actions).toEqual([]);
+  expect(field).toMatchObject({ role: "textbox", actions: ["set_value"] });
+});
+
 test("a Linux or Windows checkbox or switch reads whether it is on as its value", () => {
   const element = (role: string, selected: boolean, index: number) => ({
     element_index: index,

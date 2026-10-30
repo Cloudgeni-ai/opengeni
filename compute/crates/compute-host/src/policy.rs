@@ -55,7 +55,7 @@ pub(super) fn host_policy(
         total,
     )?;
     if let Some(memory) = policy.memory.as_mut()
-        && compresses_running(memory_profile, !args.no_compress, &meminfo)
+        && compresses_running(memory_profile, !args.no_compress, &meminfo, total)
     {
         memory.outgrowth = Some(Outgrowth::default());
     }
@@ -104,6 +104,32 @@ pub(super) fn memory_share(meminfo: &str, total_mib: Option<u64>) -> anyhow::Res
         "sandboxes use only their share of the host's memory"
     );
     Ok(mib << 20)
+}
+
+/// The sandboxes' share of host memory in MiB, if they have one:
+/// `--memory-total-mib` where given, else `COMPUTE_MEMORY_TOTAL_MIB` (`env`)
+/// where that is set and not empty, as a fleet host's `host.env` sets it
+/// (required on a shared machine: ADR 26). Empty is unset, so a `host.env`
+/// that leaves the line blank, as the example does, keeps all of the
+/// host's memory.
+pub(super) fn memory_total_mib(
+    flag: Option<u64>,
+    env: Option<&str>,
+) -> anyhow::Result<Option<u64>> {
+    if flag.is_some() {
+        return Ok(flag);
+    }
+    let Some(text) = env.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(None);
+    };
+    let mib = text
+        .parse::<u64>()
+        .ok()
+        .filter(|mib| *mib > 0)
+        .with_context(|| {
+            format!("COMPUTE_MEMORY_TOTAL_MIB={text} is not a number of MiB above 0")
+        })?;
+    Ok(Some(mib))
 }
 
 /// Bytes of guest memory the host promises its sandboxes at once:
@@ -253,19 +279,47 @@ pub(super) fn memory_policy(
 /// pages until it has drained, so compression stops dead.
 const LEAST_ZSWAP_POOL_PERCENT: u64 = 20;
 
+/// What caps compressing the sandboxes' running VMs, measured against
+/// `share`, the host memory they may use (all of it, or a shared machine's
+/// share, ADR 26): a swap device under a quarter of it, since each
+/// compressed page takes a slot at its original size, and a zswap pool
+/// (`pool_percent` of all `host` memory, as zswap counts it) under
+/// [`LEAST_ZSWAP_POOL_PERCENT`] of it.
+#[derive(Debug, PartialEq, Eq)]
+struct CompressionCaps {
+    swap: bool,
+    pool: bool,
+}
+
+fn compression_caps(
+    swap: u64,
+    host: u64,
+    share: u64,
+    pool_percent: Option<u64>,
+) -> CompressionCaps {
+    CompressionCaps {
+        swap: swap < share / 4,
+        pool: pool_percent.is_some_and(|percent| {
+            u128::from(percent) * u128::from(host)
+                < u128::from(LEAST_ZSWAP_POOL_PERCENT) * u128::from(share)
+        }),
+    }
+}
+
 /// Whether running VMs may be compressed and held back (ADR 24): on 4 KiB
 /// pages, with compression allowed (`compress`, which the readiness checks
 /// already tied to zswap being on), and with swap for zswap's slots. A
 /// compressed page takes a slot at its original size, though with
 /// writeback off none reaches the device, so the swap device caps what can
-/// be compressed; so does the pool. Without, running VMs are never
-/// compressed and a host short of memory reaches its wall sooner.
-fn compresses_running(profile: MemoryProfile, compress: bool, meminfo: &str) -> bool {
+/// be compressed; so does the pool, both against `share`, the memory the
+/// sandboxes may use. Without, running VMs are never compressed and a host
+/// short of memory reaches its wall sooner.
+fn compresses_running(profile: MemoryProfile, compress: bool, meminfo: &str, share: u64) -> bool {
     if profile.pages != compute_engine::PageSize::Base || !profile.compress || !compress {
         return false;
     }
     let swap = meminfo_field(meminfo, "SwapTotal:") << 10;
-    let total = meminfo_field(meminfo, "MemTotal:") << 10;
+    let host = meminfo_field(meminfo, "MemTotal:") << 10;
     if swap == 0 {
         tracing::warn!(
             "no swap device: running sandboxes are never compressed, so a host short of memory \
@@ -273,23 +327,24 @@ fn compresses_running(profile: MemoryProfile, compress: bool, meminfo: &str) -> 
         );
         return false;
     }
-    if swap < total / 4 {
+    let pool_percent = std::fs::read_to_string("/sys/module/zswap/parameters/max_pool_percent")
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok());
+    let caps = compression_caps(swap, host, share, pool_percent);
+    if caps.swap {
         tracing::warn!(
             swap_mib = swap >> 20,
-            total_mib = total >> 20,
-            "the swap device is under a quarter of memory: it caps what running sandboxes can \
-             have compressed"
+            share_mib = share >> 20,
+            "the swap device is under a quarter of the sandboxes' memory: it caps what running \
+             sandboxes can have compressed"
         );
     }
-    match std::fs::read_to_string("/sys/module/zswap/parameters/max_pool_percent")
-        .ok()
-        .and_then(|text| text.trim().parse::<u64>().ok())
-    {
-        Some(percent) if percent < LEAST_ZSWAP_POOL_PERCENT => tracing::warn!(
-            percent,
-            "zswap's pool is small: compression stops once it is full"
-        ),
-        _ => {}
+    if caps.pool {
+        tracing::warn!(
+            percent = pool_percent.unwrap_or(0),
+            share_mib = share >> 20,
+            "zswap's pool is small for the sandboxes' memory: compression stops once it is full"
+        );
     }
     true
 }
@@ -440,6 +495,46 @@ mod tests {
 
     const GIB: u64 = 1 << 30;
 
+    /// The swap device and zswap's pool are judged against the memory the
+    /// sandboxes may use: a shared machine's share, not all of it.
+    #[test]
+    fn compression_caps_are_judged_against_the_share() {
+        let host = 64 * GIB;
+        // A dedicated host: 8 GiB of swap caps 64 GiB, a 20 % pool does not.
+        assert_eq!(
+            compression_caps(8 * GIB, host, host, Some(20)),
+            CompressionCaps {
+                swap: true,
+                pool: false
+            }
+        );
+        assert_eq!(
+            compression_caps(16 * GIB, host, host, Some(11)),
+            CompressionCaps {
+                swap: false,
+                pool: true
+            }
+        );
+        // A shared one with 16 GiB for sandboxes: host-setup's 8 GiB of swap
+        // and 11 % of the machine (7 GiB, 44 % of the share) are plenty.
+        assert_eq!(
+            compression_caps(8 * GIB, host, 16 * GIB, Some(11)),
+            CompressionCaps {
+                swap: false,
+                pool: false
+            }
+        );
+        assert_eq!(
+            compression_caps(2 * GIB, host, 16 * GIB, Some(4)),
+            CompressionCaps {
+                swap: true,
+                pool: true
+            }
+        );
+        // An unreadable pool setting caps nothing it can tell.
+        assert!(!compression_caps(16 * GIB, host, host, None).pool);
+    }
+
     /// A host keeps a sixteenth of its processors back, at least half of
     /// one, unless told otherwise.
     #[test]
@@ -571,5 +666,23 @@ mod tests {
             vms_memory_max(base, relief, share),
             Some(30 * GIB + GIB / 2)
         );
+    }
+
+    /// The share comes from the flag, else from `host.env`'s line, which
+    /// left blank means no share; a line that is no share is an error.
+    #[test]
+    fn the_share_is_the_flag_else_a_set_host_env_line() {
+        assert_eq!(memory_total_mib(Some(16), Some("32768")).unwrap(), Some(16));
+        assert_eq!(memory_total_mib(None, Some("32768")).unwrap(), Some(32_768));
+        assert_eq!(
+            memory_total_mib(None, Some(" 32768\n")).unwrap(),
+            Some(32_768)
+        );
+        assert_eq!(memory_total_mib(None, Some("")).unwrap(), None);
+        assert_eq!(memory_total_mib(None, Some("  ")).unwrap(), None);
+        assert_eq!(memory_total_mib(None, None).unwrap(), None);
+        for wrong in ["0", "abc", "-1", "32G"] {
+            assert!(memory_total_mib(None, Some(wrong)).is_err(), "{wrong}");
+        }
     }
 }

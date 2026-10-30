@@ -7,6 +7,7 @@ import {
   durationBetween,
   flattenActivityItems,
   isPreparingWork,
+  timelineTurnsWithOutput,
   readableWorkDefaultOpen,
   readableWorkHasDetails,
   readableWorkShowsPreview,
@@ -102,6 +103,7 @@ import {
   type TimelineAnchor,
 } from "./timeline-anchor";
 import { useReadingProgress } from "./timeline-reading-progress";
+import { TimelineAnswerFollowContext } from "./timeline-answer-follow";
 import {
   animateTimelineSettlement,
   captureTimelineSettlement,
@@ -524,6 +526,22 @@ function maxScrollOf(node: HTMLElement): number {
 }
 
 /**
+ * React bubbles events from portaled content (a card's setup dialog, a menu)
+ * through the timeline's handlers although that content is outside the
+ * scroller. Only events from the scroller's own DOM are reader intent.
+ */
+function eventFromScrollerDom(event: {
+  target: EventTarget | null;
+  currentTarget: EventTarget | null;
+}): boolean {
+  return (
+    event.currentTarget instanceof Node &&
+    event.target instanceof Node &&
+    event.currentTarget.contains(event.target)
+  );
+}
+
+/**
  * Wheel bubbled from a nested overflow scroller that can still move up — not
  * timeline intent (code blocks / notice `<pre>`).
  */
@@ -820,6 +838,8 @@ export function MessageTimeline({
     return sources;
   }, [resolvedItems]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  /** The card whose answer handed the view back to the tip (see followAfterAnswer). */
+  const answeredCardRef = useRef<HTMLElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const previousBulkFirstKeyRef = useRef<string | null | undefined>(undefined);
@@ -828,6 +848,7 @@ export function MessageTimeline({
     projectedGroups,
     autoFollow && pinned && !hasNewer,
     scrollRef.current,
+    answeredCardRef.current,
   );
   const [canSkipTipCatchup, setCanSkipTipCatchup] = useState(false);
   const canSkipTipCatchupRef = useRef(false);
@@ -1156,20 +1177,7 @@ export function MessageTimeline({
   useLayoutEffect(() => {
     liveNoteIdsByWorkRef.current = liveNoteIdsByWork;
   }, [liveNoteIdsByWork]);
-  const turnsWithOutput = useMemo(
-    () =>
-      new Set(
-        resolvedItems.flatMap((item) =>
-          "turnId" in item &&
-          item.turnId &&
-          (item.kind === "tool-call" ||
-            ((item.kind === "agent-message" || item.kind === "reasoning") && item.text.trim()))
-            ? [item.turnId]
-            : [],
-        ),
-      ),
-    [resolvedItems],
-  );
+  const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(resolvedItems), [resolvedItems]);
 
   const applyCanSkipTipCatchup = useCallback((value: boolean) => {
     if (canSkipTipCatchupRef.current !== value) {
@@ -1266,6 +1274,8 @@ export function MessageTimeline({
 
   /** Reader left the tip — wheel, keyboard, pointer-armed scroll-up, or scrollend. */
   const releasePinFromReader = useCallback(() => {
+    // The reader took over again: focus on the answered card counts once more.
+    answeredCardRef.current = null;
     if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
       return;
     }
@@ -1369,6 +1379,9 @@ export function MessageTimeline({
     // timeline reader intent. A real timeline wheel in either direction
     // releases the disclosure fence; downward movement may then re-pin
     // naturally when it reaches the bottom.
+    if (!eventFromScrollerDom(event)) {
+      return;
+    }
     if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
       return;
     }
@@ -1396,7 +1409,7 @@ export function MessageTimeline({
     currentTarget: EventTarget | null;
   }) => {
     // Primary button / touch / pen only. Ignore right-click etc.
-    if (event.button && event.pointerType === "mouse") {
+    if ((event.button && event.pointerType === "mouse") || !eventFromScrollerDom(event)) {
       return;
     }
     stopSettlement();
@@ -1418,7 +1431,14 @@ export function MessageTimeline({
       : null;
   };
 
-  const onKeyDown = (event: { key: string; currentTarget: EventTarget | null }) => {
+  const onKeyDown = (event: {
+    key: string;
+    target: EventTarget | null;
+    currentTarget: EventTarget | null;
+  }) => {
+    if (!eventFromScrollerDom(event)) {
+      return;
+    }
     if (
       event.key === "ArrowUp" ||
       event.key === "ArrowDown" ||
@@ -1466,6 +1486,28 @@ export function MessageTimeline({
       syncScrollBaseline,
       writeScrollTop,
     ],
+  );
+
+  /**
+   * The person answered a card (finished a connection, say) and the agent
+   * continues from that answer: follow the tip as Jump to latest does, while
+   * focus stays on the card for keyboard and screen reader users. Wheel, keys,
+   * a drag or focus elsewhere hand the view back to the reader as usual.
+   */
+  const followAfterAnswer = useCallback(
+    (card: HTMLElement) => {
+      const node = scrollRef.current;
+      if (!autoFollow || !node || !node.contains(card) || hasNewerRef.current) {
+        return;
+      }
+      answeredCardRef.current = card;
+      disclosureKeepsUnpinnedRef.current = false;
+      wantPinRef.current = false;
+      clearPendingReaderLeave();
+      applyPinned(true);
+      snapToBottom(node);
+    },
+    [applyPinned, autoFollow, clearPendingReaderLeave, snapToBottom],
   );
 
   const beginUserMessageDisclosureChange = useCallback(
@@ -2676,6 +2718,7 @@ export function MessageTimeline({
                             touchPositionRef.current = null;
                           }}
                           onClickCapture={(event) => {
+                            if (!eventFromScrollerDom(event)) return;
                             const target =
                               event.target instanceof Element
                                 ? event.target.closest("button[aria-expanded]")
@@ -2693,7 +2736,12 @@ export function MessageTimeline({
                             }
                           }}
                           onFocusCapture={(event) => {
-                            if (readableTurns && event.target !== event.currentTarget) {
+                            if (
+                              readableTurns &&
+                              event.target !== event.currentTarget &&
+                              eventFromScrollerDom(event) &&
+                              !answeredCardRef.current?.contains(event.target)
+                            ) {
                               stopSettlement();
                               releasePinFromReader();
                               disclosureKeepsUnpinnedRef.current = true;
@@ -2715,7 +2763,10 @@ export function MessageTimeline({
                         >
                           <TimelineBeforeLayout
                             capture={() => {
-                              if (readableTurns && timelineHasReader(scrollRef.current)) {
+                              if (
+                                readableTurns &&
+                                timelineHasReader(scrollRef.current, answeredCardRef.current)
+                              ) {
                                 releasePinFromReader();
                               }
                               readingAnchorRef.current =
@@ -2732,7 +2783,11 @@ export function MessageTimeline({
                                 !disclosureKeepsUnpinnedRef.current &&
                                 !prefersReducedMotion() &&
                                 scrollRef.current
-                                  ? captureTimelineSettlement(scrollRef.current, groups)
+                                  ? captureTimelineSettlement(
+                                      scrollRef.current,
+                                      groups,
+                                      answeredCardRef.current,
+                                    )
                                   : null;
                             }}
                           >
@@ -3073,7 +3128,11 @@ export function MessageTimeline({
           resolveSessionTitle={resolveSessionTitle}
           onOpenSession={onOpenSession}
         >
-          <ProviderLogoProvider value={resolveProviderLogo}>{timeline}</ProviderLogoProvider>
+          <ProviderLogoProvider value={resolveProviderLogo}>
+            <TimelineAnswerFollowContext.Provider value={followAfterAnswer}>
+              {timeline}
+            </TimelineAnswerFollowContext.Provider>
+          </ProviderLogoProvider>
         </AgentIdentityProvider>
       </MessageSenderContext.Provider>
     </OpenGeniLinkProvider>

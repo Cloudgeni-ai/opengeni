@@ -176,6 +176,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     // Tests model a complete deployment; the production defaults are false.
     artifactMaterializerDeployed: true,
     eventTriggersEnabled: true,
+    automationMaxChainDepth: 3,
     streamTokenSecret: undefined,
     streamControlEnabled: false,
     workDiscoveryEnabled: true,
@@ -216,6 +217,9 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     slackWorkspaceRoutingEnabled: false,
     agentMaxModelCallsPerTurn: 40,
     contextWindowTokens: 1_050_000,
+    // Existing turn fixtures assert exact post-turn state; tests that exercise
+    // the idle checkpoint request enable it explicitly.
+    idleContextCompactionEnabled: false,
     contextCompactionThresholdRatio: 0.9,
     contextReservedOutputTokens: 128_000,
     modelToolOutputTruncationTokens: 10_000,

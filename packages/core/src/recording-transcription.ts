@@ -474,6 +474,12 @@ export type RecordingTrackWords = {
    */
   recorder: { label: string; speaker: string | null } | null;
   words: readonly RecordingTranscribedWord[];
+  /**
+   * Diarized voices on this microphone whose words were almost all the call
+   * heard from the speakers (see `withoutMicrophoneEchoes`). They are the
+   * speakers, not people in the room.
+   */
+  echoSpeakers?: readonly string[];
 };
 
 /**
@@ -481,7 +487,9 @@ export type RecordingTrackWords = {
  * voice (or none told apart) makes the whole track theirs. With several, it
  * is the voice that matched their remembered voice, else the one that spoke
  * the most, since the microphone is closest to them; the others are people
- * in the room with them.
+ * in the room with them. A voice that was almost all the call heard from the
+ * speakers is not a person: it is never picked over a real voice, and what
+ * the echo left of it is dropped.
  */
 export function withRecorderVoice(
   track: RecordingTrackWords,
@@ -494,13 +502,19 @@ export function withRecorderVoice(
     const length = Math.max(0, word.endMilliseconds - word.startMilliseconds);
     speech.set(word.speaker, (speech.get(word.speaker) ?? 0) + length);
   }
+  const echoes = new Set(track.echoSpeakers ?? []);
+  // When every voice is an echo, the person recording may still be one of
+  // them (told apart badly, or silent), so they are all candidates then.
+  const people = [...speech.keys()].filter((candidate) => !echoes.has(candidate));
+  const candidates = people.length > 0 ? people : [...speech.keys()];
   let speaker: string | null = null;
   if (speech.size > 1) {
     if (matchedSpeaker !== null && speech.has(matchedSpeaker)) {
       speaker = matchedSpeaker;
     } else {
       let most = -1;
-      for (const [candidate, length] of speech) {
+      for (const candidate of candidates) {
+        const length = speech.get(candidate)!;
         if (length > most) {
           most = length;
           speaker = candidate;
@@ -508,7 +522,15 @@ export function withRecorderVoice(
       }
     }
   }
-  return { ...track, recorder: { label: track.recorder.label, speaker } };
+  const recorder = { label: track.recorder.label, speaker };
+  if (speaker === null) return { ...track, recorder };
+  const dropped = new Set([...echoes].filter((echo) => echo !== speaker));
+  if (dropped.size === 0) return { ...track, recorder };
+  return {
+    ...track,
+    recorder,
+    words: track.words.filter((word) => word.speaker === null || !dropped.has(word.speaker)),
+  };
 }
 
 /** How far apart the same word may land in two tracks and still be one sound. */
@@ -517,6 +539,13 @@ const ECHO_WINDOW_MILLISECONDS = 1_500;
 const ECHO_MAX_MISHEARD_IN_A_ROW = 2;
 /** Matching words an echo needs, so one shared "ja" or "okay" stays. */
 const ECHO_MIN_MATCHED_WORDS = 2;
+/**
+ * Share of a microphone voice's spoken time that was echo before the voice is
+ * the speakers rather than a person. On a real 29-minute call without
+ * headphones, the voices diarized from the speakers' sound were 92 to 98%
+ * echo and the person recording 7%; someone in the room is near 0%.
+ */
+const ECHO_VOICE_SHARE = 0.8;
 
 /** A word as compared across tracks: letters and digits only, any case. */
 function echoKey(text: string): string {
@@ -561,7 +590,10 @@ function heardNear(starts: readonly number[] | undefined, at: number): boolean {
  * the microphone's runs of words that were said at the same moment in
  * computer audio: at least two matching words, with at most two misheard
  * words in a row between them. What the person says, even right after
- * someone else, stays.
+ * someone else, stays. A diarized voice whose spoken time was almost all such
+ * echo is the speakers themselves; it is marked in `echoSpeakers` so the
+ * misheard bits the echo left behind don't become a person
+ * (`withRecorderVoice` drops them).
  */
 export function withoutMicrophoneEchoes(
   tracks: readonly RecordingTrackWords[],
@@ -607,7 +639,23 @@ export function withoutMicrophoneEchoes(
       index = end + 1;
     }
     if (dropped.size === 0) return track;
-    return { ...track, words: words.filter((_, position) => !dropped.has(position)) };
+    const spoken = new Map<string, { echo: number; total: number }>();
+    words.forEach((word, position) => {
+      if (word.speaker === null || keys[position] === "") return;
+      const length = Math.max(0, word.endMilliseconds - word.startMilliseconds);
+      const time = spoken.get(word.speaker) ?? { echo: 0, total: 0 };
+      time.total += length;
+      if (dropped.has(position)) time.echo += length;
+      spoken.set(word.speaker, time);
+    });
+    const echoSpeakers = [...spoken]
+      .filter(([, time]) => time.total > 0 && time.echo >= ECHO_VOICE_SHARE * time.total)
+      .map(([speaker]) => speaker);
+    return {
+      ...track,
+      words: words.filter((_, position) => !dropped.has(position)),
+      ...(echoSpeakers.length > 0 ? { echoSpeakers } : {}),
+    };
   });
 }
 
