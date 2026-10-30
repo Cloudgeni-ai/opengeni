@@ -1,8 +1,11 @@
 import { collapseRepeatedSessionGoalContexts } from "@opengeni/contracts";
+import { isAnthropicWebSearchItem } from "./anthropic-web-search";
 import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
 import {
   projectHostedSearchEvidence,
+  withSearchRecordForm,
   withSearchRecordsAfterOpenCalls,
+  type SearchRecordForm,
 } from "./hosted-search-evidence";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
@@ -21,6 +24,14 @@ export type ProviderHistoryOptions = {
    * same declaration as a developer message carrying the definitions as text.
    */
   declaresAdditionalTools?: boolean;
+  /**
+   * The session's {@link SearchRecordForm} for earlier hosted searches. Without
+   * it, each search keeps the form marked on it, else the original `assistant`.
+   * Claude's own searches that stay native for the Claude transport are marked
+   * with it, so that transport projects them in the same form when it cannot
+   * replay them natively.
+   */
+  searchRecordForm?: SearchRecordForm;
 };
 
 const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
@@ -315,7 +326,13 @@ export function projectHistoryForProvider(
   // A search record never separates a tool call from its result on any API.
   const projected = withSearchRecordsAfterOpenCalls(
     goalOnce.map((item) => {
-      const evidence = projectHostedSearchEvidence(item, { preserveAnthropicNative: nativeClaude });
+      const form = options.searchRecordForm;
+      const evidence = projectHostedSearchEvidence(item, {
+        preserveAnthropicNative: nativeClaude,
+        ...(form ? { form } : {}),
+      });
+      if (nativeClaude && form && isAnthropicWebSearchItem(evidence))
+        return withSearchRecordForm(evidence, form);
       return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
     }),
   );

@@ -351,8 +351,9 @@ export function anthropicMessages(
 ): Message[] {
   const messages: Message[] = [];
   let foreignSearch = false;
-  // Search records wait for the next user message: inside a reply they would
-  // split it (thinking from its tool call), and a record is never Claude's speech.
+  // A runtime-form search record waits for the next user message: inside a
+  // reply it would split it (thinking from its tool call), and it is never
+  // Claude's speech. An assistant-form record keeps its original place.
   let pendingRecords: Json[] = [];
   const append = (role: Message["role"], content: Json[]) => {
     if (role === "user" && pendingRecords.length) {
@@ -422,9 +423,9 @@ export function anthropicMessages(
           if (options.webSearch && sameAccount) append("assistant", anthropicWebSearchBlocks(item));
           else {
             if (!sameAccount) foreignSearch = true;
-            pendingRecords.push(
-              ...contentBlocks(object(projectHostedSearchEvidence(item)).content),
-            );
+            const projected = object(projectHostedSearchEvidence(item));
+            if (projected.role === "user") pendingRecords.push(...contentBlocks(projected.content));
+            else append("assistant", contentBlocks(projected.content));
           }
           break;
         }

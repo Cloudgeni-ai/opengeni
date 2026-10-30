@@ -73,11 +73,12 @@ describe("portable compaction provider identity", () => {
       { type: "message", role: "user", content: "Second question" },
       { type: "message", role: "assistant", content: "Second answer" },
     ];
+    // History as the compaction projector hands it over in the runtime form.
+    const history = raw.map((item) => projectHostedSearchEvidence(item, { form: "runtime" }));
+    expect(isHostedSearchEvidenceRecord(history[2])).toBe(true);
     // Enough room to keep everything from the search record onward.
-    const budget = estimateTokens(
-      buildCompactionPromptInput(raw.slice(2).map((item) => projectHostedSearchEvidence(item))),
-    );
-    const prepared = prepareCompactionPromptInput(raw, budget);
+    const budget = estimateTokens(buildCompactionPromptInput(history.slice(2)));
+    const prepared = prepareCompactionPromptInput(history, budget);
     expect(prepared.droppedHistoryItems).toBe(4);
     expect(isHostedSearchEvidenceRecord(prepared.input[0])).toBe(false);
     expect(prepared.input[0]).toMatchObject({ role: "user", content: "Second question" });

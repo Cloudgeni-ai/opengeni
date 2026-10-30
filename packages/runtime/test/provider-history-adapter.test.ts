@@ -148,15 +148,23 @@ describe("projectHistoryForProvider", () => {
     ];
     const before = structuredClone(items);
     for (const api of ["responses", "chat", "anthropic-messages"] as const) {
-      const projected = projectHistoryForProvider(items, api);
-      expect(projected).toHaveLength(items.length);
-      // Runtime input, never the model's own speech it could learn to imitate.
-      expect(projected[1]).toMatchObject({ type: "message", role: "user" });
-      expect(JSON.stringify(projected[1]!.content)).toContain("exactly seven colors");
-      expect(projected[2]).toBe(items[2]);
-      expect(projected[3]).toBe(items[3]);
-      expect(projectHistoryForProvider(projected, api)).toBe(projected);
-      expect(items).toEqual(before);
+      // A session in the runtime form gets runtime input, never the model's
+      // own speech it could learn to imitate; one still in the assistant form
+      // keeps the projection its earlier requests sent.
+      for (const [options, role] of [
+        [{ searchRecordForm: "runtime" }, "user"],
+        [{ searchRecordForm: "assistant" }, "assistant"],
+        [{}, "assistant"],
+      ] as const) {
+        const projected = projectHistoryForProvider(items, api, options);
+        expect(projected).toHaveLength(items.length);
+        expect(projected[1]).toMatchObject({ type: "message", role });
+        expect(JSON.stringify(projected[1]!.content)).toContain("exactly seven colors");
+        expect(projected[2]).toBe(items[2]);
+        expect(projected[3]).toBe(items[3]);
+        expect(projectHistoryForProvider(projected, api, options)).toBe(projected);
+        expect(items).toEqual(before);
+      }
     }
   });
   test("a search record never separates a tool call from its result on any provider API", () => {
@@ -179,8 +187,9 @@ describe("projectHistoryForProvider", () => {
       result("c"),
     ];
     const before = structuredClone(items);
+    const runtime = { searchRecordForm: "runtime" } as const;
     for (const api of ["responses", "chat", "anthropic-messages"] as const) {
-      const projected = projectHistoryForProvider(items, api);
+      const projected = projectHistoryForProvider(items, api, runtime);
       const shape = projected.map((item) =>
         item.type === "message" && item.role === "user" && item !== items[0]
           ? "record"
@@ -198,12 +207,12 @@ describe("projectHistoryForProvider", () => {
         "function_call_result",
       ]);
       // Stable: projecting the projection changes nothing.
-      expect(projectHistoryForProvider(projected, api)).toBe(projected);
+      expect(projectHistoryForProvider(projected, api, runtime)).toBe(projected);
       expect(items).toEqual(before);
     }
     // Claude receives each result right after its call.
     const claude = anthropicMessages(
-      projectHistoryForProvider(items, "anthropic-messages") as ModelRequest["input"],
+      projectHistoryForProvider(items, "anthropic-messages", runtime) as ModelRequest["input"],
     );
     expect(claude.map((message) => message.role)).toEqual([
       "user",
@@ -221,7 +230,7 @@ describe("projectHistoryForProvider", () => {
     // A record outside any open call stays exactly where it was.
     const settled = [call("a"), result("a"), hostedSearchFixture(), call("b"), result("b")];
     expect(
-      projectHistoryForProvider(settled, "chat").map((item) =>
+      projectHistoryForProvider(settled, "chat", runtime).map((item) =>
         item.type === "message" ? "record" : item.type,
       ),
     ).toEqual([

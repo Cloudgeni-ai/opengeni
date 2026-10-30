@@ -32,6 +32,7 @@ import { projectReasoningConfigurations, supportsReasoningConfiguration } from "
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
 import { resolveRigProviderImageForRun, settingsWithWorkspaceSandboxImage } from "@opengeni/core";
 import { createModelHistoryAttachmentProjector } from "../run-input";
+import { loadTurnSearchRecords, type TurnSearchRecords } from "../search-record-form";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
@@ -141,6 +142,8 @@ export type GovernanceModelOk = {
   compactionModelHistoryProjector: (
     items: Array<Record<string, unknown>>,
   ) => Promise<Array<Record<string, unknown>>>;
+  /** The turn's hosted web-search record form; turn input settles it. */
+  searchRecords: TurnSearchRecords;
 };
 
 export type GovernanceModelOutcome = { exit: RunAgentTurnResult } | { ok: GovernanceModelOk };
@@ -432,11 +435,15 @@ export async function prepareGovernanceAndModel(
     collectGeneratedImageReceipts(items, media.generatedImageReceiptsByProviderItemId);
     return projectGeneratedImageHistoryForModel(items);
   };
+  // Compaction reads the same form as the turn's own requests, so its request
+  // shares their cached prefix and the summarizer sees what the model saw.
+  const searchRecords = await loadTurnSearchRecords(db, input.workspaceId, input.sessionId);
   const compactionModelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
     await modelHistoryProjector(
       projectHistoryForProvider(
         await generatedImageHistoryProjector(restoreGenericDispatchHistoryItems(items)),
         providerApi,
+        { searchRecordForm: searchRecords.form },
       ),
     );
   // Bind the provider/model catalog's context policy to every model-facing
@@ -554,6 +561,7 @@ export async function prepareGovernanceAndModel(
       modelHistoryProjector,
       generatedImageHistoryProjector,
       compactionModelHistoryProjector,
+      searchRecords,
     },
   };
 }

@@ -105,9 +105,9 @@ including encrypted reasoning, remain enabled. Other providers' includes are unc
 
 The SDK retains returned evidence in canonical history. Before replay and portable
 compaction accounting, `packages/runtime/src/hosted-search-evidence.ts` projects
-included HTTP(S) URLs and text-result titles/snippets into one labelled runtime
-search record (a user-role input message, never assistant text) at the original
-position. It labels web content as
+included HTTP(S) URLs and text-result titles/snippets into one labelled search
+record in the session's record form (below) at the original position. It labels
+web content as
 untrusted, examines at most 64 entries per include, emits at most 20 entries, and
 bounds the serialized message to 32 KiB. Titles/snippets are clipped explicitly;
 URLs are never shortened or rewritten. Omitted evidence is distinguished from
@@ -116,14 +116,32 @@ needed to replay these facts. Canonical hosted items and tool pairing stay intac
 
 The record must never look like the assistant's own speech. When it did (an
 assistant-role message), GPT models on Azure imitated it and wrote invented
-records as progress text instead of searching. A record also never separates a
-tool call from its result (`withSearchRecordsAfterOpenCalls`): Chat Completions
-and Claude require the result right after the call, so a record that falls
-while calls are open moves to just after the result that closes them, and the
-Claude transport places a record for Claude's own search in the next user
-message. Replay turns an assistant message that is entirely a record (marker,
-explanation, one evidence JSON object, nothing else) into a short note with the
-same item identity. The worker's stream filter (`HostedSearchEvidenceEchoGuard`)
+records as progress text instead of searching. The record is therefore a
+labelled runtime record in the user role (the `runtime` form).
+
+Changing how a session's searches are projected would change text its earlier
+requests already sent and lose the provider's prompt cache, so the form belongs
+to the session (`SearchRecordForm`, stored as `sessions.search_records_as_input`).
+A session keeps the original assistant-role record (the `assistant` form, byte
+for byte what it always sent) while its active history still holds an item the
+two forms project differently (`searchRecordFormMatters`). Once none is left,
+which is from the first turn for a new session and after compaction or clearing
+for an older one, the worker records the move before the turn's first request
+and the session uses the `runtime` form for good. Every model-facing projection
+of a turn reads that one form: its history, the run's own model calls, and
+compaction. Callers that know no session get the `assistant` form. A Claude
+search kept native for the Claude transport carries the session's form as a
+request-local mark (a symbol key, never part of a payload or of storage), so the
+transport projects it in that form when it cannot replay it natively.
+
+In the `runtime` form a record also never separates a tool call from its result
+(`withSearchRecordsAfterOpenCalls`): Chat Completions and Claude require the
+result right after the call, so a record that falls while calls are open moves
+to just after the result that closes them, and the Claude transport places a
+record for Claude's own search in the next user message. Replay turns an
+assistant message that is entirely a record (marker, explanation, one evidence
+JSON object, nothing else) into a short note with the same item identity. For
+every session, the worker's stream filter (`HostedSearchEvidenceEchoGuard`)
 keeps such a copy out of the visible transcript; text that quotes, mentions or
 continues after a record is shown in full. A final output that is only a copy
 counts as an empty reply, so the turn asks once for a real answer.

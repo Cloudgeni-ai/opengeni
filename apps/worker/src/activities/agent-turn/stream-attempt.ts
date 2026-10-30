@@ -221,6 +221,7 @@ import type {
 } from "@opengeni/contracts";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
+import type { TurnSearchRecords } from "../search-record-form";
 import type {
   AttemptIdentityState,
   BillingState,
@@ -347,6 +348,8 @@ export type TurnStreamAttemptDeps = {
     items: Array<Record<string, unknown>>,
   ) => Promise<Array<Record<string, unknown>>>;
   modelHistoryProjector: ModelHistoryAttachmentProjector;
+  /** The turn's hosted web-search record form; turn input settles it. */
+  searchRecords: TurnSearchRecords;
   compactionModeOptions: NonNullable<Parameters<typeof maybeCompactContext>[5]>;
   initialRunCredentialMaterial: NormalizedRunCredentialMaterial | null;
   initialGitCredentials: MintedRunGitCredentials | undefined;
@@ -492,6 +495,7 @@ export async function runTurnStreamAttempt(
     compactionModelHistoryProjector,
     generatedImageHistoryProjector,
     modelHistoryProjector,
+    searchRecords,
     compactionModeOptions,
     initialRunCredentialMaterial,
     sandboxEnvironment,
@@ -672,6 +676,7 @@ export async function runTurnStreamAttempt(
         projectCanonicalHistory: generatedImageHistoryProjector,
         materializeModelHistory: media.materializeScreenshotHistory,
         projectModelHistory: modelHistoryProjector,
+        searchRecords,
         onPreparationPhase: (measurement) => {
           recordTurnStartupPhase(observability, {
             phase: `history_${measurement.phase}`,
@@ -1112,6 +1117,8 @@ export async function runTurnStreamAttempt(
           ...(attemptSecretValues
             ? { secretMaskingInputFilter: secretValueModelInputFilter(attemptSecretValues) }
             : {}),
+          // Settled by turn input above; the same for every model call of the run.
+          searchRecordForm: searchRecords.form,
           onModelVisibleContext: async (rawSnapshot) => {
             const snapshot = attemptSecretValues
               ? attemptSecretValues.mask(rawSnapshot, "model_context_snapshot")
