@@ -23,6 +23,7 @@ fn view() -> SandboxView {
         memory_high: None,
         request: 0,
         borrowed: 0,
+        failures: 0,
     }
 }
 

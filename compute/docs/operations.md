@@ -1098,10 +1098,16 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   image needs it. Status shows the runtime the agent launches new VMs
   under, not the runtime of every saved image; each image records its own.
 - **The host kernel**: Firecracker does not promise that a memory image
-  restores under another host kernel. Before rolling a new host image out,
-  save sandboxes on the old one and wake them on the new one (with the
-  `save_wake` and `lab` tests and a store both hosts share), and keep the
-  old image to roll back to.
+  restores under another host kernel, and one made under a newer kernel
+  can be refused under an older one (KVM saved registers the older one
+  does not set). The runtime names the kernel, so warm templates are
+  rebuilt after a kernel change, and a saved image refused for another
+  kernel or processor is given up after a few wakes in a row: the sandbox
+  boots from its disk and its programs are lost, which the host alarms on.
+  So prefer kernel upgrades to rollbacks. Before rolling a new host image
+  out, save sandboxes on the old one and wake them on the new one (with
+  the `save_wake` and `lab` tests and a store both hosts share), and keep
+  the old image to roll back to.
 - **The guest kernel** a VM booted with stays through every save and wake;
   only a fresh boot picks up a new one. A sandbox's own disk then boots
   with the newest kernel, so a new guest kernel must be tested against the
