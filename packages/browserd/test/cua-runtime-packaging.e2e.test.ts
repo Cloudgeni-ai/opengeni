@@ -17,13 +17,6 @@ test.skipIf(
     const workerName = windows ? "cua-driver.exe" : "cua-driver";
     try {
       const staged = dirname(await stageCuaRuntime(process.arch));
-      if (windows) {
-        const bytes = await Bun.file(join(staged, workerName)).arrayBuffer();
-        const view = new DataView(bytes);
-        const pe = view.getUint32(0x3c, true);
-        // IMAGE_OPTIONAL_HEADER.Subsystem: 2 is GUI, 3 would open a console.
-        expect(view.getUint16(pe + 24 + 68, true)).toBe(2);
-      }
       if (process.platform === "darwin") {
         const native = join(staged, "node_modules", `@trycua/cua-driver-darwin-${process.arch}`);
         for (const file of await readdir(native)) {
