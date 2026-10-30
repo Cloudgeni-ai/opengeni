@@ -43,6 +43,7 @@ import { isProxy } from "node:util/types";
 import {
   isHostedSearchEvidenceRecord,
   projectHostedSearchEvidence,
+  withSearchRecordsAfterOpenCalls,
 } from "./hosted-search-evidence";
 
 import {
@@ -1611,8 +1612,10 @@ export function prepareCompactionPromptInput(
   maxInputTokens: number,
 ): PreparedCompactionPromptInput {
   const budget = Math.max(0, Math.floor(maxInputTokens));
-  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).map((item) =>
-    projectHostedSearchEvidence(item),
+  let history = withSearchRecordsAfterOpenCalls(
+    omitOpaqueArtifactsFromPortableCompactionHistory(items).map((item) =>
+      projectHostedSearchEvidence(item),
+    ),
   );
   let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
   let rewrittenToolOutputs = 0;

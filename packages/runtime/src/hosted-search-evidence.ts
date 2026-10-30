@@ -1,4 +1,6 @@
 import { anthropicWebSearchFacts, isAnthropicWebSearchItem } from "./anthropic-web-search";
+import { TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE } from "./history-sanitizer";
+import { toolCallIdFromSdkItem } from "./tool-call-identity";
 
 /** Hard bound on the UTF-8 JSON encoding of one projected message, not its text alone. */
 export const HOSTED_SEARCH_EVIDENCE_MAX_BYTES = 32 * 1024;
@@ -33,19 +35,77 @@ function messageText(item: Record<string, unknown>): string | undefined {
 }
 
 /**
- * True while `text` is, or may still become, a model-written copy of a search
- * record: its first non-whitespace characters are a prefix of a record marker
- * or start with one. Streaming consumers withhold text until this settles.
+ * How far streamed text is from a model-written copy of a search record:
+ * `text` once its first non-whitespace characters cannot start a record
+ * marker, `undecided` while they are still a prefix of one, and `candidate`
+ * once they start with one. Only a complete text decides a candidate.
  */
-export function hostedSearchEvidenceEchoState(text: string): "echo" | "undecided" | "text" {
+export function hostedSearchEvidenceEchoState(text: string): "text" | "undecided" | "candidate" {
   const start = text.trimStart();
-  if (ECHO_MARKERS.some((marker) => start.startsWith(marker))) return "echo";
+  if (ECHO_MARKERS.some((marker) => start.startsWith(marker))) return "candidate";
   return ECHO_MARKERS.some((marker) => marker.startsWith(start)) ? "undecided" : "text";
 }
 
-/** A complete assistant text that copies a search record instead of saying anything. */
+/**
+ * A complete assistant text that is entirely a copied search record: a record
+ * marker line, its explanatory lines, and one evidence JSON object with
+ * `included` and `entries`, and nothing else. Text that quotes, mentions or
+ * continues after a record is ordinary text.
+ */
 export function isHostedSearchEvidenceEchoText(text: string): boolean {
-  return hostedSearchEvidenceEchoState(text) === "echo";
+  const trimmed = text.trim();
+  const marker = ECHO_MARKERS.find((candidate) => trimmed.startsWith(candidate));
+  if (!marker) return false;
+  const brace = trimmed.indexOf("{", marker.length);
+  if (brace < 0) return false;
+  const preamble = trimmed.slice(marker.length, brace);
+  if (!preamble.startsWith("\n") || !preamble.endsWith("\n") || preamble.length > 1024)
+    return false;
+  let body: unknown;
+  try {
+    body = JSON.parse(trimmed.slice(brace));
+  } catch {
+    return false;
+  }
+  const evidence = record(body);
+  return Boolean(evidence && record(evidence.included) && Array.isArray(evidence.entries));
+}
+
+const TOOL_RESULT_TYPES = new Set(Object.values(TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE));
+
+/**
+ * A search record must never separate a tool call from its result: Chat
+ * Completions and Claude require the result right after the call. A record
+ * that falls while calls are open moves to just after the result that closes
+ * the last of them, keeping relative order. The placement depends only on the
+ * items themselves, so a later request reproduces the same prefix. Returns
+ * `items` itself when nothing moves.
+ */
+export function withSearchRecordsAfterOpenCalls<T>(items: T[]): T[] {
+  const open = new Set<string>();
+  let deferred: T[] = [];
+  let out: T[] | null = null;
+  for (const [index, item] of items.entries()) {
+    if (open.size > 0 && isHostedSearchEvidenceRecord(item)) {
+      out ??= items.slice(0, index);
+      deferred.push(item);
+      continue;
+    }
+    out?.push(item);
+    const type = record(item)?.type;
+    const callId = typeof type === "string" ? toolCallIdFromSdkItem(item) : undefined;
+    if (typeof type === "string" && callId) {
+      const resultType = TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE[type];
+      if (resultType) open.add(`${resultType}\u0000${callId}`);
+      else if (TOOL_RESULT_TYPES.has(type)) open.delete(`${type}\u0000${callId}`);
+    }
+    if (open.size === 0 && deferred.length > 0) {
+      out!.push(...deferred);
+      deferred = [];
+    }
+  }
+  if (deferred.length > 0) out!.push(...deferred);
+  return out ?? items;
 }
 
 /** A request-local search record produced by {@link projectHostedSearchEvidence}. */
@@ -244,22 +304,22 @@ function eventText(payload: unknown): string {
 
 /**
  * Per-stream filter that keeps a model-written copy of a search record out of
- * the visible transcript. A message's opening deltas are withheld only while
- * they could still be a record marker; ordinary text is released unchanged and
- * in order as soon as it diverges. Canonical history is untouched: replay
- * neutralizes the copy through {@link projectHostedSearchEvidence}.
+ * the visible transcript. Deltas are withheld only while a message could still
+ * be a copy: briefly while its opening characters could start a record marker,
+ * and until completion once they do. Ordinary text is released unchanged and
+ * in order; a completed message that is not entirely a record is released in
+ * full. Canonical history is untouched: replay neutralizes the copy through
+ * {@link projectHostedSearchEvidence}.
  */
 export class HostedSearchEvidenceEchoGuard {
   readonly #held = new Map<string, { text: string; events: GuardedEvent[] }>();
   readonly #released = new Set<string>();
-  readonly #echoes = new Set<string>();
 
   filter<T extends GuardedEvent>(events: readonly T[]): T[] {
     const out: T[] = [];
     for (const event of events) {
       if (event.type === "agent.message.delta") {
         const key = messageEventKey(event.payload);
-        if (this.#echoes.has(key)) continue;
         if (this.#released.has(key)) {
           out.push(event);
           continue;
@@ -267,17 +327,13 @@ export class HostedSearchEvidenceEchoGuard {
         const held = this.#held.get(key) ?? { text: "", events: [] };
         held.text += eventText(event.payload);
         held.events.push(event);
-        const state = hostedSearchEvidenceEchoState(held.text);
-        if (state === "undecided") {
+        if (hostedSearchEvidenceEchoState(held.text) !== "text") {
           this.#held.set(key, held);
           continue;
         }
         this.#held.delete(key);
-        if (state === "echo") this.#echoes.add(key);
-        else {
-          this.#released.add(key);
-          out.push(...(held.events as T[]));
-        }
+        this.#released.add(key);
+        out.push(...(held.events as T[]));
         continue;
       }
       if (event.type === "agent.message.completed") {
@@ -285,7 +341,6 @@ export class HostedSearchEvidenceEchoGuard {
         const held = this.#held.get(key);
         this.#held.delete(key);
         this.#released.delete(key);
-        this.#echoes.delete(key);
         if (isHostedSearchEvidenceEchoText(eventText(event.payload))) continue;
         if (held) out.push(...(held.events as T[]));
         out.push(event);

@@ -351,7 +351,14 @@ export function anthropicMessages(
 ): Message[] {
   const messages: Message[] = [];
   let foreignSearch = false;
+  // Search records wait for the next user message: inside a reply they would
+  // split it (thinking from its tool call), and a record is never Claude's speech.
+  let pendingRecords: Json[] = [];
   const append = (role: Message["role"], content: Json[]) => {
+    if (role === "user" && pendingRecords.length) {
+      content = [...pendingRecords, ...content];
+      pendingRecords = [];
+    }
     if (!content.length) return;
     const previous = messages.at(-1);
     if (previous?.role === role) previous.content.push(...content);
@@ -415,8 +422,9 @@ export function anthropicMessages(
           if (options.webSearch && sameAccount) append("assistant", anthropicWebSearchBlocks(item));
           else {
             if (!sameAccount) foreignSearch = true;
-            // A labelled runtime record, never Claude's own speech.
-            append("user", contentBlocks(object(projectHostedSearchEvidence(item)).content));
+            pendingRecords.push(
+              ...contentBlocks(object(projectHostedSearchEvidence(item)).content),
+            );
           }
           break;
         }
@@ -437,6 +445,7 @@ export function anthropicMessages(
         ]);
     }
   }
+  append("user", []);
   withoutUncontinuableSearches(messages);
   // Validate adjacency and pairing before network I/O. Reorder only results within their user message.
   let pending = new Set<string>();

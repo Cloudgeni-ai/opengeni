@@ -159,6 +159,80 @@ describe("projectHistoryForProvider", () => {
       expect(items).toEqual(before);
     }
   });
+  test("a search record never separates a tool call from its result on any provider API", () => {
+    const call = (callId: string) => ({
+      type: "function_call",
+      callId,
+      name: "lookup",
+      arguments: "{}",
+    });
+    const result = (callId: string) => ({ type: "function_call_result", callId, output: "ok" });
+    const items = [
+      { type: "message", role: "user", content: "Find docs" },
+      call("a"),
+      call("b"),
+      hostedSearchFixture(),
+      result("a"),
+      hostedSearchFixture(),
+      result("b"),
+      call("c"),
+      result("c"),
+    ];
+    const before = structuredClone(items);
+    for (const api of ["responses", "chat", "anthropic-messages"] as const) {
+      const projected = projectHistoryForProvider(items, api);
+      const shape = projected.map((item) =>
+        item.type === "message" && item.role === "user" && item !== items[0]
+          ? "record"
+          : String(item.type),
+      );
+      expect(shape).toEqual([
+        "message",
+        "function_call",
+        "function_call",
+        "function_call_result",
+        "function_call_result",
+        "record",
+        "record",
+        "function_call",
+        "function_call_result",
+      ]);
+      // Stable: projecting the projection changes nothing.
+      expect(projectHistoryForProvider(projected, api)).toBe(projected);
+      expect(items).toEqual(before);
+    }
+    // Claude receives each result right after its call.
+    const claude = anthropicMessages(
+      projectHistoryForProvider(items, "anthropic-messages") as ModelRequest["input"],
+    );
+    expect(claude.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect(claude[2]!.content.map((block: any) => block.type)).toEqual([
+      "tool_result",
+      "tool_result",
+      "text",
+      "text",
+    ]);
+    // A record outside any open call stays exactly where it was.
+    const settled = [call("a"), result("a"), hostedSearchFixture(), call("b"), result("b")];
+    expect(
+      projectHistoryForProvider(settled, "chat").map((item) =>
+        item.type === "message" ? "record" : item.type,
+      ),
+    ).toEqual([
+      "function_call",
+      "function_call_result",
+      "record",
+      "function_call",
+      "function_call_result",
+    ]);
+  });
+
   test("legacy Chat raw reasoning becomes inert assistant context without truncation or mutation", () => {
     const text = "Synthetic reasoning. ".repeat(2000);
     const items = [

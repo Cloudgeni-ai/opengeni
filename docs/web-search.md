@@ -116,11 +116,17 @@ needed to replay these facts. Canonical hosted items and tool pairing stay intac
 
 The record must never look like the assistant's own speech. When it did (an
 assistant-role message), GPT models on Azure imitated it and wrote invented
-records as progress text instead of searching. Replay therefore turns any
-assistant message that starts with a record marker into a short note with the
-same item identity, and the worker's stream filter
-(`HostedSearchEvidenceEchoGuard`) keeps such a copy out of the visible
-transcript; a final output that is only a copy counts as an empty reply.
+records as progress text instead of searching. A record also never separates a
+tool call from its result (`withSearchRecordsAfterOpenCalls`): Chat Completions
+and Claude require the result right after the call, so a record that falls
+while calls are open moves to just after the result that closes them, and the
+Claude transport places a record for Claude's own search in the next user
+message. Replay turns an assistant message that is entirely a record (marker,
+explanation, one evidence JSON object, nothing else) into a short note with the
+same item identity. The worker's stream filter (`HostedSearchEvidenceEchoGuard`)
+keeps such a copy out of the visible transcript; text that quotes, mentions or
+continues after a record is shown in full. A final output that is only a copy
+counts as an empty reply.
 
 This does not reconstruct evidence absent from older responses, perform another
 search, or guarantee native citation annotations. Sources-only includes supply URLs,

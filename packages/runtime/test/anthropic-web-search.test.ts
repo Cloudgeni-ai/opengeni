@@ -431,6 +431,40 @@ describe("Claude web search replay", () => {
     expect(records.map((entry: any) => entry.role)).toEqual(["user"]);
   });
 
+  test("a search record never splits a thinking reply from its tool call", () => {
+    const thinking = { type: "thinking", thinking: "Plan", signature: "SIG_1" };
+    const reply = anthropicResponse(
+      message(
+        "msg_1",
+        [thinking, call, results, { type: "tool_use", id: "toolu_1", name: "lookup", input: {} }],
+        "tool_use",
+      ),
+      undefined,
+      new Map([["lookup", { name: "lookup" }]]),
+    ).output;
+    const toolResult = {
+      type: "function_call_result",
+      callId: "toolu_1",
+      name: "lookup",
+      status: "completed",
+      output: "a result",
+    };
+    for (const tail of [[], [{ role: "user", content: "Thanks" }]]) {
+      const input = [{ role: "user", content: "Go" }, ...reply, toolResult, ...tail] as any[];
+      // Without the search tool, Claude's own search becomes a readable record.
+      const body = buildAnthropicRequest(request(input, [lookupTool]), "claude", provider, false);
+      expect(body.messages.map((entry: any) => entry.role)).toEqual(["user", "assistant", "user"]);
+      expect(body.messages[1].content.map((block: any) => block.type)).toEqual([
+        "thinking",
+        "tool_use",
+      ]);
+      const next = body.messages[2].content;
+      expect(next[0].type).toBe("tool_result");
+      expect(JSON.stringify(next[1])).toContain("opengeni release notes");
+      expect(next.length).toBe(2 + tail.length);
+    }
+  });
+
   test("a search deferred behind our tool call continues and its late result replays natively", () => {
     const deferred = anthropicResponse(
       message(

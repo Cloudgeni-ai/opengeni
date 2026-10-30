@@ -198,6 +198,8 @@ describe("search records are never the assistant's own words", () => {
     for (const item of [
       legacyEcho("The search found seven colors."),
       legacyEcho("The chat showed a [Historical hosted web-search evidence] block."),
+      legacyEcho(`${(legacyEcho().content[0] as { text: string }).text}\n\nSo the rate is 1.23.`),
+      legacyEcho("[Historical hosted web-search evidence]\nThe runtime used to label results so."),
       legacyEcho(""),
       { type: "message", role: "assistant", content: "[Opengeni search] is a product name." },
       record,
@@ -270,5 +272,36 @@ describe("streamed copies of a search record stay out of the transcript", () => 
     expect(
       guard.filter([{ type: "agent.message.completed", payload: { text: legacyText } }]),
     ).toEqual([]);
+  });
+
+  test("only text that is entirely a record is hidden; answers that quote or continue one appear in full", () => {
+    const record = (projectHostedSearchEvidence(hostedSearchFixture()).content as any)[0].text;
+    expect(isHostedSearchEvidenceEchoText(legacyText)).toBe(true);
+    expect(isHostedSearchEvidenceEchoText(` \n${record}\n`)).toBe(true);
+    for (const text of [
+      `${legacyText}\n\nSo the rate is 1.23.`,
+      `Here is what the chat showed:\n${legacyText}`,
+      "[Historical hosted web-search evidence]\nThe runtime used to label search results this way.",
+      "[Historical hosted web-search evidence]\n{not json}",
+      '[Historical hosted web-search evidence]\n{"status":"completed"}',
+      legacyText.slice(0, -20),
+    ])
+      expect(isHostedSearchEvidenceEchoText(text)).toBe(false);
+
+    const answer = `${legacyText}\n\nSo the rate is 1.23.`;
+    const guard = new HostedSearchEvidenceEchoGuard();
+    const events = [
+      delta(answer.slice(0, 50), "msg_q"),
+      delta(answer.slice(50), "msg_q"),
+      completed(answer, "msg_q"),
+    ];
+    // Held while it could still be a copy, then released unchanged and in order.
+    expect(guard.filter(events.slice(0, 2))).toEqual([]);
+    expect(guard.filter(events.slice(2))).toEqual(events);
+    const quoted = `Here is what the chat showed:\n${legacyText}`;
+    expect(guard.filter([delta(quoted, "msg_r"), completed(quoted, "msg_r")])).toEqual([
+      delta(quoted, "msg_r"),
+      completed(quoted, "msg_r"),
+    ]);
   });
 });

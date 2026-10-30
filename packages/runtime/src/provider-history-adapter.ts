@@ -1,6 +1,9 @@
 import { collapseRepeatedSessionGoalContexts } from "@opengeni/contracts";
 import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
-import { projectHostedSearchEvidence } from "./hosted-search-evidence";
+import {
+  projectHostedSearchEvidence,
+  withSearchRecordsAfterOpenCalls,
+} from "./hosted-search-evidence";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
@@ -309,10 +312,13 @@ export function projectHistoryForProvider(
   const nativeClaude = providerApi === "anthropic-messages";
   // Each distinct session goal context reaches the model once per request.
   const goalOnce = collapseRepeatedSessionGoalContexts(items);
-  const projected = goalOnce.map((item) => {
-    const evidence = projectHostedSearchEvidence(item, { preserveAnthropicNative: nativeClaude });
-    return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
-  });
+  // A search record never separates a tool call from its result on any API.
+  const projected = withSearchRecordsAfterOpenCalls(
+    goalOnce.map((item) => {
+      const evidence = projectHostedSearchEvidence(item, { preserveAnthropicNative: nativeClaude });
+      return nativeClaude ? evidence : withoutClaudeCitationMetadata(evidence);
+    }),
+  );
   const input = projected.every((item, index) => item === items[index]) ? items : projected;
   return projectWireHistory(withWireValidFunctionCallArguments(input), providerApi, options);
 }
