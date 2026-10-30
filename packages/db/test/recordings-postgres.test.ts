@@ -2598,6 +2598,97 @@ describe("recordings and usage allowances", () => {
     expect(Number(day!.unbacked)).toBe(LIVE_UNBACKED_DAILY_MAX_MILLISECONDS);
   }, 60_000);
 
+  test("concurrent saves and starts of a person, with old hours to drop, never deadlock", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    const first = await liveMeeting(scope);
+    const second = await liveMeeting(scope);
+    await first.start(0);
+    await second.start(0);
+    // Each round an hour older than two days waits to be dropped while two
+    // saves (each giving back its session's provisional time in the current
+    // hour) and a new recording's first session run at once.
+    // The database error's code (40P01 for a deadlock), or the refusal's.
+    const failures: string[] = [];
+    for (let round = 0; round < 40; round++) {
+      await shared.admin`
+        insert into recording_live_unbacked_hours
+          (account_id, workspace_id, bound_subject_id, hour_start, unbacked_milliseconds)
+        values (${scope.accountId}, ${scope.workspaceId}, ${scope.owner},
+          date_trunc('hour', now()) - interval '3 days', 1000)
+        on conflict do nothing`;
+      const next = await liveMeeting(scope);
+      const results = await Promise.allSettled([
+        first.report(600_000),
+        next.start(0),
+        second.report(600_000),
+      ]);
+      for (const result of results) {
+        if (result.status !== "rejected") continue;
+        const reason = result.reason as { code?: string; cause?: { code?: string } };
+        failures.push(reason.cause?.code ?? reason.code ?? String(result.reason));
+      }
+    }
+    expect(failures).toEqual([]);
+  }, 120_000);
+
+  test("a save or new session a day after a session's hour leaves that day's time where it was", async () => {
+    if (!client || !shared) return;
+    const meeting = await liveMeeting();
+    const day = async () => {
+      const [row] = await shared!.admin<{ unbacked: string }[]>`
+        select coalesce(sum(h.unbacked_milliseconds), 0)::text as unbacked
+        from recording_live_unbacked_hours h
+        join recordings r on r.workspace_id = h.workspace_id
+        where r.id = ${meeting.recordingId}
+          and h.hour_start > clock_timestamp() - interval '24 hours'`;
+      return Number(row!.unbacked);
+    };
+    await meeting.start(0);
+    await meeting.start(1);
+    // Track 1 reports its audio, so it isn't behind when it asks again.
+    await meeting.report(50 * 60_000, 1);
+    await meeting.elapse(25 * 60);
+    expect(await day()).toBe(0);
+    // The sessions' time belongs to the hour they began in, which no longer
+    // counts: a report adds nothing to today, and a new session only its own
+    // hour.
+    await meeting.report(0);
+    expect(await day()).toBe(0);
+    await meeting.start(1);
+    expect(await day()).toBeGreaterThanOrEqual(LIVE_SESSION_MAX_MILLISECONDS);
+    expect(await day()).toBeLessThan(LIVE_SESSION_MAX_MILLISECONDS + 10_000);
+  });
+
+  test("a save on a session with no provisional time waits its turn, as a start does", async () => {
+    if (!client || !shared) return;
+    const scope = await workspace();
+    const meeting = await liveMeeting(scope);
+    // A session a previous release started (or one before credits were
+    // billed) has no provisional time, so a charged save adds its gap and
+    // what it could still run to the day.
+    await meeting.start(0, false);
+    await meeting.elapse(30);
+    let saved = false;
+    let save: Promise<void> | undefined;
+    await shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${`recording-live-day:${scope.workspaceId}:${scope.owner}`}, 0))`;
+      save = meeting.report(60_000).then(() => {
+        saved = true;
+      });
+      await Bun.sleep(500);
+      expect(saved).toBe(false);
+    });
+    await save;
+    expect(saved).toBe(true);
+    const [row] = await shared.admin<{ unbacked: string }[]>`
+      select coalesce(sum(unbacked_milliseconds), 0)::text as unbacked
+      from recording_live_unbacked_hours where workspace_id = ${scope.workspaceId}`;
+    // 29 of the 30 minutes, and the half hour the session could still run.
+    expect(Number(row!.unbacked)).toBeGreaterThan(59 * 60_000 - 10_000);
+    expect(Number(row!.unbacked)).toBeLessThanOrEqual(59 * 60_000);
+  });
+
   test("an allowance that ignores unbilled usage doesn't count recordings", async () => {
     if (!client) return;
     const db = client.db;

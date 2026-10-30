@@ -410,7 +410,9 @@ measured between them so a pause never counts:
   minutes of its sessions counted and charges 20 minutes, which allow 120
   more, so meetings of about 9 minutes or longer never use the day up.
   Session requests of the same person and workspace are handled one at a
-  time, so requests at the same moment can't run over the bound. New
+  time (as are saves on a session a previous release started, which has no
+  hour counted up front), so requests at the same moment can't run over the
+  bound. New
   recordings don't reset it. The person is the human behind the request; a
   personal API key or a delegated session acts as them. Organization and
   workspace API keys record no person, so all of a workspace's keys share
@@ -460,9 +462,11 @@ recorder reports.
   charged audio allows (a 5-minute meeting on two tracks nets about 50
   minutes), so a day of many very short live meetings can still lose the
   live preview.
-- Only time of tracks charged in credits is stored per hour. Hours older than
-  two days are removed on the person's next write in that workspace, not
-  otherwise; they no longer count after a day either way.
+- Only time of tracks charged in credits is stored per hour. A session's
+  time stays in the hour it began in, so a report or request a day later
+  adds nothing to today for it. Hours older than two days are removed on the
+  person's next write in that workspace (skipped while another request holds
+  them), not otherwise; they no longer count after a day either way.
 
 Telling an honest pause from a fake one needs a meter the client doesn't
 control, for example the server holding each provider session (and hanging

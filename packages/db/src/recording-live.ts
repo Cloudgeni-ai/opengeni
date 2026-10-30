@@ -81,12 +81,13 @@ function trackWhere(input: { workspaceId: string; recordingId: string; trackNumb
  * day, so new recordings don't reset the bound, and a session is granted only
  * if the day, with all it could run counted, stays within that. Starts are
  * serialized per bound (an advisory lock), so a burst of them can't all read
- * the same day; saves and releases never add to the day more than the
- * session's provisional time they replace, so they need no lock. A session
- * counts all it could run up front, as the track's provisional time, which
- * each report or new request swaps for the time it actually left unaccounted
- * plus what it could still run: a session nobody reports on costs its whole
- * hour, and a refusal (which rolls the request back) leaves it counted. A
+ * the same day, and so are saves on a track whose session has no
+ * provisional time (one a previous release started); other saves and
+ * releases never add to the day more than the provisional time they
+ * replace, in the hour it was counted in. A session counts all it could run
+ * up front, as the track's provisional time, which each report or new
+ * request swaps for the time it actually left unaccounted plus what it could
+ * still run: a session nobody reports on costs its whole hour, and a refusal (which rolls the request back) leaves it counted. A
  * session the provider never started gives it back. The person is the human
  * behind the request (a personal API key and a delegated session act as
  * them); the workspace's other API keys record no person, so they share one
@@ -201,33 +202,71 @@ async function boundDay(
 type Provisional = { milliseconds: number; hour: Date } | null;
 
 /**
- * Change the person's hours: take a track's earlier provisional time back
- * from the hour it was counted in, and add unbacked time (the new
- * provisional time included) and audio charged in credits to `hour`, the
- * current one. Hours older than two days are dropped on the way.
+ * Serialize what may add to the person's day, so concurrent requests can't
+ * all read the same day: a session start, and a save on a track whose
+ * session has no provisional time to replace. Locks go recording, track,
+ * this, then the hours.
+ */
+async function lockBoundDay(
+  tx: Database,
+  input: { workspaceId: string; subjectId: string },
+): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`recording-live-day:${input.workspaceId}:${liveBoundSubject(input.subjectId)}`}, 0))`,
+  );
+}
+
+/**
+ * Change the person's hours. A track's earlier provisional time gives way,
+ * in the hour it was counted in, to `replace` (what its session actually
+ * left unaccounted, plus what it could still run); without one, `replace`
+ * adds to `hour`, the current one, as do `added` (a new session's time) and
+ * audio charged in credits.
+ *
+ * Hour rows are locked oldest first (hours older than two days, skipped if
+ * another request holds them; the provisional hour; the current hour), so
+ * concurrent requests of a person can't deadlock on them.
  */
 async function changeBoundDay(
   tx: Database,
   recording: RecordingRow,
   input: { subjectId: string },
-  change: { refund: Provisional; hour: Date; unbacked: number; charged: number },
+  change: {
+    refund: Provisional;
+    replace: number;
+    hour: Date;
+    added: number;
+    charged: number;
+  },
 ): Promise<void> {
   const table = schema.recordingLiveUnbackedHours;
   const bound = liveBoundSubject(input.subjectId);
-  const mine = and(eq(table.workspaceId, recording.workspaceId), eq(table.boundSubjectId, bound));
   const refund = Math.round(change.refund?.milliseconds ?? 0);
-  if (change.refund && refund > 0) {
+  const replace = Math.max(0, Math.round(change.replace));
+  const added = Math.max(0, Math.round(change.added)) + (change.refund ? 0 : replace);
+  const charged = Math.max(0, Math.round(change.charged));
+  if (refund === 0 && added === 0 && charged === 0) return;
+  await tx.execute(sql`
+    delete from ${table} where (workspace_id, bound_subject_id, hour_start) in (
+      select workspace_id, bound_subject_id, hour_start from ${table}
+      where workspace_id = ${recording.workspaceId} and bound_subject_id = ${bound}
+        and hour_start < clock_timestamp() - interval '2 days'
+      for update skip locked)`);
+  if (change.refund) {
     await tx
       .update(table)
-      .set({ unbackedMilliseconds: sql`greatest(${table.unbackedMilliseconds} - ${refund}, 0)` })
-      .where(and(mine, eq(table.hourStart, change.refund.hour)));
+      .set({
+        unbackedMilliseconds: sql`greatest(${table.unbackedMilliseconds} - ${refund} + ${replace}, 0)`,
+      })
+      .where(
+        and(
+          eq(table.workspaceId, recording.workspaceId),
+          eq(table.boundSubjectId, bound),
+          eq(table.hourStart, change.refund.hour),
+        ),
+      );
   }
-  const unbacked = Math.max(0, Math.round(change.unbacked));
-  const charged = Math.max(0, Math.round(change.charged));
-  if (unbacked === 0 && charged === 0) return;
-  await tx
-    .delete(table)
-    .where(and(mine, sql`${table.hourStart} < clock_timestamp() - interval '2 days'`));
+  if (added === 0 && charged === 0) return;
   await tx
     .insert(table)
     .values({
@@ -235,7 +274,7 @@ async function changeBoundDay(
       workspaceId: recording.workspaceId,
       boundSubjectId: bound,
       hourStart: change.hour,
-      unbackedMilliseconds: unbacked,
+      unbackedMilliseconds: added,
       chargedMilliseconds: charged,
     })
     .onConflictDoUpdate({
@@ -319,6 +358,10 @@ export async function startRecordingLiveTrack(
         sinceCounted: sinceCountedInSession,
         provisional: schema.recordingTracks.liveProvisionalMilliseconds,
         provisionalHour: schema.recordingTracks.liveProvisionalHour,
+        // Whether that hour still counts toward the day (see boundDay).
+        provisionalInDay: sql<
+          boolean | null
+        >`${schema.recordingTracks.liveProvisionalHour} > clock_timestamp() - interval '24 hours'`,
         hour: currentHour,
       })
       .from(schema.recordingTracks)
@@ -340,22 +383,25 @@ export async function startRecordingLiveTrack(
     const unreported = (current.unreported ?? 0) + (open && !reported ? 1 : 0);
     if (input.bounded) {
       // One start at a time per bound, so a burst of starts can't all read
-      // the same day. Locks go recording, track, this, then the hours.
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`recording-live-day:${input.workspaceId}:${liveBoundSubject(input.subjectId)}`}, 0))`,
-      );
+      // the same day.
+      await lockBoundDay(tx, input);
       // The person's day once the latest session is closed (its provisional
-      // time, all it could still run, gives way to what it actually left
-      // unaccounted, which is never more) and the new one counts its hour.
-      // A refusal rolls this back and leaves the provisional time counted.
+      // time, all it could still run, gives way in its own hour to what it
+      // actually left unaccounted, which is never more) and the new one
+      // counts its hour. A refusal rolls this back and leaves the
+      // provisional time counted.
       const day = await boundDay(tx, input);
+      const closed = provisional
+        ? current.provisionalInDay
+          ? tail - provisional.milliseconds
+          : 0
+        : tail;
       const refusal = liveGrantRefusal({
         grants: current.grants ?? 0,
         unreportedGrants: unreported,
         streamedMilliseconds: Number(current.streamed),
         coveredMilliseconds: covered,
-        unbackedMilliseconds:
-          day.unbacked - (provisional?.milliseconds ?? 0) + tail + LIVE_SESSION_MAX_MILLISECONDS,
+        unbackedMilliseconds: day.unbacked + closed + LIVE_SESSION_MAX_MILLISECONDS,
         chargedMilliseconds: day.charged,
       });
       if (refusal) throw new RecordingConflictError(LIVE_GRANT_REFUSED_MESSAGE, refusal);
@@ -365,8 +411,9 @@ export async function startRecordingLiveTrack(
     if (input.bounded || provisional) {
       await changeBoundDay(tx, recording, input, {
         refund: provisional,
+        replace: tail,
         hour: current.hour,
-        unbacked: tail + (input.bounded ? LIVE_SESSION_MAX_MILLISECONDS : 0),
+        added: input.bounded ? LIVE_SESSION_MAX_MILLISECONDS : 0,
         charged: 0,
       });
     }
@@ -418,8 +465,9 @@ export async function releaseRecordingLiveGrant(
     if (provisional) {
       await changeBoundDay(tx, recording, input, {
         refund: provisional,
+        replace: 0,
         hour: current.hour,
-        unbacked: 0,
+        added: 0,
         charged: 0,
       });
     }
@@ -565,20 +613,25 @@ export async function appendRecordingLiveSegments(
       charge && streamed > chargedUpTo
         ? { fromMilliseconds: chargedUpTo, toMilliseconds: streamed }
         : null;
-    if (charge && charged) await charge(tx, charged);
     // Only audio charged in credits counts toward the person's day: the
-    // session's provisional time gives way to what this gap left
-    // unaccounted plus what the session could still run, and the charged
-    // audio adds to the day's allowance. Toward the day only the reported
-    // audio accounts for the gap (no slack), so a trickle of audio doesn't.
+    // session's provisional time gives way, in the hour it was counted in,
+    // to what this gap left unaccounted plus what the session could still
+    // run, and the charged audio adds to the day's allowance. Toward the day
+    // only the reported audio accounts for the gap (no slack), so a trickle
+    // of audio doesn't. A session with no provisional time (started by a
+    // previous release, or before credits were billed) adds that to the
+    // current hour instead, so it waits its turn as a start does.
     const provisional = storedProvisional(before);
+    if (charge && !provisional) await lockBoundDay(tx, input);
+    if (charge && charged) await charge(tx, charged);
     const left =
       charge && gap !== null ? Math.round(Math.max(0, Number(before.sessionLeft ?? 0))) : 0;
     if (charge || provisional) {
       await changeBoundDay(tx, recording, input, {
         refund: provisional,
+        replace: (charge && gap !== null ? gap - Math.min(gap, Math.max(0, grew)) : 0) + left,
         hour: before.hour,
-        unbacked: (charge && gap !== null ? gap - Math.min(gap, Math.max(0, grew)) : 0) + left,
+        added: 0,
         charged: charged ? charged.toMilliseconds - charged.fromMilliseconds : 0,
       });
     }
@@ -596,7 +649,7 @@ export async function appendRecordingLiveSegments(
         ...(charge || provisional
           ? {
               liveProvisionalMilliseconds: left > 0 ? left : null,
-              liveProvisionalHour: left > 0 ? before.hour : null,
+              liveProvisionalHour: left > 0 ? (provisional?.hour ?? before.hour) : null,
             }
           : {}),
         ...(gap !== null
