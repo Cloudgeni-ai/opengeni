@@ -1,5 +1,4 @@
-import { isRetiredNativeGoogleDriveTask } from "@opengeni/contracts/google-drive-native-retirement";
-import { isRetiredNativeAtlassianTask } from "@opengeni/contracts/atlassian-native-retirement";
+import { isRetiredKnowledgeSourceSyncTask } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import { localDateTimeValue, formatTimestamp } from "@opengeni/react/app/lib/format";
 import type {
@@ -131,32 +130,13 @@ export type ScheduledTaskFormState = {
 export function scheduledTaskStateLabel(task: ScheduledTask): {
   label: string;
   active: boolean;
-  reason: "active" | "user_paused" | "connection_paused" | "source_disabled" | "provider_retired";
+  reason: "active" | "user_paused" | "provider_retired";
 } {
-  if (isRetiredNativeAtlassianTask(task) || isRetiredNativeGoogleDriveTask(task))
+  // Integration Knowledge sync is retired; every saved source task reads as such.
+  if (isRetiredKnowledgeSourceSyncTask(task))
     return { label: "Sync retired", active: false, reason: "provider_retired" };
   if (task.status === "paused") {
     return { label: "Paused", active: false, reason: "user_paused" };
-  }
-  if (task.agentConfig?.knowledgeSource || task.action?.kind === "knowledge_source_sync") {
-    const value = task.metadata?.knowledgeSourceSync;
-    if (value && typeof value === "object") {
-      const control = value as Record<string, unknown>;
-      if (control.sourceEnabled === false) {
-        return {
-          label: "Sync disabled",
-          active: false,
-          reason: "source_disabled",
-        };
-      }
-      if (control.connectionPaused === true) {
-        return {
-          label: "Connection paused",
-          active: false,
-          reason: "connection_paused",
-        };
-      }
-    }
   }
   return { label: "Active", active: true, reason: "active" };
 }

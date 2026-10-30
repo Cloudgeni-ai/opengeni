@@ -817,8 +817,9 @@ authorization and receive credential-free attribution. Git, sandbox, and run
 credential ports are separate authorities and are not covered by migration 0264.
 Activated Atlassian is omitted from direct turns, and scheduled tasks reject
 activated MCP, Google Drive, and Atlassian selections, until their dedicated
-acceptance/occurrence adapters land. First-party Atlassian, Fiken, Slack,
-social, and scheduled knowledge-source surfaces remain explicit successors;
+acceptance/occurrence adapters land. First-party Atlassian, Fiken, Slack and
+social surfaces remain explicit successors (scheduled knowledge-source sync is
+retired);
 workspace and `legacy_user` connections remain on their bounded compatibility
 path rather than being silently upgraded.
 

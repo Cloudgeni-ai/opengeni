@@ -629,6 +629,7 @@ async function installApiIntegrationInScope(
             oldFacetInstallations,
             integrationFacetInstallationId: integrationFacetInstallation.id,
             apiFacetInstallationId: apiFacetInstallation.id,
+            integrationFacetId: integrationFacet.id,
             facetDefinitions,
             excludedRuntimeKey: runtimeServerId,
             revision: input.revision,
@@ -1850,6 +1851,8 @@ async function migrateApiIntegrationFacetInstallations(
     oldFacetInstallations: InstalledFacetRow[];
     integrationFacetInstallationId: string;
     apiFacetInstallationId: string;
+    /** The target revision's integration facet, which owns its facet definitions. */
+    integrationFacetId: string;
     facetDefinitions: ReadonlyMap<string, typeof schema.integrationFacetDefinitions.$inferSelect>;
     excludedRuntimeKey: string;
     revision: StoredApiIntegrationRevision;
@@ -1898,6 +1901,8 @@ async function migrateApiIntegrationFacetInstallations(
       binding: schema.integrationFacetBindings,
       facetKey: schema.integrationFacetDefinitions.facetKey,
       facetKind: schema.integrationFacetDefinitions.kind,
+      facetConfigSchema: schema.integrationFacetDefinitions.configSchema,
+      facetCapabilities: schema.integrationFacetDefinitions.capabilities,
     })
     .from(schema.integrationFacetBindings)
     .innerJoin(
@@ -1918,7 +1923,19 @@ async function migrateApiIntegrationFacetInstallations(
   const available = new Set(input.revision.tools.map((tool) => tool.id));
   for (const row of bindings) {
     const binding = row.binding;
-    const targetFacet = input.facetDefinitions.get(row.facetKey);
+    let targetFacet = input.facetDefinitions.get(row.facetKey);
+    // Knowledge-source facets are retired and no longer defined, but a stored
+    // binding is user data: carry its historical definition forward unchanged
+    // instead of refusing the update or dropping the binding.
+    if (!targetFacet && row.facetKind === "knowledge_source") {
+      targetFacet = await ensureIntegrationFacetDefinition(db, {
+        integrationFacetId: input.integrationFacetId,
+        facetKey: row.facetKey,
+        kind: "knowledge_source",
+        configSchema: objectValue(row.facetConfigSchema),
+        capabilities: objectValue(row.facetCapabilities),
+      });
+    }
     if (!targetFacet || targetFacet.kind !== row.facetKind) {
       throw new Error(`API Integration update would remove configured facet ${row.facetKey}`);
     }

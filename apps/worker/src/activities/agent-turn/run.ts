@@ -12,7 +12,6 @@ import {
 import { routingEnabled } from "../../sandbox-routing";
 import { createAttemptVaultAccess } from "./secret-resolver";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
-import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
   freezeAgentLearningPolicy,
   recoverLegacyKnowledgeConfirmations,
@@ -259,13 +258,6 @@ export function sessionTitleXaiRequestContext(
 
 /** Lifecycle orchestrator: claim → capacity → governance → sandbox → tools → stream. */
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
-  let documents: Promise<import("@opengeni/documents").DocumentServices> | undefined;
-  const sourceActivities = createKnowledgeSourceSyncActivities(services, async () => {
-    documents ??= import("@opengeni/documents").then(async ({ createDocumentServices }) =>
-      createDocumentServices((await services()).settings),
-    );
-    return documents;
-  });
   const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
   // Keep a distinct cooldown for terminal collection. A collection at the
   // final model checkpoint happens while the activity still owns its complete
@@ -1746,7 +1738,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const toolRuntime = await prepareTurnToolRuntime({
             independentSessionTitles: !!startSessionTitleWorkflow,
             vaultAccess,
-            fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
             runMcpCredentials,
             input,

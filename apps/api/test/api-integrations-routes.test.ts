@@ -1383,7 +1383,7 @@ describe("API Integration routes", () => {
       facetDefinitions: [
         {
           facetKey: "inventory-source",
-          kind: "knowledge_source",
+          kind: "inbound_trigger",
           configSchema: {
             type: "object",
             required: ["collection"],
@@ -1394,6 +1394,13 @@ describe("API Integration routes", () => {
             additionalProperties: false,
           },
           capabilities: { connectionRequired: true, sync: "incremental" },
+        },
+        {
+          // Integration Knowledge sync is retired: still listed, never configurable.
+          facetKey: "legacy-source",
+          kind: "knowledge_source",
+          configSchema: { type: "object", properties: {}, additionalProperties: false },
+          capabilities: {},
         },
       ],
       revision: {
@@ -1436,12 +1443,25 @@ describe("API Integration routes", () => {
         {
           definition: {
             facetKey: "inventory-source",
-            kind: "knowledge_source",
+            kind: "inbound_trigger",
           },
+          binding: null,
+        },
+        {
+          definition: { facetKey: "legacy-source", kind: "knowledge_source" },
           binding: null,
         },
       ],
     });
+    const retired = await request(`${base}/legacy-source`, {
+      method: "PUT",
+      body: JSON.stringify({
+        displayName: "Legacy source",
+        config: {},
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(retired.status).toBe(410);
 
     const configureKey = crypto.randomUUID();
     const configuredResponse = await request(`${base}/inventory-source`, {
