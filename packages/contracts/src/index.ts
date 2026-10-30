@@ -184,6 +184,7 @@ export * from "./desktop-app";
 export * from "./event-triggers";
 export * from "./automation-templates";
 export * from "./bots";
+export * from "./slack-agents";
 export * from "./mcp-elicitation";
 import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
 import {
@@ -1191,6 +1192,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_delete_message",
   "slack_bot_prepare_message",
   "slack_bot_send_prepared_message",
+  "slack_agent_handoff",
+  "slack_agent_chats",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",
@@ -1449,6 +1452,8 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
       name === "slack_bot_list_channels" ||
       name === "slack_bot_prepare_message" ||
       name === "slack_bot_send_prepared_message") &&
+    // Only chats started from Slack in an installation with Slack agents get these.
+    !name.startsWith("slack_agent_") &&
     !name.startsWith("fiken_") &&
     !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
@@ -2699,6 +2704,9 @@ export const SlackChannelRoute = /* @__PURE__ */ defineSchema(() =>
     // Unbounded like `Workspace.name` itself: a cap here would reject a row the
     // database happily holds.
     targetWorkspaceName: z.string().min(1).nullable(),
+    /** Set when a Slack agent answers in this channel. */
+    slackAgentId: primitives.nullableUuid.default(null),
+    slackAgentName: z.string().min(1).nullable().default(null),
     source: z.enum(["picker", "admin"]),
     updatedAt: primitives.string,
   }),
@@ -2727,6 +2735,11 @@ export const UpdateSlackChannelRoutesRequest = /* @__PURE__ */ defineSchema(() =
           slackChannelId: z.string().min(1).max(64),
           /** Null clears the route, so the channel asks once again. */
           targetWorkspaceId: primitives.nullableUuid,
+          /**
+           * A Slack agent that answers in this channel. Its own workspace must
+           * equal `targetWorkspaceId`. Omitted or null: plain Opengeni.
+           */
+          slackAgentId: primitives.nullableUuid.optional(),
         }),
       )
       .max(200),

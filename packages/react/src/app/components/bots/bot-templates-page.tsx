@@ -46,7 +46,18 @@ const EMPTY_TEMPLATE: BotTemplateValues = {
   visibility: "workspace",
 };
 
-export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
+export function BotTemplatesPage({
+  workspaceId,
+  onUseInSlack,
+}: {
+  workspaceId: string;
+  /**
+   * Start a Slack agent from a template: a one-time copy of its name,
+   * description, avatar and setup instructions. Hosts pass it only to people
+   * who can create Slack agents.
+   */
+  onUseInSlack?: ((template: WorkspaceBotTemplate) => void) | undefined;
+}) {
   const { client } = useAppContext();
   const navigate = useNavigate();
   const saved = useBotTemplates(workspaceId);
@@ -220,6 +231,11 @@ export function BotTemplatesPage({ workspaceId }: { workspaceId: string }) {
                       <DownloadIcon />
                       Export
                     </DropdownMenuItem>
+                    {onUseInSlack ? (
+                      <DropdownMenuItem onSelect={() => onUseInSlack(template)}>
+                        Use in Slack
+                      </DropdownMenuItem>
+                    ) : null}
                     {template.viewerAccess === "manage" ? (
                       <>
                         <DropdownMenuItem onSelect={() => setEditing(template)}>

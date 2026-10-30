@@ -556,6 +556,16 @@ export default defineConfig({
               priority: 21,
             },
             {
+              // The dropdown menu is used by many lazy pages and the session
+              // header, but not by startup. Left to entry-aware merging it can
+              // share a chunk with a startup helper (model display), so every
+              // page would load it and, through it, the menu primitives.
+              name: "dropdown-menu",
+              test: /packages[\\/]react[\\/]src[\\/]ui[\\/]dropdown-menu\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
               // Budget pages, Workspace settings > Usage and the member slider
               // (with its Radix primitive, used nowhere else; it must not join
               // the shared UI runtime). Only reached from lazy settings routes.
