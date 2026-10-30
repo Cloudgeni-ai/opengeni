@@ -333,6 +333,8 @@ describe("responsive production session header", () => {
       const header = page.locator("header");
       const running = header.locator('[data-status="running"]:visible');
       await running.waitFor();
+      // Measure both pills in the same (dark) theme so the colour check means something.
+      await setTheme(page, "dark");
       const runningMetrics = await statusPillMetrics(running);
       await captureStatusPill(page, "running");
 
