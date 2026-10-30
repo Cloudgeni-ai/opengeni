@@ -320,6 +320,18 @@ describe("lockstep tee", () => {
     tee.releaseSecondary();
   });
 
+  test("releasing after the secondary was read to the end leaves both branches whole", async () => {
+    const source = counted(300);
+    const tee = lockstepTee(source.stream);
+    const [a, b] = await Promise.all([
+      new Response(tee.primary).arrayBuffer(),
+      new Response(tee.secondary).arrayBuffer().finally(tee.releaseSecondary),
+    ]);
+    await tee.done;
+    expect(a.byteLength).toBe(300);
+    expect(b.byteLength).toBe(300);
+  });
+
   test("both branches see every chunk in order", async () => {
     const source = counted(300);
     const { primary, secondary, done } = lockstepTee(source.stream);

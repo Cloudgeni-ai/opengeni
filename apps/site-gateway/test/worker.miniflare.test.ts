@@ -748,6 +748,28 @@ describe("site gateway in workerd", () => {
     });
     expect(revalidated.status).toBe(304);
     expect(htmlFetches).toBe(fetches + 1);
+    // That API read refilled the edge cache: the next revalidation is answered there.
+    let again = await get("recheck", `/_og/v/${VERSION}`, {
+      headers: { ...FRAME, "if-none-match": etag },
+    });
+    for (
+      let attempt = 0;
+      attempt < 20 && again.headers.get("x-opengeni-site-cache") !== "HIT";
+      attempt += 1
+    ) {
+      await Bun.sleep(50);
+      again = await get("recheck", `/_og/v/${VERSION}`, {
+        headers: { ...FRAME, "if-none-match": etag },
+      });
+    }
+    expect(again.status).toBe(304);
+    expect(again.headers.get("x-opengeni-site-cache")).toBe("HIT");
+    await kv.put(
+      key,
+      JSON.stringify(
+        record("recheck", { siteId: "aaaaaaaa-0000-4000-8000-000000000001", generation: 3 }),
+      ),
+    );
     takenDown.add("aaaaaaaa-0000-4000-8000-000000000001");
     try {
       const refused = await get("recheck", `/_og/v/${VERSION}`, {

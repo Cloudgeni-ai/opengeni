@@ -210,8 +210,21 @@ export async function handleVersionHtml(site: SiteContext, versionId: string): P
     await response.body?.cancel();
     return siteTooLargePage(site, declared);
   }
+  const cacheHeaders = {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": `public, max-age=${EDGE_HTML_TTL}`,
+    ETag: etag,
+  };
   if (revalidating) {
-    await response.body?.cancel();
+    // The browser keeps its copy; the page still refills the edge cache, so
+    // the next revalidation is answered there instead of by another API read.
+    if (cache && response.body)
+      site.ctx.waitUntil(
+        cache
+          .put(key, new Response(siteFrameStream(response.body), { headers: cacheHeaders }))
+          .catch(() => undefined),
+      );
+    else await response.body?.cancel();
     return new Response(null, { status: 304, headers });
   }
   headers.set("X-OpenGeni-Site-Cache", "MISS");
@@ -228,16 +241,7 @@ export async function handleVersionHtml(site: SiteContext, versionId: string): P
   site.ctx.waitUntil(branches.done);
   site.ctx.waitUntil(
     cache
-      .put(
-        key,
-        new Response(branches.secondary, {
-          headers: {
-            "Content-Type": "text/html; charset=utf-8",
-            "Cache-Control": `public, max-age=${EDGE_HTML_TTL}`,
-            ETag: etag,
-          },
-        }),
-      )
+      .put(key, new Response(branches.secondary, { headers: cacheHeaders }))
       .catch(() => undefined)
       // However put settles, the viewer's branch no longer waits for it.
       .finally(branches.releaseSecondary),
