@@ -23,11 +23,18 @@ import { BYOK_PLATFORM_FEE_TYPE } from "@opengeni/contracts";
    where a mark is paid credits before it (plus what it returns) less paid
    funding before it. Paid funding only changes through receipts, and
    between receipts plain spending only lowers credits, so the lowest point
-   is either now or a mark. The balance read takes it from the rows that can
-   carry a receipt alone (credit added, Stripe refunds and dispute holds,
-   fees; credit_ledger_receipt_rows_idx): a few sums, plus the paid inflows
-   and the unpaid inflows without a receipt. Its cost scales with top-ups,
-   grants, refunds and fees; ordinary debits' metadata is never read.
+   is either now or a mark.
+
+   Each receipt also carries the running totals over every row up to and
+   including it (`paidCreditTotals`, PaidCreditChain): the sums of
+   paid parts, fee debt repaid, fees' unfunded shares and paid inflows, the
+   lowest mark, and this month's fees. Ledger writes that change paid credit
+   take the account lock and stamp `created_at` after it, so the latest
+   receipt holds the totals of every row before it. The balance read takes
+   that one receipt, through credit_ledger_receipt_rows_idx, plus the rows
+   that can carry a receipt written after it (normally none). Its cost does
+   not grow with fees, top-ups or grants; ordinary debits' metadata is never
+   read.
 
    Rows with no receipt (written before receipts existed, or by an older
    release while one rolls out) are bounded conservatively. Unpaid credit
@@ -35,8 +42,9 @@ import { BYOK_PLATFORM_FEE_TYPE } from "@opengeni/contracts";
    at least credits less the unpaid credit the latest receipt left (none
    before the first) less those inflows. Each such inflow is also taken to
    arrive when paid credit was zero, and the larger bound holds. Neither
-   ever overstates paid credit, and the next receipt pins the result. A
-   top-up without a receipt after the latest mark repays fee debt first.
+   ever overstates paid credit, and the next receipt folds them into its
+   totals. A top-up without a receipt after the latest receipt repays fee
+   debt first.
    -------------------------------------------------------------------------- */
 
 /** Paid-for credit: top-ups (net of a coupon discount), operator credit grants, won disputes. */
@@ -83,15 +91,51 @@ export function topUpPaidMicros(amountMicros: number, metadata?: Record<string, 
   return Number((BigInt(amountMicros) * paid) / (paid + BigInt(discount)));
 }
 
-/** The read's per-account paid-credit totals (see getBillingBalance). */
+/**
+ * Running totals a receipt carries (`paidCreditTotals`), over every ledger
+ * row up to and including its own. Fees are this month's (UTC), `feeMonth`.
+ */
+export type PaidCreditChain = {
+  /** Receipts so far: orders receipts written in the same microsecond. */
+  n: number;
+  /** Paid credit receipts added or took back (fees: what they drew). */
+  paidPart: number;
+  /** Fee debt repaid. */
+  repaid: number;
+  /** Fees' unfunded shares. */
+  unfunded: number;
+  /** The lowest mark. */
+  markFloor: number | null;
+  /** Paid inflows' paid parts. */
+  paidInflow: number;
+  feeMonth: string | null;
+  feesInMonth: number;
+};
+
+export const EMPTY_PAID_CREDIT_CHAIN: PaidCreditChain = Object.freeze({
+  n: 0,
+  paidPart: 0,
+  repaid: 0,
+  unfunded: 0,
+  markFloor: null,
+  paidInflow: 0,
+  feeMonth: null,
+  feesInMonth: 0,
+});
+
+/** The read's per-account paid-credit totals (see readBillingBalance). */
 export type PaidCreditTotals = {
-  paidFunding: string;
-  feeDebt: string;
-  markFloor: string | null;
-  latestMarkAt: string | null;
-  /** `[at, paid micros, has a receipt]` per paid inflow, `at` in epoch microseconds. */
+  /** Running totals through now: the latest receipt's plus the rows after it. */
+  chain: PaidCreditChain;
+  /** When the latest receipt was written, epoch microseconds; null before the first. */
+  latestMarkAt: number | null;
+  /** The unpaid credit the latest receipt left (`unpaidCreditsAfterMicros`). */
+  latestMarkUnpaid: number | null;
+  /** Paid inflows' paid parts up to the latest receipt. */
+  paidInflowBefore: number;
+  /** `[at, paid micros, has a receipt]` per paid inflow after it, `at` in epoch microseconds. */
   paidInflows: [number, number, boolean][] | null;
-  /** `[at, unpaid micros]` per unpaid inflow without a receipt. */
+  /** `[at, unpaid micros]` per unpaid inflow without a receipt after it. */
   unpaidInflows: [number, number][] | null;
 };
 
@@ -106,32 +150,17 @@ export type PaidCreditState = {
   unrecordedFeeDebtRepaidMicros: number;
   /** Unpaid credit: credits (with fee debt added back) that are not paid credit. */
   unpaidCreditsMicros: number;
+  /** Running totals through now, which the next receipt extends. */
+  chain: PaidCreditChain;
 };
 
-/**
- * Whether paid credit needs the unpaid credit the latest receipt left
- * (`unpaidCreditsAfterMicros`): only after unpaid inflows without a receipt.
- */
-export function needsLatestMarkUnpaid(totals: PaidCreditTotals): boolean {
-  if (totals.latestMarkAt === null) return false;
-  const latestMark = Number(totals.latestMarkAt);
-  return (totals.unpaidInflows ?? []).some(([at]) => at > latestMark);
-}
-
-/**
- * Paid credit from the read's totals and the account's credits
- * (`creditsMicros`). `latestMarkUnpaidMicros` is the latest receipt's
- * `unpaidCreditsAfterMicros` when {@link needsLatestMarkUnpaid}.
- */
-export function paidCreditState(
-  totals: PaidCreditTotals,
-  creditsMicros: number,
-  latestMarkUnpaidMicros?: number | null,
-): PaidCreditState {
-  const latestMark = totals.latestMarkAt === null ? null : Number(totals.latestMarkAt);
+/** Paid credit from the read's totals and the account's credits (`creditsMicros`). */
+export function paidCreditState(totals: PaidCreditTotals, creditsMicros: number): PaidCreditState {
+  const { chain } = totals;
+  const latestMark = totals.latestMarkAt;
   const unpinned = (at: number) => latestMark === null || at > latestMark;
   const paidInflows = [...(totals.paidInflows ?? [])].sort((a, b) => a[0] - b[0]);
-  const recordedDebt = Math.max(0, Number(totals.feeDebt));
+  const recordedDebt = Math.max(0, chain.unfunded - chain.repaid);
   // Top-ups an older release wrote after the latest receipt repay fee debt first.
   const unrecordedPaid =
     latestMark === null
@@ -142,13 +171,13 @@ export function paidCreditState(
         );
   const repaid = Math.min(recordedDebt, unrecordedPaid);
   const feeDebtMicros = recordedDebt - repaid;
-  const paidFundingMicros = Number(totals.paidFunding) - repaid;
+  const paidFundingMicros = chain.paidPart - chain.repaid - repaid;
   // Credits ordinary spending may use: fee debt is owed from paid credit only.
   const credits = creditsMicros + feeDebtMicros;
-  const recordedFloor = Math.min(0, totals.markFloor === null ? 0 : Number(totals.markFloor));
+  const recordedFloor = Math.min(0, chain.markFloor ?? 0);
   let floor = recordedFloor;
   let unrecordedUnpaid = 0;
-  let paidBefore = 0;
+  let paidBefore = totals.paidInflowBefore;
   let next = 0;
   const unpaidInflows = (totals.unpaidInflows ?? [])
     .filter(([at]) => unpinned(at))
@@ -163,7 +192,7 @@ export function paidCreditState(
     unrecordedUnpaid += amount;
   }
   let paidCreditsMicros = Math.max(0, Math.min(paidFundingMicros + floor, credits));
-  const unpaidBefore = latestMark === null ? 0 : latestMarkUnpaidMicros;
+  const unpaidBefore = latestMark === null ? 0 : totals.latestMarkUnpaid;
   if (unrecordedUnpaid > 0 && typeof unpaidBefore === "number") {
     // Unpaid credit is at most what the latest receipt left plus those
     // inflows; never more than the receipts alone allow.
@@ -179,6 +208,50 @@ export function paidCreditState(
     feeDebtMicros,
     unrecordedFeeDebtRepaidMicros: repaid,
     unpaidCreditsMicros: Math.max(0, credits - paidCreditsMicros),
+    chain,
+  };
+}
+
+/**
+ * A receipt with the running totals after its row (`paidCreditTotals`):
+ * the state's totals through now plus what this row adds. Every receipt
+ * writer extends the chain, under the account lock.
+ */
+export function chainedReceipt<
+  R extends Record<string, number> & {
+    paidCreditsBeforeMicros: number;
+    paidFundingBeforeMicros: number;
+  },
+>(
+  state: PaidCreditState,
+  row: { type: string; amountMicros: number },
+  receipt: R,
+): R & { paidCreditTotals: PaidCreditChain } {
+  const fee = row.type === BYOK_PLATFORM_FEE_TYPE;
+  const paidPart = fee ? -(receipt.creditPaidMicros ?? 0) : (receipt.paidCreditMicros ?? 0);
+  const mark =
+    receipt.paidCreditsBeforeMicros +
+    (receipt.paidRestoredMicros ?? 0) -
+    receipt.paidFundingBeforeMicros;
+  const paidInflow =
+    row.amountMicros > 0 &&
+    (PAID_INFLOW_TYPES as readonly string[]).includes(row.type) &&
+    paidPart > 0
+      ? paidPart
+      : 0;
+  const { chain } = state;
+  return {
+    ...receipt,
+    paidCreditTotals: {
+      n: chain.n + 1,
+      paidPart: chain.paidPart + paidPart,
+      repaid: chain.repaid + (receipt.feeDebtRepaidMicros ?? 0),
+      unfunded: chain.unfunded + (fee ? (receipt.unfundedMicros ?? 0) : 0),
+      markFloor: Math.min(chain.markFloor ?? mark, mark),
+      paidInflow: chain.paidInflow + paidInflow,
+      feeMonth: chain.feeMonth,
+      feesInMonth: chain.feesInMonth + (fee ? Math.abs(row.amountMicros) : 0),
+    },
   };
 }
 

@@ -107,7 +107,7 @@ import {
   readBillingBalance,
   type CreditUsage,
 } from "./credit-balances";
-import { feeDebtRepaid, paidCreditMark } from "./paid-credit";
+import { chainedReceipt, feeDebtRepaid, paidCreditMark } from "./paid-credit";
 export {
   apiSpendableCreditMicros,
   byokFeeSpendableMicros,
@@ -7080,9 +7080,11 @@ export async function applyByokPlatformFeeDebit(
           type: BYOK_PLATFORM_FEE_TYPE,
           metadata: {
             ...input.metadata,
-            ...funding,
-            ...paidCreditMark(paid),
-            ...feeDebtRepaid(paid),
+            ...chainedReceipt(
+              paid,
+              { type: BYOK_PLATFORM_FEE_TYPE, amountMicros: input.amountMicros },
+              { ...funding, ...paidCreditMark(paid), ...feeDebtRepaid(paid) },
+            ),
           },
         },
         usageOrigin,

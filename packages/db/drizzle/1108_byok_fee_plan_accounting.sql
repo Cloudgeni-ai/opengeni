@@ -12,8 +12,11 @@
 --   work has spent plus own-key fee debt still owed (unfundedMicros less
 --   feeDebtRepaidMicros), so fee debt waits for paid-for credit (the next
 --   top-up) and is never repaid by plan credit at period expiry or in a new
---   period's opening debt. Fees paid in full never raise it. The app's
---   balance read uses the same terms (packages/db/src/credit-balances.ts).
+--   period's opening debt. Fees paid in full never raise it. Fee debt is
+--   read from the latest paid-credit receipt's running totals
+--   (paidCreditTotals) plus any rows that can carry a receipt after it, so
+--   it never grows with the number of fees. The app's balance read uses the
+--   same terms (packages/db/src/credit-balances.ts).
 --
 -- Rolling: same-signature replacements of two function bodies. The previous
 -- release never writes byok_platform_fee rows, so its results are unchanged.
@@ -77,12 +80,26 @@ BEGIN
           (SELECT coalesce(sum(-amount_micros)
               FILTER (WHERE usage_origin = 'api' AND type <> 'byok_platform_fee'), 0)
             FROM credit_ledger_entries WHERE account_id = p_account_id)
-          + (SELECT coalesce(sum((metadata->>'unfundedMicros')::bigint)
-                FILTER (WHERE type = 'byok_platform_fee'), 0)
-              - coalesce(sum((metadata->>'feeDebtRepaidMicros')::bigint), 0)
-            FROM credit_ledger_entries WHERE account_id = p_account_id
-              AND (amount_micros > 0
-                OR type IN ('credit_refund', 'credit_dispute_hold', 'byok_platform_fee')))) AS credit_spent) balances
+          -- Own-key fee debt still owed: the latest receipt's running totals
+          -- (paidCreditTotals) plus rows that can carry a receipt after it.
+          + (SELECT coalesce((latest.chain->>'unfunded')::bigint, 0)
+              - coalesce((latest.chain->>'repaid')::bigint, 0)
+              + coalesce(after.unfunded, 0) - coalesce(after.repaid, 0)
+            FROM (SELECT 1) seed
+            LEFT JOIN LATERAL (SELECT created_at, metadata->'paidCreditTotals' AS chain
+              FROM credit_ledger_entries WHERE account_id = p_account_id
+                AND (amount_micros > 0
+                  OR type IN ('credit_refund', 'credit_dispute_hold', 'byok_platform_fee'))
+                AND jsonb_typeof(metadata->'paidCreditTotals') = 'object'
+              ORDER BY created_at DESC, metadata->'paidCreditTotals'->'n' DESC LIMIT 1) latest ON true
+            CROSS JOIN LATERAL (SELECT coalesce(latest.created_at, '-infinity'::timestamptz) AS since OFFSET 0) bound
+            CROSS JOIN LATERAL (SELECT sum((metadata->>'unfundedMicros')::bigint)
+                FILTER (WHERE type = 'byok_platform_fee') AS unfunded,
+              sum((metadata->>'feeDebtRepaidMicros')::bigint) AS repaid
+              FROM credit_ledger_entries WHERE account_id = p_account_id
+                AND (amount_micros > 0
+                  OR type IN ('credit_refund', 'credit_dispute_hold', 'byok_platform_fee'))
+                AND created_at > bound.since) after)) AS credit_spent) balances
     $$;
   $create$, data_schema);
 END $install$;

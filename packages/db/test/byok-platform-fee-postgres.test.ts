@@ -636,21 +636,19 @@ test("the balance read never touches an ordinary debit's metadata", async () => 
 
 /**
  * Ledger rows the work reads, from this transaction's statistics: rows
- * sequential scans return plus index entries index scans read (only those of
- * `index` when given).
+ * sequential scans return plus index entries index scans read. `indexed`
+ * turns sequential scans off, so a small test ledger is read the way a large
+ * one is.
  */
-async function ledgerRowsRead(work: (db: DbClient["db"]) => Promise<unknown>, index?: string) {
+async function ledgerRowsRead(work: (db: DbClient["db"]) => Promise<unknown>, indexed = false) {
   return await client!.db.transaction(async (tx) => {
     const db = tx as unknown as DbClient["db"];
+    if (indexed) await tx.execute(sql`set local enable_seqscan = off`);
     const count = async () => {
-      const [row] = (await tx.execute(
-        index
-          ? sql`select pg_stat_get_xact_tuples_returned(${index}::regclass)::text n`
-          : sql`
+      const [row] = (await tx.execute(sql`
         select sum(pg_stat_get_xact_tuples_returned(c.oid))::text n from pg_class c
         where c.oid = 'credit_ledger_entries'::regclass or c.oid in (
-          select indexrelid from pg_index where indrelid = 'credit_ledger_entries'::regclass)`,
-      )) as unknown as {
+          select indexrelid from pg_index where indrelid = 'credit_ledger_entries'::regclass)`)) as unknown as {
         n: string;
       }[];
       return Number(row!.n);
@@ -661,31 +659,89 @@ async function ledgerRowsRead(work: (db: DbClient["db"]) => Promise<unknown>, in
   });
 }
 
-test("paid credit and fee debt are read from receipt rows alone, not from every debit", async () => {
+test("paid credit and fee debt are read from the latest receipt, not from every fee", async () => {
   if (!client || !shared) return;
   const accountId = await account("free");
   await credit(accountId, "credit_topup", 10 * M);
   expect((await fee(accountId, 12 * M, "api")).unfundedMicros).toBe(2 * M);
   await credit(accountId, "credit_topup", 100 * M);
-  const rows = 3_000;
-  await shared.admin`
-    insert into credit_ledger_entries (account_id, type, amount_micros, source_type, source_id,
-      usage_origin, idempotency_key)
-    select ${accountId}::uuid, 'model_usage_debit', -1, 'model_response', gen_random_uuid()::text,
-      'api', gen_random_uuid()::text
-    from generate_series(1, ${rows})`;
-  await shared.admin`analyze credit_ledger_entries`;
-  // The receipt sums read the three receipt rows from their partial index;
-  // the one pass over every row computes only the balance and API spending.
-  const receiptRows = await ledgerRowsRead(
-    (db) => getByokFeeSpendableBalance(db, accountId, "api"),
-    "credit_ledger_receipt_rows_idx",
-  );
-  expect(receiptRows).toBeGreaterThanOrEqual(3);
-  expect(receiptRows).toBeLessThan(10);
+  // An own-key-only account: every response writes just a fee row.
+  const fees = 200;
+  for (let i = 0; i < fees; i += 1) await fee(accountId, 1_000, i % 2 ? "app" : "api");
+  // One pass over the ledger for the balance; the paid-credit figures come
+  // from the latest receipt alone, whatever the number of fees before it.
+  const rows = fees + 3;
+  for (const read of [
+    (db: DbClient["db"]) => getByokFeeSpendableBalance(db, accountId, "api"),
+    (db: DbClient["db"]) => getBillingBalance(db, accountId),
+  ]) {
+    const tuples = await ledgerRowsRead(read, true);
+    expect(tuples).toBeGreaterThanOrEqual(rows);
+    expect(tuples).toBeLessThan(rows + 10);
+  }
   const balance = await balanceOf(accountId);
-  expect(balance.paidCreditsMicros).toBe(98 * M - rows);
+  expect(balance.paidCreditsMicros).toBe(98 * M - fees * 1_000);
   expect(balance.byokFeeDebtMicros).toBeUndefined();
+  expect(balance.byokPlatformFeeMonthMicros).toBe(12 * M + fees * 1_000);
+}, 180_000);
+
+test("a receipt's running totals equal a full recount of the ledger", async () => {
+  if (!client || !shared) return;
+  const accountId = await account("pro");
+  await credit(accountId, "credit_topup", 3 * M);
+  await credit(accountId, "grant", 2 * M);
+  await fee(accountId, 4 * M, "api"); // $1 unfunded
+  await applyCreditLedgerEntry(client.db, {
+    accountId,
+    type: "credit_topup",
+    amountMicros: 10 * M,
+    idempotencyKey: crypto.randomUUID(),
+    metadata: { stripeAmountTotalCents: 500, stripeDiscountCents: 500 },
+  });
+  await usage(accountId, 6 * M, "api");
+  await credit(accountId, "credit_refund", -1 * M);
+  await fee(accountId, 2 * M, "app");
+  // An older release's rows after the latest receipt, then a receipt folding them in.
+  await shared.admin`
+    insert into credit_ledger_entries (account_id, type, amount_micros, idempotency_key)
+    values (${accountId}::uuid, 'credit_topup', ${4 * M}, ${crypto.randomUUID()}),
+      (${accountId}::uuid, 'grant', ${1 * M}, ${crypto.randomUUID()})`;
+  const before = await balanceOf(accountId);
+  await fee(accountId, 1 * M, "api");
+  const [latest] = await shared.admin<{ chain: Record<string, number | string | null> }[]>`
+    select metadata->'paidCreditTotals' chain from credit_ledger_entries
+    where account_id = ${accountId} and type = 'byok_platform_fee'
+    order by created_at desc limit 1`;
+  const [recount] = await shared.admin<Record<string, string>[]>`
+    select
+      count(*) filter (where metadata ? 'paidCreditTotals')::text n,
+      coalesce(sum(case
+        when metadata ? 'paidCreditMicros' then (metadata->>'paidCreditMicros')::bigint
+        when type = 'byok_platform_fee' then -coalesce((metadata->>'creditPaidMicros')::bigint, 0)
+        when type in ('credit_topup', 'manual_credit_grant', 'credit_dispute_release') then amount_micros
+        else 0 end), 0)::text "paidPart",
+      coalesce(sum((metadata->>'feeDebtRepaidMicros')::bigint), 0)::text repaid,
+      coalesce(sum((metadata->>'unfundedMicros')::bigint) filter (where type = 'byok_platform_fee'), 0)::text unfunded,
+      min((metadata->>'paidCreditsBeforeMicros')::bigint + coalesce((metadata->>'paidRestoredMicros')::bigint, 0)
+        - (metadata->>'paidFundingBeforeMicros')::bigint)::text "markFloor",
+      coalesce(sum(-amount_micros) filter (where type = 'byok_platform_fee'), 0)::text fees
+    from credit_ledger_entries
+    where account_id = ${accountId}
+      and (amount_micros > 0 or type in ('credit_refund', 'credit_dispute_hold', 'byok_platform_fee'))`;
+  const chain = latest!.chain;
+  expect(chain.n).toBe(Number(recount!.n));
+  expect(chain.paidPart).toBe(Number(recount!.paidPart));
+  expect(chain.repaid).toBe(Number(recount!.repaid));
+  expect(chain.unfunded).toBe(Number(recount!.unfunded));
+  expect(chain.markFloor).toBe(Number(recount!.markFloor));
+  expect(chain.feesInMonth).toBe(Number(recount!.fees));
+  // Paid inflows: $3, $5 of the coupon top-up, and the older release's $4.
+  expect(chain.paidInflow).toBe(12 * M);
+  // The older release's $4 top-up repaid the $1 of fee debt first.
+  expect(before.byokFeeDebtMicros).toBeUndefined();
+  const after = await balanceOf(accountId);
+  expect(after.byokFeeDebtMicros).toBeUndefined();
+  expect(after.paidCreditsMicros).toBe(before.paidCreditsMicros! - 1 * M);
 }, 180_000);
 
 test("fee reads and settlement read the ledger once, even after an unfunded fee", async () => {
