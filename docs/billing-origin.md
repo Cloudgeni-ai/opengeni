@@ -305,28 +305,36 @@ then
 where paid funding is the receipts' paid credit less fees paid from it and
 fee debt repaid, and a mark is paid credits before it (plus what it restores)
 less paid funding before it. Between receipts plain spending only lowers
-credits, so the lowest point is either now or a mark. The balance read sums
-the balance and API spending in one pass over the ledger, exactly as without
-the fee, and reads the receipts only from the rows that can carry one (credit
-added, Stripe refunds and dispute holds, fees) through the partial index
-`credit_ledger_receipt_rows_idx`. Ordinary debits' metadata is never read, so
-an account without fees reads its balance as fast as before, and the
-paid-credit figures scale with top-ups, grants, refunds and fees rather than
-usage. Fee admission and settlement cost the same as a plain balance read,
-and settling a fee reads the balance once.
+credits, so the lowest point is either now or a mark.
+
+Each receipt also carries running totals over every row up to and including
+its own (`paidCreditTotals`): the sums of paid parts, fee debt repaid, fees'
+unfunded shares and paid inflows, the lowest mark, a receipt count, and this
+month's fees. Writes that change paid credit take the account lock and stamp
+`created_at` after taking it, so the latest receipt's totals cover every row
+before it. The balance read sums the balance and API spending in one pass
+over the ledger, exactly as without the fee, and takes the paid-credit
+figures from the latest receipt (through the partial index
+`credit_ledger_receipt_rows_idx`) plus any rows that can carry a receipt
+written after it, which is normally none. Ordinary debits' metadata is never
+read, and the read does not grow with the number of fees, top-ups or grants:
+an account that only uses its own keys, where every row is a fee, reads its
+balance as fast as an account without fees. Fee admission and settlement
+cost the same as a plain balance read, and settling a fee reads the balance
+once. `plan_app_general_balance` reads fee debt the same way.
 
 A video refund returns as paid credit what its debit drew from paid credit
 (`paidDrawnMicros` on the debit); other usage refunds return unpaid credit,
 which can understate paid credit but never overstate it. Rows without a
 receipt (written before this release, or by the previous release during a
 rolling deploy) are bounded conservatively, never above what receipts
-recorded: an unrecorded unpaid inflow after the latest mark is taken to
+recorded: an unrecorded unpaid inflow after the latest receipt is taken to
 arrive when paid credit was zero, and paid credit is also at least credits
 less the unpaid credit the latest receipt left (none before the first) less
 the unrecorded unpaid inflows since, whichever bound is larger. So an older
 release's top-up and grant written after a receipt keep the paid credit
-before them. An unrecorded top-up after the latest mark repays fee debt
-first, and the next receipt records it.
+before them. An unrecorded top-up after the latest receipt repays fee debt
+first, and the next receipt records it and folds those rows into its totals.
 
 Workspace and member allowances count fee debits like any other debit, so an
 allowance that also counts unbilled usage at list price sees an own-key call
@@ -361,8 +369,9 @@ are read conservatively (see Paid credit).
 
 Migration 1109 builds `credit_ledger_receipt_rows_idx` concurrently (a
 non-unique partial index, so it may land after traffic returns). Reads are
-correct without it; until it exists the receipt figures take a second pass
-over the account's ledger.
+correct without it; until it exists the read finds the latest receipt through
+the account's `(account_id, created_at)` index, walking back over the spending
+since that receipt.
 
 The fee's default (500) turns it on wherever Stripe billing is active once
 deployed; set `OPENGENI_BYOK_PLATFORM_FEE_BPS=0` to deploy it switched off.
