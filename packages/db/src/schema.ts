@@ -5263,13 +5263,13 @@ export const sessions = pgTable(
     importedArchiveNextOffset: integer("imported_archive_next_offset"),
     /** Never move this session's content to the idle-session archive. */
     keepLive: boolean("keep_live").notNull().default(false),
-    /** Changeable unattended setting (migration 1105); null defers to the create option. */
+    /** Changeable unattended setting (migration 1111); null defers to the create option. */
     unattendedSetting: text("unattended_setting").$type<
       "unattended" | "attended" | "unattended_by_default"
     >(),
     /**
      * Set once at create when the setting starts the chat unattended
-     * (migration 1105); never updated, so the instructions and tools follow
+     * (migration 1111); never updated, so the instructions and tools follow
      * how the chat started. Null when it did not.
      */
     startedUnattended: boolean("started_unattended"),

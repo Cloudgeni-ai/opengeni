@@ -30266,7 +30266,7 @@ export type SessionCreateInput = {
    */
   unattended?: boolean;
   /**
-   * Changeable unattended setting (migration 1105), set only by first-party
+   * Changeable unattended setting (migration 1111), set only by first-party
    * creators such as the scheduler; omitted leaves it to the create option.
    */
   unattendedSetting?: SessionUnattendedSetting;
