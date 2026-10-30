@@ -34,6 +34,7 @@ function pull(number: number, extra: Partial<QueuedPull> = {}): QueuedPull {
     slots: [],
     priority: false,
     version: false,
+    behind: false,
     controlPlane: false,
     ...extra,
   };
@@ -149,8 +150,43 @@ describe("nextBatch", () => {
       NOW,
       DEFAULT_SETTINGS,
     );
-    // The Version PR is urgent, so it goes first and alone.
+    // A queued Version PR holds the queue, so it goes first and alone.
     expect(barrier?.kind === "build" && barrier.members.map((p) => p.number)).toEqual([2]);
+  });
+
+  test("a queued Version PR holds everything else until it is green and current", () => {
+    const others = [pull(1), pull(2, { priority: true }), pull(3, { controlPlane: true })];
+    const waiting = pull(5, { version: true, greenAt: null });
+    expect(nextBatch([...others, waiting], [[1], [2]], NOW, DEFAULT_SETTINGS)).toEqual({
+      kind: "hold",
+      number: 5,
+      headSha: waiting.headSha,
+      behind: false,
+    });
+    const behind = pull(5, { version: true, behind: true });
+    expect(nextBatch([...others, behind], [], NOW, DEFAULT_SETTINGS)).toMatchObject({
+      kind: "hold",
+      number: 5,
+      behind: true,
+    });
+    // Green and current: it builds alone and keeps a bisection for later.
+    const green = pull(5, { version: true });
+    expect(nextBatch([...others, green], [[1], [2]], NOW, DEFAULT_SETTINGS)).toEqual({
+      kind: "build",
+      members: [green],
+      pending: [[1], [2]],
+    });
+  });
+
+  test("a running batch finishes while a Version PR holds the queue", () => {
+    const waiting = pull(5, { version: true, greenAt: null });
+    const running = batch([1, 2], { runs: [run({ status: "in_progress", conclusion: null })] });
+    expect(decide(observe([pull(1), pull(2), waiting], [running]))).toEqual([]);
+    const passed = batch([1, 2], { runs: [run()] });
+    expect(decide(observe([pull(1), pull(2), pull(3), waiting], [passed]))).toEqual([
+      { kind: "land", batch: passed },
+      { kind: "hold", number: 5, headSha: waiting.headSha, behind: false },
+    ]);
   });
 
   test("priority PRs go first, together", () => {

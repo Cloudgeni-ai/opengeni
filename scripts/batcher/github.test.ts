@@ -147,3 +147,18 @@ describe("RestGitHub file and branch writes", () => {
     expect(isTransientGitHubFailure(new Error("GraphQL: Something"))).toBe(false);
   });
 });
+
+describe("RestGitHub comments", () => {
+  test("commentBodies reads the latest page of a PR's comments", async () => {
+    const { gh, requests } = client(({ url }) =>
+      url.endsWith("/issues/7")
+        ? { comments: 150 }
+        : [{ body: "first" }, { body: null }, { body: "<!-- marker -->" }],
+    );
+    expect(await gh.commentBodies(7)).toEqual(["first", "", "<!-- marker -->"]);
+    expect(requests.map((r) => r.url.replace(/^.*\/repos\/owner\/repo\//, ""))).toEqual([
+      "issues/7",
+      "issues/7/comments?per_page=100&page=2",
+    ]);
+  });
+});

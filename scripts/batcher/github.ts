@@ -106,6 +106,8 @@ export interface GitHub {
   cancelRun(id: number): Promise<void>;
   rerunFailedJobs(id: number): Promise<void>;
   comment(number: number, body: string): Promise<void>;
+  /** The bodies of a PR's latest page of comments (at most 100). */
+  commentBodies(number: number): Promise<string[]>;
   removeLabel(number: number, label: string): Promise<void>;
   disableAutoMerge(pullId: string): Promise<void>;
 }
@@ -535,6 +537,15 @@ export class RestGitHub implements GitHub {
 
   async comment(number: number, body: string) {
     await this.request("POST", `issues/${number}/comments`, { body });
+  }
+
+  async commentBodies(number: number) {
+    const issue = await this.get<{ comments: number }>(`issues/${number}`);
+    const page = Math.max(1, Math.ceil(issue.comments / 100));
+    const data = await this.get<{ body?: string | null }[]>(
+      `issues/${number}/comments?per_page=100&page=${page}`,
+    );
+    return data.map((comment) => comment.body ?? "");
   }
 
   async removeLabel(number: number, label: string) {

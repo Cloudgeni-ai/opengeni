@@ -115,7 +115,10 @@ export interface QueuedPull {
   queuedAt: number;
   /** When PR CI passed on this exact head, or null while it has not. */
   greenAt: number | null;
-  /** Why the PR cannot land on main as it is (a Git conflict, a number main already uses), or null. */
+  /**
+   * Why the PR cannot land on main as it is (a Git conflict, a number main
+   * already uses, a Version PR whose PR CI failed), or null.
+   */
   conflict: string | null;
   /**
    * Added files whose numbers main already uses, which the batcher moves to
@@ -126,6 +129,11 @@ export interface QueuedPull {
   slots: string[];
   priority: boolean;
   version: boolean;
+  /**
+   * A Version PR that main has overtaken in files it also changes. It cannot
+   * land as reviewed until it is regenerated; it keeps holding the queue.
+   */
+  behind: boolean;
   controlPlane: boolean;
 }
 
@@ -183,6 +191,8 @@ export type Action =
   | { kind: "eject"; number: number; reason: string }
   | { kind: "renumber"; number: number; paths: string[] }
   | { kind: "build"; members: QueuedPull[]; pending: number[][] }
+  /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
+  | { kind: "hold"; number: number; headSha: string; behind: boolean }
   | { kind: "wait"; until: number };
 
 export type Verdict =
@@ -223,9 +233,11 @@ export function readyAt(pull: QueuedPull): number {
 }
 
 /**
- * Choose the next batch. Priority and Version PRs go first; a failed batch's
- * remaining halves come next; then ready PRs in queue order. CI and batcher
- * changes run alone.
+ * Choose the next batch. A queued Version PR holds the queue: it builds alone
+ * once it is green and current with main, and nothing else builds before it
+ * lands, so a release operator gets a stable main. Then priority PRs go
+ * first; a failed batch's remaining halves come next; then ready PRs in queue
+ * order. CI and batcher changes run alone.
  */
 export function nextBatch(
   pulls: QueuedPull[],
@@ -233,13 +245,19 @@ export function nextBatch(
   now: number,
   settings: Settings,
 ): Action | null {
+  const version = pulls.filter((p) => p.version && p.conflict === null).sort(fifo)[0];
+  if (version)
+    return version.greenAt !== null && !version.behind && !version.renumber.length
+      ? { kind: "build", members: [version], pending }
+      : { kind: "hold", number: version.number, headSha: version.headSha, behind: version.behind };
+
   const ready = pulls
     .filter((p) => p.greenAt !== null && p.conflict === null && !p.renumber.length)
     .sort(fifo);
   if (!ready.length) return null;
-  const alone = (p: QueuedPull) => p.version || p.controlPlane;
+  const alone = (p: QueuedPull) => p.controlPlane;
 
-  const urgent = ready.filter((p) => p.priority || p.version);
+  const urgent = ready.filter((p) => p.priority);
   if (urgent.length) {
     const first = urgent[0]!;
     const members = alone(first)

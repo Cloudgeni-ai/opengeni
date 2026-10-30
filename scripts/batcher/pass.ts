@@ -46,6 +46,12 @@ const ADDED = new Set(["added", "renamed", "copied"]);
 export const VERSION_OVERLAP =
   "main changed files this Version PR also changes after it was generated, so it cannot land as reviewed. Run the Open Version PR workflow to regenerate it from current main; do not merge main into it.";
 
+export const VERSION_CI_FAILED =
+  "its PR CI failed on its current head, and while a Version PR is queued no other PR builds. Rerun or fix its PR CI, or run the Open Version PR workflow again.";
+
+/** Marks the one notice per Version PR head that main has overtaken it. */
+const versionBehindMarker = (headSha: string) => `<!-- merge-batcher:version-behind ${headSha} -->`;
+
 export class LandingMismatch extends Error {}
 
 export interface PassOptions {
@@ -107,17 +113,20 @@ async function observe(ctx: Context): Promise<Observation> {
     if (pull.draft || !pull.sameRepository) continue;
     if (pull.autoMergeAt !== null) ctx.autoMerge.set(pull.number, pull.id);
     const check = await gh.check(pull.headSha, PR_CHECK);
-    const green =
+    const current =
       check?.status === "completed" &&
-      check.conclusion === "success" &&
       check.workflow === PR_WORKFLOW &&
       check.runHeadSha === pull.headSha;
+    const green = current && check.conclusion === "success";
+    const version = pull.headRef === VERSION_BRANCH;
     const changed = green ? await gh.pullFiles(pull.number) : [];
     const files = changed?.flatMap((f) => (f.previous ? [f.path, f.previous] : [f.path])) ?? null;
     const added = numberedFiles(
       (changed ?? []).filter((f) => ADDED.has(f.status)).map((f) => f.path),
     );
     let conflict = pull.mergeable === "CONFLICTING" ? CONFLICTING : null;
+    // A Version PR holds the queue, so one whose PR CI failed leaves it.
+    if (version && current && !green) conflict = VERSION_CI_FAILED;
     const renumber: string[] = [];
     for (const directory of new Set(
       added.map((f) => f.slot.slice(0, f.slot.lastIndexOf("/") + 1)),
@@ -154,7 +163,10 @@ async function observe(ctx: Context): Promise<Observation> {
       renumber: conflict === null ? renumber : [],
       slots: added.map((f) => f.slot),
       priority: pull.labels.includes(PRIORITY_LABEL),
-      version: pull.headRef === VERSION_BRANCH,
+      version,
+      // Only a held Version PR is compared: main moves under it only when the
+      // batch in flight when it was queued lands.
+      behind: version && conflict === null && (await versionOverlaps(gh, mainSha, pull.headSha)),
       // Too many files to list is treated like a CI change: it runs alone.
       controlPlane: files === null || isControlPlane(files),
     });
@@ -439,8 +451,9 @@ async function build(ctx: Context, members: QueuedPull[], pending: number[][]) {
   await gh.createBranch(scratch, base);
   try {
     for (const pull of members) {
+      // Main moved since this pass observed it; the next pass holds for it.
       if (pull.version && (await versionOverlaps(gh, base, pull.headSha))) {
-        await eject(ctx, pull.number, VERSION_OVERLAP);
+        ctx.log(`Not building Version PR #${pull.number}: main changed files it also changes`);
         continue;
       }
       const result = await gh.mergeInto(
@@ -497,9 +510,23 @@ async function act(ctx: Context, action: Action) {
       return moveMigrations(ctx, action.number, action.paths);
     case "build":
       return build(ctx, action.members, action.pending);
+    case "hold":
+      if (action.behind) await noteVersionBehind(ctx, action.number, action.headSha);
+      return;
     case "wait":
       return;
   }
+}
+
+/** Tell a held Version PR once per head that it must be regenerated. */
+async function noteVersionBehind(ctx: Context, number: number, headSha: string) {
+  const marker = versionBehindMarker(headSha);
+  if ((await ctx.gh.commentBodies(number)).some((body) => body.includes(marker))) return;
+  ctx.log(`Asking for Version PR #${number} to be regenerated`);
+  await ctx.gh.comment(
+    number,
+    `${marker}\nThe merge queue is holding main for this Version PR, but ${VERSION_OVERLAP} It keeps its place in the queue and lands next.`,
+  );
 }
 
 export function describe(action: Action): string {
@@ -516,6 +543,10 @@ export function describe(action: Action): string {
       return `move #${action.number}'s ${action.paths.map(fileName).join(", ")} to the next free number`;
     case "build":
       return `build ${action.members.map((m) => `#${m.number}`).join(", ")}${action.pending.length ? ` (then ${JSON.stringify(action.pending)})` : ""}`;
+    case "hold":
+      return action.behind
+        ? `hold the queue for Version PR #${action.number}: main changed files it also changes, so it waits to be regenerated`
+        : `hold the queue for Version PR #${action.number} until its PR CI passes`;
     case "wait":
       return `wait until ${new Date(action.until).toISOString()} to collect more PRs`;
   }

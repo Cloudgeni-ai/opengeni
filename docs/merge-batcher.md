@@ -16,6 +16,29 @@ head. Add `queue-priority` as well for an urgent fix: priority PRs are tested
 next, as soon as the batch that is already running finishes. A running batch is
 never cancelled for one.
 
+## Releasing: a Version PR holds main
+
+A queued Version PR (the `changeset-release/main` branch that the Open Version
+PR workflow opens) holds the queue so it lands on a stable `main`:
+
+1. Run the **Open Version PR** workflow, then add `queue-ready` to the PR.
+2. The batch already running, if any, still finishes and may land. After
+   that, nothing else builds, including priority and CI-change PRs, so `main`
+   moves at most once after you queue it.
+3. Once the Version PR's PR CI passes on its head, it is built alone on that
+   `main` and lands as a true merge. Normal batching then resumes, priority
+   PRs first.
+
+If the batch that was running lands a file the Version PR also changes, the
+Version PR cannot land as reviewed. It keeps holding the queue and gets one
+comment asking for it to be regenerated: run the Open Version PR workflow
+again. That updates the same PR from the now-stable `main`, it keeps its
+label, and it lands next. If its PR CI fails on its current head, it leaves the
+queue with a comment instead, so a broken Version PR never blocks other work.
+To give up on a release, remove its `queue-ready` label. A bisection that was
+in progress may be dropped during a hold; its PRs are simply batched again
+afterwards.
+
 The release-plan guard recognizes singleton Version batches by their manifest
 and exact parent topology, independently recomputes their complete merge tree,
 then reproduces the original Version head from its own base. Consumed changesets
@@ -55,7 +78,8 @@ never share a batch. The numbered directories are listed in `NUMBERED_FILES`
 1. **Collect.** Once the oldest ready PR has waited the batching window
    (3 minutes, `MERGE_BATCHER_WINDOW_SECONDS`), the batcher takes up to 12 ready
    PRs (`MERGE_BATCHER_MAX_BATCH`) in queue order. PRs that change `.github/`,
-   `scripts/ci/` or `scripts/batcher/`, and Version PRs, are batched alone.
+   `scripts/ci/` or `scripts/batcher/`, and Version PRs, are batched alone
+   (a Version PR first; see above).
 2. **Build.** It merges the PRs one by one onto the current `main` with
    GitHub's merge API on a scratch branch, and pushes the result with a
    manifest commit as `batch/<id>`. A PR that conflicts with an earlier one in
@@ -159,6 +183,9 @@ staging deploys use the newest fully green `main` SHA as before.
 - **Run a pass now:** `gh workflow run merge-batcher.yml`.
 - **Stop landing:** set `MERGE_BATCHER` to anything else. Nothing is lost: the
   queue is the labels, and a leftover `batch/<id>` branch is rebuilt later.
+- **Hold main for a release:** queue the Version PR (see
+  [Releasing](#releasing-a-version-pr-holds-main)); do not change the window,
+  the batch size or other PRs' labels.
 - **Every pass is idempotent.** It reads GitHub, does the next step and exits,
   so a cancelled or failed pass is repaired by the next one (every 5 minutes,
   and whenever PR CI or batch CI finishes or a PR is queued).
