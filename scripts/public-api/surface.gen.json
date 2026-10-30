@@ -21999,6 +21999,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.allowPersonalWorkspaces": "boolean!",
         "$.createdAt": "string!",
         "$.enabled": "boolean!",
         "$.organizationId": "string!",
@@ -23627,6 +23628,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.allowPersonalWorkspaces": "boolean?",
         "$.enabled": "boolean?",
         "$.timeoutMs": "integer?",
         "$.url": "string!",
