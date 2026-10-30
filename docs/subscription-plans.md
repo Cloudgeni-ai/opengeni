@@ -260,6 +260,24 @@ canonical lock. Setup retries cannot issue another witness; additional organizat
 invited users and unverified people cannot obtain one. There is **no backfill**:
 old completed setups with no trial receipt remain ineligible, even on replay.
 
+### Signup cutoff (1119)
+
+An owner can additionally set a signup cutoff with
+`opengeni_private.set_free_credit_signup_cutoff(timestamptz, text, text, bigint)`
+(revision-fenced, audited, owner-only; see
+[signup abuse protection](signup-abuse-protection.md#free-credit-signup-cutoff)).
+While it is set, `free_plan_credit_eligible` and the Free branch of
+`list_subscription_plan_maintenance_accounts` also require the receipt owner's
+`auth_users.created_at` to be at or after the cutoff. Every Free issuance path
+(the sweep, `grant_plan_credit_period` and `replace_plan_credit_period`, which
+delegates to it) goes through that check. Exact replays of an existing receipt
+still return it, and existing periods stay spendable until their normal expiry.
+A `NULL` cutoff or no revision means no cutoff.
+
+Set the cutoff **before** re-enabling Free in the catalog. To roll back, turn
+Free off in the catalog or clear the cutoff; neither removes issued periods. If the
+signup challenge is disabled, the cutoff alone no longer implies a CAPTCHA.
+
 The old `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` environment flag and
 `set_verified_signup_trial_credits_enabled` runtime switch no longer gate this
 non-monetary witness and cannot restore a bonus. No production config edit is

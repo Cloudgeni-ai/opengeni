@@ -2741,6 +2741,7 @@ BEGIN
       'set_promotion_enforcement(boolean,text,text,boolean)',
       'evaluate_promotion_abuse(uuid)',
       'set_promotion_detector_mode(text,text)',
+      'set_free_credit_signup_cutoff(timestamptz,text,text,bigint)',
       'wake_teams_route_for_session_event()',
       'sync_usage_maintenance_due()',
       'arm_usage_allowances_for_membership()',

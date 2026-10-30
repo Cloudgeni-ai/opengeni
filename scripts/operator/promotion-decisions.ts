@@ -18,6 +18,8 @@ const { values } = parseArgs({
     reason: { type: "string" },
     revision: { type: "string" },
     show: { type: "boolean" },
+    "free-credit-cutoff": { type: "string" },
+    "free-credit-cutoff-history": { type: "boolean" },
   },
 });
 const modes = [
@@ -27,10 +29,12 @@ const modes = [
   values.enforcement,
   values.observations,
   values["detector-mode"],
+  values["free-credit-cutoff"],
+  values["free-credit-cutoff-history"],
 ].filter(Boolean);
 if (modes.length !== 1)
   throw new Error(
-    "Choose --show, --list, --observations, --detector-mode off|observe|enforce, --enforcement on|off, or --decision eligible|verification_required|held|denied",
+    "Choose --show, --list, --observations, --detector-mode off|observe|enforce, --enforcement on|off, --free-credit-cutoff <timestamp|none>, --free-credit-cutoff-history, or --decision eligible|verification_required|held|denied",
   );
 if (
   (values.show || values.decision) &&
@@ -48,6 +52,31 @@ try {
     if (!values.operator?.trim()) throw new Error("Provide --operator");
     const result = await client.db.execute(sql`select opengeni_private.set_promotion_detector_mode(
       ${values["detector-mode"]}, ${`operator:${values.operator.trim()}`}) as mode`);
+    console.log(JSON.stringify(result, null, 2));
+  } else if (values["free-credit-cutoff"]) {
+    // Owner-only, revision-fenced (0 before the first write). "none" clears it.
+    if (
+      !values.operator?.trim() ||
+      !values.reason ||
+      values.reason.trim().length < 6 ||
+      !values.revision ||
+      !/^\d+$/.test(values.revision)
+    )
+      throw new Error(
+        "Provide --operator, --reason (six characters), and --revision <current cutoff revision, 0 for none>",
+      );
+    const cutoff = values["free-credit-cutoff"];
+    const notBefore = cutoff === "none" ? null : cutoff;
+    const result = await client.db
+      .execute(sql`select opengeni_private.set_free_credit_signup_cutoff(
+      ${notBefore}::timestamptz, ${values.operator.trim()}, ${values.reason.trim()}, ${values.revision}::bigint) as cutoff`);
+    console.log(JSON.stringify(result, null, 2));
+  } else if (values["free-credit-cutoff-history"]) {
+    const result = await client.db
+      .execute(sql`select revision, not_before, operator, reason, database_role, changed_at
+      from opengeni_private.free_credit_signup_cutoff_revisions
+      where data_schema=session_tenancy_fence_target_schema()::regnamespace::text
+      order by revision desc limit 100`);
     console.log(JSON.stringify(result, null, 2));
   } else if (values.observations) {
     const result = await client.db

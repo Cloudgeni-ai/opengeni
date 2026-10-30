@@ -135,6 +135,54 @@ bun scripts/operator/promotion-decisions.ts --account <uuid> --decision eligible
 The bounded list includes free allowance totals and current held balance. Preserve
 incident exports privately; do not commit customer identities or machine evidence.
 
+## Free credit signup cutoff
+
+`1119_free_credit_signup_cutoff.sql` adds an owner-only cutoff for **new** Free
+monthly periods. While a cutoff is set, `free_plan_credit_eligible` and the Free
+branch of the maintenance sweep also require the owner named by the signup
+receipt (`source_id`, an `auth_users` row) to have been created at or after the
+cutoff. Organization creation time does not count: an older user who creates a
+new organization does not qualify. With no cutoff (no revision, or a `NULL`
+cutoff) nothing changes.
+
+The cutoff is meant to be the time the signup challenge became enforced, so that
+only owners who passed it receive Free credit. That holds only while the
+challenge stays enabled: if the signup challenge is ever disabled, a later signup
+still passes the cutoff without having passed a CAPTCHA.
+
+It never removes, expires or changes what an already-issued period can spend.
+`getSpendableCreditBalance` calls `free_plan_credit_eligible` only for its abuse
+detector side effect and ignores the result. Paid plans, top-ups, decisions and
+enforcement are unaffected.
+
+```sql
+opengeni_private.set_free_credit_signup_cutoff(p_not_before timestamptz, p_operator text,
+  p_reason text, p_expected_revision bigint) -> jsonb
+```
+
+The setter compares `p_expected_revision` with the current revision (0 before the
+first write) and fails with `40001` when it changed. Every write appends a row to
+`opengeni_private.free_credit_signup_cutoff_revisions` with the operator, reason
+(6-1000 bytes) and database role. Runtime roles can neither read the table nor call
+the setter.
+
+```sh
+bun scripts/operator/promotion-decisions.ts --free-credit-cutoff-history
+bun scripts/operator/promotion-decisions.ts --free-credit-cutoff 2026-10-29T15:08:00Z \
+  --revision 0 --operator <operator-id> --reason 'Free credit only for CAPTCHA-verified signups'
+bun scripts/operator/promotion-decisions.ts --free-credit-cutoff none \
+  --revision <current-revision> --operator <operator-id> --reason 'Remove the signup cutoff'
+```
+
+Order matters. Deploy the release containing 1119, **set the cutoff, then turn Free
+credit back on** in the subscription catalog. Turning Free on first lets the sweep
+fund every older eligible owner before the cutoff exists. Owners who signed up after
+the cutoff while Free was off are funded on the next sweep once it is on.
+
+Rollback: turn Free off in the catalog (`freeCredit=false`, `monthlyCreditMicros=0`)
+to stop all new Free periods, or clear the cutoff (`--free-credit-cutoff none`) to
+return to the previous eligibility. Neither removes periods that were already issued.
+
 ## Rollout and rollback
 
 Migrations are additive/rolling and default inert. Apply migrations and provision
