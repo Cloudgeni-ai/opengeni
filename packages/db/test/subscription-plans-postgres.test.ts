@@ -1017,6 +1017,148 @@ for (const posture of ["production", "restricted"] as const) {
       "P0S01",
     );
   }, 180_000);
+
+  // Whatever refuses one organization's binding, sign-in must keep the
+  // person's other organizations. The failure is injected so that it covers
+  // refusals the seat trigger no longer raises.
+  test(`one organization refusing a sign-in binding leaves its invitation pending and keeps the rest (${posture} owner)`, async () => {
+    if (!client || !shared) return;
+    const run =
+      posture === "production" ? asProductionOwnerPosture : <T>(fn: () => Promise<T>) => fn();
+    const refusing = await account();
+    const accepting = await account();
+    const userId = crypto.randomUUID();
+    const email = `${userId}@example.test`;
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${userId}, 'Isolated recipient', ${email}, true)`;
+    const own = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email,
+      name: "Isolated recipient",
+    });
+    const inviteFrom = (from: { accountId: string; subject: string }) =>
+      createOrganizationInvitation(client!.db, {
+        organizationId: from.accountId,
+        actorSubjectId: from.subject,
+        operationId: crypto.randomUUID(),
+        targetSubjectId: null,
+        targetEmail: email,
+        role: "member",
+        expiresAt: new Date(Date.now() + 3600000).toISOString(),
+      });
+    const refused = await inviteFrom(refusing);
+    const bound = await inviteFrom(accepting);
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const schema = `"${shared.schema.replaceAll('"', '""')}"`;
+    await shared.admin.unsafe(`
+      CREATE FUNCTION ${schema}.refuse_binding_${suffix}() RETURNS trigger LANGUAGE plpgsql AS $f$
+      BEGIN
+        IF NEW.account_id = '${refusing.accountId}' AND NEW.target_subject_id IS NOT NULL THEN
+          RAISE EXCEPTION 'injected binding refusal' USING ERRCODE = 'P0S01';
+        END IF;
+        RETURN NEW;
+      END $f$;
+      CREATE TRIGGER refuse_binding_${suffix} BEFORE UPDATE ON ${schema}.organization_membership_invitations
+        FOR EACH ROW EXECUTE FUNCTION ${schema}.refuse_binding_${suffix}();`);
+    const targets = async () =>
+      Object.fromEntries(
+        (
+          await shared!.admin<
+            Array<{ id: string; target_subject_id: string | null; status: string }>
+          >`
+            select id, target_subject_id, status from organization_membership_invitations
+            where id in (${refused.id}, ${bound.id})`
+        ).map((row) => [row.id, row]),
+      );
+    const fresh = createDb(shared.appUrl, { max: 1, searchPath: shared.schema });
+    const signIn = () =>
+      ensureManagedAccessForUserWithOrganizationMemberships(fresh.db, {
+        userId,
+        email,
+        name: "Isolated recipient",
+        emailVerified: true,
+      });
+    try {
+      try {
+        const signedIn = await run(signIn);
+        expect(signedIn.organizationMemberships.map((m) => m.organizationId)).toContain(
+          own.defaultAccountId!,
+        );
+        expect(await targets()).toMatchObject({
+          [refused.id]: { target_subject_id: null, status: "pending" },
+          [bound.id]: { target_subject_id: `user:${userId}`, status: "pending" },
+        });
+      } finally {
+        await shared.admin.unsafe(`
+          DROP TRIGGER refuse_binding_${suffix} ON ${schema}.organization_membership_invitations;
+          DROP FUNCTION ${schema}.refuse_binding_${suffix}();`);
+      }
+      // The next sign-in binds the invitation the organization refused before.
+      await run(signIn);
+      expect((await targets())[refused.id]).toMatchObject({
+        target_subject_id: `user:${userId}`,
+      });
+    } finally {
+      await fresh.close();
+    }
+  }, 180_000);
+
+  // The seat a binding keeps is only the one its invitation already held.
+  test(`invitation writes that would take a new seat are still refused at the cap (${posture} owner)`, async () => {
+    if (!client || !shared) return;
+    const run =
+      posture === "production" ? asProductionOwnerPosture : <T>(fn: () => Promise<T>) => fn();
+    const { accountId, subject } = await account();
+    const member = `user:${crypto.randomUUID()}`;
+    await provision(accountId, member);
+    const memberInvitation = await invite(accountId, subject);
+    const revoked = await invite(accountId, subject);
+    const expired = await invite(accountId, subject);
+    // An invitation aimed at an existing member holds no seat of its own.
+    await shared.admin`update organization_membership_invitations set target_subject_id = ${member} where id = ${memberInvitation.id}`;
+    await shared.admin`update organization_membership_invitations set status = 'revoked' where id = ${revoked.id}`;
+    await shared.admin`update organization_membership_invitations set expires_at = clock_timestamp() - interval '1 minute' where id = ${expired.id}`;
+    for (let i = 0; i < 3; i++) await invite(accountId, subject);
+    await activate(accountId, "free");
+    expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(5);
+    const write = (statement: string, params: string[]) =>
+      run(() =>
+        shared!.admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.organization_tenancy_lifecycle','organization_membership_lifecycle',true),set_config('opengeni.account_id',${accountId},true)`;
+          await tx.unsafe(statement, params);
+        }),
+      );
+    const stranger = `user:${crypto.randomUUID()}`;
+    for (const [statement, params] of [
+      // Re-aiming a member's invitation at someone new.
+      [
+        "update organization_membership_invitations set target_subject_id = $1 where id = $2",
+        [stranger, memberInvitation.id],
+      ],
+      // Re-pending a revoked invitation, with or without a new target.
+      [
+        "update organization_membership_invitations set status = 'pending' where id = $1",
+        [revoked.id],
+      ],
+      [
+        "update organization_membership_invitations set status = 'pending', target_subject_id = $1 where id = $2",
+        [stranger, revoked.id],
+      ],
+      // Renewing, or renewing and binding, an invitation that already expired.
+      [
+        "update organization_membership_invitations set expires_at = clock_timestamp() + interval '1 hour' where id = $1",
+        [expired.id],
+      ],
+      [
+        "update organization_membership_invitations set expires_at = clock_timestamp() + interval '1 hour', target_subject_id = $1 where id = $2",
+        [stranger, expired.id],
+      ],
+    ] as Array<[string, string[]]>) {
+      await expectState(() => write(statement, params), "P0S01");
+    }
+    expect((await getBillingBalance(client.db, accountId)).plan?.seatsUsed).toBe(5);
+  }, 180_000);
 }
 
 test("seat limits apply to lifecycle writers without the organization's account context", async () => {

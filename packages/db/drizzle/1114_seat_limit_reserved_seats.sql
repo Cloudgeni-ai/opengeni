@@ -15,12 +15,17 @@
 --
 -- A pending invitation that already holds a seat keeps holding the same seat
 -- when it is bound or renewed, and an insert for a person who already has a
--- membership row in the organization adds nobody (the unique index makes it a
--- no-op or an error). Neither is counted. Everything else is unchanged: new
+-- counted membership row in the organization adds nobody (the unique index
+-- makes it a no-op or an error). Neither is counted. Everything else is unchanged: new
 -- invitations, new members and reactivations still need a free seat, existing
 -- people stay, and the refusal is the same P0S01. Its DETAIL also names the
 -- organization's plan key, so the API can name the one plan that adds the seat.
 -- Only the trigger body is replaced; its owner, grants and triggers stay.
+--
+-- Sign-in binding also isolates each organization: any failure binding one
+-- organization's invitations leaves them pending and unbound (the next sign-in
+-- tries again) and never aborts the caller, so one organization can never take
+-- away access to the person's other organizations.
 -- Rolling: the previous release reads no new shape and only sees fewer refusals.
 CREATE OR REPLACE FUNCTION opengeni_private.enforce_organization_plan_seats()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
@@ -49,11 +54,12 @@ BEGIN
   END IF;
   PERFORM set_config('opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true);
   IF TG_TABLE_NAME = 'organization_memberships' THEN
-    -- An insert for someone who already has a row here (ON CONFLICT DO NOTHING)
-    -- adds nobody.
+    -- An insert for someone who already holds a seat here (ON CONFLICT DO
+    -- NOTHING) adds nobody. Only a counted row qualifies, so deleting a row
+    -- concurrently can never let an uncounted person in.
     IF TG_OP = 'INSERT' THEN
       SELECT EXISTS (SELECT 1 FROM organization_memberships WHERE account_id = NEW.account_id
-        AND subject_id = NEW.subject_id) INTO reserved;
+        AND subject_id = NEW.subject_id AND status IN ('active','provisioning')) INTO reserved;
     END IF;
     -- Acceptance converts an already-counted reservation, even after a downgrade.
     IF NOT reserved THEN
@@ -93,4 +99,114 @@ DO $posture$
 BEGIN
   EXECUTE format('ALTER FUNCTION opengeni_private.enforce_organization_plan_seats() SET search_path = pg_catalog, %I, opengeni_private, pg_temp',
     current_schema());
+END $posture$;
+
+-- Same body as before, except that each organization binds in its own
+-- subtransaction. A refusal there (seat limit, a constraint, a lock timeout)
+-- rolls back only that organization's binding and is reported as a WARNING
+-- with its SQLSTATE; the person's other organizations and the caller's
+-- membership lookup carry on.
+CREATE OR REPLACE FUNCTION bind_pending_organization_invitations_for_verified_email(p_subject_id text, p_email text)
+RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
+DECLARE
+  normalized_email text := lower(btrim(p_email));
+  user_id_value text;
+  bound_count integer := 0;
+  bound_here integer;
+  account_id_value uuid;
+BEGIN
+  IF p_subject_id IS NULL
+    OR p_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()
+    OR p_subject_id NOT LIKE 'user:%'
+    OR normalized_email IS NULL
+    OR octet_length(convert_to(normalized_email, 'UTF8')) NOT BETWEEN 3 AND 320
+  THEN
+    RAISE EXCEPTION 'verified managed human authority required' USING ERRCODE = '42501';
+  END IF;
+  user_id_value := substring(p_subject_id FROM 6);
+  IF user_id_value IS NULL
+    OR octet_length(convert_to(user_id_value, 'UTF8')) NOT BETWEEN 1 AND 1019
+  THEN
+    RAISE EXCEPTION 'verified managed human authority required' USING ERRCODE = '42501';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM auth_users auth_user
+    WHERE auth_user.id = user_id_value
+      AND auth_user.email_verified IS TRUE
+      AND lower(btrim(auth_user.email)) = normalized_email
+  ) THEN
+    RAISE EXCEPTION 'verified managed human authority required' USING ERRCODE = '42501';
+  END IF;
+
+  -- Hold this transaction-scoped fence through the caller's subsequent
+  -- pending-invitation check and fallback provisioning decision. Creation
+  -- takes the same fence before any organization lock, so neither path can
+  -- snapshot an absence while a matching invitation is committing.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(
+      'organization-invitation-email:' || normalized_email, 0
+    )
+  );
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle',
+    'organization_membership_lifecycle', true
+  );
+  FOR account_id_value IN
+    SELECT DISTINCT invitation.account_id
+    FROM organization_membership_invitations invitation
+    WHERE invitation.target_subject_id IS NULL
+      AND invitation.target_email = normalized_email
+      AND invitation.status = 'pending'
+      AND invitation.expires_at > pg_catalog.clock_timestamp()
+    ORDER BY invitation.account_id
+  LOOP
+    BEGIN
+      PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+          'organization-membership:' || account_id_value::text, 0
+        )
+      );
+      PERFORM 1 FROM managed_accounts account
+      WHERE account.id = account_id_value FOR KEY SHARE;
+      WITH bound AS (
+        UPDATE organization_membership_invitations invitation SET
+          target_subject_id = p_subject_id,
+          revision = invitation.revision + 1,
+          updated_at = pg_catalog.clock_timestamp()
+        WHERE invitation.account_id = account_id_value
+          AND invitation.target_subject_id IS NULL
+          AND invitation.target_email = normalized_email
+          AND invitation.status = 'pending'
+          AND invitation.expires_at > pg_catalog.clock_timestamp()
+          AND NOT EXISTS (
+            SELECT 1 FROM organization_membership_invitations existing
+            WHERE existing.account_id = invitation.account_id
+              AND existing.target_subject_id = p_subject_id
+              AND existing.status = 'pending'
+          )
+        RETURNING invitation.id, invitation.account_id, invitation.revision
+      ), recorded AS (
+        INSERT INTO organization_invitation_binding_events (
+          account_id, invitation_id, target_subject_id, resulting_revision
+        )
+        SELECT account_id, id, p_subject_id, revision FROM bound
+        RETURNING 1
+      )
+      SELECT pg_catalog.count(*)::integer INTO bound_here FROM recorded;
+      bound_count := bound_count + bound_here;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE WARNING 'organization invitation binding skipped'
+        USING DETAIL = pg_catalog.jsonb_build_object(
+          'organizationId', account_id_value, 'sqlState', SQLSTATE
+        )::text;
+    END;
+  END LOOP;
+  RETURN bound_count;
+END
+$body$;
+
+DO $posture$
+BEGIN
+  EXECUTE format('ALTER FUNCTION %I.bind_pending_organization_invitations_for_verified_email(text, text) SET search_path = pg_catalog, %I, pg_temp',
+    current_schema(), current_schema());
 END $posture$;
