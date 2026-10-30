@@ -239,6 +239,21 @@ admitted and revalidated against a `connected_machine.use` grant. Workspace acce
 loss removes workspace resources immediately without deleting the user's resources;
 cross-organization visibility remains impossible.
 
+### Available here
+
+Workspace settings › Available here shows what agent turns in one workspace can
+use, grouped by owner: the workspace's own things, the organization's things
+that reach the workspace, and the viewer's own things. It reads the same lists
+each kind's own page reads (connector installations, Connected Machines, rigs,
+vaults, Skills and Knowledge), so it never shows anything those pages would not:
+other people's personal resources never appear, and a kind the viewer may not
+list is left out instead of shown as an error. Each row says who manages it
+(workspace admins for connectors and machines, workspace members and admins for
+rigs, vaults, Skills and Knowledge, organization owners for organization things,
+only the owner for personal things) and opens the thing's own page. Model plans
+and keys stay on Organization settings › Models, which already shows each
+one's owner; the page links there for people who may open it.
+
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
 Migration `0219_organization_tenancy_managed_human_provisioning.sql` adds the
