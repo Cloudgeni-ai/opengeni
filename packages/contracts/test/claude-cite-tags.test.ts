@@ -100,4 +100,48 @@ describe("Claude citation tags", () => {
       ].join("\n"),
     );
   });
+
+  test("replace nested tags innermost first", () => {
+    const nested = cite("1-1", `a ${cite("2-2", "b")} c`);
+    expect(rewriteClaudeCiteTags(nested)).toBe("a b c");
+    expect(rewriteClaudeCiteTags(nested, resolve)).toBe(
+      `a [b](${SOURCES[1]}) c ([x.com](${SOURCES[0]}))`,
+    );
+  });
+
+  test("remove many unclosed tags in linear time", () => {
+    const many = `${open("1-1")}x `.repeat(20_000);
+    const started = performance.now();
+    expect(rewriteClaudeCiteTags(`${many}${cite("1-1", "end")}`)).toBe(`${"x ".repeat(20_000)}end`);
+    expect(rewriteClaudeCiteTags(`${cite("1-1", "start")} ${many}`)).toBe(
+      `start ${"x ".repeat(20_000)}`,
+    );
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  test("hide a closing tag cut short at the end, but keep a final less-than sign", () => {
+    expect(rewriteClaudeCiteTags(`${open("1-1")}"half${LT}/ci`)).toBe('"half');
+    expect(rewriteClaudeCiteTags(`Done. ${LT}cite index="1-2"`)).toBe("Done. ");
+    expect(rewriteClaudeCiteTags(`${cite("1-1", "a")} and 3 ${LT}`)).toBe(`a and 3 ${LT}`);
+  });
+
+  test("link only safe http(s) URLs, and never a label that would break the link", () => {
+    for (const url of [
+      "data:text/html,x",
+      "https://example.com/a b",
+      "https://example.com/a|b",
+      "https://example.com/\u0000",
+      "https://",
+    ])
+      expect(rewriteClaudeCiteTags(cite("1-1", "q"), () => ({ url }))).toBe("q");
+    expect(rewriteClaudeCiteTags(cite("3-1", "ends in \\"), resolve)).toBe(
+      `ends in \\ ([vals.ai](${SOURCES[2]}))`,
+    );
+  });
+
+  test("treat only matching backtick runs as inline code", () => {
+    // The span is "` c `"; the lone run of three opens nothing.
+    const text = `a \`\`\` ${cite("1-1", "b")} \`${cite("1-1", "c")}\` d`;
+    expect(rewriteClaudeCiteTags(text)).toBe(`a \`\`\` b \`${cite("1-1", "c")}\` d`);
+  });
 });

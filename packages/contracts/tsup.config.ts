@@ -9,6 +9,7 @@ export default defineConfig({
     "src/timeline-order.ts",
     "src/learning-refusal.ts",
     "src/values.ts",
+    "src/claude-cite-tags.ts",
     "src/usage-allowances.ts",
     "src/session-usage-limits.ts",
     "src/session-usage-limit-refusal.ts",

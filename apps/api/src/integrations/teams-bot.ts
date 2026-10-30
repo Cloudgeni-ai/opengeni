@@ -599,11 +599,16 @@ async function catalogDeps(deps: ApiRouteDeps, grant: AccessGrant): Promise<ApiR
     ).settings,
   };
 }
-/** An agent's reply as Teams message parts. Teams shows plain text, so Claude
- * citation tags become their quoted text instead of raw markup. */
+
+/**
+ * An agent's reply as Teams message parts. Claude citation tags left in the
+ * text become their quoted text instead of raw markup; links the Claude
+ * transport already made from them stay Markdown links.
+ */
 export function teamsReplyParts(text: string): string[] {
   return teamsTextParts(rewriteClaudeCiteTags(text));
 }
+
 export function teamsTextParts(text: string): string[] {
   const parts: string[] = [];
   let part = "";

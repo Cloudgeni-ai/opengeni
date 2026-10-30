@@ -1,4 +1,3 @@
-import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 /**
  * Markdown to Slack mrkdwn for model-authored text Opengeni posts to Slack.
  *
@@ -20,6 +19,8 @@ import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
  * reachable the same way, or operations started before the deploy conflict on
  * every retry.
  */
+
+import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 
 /**
  * A private provider citation handle: U+E200 `cite`, one or more U+E202
@@ -95,7 +96,20 @@ export function stripProviderCitationMarkers(text: string): string {
  * Text that uses none of this syntax comes back unchanged.
  */
 export function slackMrkdwnFromMarkdown(markdown: string): string {
-  const lines = stripProviderCitationMarkers(rewriteClaudeCiteTags(markdown)).split("\n");
+  return slackMrkdwn(rewriteClaudeCiteTags(markdown));
+}
+
+/**
+ * The rendering from before Claude citation tags were rewritten. An operation
+ * an earlier release bound to these bytes keeps them on retry
+ * (`deliverSlackModelText`); nothing else should use it.
+ */
+export function slackMrkdwnKeepingClaudeCiteTags(markdown: string): string {
+  return slackMrkdwn(markdown);
+}
+
+function slackMrkdwn(markdown: string): string {
+  const lines = stripProviderCitationMarkers(markdown).split("\n");
   const output: string[] = [];
   let fence: { character: string; length: number } | null = null;
   for (const line of lines) {

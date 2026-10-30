@@ -953,8 +953,9 @@ describe("Claude citation tags in a reply", () => {
     expect(argumentsOf(response.output as any[])).toEqual({ patch, reply: patch });
   });
 
-  test("a model request numbers the results its history sends before the response's", async () => {
-    const history = [
+  /** A conversation whose earlier answer searched on this account (two results). */
+  const searchedHistory = (account: string | null = testAccount) =>
+    [
       { role: "user", content: "What changed?" },
       ...parseAnthropicResponse(
         message("msg_1", searchedContent),
@@ -962,20 +963,34 @@ describe("Claude citation tags in a reply", () => {
         undefined,
         undefined,
         undefined,
-        testAccount,
+        account,
       ).output,
       { role: "user", content: "Quote it" },
     ] as ModelRequest["input"];
-    const waitTool = {
-      ...lookupTool,
-      name: "opengeni__wait_for_input",
-      parameters: {
-        type: "object",
-        properties: { reply: { type: "string" } },
-        required: ["reply"],
-        additionalProperties: false,
-      },
-    };
+  const waitTool = {
+    ...lookupTool,
+    name: "opengeni__wait_for_input",
+    parameters: {
+      type: "object",
+      properties: { reply: { type: "string" } },
+      required: ["reply"],
+      additionalProperties: false,
+    },
+  };
+  const replying = (responses: unknown[]) => {
+    let calls = 0;
+    return new AnthropicMessagesModel(
+      provider,
+      "claude",
+      (async () =>
+        new Response(JSON.stringify(responses[calls++]), {
+          headers: { "request-id": `req_${calls}` },
+        })) as typeof fetch,
+    );
+  };
+
+  test("a model request numbers the results its history sends before the response's", async () => {
+    const history = searchedHistory();
     const model = new AnthropicMessagesModel(
       provider,
       "claude",
@@ -1007,5 +1022,63 @@ describe("Claude citation tags in a reply", () => {
     const done = events.find((event) => event.type === "response_done");
     // Two results in the history, then this response's: result 4 is its second.
     expect(argumentsOf(done.response.output).reply).toBe("[Blog](https://example.org/blog)");
+  });
+  test("a paused turn numbers the request's results, then the merged response's", async () => {
+    const model = replying([
+      message("msg_2", [call], "pause_turn"),
+      message(
+        "msg_3",
+        [
+          results,
+          toolUse("opengeni__wait_for_input", {
+            reply: `${cite("1-1", "old")} ${cite("4-1", "new")}`,
+          }),
+        ],
+        "tool_use",
+      ),
+    ]);
+    const response = await model.getResponse(
+      request(searchedHistory(), [waitTool, serializedSearch]),
+    );
+    expect(argumentsOf(response.output as any[]).reply).toBe(
+      "[old](https://example.com/notes) [new](https://example.org/blog)",
+    );
+  });
+
+  test("another account's searches, sent as text, are not numbered", async () => {
+    const other = anthropicSearchAccountScope(
+      subscription("10000000-0000-4000-8000-00000000000b", "sk-ant-oat01-token-b"),
+    );
+    const model = replying([
+      message(
+        "msg_2",
+        [
+          { ...call, id: "srvtoolu_2" },
+          { ...results, tool_use_id: "srvtoolu_2", content: [results.content[1]] },
+          toolUse("opengeni__wait_for_input", { reply: `${cite("1-1", "only")}` }),
+        ],
+        "tool_use",
+      ),
+    ]);
+    const response = await model.getResponse(
+      request(searchedHistory(other), [waitTool, serializedSearch]),
+    );
+    expect(argumentsOf(response.output as any[]).reply).toBe("[only](https://example.org/blog)");
+  });
+
+  test("results after the reply's call are not numbered", () => {
+    const response = parseAnthropicResponse(
+      message(
+        "msg_1",
+        [toolUse("opengeni__wait_for_input", { reply: cite("1-1", "early") }), call, results],
+        "tool_use",
+      ),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      testAccount,
+    );
+    expect(argumentsOf(response.output as any[]).reply).toBe("early");
   });
 });
