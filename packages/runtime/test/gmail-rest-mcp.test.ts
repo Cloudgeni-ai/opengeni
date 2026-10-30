@@ -516,6 +516,87 @@ describe("Gmail REST MCP adapter", () => {
     expect(JSON.parse(result.content[0]!.text)).toEqual({ id: "sent-2", threadId: "thread-2" });
   });
 
+  test("a read-only account asks in the chat for the access a tool needs before anything runs", async () => {
+    const readonly = "https://www.googleapis.com/auth/gmail.readonly";
+    const events: unknown[] = [];
+    const requests: string[] = [];
+    let granted = [readonly];
+    const gmail = server({
+      resolveCredential: async () => ({
+        status: "ok",
+        headers: { authorization: "Bearer gmail-token" },
+        connectionId: "conn_1",
+        grantedScopes: granted,
+      }),
+      onAuthNeeded: (payload) => {
+        events.push(payload);
+      },
+      fetchImpl: async (input) => {
+        requests.push(new URL(input.toString()).pathname);
+        return input.toString().includes("/messages/send")
+          ? Response.json({ id: "sent-1", threadId: "thread-1" })
+          : Response.json({ labels: [] });
+      },
+    });
+    // Every tool stays listed, so the model's tool list never changes with grants.
+    expect((await gmail.listTools()).map((tool) => tool.name)).toContain("send_message");
+    expect((await gmail.callToolResult("list_labels", {})).isError).toBeUndefined();
+    requests.length = 0;
+
+    const send = (await gmail.callToolResult("send_message", {
+      to: ["user@example.com"],
+      subject: "Hello",
+      body: "Hi",
+    })) as { isError?: boolean; content: Array<{ text: string }>; structuredContent: unknown };
+    expect(send.isError).toBe(true);
+    expect(send.content[0]!.text).toBe(
+      "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; try again after they do.",
+    );
+    expect(send.structuredContent).toEqual({
+      error: {
+        connectorActionOutcome: "not_executed",
+        outcomeUnknown: false,
+        code: "authentication_required",
+        retryable: false,
+      },
+    });
+    // An approval is never asked for an action that cannot run yet.
+    await expect(gmail.reviewContext("trash_message", { messageId: "m-1" })).rejects.toThrow(
+      "Gmail has not been given access for this action yet.",
+    );
+    expect(requests).toEqual([]);
+    expect(events).toEqual([
+      {
+        serverId: "gmail",
+        toolName: "send_message",
+        providerDomain: "gmailmcp.googleapis.com",
+        reason: "insufficient_scope",
+        connectionId: "conn_1",
+        scopes: ["https://www.googleapis.com/auth/gmail.compose"],
+        subjectId: "subject-a",
+      },
+      {
+        serverId: "gmail",
+        toolName: "trash_message",
+        providerDomain: "gmailmcp.googleapis.com",
+        reason: "insufficient_scope",
+        connectionId: "conn_1",
+        scopes: ["https://www.googleapis.com/auth/gmail.modify"],
+        subjectId: "subject-a",
+      },
+    ]);
+
+    // Once the person allows sending, the same call goes through.
+    granted = [readonly, "https://www.googleapis.com/auth/gmail.compose"];
+    const sent = await gmail.callToolResult("send_message", {
+      to: ["user@example.com"],
+      subject: "Hello",
+      body: "Hi",
+    });
+    expect(sent.isError).toBeUndefined();
+    expect(requests).toEqual(["/gmail/v1/users/me/messages/send"]);
+  });
+
   test("never replays send_message or send_draft after a provider 401", async () => {
     for (const [toolName, args] of [
       ["send_message", { to: ["user@example.com"], body: "x" }],

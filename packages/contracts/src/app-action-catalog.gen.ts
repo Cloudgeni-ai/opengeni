@@ -9739,6 +9739,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:control"
   },
   {
+    "id": "updateSessionUnattended",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/unattended",
+    "request": [
+      "UpdateSessionUnattendedRequest"
+    ],
+    "response": [
+      "Session"
+    ],
+    "permission": "sessions:control"
+  },
+  {
     "id": "updateSessionVisibility",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/visibility",

@@ -23,11 +23,7 @@
       "tier": "verified",
       "provenance": "first-party:opengeni-gmail-rest",
       "authKind": "oauth2",
-      "scopesHint": [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose",
-        "https://www.googleapis.com/auth/gmail.modify"
-      ],
+      "scopesHint": ["https://www.googleapis.com/auth/gmail.readonly"],
       "allowedTools": [
         "create_draft",
         "send_message",
@@ -119,7 +115,7 @@
             "description": "Read mailbox changes, account settings and configuration. Optional notifications use an operator-configured Pub/Sub topic."
           }
         ],
-        "permissionSummary": "Google asks for read, compose, and organize access to the mailbox you approve. Choose Allow, Ask first, or Block for the available tools in Approvals. Models paid with Opengeni credits do not train on your mail. If agents run on your own AI subscription, turn off model training in that provider's settings first.",
+        "permissionSummary": "Google first asks only to read the mailbox you approve. If you later ask an agent to draft, send or organize mail, it asks you in the chat to allow that too. Choose Allow, Ask first, or Block for the available tools in Approvals. Models paid with Opengeni credits do not train on your mail. If agents run on your own AI subscription, turn off model training in that provider's settings first.",
         "scopeLabels": {
           "https://www.googleapis.com/auth/gmail.readonly": {
             "label": "Read your mail",
@@ -140,7 +136,7 @@
       "installUrl": "https://developers.google.com/identity/protocols/oauth2/web-server",
       "documentationUrl": "https://developers.google.com/workspace/gmail/api/reference/rest",
       "notes": [
-        "scopesHint keeps consent to the reviewed Gmail REST tools. OAuth discovery uses pinned Google metadata and verifies the consenting mailbox with Gmail users/me/profile, without depending on the Developer Preview MCP server. Gmail connections are personal-only; every member connects their own mailbox.",
+        "scopesHint is what a first connection asks for: read access only. gmail.compose and gmail.modify are asked for later through incremental consent, when a tool call needs them, and never beyond the reviewed Gmail REST tools. OAuth discovery uses pinned Google metadata and verifies the consenting mailbox with Gmail users/me/profile, without depending on the Developer Preview MCP server. Gmail connections are personal-only; every member connects their own mailbox.",
         "allowedTools freezes the reviewed tool surface. Every tool call executes through Opengeni's first-party Gmail REST bridge (packages/runtime/src/gmail-rest-mcp.ts), never Google's Developer Preview MCP endpoint directly; this connection's mcpUrl identity is unchanged so existing consents and reconnect flows keep working. send_message and send_draft use the selected account's approval choices; requireApproval supplies the recommendation when no choice is saved.",
         "logoSourceUrl is null because Google has not published a reusable Gmail MCP logo asset. Keep the self-hosted monogram rather than hotlinking a brand asset."
       ]

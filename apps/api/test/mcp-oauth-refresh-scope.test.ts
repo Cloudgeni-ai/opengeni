@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { chooseMcpAuthorizeScopes } from "../src/integrations/oauth-client";
 import {
-  OFFICIAL_GMAIL_MCP_SCOPES,
+  OFFICIAL_GMAIL_MCP_BASE_SCOPES,
   OFFICIAL_GMAIL_MCP_URL,
 } from "../src/integrations/oauth-profiles";
 
@@ -38,6 +38,28 @@ test("does not add refresh scope when the authorization server does not advertis
   ).toEqual(["mcp:use"]);
 });
 
+test("a generic reconnect asking for more access keeps the scopes the account holds", () => {
+  expect(
+    chooseMcpAuthorizeScopes({
+      ...generic,
+      requested: ["pages:write"],
+      reconnectGrantedScopes: ["mcp:use", "pages:read"],
+    }),
+  ).toEqual(["mcp:use", "pages:read", "pages:write"]);
+  // Unknown grants fall back to what a plain reconnect would ask for.
+  expect(
+    chooseMcpAuthorizeScopes({
+      ...generic,
+      requested: ["pages:write"],
+      reconnectGrantedScopes: [],
+    }),
+  ).toEqual(["mcp:use", "pages:write"]);
+  // Without a reconnect the requested scopes are used as before.
+  expect(chooseMcpAuthorizeScopes({ ...generic, requested: ["pages:write"] })).toEqual([
+    "pages:write",
+  ]);
+});
+
 test("reviewed Gmail scope pins remain exact even when the AS advertises offline_access", () => {
   expect(
     chooseMcpAuthorizeScopes({
@@ -45,5 +67,5 @@ test("reviewed Gmail scope pins remain exact even when the AS advertises offline
       mcpUrl: OFFICIAL_GMAIL_MCP_URL,
       authorizationServerScopesSupported: ["offline_access"],
     }),
-  ).toEqual([...OFFICIAL_GMAIL_MCP_SCOPES]);
+  ).toEqual([...OFFICIAL_GMAIL_MCP_BASE_SCOPES]);
 });

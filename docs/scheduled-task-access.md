@@ -422,6 +422,18 @@ durable delivery outbox and is not part of this change.
 
 ## Runs waiting on a person
 
+A chat that a scheduled task or event trigger starts is unattended by default
+(see [`http-api.md`](http-api.md)): the agent is told nobody answers during the
+run, it gets no tool that waits for a person, and a call that needs approval
+is refused at once instead of waiting, so such a run does not wait on a person
+at all. The rest of this section applies to runs that are attended: tasks that
+set `agentConfig.unattended: false`, tasks that set
+`agentConfig.approvalTimeoutSeconds` without `unattended`, runs posted into an
+existing chat, chats whose **Work without me** switch is off, and turns after a
+person wrote into a chat that was unattended only by default (those turns keep
+the instructions and tools the chat started with; only their approvals and
+questions now wait for a person).
+
 A dispatched run whose own turn stops for a tool approval or a structured
 question stays `dispatched` (its lifecycle settles only when the turn
 finishes), but it is no longer indistinguishable from a running one:

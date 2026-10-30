@@ -4,7 +4,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
-import { createManagedAuth } from "../src/auth/managed-auth";
+import { createManagedAuth, findManagedAuthOAuthState } from "../src/auth/managed-auth";
 let shared: SharedTestDatabase | null;
 let client: DbClient | null;
 beforeAll(async () => {
@@ -126,8 +126,8 @@ test("email and OAuth creation require a single-use challenge, including direct 
     google.validateAuthorizationCode = async () => ({ accessToken: "fake", tokenType: "Bearer" });
     const socialEmail = `social-${email}`;
     google.getUserInfo = async () => ({
-      user: { id, name: "Human", email: socialEmail, emailVerified: true },
-      data: {},
+      user: { name: "Human", email: socialEmail, emailVerified: true },
+      data: { sub: id },
     });
     async function oauth(token?: string) {
       const start = await post("/v1/auth/sign-in/social", {
@@ -320,7 +320,7 @@ test("broker OAuth persists the pass in server state and replays without consumi
     expect(await replay.json()).toEqual(started);
     expect(verifications).toBe(1);
     const state = new URL(started.url).searchParams.get("state")!;
-    const stored = await (await auth.$context).internalAdapter.findVerificationValue(state);
+    const stored = await findManagedAuthOAuthState(auth, state);
     const data = JSON.parse(stored!.value);
     expect(data.opengeniSignupChallenge.provider).toBe("google");
     expect(stored!.value).not.toContain("broker-token");
@@ -331,8 +331,8 @@ test("broker OAuth persists the pass in server state and replays without consumi
     const email = `${id}@example.test`;
     google.validateAuthorizationCode = async () => ({ accessToken: "fake", tokenType: "Bearer" });
     google.getUserInfo = async () => ({
-      user: { id, name: "Human", email, emailVerified: true },
-      data: {},
+      user: { name: "Human", email, emailVerified: true },
+      data: { sub: id },
     });
     await app.request(`/v1/auth/callback/google?state=${state}&code=simulated`, {
       headers: { ...headers, cookie: `${headers.cookie}; ${cookies(start)}` },

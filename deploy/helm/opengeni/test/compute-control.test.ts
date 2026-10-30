@@ -140,12 +140,22 @@ describe("computeControl", () => {
     expect(script).toContain("set search_path = %I");
     expect(script).toContain("create schema if not exists %I authorization %I");
     const sweep = find(manifests, "CronJob", "cc-opengeni-compute-control-sweep");
-    expect(sweep.spec.jobTemplate.spec.template.spec.containers[0].command).toEqual([
-      "/usr/local/bin/compute-host",
+    // The sweep reads the pointers the service keeps (ADR 25), from the
+    // service's database with the service's settings.
+    const sweeper = sweep.spec.jobTemplate.spec.template.spec.containers[0];
+    expect(sweeper.command).toEqual([
+      "/usr/local/bin/compute-control",
       "sweep",
       "--store=gs://example-archive/archive",
+      "--connections=2",
       "--delete",
     ]);
+    expect(sweeper.env.find((e: any) => e.name === "COMPUTE_CONTROL_DATABASE").value).toBe(
+      database.value,
+    );
+    expect(
+      sweeper.env.find((e: any) => e.name === "COMPUTE_CONTROL_DATABASE_PASSWORD").valueFrom,
+    ).toEqual(password.valueFrom);
 
     const config = find(manifests, "ConfigMap", "cc-opengeni-config");
     expect(config.data.OPENGENI_COMPUTE_API_URL).toBe("http://cc-opengeni-compute-control:8080");
@@ -324,13 +334,17 @@ describe("computeControl", () => {
     expect(pod.initContainers).toBeUndefined();
   });
 
-  test("sweeps only archives it can delete from", async () => {
-    const azure = await helmTemplate({
-      ...enabled,
-      computeControl: { ...enabled.computeControl, archive: "az://account/container" },
-    });
-    expect(azure.exitCode).not.toBe(0);
-    expect(azure.stderr).toContain("computeControl.sweep deletes only from Google Cloud Storage");
+  test("sweeps archives on every object store, and none when told not to", async () => {
+    for (const archive of ["az://account/container", "s3://bucket/archive"]) {
+      const manifests = await render({
+        ...enabled,
+        computeControl: { ...enabled.computeControl, archive },
+      });
+      const sweep = find(manifests, "CronJob", "cc-opengeni-compute-control-sweep");
+      expect(sweep.spec.jobTemplate.spec.template.spec.containers[0].command).toContain(
+        `--store=${archive}`,
+      );
+    }
     const manifests = await render({
       ...enabled,
       computeControl: {
@@ -352,6 +366,7 @@ describe("computeControl", () => {
     );
     expect(components).toContain("compute-control");
     expect(components).toContain("compute-database");
+    expect(components).toContain("compute-sweep");
     find(manifests, "NetworkPolicy", "cc-opengeni-compute-control");
   });
 

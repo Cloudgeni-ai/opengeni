@@ -167,6 +167,8 @@ export type TurnInputOptions = {
   programmaticApprovalAcknowledged?: boolean;
   knowledgeSourcePreparationNote?: string;
   workspaceRecoveryNote?: string;
+  /** The chat's attendance differs from how it started (see `attendanceChangeNote`). */
+  attendanceNote?: string;
   /**
    * File resources mounted into the sandbox for this turn. The system
    * instructions never list them, so each one must appear in the turn's
@@ -759,6 +761,7 @@ export async function turnInput(
     options.codemodeContinuationNote,
     options.knowledgeSourcePreparationNote,
     options.workspaceRecoveryNote,
+    options.attendanceNote,
   );
   if (trigger.type === "user.message") {
     const payload = trigger.payload as {

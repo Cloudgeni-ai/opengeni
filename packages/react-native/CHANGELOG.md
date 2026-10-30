@@ -1,5 +1,19 @@
 # @opengeni/react-native
 
+## 6.1.1
+
+### Patch Changes
+
+- d60e6ec: Command steps in a chat's activity read as what they did in plain words ("Downloaded email-review.json", "Read report.md", "Ran make_chart.py", or the tool an `ogtool call` ran, such as "Search messages") instead of the raw `$ command`. The full command stays one click away, at the top of the step's output. Signed and token-bearing links (storage signatures such as `sig=` or `X-Amz-Signature=`, and `token=`-style parameters) never show their query as text, in commands, command output or tool payloads. Credentials are hidden too: well-known token formats, `Authorization` and `Cookie` headers (including `[name, value]` header pairs), `.netrc` passwords, password flags such as `mysql -p…`, `sshpass -p` and `docker login -p`, and values under secret-looking names. Command fields are read as commands, while output and prose are read as text, so code (calls, member access, constants) and ordinary words stay visible, and saved secret references stay intact. `@opengeni/react/timeline-model` exports `commandStepTitle`, `redactSignedUrls`, `redactPayload` and the `CredentialContext` type, and the English catalog gains the `timeline.commandStep.*` keys. Plain tool details are unchanged.
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [d60e6ec]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/contracts@6.1.0
+  - @opengeni/sdk@6.1.0
+  - @opengeni/react@6.1.0
+
 ## 6.0.2
 
 ### Minor Changes

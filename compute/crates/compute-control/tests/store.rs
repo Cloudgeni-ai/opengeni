@@ -10,11 +10,12 @@ use std::future::Future;
 
 use compute_control::e2b::lifecycle::{OnTimeout, Record, State};
 use compute_control::store::{
-    Admission, AgentRef, Collector, Inserted, LifecycleRow, Linked, MemoryStore, PostgresStore,
-    RequestRow, SandboxRow, Spec, Store, TEMPLATE_PREFIX, TemplateRow, Write, replace_lifecycle,
+    Admission, AgentRef, Collector, Found, Import, Imported, Inserted, LifecycleRow, Linked,
+    MemoryStore, PointerRow, PostgresStore, RequestRow, SandboxRow, Spec, Store, TEMPLATE_PREFIX,
+    TemplateRow, Write, replace_lifecycle,
 };
-use compute_fleet::{HostId, HostState, OwnerEpoch, Ownership, SandboxId, Sends};
-use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Verdict};
+use compute_fleet::{HostId, HostState, OwnerEpoch, Ownership, SandboxId, Sends, Stamp};
+use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Report, Verdict};
 use compute_protocol::host::{Id, ImageId, SandboxConfig, SleepConfig};
 
 fn random() -> u64 {
@@ -43,6 +44,7 @@ fn capacity() -> Capacity {
         ready: Vec::new(),
         awake: 0,
         sandboxes: 0,
+        pointers_in_service: true,
     }
 }
 
@@ -108,6 +110,7 @@ async fn registered<S: Store>(store: &S, register: &Register) -> (HostId, u64) {
     match store.register(register).await.unwrap() {
         Admission::Registered { host, epoch, .. } => (host, epoch.0),
         Admission::StillLive => panic!("{} is still live", register.info.name),
+        Admission::Outdated => panic!("{} is outdated", register.info.name),
     }
 }
 
@@ -1202,7 +1205,7 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))
@@ -1716,4 +1719,374 @@ async fn sandboxes_from_templates<S: Store>(store: S) {
 #[tokio::test]
 async fn a_sandbox_is_created_from_a_template_only_while_the_template_is_there() {
     each(sandboxes_from_templates, sandboxes_from_templates).await;
+}
+
+fn stamp(epoch: u64, save: u64) -> Stamp {
+    Stamp {
+        epoch: OwnerEpoch(epoch),
+        save,
+    }
+}
+
+/// The save a deleted sandbox's tombstone carries.
+const TOMBSTONE_SAVE: u64 = u64::MAX;
+
+/// The latest change to any host row, as an import reads it before it
+/// reads the object store.
+async fn seen<S: Store>(store: &S) -> u64 {
+    store
+        .hosts_changed(0)
+        .await
+        .unwrap()
+        .iter()
+        .map(|host| host.changed)
+        .max()
+        .unwrap_or(0)
+}
+
+async fn pointer_writes<S: Store>(store: S) {
+    let name = format!("pointers/v3/sandboxes/{}", name());
+    assert_eq!(store.pointer(&name).await.unwrap(), None);
+    let first = store
+        .write_pointer(&name, stamp(1, 1), b"first", None)
+        .await
+        .unwrap()
+        .expect("created");
+    assert_eq!(
+        store
+            .write_pointer(&name, stamp(1, 2), b"again", None)
+            .await
+            .unwrap(),
+        None,
+        "a create finds it there"
+    );
+    let second = store
+        .write_pointer(&name, stamp(1, 2), b"second", Some(first))
+        .await
+        .unwrap()
+        .expect("replaced on the version read");
+    assert!(second > first);
+    assert_eq!(
+        store
+            .write_pointer(&name, stamp(2, 0), b"late", Some(first))
+            .await
+            .unwrap(),
+        None,
+        "a write held up in flight lands on nothing newer"
+    );
+    assert_eq!(
+        store.pointer(&name).await.unwrap(),
+        Some(PointerRow {
+            owner: stamp(1, 2),
+            pointer: b"second".to_vec(),
+            version: second,
+        })
+    );
+    assert!(store.pointer_names().await.unwrap().contains(&name));
+
+    // Writes racing on one version: exactly one lands.
+    let raced = futures::future::join_all(
+        (0..8).map(|save| store.write_pointer(&name, stamp(1, 3 + save), b"raced", Some(second))),
+    )
+    .await;
+    let landed: Vec<i64> = raced
+        .into_iter()
+        .filter_map(|write| write.unwrap())
+        .collect();
+    assert_eq!(landed.len(), 1, "{landed:?}");
+
+    // An empty pointer, as an archive in flight or a tombstone keeps, is
+    // kept like any other, a tombstone's save (`u64::MAX`) as it is, and
+    // versions never repeat across names.
+    let emptied = store
+        .write_pointer(&name, stamp(3, TOMBSTONE_SAVE), b"", Some(landed[0]))
+        .await
+        .unwrap()
+        .expect("emptied");
+    let kept = store.pointer(&name).await.unwrap().unwrap();
+    assert_eq!(
+        (kept.owner, kept.pointer.as_slice()),
+        (stamp(3, TOMBSTONE_SAVE), b"".as_slice())
+    );
+    let other = format!("pointers/v3/images/{}", self::name());
+    let elsewhere = store
+        .write_pointer(&other, stamp(1, 1), b"other", None)
+        .await
+        .unwrap()
+        .expect("created");
+    assert!(elsewhere > emptied);
+}
+
+#[tokio::test]
+async fn pointers_are_replaced_only_on_the_version_their_writer_read() {
+    each(pointer_writes, pointer_writes).await;
+}
+
+async fn pointer_adoptions<S: Store>(store: S) {
+    let kept = format!("s-{:016x}", random());
+    let missed = format!("s-{:016x}", random());
+    let version = store
+        .write_pointer(&kept, stamp(5, 1), b"newer", None)
+        .await
+        .unwrap()
+        .expect("created");
+    let found = |name: &str, pointer: &[u8]| Found {
+        name: name.to_owned(),
+        owner: stamp(1, 1),
+        pointer: pointer.to_vec(),
+    };
+    // Pointers an object store still holds from before the import: one the
+    // store keeps a newer copy of, and one an import missed.
+    let adopted = store
+        .adopt_pointers(&[found(&kept, b"older"), found(&missed, b"missed")])
+        .await
+        .unwrap();
+    assert_eq!(adopted, 1, "only the one the store had none of");
+    assert_eq!(
+        store.pointer(&kept).await.unwrap(),
+        Some(PointerRow {
+            owner: stamp(5, 1),
+            pointer: b"newer".to_vec(),
+            version,
+        }),
+        "a pointer the store keeps wins"
+    );
+    let row = store.pointer(&missed).await.unwrap().expect("adopted");
+    assert_eq!(
+        (row.owner, row.pointer.as_slice()),
+        (stamp(1, 1), &b"missed"[..])
+    );
+    assert!(row.version > version, "a version no write had");
+    assert_eq!(
+        store
+            .adopt_pointers(&[found(&missed, b"again")])
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(store.adopt_pointers(&[]).await.unwrap(), 0);
+
+    // The fleet's clock is the store's.
+    let clock = store.clock_ms().await.unwrap();
+    assert!(clock.abs_diff(now_ms()) < 60_000, "{clock}");
+}
+
+#[tokio::test]
+async fn pointers_an_import_missed_are_adopted_and_a_kept_one_wins() {
+    each(pointer_adoptions, pointer_adoptions).await;
+}
+
+/// A registration of a host of a release that keeps its pointers in the
+/// object store itself.
+fn earlier(name: &str) -> Register {
+    Register {
+        capacity: Capacity {
+            pointers_in_service: false,
+            ..capacity()
+        },
+        ..register(name, random(), Vec::new())
+    }
+}
+
+#[expect(clippy::too_many_lines, reason = "one import, step by step")]
+async fn importing<S: Store>(store: S) {
+    const FROM: &str = "s3://earlier/archive";
+    // A pointer the service keeps already, and one only the object store
+    // has.
+    let kept = format!("pointers/v3/sandboxes/{}", name());
+    let moved = format!("pointers/v3/sandboxes/{}", name());
+    let deleted = format!("pointers/v3/sandboxes/{}", name());
+    let version = store
+        .write_pointer(&kept, stamp(5, 5), b"kept", None)
+        .await
+        .unwrap()
+        .expect("created");
+    let found = [
+        Found {
+            name: kept.clone(),
+            owner: stamp(1, 1),
+            pointer: b"stale".to_vec(),
+        },
+        Found {
+            name: moved.clone(),
+            owner: stamp(1, 2),
+            pointer: b"moved".to_vec(),
+        },
+        // A deleted sandbox's tombstone.
+        Found {
+            name: deleted.clone(),
+            owner: stamp(3, TOMBSTONE_SAVE),
+            pointer: Vec::new(),
+        },
+    ];
+
+    // A host of an earlier release holds it up while it is live,
+    let older = name();
+    let (host, epoch) = registered(&store, &earlier(&older)).await;
+    let renew = Renew {
+        host: host.0,
+        epoch,
+        seq: 1,
+        capacity: Some(earlier(&older).capacity),
+    };
+    assert!(
+        store
+            .renew(&renew, std::slice::from_ref(&older))
+            .await
+            .unwrap()
+    );
+    let before = seen(&store).await;
+    assert_eq!(
+        store
+            .import_pointers(&found, FROM, 1_000, before)
+            .await
+            .unwrap(),
+        Import::Waiting(vec![older.clone()])
+    );
+    // and once given up on, still, if that was after the import looked:
+    // it may have written a pointer the import did not read.
+    let count = renewals(&store, host).await.unwrap();
+    assert!(
+        store
+            .give_up(host, count, now_ms())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .import_pointers(&found, FROM, 1_000, before)
+            .await
+            .unwrap(),
+        Import::Waiting(vec![older.clone()])
+    );
+    assert_eq!(store.pointers_imported().await.unwrap(), None);
+
+    // Looked at again, with a host of this release live: imported, a
+    // pointer kept already winning over the one found.
+    let current = name();
+    let (host, epoch) = registered(&store, &register(&current, random(), Vec::new())).await;
+    let imported = Imported {
+        at_ms: 2_000,
+        from: FROM.to_owned(),
+    };
+    let after = seen(&store).await;
+    assert_eq!(
+        store
+            .import_pointers(&found, FROM, 2_000, after)
+            .await
+            .unwrap(),
+        Import::Done(imported.clone())
+    );
+    assert_eq!(
+        store.pointer(&kept).await.unwrap(),
+        Some(PointerRow {
+            owner: stamp(5, 5),
+            pointer: b"kept".to_vec(),
+            version,
+        })
+    );
+    let row = store.pointer(&moved).await.unwrap().expect("imported");
+    assert_eq!(
+        (row.owner, row.pointer.as_slice()),
+        (stamp(1, 2), b"moved".as_slice())
+    );
+    assert!(row.version > version);
+    let tombstone = store.pointer(&deleted).await.unwrap().expect("imported");
+    assert_eq!(
+        (tombstone.owner, tombstone.pointer.as_slice()),
+        (stamp(3, TOMBSTONE_SAVE), b"".as_slice())
+    );
+
+    // Once: a later import answers the first and changes nothing.
+    let again = [Found {
+        name: moved.clone(),
+        owner: stamp(9, 9),
+        pointer: b"again".to_vec(),
+    }];
+    assert_eq!(
+        store
+            .import_pointers(&again, "s3://elsewhere", 3_000, seen(&store).await)
+            .await
+            .unwrap(),
+        Import::Done(imported.clone())
+    );
+    assert_eq!(store.pointer(&moved).await.unwrap(), Some(row));
+    assert_eq!(store.pointers_imported().await.unwrap(), Some(imported));
+
+    // From then on a host of an earlier release is refused, registering
+    // anew or coming back, and so is a renewal or report without the mark.
+    assert_eq!(
+        store.register(&earlier(&name())).await.unwrap(),
+        Admission::Outdated
+    );
+    assert_eq!(
+        store.register(&earlier(&older)).await.unwrap(),
+        Admission::Outdated
+    );
+    let names = std::slice::from_ref(&current);
+    let unmarked = Renew {
+        host: host.0,
+        epoch,
+        seq: 1,
+        capacity: Some(earlier(&current).capacity),
+    };
+    assert!(!store.renew(&unmarked, names).await.unwrap());
+    let report = Report {
+        host: host.0,
+        epoch,
+        capacity: earlier(&current).capacity,
+    };
+    assert!(!store.report(&report, names).await.unwrap());
+    // Renewing while it takes its sandboxes back, saying nothing of its
+    // capacity, or with it, a host of this release renews.
+    let starting = Renew {
+        capacity: None,
+        seq: 2,
+        ..unmarked.clone()
+    };
+    assert!(store.renew(&starting, names).await.unwrap());
+    let marked = Renew {
+        capacity: Some(capacity()),
+        seq: 3,
+        ..unmarked
+    };
+    assert!(store.renew(&marked, names).await.unwrap());
+}
+
+/// A schema of its own in the database `COMPUTE_TEST_POSTGRES` names, for
+/// a check of what a fleet keeps once, such as whether its pointers were
+/// imported; dropped after.
+async fn own_schema<F, P>(check: F)
+where
+    F: FnOnce(PostgresStore) -> P,
+    P: Future<Output = ()>,
+{
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let schema = format!("compute_pointers_{:x}", random());
+    client
+        .batch_execute(&format!("create schema {schema}"))
+        .await
+        .unwrap();
+    let scoped = format!("{url} options='-c search_path={schema}' application_name={schema}");
+    check(PostgresStore::connect(&scoped, None, 4).await.unwrap()).await;
+    client
+        .batch_execute(&format!("drop schema {schema} cascade"))
+        .await
+        .unwrap();
+}
+
+/// A fleet's pointers move into the service once, only while no host that
+/// keeps them in the object store is live or changed since the import
+/// looked, and from then on such a host is refused (ADR 25).
+#[tokio::test]
+async fn a_fleets_pointers_are_imported_once_no_earlier_host_can_write_them() {
+    importing(MemoryStore::new()).await;
+    own_schema(importing).await;
 }

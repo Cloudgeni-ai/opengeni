@@ -131,6 +131,10 @@ pub struct Metrics {
     given_up: [AtomicU64; 2],
     give_up_failures: AtomicU64,
     group_failures: AtomicU64,
+    /// Whether this replica found the fleet's pointers moved into the
+    /// service, and how many hosts of an earlier release the move waits
+    /// for; `None` until its import first looked, or without an archive.
+    pointers: Mutex<Option<(bool, usize)>>,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -199,6 +203,12 @@ impl Metrics {
         self.group_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Notes whether the fleet's pointers are in the service, and how many
+    /// hosts of an earlier release moving them waits for meanwhile.
+    pub fn pointers(&self, imported: bool, waiting: usize) {
+        *locked(&self.pointers) = Some((imported, waiting));
+    }
+
     /// The metrics in the text format, with `hosts` as the view has them.
     #[must_use]
     pub fn render(&self, hosts: &[Known]) -> String {
@@ -233,6 +243,28 @@ impl Metrics {
             "1 while this replica leads: it alone reports the compute_fleet_ series.",
         );
         out.sample("compute_control_leader", &[], u64::from(leading));
+        if let Some((imported, waiting)) = *locked(&self.pointers) {
+            out.family(
+                "compute_control_pointers_imported",
+                "gauge",
+                "1 once the fleet's pointers are in the service (ADR 25). Until then hosts of this release neither archive nor restore, while it waits for the hosts of an earlier release in compute_control_pointers_waiting_hosts to stop.",
+            );
+            out.sample(
+                "compute_control_pointers_imported",
+                &[],
+                u64::from(imported),
+            );
+            out.family(
+                "compute_control_pointers_waiting_hosts",
+                "gauge",
+                "Live or draining hosts of an earlier release, which keep their pointers in the object store, that moving the fleet's pointers into the service waits for.",
+            );
+            out.sample(
+                "compute_control_pointers_waiting_hosts",
+                &[],
+                u64::try_from(waiting).unwrap_or(u64::MAX),
+            );
+        }
         out.family(
             "compute_control_hosts_given_up_total",
             "counter",

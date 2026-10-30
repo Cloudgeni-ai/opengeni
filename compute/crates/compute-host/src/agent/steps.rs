@@ -688,10 +688,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         paths: Paths,
         cancel: CancellationToken,
     ) -> Job<E, S> {
-        let last_activity = self
-            .core
-            .sandbox(record.id.0)
+        let view = self.core.sandbox(record.id.0);
+        let last_activity = view
+            .as_ref()
             .map_or_else(|| self.now(), |view| view.last_activity);
+        let failures = view.map_or(0, |view| view.failures);
         let disk_image = self.image_path(record.config.image);
         Job {
             engine: Arc::clone(&self.engine),
@@ -715,6 +716,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             unthrottle: None,
             meter: None,
             last_used_ms: self.unix_ms(last_activity),
+            failures,
         }
     }
 
