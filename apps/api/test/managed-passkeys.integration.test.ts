@@ -214,7 +214,7 @@ describe("passkey sign-in and passkey-only accounts", () => {
     expect(refused.response.status).toBe(403);
     expect(await refused.response.json()).toEqual({
       code: "SIGN_IN_EMAIL_NOT_ALLOWED",
-      message: "This email address can't sign in here",
+      message: "This email can't sign in here",
     });
     expect(sessionCookie(refused.response)).not.toContain("session_token=");
   }, 60_000);

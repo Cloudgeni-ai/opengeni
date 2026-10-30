@@ -23,4 +23,4 @@ export const SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE =
  * doesn't add the address, and it says nothing about the password.
  */
 export const SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE =
-  "This email address can't sign in here. Ask whoever runs this service to allow it.";
+  "This email can't sign in here. Ask your admin for access.";

@@ -72,7 +72,7 @@ test("a refused social sign-up for an unapproved address says who to ask", () =>
 
 test("a refused social sign-in for an address that isn't allowed says who to ask", () => {
   expect(readSignInCallbackError("?error=sign_in_email_not_allowed")).toBe(
-    "This email address can't sign in here. Ask whoever runs this service to allow it.",
+    "This email can't sign in here. Ask your admin for access.",
   );
 });
 

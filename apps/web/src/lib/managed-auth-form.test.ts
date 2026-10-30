@@ -112,7 +112,7 @@ describe("managed auth form", () => {
     );
     expect(failure).toEqual({
       fields: {},
-      message: "This email address can't sign in here. Ask whoever runs this service to allow it.",
+      message: "This email can't sign in here. Ask your admin for access.",
       switchTo: null,
       canResendVerification: false,
     });

@@ -156,7 +156,7 @@ async function signInVerifiedPerson(
     session = null;
   }
   if (refusedCode === MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE) {
-    return refusal(403, refusedCode, "This email address can't sign in here");
+    return refusal(403, refusedCode, "This email can't sign in here");
   }
   if (!session?.token) {
     return refusal(403, "PASSKEY_SIGN_IN_REFUSED", "This account can't sign in right now");

@@ -546,8 +546,7 @@ test("an address the deployment doesn't allow is told it can't sign in, for a pa
         ]!.onChange({ target: { value } });
       });
     };
-    const message =
-      "This email address can't sign in here. Ask whoever runs this service to allow it.";
+    const message = "This email can't sign in here. Ask your admin for access.";
     try {
       await act(async () =>
         root.render(
