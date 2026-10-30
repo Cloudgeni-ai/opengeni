@@ -526,8 +526,9 @@ operator procedure.
 
 ## Keeping these notes current
 
-Attached-browser recovery is per tab: debugger detachment invalidates cached
-controls; reads may attach a surviving tab with fresh authority. Explicit user
+Attached-browser recovery is per tab: debugger detachment ends the attachment's
+commands and controls; a surviving tab attaches again, keeping its authority only
+when it still shows the same document (same main-frame loader). Explicit user
 cancellation or uncertain effects require reconnection. Partially dispatched
 input stays outcome unknown; never report it as a definite refusal. Never restart the user's
 Chrome or replay mutations to repair a disconnected debugger. See
