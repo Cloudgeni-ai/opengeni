@@ -56,6 +56,7 @@ import {
   getWorkspace,
   listDeletingRecordingObjectKeys,
   listDueRecordingRetention,
+  listRecordingTranscriptPieceResults,
   listStalledRecordingWork,
   loadOrganizationModelProviderApiKey,
   loadWorkspaceProviderApiKey,
@@ -65,9 +66,11 @@ import {
   recordingPreparedTrackObjectKey,
   RecordingNotFoundError,
   recordingVoiceChannel,
+  saveRecordingTranscriptPieceResult,
   setRecordingTrackPrepared,
   voiceMatchingVoiceprints,
   type Database,
+  type RecordingTranscriptPieceResult,
   type RecordingSpeakerVoice,
   type StalledRecordingWork,
   type TrackSpeaker,
@@ -269,9 +272,106 @@ function preparedPieceFormat(extension: string): RecordingPieceFormat {
 const WRITABLE_PIECE_FORMATS: readonly RecordingPieceFormat[] = ["flac", "wav", "webm", "mp4"];
 
 /**
+ * One track's view of the pieces kept for a version: reuses a kept piece
+ * asked the same question, and saves each new one.
+ */
+export function trackPieceResults(input: {
+  kept: readonly RecordingTranscriptPieceResult[];
+  trackNumber: number;
+  save: (piece: RecordingTranscriptPieceResult) => Promise<void>;
+  onReused?: (pieceIndex: number) => void;
+}): RecordingPieceResults {
+  return {
+    reuse: (pieceIndex, requestKey) => {
+      const found = input.kept.find(
+        (piece) =>
+          piece.trackNumber === input.trackNumber &&
+          piece.pieceIndex === pieceIndex &&
+          piece.requestKey === requestKey,
+      );
+      const result = found ? keptTranscriptionResult(found.result) : null;
+      if (result) input.onReused?.(pieceIndex);
+      return result;
+    },
+    keep: async (pieceIndex, requestKey, result) => {
+      await input.save({
+        trackNumber: input.trackNumber,
+        pieceIndex,
+        requestKey,
+        result: result as unknown as Record<string, unknown>,
+      });
+    },
+  };
+}
+
+/** A kept piece read back; anything not shaped like a result is asked again. */
+function keptTranscriptionResult(value: unknown): RecordingTranscriptionResult | null {
+  if (!value || typeof value !== "object") return null;
+  const result = value as Partial<RecordingTranscriptionResult>;
+  if (!Array.isArray(result.words) || !Array.isArray(result.languages)) return null;
+  if (typeof result.diarized !== "boolean") return null;
+  return {
+    languages: result.languages.filter(
+      (language): language is string => typeof language === "string",
+    ),
+    audioMilliseconds:
+      typeof result.audioMilliseconds === "number" ? result.audioMilliseconds : null,
+    diarized: result.diarized,
+    words: result.words,
+    ...(typeof result.text === "string" ? { text: result.text } : {}),
+    ...(result.usage ? { usage: result.usage } : {}),
+  };
+}
+
+/**
+ * Pieces a version's earlier attempts already got back from the provider.
+ * `reuse` answers a piece only when it was asked the same question.
+ */
+export type RecordingPieceResults = {
+  reuse: (pieceIndex: number, requestKey: string) => RecordingTranscriptionResult | null;
+  keep: (
+    pieceIndex: number,
+    requestKey: string,
+    result: RecordingTranscriptionResult,
+  ) => Promise<void>;
+};
+
+/**
+ * What one piece asks a model, as a hash: the model and options, where the
+ * piece starts and ends, the format it is sent in and the audio itself.
+ */
+export function recordingPieceRequestKey(input: {
+  model: string;
+  request: Pick<RecordingTranscriptionRequest, "language" | "diarize" | "maxSpeakers" | "keyterms">;
+  audioSha256: string;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  whole: boolean;
+  format: RecordingPieceFormat | null;
+}): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        1,
+        input.model,
+        input.request.language ?? null,
+        input.request.diarize ?? null,
+        input.request.maxSpeakers ?? null,
+        input.request.keyterms ?? null,
+        input.audioSha256,
+        input.whole ? null : [input.startMilliseconds, input.endMilliseconds],
+        input.format,
+      ]),
+    )
+    .digest("hex");
+}
+
+/**
  * Transcribe one track with a model, converting it when the model needs
  * another format and sending it in overlapping pieces when it is longer
- * than the model takes in one request.
+ * than the model takes in one request. With `pieces`, a piece an earlier
+ * attempt already got back is reused, and each new one is kept as soon as
+ * it is back, so a lost worker never pays for the same audio twice.
  */
 export async function transcribeTrack(input: {
   provider: RecordingTranscriptionProvider;
@@ -287,9 +387,13 @@ export async function transcribeTrack(input: {
   aligner?: RecordingWordAligner | null;
   /** Adds each aligned piece's placement counts and scores. */
   onAligned?: (aligned: RecordingAlignedWords) => void;
+  pieces?: RecordingPieceResults;
 }): Promise<RecordingTranscriptionResult> {
   const { source, format, maxPieceMilliseconds } = pieceShape(input.spec, input.audio.extension);
   const pieces = planRecordingTranscriptionPieces(input.durationMilliseconds, maxPieceMilliseconds);
+  const audioSha256 = input.pieces
+    ? createHash("sha256").update(input.audio.bytes).digest("hex")
+    : "";
   const parts: Array<{
     piece: (typeof pieces)[number];
     result: RecordingTranscriptionResult;
@@ -297,6 +401,24 @@ export async function transcribeTrack(input: {
   for (const [index, piece] of pieces.entries()) {
     input.onPiece?.(index);
     const whole = pieces.length === 1;
+    const requestKey = input.pieces
+      ? recordingPieceRequestKey({
+          model: input.spec.model,
+          request: input.request,
+          audioSha256,
+          startMilliseconds: piece.startMilliseconds,
+          endMilliseconds: piece.endMilliseconds,
+          whole,
+          format,
+        })
+      : "";
+    const reused = input.pieces?.reuse(index, requestKey) ?? null;
+    // A text-only model's piece kept before its words were placed is placed
+    // again, which needs its audio; everything else is reused as it is.
+    if (reused && (reused.words.length > 0 || !input.aligner)) {
+      parts.push({ piece, result: reused });
+      continue;
+    }
     const audio =
       whole && !format
         ? input.audio
@@ -322,19 +444,28 @@ export async function transcribeTrack(input: {
       input.request.scope && !whole
         ? { ...input.request.scope, requestId: `${input.request.scope.requestId}:p${index}` }
         : input.request.scope;
-    const result = await measureRecordingStage("transcribe", () =>
-      input.provider.transcribe(
-        {
-          ...input.request,
-          ...(scope ? { scope } : {}),
-          audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
-        },
-        input.credentials,
-      ),
-    ).catch((error: unknown) => {
-      throw asRecordingTranscriptionError(error);
-    });
-    parts.push({ piece, result: await alignPiece(input, audio, result) });
+    let result = reused;
+    if (!result) {
+      result = await measureRecordingStage("transcribe", () =>
+        input.provider.transcribe(
+          {
+            ...input.request,
+            ...(scope ? { scope } : {}),
+            audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
+          },
+          input.credentials,
+        ),
+      ).catch((error: unknown) => {
+        throw asRecordingTranscriptionError(error);
+      });
+      // Kept the moment it is paid for: placing a text-only model's words
+      // can take as long as the audio, and a worker lost meanwhile must not
+      // ask again.
+      await input.pieces?.keep(index, requestKey, result);
+    }
+    const aligned = await alignPiece(input, audio, result);
+    if (aligned !== result) await input.pieces?.keep(index, requestKey, aligned);
+    parts.push({ piece, result: aligned });
   }
   return mergeRecordingTranscriptionPieces(parts);
 }
@@ -762,6 +893,42 @@ export function createRecordingActivities(
           source: (typeof job.recording.tracks)[number]["source"];
           result: RecordingDiarizerResult;
         }> = [];
+        // What an earlier attempt of this version already paid for.
+        const kept = await listRecordingTranscriptPieceResults(db, {
+          ...actor,
+          versionId: input.versionId,
+          processingOwner: input.processingOwner,
+        });
+        const piecesFor = (trackNumber: number): RecordingPieceResults =>
+          trackPieceResults({
+            kept,
+            trackNumber,
+            onReused: (pieceIndex) =>
+              observability.info("reused a transcribed piece from an earlier attempt", {
+                workspaceId: input.workspaceId,
+                recordingId: input.recordingId,
+                versionId: input.versionId,
+                trackNumber,
+                pieceIndex,
+              }),
+            save: async (piece) => {
+              await saveRecordingTranscriptPieceResult(db, {
+                ...actor,
+                versionId: input.versionId,
+                processingOwner: input.processingOwner,
+                ...piece,
+              }).catch((error: unknown) => {
+                // Not keeping it only costs a retry the same request again.
+                observability.warn("couldn't keep a transcribed piece for retries", {
+                  workspaceId: input.workspaceId,
+                  recordingId: input.recordingId,
+                  versionId: input.versionId,
+                  trackNumber,
+                  error: errorMessage(error),
+                });
+              });
+            },
+          });
         for (const plan of plans) {
           const track = job.recording.tracks.find((item) => item.trackNumber === plan.trackNumber)!;
           const chunks = job.chunks.filter((chunk) => chunk.trackNumber === plan.trackNumber);
@@ -848,6 +1015,7 @@ export function createRecordingActivities(
                 request,
                 aligner,
                 onAligned: (aligned) => addAlignment(telemetry, aligned),
+                pieces: piecesFor(plan.trackNumber),
               }),
               runOurs(),
             ]);
