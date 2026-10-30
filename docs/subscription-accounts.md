@@ -107,12 +107,18 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   in every workspace that person can use, including their Personal workspace,
   without exposing private workspace inventory to administrators.
   Verification: `packages/db/test/helpers/subscription-core-conformance.ts`.
-- **SUB-OWN-04** A workspace's own connection reaches only that workspace
-  and is managed by that workspace's administrators. Organization
-  administrators see it, labelled as that workspace's, and can make it the
-  organization's; only an organization connection reaches other workspaces
-  or chosen people. Verification: `packages/db/test/subscription-core-codex-access-editor-postgres.test.ts`,
-  `packages/db/test/subscription-core-codex-writers-postgres.test.ts`.
+- **SUB-OWN-04** A workspace's own connection is managed by that workspace's
+  administrators and serves that workspace, plus any other shared workspaces
+  chosen for it; sharing never changes its owner (D-52). Its administrators
+  can add workspaces they also administer and remove any; an administrator
+  of a workspace it serves can stop using it there but can't change it.
+  Organization administrators see it, labelled as that workspace's, can
+  choose its workspaces, and can move it to the organization explicitly.
+  Only an organization connection reaches every shared workspace, Personal
+  workspaces or chosen people. Verification: `packages/db/test/subscription-core-codex-access-editor-postgres.test.ts`,
+  `packages/db/test/subscription-core-codex-writers-postgres.test.ts`,
+  `apps/api/test/claude-core-routes.test.ts`,
+  `apps/web/src/components/connection-access-settings.test.tsx`.
 - **SUB-OWN-05** An organization administrator can disable personal
   connections for the whole organization. Disabling stops new selection of
   personal connections; work already running on one moves at its next safe
@@ -134,8 +140,9 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
 - **SUB-OWN-09** A shared workspace's administrator, without being an
   organization administrator, can connect a new account of any provider for
   that workspace and remove it again. It is the workspace's own account
-  (SUB-OWN-01): it serves only that workspace and never Personal workspaces,
-  and the workspace manages it (SUB-OWN-04). An upstream account already
+  (SUB-OWN-01): it serves that workspace, and other shared workspaces only
+  when they are chosen for it, never Personal workspaces, and the workspace
+  manages it (SUB-OWN-04). An upstream account already
   connected elsewhere in the organization is refused, never duplicated or
   taken over.
   Verification: `packages/db/test/subscription-core-codex-writers-postgres.test.ts`,
@@ -175,8 +182,9 @@ See [typing preparation](design/typing-turn-preparation.md) for timing and verif
   `packages/db/test/subscription-core-m2-postgres.test.ts` (provider switch
   overrides and SQL/TypeScript parity).
 - **SUB-SET-07** The organization's account lists say who each shared
-  connection reaches (`reach`: its owning workspace, every workspace, a list
-  of workspaces, Personal workspaces, or a number of chosen people), so an
+  connection reaches (`reach`: its owning workspace and any other workspaces
+  it serves, every workspace, a list of workspaces, Personal workspaces, or a
+  number of chosen people), so an
   administrator's overview shows every account once, with its owner, without
   a read per account or per workspace. Verification:
   `packages/db/test/helpers/subscription-core-conformance.ts` and
@@ -551,6 +559,7 @@ by the implementer and recorded here; consequential ones are escalated.
 | D-49 | 2026-10-14 | The product owner decided that a workspace administrator connects subscription accounts for their own workspace without being an organization administrator (SUB-OWN-09). Before, only an organization administrator could create any new shared connection, so a workspace administrator saw providers they could not add. The workspace's own account is exactly the shape an organization administrator already created from a workspace route, so selection, pools and settings are unchanged, and organization ownership, visibility and scope changes stay with the organization (SUB-OWN-01/04). |
 | D-50 | 2026-10-22 | The product owner decided that every connection has exactly one owner (the organization, one shared workspace, or one person) and serves exactly where it reaches (SUB-OWN-01, SUB-OWN-04). This retires the per-workspace "inference pool" split, where one connection could sit in a workspace twice, once as the workspace's own copy and once as the organization's, each with its own on/off switch; the per-workspace preference (`providers.<id>.inferenceSource` and the older `useOrganizationAccounts`) that chose between those copies; and the "Set aside" state it produced. A connection has one on/off switch. A workspace's own connection reaches only that workspace; making it serve more workspaces makes it the organization's. Migration 0907 keeps everyone's access exactly as it was: a workspace that used a connection keeps it, a workspace that had it switched off or excluded by its preference loses it from the connection's reach (an organization-wide connection becomes a list of the workspaces that used it, still reaching workspaces created later), and a connection whose only use was as one workspace's own copy becomes that workspace's. A connection that was switched off everywhere keeps its listed reach, so switching it on serves where it was meant to. The assignment-policy table is no longer read or written; it is emptied here and dropped in a later contract step. |
 | D-51 | 2026-10-30 | Supersedes the remaining pool readings of D-42 and D-50: who manages a shared connection never decides which models exist or which shared connections a turn may use. Claude catalog readiness, organization-model admission, the funding check and placement count the same connections (`listSubscriptionCoreServingConnections`: shared connections reaching the workspace, plus the subject's own personal connections in their own Personal workspace) for every Claude model id form (`workspace-claude-subscription/`, `organization-claude-subscription/` and the canonical `claude/`). Background work keeps its accepted carrier: a frozen record that accepted shared capacity under either legacy pool may use every shared connection reaching the workspace, and one without shared capacity keeps personal connections only. Workspace model policy treats every Claude subscription provider id as one provider, allowed when the canonical or the organization id is listed. See `docs/design/subscription-model-ids-without-pools.md`. |
+| D-52 | 2026-10-30 | Supersedes the last clause of D-50 ("making it serve more workspaces makes it the organization's"): sharing never changes a connection's owner. A workspace's own connection may also serve other shared workspaces, chosen one by one, and stays that workspace's: its administrators and the organization's administrators manage it. Organization administrators choose those workspaces from the organization's list. The owning workspace's administrators can add a workspace they also administer, and can remove any. An administrator of a workspace it serves can remove it from that workspace but can't change it. A workspace's own connection never serves a Personal workspace, every shared workspace including later ones, or chosen people: that needs the organization to own it, and an organization administrator moves it there explicitly (`moveToOrganization`), after which the workspace's administrators no longer manage it. Connections that D-50 already gave to the organization stay the organization's. Migration 1150 replaces the owner-reach guard (other workspaces must be shared ones) and adds the managing-workspace and receiving-workspace row policies. |
 
 ### Open decisions
 

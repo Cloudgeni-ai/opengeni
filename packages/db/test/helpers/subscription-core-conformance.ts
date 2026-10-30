@@ -3142,7 +3142,8 @@ export function describeSubscriptionCoreConformance<Credential>(
       );
       expect(localAccess).toMatchObject({
         allowedModels: null,
-        allowedWorkspaces: null,
+        // The workspace route reads the workspaces its own account serves.
+        allowedWorkspaces: [org.sharedWorkspaceId],
         allowPersonalWorkspaces: false,
       });
       expect(

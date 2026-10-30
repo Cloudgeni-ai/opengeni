@@ -670,8 +670,10 @@ import {
 export * from "./model-connection-access";
 export {
   SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessMoveRequiredError,
   SubscriptionCoreAccessPeopleUnlistableError,
   SubscriptionCoreAccessPersonNotInOrganizationError,
+  SubscriptionCoreAccessWorkspaceNotAdministeredError,
   type SubscriptionCoreAccess,
 } from "./subscription-core/access";
 import { createHash, randomUUID } from "node:crypto";

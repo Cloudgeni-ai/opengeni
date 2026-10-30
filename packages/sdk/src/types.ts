@@ -5356,6 +5356,12 @@ export type CodexAccount = {
   ownInWorkspaceIds?: string[];
   /** The organization's list only: who the account reaches. */
   reach?: SubscriptionAccountReach;
+  /**
+   * The workspace whose own account this is, or null for the organization's
+   * and personal accounts. In another workspace's list it was shared there by
+   * its owner, and that workspace can only remove it. Absent from older servers.
+   */
+  ownerWorkspaceId?: string | null;
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -11066,7 +11072,13 @@ export type EnrollTokenExchangeResponse = {
 
 export type ModelConnectionAccessPolicy = {
   allowedModels: string[] | null;
-  /** Organization-pool grants; null for every shared workspace, including new ones. */
+  /**
+   * The shared workspaces that may use the account; null for every shared
+   * workspace, including new ones. A workspace's own account always keeps
+   * serving its workspace. On a workspace's own route this is the list of
+   * workspaces it serves, and only workspaces the caller also administers
+   * can be added.
+   */
   allowedWorkspaces: string[] | null;
   allowPersonalWorkspaces: boolean;
   /**
@@ -11077,6 +11089,13 @@ export type ModelConnectionAccessPolicy = {
   allowedPeople?: string[] | null;
   /** Explicit owner consent to share a personal subscription with the organization. */
   sharePersonal?: true;
+  /**
+   * Explicit consent to make a workspace's own account the organization's, so
+   * that workspace's admins no longer manage it. Required on the organization
+   * route before it can serve every shared workspace, Personal workspaces or
+   * chosen people.
+   */
+  moveToOrganization?: true;
   version: number;
 };
 export type ModelConnectionAccessResponse = {

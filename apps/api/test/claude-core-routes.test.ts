@@ -171,17 +171,18 @@ afterAll(async () => {
 
 async function request(
   path: string,
-  options: { method?: string; body?: unknown; permissions?: Permission[] } = {},
+  options: { method?: string; body?: unknown; permissions?: Permission[]; workspace?: string } = {},
 ): Promise<Response> {
+  const workspace = options.workspace ?? workspaceId;
   const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId,
-    workspaceId,
+    workspaceId: workspace,
     subjectId,
     principalKind: "human_session",
     permissions: options.permissions ?? ["workspace:read", "workspace:admin"],
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   });
-  return await app!.request(`http://x/v1/workspaces/${workspaceId}${path}`, {
+  return await app!.request(`http://x/v1/workspaces/${workspace}${path}`, {
     method: options.method ?? "GET",
     headers: {
       authorization: `Bearer ${token}`,
@@ -452,8 +453,11 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
     const access = await request(accessPath);
     expect(access.status).toBe(200);
     const accessBody = await access.json();
+    // A workspace's own account serves its workspace, which manages it (D-52).
     expect(accessBody).toMatchObject({
-      policy: { allowedModels: null, allowedWorkspaces: null },
+      policy: { allowedModels: null, allowedWorkspaces: [workspaceId] },
+      localWorkspaceIds: [workspaceId],
+      managedByWorkspaceId: workspaceId,
     });
     const model = "workspace-claude-subscription/claude-sonnet-4-5";
     const restricted = await request(accessPath, {
@@ -728,5 +732,103 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
         core,
       ),
     ).rejects.toMatchObject({ status: 403 });
+  });
+
+  test("D-52: a workspace's own account serves workspaces its admins also administer, and stays its own", async () => {
+    // Another shared workspace this person administers, and one they only use.
+    const workspace = async (name: string, role: string, permissions: string[]) => {
+      const [row] = await shared!.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${accountId}::uuid, ${name}) returning id::text as id`;
+      await shared!.admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+        values (${accountId}::uuid, ${row!.id}::uuid, ${subjectId}, ${role},
+          ${JSON.stringify(permissions)}::jsonb)`;
+      await shared!.admin`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${row!.id}::uuid, ${accountId}::uuid)`;
+      return row!.id;
+    };
+    const administered = await workspace("D-52 administered", "admin", [
+      "workspace:read",
+      "workspace:admin",
+    ]);
+    const used = await workspace("D-52 used", "member", ["workspace:read"]);
+    const connected = await connectSetupToken({ label: "D-52 Claude" });
+    expect(connected.status).toBe(200);
+    const { accountId: connectionId } = await connected.json();
+    const accessPath = `/model-connections/claude_subscription/${connectionId}/access`;
+    const owner = async () =>
+      (
+        await shared!.admin<{ managed_by_workspace_id: string | null }[]>`
+          select managed_by_workspace_id::text as managed_by_workspace_id
+          from subscription_connections where id = ${connectionId}::uuid`
+      )[0]!.managed_by_workspace_id;
+    const served = async () =>
+      (
+        await shared!.admin<{ workspace_id: string }[]>`
+          select workspace_id::text as workspace_id from subscription_connection_workspaces
+          where connection_id = ${connectionId}::uuid order by workspace_id`
+      ).map((row) => row.workspace_id);
+
+    // Its route offers the workspaces this person administers, never one they only use.
+    const read = await request(accessPath);
+    expect(read.status).toBe(200);
+    const body = await read.json();
+    const offered = body.workspaces.map((entry: { id: string }) => entry.id);
+    expect(offered).toContain(workspaceId);
+    expect(offered).toContain(administered);
+    expect(offered).not.toContain(used);
+    expect(offered).not.toContain(personalWorkspaceId);
+    expect(body).toMatchObject({
+      policy: { allowedWorkspaces: [workspaceId], allowPersonalWorkspaces: false },
+      peopleSupported: false,
+      personalWorkspacesSupported: false,
+      managedByWorkspaceId: workspaceId,
+    });
+
+    // Personal workspaces, people or a move are refused from here, and nothing
+    // changes. (A workspace admin who isn't the organization's can't add a
+    // workspace they only use either; the database tests cover that person.)
+    const latest = async () => (await (await request(accessPath)).json()).policy;
+    const put = async (policy: Record<string, unknown>) =>
+      request(accessPath, { method: "PUT", body: { ...(await latest()), ...policy } });
+    expect((await put({ allowPersonalWorkspaces: true })).status).toBe(422);
+    expect((await put({ allowedPeople: [] })).status).toBe(422);
+    expect((await put({ moveToOrganization: true })).status).toBe(422);
+    expect(await served()).toEqual([workspaceId]);
+
+    // Shared with a workspace this person administers: it stays its workspace's.
+    const sharing = await put({ allowedWorkspaces: [workspaceId, administered] });
+    expect(sharing.status).toBe(200);
+    expect((await sharing.json()).allowedWorkspaces).toEqual([workspaceId, administered].sort());
+    expect(await owner()).toBe(workspaceId);
+    expect(await served()).toEqual([workspaceId, administered].sort());
+    // The organization's owner can share it with any shared workspace, as from
+    // the organization's page; it still stays its workspace's.
+    expect((await put({ allowedWorkspaces: [workspaceId, administered, used] })).status).toBe(200);
+    expect(await owner()).toBe(workspaceId);
+    expect(await served()).toEqual([workspaceId, administered, used].sort());
+
+    // Its own workspace can't drop it: it is always served there.
+    expect((await put({ allowedWorkspaces: [] })).status).toBe(200);
+    expect(await served()).toEqual([workspaceId]);
+    // A stale version is a conflict, never a silent overwrite.
+    const stale = await request(accessPath, {
+      method: "PUT",
+      body: { ...body.policy, allowedWorkspaces: [administered] },
+    });
+    expect(stale.status).toBe(409);
+    expect(await served()).toEqual([workspaceId]);
+    expect((await put({ allowedWorkspaces: [administered] })).status).toBe(200);
+    expect(await served()).toEqual([workspaceId, administered].sort());
+
+    // The receiving workspace's admins can stop using it, but not from its own workspace.
+    const remove = (from: string) => request(accessPath, { method: "DELETE", workspace: from });
+    expect((await remove(workspaceId)).status).toBe(404);
+    expect((await remove(administered)).status).toBe(204);
+    expect(await served()).toEqual([workspaceId]);
+    expect(await owner()).toBe(workspaceId);
+    expect((await remove(administered)).status).toBe(404);
   });
 });
