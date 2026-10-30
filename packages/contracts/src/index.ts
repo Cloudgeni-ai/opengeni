@@ -4426,9 +4426,9 @@ export const USER_SETUP_BLOCKERS: readonly UserSetupBlocker[] = [
     code: "personal_machine_permission_required",
     capabilityId: "api:connected-machine",
     problem:
-      "This is a personal (Only me) machine, and its owner has not allowed this chat to use it yet.",
-    rationale: "Allow this chat to use your computer.",
-    nextStep: "open this chat in Opengeni and allow it to use their machine",
+      "This is a personal (Only me) machine, and its owner has not turned it on for agents in this workspace yet.",
+    rationale: "Let your agents use your computer in this workspace.",
+    nextStep: "open this chat in Opengeni and allow their machine in this workspace",
   },
 ];
 

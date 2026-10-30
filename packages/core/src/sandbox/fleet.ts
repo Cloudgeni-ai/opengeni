@@ -318,7 +318,7 @@ export function personalMachineRefusal(
     return {
       code: "personal_machine_permission_required",
       reason:
-        "This is a personal (Only me) machine, and its owner has not allowed this chat to use it. " +
+        "This is a personal (Only me) machine, and its owner has not turned it on for agents in this workspace. " +
         "To ask them, call capability_authorization_request once with capabilityId api:connected-machine: the card it posts lets them allow it, so do not describe buttons or steps.",
     };
   }

@@ -39,12 +39,14 @@ import {
   getScheduledTask,
   getNestedAgentDepthDeploymentPolicy,
   getScheduledTaskRevisionAuthority,
+  issueSelfUserResourceGrant,
   listSessionSystemUpdatesForTurn,
   listScheduledTaskRuns,
   nestedPostgresSqlState,
   persistSlackBotInstallationWithSuccessAudit,
   requestSessionTurnRecovery,
   requireSession,
+  revokeSelfUserResourceGrant,
   updateScheduledTask,
   type DbClient,
   type Database,
@@ -929,12 +931,29 @@ describe("scheduled task personal MCP authority", () => {
       from session_attempt_connected_machine_authorizations where attempt_id = ${attemptId}`;
     expect(authorization).toEqual({ enrollmentId: machine.enrollmentId, grantMode: "session" });
 
-    // Without that grant the database refuses the run's next attempt.
+    // Without that grant, and once the owner turned the machine off in this
+    // workspace, the database refuses the run's next attempt.
     const second = await dispatch(task.id);
     if (second.action !== "start") throw new Error(`Unexpected: ${second.action}`);
     await admin`update organization_user_resource_grants set status = 'revoked',
         revoked_at = clock_timestamp(), generation = generation + 1, updated_at = clock_timestamp()
       where session_id = ${second.sessionId} and action = 'connected_machine.use'`;
+    const [machineAuthority] = await admin<Array<{ authorityId: string }>>`
+      select authority_id as "authorityId" from enrollments where id = ${machine.enrollmentId}`;
+    const owner = {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: workspace.subjectId,
+    };
+    const standing = await issueSelfUserResourceGrant(client.db, {
+      ...owner,
+      authorityId: machineAuthority!.authorityId,
+      resourceKind: "connected_machine",
+      mode: "always",
+      context: "user_private",
+      workspaceSharedAcknowledged: false,
+    });
+    await revokeSelfUserResourceGrant(client.db, { ...owner, grantId: standing.grantId });
     const refused = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
       sessionId: second.sessionId,
       workflowId: second.workflowId,

@@ -14,6 +14,7 @@ import {
   forkSessionContent,
   getSessionMachineAccess,
   readActiveSandbox,
+  revokeSelfUserResourceGrant,
   setActiveSandbox,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
@@ -277,7 +278,7 @@ describe("a fork runs on its source's machine", () => {
     await firstMessageIsAdmitted(f, forked.sessionId, f.owner);
   }, 180_000);
 
-  test("the owner's fork of a chat on their personal machine stays on it under the same consent rule", async () => {
+  test("the owner's fork of a chat on their personal machine stays on it under the same rule as its source", async () => {
     const f = await fixture();
     const sourceId = await chatOnMachine(f, f.personal.sandboxId);
     const firstEventId = await completedExchange(f, sourceId);
@@ -286,8 +287,6 @@ describe("a fork runs on its source's machine", () => {
       expect(await readActiveSandbox(client.db, f.workspaceId, forked.sessionId)).toEqual(
         onTheMachine(f.personal.sandboxId),
       );
-      // A personal machine still needs its owner's approval for each chat, so
-      // the fork's machine card offers the owner that ordinary approval.
       expect(
         await getSessionMachineAccess(client.db, {
           accountId: f.accountId,
@@ -300,10 +299,39 @@ describe("a fork runs on its source's machine", () => {
         machineName: "Alex's laptop",
         isOwner: true,
       });
-      await expect(sendFirstMessage(f, forked.sessionId, f.owner)).rejects.toThrow();
+      // The machine is on where it was connected, so the owner's own turns
+      // run there without asking in each chat.
+      await firstMessageIsAdmitted(f, forked.sessionId, f.owner);
     }
-    // Exactly as the source itself behaves without that approval.
-    await expect(sendFirstMessage(f, sourceId, f.owner)).rejects.toThrow();
+    // Exactly as the source itself behaves.
+    await firstMessageIsAdmitted(f, sourceId, f.owner);
+
+    // Once the owner turns it off here, a new fork waits for their approval
+    // like any other chat.
+    const [machine] = await shared.admin<Array<{ authority_id: string }>>`
+      select authority_id from enrollments where id = ${f.personal.enrollmentId}`;
+    const standing = await shared.admin<Array<{ id: string }>>`
+      select id from organization_user_resource_grants
+      where authority_id = ${machine!.authority_id} and workspace_id = ${f.workspaceId}
+        and action = 'connected_machine.use' and mode = 'always' and status = 'active'`;
+    // Its first use here recorded the standing permission the owner now takes back.
+    expect(standing.length).toBeGreaterThan(0);
+    for (const grant of standing) {
+      await revokeSelfUserResourceGrant(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        subjectId: f.owner,
+        grantId: grant.id,
+      });
+    }
+    const offSource = await chatOnMachine(f, f.personal.sandboxId);
+    await completedExchange(f, offSource);
+    const afterOff = await fork(f, offSource, f.owner);
+    expect(await readActiveSandbox(client.db, f.workspaceId, afterOff.sessionId)).toEqual(
+      onTheMachine(f.personal.sandboxId),
+    );
+    await expect(sendFirstMessage(f, afterOff.sessionId, f.owner)).rejects.toThrow();
+    await expect(sendFirstMessage(f, offSource, f.owner)).rejects.toThrow();
   }, 180_000);
 
   test("another member's fork keeps a machine they may use and never borrows a personal one", async () => {
