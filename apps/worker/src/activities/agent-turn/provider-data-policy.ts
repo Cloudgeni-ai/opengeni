@@ -40,6 +40,12 @@ export type ProviderDataPolicy = {
   location: string;
   /** The provider's own documentation for the statements above. */
   sources: readonly string[];
+  /**
+   * What Opengeni's own requests on this route do, when that changes the
+   * provider's default. Shown only when Opengeni calls the provider directly,
+   * never for a gateway's upstream provider.
+   */
+  opengeni?: string;
   /** ISO date the sources were last read. Null only for the unknown row. */
   checkedOn: string | null;
 };
@@ -57,7 +63,7 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     training:
       "No. Microsoft does not use prompts or outputs to train models without permission, and they are not available to OpenAI.",
     retention:
-      "Abuse monitoring may store flagged prompts and outputs for human review in the resource's geography; the period is not stated (unknown). Responses API response data is kept for 30 days by default, and Opengeni does not turn that storage off on Azure.",
+      "Abuse monitoring may store flagged prompts and outputs for human review in the resource's geography; the period is not stated (unknown). Responses API response data is kept for 30 days by default.",
     location:
       "Data at rest stays in the Azure resource's geography. Global deployments may process prompts in any geography where the model is deployed; Data Zone EU deployments process only in EU member states.",
     sources: [
@@ -65,6 +71,7 @@ export const PROVIDER_DATA_POLICIES: Readonly<
       "https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/abuse-monitoring",
       "https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses",
     ],
+    opengeni: "Opengeni does not turn off Responses API storage on Azure chat turns.",
     checkedOn: CHECKED_2026_10_30,
   },
   azure_foundry_fireworks: {
@@ -86,7 +93,7 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     training:
       "No. Neither AWS nor the model's maker uses prompts or outputs to train models, and the model's maker does not receive them.",
     retention:
-      "Depends on the model. AWS stores prompts and outputs only for models on its abuse-detection list, for up to 30 days inside AWS in the region that processed the request, and does not share them with the model's maker. When checked, Claude Opus 5.5 and Sonnet 5.5 were not on that list.",
+      "Depends on the model. AWS stores prompts and outputs for models on its abuse-detection list, for up to 30 days inside AWS in the region that processed the request, and does not share them with the model's maker. AWS may also keep content for child sexual abuse material detection. When checked, Claude Opus 5.5 and Sonnet 5.5 were not on that list.",
     location:
       "A global.* inference profile can process in any commercial AWS region; an eu.* profile processes only in EU AWS regions.",
     sources: [
@@ -103,13 +110,14 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     training: "No, not without express permission.",
     retention:
       "Deleted within 30 days of receipt by default; content flagged by Anthropic's trust and safety systems can be kept for up to 2 years. Zero data retention only by separate agreement.",
-    location:
-      "Inference may run in any geography by default; Opengeni does not set a region, so the Anthropic workspace's own default applies.",
+    location: "Inference may run in any geography by default.",
     sources: [
       "https://platform.claude.com/docs/en/build-with-claude/api-and-data-retention",
       "https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data",
       "https://platform.claude.com/docs/en/build-with-claude/data-residency",
     ],
+    opengeni:
+      "Opengeni does not set an inference region, so the Anthropic workspace's own default applies.",
     checkedOn: CHECKED_2026_10_30,
   },
   claude_subscription: {
@@ -133,10 +141,11 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     provider: "OpenAI API",
     training: "No, unless the organization opts in.",
     retention:
-      "Abuse-monitoring logs are kept for up to 30 days, unless the law requires longer. Responses API data is kept for 30 days by default, and Opengeni does not turn this off for chat turns. Zero data retention only with OpenAI's approval.",
+      "Abuse-monitoring logs are kept for up to 30 days, unless the law requires longer. Responses API data is kept for 30 days by default. Zero data retention only with OpenAI's approval.",
     location:
       "Not stated for default projects (unknown). Data residency projects and the regional endpoints pin processing to that region.",
     sources: ["https://developers.openai.com/api/docs/guides/your-data"],
+    opengeni: "Opengeni does not turn off Responses API storage for chat turns.",
     checkedOn: CHECKED_2026_10_30,
   },
   codex_subscription: {
@@ -144,14 +153,14 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     provider: "OpenAI, under the connected ChatGPT subscription's own terms",
     training:
       'Personal ChatGPT plans: may be used for training unless the account turns off "Improve the model for everyone". Business, Enterprise and Edu plans: not used for training by default.',
-    retention:
-      "Set by the ChatGPT account's terms and settings. Opengeni asks OpenAI not to store responses on this route.",
+    retention: "Set by the ChatGPT account's terms and settings.",
     location:
       "Not stated (unknown); ChatGPT Enterprise and Edu workspaces can have data residency.",
     sources: [
       "https://help.openai.com/en/articles/7730893-data-controls-faq",
       "https://help.openai.com/en/articles/5722486-how-your-data-is-used-to-improve-model-performance",
     ],
+    opengeni: "Opengeni asks OpenAI not to store responses on this route.",
     checkedOn: CHECKED_2026_10_30,
   },
   xai_api: {
@@ -208,9 +217,9 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     family: "openrouter",
     provider: "OpenRouter, which forwards to an upstream model provider",
     training:
-      "OpenRouter uses prompts only if the account opts in. The upstream provider OpenRouter routes to applies its own policy; an account setting can exclude providers that train.",
+      "OpenRouter uses prompts only if the account opts in, apart from anonymously sampling a small number of prompts to categorize them. The upstream provider OpenRouter routes to applies its own policy; an account setting can exclude providers that train.",
     retention:
-      "OpenRouter stores prompts only if the account opts in, or when content is flagged as potential child sexual abuse material; it keeps request metadata. The upstream provider's own retention applies.",
+      "OpenRouter stores prompts if the account opts in, or when content is flagged as potential child sexual abuse material; it may also sample a small number of prompts anonymously for categorization, and it keeps request metadata. The upstream provider's own retention applies.",
     location:
       "Not pinned to a region (OpenRouter's in-region routing is not used); the upstream region is not stated (unknown).",
     sources: [

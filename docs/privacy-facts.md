@@ -65,7 +65,7 @@ sentence against its source:
 | --- | --- | --- | --- |
 | Azure OpenAI (sold by Azure) | No | Flagged content for abuse review, period not stated; Responses data 30 days by default (Opengeni does not turn it off on Azure) | Resource geography at rest; Global may process wherever the model is deployed; Data Zone EU in the EU |
 | Fireworks on Azure Foundry | Not stated | Not stated | Fireworks GPUs outside Microsoft facilities; excluded from the EU Data Boundary; pay-per-token Data Zone in US regions |
-| Amazon Bedrock | No | Only models on AWS's abuse-detection list, up to 30 days (Claude Opus and Sonnet 5.5 were not on it) | `global.*` any commercial region; `eu.*` EU regions |
+| Amazon Bedrock | No | Models on AWS's abuse-detection list, up to 30 days (Claude Opus and Sonnet 5.5 were not on it); CSAM detection may keep content | `global.*` any commercial region; `eu.*` EU regions |
 | Anthropic API | No | Within 30 days; flagged up to 2 years | Any geography by default; the Anthropic workspace default applies |
 | Claude subscription | Personal plans: with the setting on, plus flagged chats and feedback; Team and Enterprise: only on opt-in or feedback | Personal: 30 days, or up to 5 years with the setting on; Team and Enterprise: 30 days | Not stated |
 | OpenAI API | No, unless opted in | Abuse logs up to 30 days; Responses data 30 days by default (Opengeni does not turn it off) | Not stated for default projects |
@@ -74,11 +74,16 @@ sentence against its source:
 | SuperGrok subscription | May train | No fixed period stated | Not stated |
 | Vercel AI Gateway | Vercel no; upstream default or Vercel's stricter agreement | Vercel none; upstream applies | Any Vercel region; no inference region pinned |
 | Google Vertex (Gemini) | No | 24-hour cache; flagged prompts up to 90 days; Frontier Models logs 30 days | Any region unless a regional endpoint is used |
-| OpenRouter | Only if the account opts in; upstream applies | Only on opt-in or flagged CSAM; metadata kept | Not pinned |
+| OpenRouter | Only if the account opts in, apart from anonymous sampling for categorization; upstream applies | On opt-in or flagged CSAM; may sample a few prompts anonymously; metadata kept | Not pinned |
 | Opper | No; upstream applies | Metadata only by default; tracing 1 to 30 days if turned on | EU-hosted gateway (Stockholm) |
 
 Changing a row is a reviewed change: re-read every source, update the date, and
 keep unknowns unknown.
+
+Statements about what Opengeni's own requests do (for example whether Opengeni
+turns off Responses API storage) sit in a separate `opengeni` field. The tool
+shows them only when Opengeni calls that provider directly, not when the
+provider sits behind a gateway such as Vercel AI Gateway.
 
 ## Not covered
 

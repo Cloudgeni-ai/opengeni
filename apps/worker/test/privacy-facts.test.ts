@@ -106,19 +106,45 @@ describe("Opengeni's own storage claims in the table", () => {
       (slug) => slug,
     );
     expect(codex.store).toBe(false);
-    expect(PROVIDER_DATA_POLICIES.codex_subscription.retention).toContain(
+    expect(PROVIDER_DATA_POLICIES.codex_subscription.opengeni).toContain(
       "Opengeni asks OpenAI not to store responses",
     );
     // Main chat turns on Azure and the OpenAI API leave `store` at its default.
-    expect(PROVIDER_DATA_POLICIES.openai_api.retention).toContain(
-      "Opengeni does not turn this off for chat turns",
+    expect(PROVIDER_DATA_POLICIES.openai_api.opengeni).toContain(
+      "Opengeni does not turn off Responses API storage for chat turns",
     );
-    expect(PROVIDER_DATA_POLICIES.azure_openai.retention).toContain(
-      "Opengeni does not turn that storage off on Azure",
+    expect(PROVIDER_DATA_POLICIES.azure_openai.opengeni).toContain(
+      "Opengeni does not turn off Responses API storage on Azure chat turns",
     );
     for (const family of ["openai_api", "azure_openai", "vercel_ai_gateway"] as const) {
-      expect(PROVIDER_DATA_POLICIES[family].retention).not.toContain("asks OpenAI not to store");
+      expect(PROVIDER_DATA_POLICIES[family].opengeni ?? "").not.toContain(
+        "asks OpenAI not to store",
+      );
     }
+    // Statements about Opengeni's own requests live only in `opengeni`.
+    for (const policy of Object.values(PROVIDER_DATA_POLICIES)) {
+      expect(`${policy.training} ${policy.retention} ${policy.location}`).not.toMatch(
+        /Opengeni (does not|asks)/,
+      );
+    }
+  });
+
+  test("are shown for a direct route but not for a gateway's upstream provider", () => {
+    const direct = renderPrivacyFacts({
+      route: route({ kind: "direct-openai-workspace" }),
+      live: LIVE_OFF,
+      deployment: DEPLOYMENT,
+    });
+    expect(direct).toContain(
+      "- Opengeni's requests: Opengeni does not turn off Responses API storage for chat turns.",
+    );
+    const gateway = renderPrivacyFacts({
+      route: route({ baseUrl: "https://ai-gateway.vercel.sh/v1", gatewayOnly: ["openai"] }),
+      live: LIVE_OFF,
+      deployment: DEPLOYMENT,
+    });
+    expect(gateway).toContain("Upstream provider behind the gateway");
+    expect(gateway).not.toContain("Opengeni's requests:");
   });
 });
 

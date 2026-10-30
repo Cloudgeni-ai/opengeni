@@ -105,7 +105,9 @@ function isAzureHost(host: string | null): boolean {
  * An Azure route. Only the Responses API is certainly an Azure OpenAI model
  * sold by Azure; Fireworks models are named `FW-…`. Other Azure-hosted models
  * (Claude through Anthropic's Messages API, partner and community models) are
- * processed by others under other terms, so they stay unknown.
+ * processed by others under other terms, so they stay unknown. A declared
+ * `azure_*` deployment on the chat API still counts as Azure OpenAI, because
+ * the operator declared it as one.
  */
 function azureFamily(route: PrivacyFactsRoute, declaredAzure: boolean): ProviderDataPolicyFamily {
   const upstream = route.upstreamModelId;
@@ -210,12 +212,17 @@ function residencyText(residency: ModelResidencyV1 | null): string {
   return `Declared as processing in ${where}${regions}, deployment type ${residency.deploymentType}.`;
 }
 
-function policyLines(heading: string, policy: ProviderDataPolicy): string[] {
+function policyLines(
+  heading: string,
+  policy: ProviderDataPolicy,
+  options: { direct: boolean },
+): string[] {
   return [
     `${heading}: ${policy.provider}`,
     `- Trains on the data: ${policy.training}`,
     `- Keeps the data: ${policy.retention}`,
     `- Where it processes: ${policy.location}`,
+    ...(options.direct && policy.opengeni ? [`- Opengeni's requests: ${policy.opengeni}`] : []),
     policy.sources.length > 0
       ? `- Sources (checked ${policy.checkedOn}): ${policy.sources.join(" ; ")}`
       : "- Sources: none; this provider is not in Opengeni's reviewed table.",
@@ -250,7 +257,7 @@ export function renderPrivacyFacts(input: {
         ? "EU-only: on. Every model route this workspace uses must be declared as processing in the EU."
         : "EU-only: off. Model routes may process outside the EU; only say data stays in the EU for a route declared EU above.",
     "",
-    ...policyLines("Provider", policy),
+    ...policyLines("Provider", policy, { direct: true }),
   ];
   if (family === "vercel_ai_gateway") {
     lines.push(
@@ -259,6 +266,7 @@ export function renderPrivacyFacts(input: {
         ? policyLines(
             "Upstream provider behind the gateway (that provider's public default for its own API customers; Vercel's agreement with it may differ)",
             PROVIDER_DATA_POLICIES[upstreamFamily],
+            { direct: false },
           )
         : ["Upstream provider behind the gateway: not pinned by this route (unknown)."]),
     );
