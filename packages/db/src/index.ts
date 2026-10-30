@@ -22705,10 +22705,35 @@ export class ChannelNotFoundError extends Error {
   }
 }
 
+/**
+ * An Only me project holds only its owner's own Only me chats and Sites
+ * (1161), so nothing in it is ever visible to anyone else.
+ */
+export class ChannelAudienceMismatchError extends Error {
+  constructor(kind: "chat" | "Site") {
+    super(`An Only me project holds only your own Only me ${kind}s.`);
+    this.name = "ChannelAudienceMismatchError";
+  }
+}
+
 function isChannelNameUniqueViolation(error: unknown): boolean {
+  const constraint = safeDatabaseErrorFacts(error).constraint;
   return (
     nestedPostgresSqlState(error) === "23505" &&
-    safeDatabaseErrorFacts(error).constraint === "channels_workspace_name_idx"
+    (constraint === "channels_workspace_name_idx" || constraint === "channels_owner_name_idx")
+  );
+}
+
+/** Whether an item fits a project: anything fits a shared one. */
+function fitsProject(
+  project: { visibility: string; ownerSubjectId: string | null },
+  item: { visibility: string; ownerSubjectId: string | null },
+): boolean {
+  return (
+    project.visibility !== "user_private" ||
+    (item.visibility === "user_private" &&
+      item.ownerSubjectId !== null &&
+      item.ownerSubjectId === project.ownerSubjectId)
   );
 }
 
@@ -22741,6 +22766,7 @@ function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
     avatar: storedSessionAvatar(row.avatar),
     pinned: row.pinned,
     sortOrder: row.sortOrder,
+    visibility: row.visibility === "user_private" ? "private" : "workspace",
     createdBy: row.createdBy ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -22756,8 +22782,17 @@ export async function createChannel(
     description?: string | null;
     avatar?: SessionAvatar | null;
     createdBy?: string | null;
+    /**
+     * Who sees it; Only me needs its owner. Omitted, shared with the
+     * workspace, as every project was before audiences.
+     */
+    audience?: { visibility: "user_private" | "workspace_shared"; ownerSubjectId: string | null };
   },
 ): Promise<Channel> {
+  const visibility = input.audience?.visibility ?? "workspace_shared";
+  const ownerSubjectId = input.audience?.ownerSubjectId ?? null;
+  if (visibility === "user_private" && !ownerSubjectId)
+    throw new TypeError("An Only me project needs an owner");
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -22781,6 +22816,8 @@ export async function createChannel(
             description: input.description ?? null,
             avatar: input.avatar ?? null,
             sortOrder: nextSortOrder,
+            visibility,
+            ownerSubjectId,
             createdBy: input.createdBy ?? null,
           })
           .returning();
@@ -22837,9 +22874,28 @@ export async function updateChannel(
     description?: string | null | undefined;
     avatar?: SessionAvatar | null | undefined;
     pinned?: boolean | undefined;
+    /** Shares an Only me project with the workspace; never narrows. */
+    visibility?: "workspace_shared" | undefined;
   },
 ): Promise<Channel | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    // Sharing keeps the name, which then has to be free among shared projects.
+    const conflictName =
+      input.name ??
+      (input.visibility === undefined
+        ? ""
+        : ((
+            await scopedDb
+              .select({ name: schema.channels.name })
+              .from(schema.channels)
+              .where(
+                and(
+                  eq(schema.channels.workspaceId, workspaceId),
+                  eq(schema.channels.id, channelId),
+                ),
+              )
+              .limit(1)
+          )[0]?.name ?? ""));
     try {
       const [row] = await scopedDb
         .update(schema.channels)
@@ -22848,6 +22904,7 @@ export async function updateChannel(
           ...(input.description !== undefined ? { description: input.description } : {}),
           ...(input.avatar !== undefined ? { avatar: input.avatar } : {}),
           ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+          ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
@@ -22855,7 +22912,7 @@ export async function updateChannel(
       return row ? mapChannel(row) : null;
     } catch (error) {
       if (isChannelNameUniqueViolation(error)) {
-        throw new ChannelNameConflictError(input.name ?? "");
+        throw new ChannelNameConflictError(conflictName);
       }
       throw error;
     }
@@ -22951,7 +23008,11 @@ export async function setSessionChannel(
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
     if (input.channelId !== null) {
       const [channel] = await scopedDb
-        .select({ id: schema.channels.id })
+        .select({
+          id: schema.channels.id,
+          visibility: schema.channels.visibility,
+          ownerSubjectId: schema.channels.ownerSubjectId,
+        })
         .from(schema.channels)
         .where(
           and(
@@ -22962,6 +23023,29 @@ export async function setSessionChannel(
         .limit(1);
       if (!channel) {
         throw new ChannelNotFoundError(input.channelId);
+      }
+      if (channel.visibility === "user_private") {
+        const [session] = await scopedDb
+          .select({
+            visibility: schema.sessions.visibility,
+            ownerSubjectId: schema.sessions.ownerSubjectId,
+          })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        if (!session) return false;
+        if (
+          !fitsProject(channel, {
+            visibility: session.visibility,
+            ownerSubjectId: session.ownerSubjectId ?? null,
+          })
+        )
+          throw new ChannelAudienceMismatchError("chat");
       }
     }
     try {
@@ -23060,6 +23144,8 @@ export async function moveSiteToProject(
         accountId: string;
         homeChannelId: string | null;
         inAudience: boolean;
+        visibility: string;
+        ownerSubjectId: string | null;
       }>(
         scoped,
         sql`
@@ -23067,7 +23153,9 @@ export async function moveSiteToProject(
             (case when placement.site_id is not null then placement.channel_id
               else creator.channel_id end)::text as "homeChannelId",
             (artifact.visibility = 'workspace_shared'
-              or artifact.owner_subject_id = ${input.subjectId}) as "inAudience"
+              or artifact.owner_subject_id = ${input.subjectId}) as "inAudience",
+            artifact.visibility as "visibility",
+            artifact.owner_subject_id as "ownerSubjectId"
           from ${schema.workspaceArtifacts} artifact
           left join ${schema.siteProjectPlacements} placement
             on placement.workspace_id = artifact.workspace_id and placement.site_id = artifact.id
@@ -23088,7 +23176,11 @@ export async function moveSiteToProject(
       if (input.fromChannelId === input.channelId) return { siteMoved: false, movedSessionIds: [] };
       if (input.channelId !== null) {
         const [channel] = await scoped
-          .select({ id: schema.channels.id })
+          .select({
+            id: schema.channels.id,
+            visibility: schema.channels.visibility,
+            ownerSubjectId: schema.channels.ownerSubjectId,
+          })
           .from(schema.channels)
           .where(
             and(
@@ -23098,6 +23190,30 @@ export async function moveSiteToProject(
           )
           .limit(1);
         if (!channel) throw new ChannelNotFoundError(input.channelId);
+        // An Only me project takes only its owner's Only me Site, and the
+        // conversations that move with a row must fit it too.
+        if (channel.visibility === "user_private") {
+          if (!fitsProject(channel, site)) throw new ChannelAudienceMismatchError("Site");
+          const misfits =
+            input.sessionIds.length === 0
+              ? []
+              : await scoped
+                  .select({ id: schema.sessions.id })
+                  .from(schema.sessions)
+                  .where(
+                    and(
+                      eq(schema.sessions.workspaceId, input.workspaceId),
+                      inArray(schema.sessions.id, [...input.sessionIds]),
+                      or(
+                        ne(schema.sessions.visibility, "user_private"),
+                        isNull(schema.sessions.ownerSubjectId),
+                        ne(schema.sessions.ownerSubjectId, channel.ownerSubjectId ?? ""),
+                      ),
+                    ),
+                  )
+                  .limit(1);
+          if (misfits.length > 0) throw new ChannelAudienceMismatchError("chat");
+        }
       }
       const siteMoved = site.inAudience && site.homeChannelId === input.fromChannelId;
       try {

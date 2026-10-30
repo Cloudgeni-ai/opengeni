@@ -5203,6 +5203,14 @@ export const channels = pgTable(
     pinned: boolean("pinned").notNull().default(false),
     // Explicit user order within the pinned and unpinned project groups.
     sortOrder: integer("sort_order").notNull().default(0),
+    // Who sees it (1161): the workspace, or only its owner ("Only me"), like
+    // a chat. An Only me project holds only its owner's Only me chats and
+    // Sites; the migration owns the rule and the per-audience name indexes.
+    visibility: text("visibility")
+      .$type<"workspace_shared" | "user_private">()
+      .notNull()
+      .default("workspace_shared"),
+    ownerSubjectId: text("owner_subject_id"),
     // Attribution string: 'user:<subject>' | 'session:<id>' | 'system'.
     createdBy: text("created_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -312,6 +312,8 @@ import {
   scheduledTaskViewerForGrant,
   siteViewerForGrant,
   resolveNewSiteAudience,
+  resolveNewProjectAudience,
+  projectSourceSessionId,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -7065,6 +7067,14 @@ function registerProjectTools(
       },
       async ({ name, description, avatar }) => {
         const exactAvatar = await projectAvatarFromToolInput(deps, grant, avatar);
+        // A project made in an Only me chat is Only me, so that chat fits it.
+        const audience = await resolveNewProjectAudience({
+          db: deps.db,
+          settings: deps.settings,
+          grant,
+          requested: undefined,
+          sourceSessionId: projectSourceSessionId(grant),
+        });
         return json({
           project: await createChannel(deps.db, {
             accountId: grant.accountId,
@@ -7073,6 +7083,7 @@ function registerProjectTools(
             description: description ?? null,
             avatar: exactAvatar ?? null,
             createdBy: grant.subjectId,
+            audience,
           }),
         });
       },

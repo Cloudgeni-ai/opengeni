@@ -68,7 +68,10 @@ import {
 import { toast } from "../lib/toast";
 
 import { BillingClassMark } from "../components/billing-class-mark";
-import { ChannelCreateDialog } from "../components/rail/channel-create-dialog";
+import {
+  ChannelCreateDialog,
+  type ProjectAudience,
+} from "../components/rail/channel-create-dialog";
 import { ProjectGlyph } from "../components/rail/project-glyph";
 import { ConsoleComposer, useDraftAttachments } from "../components/Composer";
 import { NewSessionStarters } from "../components/new-session-starters";
@@ -331,6 +334,7 @@ function SessionsIndexRouteContent({
   const recentChannelId = selectionHistory.projects[0]?.channelId ?? null;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
+  const [projectAudienceDraft, setProjectAudienceDraft] = useState<ProjectAudience>("workspace");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   // ?botTemplateId= starts this chat as a bot: the template's setup
@@ -492,6 +496,12 @@ function SessionsIndexRouteContent({
     draft.visibility,
     tenancyCapabilities?.canCreatePrivate === true,
   );
+  const canCreatePrivateChat = tenancyCapabilities?.canCreatePrivate === true;
+  // A new project can be Only me wherever a new chat can.
+  const projectAudienceOffered = hasVisibilityChoice({
+    personalWorkspace,
+    canCreatePrivate: canCreatePrivateChat,
+  });
   const personalOwnerScope = resolvePersonalResourceOwnerScope({
     authMode: context.clientConfig.auth.mode,
     authSession: context.authSession,
@@ -755,7 +765,10 @@ function SessionsIndexRouteContent({
   const createProject = useCallback(async () => {
     const name = projectNameDraft.trim();
     if (!name) return;
-    const project = await channelsQuery.create({ name });
+    const project = await channelsQuery.create({
+      name,
+      ...(projectAudienceOffered ? { visibility: projectAudienceDraft } : {}),
+    });
     if (!project) {
       toast.error("Couldn't create the project. The name may already be in use.");
       return;
@@ -763,7 +776,30 @@ function SessionsIndexRouteContent({
     selectProject(project.id);
     setProjectDialogOpen(false);
     setProjectNameDraft("");
-  }, [channelsQuery, projectNameDraft, selectProject]);
+    setProjectAudienceDraft("workspace");
+  }, [
+    channelsQuery,
+    projectAudienceDraft,
+    projectAudienceOffered,
+    projectNameDraft,
+    selectProject,
+  ]);
+
+  // An Only me project holds only Only me chats, so choosing one makes the new
+  // chat Only me. Where Only me is off, its Only me projects take no new chats.
+  const selectedProjectOnlyMe =
+    channelsQuery.channels.find((channel) => channel.id === selectedChannelId)?.visibility ===
+    "private";
+  useEffect(() => {
+    if (!selectedProjectOnlyMe || !tenancyCapabilities) return;
+    if (!canCreatePrivateChat) {
+      selectProject(null, false);
+      return;
+    }
+    setDraft((current) =>
+      current.visibility === "private" ? current : { ...current, visibility: "private" },
+    );
+  }, [canCreatePrivateChat, selectProject, selectedProjectOnlyMe, tenancyCapabilities]);
 
   useEffect(() => {
     const onRequest = (event: Event) => {
@@ -1965,6 +2001,9 @@ function SessionsIndexRouteContent({
                               disabled={busy || newSessionDraft.loading}
                               onChange={(visibility) => {
                                 visibilityChosenRef.current = true;
+                                // A shared chat can't go in an Only me project.
+                                if (visibility === "workspace" && selectedProjectOnlyMe)
+                                  selectProject(null);
                                 setDraft((current) => ({
                                   ...current,
                                   visibility,
@@ -2132,7 +2171,13 @@ function SessionsIndexRouteContent({
                   {chatList ? (
                     <SessionSetupStrip
                       disabled={busy || newSessionDraft.loading}
-                      channels={channelsQuery.channels}
+                      channels={
+                        canCreatePrivateChat
+                          ? channelsQuery.channels
+                          : channelsQuery.channels.filter(
+                              (channel) => channel.visibility !== "private",
+                            )
+                      }
                       selectedChannelId={selectedChannelId}
                       onChannelChange={selectProject}
                       onCreateProject={() => setProjectDialogOpen(true)}
@@ -2233,10 +2278,18 @@ function SessionsIndexRouteContent({
         open={projectDialogOpen}
         name={projectNameDraft}
         busy={channelsQuery.mutating}
+        audience={
+          projectAudienceOffered
+            ? { value: projectAudienceDraft, onChange: setProjectAudienceDraft }
+            : undefined
+        }
         onNameChange={setProjectNameDraft}
         onOpenChange={(open) => {
           setProjectDialogOpen(open);
-          if (!open) setProjectNameDraft("");
+          if (!open) {
+            setProjectNameDraft("");
+            setProjectAudienceDraft("workspace");
+          }
         }}
         onSubmit={() => void createProject()}
       />
@@ -2463,12 +2516,15 @@ function SessionFolderPicker({
           variant="outline"
           size="sm"
           disabled={disabled}
-          aria-label={`Project: ${label}`}
+          aria-label={`Project: ${label}${selected?.visibility === "private" ? ", Only me" : ""}`}
           title={label}
           className="h-8 min-w-0 max-w-[12rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg sm:shrink-0"
         >
           <ProjectGlyph project={selected} />
           <span className="min-w-0 truncate">{label}</span>
+          {selected?.visibility === "private" ? (
+            <LockIcon aria-hidden="true" className="size-3 shrink-0" />
+          ) : null}
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
@@ -2483,6 +2539,9 @@ function SessionFolderPicker({
           <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
             <ProjectGlyph project={channel} className="size-4" />
             <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+            {channel.visibility === "private" ? (
+              <LockIcon aria-label="Only me" className="size-3.5 shrink-0 text-fg-subtle" />
+            ) : null}
             <DropdownMenuCheck checked={channel.id === selectedChannelId} />
           </DropdownMenuItem>
         ))}
