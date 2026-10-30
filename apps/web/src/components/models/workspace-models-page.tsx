@@ -185,9 +185,16 @@ const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelCatalogProviderKind>
 export function useOrganizationModelAccounts({
   organizationId,
   enabled,
+  gatewaysEnabled = enabled,
 }: {
   organizationId: string | undefined;
   enabled: boolean;
+  /**
+   * The organization's keys (gateways and direct providers) are read through
+   * an owner's or admin's membership; an account administrator without one
+   * (a key or service) manages only the subscription accounts.
+   */
+  gatewaysEnabled?: boolean;
 }) {
   const { client, clientConfig } = useAppContext();
   const claudeEnabled = clientConfig.claudeSubscriptionEnabled === true;
@@ -213,7 +220,7 @@ export function useOrganizationModelAccounts({
     client,
     organizationId: orgId,
     providerKind: ORGANIZATION_KIND[id],
-    enabled: enabled && on,
+    enabled: gatewaysEnabled && on,
     azureDeploymentIdentity: clientConfig.azureOpenAIDeploymentIdentity === true,
   });
   const orgGateways: Record<GatewayId, ProviderConnection> = {
@@ -265,6 +272,7 @@ export function WorkspaceModelsPageBody({
   canAdministerWorkspace,
   canManageConnections,
   canManageOrganizationModels,
+  organizationPeopleAdministrator = canManageOrganizationModels,
   account,
   view,
   onConnectionChange,
@@ -298,6 +306,12 @@ export function WorkspaceModelsPageBody({
   canManageConnections: boolean;
   /** Organization owners and admins: connect for everyone, and manage the organization's accounts. */
   canManageOrganizationModels: boolean;
+  /**
+   * An owner or admin acting as a person: also the organization's model
+   * defaults. False for an account administrator without a person (a key or
+   * service), which manages the subscription accounts only.
+   */
+  organizationPeopleAdministrator?: boolean;
   account: string | undefined;
   view: ModelsView | undefined;
   onConnectionChange: () => void;
@@ -322,6 +336,7 @@ export function WorkspaceModelsPageBody({
   };
   const labels = modelsScopeLabels(organizationName, personal, workspaceName);
   const organizationAdmin = canManageOrganizationModels && Boolean(organizationId);
+  const organizationPeopleAdmin = organizationPeopleAdministrator && Boolean(organizationId);
   const here = useMemo(() => ({ id: workspaceId, personal }), [workspaceId, personal]);
 
   /* This workspace's view of every provider. */
@@ -404,7 +419,10 @@ export function WorkspaceModelsPageBody({
   const catalog = useWorkspaceModelCatalog(workspaceId);
   const credits = useOpenGeniCredits(organizationId);
   // What every workspace follows until it changes it: owners and admins only.
-  const organizationDefaults = useOrganizationModelDefaults(organizationId, organizationAdmin);
+  const organizationDefaults = useOrganizationModelDefaults(
+    organizationId,
+    organizationPeopleAdmin,
+  );
   // On a workspace's page too: its rules name the default each would go back to.
   const accountRules = useModelAccountSettingsOverview(organizationId, organizationAdmin);
   const workspaceAccountRules = useWorkspaceModelAccountSettings(
@@ -1091,7 +1109,7 @@ export function WorkspaceModelsPageBody({
     );
   } else if ((view === "compaction" || view === "allowed-models") && !workspacePage) {
     // Opened from the organization's list: the defaults every workspace follows.
-    page = !organizationAdmin ? (
+    page = !organizationPeopleAdmin ? (
       <DetailPage
         back={{ label: "Models", onClick: backToList }}
         className={FLUSH_DETAIL_PAGE_CLASS}
@@ -1105,7 +1123,7 @@ export function WorkspaceModelsPageBody({
       <ModelCompactionPage
         key={`organization:${orgId}`}
         workspaceId={anchorWorkspaceId}
-        canManage={organizationAdmin}
+        canManage={organizationPeopleAdmin}
         onClose={backToList}
         organizationName={organizationName}
         organizationDefaults={organizationDefaults}
@@ -1114,7 +1132,7 @@ export function WorkspaceModelsPageBody({
       <AllowedModelsFormPage
         key={`organization-allowed:${orgId}:${revision}`}
         workspaceId={anchorWorkspaceId}
-        canManage={organizationAdmin}
+        canManage={organizationPeopleAdmin}
         onClose={backToList}
         organizationName={organizationName}
         organizationDefaults={organizationDefaults}
@@ -1267,7 +1285,7 @@ export function WorkspaceModelsPageBody({
         <OrganizationModelsList
           client={client}
           organizationId={organizationId}
-          organizationDefaults={organizationAdmin ? organizationDefaults : null}
+          organizationDefaults={organizationPeopleAdmin ? organizationDefaults : null}
           accountRules={organizationAdmin ? accountRules : null}
           modelLabel={(id) => catalog.models.find((model) => model.id === id)?.label ?? id}
           onEditAllowed={() => nav.openView("allowed-models")}

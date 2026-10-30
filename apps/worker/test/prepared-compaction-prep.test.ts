@@ -11,9 +11,17 @@ import {
   withPreparedCompactionRequest,
 } from "../../../packages/runtime/src/prepared-compaction-request";
 
-for (const maintenance of [false, true]) {
-  test(`remote compaction waits for real request preparation (maintenance=${maintenance})`, async () => {
-    const requested = spyOn(db, "isSessionCompactionRequested").mockResolvedValue(maintenance);
+for (const [maintenance, requestTrigger] of [
+  [false, null],
+  [true, "operator"],
+  // The idle checkpoint: the queued error still means "consume the request";
+  // its event/metric label is re-read from the request when it runs.
+  [true, "proactive"],
+] as const) {
+  test(`remote compaction waits for real request preparation (maintenance=${maintenance}, request=${requestTrigger})`, async () => {
+    const requested = spyOn(db, "sessionCompactionRequestTrigger").mockResolvedValue(
+      requestTrigger,
+    );
     const settings = testSettings({ contextAutoCompactThresholdTokens: 100 });
     const agent = { instructions: "unprepared" };
     let compactionCalls = 0;
@@ -72,7 +80,7 @@ test("only Chat Completions providers keep the standalone checkpoint request", (
 
 for (const api of ["anthropic-messages", "responses"] as const) {
   test(`portable ${api} compaction waits for the prepared request`, async () => {
-    const requested = spyOn(db, "isSessionCompactionRequested").mockResolvedValue(false);
+    const requested = spyOn(db, "sessionCompactionRequestTrigger").mockResolvedValue(null);
     const settings = testSettings({ contextAutoCompactThresholdTokens: 100 });
     const agent = { instructions: "unprepared" };
     let summarized = 0;
