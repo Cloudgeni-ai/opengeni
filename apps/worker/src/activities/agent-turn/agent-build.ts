@@ -791,9 +791,18 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     vaultAccess: deps.vaultAccess,
   });
   // Prompt text only: the repositories module names the person's login for
-  // repositories mounted as them. Best effort and never an authority.
+  // repositories mounted as them in a managed sandbox. Best effort and never
+  // an authority; a failed read only drops the login from that turn's prompt.
+  const promptBackend = activeSandboxBackend ?? groupBoxBackend;
   const personalGitHubLogin =
-    session.agent && activeSandboxBackend !== "selfhosted"
+    session.agent &&
+    promptBackend !== "selfhosted" &&
+    promptBackend !== "none" &&
+    runtimeResources.some(
+      (resource) =>
+        resource.kind === "repository" &&
+        (resource as { connectionType?: string }).connectionType === "github_personal",
+    )
       ? await personalGitHubLoginForTurn(db, turn.personalConnectionDelegations)
       : undefined;
   const agent = (() => {

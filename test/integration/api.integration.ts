@@ -8214,6 +8214,8 @@ describe("API component integration", () => {
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         publicBaseUrl: "https://api.opengeni.test",
+        // The person's links open the web console, not the API origin.
+        webBaseUrl: "https://app.opengeni.test/",
         integrationsEnabled: true,
         githubPersonalOauthEnabled: true,
         githubPersonalOauthClientId: "personal-client-id",
@@ -8241,7 +8243,7 @@ describe("API component integration", () => {
       login: null,
       repositoryCount: null,
       manageUrl: null,
-      connectUrl: `https://api.opengeni.test/workspaces/${grant.workspaceId}/plugins?open=integration%3Agithub&github=personal`,
+      connectUrl: `https://app.opengeni.test/workspaces/${grant.workspaceId}/plugins?open=integration%3Agithub&github=personal`,
     });
     const memberPersonal = await callMcpTool<{
       installUrl: string | null;
@@ -8256,6 +8258,16 @@ describe("API component integration", () => {
     );
     expect(memberPersonal.installUrl).toBeNull();
     expect(memberPersonal.personal).toMatchObject({ status: "not_connected", connectUrl: null });
+    // Personal guidance reaches the agent only where personal sign-in exists.
+    const describedTool = (server: unknown, name: string) =>
+      (server as { _registeredTools?: Record<string, { description?: string }> })
+        ._registeredTools?.[name]?.description ?? "";
+    expect(
+      describedTool(buildOpenGeniMcpServer(mcpDeps, grant), "github_connect_link"),
+    ).not.toContain("github_personal__");
+    expect(
+      describedTool(buildOpenGeniMcpServer(personalDeps, grant), "github_connect_link"),
+    ).toContain("github_personal__*");
 
     const useOnlyLink = await callMcpTool<{
       status: string;

@@ -185,6 +185,26 @@ describe("Your GitHub card", () => {
     }
   });
 
+  test("connected without connections:write offers no repository chooser", async () => {
+    context.personalGitHubStatus = {
+      enabled: true,
+      connection: connection("active"),
+      reviewUrl: null,
+    };
+    context.personalGitHubSelection = { repositories: [{}, {}] };
+    context.accessContext.workspaceGrants = [
+      { workspaceId: "workspace", permissions: ["connections:read"] },
+    ];
+    const card = await render();
+    try {
+      expect(card.text()).toContain("Connected as @octocat · 2 repos");
+      expect(card.buttons()).not.toContain("Choose repos");
+    } finally {
+      await card.unmount();
+      context.accessContext.workspaceGrants = [{ workspaceId: "workspace", permissions: everyone }];
+    }
+  });
+
   test("says why when the person can't connect here, and reads status when missing", async () => {
     context.accessContext.workspaceGrants = [
       { workspaceId: "workspace", permissions: ["connections:read"] },

@@ -155,7 +155,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       "",
       `${window.location.pathname}${link.cleanedSearch}${window.location.hash}`,
     );
-    if (personalConnected) {
+    // The chooser saves the allowlist, which needs connections:write.
+    if (personalConnected && canManagePersonal) {
       setPersonalOpen(true);
       return;
     }
@@ -167,7 +168,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       target?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [personalStatusLoaded, personalConnected]);
+  }, [personalStatusLoaded, personalConnected, canManagePersonal]);
   const actionPolicyActorKey = [
     ...installations.map((installation) => `app:${installation.installationId}`),
     personalConnection ? `personal:${personalConnection.id}` : "",

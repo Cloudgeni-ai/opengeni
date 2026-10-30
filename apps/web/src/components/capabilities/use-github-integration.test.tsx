@@ -577,6 +577,31 @@ describe("GitHub connects two ways", () => {
     }
   });
 
+  test("the connect link never opens the chooser for a viewer who can't save it", async () => {
+    const page = (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM;
+    page.setURL("http://localhost/workspaces/w/plugins?open=integration%3Agithub&github=personal");
+    const rendered = await renderAdapter(
+      personalContext(
+        {
+          personalGitHubStatus: {
+            enabled: true,
+            connection: personalConnection(),
+            reviewUrl: null,
+          },
+          personalGitHubSelection: { repositories: [] },
+        },
+        ["github:manage", "connections:read"],
+      ),
+    );
+    try {
+      expect(personalDialog.current?.open ?? false).toBe(false);
+      expect(window.location.search).toBe("?open=integration%3Agithub");
+    } finally {
+      await rendered.unmount();
+      page.setURL("http://localhost/");
+    }
+  });
+
   test("reconnect, and notes in place of actions the viewer cannot take", async () => {
     const rendered = await renderAdapter(
       personalContext(

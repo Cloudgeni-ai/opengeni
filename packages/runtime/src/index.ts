@@ -2824,6 +2824,7 @@ export function agentPromptResourcesFor(
     ...(options.rig ? { rig: options.rig } : {}),
     ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
     ...(options.unattended ? { unattended: true } : {}),
+    ...(settings.githubPersonalOauthEnabled ? { personalGitHub: true } : {}),
     ...(repositoryIdentities.length > 0 ? { repositoryIdentities } : {}),
   };
 }
@@ -2833,7 +2834,8 @@ const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u;
 /**
  * Which GitHub identity each mounted GitHub repository acts as: the person's
  * own account (a personal GitHub resource) or the workspace Opengeni app (an
- * installation-scoped resource). Other repositories are not listed.
+ * installation-scoped resource). Other repositories are not listed, and an
+ * App-only session lists none, so its prompt stays byte-identical.
  */
 export function repositoryIdentitiesFor(
   resources: readonly ResourceRef[],
@@ -2841,7 +2843,7 @@ export function repositoryIdentitiesFor(
 ): AgentPromptRepositoryIdentity[] {
   const login =
     personalGitHubLogin && GITHUB_LOGIN.test(personalGitHubLogin) ? personalGitHubLogin : undefined;
-  return resources.flatMap((resource): AgentPromptRepositoryIdentity[] => {
+  const identities = resources.flatMap((resource): AgentPromptRepositoryIdentity[] => {
     if (resource.kind !== "repository") return [];
     const identity =
       resource.connectionType === "github_personal"
@@ -2863,6 +2865,7 @@ export function repositoryIdentitiesFor(
       ? [{ path, identity, ...(login ? { login } : {}) }]
       : [{ path, identity }];
   });
+  return identities.some((entry) => entry.identity === "personal") ? identities : [];
 }
 
 /** Deployment prompt experiments; absent when every experiment is off. */

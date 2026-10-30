@@ -8,12 +8,13 @@ import {
 
 /**
  * Which GitHub identity each mounted repository acts as, and what that means
- * for tools. Absent when no mounted repository has a known GitHub identity.
+ * for tools. Absent unless a repository is mounted as the person, so App-only
+ * sessions keep their prompt bytes.
  */
 function repositoryIdentityBlock(context: AgentPromptContext): string | null {
   const identities = context.resources.repositoryIdentities ?? [];
-  if (identities.length === 0) return null;
   const personal = identities.some((repository) => repository.identity === "personal");
+  if (!personal) return null;
   const app = identities.some((repository) => repository.identity === "app");
   return blocks(
     "GitHub identity per mounted repository:",
@@ -25,9 +26,8 @@ function repositoryIdentityBlock(context: AgentPromptContext): string | null {
       ),
     ),
     sentences(
-      personal &&
-        "On repositories mounted as the person, use plain git and the github_personal__* tools; gh and raw GitHub API calls do not act as the person and must not be used there.",
-      app && personal && "On Opengeni app repositories, use the github_app__* tools.",
+      "On repositories mounted as the person, use plain git and the github_personal__* tools; gh and raw GitHub API calls do not act as the person and must not be used there.",
+      app && "On Opengeni app repositories, use the github_app__* tools.",
     ),
   );
 }

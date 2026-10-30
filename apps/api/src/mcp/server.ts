@@ -283,7 +283,10 @@ import {
 } from "../integrations/personal-github";
 import {
   GITHUB_IDENTITIES_GUIDANCE,
+  personalGitHubConsoleBaseUrl,
   personalGitHubIdentityStatus,
+  personalGitHubSetupProjection,
+  resolvePersonalGitHubPerson,
   type PersonalGitHubIdentityStatus,
   type PersonalGitHubPerson,
 } from "./github-identity-status";
@@ -7389,7 +7392,9 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself." +
+        (deps.settings.githubPersonalOauthEnabled
+          ? "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself."
+          : "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself.") +
         (secretsSelected
           ? ' For a single password, API key or code for a service with no connector here, ask with a kind: "secret" question in request_human_input instead; you get a saved reference back.'
           : ""),
@@ -7632,46 +7637,9 @@ async function personalGitHubSetup(
   grant: AccessGrant,
   sessionId: string,
 ): Promise<CapabilitySetupProjection> {
-  const personal = await personalGitHubStatusForGrant(deps, grant, sessionId, null).catch(
-    () => null,
+  return personalGitHubSetupProjection(
+    await personalGitHubStatusForGrant(deps, grant, sessionId, null).catch(() => null),
   );
-  if (!personal) {
-    return {
-      status: "unavailable",
-      action: null,
-      detail: "Your GitHub status could not be read right now.",
-    };
-  }
-  switch (personal.status) {
-    case "connected":
-      return {
-        status: "ready",
-        action: null,
-        detail: `Your GitHub is connected as @${personal.login ?? "unknown"} with ${personal.repositoryCount ?? 0} allowed repositories.`,
-      };
-    case "not_connected":
-    case "needs_reconnect":
-      return personal.connectUrl
-        ? {
-            status: "authorization_required",
-            action: "connect",
-            detail:
-              personal.status === "needs_reconnect"
-                ? "The person must reconnect their GitHub account from the card."
-                : "The person connects their own GitHub account from the card, then chooses repositories.",
-          }
-        : {
-            status: "unavailable",
-            action: null,
-            detail: personal.note ?? "This person can't connect a GitHub account here.",
-          };
-    default:
-      return {
-        status: "unavailable",
-        action: null,
-        detail: personal.note ?? "Your GitHub isn't available here.",
-      };
-  }
 }
 
 async function capabilitySetupProjection(
@@ -7952,28 +7920,16 @@ async function personalGitHubPersonForGrant(
   grant: AccessGrant,
   sessionId: string | null,
 ): Promise<PersonalGitHubPerson | null> {
-  if (!exactAgentAttemptClaims(grant)) {
-    return {
-      subjectId: grant.subjectId,
-      permissions: grant.permissions,
-      ...(grant.permissionMode ? { permissionMode: grant.permissionMode } : {}),
-    };
-  }
-  if (!sessionId) return null;
-  const { initiatingHumanSubjectId } = await requireLiveAgentAttemptAuthorization(
-    db,
+  const isAgentAttempt = Boolean(exactAgentAttemptClaims(grant));
+  if (isAgentAttempt && !sessionId) return null;
+  return await resolvePersonalGitHubPerson({
     grant,
-    sessionId,
-  );
-  if (!initiatingHumanSubjectId) return null;
-  const access = await connectingPersonGrant(db, grant, sessionId);
-  return access
-    ? {
-        subjectId: initiatingHumanSubjectId,
-        permissions: access.permissions,
-        ...(access.permissionMode ? { permissionMode: access.permissionMode } : {}),
-      }
-    : null;
+    isAgentAttempt,
+    loadInitiator: async () =>
+      (await requireLiveAgentAttemptAuthorization(db, grant, sessionId!))
+        .initiatingHumanSubjectId ?? null,
+    loadSenderGrant: async () => await connectingPersonGrant(db, grant, sessionId!),
+  });
 }
 
 /** The person's own GitHub identity for the status tool and its setup card. */
@@ -7986,7 +7942,11 @@ async function personalGitHubStatusForGrant(
   return await personalGitHubIdentityStatus({
     enabled: deps.settings.githubPersonalOauthEnabled,
     workspaceId: grant.workspaceId,
-    baseUrl: canonicalPublicOrigin(deps.settings.publicBaseUrl) ?? requestOrigin ?? "",
+    baseUrl: personalGitHubConsoleBaseUrl({
+      webBaseUrl: deps.settings.webBaseUrl,
+      publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
+      requestOrigin,
+    }),
     person: deps.settings.githubPersonalOauthEnabled
       ? await personalGitHubPersonForGrant(deps.db, grant, sessionId)
       : null,
@@ -8020,7 +7980,9 @@ function registerGitHubConnectTool(
   server.registerTool(
     "github_connect_link",
     {
-      description: `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the Opengeni app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. When unclear, explain the difference in one or two sentences. On personal repositories, use github_personal__* tools and plain git; gh and raw GitHub API calls do not act as the person. Never returns tokens.`,
+      description: deps.settings.githubPersonalOauthEnabled
+        ? `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the Opengeni app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. When unclear, explain the difference in one or two sentences. On personal repositories, use github_personal__* tools and plain git; gh and raw GitHub API calls do not act as the person. Never returns tokens.`
+        : "Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. Server App configuration alone is never reported as a usable binding. Personal GitHub sign-in is not enabled on this deployment (personal.status is disabled).",
       inputSchema: {},
     },
     async () => {

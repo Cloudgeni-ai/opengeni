@@ -88,6 +88,17 @@ describe("GitHub identity per mounted repository", () => {
     expect(
       repositoryIdentitiesFor([{ ...appRepo, uri: "not a url" }, personalRepo] as never),
     ).toEqual([{ path: expect.stringContaining("octocat/private"), identity: "personal" }]);
+    // Personal GitHub sign-in on the deployment adds only its own flag.
+    expect(
+      agentPromptResourcesFor(testSettings({ sandboxBackend: "docker" }), [] as never, {}),
+    ).not.toHaveProperty("personalGitHub");
+    expect(
+      agentPromptResourcesFor(
+        testSettings({ sandboxBackend: "docker", githubPersonalOauthEnabled: true }),
+        [] as never,
+        {},
+      ).personalGitHub,
+    ).toBe(true);
   });
 
   test("mixed identities: the prompt names each repo's identity and the tools to use", () => {
@@ -118,14 +129,25 @@ describe("GitHub identity per mounted repository", () => {
     expect(text).not.toContain("github_app__* tools");
   });
 
-  test("app only keeps gh guidance unqualified", () => {
+  test("app only leaves the repositories module byte-for-byte unchanged", () => {
+    // Most sessions mount only App repositories; they keep their prompt bytes.
+    expect(repositoryIdentitiesFor([appRepo, gitlabRepo] as never, "octocat")).toEqual([]);
+    const settings = testSettings({ sandboxBackend: "docker" });
+    expect(agentPromptResourcesFor(settings, [appRepo] as never, {})).not.toHaveProperty(
+      "repositoryIdentities",
+    );
     const text = render({
       ...BASE,
       repositoryIdentities: [{ path: "repos/github.com/acme/web", identity: "app" }],
     });
-    expect(text).toContain("`repos/github.com/acme/web`: as the Opengeni app.");
-    expect(text).not.toContain("github_personal__*");
-    expect(text).not.toContain("not mounted as the person");
+    expect(text).toBe(render(BASE));
+    expect(text).not.toContain("GitHub identity per mounted repository");
+  });
+
+  test("the two-identity setup sentence needs personal GitHub sign-in on the deployment", () => {
+    const sentence = "`github_connect_link` reports both identities";
+    expect(render(BASE)).not.toContain(sentence);
+    expect(render({ ...BASE, personalGitHub: true })).toContain(sentence);
   });
 
   test("no identities leaves the repositories module byte-for-byte unchanged", () => {

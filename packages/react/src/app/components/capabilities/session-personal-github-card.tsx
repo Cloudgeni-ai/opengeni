@@ -107,7 +107,7 @@ export function SessionPersonalGitHubCapabilityCard({
       opener={opener}
       cardRef={cardRef}
       details={
-        connected && count > 0 ? (
+        connected && count > 0 && canConnect ? (
           <div
             data-slot="personal-github-repos"
             className="border-t border-border px-[19px] pt-3 pb-4 max-[480px]:px-3.5"

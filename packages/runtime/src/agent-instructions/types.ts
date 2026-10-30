@@ -61,6 +61,11 @@ export type AgentPromptResources = {
    * session create). Gates the unattended module; omitted keeps prompts unchanged.
    */
   unattended?: boolean | undefined;
+  /**
+   * Personal GitHub sign-in ("Your GitHub") is enabled on this deployment.
+   * Gates personal-identity guidance; omitted keeps prompts unchanged.
+   */
+  personalGitHub?: boolean | undefined;
   workspaceEnvironment?: WorkspaceEnvironmentContext | undefined;
   rig?: RigInstructionsContext | undefined;
   /**

@@ -2,7 +2,11 @@ import { describe, expect, mock, test } from "bun:test";
 
 import {
   GITHUB_IDENTITIES_GUIDANCE,
+  personalGitHubConsoleBaseUrl,
   personalGitHubIdentityStatus,
+  personalGitHubSetupProjection,
+  resolvePersonalGitHubPerson,
+  type PersonalGitHubIdentityStatus,
   type PersonalGitHubConnectionSummary,
   type PersonalGitHubPerson,
 } from "../src/mcp/github-identity-status";
@@ -163,5 +167,181 @@ describe("personal GitHub identity status for the agent", () => {
     expect(GITHUB_IDENTITIES_GUIDANCE).toContain("means personal");
     expect(GITHUB_IDENTITIES_GUIDANCE).toContain("'install the GitHub app'");
     expect(GITHUB_IDENTITIES_GUIDANCE).toContain("means the app");
+  });
+});
+
+describe("the person personal GitHub acts for", () => {
+  const sessionCreatorGrant = {
+    subjectId: "session-creator",
+    permissions: ["workspace:admin"],
+    principalKind: "agent_attempt",
+  } as const;
+
+  test("an agent attempt resolves to the initiating person with frozen send-time access", async () => {
+    const loadSenderGrant = mock(async () => ({
+      permissions: ["connections:read", "connections:write"],
+      permissionMode: "explicit" as const,
+    }));
+    const person = await resolvePersonalGitHubPerson({
+      grant: sessionCreatorGrant as never,
+      isAgentAttempt: true,
+      loadInitiator: async () => "initiating-person",
+      loadSenderGrant,
+    });
+    // Never the session creator or the attempt's own permissions.
+    expect(person).toEqual({
+      subjectId: "initiating-person",
+      permissions: ["connections:read", "connections:write"],
+      permissionMode: "explicit",
+    });
+    expect(loadSenderGrant).toHaveBeenCalledTimes(1);
+  });
+
+  test("no initiating person, or no sender access, means no person", async () => {
+    const loadSenderGrant = mock(async () => ({ permissions: ["connections:read"] }));
+    expect(
+      await resolvePersonalGitHubPerson({
+        grant: sessionCreatorGrant as never,
+        isAgentAttempt: true,
+        loadInitiator: async () => null,
+        loadSenderGrant,
+      }),
+    ).toBeNull();
+    expect(loadSenderGrant).not.toHaveBeenCalled();
+    expect(
+      await resolvePersonalGitHubPerson({
+        grant: sessionCreatorGrant as never,
+        isAgentAttempt: true,
+        loadInitiator: async () => "initiating-person",
+        loadSenderGrant: async () => null,
+      }),
+    ).toBeNull();
+  });
+
+  test("a stale attempt rejects, which the tool degrades to unknown", async () => {
+    await expect(
+      resolvePersonalGitHubPerson({
+        grant: sessionCreatorGrant as never,
+        isAgentAttempt: true,
+        loadInitiator: async () => {
+          throw new Error("attempt is no longer live");
+        },
+        loadSenderGrant: async () => ({ permissions: [] }),
+      }),
+    ).rejects.toThrow("no longer live");
+  });
+
+  test("a direct human grant is the person; service and key callers are not", async () => {
+    const human = {
+      subjectId: "person-a",
+      permissions: ["connections:read"],
+      principalKind: "human_session",
+    };
+    const unused = async () => {
+      throw new Error("not used for direct grants");
+    };
+    expect(
+      await resolvePersonalGitHubPerson({
+        grant: human as never,
+        isAgentAttempt: false,
+        loadInitiator: unused,
+        loadSenderGrant: unused,
+      }),
+    ).toEqual({ subjectId: "person-a", permissions: ["connections:read"] });
+    for (const principalKind of ["service", "api_key", "configured_key"]) {
+      expect(
+        await resolvePersonalGitHubPerson({
+          grant: { ...human, principalKind } as never,
+          isAgentAttempt: false,
+          loadInitiator: unused,
+          loadSenderGrant: unused,
+        }),
+      ).toBeNull();
+    }
+  });
+});
+
+describe("Your GitHub setup card readiness", () => {
+  const base: PersonalGitHubIdentityStatus = {
+    enabled: true,
+    connected: true,
+    status: "connected",
+    login: "octocat",
+    repositoryCount: 3,
+    connectUrl: null,
+    manageUrl: LINK,
+  };
+
+  test("connected is ready and names only what is known", () => {
+    expect(personalGitHubSetupProjection(base)).toEqual({
+      status: "ready",
+      action: null,
+      detail: "Your GitHub is connected as @octocat with 3 allowed repositories.",
+    });
+    expect(
+      personalGitHubSetupProjection({ ...base, login: null, repositoryCount: null }).detail,
+    ).toBe("Your GitHub is connected.");
+    expect(personalGitHubSetupProjection({ ...base, repositoryCount: 1 }).detail).toBe(
+      "Your GitHub is connected as @octocat with 1 allowed repository.",
+    );
+  });
+
+  test("not connected with a link asks the person to connect from the card", () => {
+    const notConnected = {
+      ...base,
+      connected: false,
+      status: "not_connected" as const,
+      login: null,
+      repositoryCount: null,
+      connectUrl: LINK,
+      manageUrl: null,
+    };
+    expect(personalGitHubSetupProjection(notConnected)).toMatchObject({
+      status: "authorization_required",
+      action: "connect",
+    });
+    expect(
+      personalGitHubSetupProjection({ ...notConnected, status: "needs_reconnect" }).detail,
+    ).toContain("reconnect");
+    // Without connections:write there is no link and no card to complete.
+    expect(
+      personalGitHubSetupProjection({ ...notConnected, connectUrl: null, note: "No access." }),
+    ).toEqual({ status: "unavailable", action: null, detail: "No access." });
+  });
+
+  test("disabled, unknown and unreadable are unavailable", () => {
+    expect(
+      personalGitHubSetupProjection({ ...base, status: "disabled", note: "Off." }).status,
+    ).toBe("unavailable");
+    expect(personalGitHubSetupProjection({ ...base, status: "unknown" }).status).toBe(
+      "unavailable",
+    );
+    expect(personalGitHubSetupProjection(null)).toEqual({
+      status: "unavailable",
+      action: null,
+      detail: "Your GitHub status could not be read right now.",
+    });
+  });
+});
+
+describe("personal GitHub console links", () => {
+  test("prefer the web console, then the public origin, then the request origin", () => {
+    expect(
+      personalGitHubConsoleBaseUrl({
+        webBaseUrl: "https://app.example.test//",
+        publicOrigin: "https://api.example.test",
+        requestOrigin: "https://request.example.test",
+      }),
+    ).toBe("https://app.example.test");
+    expect(
+      personalGitHubConsoleBaseUrl({
+        publicOrigin: "https://api.example.test",
+        requestOrigin: "https://request.example.test",
+      }),
+    ).toBe("https://api.example.test");
+    expect(personalGitHubConsoleBaseUrl({ requestOrigin: "https://request.example.test" })).toBe(
+      "https://request.example.test",
+    );
+    expect(personalGitHubConsoleBaseUrl({})).toBe("");
   });
 });

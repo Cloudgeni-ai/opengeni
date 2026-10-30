@@ -36,6 +36,7 @@ export const adminModule: AgentPromptModule = {
         setupCards && "Resolve out-of-scope architecture choices before requesting setup.",
         setupCards && "After setup, rediscover tools and verify access.",
         github &&
+          context.resources.personalGitHub &&
           "For GitHub, `github_connect_link` reports both identities: 'connect my GitHub' or 'do it as me' means the person's own account (Your GitHub), and 'install the GitHub app' means the Opengeni app.",
         "If a setup tool is unavailable, give the user the exact next step; if they can't fix it, explain the specific gap and who can.",
       ),

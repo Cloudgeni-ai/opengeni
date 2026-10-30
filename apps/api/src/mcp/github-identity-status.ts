@@ -36,6 +36,50 @@ export type PersonalGitHubPerson = {
   permissionMode?: AccessGrant["permissionMode"];
 };
 
+const NON_PERSON_PRINCIPAL_KINDS: ReadonlySet<string> = new Set([
+  "service",
+  "api_key",
+  "configured_key",
+]);
+
+/**
+ * The human this agent acts for, as personal GitHub sees them: the person who
+ * started the exact live attempt (never the session creator), with the
+ * permissions frozen when they sent the message, or the caller itself for a
+ * direct human grant. Null when no person started this work.
+ */
+export async function resolvePersonalGitHubPerson(input: {
+  grant: Pick<AccessGrant, "subjectId" | "permissions" | "permissionMode" | "principalKind">;
+  isAgentAttempt: boolean;
+  /** The initiating human of the live attempt; throws when the attempt is stale. */
+  loadInitiator: () => Promise<string | null>;
+  /** That person's frozen send-time (or current) workspace access. */
+  loadSenderGrant: () => Promise<{
+    permissions: readonly string[];
+    permissionMode?: AccessGrant["permissionMode"] | undefined;
+  } | null>;
+}): Promise<PersonalGitHubPerson | null> {
+  const { grant } = input;
+  if (!input.isAgentAttempt) {
+    if (grant.principalKind && NON_PERSON_PRINCIPAL_KINDS.has(grant.principalKind)) return null;
+    return {
+      subjectId: grant.subjectId,
+      permissions: grant.permissions,
+      ...(grant.permissionMode ? { permissionMode: grant.permissionMode } : {}),
+    };
+  }
+  const initiator = await input.loadInitiator();
+  if (!initiator) return null;
+  const access = await input.loadSenderGrant();
+  return access
+    ? {
+        subjectId: initiator,
+        permissions: access.permissions,
+        ...(access.permissionMode ? { permissionMode: access.permissionMode } : {}),
+      }
+    : null;
+}
+
 export async function personalGitHubIdentityStatus(input: {
   enabled: boolean;
   workspaceId: string;
@@ -135,3 +179,63 @@ export async function personalGitHubIdentityStatus(input: {
 /** Agent guidance shared by the GitHub status tool and its setup cards. */
 export const GITHUB_IDENTITIES_GUIDANCE =
   "Two GitHub identities exist. Your GitHub (personal): the person's own account; commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose. Opengeni app: work appears as the Opengeni bot, shared with the workspace, installed per organization or account. 'Connect my GitHub', 'use my account' or 'do it as me' means personal; 'install the GitHub app' or 'give Opengeni access to the org/repos' means the app.";
+
+/** Console origin for the person's links: the web console, never the API's own origin. */
+export function personalGitHubConsoleBaseUrl(input: {
+  webBaseUrl?: string | null | undefined;
+  publicOrigin?: string | null | undefined;
+  requestOrigin?: string | null | undefined;
+}): string {
+  const web = input.webBaseUrl?.trim().replace(/\/+$/u, "");
+  return web || input.publicOrigin || input.requestOrigin || "";
+}
+
+export type PersonalGitHubSetupProjection =
+  | { status: "ready"; action: null; detail: string }
+  | { status: "authorization_required"; action: "connect"; detail: string }
+  | { status: "unavailable"; action: null; detail: string };
+
+/** "Your GitHub" setup-card readiness from the person's status (null when unreadable). */
+export function personalGitHubSetupProjection(
+  personal: PersonalGitHubIdentityStatus | null,
+): PersonalGitHubSetupProjection {
+  if (!personal) {
+    return {
+      status: "unavailable",
+      action: null,
+      detail: "Your GitHub status could not be read right now.",
+    };
+  }
+  switch (personal.status) {
+    case "connected": {
+      const as = personal.login ? ` as @${personal.login}` : "";
+      const count =
+        personal.repositoryCount === null
+          ? ""
+          : ` with ${personal.repositoryCount} allowed ${personal.repositoryCount === 1 ? "repository" : "repositories"}`;
+      return { status: "ready", action: null, detail: `Your GitHub is connected${as}${count}.` };
+    }
+    case "not_connected":
+    case "needs_reconnect":
+      return personal.connectUrl
+        ? {
+            status: "authorization_required",
+            action: "connect",
+            detail:
+              personal.status === "needs_reconnect"
+                ? "The person must reconnect their GitHub account from the card."
+                : "The person connects their own GitHub account from the card, then chooses repositories.",
+          }
+        : {
+            status: "unavailable",
+            action: null,
+            detail: personal.note ?? "This person can't connect a GitHub account here.",
+          };
+    default:
+      return {
+        status: "unavailable",
+        action: null,
+        detail: personal.note ?? "Your GitHub isn't available here.",
+      };
+  }
+}
