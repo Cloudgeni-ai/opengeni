@@ -22124,6 +22124,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.crossProviderFailoverAvailable": "boolean?",
         "$.locked": "array!",
         "$.locked[]": "ref(ModelAccountSettingKey)",
         "$.organizationId": "string!",
@@ -32388,6 +32389,7 @@
       "shape": {
         "$": "object",
         "$.canEdit": "boolean!",
+        "$.crossProviderFailoverAvailable": "boolean?",
         "$.entrySources": "object!",
         "$.entrySources.fallbackOrder": "object!",
         "$.entrySources.fallbackOrder{}": "enum=[\"\\\"organization\\\"\",\"\\\"workspace\\\"\"]",

@@ -4910,6 +4910,11 @@ export type OrganizationModelAccountSettings = {
   locked: ModelAccountSettingKey[];
   version: number;
   updatedAt: string | null;
+  /**
+   * False when this deployment doesn't switch models when subscriptions run
+   * out, so `crossProviderFailover` has no effect here. Absent from older servers.
+   */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
@@ -4943,6 +4948,8 @@ export type WorkspaceModelAccountSettings = ModelAccountSettingsView & {
   version: number;
   updatedAt: string | null;
   canEdit: boolean;
+  /** As on the organization's settings: false when switching models is off here. */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
