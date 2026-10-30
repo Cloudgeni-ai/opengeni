@@ -42,6 +42,7 @@ import { isRetiredNativeAtlassianTool } from "@opengeni/contracts/atlassian-nati
 import { modelLogoUrl } from "@opengeni/contracts/model-display";
 import {
   directModelConnectionSpec,
+  isDirectModelProviderId,
   BillingMode,
   CAPABILITY_DESCRIPTORS,
   agentConfigDeploymentLimitsFromAllowlist,
@@ -3540,6 +3541,7 @@ export const RegistryProviderKind = z.enum([
   "vercel-gateway-organization",
   "direct-openai-workspace",
   "direct-azure-workspace",
+  "direct-compatible-workspace",
   "direct-openai-organization",
   "direct-azure-organization",
   "openrouter-workspace",
@@ -4124,11 +4126,7 @@ export const ModelCatalogDocument = z
       });
     }
     document.registryProviders.forEach((provider, providerIndex) => {
-      if (
-        RESERVED_MODEL_PROVIDER_IDS.has(provider.id) ||
-        provider.id.startsWith("workspace-openai-") ||
-        provider.id.startsWith("workspace-azure-openai-")
-      ) {
+      if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id) || isDirectModelProviderId(provider.id)) {
         context.addIssue({
           code: "custom",
           path: ["registryProviders", providerIndex, "id"],
@@ -7436,7 +7434,10 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
   return injected;
 }
 
-/** Customer-owned OpenAI/Azure routes, bound to immutable connection identity. */
+/**
+ * Customer-owned OpenAI, Azure OpenAI and OpenAI-compatible routes, each bound
+ * to one immutable workspace connection identity.
+ */
 export function withDirectModelProviders(
   settings: Settings,
   connections: readonly {
@@ -7451,13 +7452,35 @@ export function withDirectModelProviders(
   }[],
 ): Settings {
   const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
-    (provider) =>
-      !provider.id.startsWith("workspace-openai-") &&
-      !provider.id.startsWith("workspace-azure-openai-"),
+    (provider) => !isDirectModelProviderId(provider.id),
   );
   for (const connection of connections) {
     const spec = directModelConnectionSpec(connection);
     if (!spec) continue;
+    if (spec.provider === "openai_compatible") {
+      // A workspace's own OpenAI-compatible server: text in and out with
+      // function calling over SSE, the capabilities every such API shares.
+      // Its requests are DNS-pinned to public addresses by the runtime.
+      providers.push({
+        kind: "direct-compatible-workspace",
+        id: spec.providerId,
+        label: spec.label ?? new URL(spec.baseUrl).hostname,
+        api: spec.api ?? "chat",
+        wireProfile: "openai",
+        baseUrl: spec.baseUrl,
+        ...(connection.apiKey ? { apiKey: connection.apiKey } : {}),
+        models: [
+          {
+            id: spec.modelId,
+            upstreamModelId: spec.model,
+            label: spec.model,
+            capabilities: openRouterCustomModelCapabilities(settings),
+            toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+          },
+        ],
+      });
+      continue;
+    }
     providers.push({
       kind: spec.provider === "openai" ? "direct-openai-workspace" : "direct-azure-workspace",
       id: spec.providerId,
@@ -8301,6 +8324,7 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "vercel-gateway-workspace":
     case "direct-openai-workspace":
     case "direct-azure-workspace":
+    case "direct-compatible-workspace":
     case "openrouter-workspace":
     case "opper-workspace":
     case "anthropic-workspace":
@@ -8337,6 +8361,7 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "vercel-gateway-workspace":
     case "direct-openai-workspace":
     case "direct-azure-workspace":
+    case "direct-compatible-workspace":
     case "openrouter-workspace":
     case "opper-workspace":
     case "anthropic-workspace":
@@ -8527,6 +8552,12 @@ export function registryModelResidency(
         "unknown",
         "unknown",
         "The connection does not record the Azure deployment type, which can be GlobalStandard.",
+      );
+    case "direct-compatible-workspace":
+      return builtInResidencyRule(
+        "unknown",
+        "unknown",
+        "A workspace's own OpenAI-compatible endpoint; where it processes data is not recorded.",
       );
     default: {
       const _exhaustive: never = provider.kind;
@@ -9340,9 +9371,8 @@ export function policyChargesCreditsForModel(settings: Settings, modelId: string
   const providerPrefix = slash > 0 ? canonicalModelId.slice(0, slash) : "";
   if (
     NON_CREDIT_POLICY_PROVIDER_IDS.has(providerPrefix) ||
-    // Direct workspace OpenAI / Azure OpenAI keys (`workspace-openai-<id>/…`).
-    providerPrefix.startsWith("workspace-openai-") ||
-    providerPrefix.startsWith("workspace-azure-openai-")
+    // A workspace's own direct model connections (`workspace-openai-<id>/…`).
+    isDirectModelProviderId(providerPrefix)
   ) {
     return false;
   }
@@ -12713,6 +12743,7 @@ export function validateModelCatalogSettings(
       provider.kind === "vercel-gateway-organization" ||
       provider.kind === "direct-openai-workspace" ||
       provider.kind === "direct-azure-workspace" ||
+      provider.kind === "direct-compatible-workspace" ||
       provider.kind === "direct-openai-organization" ||
       provider.kind === "direct-azure-organization" ||
       provider.kind === "openrouter-workspace" ||

@@ -7,6 +7,7 @@ import {
 } from "@opengeni/config";
 import {
   ClientModel,
+  isDirectModelProviderId,
   isEuResidency,
   projectClientModelResidency,
   REGION_RESTRICTED,
@@ -31,9 +32,7 @@ export {
 export function projectClientModel(model: ConfiguredModel): ClientModel {
   const anonymousProvider =
     model.credentialSource.kind === "deployment" && model.credentialSource.mechanism === "none";
-  const directProvider =
-    model.providerId.startsWith("workspace-openai-") ||
-    model.providerId.startsWith("workspace-azure-openai-");
+  const directProvider = isDirectModelProviderId(model.providerId);
   const organizationProvider = model.credentialSource.kind === "organization_connection";
   // Keep the established closed `source` enum compatible for older same-major
   // clients. OpenRouter remains truthfully identified by its public provider

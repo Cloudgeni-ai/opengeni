@@ -14,6 +14,7 @@ pub mod manifest;
 pub mod pointer_store;
 pub mod store;
 pub mod sweep;
+pub mod transfer;
 mod upload;
 
 /// Fail closed on invalid metadata, unavailable objects and corrupt content.
