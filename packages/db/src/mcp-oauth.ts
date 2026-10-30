@@ -1,5 +1,6 @@
 import {
   OrganizationAccessPolicy,
+  normalizePermission,
   Permission,
   ToolGatewayIdentity,
   type AccessGrant,
@@ -144,7 +145,7 @@ export async function createMcpOAuthAuthorizationRequest(
   ) values (
     ${input.requestHash}, ${input.clientId}, ${input.accountId}, ${input.workspaceId},
     ${input.subjectId}, ${input.resource}, ${input.redirectUri}, ${input.codeChallenge},
-    ${input.state}, ${JSON.stringify(input.permissions)}::jsonb,
+    ${input.state}, ${JSON.stringify(canonicalMcpOAuthPermissions(input.permissions))}::jsonb,
     ${JSON.stringify(input.toolIdentities)}::jsonb, ${jsonOrNull(input.organizationAccess)}::jsonb,
     ${input.expiresAt.toISOString()}::timestamptz
   )`);
@@ -208,7 +209,7 @@ export async function rebindMcpOAuthAuthorizationRequest(
     sql`update mcp_oauth_authorization_requests
       set account_id = ${input.accountId},
           workspace_id = ${input.workspaceId},
-          permissions = ${JSON.stringify(input.permissions)}::jsonb,
+          permissions = ${JSON.stringify(canonicalMcpOAuthPermissions(input.permissions))}::jsonb,
           tool_identities = ${JSON.stringify(input.toolIdentities)}::jsonb
       where request_hash = ${input.requestHash}
         and subject_id = ${input.subjectId}
@@ -254,7 +255,7 @@ export async function consumeMcpOAuthAuthorizationRequest(
     ) values (
       ${input.codeHash}, ${row.client_id}, ${row.account_id}, ${row.workspace_id},
       ${row.subject_id}, ${row.resource}, ${row.redirect_uri}, ${row.code_challenge},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
+      ${JSON.stringify(canonicalMcpOAuthPermissions(row.permissions))}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
       ${input.codeExpiresAt.toISOString()}::timestamptz
     )`);
     return {
@@ -299,6 +300,7 @@ export async function exchangeMcpOAuthAuthorizationCode(
     if (!row) return null;
     await extendMcpOAuthClientRetention(tx, row.client_id);
     const familyId = crypto.randomUUID();
+    const permissions = canonicalMcpOAuthPermissions(row.permissions);
     if (input.refreshTokenHash) {
       await tx.execute(sql`insert into mcp_oauth_refresh_tokens (
         token_hash, family_id, generation, client_id, account_id, workspace_id,
@@ -306,7 +308,7 @@ export async function exchangeMcpOAuthAuthorizationCode(
       ) values (
         ${input.refreshTokenHash}, ${familyId}, 1, ${row.client_id}, ${row.account_id},
         ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-        ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
+        ${JSON.stringify(permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
         clock_timestamp(), ${input.refreshExpiresAt.toISOString()}::timestamptz
       )`);
     }
@@ -316,7 +318,7 @@ export async function exchangeMcpOAuthAuthorizationCode(
     ) values (
       ${input.accessTokenHash}, ${familyId}, 1, ${row.client_id}, ${row.account_id},
       ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
+      ${JSON.stringify(permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
       ${input.accessExpiresAt.toISOString()}::timestamptz
     )`);
     return {
@@ -325,6 +327,7 @@ export async function exchangeMcpOAuthAuthorizationCode(
       refreshFamilyId: familyId,
       refreshGeneration: 1,
       ...mapGrant(row),
+      permissions,
       expiresAt: input.accessExpiresAt,
     };
   });
@@ -387,13 +390,14 @@ export async function rotateMcpOAuthRefreshToken(
       set revoked_at = clock_timestamp()
       where token_hash = ${input.refreshTokenHash}`);
     const generation = Number(row.generation) + 1;
+    const permissions = canonicalMcpOAuthPermissions(row.permissions);
     await tx.execute(sql`insert into mcp_oauth_refresh_tokens (
       token_hash, family_id, generation, client_id, account_id, workspace_id,
       subject_id, resource, permissions, tool_identities, organization_access, connected_at, expires_at
     ) values (
       ${input.nextRefreshTokenHash}, ${row.family_id}, ${generation}, ${row.client_id},
       ${row.account_id}, ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
+      ${JSON.stringify(permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
       (select previous.connected_at from mcp_oauth_refresh_tokens previous
         where previous.token_hash = ${input.refreshTokenHash}), ${input.refreshExpiresAt.toISOString()}::timestamptz
     )`);
@@ -403,7 +407,7 @@ export async function rotateMcpOAuthRefreshToken(
     ) values (
       ${input.accessTokenHash}, ${row.family_id}, ${generation}, ${row.client_id},
       ${row.account_id}, ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
+      ${JSON.stringify(permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
       ${input.accessExpiresAt.toISOString()}::timestamptz
     )`);
     return {
@@ -412,6 +416,7 @@ export async function rotateMcpOAuthRefreshToken(
       refreshFamilyId: row.family_id,
       refreshGeneration: generation,
       ...mapGrant(row),
+      permissions,
       expiresAt: input.accessExpiresAt,
     };
   });
@@ -486,8 +491,10 @@ export async function resolveLiveMcpOAuthGrant(
     const livePermissions = membership
       ? Permission.array().parse(membership.permissions)
       : access.permissions;
-    const liveSet = new Set(livePermissions);
-    const permissions = access.permissions.filter((permission) => liveSet.has(permission));
+    const liveSet = new Set(canonicalMcpOAuthPermissions(livePermissions));
+    const permissions = canonicalMcpOAuthPermissions(access.permissions).filter((permission) =>
+      liveSet.has(permission),
+    );
     if (!permissions.includes("workspace:read")) return null;
     return {
       accountId: access.accountId,
@@ -699,6 +706,19 @@ function mapClient(row: ClientRow): McpOAuthClient {
     responseTypes: stringArray(row.response_types) as ["code"],
     createdAt: new Date(row.created_at),
   };
+}
+
+/** Canonicalize only newly issued grants and the live permission comparison.
+ * Existing token and accepted-execution records retain their original bytes.
+ */
+function canonicalMcpOAuthPermissions(value: unknown): Permission[] {
+  return [
+    ...new Set(
+      Permission.array()
+        .parse(value)
+        .map((permission) => normalizePermission(permission) as Permission),
+    ),
+  ];
 }
 
 function mapGrant(row: GrantRow): McpOAuthGrantSnapshot {
