@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { parseSecretReference, tokenizeSecretText } from "@opengeni/contracts";
 import type { SessionEvent, ToolActionReview } from "@opengeni/sdk";
 import type { ReactNode } from "react";
-import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import { actRun, flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 import { createOpenGeniText } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
@@ -253,7 +253,7 @@ describe("chips in tool payloads, commands and reviews", () => {
       (node) => node.textContent?.includes("Ran a command"),
     );
     expect(row).toBeTruthy();
-    row!.click();
+    await actRun(() => row!.click());
     await flush();
     const refs = chips(container).map((chip) => chip.getAttribute("data-og-secret-ref"));
     // The user message and the exec row's command.
