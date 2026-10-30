@@ -488,14 +488,17 @@ The model only hears audio with sound in it. A stretch of 1.5 s or more
 below −55 dBFS (a microphone while its person listens, a call while nobody
 on it talks) is taken out but for half a second on either side, and the rest
 is joined up and scored as usual; the frames taken out read as silence, so
-no word can land in them. On 10 minutes of the AMI meeting corpus, aligned on
-one thread and scored against its manual word times:
+no word can land in them. A pause inside a word also costs a little for
+each frame, so a word stays in one piece instead of starting on a sound long
+before the rest of it; pauses between words stay free. On 10 minutes of the
+AMI meeting corpus, aligned on one thread and scored against its manual word
+times:
 
-| Track | Words | CPU before | CPU now | Starts within 100 ms, before → now |
-| --- | --- | --- | --- | --- |
-| One person's headset, quiet 90% of the time | 161 | 184 s | 56 s | 67.7% → 75.8% |
-| The other three people mixed, as a call track | 945 | 172 s | 150 s | 84.3% → 84.8% |
-| The room mix, everyone | 1,106 | 180 s | 165 s | 76.9% → 81.2% |
+| Track | Words | CPU before → now | Starts within 100 ms | Within 500 ms | Words placed over 2 s |
+| --- | --- | --- | --- | --- | --- |
+| One person's headset, quiet 90% of the time | 161 | 184 s → 56 s | 67.7% → 76.4% | 78.9% → 90.1% | 9 → 0 |
+| The other three people mixed, as a call track | 945 | 172 s → 147 s | 84.3% → 84.8% | 96.9% → 97.6% | 8 → 0 |
+| The room mix, everyone | 1,106 | 180 s → 156 s | 76.9% → 81.4% | 88.7% → 96.1% | 14 → 0 |
 
 The worker image ships the model as `alignment.onnx` and
 `alignment-tokens.txt` (with its license) next to the speaker models,

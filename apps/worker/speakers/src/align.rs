@@ -47,6 +47,10 @@ const GAP: u32 = u32::MAX;
 const GAP_PENALTY: f32 = 1.0;
 /// Letters a run of agreeing words needs before it may anchor the audio.
 const MIN_ANCHOR_LETTERS: usize = 12;
+/// What each frame of a pause inside a word costs: a few frames between two
+/// characters cost next to nothing, a word stretched over a long silence
+/// costs far more than placing it on one sound.
+const INSIDE_WORD_BLANK: f32 = 0.05;
 /// A frame quieter than this (-55 dBFS) has no speech in it: well below a
 /// voice, even a soft one across the room, and above the near-silence of an
 /// idle microphone or of a call while nobody on it talks.
@@ -655,6 +659,20 @@ fn viterbi(
     word_of.push(None);
     // State 2k is a blank, 2k + 1 is token k.
     let states = 2 * tokens.len() + 1;
+    // Blanks between two of a word's own characters. Each frame there costs
+    // a little (INSIDE_WORD_BLANK), so a word stays in one piece instead of
+    // starting on a sound long before the rest of it; silence between words
+    // stays free.
+    let inside: Vec<bool> = (0..states)
+        .map(|s| {
+            let k = s / 2;
+            s % 2 == 0
+                && k >= 1
+                && k < tokens.len()
+                && word_of[k].is_some()
+                && word_of[k - 1] == word_of[k]
+        })
+        .collect();
     let token_of = |s: usize| {
         if s.is_multiple_of(2) {
             blank
@@ -683,6 +701,7 @@ fn viterbi(
     let score = |frame: usize, s: usize| -> f32 {
         match token_of(s) {
             GAP => emissions.gap(frame),
+            token if inside[s] => emissions.score(frame, token) - INSIDE_WORD_BLANK,
             token => emissions.score(frame, token),
         }
     };
@@ -976,6 +995,22 @@ mod tests {
         assert_eq!(spans[1], None);
         assert_eq!(spans[0].map(|s| s.0), Some(1));
         assert_eq!(spans[2].map(|s| s.0), Some(4));
+    }
+
+    #[test]
+    fn a_word_stays_in_one_piece_across_a_silence() {
+        // Its first character also sounds alone long before the word: the
+        // two placements score the same but for the pause inside the word.
+        let script = format!(".a{}ab.", ".".repeat(40));
+        let spans = viterbi(
+            0,
+            &emissions(&script),
+            &[word("ab", &[1, 2])],
+            0,
+            script.len(),
+        )
+        .unwrap();
+        assert_eq!(spans[0].map(|s| (s.0, s.1)), Some((42, 44)));
     }
 
     fn heard(words: &[&str]) -> Vec<(String, usize, usize)> {
