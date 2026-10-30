@@ -847,8 +847,32 @@ before users move to compute from Modal:
   service adopts any pointer the object store still holds that it has
   none of (one an import missed on a store that listed it late), and says
   so. Objects of the old layout, which only those pointers name, are not
-  swept until a week after the move. Copying a fleet's archive to another
-  store is then a copy of its `chunks/` and `manifests/`.
+  swept until a week after the move.
+- **Moving a fleet's archive to another store.** The pointers stay in the
+  service, so only chunks and manifests move: `compute-control
+  copy-archive --from <store> --to <store>` copies every one a pointer
+  names, checking each against its name as it reads it, and skips what
+  the other store holds already. What no pointer names (a sweep's
+  garbage), quarantined copies and the pointers an object store kept
+  stay behind, so it copies less than a whole-bucket copy and never
+  writes to the store it copies from. It needs the fleet's pointers in
+  the service, adopts any the import missed first, marks the other store
+  as one whose pointers the service keeps, and prints a report; it fails
+  if the other store lacks anything a pointer names, saying which
+  pointers or objects, and copying again picks up where it stopped. Each
+  store takes its provider's usual settings from the environment; for two
+  stores of one kind, such as two S3 stores, give the one copied to its
+  own in a file with `--to-env` (`AWS_ENDPOINT`, `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, one `NAME=value` a line). `--at-once` (16)
+  bounds the objects copied at a time; lower it when the stores serve
+  other traffic. To move: copy while hosts still archive to the old
+  store, which can take hours for a large archive; stop the service and
+  every host (or drain them) so no archive is in flight; copy again,
+  which copies only what was stored since; point `serve --archive` and
+  every host's `--store` at the new store; start them, wake a few
+  sandboxes, and run `compute-control sweep --store <new>` without
+  `--delete`, whose `stored` should equal its `named`. Keep the old store
+  until wakes from the new one have run for a while.
 - **One clock.** Hosts in a fleet name the day of what they store by the
   fleet's clock, the database's, which the service tells with every
   pointer answer, moved on between answers by the host's monotonic clock,

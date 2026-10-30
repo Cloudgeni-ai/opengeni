@@ -254,6 +254,25 @@ impl ChunkStore {
     /// `az://container/prefix` with the provider's usual credential chain;
     /// `None` when `url` is not a store URL.
     pub fn from_url(url: &str) -> Result<Option<Self>> {
+        Self::open(url, None)
+    }
+
+    /// Opens a store as [`Self::from_url`] does, configured by `settings`
+    /// alone instead of the environment: the provider's environment
+    /// variables by name, such as `AWS_ENDPOINT` and `AWS_ACCESS_KEY_ID`
+    /// for `s3://`, `GOOGLE_SERVICE_ACCOUNT` for `gs://` and
+    /// `AZURE_STORAGE_ACCOUNT_NAME` for `az://`; other providers' are
+    /// ignored. For a process that uses two stores of one kind, such as a
+    /// copy between two S3 stores.
+    ///
+    /// # Errors
+    ///
+    /// When a setting of the store's provider is not one it takes.
+    pub fn from_url_with(url: &str, settings: &[(String, String)]) -> Result<Option<Self>> {
+        Self::open(url, Some(settings))
+    }
+
+    fn open(url: &str, settings: Option<&[(String, String)]>) -> Result<Option<Self>> {
         use object_store::aws::{AmazonS3Builder, Checksum};
         use object_store::azure::MicrosoftAzureBuilder;
         use object_store::client::{HttpConnector as _, ReqwestConnector};
@@ -266,9 +285,16 @@ impl ChunkStore {
         let prefix = Path::from(prefix.trim_end_matches('/'));
         let (backend, uploader): (Arc<dyn ObjectStore>, _) = match scheme {
             "gs" => {
-                let store = GoogleCloudStorageBuilder::from_env()
-                    .with_bucket_name(bucket)
-                    .build()?;
+                let builder = match settings {
+                    None => GoogleCloudStorageBuilder::from_env(),
+                    Some(settings) => configured(
+                        GoogleCloudStorageBuilder::new(),
+                        settings,
+                        "GOOGLE_",
+                        GoogleCloudStorageBuilder::with_config,
+                    )?,
+                };
+                let store = builder.with_bucket_name(bucket).build()?;
                 let client = ReqwestConnector::default().connect(&ClientOptions::new())?;
                 let gcs = Gcs::new(
                     client,
@@ -280,18 +306,34 @@ impl ChunkStore {
             }
             "s3" => (
                 Arc::new(
-                    AmazonS3Builder::from_env()
-                        .with_bucket_name(bucket)
-                        .with_checksum_algorithm(Checksum::SHA256)
-                        .build()?,
+                    match settings {
+                        None => AmazonS3Builder::from_env(),
+                        Some(settings) => configured(
+                            AmazonS3Builder::new(),
+                            settings,
+                            "AWS_",
+                            AmazonS3Builder::with_config,
+                        )?,
+                    }
+                    .with_bucket_name(bucket)
+                    .with_checksum_algorithm(Checksum::SHA256)
+                    .build()?,
                 ),
                 Uploader::StoreVerified,
             ),
             "az" => (
                 Arc::new(
-                    MicrosoftAzureBuilder::from_env()
-                        .with_container_name(bucket)
-                        .build()?,
+                    match settings {
+                        None => MicrosoftAzureBuilder::from_env(),
+                        Some(settings) => configured(
+                            MicrosoftAzureBuilder::new(),
+                            settings,
+                            "AZURE_",
+                            MicrosoftAzureBuilder::with_config,
+                        )?,
+                    }
+                    .with_container_name(bucket)
+                    .build()?,
                 ),
                 Uploader::ReadBack,
             ),
@@ -628,6 +670,76 @@ impl ChunkStore {
         DiskManifest::decode(&bytes)
     }
 
+    /// The bytes stored for the chunk `reference` names, as they are
+    /// stored (compressed), checked against its stored length and hash,
+    /// for copying it to another store. A read that fails the check is
+    /// tried once more; nothing is quarantined, so a copy never writes to
+    /// the store it copies from.
+    pub async fn get_stored_chunk(&self, reference: &ChunkRef) -> Result<Bytes> {
+        reference.validate()?;
+        let path = self.path(&reference.key());
+        let read = || self.read_stored_chunk(&path, reference);
+        match self.settled(&path, self.settle, read).await {
+            Err(Error::Integrity | Error::Truncated { .. }) => {
+                self.settled(&path, self.settle, read).await
+            }
+            result => result,
+        }
+    }
+
+    async fn read_stored_chunk(&self, path: &Path, reference: &ChunkRef) -> Result<Bytes> {
+        let bytes = self.backend.get(path).await?.bytes().await?;
+        if bytes.len() != reference.stored_len as usize {
+            return Err(Error::Truncated {
+                expected: u64::from(reference.stored_len),
+                actual: bytes.len() as u64,
+            });
+        }
+        if blake3::hash(&bytes).to_hex().as_str() != reference.stored_hash {
+            return Err(Error::Integrity);
+        }
+        Ok(bytes)
+    }
+
+    /// The bytes stored for the manifest named `name`, checked against its
+    /// digest, for copying it to another store; as
+    /// [`Self::get_stored_chunk`], tried once more and never quarantined.
+    pub async fn get_stored_manifest(&self, name: &str) -> Result<Bytes> {
+        let (_, digest) = manifest_name(name)?;
+        let path = self.path(&Self::manifest_key(name)?);
+        let read = || self.read_stored_manifest(&path, digest);
+        match self.settled(&path, self.settle, read).await {
+            Err(Error::Integrity) => self.settled(&path, self.settle, read).await,
+            result => result,
+        }
+    }
+
+    async fn read_stored_manifest(&self, path: &Path, digest: &str) -> Result<Bytes> {
+        let result = self.backend.get(path).await?;
+        if result.meta.size > MAX_MANIFEST_BYTES as u64 {
+            return Err(Error::Invalid("manifest too large"));
+        }
+        let bytes = result.bytes().await?;
+        if blake3::hash(&bytes).to_hex().as_str() != digest {
+            return Err(Error::Integrity);
+        }
+        Ok(bytes)
+    }
+
+    /// Stores `bytes`, read from another store with
+    /// [`Self::get_stored_chunk`] or [`Self::get_stored_manifest`], under
+    /// the chunk or manifest key `key` they were stored under there, as an
+    /// archive stores them: verified in transit, and over other bytes found
+    /// under the name only after keeping those in quarantine. Keys keep
+    /// their day, so a sweep of this store judges a copied object by when
+    /// it was first stored.
+    pub async fn put_stored(&self, key: &str, bytes: Bytes) -> Result<()> {
+        if written(key).is_none() {
+            return Err(Error::Invalid("only chunks and manifests are copied"));
+        }
+        self.put_immutable(key, bytes).await.map(|_| ())
+    }
+
     /// Runs `read` of `path`, again while the store answers that nothing is
     /// there, for up to `settle` ([`Self::with_settle`]'s time, [`SETTLE`]).
     async fn settled<T, F: Future<Output = Result<T>>>(
@@ -706,6 +818,59 @@ pub enum Written {
     /// In the old layout, named by its content alone: its listing tells
     /// when it was last stored.
     Legacy,
+}
+
+/// `builder` given `settings` as its `from_env` takes the environment:
+/// each named with `prefix`, the provider's, by its lowercase name. Others
+/// are another provider's, and left out.
+fn configured<B, K: std::str::FromStr>(
+    builder: B,
+    settings: &[(String, String)],
+    prefix: &str,
+    with: impl Fn(B, K, String) -> B,
+) -> Result<B> {
+    settings
+        .iter()
+        .filter(|(name, _)| name.starts_with(prefix))
+        .try_fold(builder, |builder, (name, value)| {
+            let key = name
+                .to_ascii_lowercase()
+                .parse()
+                .map_err(|_| Error::Invalid("a store setting its provider does not take"))?;
+            Ok(with(builder, key, value.clone()))
+        })
+}
+
+/// The settings `text` holds, one `NAME=value` a line, as an environment
+/// file does (for [`ChunkStore::from_url_with`]): blank lines and lines
+/// starting with `#` are skipped, and a value in matching quotes loses
+/// them.
+///
+/// # Errors
+///
+/// When a line holds no `=`, or no name before it.
+pub fn settings(text: &str) -> Result<Vec<(String, String)>> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let (name, value) = line
+                .split_once('=')
+                .filter(|(name, _)| !name.trim().is_empty())
+                .ok_or(Error::Invalid("a setting line is not NAME=value"))?;
+            let value = value.trim();
+            let value = ['"', '\'']
+                .iter()
+                .find_map(|quote| {
+                    value
+                        .strip_prefix(*quote)
+                        .and_then(|inner| inner.strip_suffix(*quote))
+                })
+                .unwrap_or(value);
+            Ok((name.trim().to_owned(), value.to_owned()))
+        })
+        .collect()
 }
 
 /// When the chunk or manifest under `key` (as a listing gives it) was
