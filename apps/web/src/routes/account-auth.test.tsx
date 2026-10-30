@@ -228,7 +228,7 @@ describe("add-account failure messages", () => {
     expect(message(403, "email_not_verified")).toBe("Verify your email before signing in.");
     expect(message(403, "sign_in_refused")).toBe("This account can't sign in right now.");
     expect(message(429, "login_transaction_rate_limited")).toBe(
-      "Too many attempts. Wait a few minutes, then try again.",
+      "Too many attempts. Wait a while, then try again.",
     );
   });
 

@@ -43,7 +43,7 @@ export function accountAuthFailureMessage(error: unknown): string {
     case "sign_in_refused":
       return "This account can't sign in right now.";
     case "login_transaction_rate_limited":
-      return "Too many attempts. Wait a few minutes, then try again.";
+      return "Too many attempts. Wait a while, then try again.";
     default:
       return ACCOUNT_AUTH_FAILED_MESSAGE;
   }
