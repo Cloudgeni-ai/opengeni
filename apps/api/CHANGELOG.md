@@ -1,5 +1,37 @@
 # @opengeni/api-router
 
+## 6.2.1
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+  - @opengeni/core@6.2.0
+  - @opengeni/db@6.2.0
+  - @opengeni/config@6.2.0
+  - @opengeni/runtime@6.2.0
+  - @opengeni/artifact-tool@6.2.0
+  - @opengeni/capabilities@6.2.0
+  - @opengeni/codemode@6.2.0
+  - @opengeni/codex@6.2.0
+  - @opengeni/documents@6.2.0
+  - @opengeni/events@6.2.0
+  - @opengeni/github@6.2.0
+  - @opengeni/interaction@6.2.0
+  - @opengeni/observability@6.2.0
+  - @opengeni/storage@6.2.0
+  - @opengeni/tool-gateway@6.2.0
+  - @opengeni/vaults@6.2.0
+  - @opengeni/vaults-bitwarden@6.2.0
+  - @opengeni/vaults-keeper@6.2.0
+  - @opengeni/vaults-onepassword@6.2.0
+  - @opengeni/vaults-protonpass@6.2.0
+  - @opengeni/agent-proto@6.2.0
+  - @opengeni/network@6.2.0
+  - @opengeni/xai-subscription@6.2.0
+
 ## 6.1.1
 
 ### Minor Changes
