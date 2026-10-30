@@ -21,6 +21,7 @@ pub(crate) use admission::WakeRoom;
 pub use admission::{Capacity, CpuCapacity, CreateRoom, Size};
 pub use disk::{DiskCapacity, DiskSpace, Resource};
 pub use outgrowth::MemoryLevels;
+pub use spare::Claims;
 pub(crate) use squeeze::{Balloon, Squeeze};
 
 /// Something that happened, fed to [`Host::handle`].

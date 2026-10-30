@@ -29,7 +29,10 @@
 //! Memory is one book, kept by the core: every ready sandbox, filling or
 //! filled, is a spare VM there (see [`compute_core::Input::Spare`]). A
 //! fill starts only within [`compute_core::Host::spare_fits`], room no wake
-//! wants, and is booked before it starts; the core counts ready sandboxes
+//! wants that also leaves room in the budget to claim every ready sandbox
+//! kept, itself included, so a fill never takes the room a create needs
+//! to claim one kept already. It is booked before it starts; the core
+//! counts ready sandboxes
 //! against the admission budget and ends them first, with
 //! [`compute_core::Action::Discard`], when it needs memory for a wake, its
 //! buffer or pressure. A claim takes its ready sandbox off the spares and
@@ -46,7 +49,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use compute_core::{DiskSpace, Durability, Input, Level, Outcome, SandboxId, State, Step};
+use compute_core::{Claims, DiskSpace, Durability, Input, Level, Outcome, SandboxId, State, Step};
 use compute_engine::{CancellationToken, Engine};
 use tokio::time::Instant;
 
@@ -376,14 +379,61 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Whether the core leaves room for one more ready sandbox filled from
     /// `template`: room no wake wants, above the admission buffer and the
-    /// high watermark, counting every spare booked already, and disk for
-    /// its fill (see [`HostAgent::fill_disk`]).
+    /// high watermark, counting every spare booked already, room in the
+    /// budget for creates to claim every ready sandbox kept and this one
+    /// (see [`HostAgent::unclaimed`]), and disk for its fill (see
+    /// [`HostAgent::fill_disk`]).
     pub(super) fn memory_allows(&self, template: &Template) -> bool {
+        let (shape, fill) = (template.shape(), self.fill_memory(template));
+        let kept = self.unclaimed();
+        // Its own claim books the rest of its shape's memory, and the
+        // processor time it books while it fills.
+        let claims = Claims {
+            memory: kept
+                .memory
+                .saturating_add(shape.bytes().saturating_sub(fill)),
+            cpu: kept.cpu,
+        };
         self.core.spare_fits(
-            self.fill_memory(template),
-            self.fill_disk(template.shape().image),
-            template.shape().cpu_millis(),
+            fill,
+            self.fill_disk(shape.image),
+            shape.cpu_millis(),
+            claims,
         )
+    }
+
+    /// What creates claiming every ready sandbox kept, filled or filling,
+    /// would book beyond what each books now, each claimed by a create of
+    /// its shape asking for the default guarantees (see
+    /// [`HostAgent::claim`]): all its memory, less what it holds, and the
+    /// default processor request. One filling books more processor time
+    /// than that already, its whole shape, and one filled none. A create
+    /// asking for more processor time than the default can find a fill's
+    /// in its way until that fill is ready, as any create the processor
+    /// budget cannot take is refused.
+    fn unclaimed(&self) -> Claims {
+        let idle = self
+            .ready
+            .idle
+            .iter()
+            .map(|idle| (idle.record.id.0, Shape::of(&idle.record.config), false));
+        let filling = self
+            .ready
+            .filling
+            .iter()
+            .map(|(host, shape)| (*host, *shape, true));
+        idle.chain(filling)
+            .fold(Claims::default(), |sum, (host, shape, filling)| {
+                let held = self.ready.spares.get(&host).copied().unwrap_or(0);
+                Claims {
+                    memory: sum
+                        .memory
+                        .saturating_add(shape.bytes().saturating_sub(held)),
+                    cpu: sum
+                        .cpu
+                        .saturating_add(if filling { 0 } else { shape.claim_cpu_millis() }),
+                }
+            })
     }
 
     /// What a ready sandbox filled from `template` books of host memory
