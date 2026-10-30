@@ -4,13 +4,14 @@ import {
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   DEFAULT_MODEL_COST_POLICY_JSON,
 } from "@opengeni/config/defaults";
-import type { Settings } from "@opengeni/config";
+import { DEFAULT_BILLING_LEGACY_ACCOUNT_IDS, type Settings } from "@opengeni/config";
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     slackAccessMode: "limited",
     microsoftTeamsToolsEnabled: false,
     microsoftTeamsAllowedWorkspaceIds: [],
+    billingLegacyAccountIds: [...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS],
     teamsBotEnabled: false,
     teamsBotAllowedTenantIds: [],
     teamsBotAllowedChannelIds: [],
@@ -90,6 +91,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
     billingMode: "disabled",
     subscriptionPlansEnabled: false,
+    // Off in fixtures; bring-your-own-key fee tests opt in.
+    byokPlatformFeeBps: 0,
     verifiedSignupTrialCreditsEnabled: false,
     creditPromotionPolicy: { offers: {} },
     sandboxWarmBillingMode: "usage_only",

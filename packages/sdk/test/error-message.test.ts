@@ -55,6 +55,42 @@ describe("brand-neutral error presentation", () => {
     }
   });
 
+  test("credit refusals keep their one public action and name the fix", () => {
+    for (const [code, action, text] of [
+      [
+        "api_credits_required",
+        { type: "add_credits", href: "/billing" },
+        "API usage uses credits, not your plan credit. Add credits to continue.",
+      ],
+      [
+        "byok_paid_credit_required",
+        { type: "add_credits", href: "/billing" },
+        "Add credits to use your own key.",
+      ],
+      [
+        "byok_paid_credit_required",
+        { type: "upgrade_plan", href: "/billing" },
+        "Upgrade to Pro to use your own key.",
+      ],
+    ] as const) {
+      const error = new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            status: 402,
+            code: "insufficient_credits",
+            message: "diagnostic",
+            requestId: "credit-refusal",
+            details: { code, action },
+          },
+        }),
+        { mutation: true },
+      );
+      expect(error.details?.action).toEqual(action);
+      expect(formatErrorMessage(error)).toBe(`${text} Reference: credit-refusal.`);
+    }
+  });
+
   test("Site refusals are friendly before a conversation exists too", () => {
     for (const [code, status, text] of [
       ["not_available_for_viewer", 403, "not available for this viewer"],

@@ -278,11 +278,14 @@ test("scoped monthly credit appears once and is not subtracted from purchased ge
       }}
     />,
   );
-  expect(container.textContent?.match(/Monthly plan credit/g)).toHaveLength(1);
-  expect(container.textContent).toContain("$35.00");
+  expect(container.textContent?.match(/Plan credit/g)).toHaveLength(1);
+  expect(container.textContent).not.toContain("Monthly plan credit");
+  // Plan credit and credits pay for different use: no blended $35 total.
+  expect(container.textContent).not.toContain("$35.00");
+  expect(container.textContent).toContain("$10.00");
   expect(container.textContent).toContain("$25.00");
   expect(container.textContent).not.toContain("$15.00");
-  expect(container.textContent).toContain("Used first · Resets monthly · View models");
+  expect(container.textContent).toContain("For app use · Resets monthly · View models");
   const disclosure = container.querySelector("button")!;
   await act(async () => disclosure.click());
   expect(container.textContent).toContain("GPT-6 Luna");
@@ -317,11 +320,141 @@ test("balance splits monthly, promotional and other general credit without doubl
       }}
     />,
   );
-  expect(document.body.textContent).toContain("$158.45");
+  expect(document.body.textContent).not.toContain("Total balance");
   expect(document.body.textContent).toContain("$73.45");
   expect(document.body.textContent).toContain("$75.00");
   expect(document.body.textContent).toContain("$10.00");
-  expect(document.body.textContent).toContain("Other general credit");
+  expect(document.body.textContent).toContain("Plan credit");
+  expect(document.body.textContent).toContain("For app use. Resets monthly.");
+  expect(document.body.textContent).toContain("Credits");
+  expect(document.body.textContent).toContain("For API use, and app use beyond plan credit.");
+  expect(document.body.textContent).not.toContain("Platform fee on your own keys");
+});
+
+test("plan credit and credits are separate balances, and own-key fees have their own line", async () => {
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          // API use overran credits by $5; the plan credit is untouched.
+          balanceMicros: 95_000_000,
+          generalBalanceMicros: 95_000_000,
+          creditsMicros: -5_000_000,
+          apiDebtMicros: 5_000_000,
+          byokPlatformFeeMonthMicros: 1_250_000,
+          currency: "usd",
+          updatedAt: "2026-10-29T14:00:00Z",
+          plan: { ...previewPlan("pro"), creditRemainingMicros: 100_000_000 },
+          promotionalCredits: [],
+        },
+      }}
+    />,
+  );
+  const rows = [...document.body.querySelectorAll("div.divide-y > div")].map(
+    (row) => row.textContent,
+  );
+  expect(rows).toEqual([
+    "Plan creditFor app use. Resets monthly.$100.00",
+    "CreditsFuture purchases cover prior usage first.-$5.00",
+  ]);
+  // Two balances for different use, not a blended $95 total.
+  expect(document.body.textContent).not.toContain("Total balance");
+  // A charge, set apart from the balances.
+  expect(document.body.querySelector('[data-testid="byok-platform-fee"]')!.textContent).toBe(
+    "Platform fee on your own keysCharged this month$1.25",
+  );
+});
+
+test("without a plan or promotions, the fee line sits under the single total", async () => {
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 20_000_000,
+          generalBalanceMicros: 20_000_000,
+          creditsMicros: 20_000_000,
+          byokPlatformFeeMonthMicros: 500_000,
+          currency: "usd",
+          updatedAt: "2026-10-29T14:00:00Z",
+          plan: null,
+          promotionalCredits: [],
+        },
+      }}
+    />,
+  );
+  expect(document.body.querySelectorAll("div.divide-y")).toHaveLength(0);
+  expect(document.body.textContent).toContain("Total balance");
+  expect(document.body.textContent).toContain("Charged this month$0.50");
+});
+
+test("with the plan row hidden, plan credit stays in Credits so the rows add up", async () => {
+  await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit={false}
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 130_000_000,
+          generalBalanceMicros: 120_000_000,
+          creditsMicros: 20_000_000,
+          currency: "usd",
+          updatedAt: "2026-10-29T14:00:00Z",
+          plan: { ...previewPlan("pro"), creditRemainingMicros: 100_000_000 },
+          promotionalCredits: [
+            {
+              grantId: "g-1",
+              label: "Promotional credits",
+              remainingMicros: 10_000_000,
+              eligibleModelIds: ["gpt-6-luna"],
+            },
+          ],
+        },
+      }}
+    />,
+  );
+  const rows = [...document.body.querySelectorAll("div.divide-y > div")].map(
+    (row) => row.textContent,
+  );
+  expect(rows.at(-1)).toContain("$120.00");
+});
+
+test("the Plans section states the two pricing lines", async () => {
+  await mount(
+    <SubscriptionPlans
+      client={clientFixture() as unknown as OpenGeniBrowserClient}
+      accountId="org-a"
+      returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
+      catalog={{ accountId: "org-a", revision: 1, plans: previewPlans, plan: previewPlan("free") }}
+      plan={previewPlan("free")}
+      canManage
+      supportEmail="support@example.test"
+      onChanged={() => {}}
+    />,
+  );
+  expect(document.body.textContent).toContain(
+    "Subscriptions give 5x the plan price in credits for the Opengeni apps, and you can bring your own keys.",
+  );
+  expect(document.body.textContent).toContain(
+    "API use in your own product is pay-as-you-go at cost plus 5%, own keys welcome.",
+  );
 });
 
 test("an organization without a monthly grant shows no empty plan credit meter or row", async () => {
@@ -363,8 +496,8 @@ test("an organization without a monthly grant shows no empty plan credit meter o
   expect(document.body.textContent).toContain("Your plan");
   expect(document.body.textContent).toContain("5 seats");
   expect(document.body.textContent).not.toContain("of $0.00 left");
-  expect(document.body.textContent).not.toContain("Used first. Resets monthly.");
-  expect(document.body.textContent).not.toContain("Other general credit");
+  expect(document.body.textContent).not.toContain("For app use. Resets monthly.");
+  expect(document.body.textContent).not.toContain("For API use, and app use beyond plan credit.");
   expect(document.body.textContent).toContain("$7.00");
 });
 
@@ -470,5 +603,5 @@ test("a funding hold explains unavailable free funds without erasing purchased c
   );
   expect(container.textContent).toContain("$10.00 of the balance is on hold");
   expect(container.textContent).toContain("$25.00");
-  expect(container.textContent).not.toContain("Used first · Resets monthly");
+  expect(container.textContent).not.toContain("For app use · Resets monthly");
 });

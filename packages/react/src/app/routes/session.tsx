@@ -5,7 +5,7 @@ import {
   createWorkspaceRetainedArtifactLoader,
   createWorkspaceRetainedVideoLoader,
 } from "../../timeline";
-import { isModelUnavailableSubmissionError } from "../../lib/format";
+import { isModelUnavailableSubmissionError, type CreditRefusalKind } from "../../lib/format";
 import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { LazyPart } from "../../components/lazy-part";
@@ -37,10 +37,14 @@ import {
 } from "../lib/failed-session-retry";
 import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
-import { failedSessionCopy } from "../lib/failed-session-copy";
+import {
+  chatComposerPlaceholder,
+  failedSessionCopy,
+  failureFallbackReason,
+} from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import { ChatPaymentPages } from "../components/chat-payment-pages";
-import { isPaymentRequiredError } from "../lib/model-access";
+import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
 import { waitingDescendants } from "../lib/descendant-requests";
@@ -117,6 +121,7 @@ import { expireArtifactCatalog } from "../lib/artifact-catalog-cache";
 import { useArtifactCatalogMutationInvalidation } from "../lib/use-artifact-catalog-mutation-invalidation";
 import {
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   conversationTimeline,
   projectPendingApprovals,
   useComposer,
@@ -707,6 +712,8 @@ export function SessionRoute({
   // healthy-looking. Track the terminal credit state from the last turn-end so
   // the banner shows for idle-but-broke sessions too, not only failed ones.
   const creditExhausted = useMemo(() => creditExhaustedFromEvents(events), [events]);
+  // The one fix (own-key fee or API use) that stop names, from the same turn end.
+  const creditRefusal = useMemo(() => creditRefusalFromEvents(events), [events]);
   const failure = useMemo(
     () =>
       session && (session.status === "failed" || creditExhausted)
@@ -1429,6 +1436,7 @@ export function SessionRoute({
       humanInput={humanInput}
       failure={failure}
       creditExhausted={creditExhausted}
+      creditRefusal={creditRefusal}
       goal={goal}
       queue={queue}
       agentNodes={agentNodes}
@@ -2103,6 +2111,8 @@ function SessionChatPane(props: {
   failure: ReturnType<typeof summarizeSessionFailure> | null;
   /** The last turn ended budget_exhausted — the workspace is out of credits. */
   creditExhausted: boolean;
+  /** The one-fix refusal (own-key fee or API use) the last turn ended on, if any. */
+  creditRefusal: CreditRefusalKind | null;
   goal: ReturnType<typeof useGoal>;
   queue: ReturnType<typeof useTurnQueue>;
   /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
@@ -2285,11 +2295,9 @@ function SessionChatPane(props: {
   );
   // The API's credit refusal of a Send: no remaining credit pays for that model.
   // It stays above the composer until a message is accepted or it is dismissed.
-  const [creditRefusal, setCreditRefusal] = useState<{
+  const [creditRefusal, setCreditRefusal] = useState<CreditRefusalRecord<{
     sessionId: string;
-    model: string;
-    message: string;
-  } | null>(null);
+  }> | null>(null);
   useEffect(() => {
     const onFocusRequest = (event: Event) => {
       const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
@@ -2833,7 +2841,15 @@ function SessionChatPane(props: {
     loadFailed: connectionAccounts.error !== null,
   };
   const composerSendBlocker = () => sendGate.blocker(sendState);
+  const workspaceAccountId = context.workspaces.find(
+    (candidate) => candidate.id === props.session.workspaceId,
+  )?.accountId;
+  const canBuyCredits =
+    context.clientConfig.billingMode === "stripe" &&
+    Boolean(workspaceAccountId) &&
+    hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
   const composer = useComposer(props.session.id, {
+    canBuyCredits,
     events: props.events,
     sendExtras: () => ({
       ...withHostMessageContext(hostMessageContext, props.messageContext),
@@ -2903,12 +2919,13 @@ function SessionChatPane(props: {
         setModelPickerSession(props.session.id);
       }
       // Re-read funding so the notice and picker name what the credit covers now.
-      if (isPaymentRequiredError(error)) {
-        setCreditRefusal({
-          sessionId: props.session.id,
-          model: refusedModelId(error, input) ?? props.session.model,
-          message: error.message,
-        });
+      const refusal = creditRefusalRecord(
+        error,
+        { sessionId: props.session.id },
+        refusedModelId(error, input) ?? props.session.model,
+      );
+      if (refusal) {
+        setCreditRefusal(refusal);
         void modelCatalog.refresh();
       }
     },
@@ -3002,27 +3019,32 @@ function SessionChatPane(props: {
   const modelPickerDisabled =
     composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
   const canChooseRecoveryModel = !modelPickerDisabled;
+  // An own-key or API stop names its one fix; no model choice or free credit fixes it.
+  const stopRefusal = props.creditExhausted ? props.creditRefusal : null;
   // Free credit can still cover other models after this model's credit ran out.
-  const creditGap = props.creditExhausted
-    ? freeCreditGap(modelCatalog.rows, props.session.model, {
-        selectedModel: composerPolicy?.model,
-        preferredModel: modelCatalog.defaultSelection?.model,
-      })
-    : null;
+  const creditGap =
+    props.creditExhausted && !stopRefusal
+      ? freeCreditGap(modelCatalog.rows, props.session.model, {
+          selectedModel: composerPolicy?.model,
+          preferredModel: modelCatalog.defaultSelection?.model,
+        })
+      : null;
   // Shown while the banner chunk loads or if it fails. On the free model the
   // generic daily-limit line then gives way to the free-model copy; that brief
   // text change keeps the free-model copy out of the direct session bundle.
   const failureFallback = props.failure ? (
     <div role="alert" className={cn("mx-auto my-2 w-full max-w-3xl text-sm text-fg-muted", gutter)}>
-      {
+      {failureFallbackReason(
         failedSessionCopy(
           props.failure,
           props.creditExhausted && !props.failure.structuralSandboxFailure,
           Boolean(composerPolicy && composerPolicy.model !== props.session.model),
           canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
           creditGap,
-        ).reason
-      }
+          stopRefusal,
+        ),
+        canBuyCredits,
+      )}
     </div>
   ) : null;
   const model = composerPolicy?.model ?? props.session.model;
@@ -3545,9 +3567,6 @@ function SessionChatPane(props: {
   const modelSwitchHeadsUp = chosenModelHeadsUp ? (
     <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
   ) : null;
-  const workspaceAccountId = context.workspaces.find(
-    (candidate) => candidate.id === props.session.workspaceId,
-  )?.accountId;
   // The chat's Secrets row: hidden when its agent can't use secrets.
   const sessionSecrets = useSessionSecrets(props.session.id, {
     enabled: workspacePermissions.includes("secrets:list"),
@@ -3736,18 +3755,22 @@ function SessionChatPane(props: {
     ],
   );
 
-  const canBuyCredits =
-    context.clientConfig.billingMode === "stripe" &&
-    Boolean(workspaceAccountId) &&
-    hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
   const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const openCreditTopup = canBuyCredits ? () => setCreditTopupOpen(true) : undefined;
+  // Opened beside an own-key refusal, the top-up hides coupons: their credit
+  // can't pay the own-key fee.
+  const topupRefusal =
+    ((creditRefusal?.sessionId === props.session.id ? creditRefusal.code : null) ?? stopRefusal) ===
+    "byok_paid_credit_required"
+      ? "byok_paid_credit_required"
+      : null;
   const creditTopupPrompt =
     canBuyCredits && workspaceAccountId ? (
       <Suspense fallback={null}>
         {creditTopupOpen ? (
           <LazyCreditTopupPrompt
             purpose="topup"
+            refusalCode={topupRefusal}
             open
             workspaceId={props.session.workspaceId}
             accountId={workspaceAccountId}
@@ -3788,6 +3811,7 @@ function SessionChatPane(props: {
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
             creditExhausted={props.creditExhausted}
+            creditRefusal={stopRefusal}
             freeCreditGap={creditGap}
             onChooseModel={chooseCoveredModel}
             workspaceId={props.session.workspaceId}
@@ -3874,6 +3898,7 @@ function SessionChatPane(props: {
             preferredModel: modelCatalog.defaultSelection?.model,
           })}
           message={sessionCreditRefusal.message}
+          refusalCode={sessionCreditRefusal.code}
           workspaceId={props.session.workspaceId}
           accountId={workspaceAccountId}
           canReadBilling={
@@ -4496,21 +4521,15 @@ function SessionChatPane(props: {
                     </LazyPart>
                   ) : null
                 }
-                placeholder={
-                  props.session.status === "cancelled"
-                    ? "This session was cancelled."
-                    : props.creditExhausted &&
-                        (props.session.status === "failed" || props.session.status === "idle")
-                      ? // "Send a message to revive" is a dead end without credits —
-                        // the reply turn dies the same budget death. With free
-                        // credit left for other models, a covered model revives it.
-                        creditGap
-                        ? creditGap.selectionUsable
-                          ? "Send a follow-up…"
-                          : "Your free credits don't cover this model — choose another model or add credits."
-                        : "Out of Opengeni credits — add credits to continue."
-                      : "Send a follow-up…"
-                }
+                placeholder={chatComposerPlaceholder({
+                  cancelled: props.session.status === "cancelled",
+                  creditStopped:
+                    Boolean(props.creditExhausted) &&
+                    (props.session.status === "failed" || props.session.status === "idle"),
+                  stopRefusal,
+                  creditGap,
+                  canBuyCredits,
+                })}
                 controls={
                   <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
                     <ModelPicker

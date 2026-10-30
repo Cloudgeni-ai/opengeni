@@ -97,14 +97,24 @@ export * from "./subscription-plans";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 export * from "./subscription-plan-maintenance";
 import {
+  byokFeeFunding,
+  chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
+  paidCreditReceipt,
+  receiptCreatedAt,
   planCreditDebit,
   planPostUseCreditAllocations,
+  readBillingBalance,
   type CreditUsage,
 } from "./credit-balances";
+import { chainedReceipt, feeDebtRepaid, paidCreditMark } from "./paid-credit";
 export {
+  apiSpendableCreditMicros,
+  byokFeeSpendableMicros,
+  chargeBillingOrigin,
   getBillingBalance,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   spendableCreditMicros,
   VOICE_CREDIT_USAGE,
@@ -160,6 +170,7 @@ import {
   withSessionUnattendedMetadata,
   type SessionUnattendedSetting,
 } from "@opengeni/contracts";
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import {
@@ -301,6 +312,11 @@ export {
 
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
+  BYOK_PLATFORM_FEE_TYPE,
+  storedBillingOrigin,
+  type BillingOrigin,
+} from "@opengeni/contracts";
+import {
   normalizeOrganizationAccessPolicy,
   type OrganizationAccessPolicy,
   type UpdateOrganizationApiKeyRequest,
@@ -342,6 +358,7 @@ import {
   currentSessionRlsActorInitiatingHumanSubjectId,
 } from "./database";
 import {
+  ambientBillingOrigin,
   CreditDebitAttribution,
   creditDebitAttributionMetadata,
   currentCreditDebitAttribution,
@@ -6664,6 +6681,18 @@ export async function applyCreditLedgerEntryOnce(
       // Funding and usage adjustments share the expiry boundary too.
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      // Paid-for credit, refunds of it and unpaid credit record what they
+      // change in paid credit (paid-credit.ts).
+      const receipt = await paidCreditReceipt(scopedDb, {
+        accountId: input.accountId,
+        settledAt,
+        type: input.type,
+        amountMicros: input.amountMicros,
+        eligibleModelIds: input.eligibleModelIds ?? null,
+        metadata: input.metadata,
+        sourceType: input.sourceType ?? null,
+        sourceId: input.sourceId ?? null,
+      });
       const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
@@ -6675,9 +6704,9 @@ export async function applyCreditLedgerEntryOnce(
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
           idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
+          metadata: { ...input.metadata, ...receipt.metadata },
           occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
+          createdAt: receipt.createdAt,
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
@@ -6689,6 +6718,83 @@ export async function applyCreditLedgerEntryOnce(
       };
     },
   );
+}
+
+const USAGE_ORIGIN_TURN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The funding origin a usage debit is charged under, frozen on its ledger row
+ * (`usage_origin`): the caller's explicit origin; else the origin carried in
+ * its attribution metadata; else the turn it names; else the origin a
+ * trusted outer scope fixed; else app (today's behaviour, and legacy null).
+ * API debits never count against the monthly plan allowance.
+ */
+/**
+ * The origin a frozen billing record is charged under, resolved like the
+ * debit itself (see resolveUsageOrigin), so admission and charge agree.
+ */
+async function attributionBillingOrigin(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attribution?: CreditDebitAttribution | null | undefined;
+  },
+): Promise<BillingOrigin> {
+  const attribution = input.attribution;
+  if (!attribution || attribution.kind === "unknown") return ambientBillingOrigin() ?? "app";
+  return await resolveUsageOrigin(scopedDb, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    metadata: creditDebitAttributionMetadata(attribution),
+  });
+}
+
+/** {@link attributionBillingOrigin} for a caller outside an account scope. */
+export async function billingOriginForAttribution(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attribution?: CreditDebitAttribution | null | undefined;
+  },
+): Promise<BillingOrigin> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await attributionBillingOrigin(scopedDb, input),
+  );
+}
+
+async function resolveUsageOrigin(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    usageOrigin?: BillingOrigin | undefined;
+    metadata?: Record<string, unknown> | undefined;
+  },
+): Promise<BillingOrigin> {
+  if (input.usageOrigin) return input.usageOrigin;
+  const metadataOrigin = input.metadata?.billingOrigin;
+  if (metadataOrigin === "app" || metadataOrigin === "api") return metadataOrigin;
+  const attribution = currentCreditDebitAttribution();
+  const turnId =
+    typeof input.metadata?.turnId === "string"
+      ? input.metadata.turnId
+      : attribution.kind === "turn" && !attribution.billingOrigin
+        ? attribution.turnId
+        : null;
+  if (turnId && input.workspaceId && USAGE_ORIGIN_TURN_ID.test(turnId)) {
+    const [turn] = await rawRows<{ billingOrigin: string | null }>(
+      scopedDb,
+      sql`SELECT billing_origin AS "billingOrigin" FROM session_turns
+        WHERE account_id=${input.accountId}::uuid AND workspace_id=${input.workspaceId}::uuid
+          AND id=${turnId}::uuid`,
+    );
+    if (turn) return storedBillingOrigin(turn.billingOrigin);
+  }
+  return ambientBillingOrigin() ?? "app";
 }
 
 export async function applyCreditDebitUpToBalance(
@@ -6706,6 +6812,8 @@ export async function applyCreditDebitUpToBalance(
     idempotencyKey: string;
     metadata?: Record<string, unknown>;
     occurredAt?: Date;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
   },
 ): Promise<{
   balance: BillingBalance;
@@ -6737,7 +6845,8 @@ export async function applyCreditDebitUpToBalance(
         settledAt,
         true,
       );
-      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
+      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId, usageOrigin);
       const candidateDebitMicros = plan.debitedMicros;
       // Keep a zero-cost receipt too: retrying after a top-up must not charge
       // a response that was already settled while the eligible balance was empty.
@@ -6750,6 +6859,7 @@ export async function applyCreditDebitUpToBalance(
           amountMicros: -candidateDebitMicros,
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
+          usageOrigin,
           idempotencyKey: input.idempotencyKey,
           metadata: {
             ...input.metadata,
@@ -6809,10 +6919,15 @@ export async function applyCreditDebitAfterUse(
      * Omitted: general credit only.
      */
     usage?: CreditUsage;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
   },
 ): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
     throw new Error("post-use credit debit requires a positive, safe integer micro amount");
+  }
+  if (input.type === BYOK_PLATFORM_FEE_TYPE) {
+    throw new Error("a bring-your-own-key fee settles with applyByokPlatformFeeDebit");
   }
   return await withRlsContext(
     db,
@@ -6822,68 +6937,165 @@ export async function applyCreditDebitAfterUse(
       // that cannot allocate promotional grants.
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
-      if (input.usage) {
+      // App use: plan credit (the Free plan's scoped credit too) pays for
+      // tools as well as models.
+      if (usageOrigin === "app") {
         allocations = planPostUseCreditAllocations(
           await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
           input.amountMicros,
           input.usage,
         );
       }
-      const inserted = await scopedDb
-        .insert(schema.creditLedgerEntries)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId ?? null,
-          type: input.type,
-          amountMicros: -input.amountMicros,
-          sourceType: input.sourceType,
-          sourceId: input.sourceId,
-          idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
-          occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
-        })
-        .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
-        .returning({ id: schema.creditLedgerEntries.id });
-      if (inserted.length === 0) {
-        const [prior] = await scopedDb
-          .select({
-            accountId: schema.creditLedgerEntries.accountId,
-            workspaceId: schema.creditLedgerEntries.workspaceId,
-            type: schema.creditLedgerEntries.type,
-            amountMicros: schema.creditLedgerEntries.amountMicros,
-            sourceType: schema.creditLedgerEntries.sourceType,
-            sourceId: schema.creditLedgerEntries.sourceId,
-          })
-          .from(schema.creditLedgerEntries)
-          .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
-        if (
-          !prior ||
-          prior.accountId !== input.accountId ||
-          prior.workspaceId !== (input.workspaceId ?? null) ||
-          prior.type !== input.type ||
-          prior.amountMicros !== -input.amountMicros ||
-          prior.sourceType !== input.sourceType ||
-          prior.sourceId !== input.sourceId
-        ) {
-          throw new Error(
-            "post-use credit debit idempotency key conflicts with a different charge",
-          );
-        }
-      } else if (allocations.length) {
+      const insertedId = await insertPostUseDebit(scopedDb, input, usageOrigin, settledAt);
+      if (insertedId && allocations.length) {
         await scopedDb.insert(schema.creditDebitAllocations).values(
           allocations.map((allocation) => ({
             ...allocation,
             accountId: input.accountId,
-            debitEntryId: inserted[0]!.id,
+            debitEntryId: insertedId,
           })),
         );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
-        debitedMicros: inserted.length ? input.amountMicros : 0,
+        debitedMicros: insertedId ? input.amountMicros : 0,
       };
+    },
+  );
+}
+
+/**
+ * Insert an already-consumed charge once. A replay of the same idempotency
+ * key must be the same charge. Returns the new row's id, or null on replay.
+ */
+async function insertPostUseDebit(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    type: string;
+    amountMicros: number;
+    sourceType: string;
+    sourceId: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+  },
+  usageOrigin: BillingOrigin,
+  settledAt: string,
+  createdAt: SQL = sql`${settledAt}::timestamptz`,
+): Promise<string | null> {
+  const inserted = await scopedDb
+    .insert(schema.creditLedgerEntries)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId ?? null,
+      type: input.type,
+      amountMicros: -input.amountMicros,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      usageOrigin,
+      idempotencyKey: input.idempotencyKey,
+      metadata: input.metadata ?? {},
+      occurredAt: input.occurredAt ?? new Date(),
+      createdAt,
+    })
+    .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
+    .returning({ id: schema.creditLedgerEntries.id });
+  if (inserted.length) return inserted[0]!.id;
+  const [prior] = await scopedDb
+    .select({
+      accountId: schema.creditLedgerEntries.accountId,
+      workspaceId: schema.creditLedgerEntries.workspaceId,
+      type: schema.creditLedgerEntries.type,
+      amountMicros: schema.creditLedgerEntries.amountMicros,
+      sourceType: schema.creditLedgerEntries.sourceType,
+      sourceId: schema.creditLedgerEntries.sourceId,
+    })
+    .from(schema.creditLedgerEntries)
+    .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
+  if (
+    !prior ||
+    prior.accountId !== input.accountId ||
+    prior.workspaceId !== (input.workspaceId ?? null) ||
+    prior.type !== input.type ||
+    prior.amountMicros !== -input.amountMicros ||
+    prior.sourceType !== input.sourceType ||
+    prior.sourceId !== input.sourceId
+  ) {
+    throw new Error("post-use credit debit idempotency key conflicts with a different charge");
+  }
+  return null;
+}
+
+/**
+ * Settle one bring-your-own-key platform fee (`byok_platform_fee`), payable
+ * only from paid credit: an active paid plan's credit first (app use), then
+ * paid credits; the rest is fee debt the next top-up repays. Its row records
+ * the split (`planPaidMicros`, `creditPaidMicros`, `unfundedMicros`) and a
+ * paid-credit mark (paid-credit.ts). One balance read under the account lock.
+ */
+export async function applyByokPlatformFeeDebit(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    amountMicros: number;
+    sourceType: string;
+    sourceId: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
+  },
+): Promise<{
+  debitedMicros: number;
+  planPaidMicros: number;
+  creditPaidMicros: number;
+  unfundedMicros: number;
+}> {
+  if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
+    throw new Error("post-use credit debit requires a positive, safe integer micro amount");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+      const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
+      const { balance, paid } = await readBillingBalance(
+        scopedDb,
+        input.accountId,
+        undefined,
+        settledAt,
+        true,
+      );
+      const funding = byokFeeFunding(balance, paid, input.amountMicros, usageOrigin);
+      const insertedId = await insertPostUseDebit(
+        scopedDb,
+        {
+          ...input,
+          type: BYOK_PLATFORM_FEE_TYPE,
+          metadata: {
+            ...input.metadata,
+            ...chainedReceipt(
+              paid,
+              { type: BYOK_PLATFORM_FEE_TYPE, amountMicros: input.amountMicros },
+              { ...funding, ...paidCreditMark(paid), ...feeDebtRepaid(paid) },
+            ),
+          },
+        },
+        usageOrigin,
+        settledAt,
+        receiptCreatedAt(settledAt, paid),
+      );
+      return insertedId
+        ? { debitedMicros: input.amountMicros, ...funding }
+        : { debitedMicros: 0, planPaidMicros: 0, creditPaidMicros: 0, unfundedMicros: 0 };
     },
   );
 }
@@ -7116,6 +7328,8 @@ export type ScheduledTaskCreatorPolicy = {
 export type CreateScheduledTaskInput = {
   id?: string;
   accountId: string;
+  /** Funding origin of whoever set the task up, inherited by every run. */
+  billingOrigin?: BillingOrigin | null;
   /** Vault narrowing for every run (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   workspaceId: string;
@@ -7939,6 +8153,8 @@ export type EnqueueSessionTurnInput = {
   source: SessionTurnSource;
   /** Content-free product surface the request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the turn; null inherits the session's latest. */
+  billingOrigin?: BillingOrigin | null;
   prompt: string;
   modelContext?: string | null;
   resources: ResourceRef[];
@@ -7968,6 +8184,8 @@ export type SessionTurnForExecution = SessionTurn & {
   /** Worker-only causal authority; never inferred from the current worker. */
   initiatingHumanSubjectId: string | null;
   scheduledTaskRunId: string | null;
+  /** Funding origin frozen at acceptance; legacy null is app. */
+  billingOrigin: BillingOrigin;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
   goalSnapshot: SessionGoalSnapshot;
@@ -19293,6 +19511,7 @@ export async function createScheduledTask(
           id: input.id,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
+          billingOrigin: input.billingOrigin ?? null,
           name: input.name,
           ownerSubjectId:
             (input.action?.kind ?? "agent_turn") === "agent_turn"
@@ -46394,8 +46613,9 @@ export class SandboxPaidComputeAdmissionError extends Error {
   constructor(
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
+    message = "Insufficient workspace credits to admit paid sandbox compute",
   ) {
-    super("Insufficient workspace credits to admit paid sandbox compute");
+    super(message);
   }
 }
 
@@ -47718,9 +47938,28 @@ async function acquireLeaseOnce(
                 refusal,
               );
             }
-            const balance = await getSpendableCreditBalance(tx, accountId);
+            // The box is funded like the work it runs: an API chat's box spends credits.
+            const leaseOrigin = await attributionBillingOrigin(tx, {
+              accountId,
+              workspaceId,
+              attribution,
+            });
+            const balance = await getSpendableCreditBalance(
+              tx,
+              accountId,
+              undefined,
+              undefined,
+              undefined,
+              leaseOrigin,
+            );
             if (balance.balanceMicros <= 0) {
-              throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
+              throw new SandboxPaidComputeAdmissionError(
+                workspaceId,
+                sandboxGroupId,
+                chargeBillingOrigin(leaseOrigin) === "api"
+                  ? `${API_CREDITS_REQUIRED_MESSAGE} Add credits to start this computer.`
+                  : undefined,
+              );
             }
           }
         }
@@ -54857,7 +55096,20 @@ export async function heartbeatLeaseHolderStatus(
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&
           snapshot.rateMicrosPerSecond > 0 &&
-          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
+          (
+            await getSpendableCreditBalance(
+              tx,
+              input.accountId,
+              undefined,
+              undefined,
+              undefined,
+              await attributionBillingOrigin(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                attribution: snapshot.attribution,
+              }),
+            )
+          ).balanceMicros <= 0
         ) {
           // Touching the holder above is essential: the running writer remains
           // protected while it winds down. The provider/lease TTL is not renewed.
@@ -57068,7 +57320,20 @@ export async function reArmDrainingLease(
             ? snapshot.mode === "credits" && snapshot.rateMicrosPerSecond > 0
             : input.warmBilling?.rateMicrosPerSecond !== undefined &&
               input.warmBilling.rateMicrosPerSecond > 0) &&
-          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
+          (
+            await getSpendableCreditBalance(
+              tx,
+              input.accountId,
+              undefined,
+              undefined,
+              undefined,
+              await attributionBillingOrigin(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                attribution: snapshot?.attribution ?? null,
+              }),
+            )
+          ).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
         }
@@ -73351,6 +73616,8 @@ export type InitializeSessionStartInput = {
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the initial turn; null inherits the parent's. */
+  billingOrigin?: BillingOrigin | null;
   /**
    * Normalized IANA zone of the person sending the initial message, frozen in
    * the initial turn's metadata.
@@ -73976,6 +74243,7 @@ export async function initializeSessionStartAtomically(
                   status: "queued",
                   source: "user",
                   surface: input.surface ?? null,
+                  billingOrigin: input.billingOrigin ?? null,
                   promptRouting: runnable ? "accepted_for_execution" : "queued_for_execution",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
@@ -74322,6 +74590,7 @@ export async function enqueueSessionTurn(
                 status: "queued",
                 source: input.source,
                 surface: input.surface ?? null,
+                billingOrigin: input.billingOrigin ?? null,
                 promptRouting: "queued_for_execution",
                 position,
                 prompt: input.prompt,
@@ -92624,6 +92893,7 @@ function mapSessionTurnForExecution(
     mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcpAccountBindings),
     initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
     scheduledTaskRunId: row.scheduledTaskRunId ?? null,
+    billingOrigin: storedBillingOrigin(row.billingOrigin),
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personalConnectionDelegations,
       `session_turns:${row.workspaceId}:${row.sessionId}:${row.id}`,

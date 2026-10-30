@@ -10015,6 +10015,18 @@ export type BillingBalance = {
   currency: "usd";
   updatedAt: string;
   generalBalanceMicros?: number | undefined;
+  /** Credits outside plan credit (top-ups, operator grants). API usage spends only this. */
+  creditsMicros?: number | undefined;
+  /** Credit debt from API usage. Plan credit never repays it. */
+  apiDebtMicros?: number | undefined;
+  /** Paid plan credit the own-key platform fee may draw (app use only). */
+  paidPlanCreditMicros?: number | undefined;
+  /** Paid-for credits the own-key platform fee may draw. */
+  paidCreditsMicros?: number | undefined;
+  /** Own-key platform fees charged this calendar month (UTC). */
+  byokPlatformFeeMonthMicros?: number | undefined;
+  /** Own-key fees that ran past paid credit; the next top-up repays it. */
+  byokFeeDebtMicros?: number | undefined;
   promotionalCredits?: PromotionalCreditBalance[] | undefined;
   heldCreditMicros?: number | undefined;
   heldGeneralCreditMicros?: number | undefined;

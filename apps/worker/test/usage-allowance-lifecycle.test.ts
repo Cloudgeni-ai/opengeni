@@ -112,10 +112,7 @@ describe("allowance admission lifecycle boundaries", () => {
       "const admissionDenial = await agentRunAdmissionDenial(",
       human,
     );
-    const refused = source.indexOf(
-      "return await refuseAdmission(admissionDenial, true,",
-      admission,
-    );
+    const refused = source.indexOf("return await refuseAdmission(", admission);
     const accepted = source.indexOf("const acceptedModel =", refused);
     expect(human).toBeGreaterThan(0);
     expect(admission).toBeGreaterThan(human);
@@ -124,6 +121,16 @@ describe("allowance admission lifecycle boundaries", () => {
     expect(source.slice(admission, refused)).toContain(
       "initiatingHumanSubjectId: causalHumanSubjectId",
     );
+    // Run receipts record API work and own-key use without paid credit as out of credits.
+    const receipt = source.slice(refused, accepted).replace(/\s+/g, " ");
+    for (const code of [
+      "api_credits_required",
+      "byok_paid_credit_required",
+      "byok_upgrade_required",
+    ]) {
+      expect(receipt).toContain(`admissionDenial === "${code}"`);
+    }
+    expect(receipt).toContain('? "insufficient_credits" : admissionDenial,');
     const recorder = source.indexOf("const refuseAdmission = async");
     expect(source.slice(recorder, human)).toContain("recordScheduledTaskAdmissionRefusal(db,");
     expect(source.slice(recorder, human)).toContain("producerKey: stableProducerKey");

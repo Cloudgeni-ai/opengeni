@@ -581,6 +581,7 @@ export async function runTurnStreamAttempt(
         externallyBilled: billingState.isExternallyBilledTurn,
         chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
         countsTowardTokenCap: billingState.countsTowardTokenCap,
+        ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
         priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
         subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
@@ -881,6 +882,8 @@ export async function runTurnStreamAttempt(
         countsTowardTokenCap: billingState.countsTowardTokenCap,
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
         sessionId: input.sessionId,
+        ...(billingState.isByokTurn ? { byok: true } : {}),
+        ...(billingState.billingOrigin ? { billingOrigin: billingState.billingOrigin } : {}),
       }),
       checkSteer
         ? hasPendingSteerForTurn(db, {
@@ -1417,6 +1420,7 @@ export async function runTurnStreamAttempt(
           externallyBilled: billingState.isExternallyBilledTurn,
           chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
           countsTowardTokenCap: billingState.countsTowardTokenCap,
+          ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
           servingCredentialId: providerTurn.effectiveCodexCredentialId,
           priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
           subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
@@ -2108,6 +2112,7 @@ export async function runTurnStreamAttempt(
               externallyBilled: billingState.isExternallyBilledTurn,
               chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
               countsTowardTokenCap: billingState.countsTowardTokenCap,
+              ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
               usage: aggregateUsage,
               normalizedUsage: normalizedAggregateUsage,
               sourceKey: aggregateSourceKey,
@@ -2727,6 +2732,7 @@ export async function runTurnStreamAttempt(
             externallyBilled: billingState.isExternallyBilledTurn,
             chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
             countsTowardTokenCap: billingState.countsTowardTokenCap,
+            ...(billingState.isByokTurn !== undefined ? { byok: billingState.isByokTurn } : {}),
             ...(serviceTier ? { serviceTier } : {}),
           });
         })().catch((error) => {
