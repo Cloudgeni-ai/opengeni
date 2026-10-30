@@ -380,7 +380,7 @@ Two accepted residuals if the database clock steps back:
   (after the latest receipt), so `plan_period_usage` can undercount for the
   length of the skew, milliseconds in practice.
 
-Migration 1109 builds `credit_ledger_receipt_rows_idx` concurrently (a
+Migration 1111 builds `credit_ledger_receipt_rows_idx` concurrently (a
 non-unique partial index, so it may land after traffic returns). Reads are
 correct without it; until it exists the read finds the latest receipt through
 the account's `(account_id, created_at)` index, walking back over the spending
