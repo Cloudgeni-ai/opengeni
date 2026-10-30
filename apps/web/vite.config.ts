@@ -556,6 +556,27 @@ export default defineConfig({
               priority: 21,
             },
             {
+              // The dropdown menu is used by many lazy pages and the session
+              // header, but not by startup. Left to entry-aware merging it can
+              // share a chunk with a startup helper (model display), so every
+              // page would load it and, through it, the menu primitives.
+              name: "dropdown-menu",
+              test: /packages[\\/]react[\\/]src[\\/]ui[\\/]dropdown-menu\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
+              // Meeting defaults are a Workspace settings section. Their theme
+              // wrapper reaches the embedded chat chunk, so if entry-aware
+              // merging folds them into a chunk a direct session loads (the
+              // sidebar row cache), the session waits on the optional
+              // conversation panels.
+              name: "meeting-settings",
+              test: /(?:apps[\\/]web[\\/]src[\\/]components[\\/]meetings[\\/]meeting-defaults-section|packages[\\/]react[\\/]src[\\/]meetings[\\/]meeting-settings)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
               // Budget pages, Workspace settings > Usage and the member slider
               // (with its Radix primitive, used nowhere else; it must not join
               // the shared UI runtime). Only reached from lazy settings routes.

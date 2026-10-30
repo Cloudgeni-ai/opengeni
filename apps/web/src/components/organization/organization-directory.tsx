@@ -95,6 +95,8 @@ export interface OrganizationDirectory {
   createWorkspace: (name: string) => Promise<string | null>;
   renameWorkspace: (workspace: OrganizationWorkspaceAccess, name: string) => Promise<void>;
   deleteWorkspace: (workspace: OrganizationWorkspaceAccess) => Promise<void>;
+  /** Names of the Slack agents that work in a workspace (deleted with it). */
+  slackAgentNames: (workspaceId: string) => Promise<string[]>;
   /** Gives or changes a workspace role. `current` is the grant being replaced, if any. */
   setWorkspaceRole: (input: {
     workspaceId: string;
@@ -513,6 +515,18 @@ export function OrganizationDirectoryProvider({
     [loadOverview, onDeleteWorkspace, ownsIdentity],
   );
 
+  // Slack agents are listed per organization through any workspace the reader
+  // is in; the administered workspace is one.
+  const slackAgentNames = useCallback(
+    async (workspaceId: string) => {
+      const result = await client.listOpenGeniSlackAgents(identity.workspaceId);
+      return result.agents
+        .filter((agent) => agent.targetWorkspaceId === workspaceId)
+        .map((agent) => agent.name);
+    },
+    [client, identity.workspaceId],
+  );
+
   const setWorkspaceRole = useCallback(
     async ({
       workspaceId,
@@ -840,6 +854,7 @@ export function OrganizationDirectoryProvider({
       createWorkspace,
       renameWorkspace,
       deleteWorkspace,
+      slackAgentNames,
       setWorkspaceRole,
       removeWorkspaceAccess,
       changeOrganizationRole,
@@ -872,6 +887,7 @@ export function OrganizationDirectoryProvider({
     revokeInvitation,
     setWorkspaceRole,
     singleUser,
+    slackAgentNames,
     transitionMember,
     youLabel,
   ]);
