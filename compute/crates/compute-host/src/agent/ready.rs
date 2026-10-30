@@ -62,7 +62,7 @@ use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::{OwnerEpoch, Store};
 
 use super::requests::{first_wake_by_ms, new_files};
-use super::{Event, HostAgent, HostError, Reply};
+use super::{End, Event, HostAgent, HostError, Reply};
 
 /// Most ready sandboxes filled at once on a host.
 const FILL_AT_ONCE: usize = 4;
@@ -110,9 +110,9 @@ pub(super) struct Ready<V> {
     /// Build VMs that may still run, by VM name, with the name their
     /// memory is counted under as unmanaged.
     pub(super) left_builds: HashMap<String, Id>,
-    /// Ready sandboxes a create is claiming, by host name, with whether
-    /// their VM ended meanwhile.
-    claiming: HashMap<SandboxId, bool>,
+    /// Ready sandboxes a create is claiming, by host name, with how their
+    /// VM ended if it did meanwhile.
+    claiming: HashMap<SandboxId, Option<End>>,
 }
 
 impl<V> Ready<V> {
@@ -723,10 +723,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Handles the end of a ready sandbox's VM; false if `host` names
     /// none.
-    pub(super) fn ready_exited(&mut self, host: Id, incarnation: u64) -> bool {
+    pub(super) fn ready_exited(&mut self, host: Id, incarnation: u64, end: End) -> bool {
         if let Some(died) = self.ready.claiming.get_mut(&host.0) {
             // Its claim hands the news on with the VM.
-            *died = true;
+            *died = Some(end);
             return true;
         }
         let Some(at) = self
@@ -804,7 +804,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         let engine = Arc::clone(&self.engine);
         let (host, fence) = (idle.record.id, idle.record.fence());
-        self.ready.claiming.insert(host.0, false);
+        self.ready.claiming.insert(host.0, None);
         // No longer spare: the claimed sandbox's first wake, checked before
         // the claim, books the memory its VM holds, up to the request; the
         // VM's memory beyond that stays counted under the name it was
@@ -894,7 +894,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             result,
         } = claimed;
         let host = idle.record.id;
-        let died = self.ready.claiming.remove(&host.0).unwrap_or(false);
+        let died = self.ready.claiming.remove(&host.0).flatten();
         if !matches!(result, ClaimResult::Claimed(Ok(_))) {
             // Its VM holds all it did again until it goes, and a create
             // that starts over books its first wake again.
@@ -986,8 +986,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 cpu: 0,
             },
         ]);
-        if died {
-            self.exited(id, incarnation);
+        if let Some(end) = died {
+            self.exited(id, incarnation, end);
         }
         tracing::debug!(%id, %host, "ready sandbox claimed");
         let _ = reply.send(Ok(()));
