@@ -1,9 +1,20 @@
 # Atlassian integration
 
-Jira and Confluence use Atlassian's hosted MCP server. The curated connector and
-Atlassian plugins retain their existing URLs and ordinary MCP OAuth flow. Users
-approve Atlassian access in the browser; Opengeni stores the resulting connection
-through its encrypted connection broker and applies normal tool permissions.
+Jira, Confluence, Jira Service Management, Bitbucket, Loom and Compass use
+Atlassian's hosted MCP server. The curated connector uses Atlassian's v2 endpoint
+with its flat tool list, `https://mcp.atlassian.com/v2/mcp?tools=all`, so every
+tool has its own approval policy instead of shared discover and execute tools.
+That query string is the one reviewed exception to the catalog's no-query rule
+(`REVIEWED_QUERY_MCP_URLS` in `scripts/import-integrations-catalog.ts`).
+
+The earlier `https://mcp.atlassian.com/v1/mcp/authv2` row stays in the catalog as
+"Atlassian (v1)" so existing installations and connections keep working;
+connections are bound to their exact MCP URL and a v1 token can't call v2, so the
+two are separate resources and connecting v2 is a new connection. Atlassian
+switches v1 connections to v2 tools on 1 March 2027. Atlassian plugins keep their
+existing URLs. Users approve Atlassian access in the browser; Opengeni stores the
+resulting connection through its encrypted connection broker and applies normal
+tool permissions.
 Hosted tools follow the connected user's Atlassian access and provider controls.
 They do not use the former native project's or space's source selection.
 

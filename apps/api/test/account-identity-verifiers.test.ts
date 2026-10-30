@@ -14,6 +14,7 @@ import {
   oidcIdentityEligible,
 } from "../src/integrations/oauth-client";
 import {
+  ATLASSIAN_V2_MCP_URL,
   OFFICIAL_DRIVE_MCP_URL,
   OFFICIAL_GMAIL_MCP_URL,
   accountIdentityKeysFor,
@@ -74,6 +75,46 @@ describe("reviewed account identity verifiers", () => {
     expect(connectionAccountIdentityLabel(identity, "Atlassian account")).toBe("anna@example.test");
     expect(() => verifier.validateIdentity([{ email: "anna@example.test" }], NO_TOKEN)).toThrow();
     expect(accountIdentityKeysFor(null, ATLASSIAN)).toEqual(["atlassianAccountId"]);
+  });
+
+  test("Atlassian v2 reads the account from the platform profile, by the same id as v1", () => {
+    // v1 connections get v2 tools on 1 March 2027; its atlassianUserInfo answers
+    // with only the account id, in another shape.
+    expect(
+      accountIdentityVerifierFor(ATLASSIAN)!.validateIdentity(
+        [{ data: { accountId: "712020:abc" } }],
+        NO_TOKEN,
+      ),
+    ).toEqual({ atlassianAccountId: "712020:abc" });
+    for (const url of [ATLASSIAN_V2_MCP_URL, "https://mcp.atlassian.com/v2/mcp"]) {
+      const verifier = accountIdentityVerifierFor(url)!;
+      expect(verifier).toMatchObject({
+        kind: "http",
+        url: "https://api.atlassian.com/me",
+        identityKeys: ["atlassianAccountId"],
+      });
+      expect(
+        verifier.validateIdentity(
+          [
+            {
+              account_id: "712020:abc",
+              account_type: "atlassian",
+              email: "anna@example.test",
+              name: "Anna",
+              account_status: "active",
+            },
+          ],
+          NO_TOKEN,
+        ),
+      ).toEqual({
+        atlassianAccountId: "712020:abc",
+        atlassianEmail: "anna@example.test",
+        atlassianName: "Anna",
+      });
+      for (const payload of [{}, { account_id: "" }, { data: { accountId: "712020:abc" } }])
+        expect(() => verifier.validateIdentity([payload], NO_TOKEN)).toThrow();
+      expect(accountIdentityKeysFor(null, url)).toEqual(["atlassianAccountId"]);
+    }
   });
 
   test("profiles that verify identity themselves keep their own keys", () => {
