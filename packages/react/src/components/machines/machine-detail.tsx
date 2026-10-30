@@ -38,6 +38,7 @@ import { METRICS, METRIC_WINDOWS, pointsFor, WINDOW_LABEL, type MetricWindow } f
 import { MachineOperationPolicyEditor } from "./machine-operation-policy";
 import type { UpdateMachineOperationPolicyRequest } from "@opengeni/sdk";
 import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
+import type { ReactNode } from "react";
 
 export type MachineDetailProps = {
   machine: MachineView;
@@ -56,6 +57,9 @@ export type MachineDetailProps = {
   /** Open "Who can use it?" for a connected machine. Omit when the viewer
    * can't change it; the row then shows the current audience read-only. */
   onChangeAudience?: ((machine: MachineView) => void) | undefined;
+  /** For your own machine: the workspaces where it runs your own messages.
+   * Shown under "Who can use it?". */
+  whereItWorks?: ReactNode | undefined;
   /** Start, retry or resend the signed agent update. Omit when the viewer can't. */
   onUpdateAgent?: ((machine: MachineView) => void) | undefined;
   updatingAgent?: boolean | undefined;
@@ -262,6 +266,7 @@ export function MachineDetail({
   onUpdateOperationPolicy,
   updatingOperationPolicy,
   onChangeAudience,
+  whereItWorks,
   onUpdateAgent,
   updatingAgent,
   now = Date.now(),
@@ -435,6 +440,8 @@ export function MachineDetail({
       {machine.enrollmentId && !machine.isSessionGroup ? (
         <MachineAudienceRow machine={machine} onChange={onChangeAudience} />
       ) : null}
+
+      {whereItWorks}
 
       {onUpdateOperationPolicy && machine.enrollmentId && machine.operationPolicy ? (
         <MachineOperationPolicyEditor

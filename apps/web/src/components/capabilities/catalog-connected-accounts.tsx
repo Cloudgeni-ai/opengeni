@@ -9,13 +9,20 @@ import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { Notice } from "@opengeni/react/ui/notice";
 import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
-import { Switch } from "@opengeni/react/ui/switch";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import { matchingConnectionAccounts } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
 import {
   connectionAccountRows,
   type AccountOriginWorkspace,
 } from "@opengeni/react/app/components/capabilities/connection-account-rows";
+import {
+  OWN_WHERE_IT_WORKS_DESCRIPTION,
+  OWN_WHERE_IT_WORKS_TITLE,
+  OwnWhereItWorks,
+  ownReachHasNothingToChoose,
+  useOwnResourceReach,
+  type OwnReachClient,
+} from "@opengeni/react/app/components/own-where-it-works";
 
 const ACCOUNT_STATUS = {
   active: "connected",
@@ -59,58 +66,33 @@ export type CatalogConnectedAccountsProps = {
    * where they came from. */
   workspaceId?: string | undefined;
   workspaces?: readonly AccountOriginWorkspace[] | undefined;
-  /** Turn your own login on or off for your messages in this workspace (D-54). */
-  onTurnOnHere?: ((account: ConnectionMetadata, on: boolean) => Promise<void>) | undefined;
+  /** Your own logins: choose where each works for your own messages, asked from this workspace. */
+  ownReach?: { client: OwnReachClient; workspaceId: string } | undefined;
 };
 
-/**
- * Your own login in a shared workspace can be turned on or off for your
- * messages here. Your Personal workspace always uses it, so it has no switch.
- */
-export function ownLoginHasHereSwitch(
-  account: Pick<ConnectionMetadata, "subjectId" | "turnedOnHere" | "turnedOnHereGrantId">,
-  viewerSubjectId: string | null | undefined,
-): boolean {
-  if (account.subjectId === null || account.subjectId !== viewerSubjectId) return false;
-  if (account.turnedOnHere === false) return true;
-  return account.turnedOnHere === true && !!account.turnedOnHereGrantId;
-}
-
-function OwnLoginHereSwitch({
+/** Under your own login: the workspaces where it works for your own messages. */
+function OwnLoginWhereItWorks({
+  ownReach,
   account,
   label,
-  onTurnOnHere,
 }: {
+  ownReach: { client: OwnReachClient; workspaceId: string };
   account: ConnectionMetadata;
   label: string;
-  onTurnOnHere: (account: ConnectionMetadata, on: boolean) => Promise<void>;
 }) {
-  const [pending, setPending] = useState<boolean | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const on = pending ?? account.turnedOnHere === true;
+  const reach = useOwnResourceReach({
+    ...ownReach,
+    resourceKind: "connection",
+    resourceId: account.id,
+  });
+  if (reach.state.status === "absent") return null;
+  if (reach.state.status === "ready" && ownReachHasNothingToChoose(reach.state.workspaces))
+    return null;
   return (
-    <div className="flex min-w-0 basis-full items-center justify-between gap-3">
-      <div className="min-w-0">
-        <p className="m-0 text-sm text-fg">Use for my messages here</p>
-        <p className="m-0 text-xs text-fg-muted">
-          {error ??
-            "Only you can use it. In shared chats here, people see what the agent does with it."}
-        </p>
-      </div>
-      <Switch
-        aria-label={`Use ${label} for my messages here`}
-        checked={on}
-        pending={pending !== null}
-        disabled={pending !== null}
-        onCheckedChange={(next) => {
-          // The switch moves at once; a failure puts it back and says why.
-          setPending(next);
-          setError(null);
-          void onTurnOnHere(account, next)
-            .catch(() => setError("Couldn't change this. Try again."))
-            .finally(() => setPending(null));
-        }}
-      />
+    <div className="min-w-0 basis-full">
+      <p className="m-0 text-xs leading-4.5 font-medium text-fg">{OWN_WHERE_IT_WORKS_TITLE}</p>
+      <p className="m-0 text-xs leading-4.5 text-fg-muted">{OWN_WHERE_IT_WORKS_DESCRIPTION}</p>
+      <OwnWhereItWorks name={label} reach={reach} />
     </div>
   );
 }
@@ -186,7 +168,7 @@ export function CatalogConnectedAccounts({
   management,
   workspaceId,
   workspaces,
-  onTurnOnHere,
+  ownReach,
 }: CatalogConnectedAccountsProps) {
   const [removeTarget, setRemoveTarget] = useState<{
     account: ConnectionMetadata;
@@ -346,8 +328,10 @@ export function CatalogConnectedAccounts({
                     ) : null}
                   </div>
                 ) : null}
-                {onTurnOnHere && ownLoginHasHereSwitch(account, management?.viewerSubjectId) ? (
-                  <OwnLoginHereSwitch account={account} label={label} onTurnOnHere={onTurnOnHere} />
+                {ownReach &&
+                account.subjectId !== null &&
+                account.subjectId === management?.viewerSubjectId ? (
+                  <OwnLoginWhereItWorks ownReach={ownReach} account={account} label={label} />
                 ) : null}
               </li>
             );

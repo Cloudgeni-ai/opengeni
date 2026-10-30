@@ -36,7 +36,7 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
-import { OwnSubscriptionTurnsRow, type OwnTurnsPlace } from "./own-subscription-turns";
+import { OwnWhereItWorksSection } from "@opengeni/react/app/components/own-where-it-works";
 
 export type SubscriptionAccountPlaces = {
   scopeName: string;
@@ -46,8 +46,8 @@ export type SubscriptionAccountPlaces = {
   openConnect: (id?: string) => void;
   openAccess: (id: string) => void;
   sharePersonal?: ((id: string) => void) | undefined;
-  /** Your own account, seen from a shared workspace: turn it on for your messages there. */
-  ownTurns?: OwnTurnsPlace | undefined;
+  /** Your own accounts: choose where each works for your own messages, asked from this workspace. */
+  ownReach?: { workspaceId: string } | undefined;
   /** A workspace's name in the organization, where the viewer can read it. */
   workspaceName?: ((workspaceId: string) => string | undefined) | undefined;
   /**
@@ -312,14 +312,6 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
                 disabled={pool.busy}
                 onCheckedChange={(next) => void pool.setAllocator(account, next)}
               />
-              {account.scope === "user" && places.ownTurns ? (
-                <OwnSubscriptionTurnsRow
-                  client={client}
-                  place={places.ownTurns}
-                  connectionId={account.id}
-                  name={name}
-                />
-              ) : null}
               {pool.accounts.length > 1 ? (
                 <SettingRow
                   label="Primary account"
@@ -389,6 +381,15 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
             </DetailFacts>
           </DetailSection>
         )}
+        {account.scope === "user" && places.ownReach ? (
+          <OwnWhereItWorksSection
+            client={client}
+            workspaceId={places.ownReach.workspaceId}
+            resourceKind="subscription_connection"
+            resourceId={account.id}
+            name={name}
+          />
+        ) : null}
       </DetailPageBody>
       <RenameAccountDialog
         open={renaming}

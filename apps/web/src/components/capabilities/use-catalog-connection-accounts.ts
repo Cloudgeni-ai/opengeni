@@ -2,10 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConnectionMetadata } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { isWorkspacePermissionDenied } from "@opengeni/react/app/lib/permissions";
-import {
-  stopOwnLoginHere,
-  turnOnOwnLoginHere,
-} from "@opengeni/react/app/components/capabilities/own-login-turned-on";
 
 /** Settings inventory uses the same owning-human authority as the session picker,
  * with inactive accounts included for repair. It never feeds credential selection. */
@@ -93,11 +89,7 @@ export function useCatalogConnectionAccounts(
     onRetry: () => {
       void refresh();
     },
-    /** Turn your own login on or off for your messages in this workspace. */
-    onTurnOnHere: async (account: ConnectionMetadata, on: boolean) => {
-      if (on) await turnOnOwnLoginHere(client, workspaceId, account);
-      else await stopOwnLoginHere(client, workspaceId, account);
-      await refresh();
-    },
+    /** Your own logins: where each works for your own messages, asked from this workspace. */
+    ownReach: { client, workspaceId },
   };
 }

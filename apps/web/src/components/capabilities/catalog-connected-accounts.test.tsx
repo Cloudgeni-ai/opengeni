@@ -606,54 +606,93 @@ describe("catalog connected accounts", () => {
         expect(catalogAddAccountOwnership(blocked, false)).toBeNull();
     });
 
-    test("your own login has a switch for your messages here; nobody else's does", async () => {
-      const off = account({
-        metadata: { email: "off@example.test", resource: item.mcpUrl },
-        turnedOnHere: false,
-        turnedOnHereGrantId: null,
-      });
-      const on = account({
-        metadata: { email: "on@example.test", resource: item.mcpUrl },
-        turnedOnHere: true,
-        turnedOnHereGrantId: "grant-on",
-      });
-      // In the owner's Personal workspace every own login works: no grant, no switch.
-      const personal = account({
+    test("your own login lists where it works; nobody else's does", async () => {
+      const mine = account({ metadata: { email: "mine@example.test", resource: item.mcpUrl } });
+      // Only your Personal workspace, where it always works: nothing to choose, no list.
+      const personalOnly = account({
         metadata: { email: "personal@example.test", resource: item.mcpUrl },
-        turnedOnHere: true,
-        turnedOnHereGrantId: null,
       });
       const someoneElse = account({
         subjectId: "teammate",
         metadata: { email: "teammate@example.test", resource: item.mcpUrl },
-        turnedOnHere: false,
       });
       const shared = account({
         subjectId: null,
         metadata: { email: "team@example.test", resource: item.mcpUrl },
       });
-      const onTurnOnHere = mock(async () => {});
+      const personalRow = {
+        workspaceId: "personal",
+        name: "Personal",
+        personal: true,
+        current: false,
+        on: true,
+        alwaysOn: true,
+        canChange: false,
+      };
+      const teamRow = {
+        workspaceId: "team",
+        name: "Team",
+        personal: false,
+        current: true,
+        on: false,
+        alwaysOn: false,
+        canChange: true,
+      };
+      const getOwnResourceReach = mock(
+        async (_workspaceId: string, resource: { resourceKind: string; resourceId: string }) => ({
+          resourceKind: "connection" as const,
+          resourceId: resource.resourceId,
+          workspaces: resource.resourceId === mine.id ? [personalRow, teamRow] : [personalRow],
+        }),
+      );
+      const setOwnResourceReach = mock(async (workspaceId: string, request: { on: boolean }) => ({
+        workspace: { ...teamRow, workspaceId, on: request.on },
+      }));
+      const client = { getOwnResourceReach, setOwnResourceReach };
       const view = await render(
         <CatalogConnectedAccounts
           item={item}
-          connections={[off, on, personal, someoneElse, shared]}
+          connections={[mine, personalOnly, someoneElse, shared]}
           management={management()}
-          onTurnOnHere={onTurnOnHere}
+          ownReach={{ client, workspaceId: "team" }}
         />,
       );
+      await act(async () => {});
+      // Asked only for your own logins, from the workspace being viewed.
+      expect(
+        getOwnResourceReach.mock.calls.map(([workspaceId, resource]) => [
+          workspaceId,
+          resource.resourceId,
+        ]),
+      ).toEqual([
+        ["team", mine.id],
+        ["team", personalOnly.id],
+      ]);
+      expect(view.container.textContent).toContain("Where it works");
       const switches = [...view.container.querySelectorAll('[role="switch"]')];
       expect(switches.map((entry) => entry.getAttribute("aria-label"))).toEqual([
-        "Use off@example.test for my messages here",
-        "Use on@example.test for my messages here",
+        "Use mine@example.test in Personal",
+        "Use mine@example.test in Team",
       ]);
       expect(switches.map((entry) => entry.getAttribute("aria-checked"))).toEqual([
-        "false",
         "true",
+        "false",
       ]);
+      // Your Personal workspace can't be turned off; the switch says why.
+      expect(switches[0]?.getAttribute("aria-disabled")).toBe("true");
       await act(async () => (switches[0] as HTMLButtonElement).click());
-      expect(onTurnOnHere).toHaveBeenCalledWith(off, true);
+      expect(setOwnResourceReach).not.toHaveBeenCalled();
       await act(async () => (switches[1] as HTMLButtonElement).click());
-      expect(onTurnOnHere).toHaveBeenCalledWith(on, false);
+      expect(setOwnResourceReach).toHaveBeenCalledWith("team", {
+        resourceKind: "connection",
+        resourceId: mine.id,
+        on: true,
+      });
+      expect(
+        view.container
+          .querySelector('[aria-label="Use mine@example.test in Team"]')
+          ?.getAttribute("aria-checked"),
+      ).toBe("true");
       await view.unmount();
     });
   });

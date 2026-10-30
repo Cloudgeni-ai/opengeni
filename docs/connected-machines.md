@@ -1893,6 +1893,19 @@ with full access calls the same two routes as them (the `previewMachineAudience`
 and `changeMachineAudience` admin actions). An agent acting as itself, or one
 with less than the person's full access, is refused.
 
+### Where your own machine works
+
+An **Only me** machine runs its owner's own messages, and only in the
+workspaces where it is on. It starts on in the owner's Personal workspace and
+in the workspace it was connected from. Opening the machine on the Machines
+page shows **Where it works** under **Who can use it?**: every workspace the
+owner belongs to in the organization, with a switch for each. Turning it on
+in a workspace is the owner's standing `always` `connected_machine.use` grant
+there, for private and shared chats; turning it off revokes it, including in
+the Personal workspace. Other people's messages never run on it. The list and
+switches use the same own-resources reach routes as personal logins (see
+`docs/remote-mcp-credentials.md`).
+
 ### Zero-click token (fleet / headless)
 
 Agents with the existing `enrollments:manage` permission can call the first-party

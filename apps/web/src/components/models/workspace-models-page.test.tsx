@@ -244,6 +244,42 @@ const client = {
     ],
   })),
   updateModelConnectionAccess: mock(async (_target: unknown, policy: unknown) => policy),
+  getOwnResourceReach: mock(
+    async (_workspaceId: string, resource: { resourceKind: string; resourceId: string }) => ({
+      ...resource,
+      workspaces: [
+        {
+          workspaceId: "workspace-personal",
+          name: "Personal",
+          personal: true,
+          current: false,
+          on: true,
+          alwaysOn: true,
+          canChange: false,
+        },
+        {
+          workspaceId: "workspace-a",
+          name: "Design preview",
+          personal: false,
+          current: true,
+          on: true,
+          alwaysOn: false,
+          canChange: true,
+        },
+      ],
+    }),
+  ),
+  setOwnResourceReach: mock(async (workspaceId: string, request: { on: boolean }) => ({
+    workspace: {
+      workspaceId,
+      name: "Design preview",
+      personal: false,
+      current: true,
+      on: request.on,
+      alwaysOn: false,
+      canChange: true,
+    },
+  })),
   listOrganizationProviderCustomModels: mock(async (): Promise<unknown> => ({ models: [] })),
   createOrganizationProviderCustomModel: mock(
     async (...args: unknown[]): Promise<unknown> => ({
@@ -2627,6 +2663,17 @@ describe("One Models page for the organization and the workspace", () => {
         account: `claude:${ownClaudeId}`,
       });
       expect(view.container.querySelector("h1")?.textContent).toBe("My Claude");
+      // Its page lists where it works for their own messages, asked from this workspace.
+      expect(client.getOwnResourceReach).toHaveBeenCalledWith("workspace-a", {
+        resourceKind: "subscription_connection",
+        resourceId: ownClaudeId,
+      });
+      expect(view.container.textContent).toContain("Where it works");
+      expect(
+        view.container
+          .querySelector('[aria-label="Use My Claude in Design preview"]')
+          ?.getAttribute("aria-checked"),
+      ).toBe("true");
       await act(async () => navigateTo({ account: "codex:own-codex" }));
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("My ChatGPT");
