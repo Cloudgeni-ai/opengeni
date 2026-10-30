@@ -3,6 +3,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { BillingBalance, ErrorEnvelope, OPENGENI_CORRELATION_HEADER } from "@opengeni/contracts";
 import { formatErrorMessage, OpenGeniApiError } from "@opengeni/sdk";
 import {
+  bindPendingOrganizationInvitationsForVerifiedEmail,
   completeSelfServiceOrganizationSetup,
   createDb,
   createOrganizationInvitation,
@@ -21,6 +22,22 @@ let client: DbClient | null = null;
 let app: Hono | null = null;
 let accountId = "";
 let settings: ApiRouteDeps["settings"] | null = null;
+type TestSessionUser = { sessionId: string; id: string; email: string; name: string };
+let sessionUser: TestSessionUser | null = null;
+async function signInUser(name: string): Promise<TestSessionUser> {
+  const id = crypto.randomUUID();
+  const email = `${id}@example.test`;
+  await shared!
+    .admin`insert into auth_users(id,name,email,email_verified) values (${id},${name},${email},true)`;
+  await shared!
+    .admin`insert into auth_identities(id,user_id,provider_id,account_id) values (${crypto.randomUUID()},${id},'credential',${id})`;
+  const identity = await synchronizeCanonicalHumanLoginBindings(client!.db, id);
+  const sessionId = crypto.randomUUID();
+  await shared!
+    .admin`insert into auth_sessions(id,user_id,token,expires_at,identity_id,identity_revision,auth_revision)
+    values (${sessionId},${id},${crypto.randomUUID()},clock_timestamp()+interval '1 hour',${identity.identityId},${identity.identityRevision},${identity.authRevision})`;
+  return { sessionId, id, email, name };
+}
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("subscription-plan-seat-api");
   if (!shared) {
@@ -46,6 +63,7 @@ beforeAll(async () => {
   const sessionId = crypto.randomUUID();
   await shared.admin`insert into auth_sessions(id,user_id,token,expires_at,identity_id,identity_revision,auth_revision)
     values (${sessionId},${userId},${crypto.randomUUID()},clock_timestamp()+interval '1 hour',${identity.identityId},${identity.identityRevision},${identity.authRevision})`;
+  const owner = { sessionId, id: userId, email, name: "Plan owner" };
   for (let i = 0; i < 4; i++) {
     await createOrganizationInvitation(client.db, {
       organizationId: accountId,
@@ -68,13 +86,16 @@ beforeAll(async () => {
     settings,
     managedAuth: {
       api: {
-        getSession: async () => ({
-          headers: new Headers(),
-          response: {
-            session: { id: sessionId },
-            user: { id: userId, email, name: "Plan owner", emailVerified: true },
-          },
-        }),
+        getSession: async () => {
+          const user = sessionUser ?? owner;
+          return {
+            headers: new Headers(),
+            response: {
+              session: { id: user.sessionId },
+              user: { id: user.id, email: user.email, name: user.name, emailVerified: true },
+            },
+          };
+        },
       },
     } as never,
     managedEmailTransport: {
@@ -183,5 +204,83 @@ test("with subscription plans on, the seat refusal names the one plan that adds 
   } finally {
     Object.assign(settings, previous);
     await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(initial.plans)}, 'seat-api-test', 'Restore fixture catalog')`;
+  }
+}, 180_000);
+
+test("an invitee refused by a full organization is told to ask an owner", async () => {
+  if (!app || !client || !shared) return;
+  const founder = await signInUser("Full org owner");
+  const organizationId = (
+    await completeSelfServiceOrganizationSetup(client.db, {
+      authUserId: founder.id,
+      actorSubjectId: `user:${founder.id}`,
+      organizationName: "Full organization",
+      operationId: crypto.randomUUID(),
+      requestFingerprint: "b".repeat(64),
+      trialCreditsEnabled: false,
+    })
+  ).organizationId;
+  const invitee = await signInUser("Invitee");
+  const invitation = await createOrganizationInvitation(client.db, {
+    organizationId,
+    actorSubjectId: `user:${founder.id}`,
+    operationId: crypto.randomUUID(),
+    targetSubjectId: null,
+    targetEmail: invitee.email,
+    role: "member",
+    expiresAt: new Date(Date.now() + 3600000).toISOString(),
+  });
+  await bindPendingOrganizationInvitationsForVerifiedEmail(client.db, {
+    subjectId: `user:${invitee.id}`,
+    email: invitee.email,
+  });
+  const [{ revision }] = await shared.admin<Array<{ revision: number }>>`
+    select revision from organization_membership_invitations where id = ${invitation.id}`;
+  // Accepting holds the invitation's seat, so the trigger never refuses it
+  // today; force the refusal to pin the invitee-facing copy.
+  const suffix = crypto.randomUUID().replaceAll("-", "");
+  await shared.admin.unsafe(`
+    CREATE FUNCTION refuse_accept_${suffix}() RETURNS trigger LANGUAGE plpgsql AS $f$
+    BEGIN
+      IF NEW.account_id = '${organizationId}' THEN
+        RAISE EXCEPTION 'organization seat limit reached' USING ERRCODE = 'P0S01',
+          DETAIL = '{"seatLimit": 1, "seatsUsed": 1, "planKey": "free"}';
+      END IF;
+      RETURN NEW;
+    END $f$;
+    CREATE TRIGGER refuse_accept_${suffix} BEFORE INSERT ON organization_memberships
+      FOR EACH ROW EXECUTE FUNCTION refuse_accept_${suffix}();`);
+  sessionUser = invitee;
+  try {
+    const response = await app.request(
+      `http://x/v1/organization-invitations/${invitation.id}/accept`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: "session=present",
+          origin: "http://opengeni.test",
+        },
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          expectedRevision: Number(revision),
+        }),
+      },
+    );
+    const body = await response.text();
+    expect(response.status).toBe(402);
+    expect(ErrorEnvelope.parse(JSON.parse(body)).error).toMatchObject({
+      code: "seat_limit_reached",
+      message: "This organization is full. Ask an organization owner to upgrade.",
+      details: { askOwner: true },
+    });
+    expect(
+      formatErrorMessage(new OpenGeniApiError(response.status, body, { mutation: true })),
+    ).toStartWith("This organization is full. Ask an organization owner to upgrade.");
+  } finally {
+    sessionUser = null;
+    await shared.admin.unsafe(`
+      DROP TRIGGER refuse_accept_${suffix} ON organization_memberships;
+      DROP FUNCTION refuse_accept_${suffix}();`);
   }
 }, 180_000);
