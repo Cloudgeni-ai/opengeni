@@ -309,9 +309,37 @@ describe("githubReads", () => {
     expect(await githubReads(REPO, "t", fetcher).mainCommitWithTree(sha(0x42))).toBeNull();
   });
 
-  test("an API error throws, which the entry point turns into a full run", async () => {
-    const fetcher = (async () => response({ message: "nope" }, 502)) as unknown as typeof fetch;
-    await expect(githubReads(REPO, "t", fetcher).runs(`batch/${ID}`)).rejects.toThrow("GitHub 502");
+  test("a lasting API error throws, which the entry point turns into a full run", async () => {
+    let calls = 0;
+    const fetcher = (async () => {
+      calls += 1;
+      return response({ message: "nope" }, 502);
+    }) as unknown as typeof fetch;
+    const slept: number[] = [];
+    const timing = { sleep: async (ms: number) => void slept.push(ms), random: () => 0 };
+    await expect(githubReads(REPO, "t", fetcher, timing).runs(`batch/${ID}`)).rejects.toThrow(
+      "GitHub 502",
+    );
+    expect(calls).toBe(6);
+    expect(slept).toHaveLength(5);
+
+    const refused = (async () => response({ message: "nope" }, 404)) as unknown as typeof fetch;
+    await expect(githubReads(REPO, "t", refused, timing).runs(`batch/${ID}`)).rejects.toThrow(
+      "GitHub 404",
+    );
+  });
+
+  test("a single gateway error is read again instead of forcing a full run", async () => {
+    let calls = 0;
+    const fetcher = (async () => {
+      calls += 1;
+      return calls === 1
+        ? response({ message: "Server Error" }, 502)
+        : response({ total_count: 1, workflow_runs: [{ id: 7 }] });
+    }) as unknown as typeof fetch;
+    const timing = { sleep: async () => {}, random: () => 0 };
+    expect(await githubReads(REPO, "t", fetcher, timing).runs(`batch/${ID}`)).toEqual([{ id: 7 }]);
+    expect(calls).toBe(2);
   });
 
   test("a missing, duplicated, foreign or expired impact plan reads as no plan", async () => {
@@ -372,7 +400,8 @@ describe("githubReads", () => {
 
   test("an unreachable listing throws, which the entry point turns into a full run", async () => {
     const fetcher = (async () => response({ message: "nope" }, 503)) as unknown as typeof fetch;
-    await expect(githubReads(REPO, "t", fetcher).jobs(900)).rejects.toThrow("GitHub 503");
+    const timing = { sleep: async () => {}, random: () => 0 };
+    await expect(githubReads(REPO, "t", fetcher, timing).jobs(900)).rejects.toThrow("GitHub 503");
   });
 });
 

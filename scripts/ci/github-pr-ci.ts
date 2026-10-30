@@ -1,4 +1,9 @@
 import { appendFileSync, readFileSync } from "node:fs";
+import {
+  TRANSIENT_READ_RETRIES,
+  TRANSIENT_READ_STATUSES,
+  transientReadDelay,
+} from "./github-read-retry";
 
 class IncompleteInventory extends Error {}
 
@@ -106,16 +111,6 @@ export function supersededVersionValidationRuns(
       return match && Number(match[1]) === number && match[2] !== head;
     })
     .map((r) => r.id);
-}
-
-// A provider gateway error or a dropped connection on a read is transient: the
-// same read can be repeated. Mutations are never repeated (their outcome is unknown).
-const TRANSIENT_READ_STATUSES = new Set([502, 503, 504]);
-const TRANSIENT_READ_RETRIES = 5;
-export function transientReadDelay(retry: number, random: () => number): number {
-  // 2 s doubling to at most 30 s, with up to half of it as jitter.
-  const base = Math.min(30000, 2000 * 2 ** retry);
-  return Math.round(base / 2 + (base / 2) * random());
 }
 
 export async function runPrCiCommand(

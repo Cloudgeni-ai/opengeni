@@ -4,6 +4,7 @@
 // older parked runs never finish and pile up, slowing every scan of active
 // runs. Cancel parked runs that are clearly superseded; keep the approval gate.
 import { errorMessage } from "@opengeni/contracts/values";
+import { readWithTransientRetry } from "./github-read-retry";
 
 export type ParkedRun = {
   id: number;
@@ -172,16 +173,22 @@ async function main() {
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error("GITHUB_TOKEN is required");
   const dryRun = process.argv.includes("--dry-run");
+  // Transient read retries stop well inside the job's 10-minute timeout.
+  const retryTiming = { deadline: Date.now() + 6 * 60_000 };
   const api = async (path: string, init?: RequestInit) => {
-    const res = await fetch(`https://api.github.com/repos/${repo}/${path}`, {
-      ...init,
-      headers: {
-        authorization: `Bearer ${token}`,
-        accept: "application/vnd.github+json",
-        "x-github-api-version": "2022-11-28",
-      },
-      signal: AbortSignal.timeout(30_000),
-    });
+    const request = () =>
+      fetch(`https://api.github.com/repos/${repo}/${path}`, {
+        ...init,
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "x-github-api-version": "2022-11-28",
+        },
+        signal: AbortSignal.timeout(30_000),
+      });
+    // One 502 on a read must not end the whole pass; a mutation is never repeated.
+    const read = (init?.method ?? "GET") === "GET";
+    const res = read ? await readWithTransientRetry(request, retryTiming) : await request();
     if (!res.ok && res.status !== 202)
       throw new Error(`${init?.method ?? "GET"} ${path}: ${res.status}`);
     return res.status === 202 || res.status === 204 ? null : res.json();
