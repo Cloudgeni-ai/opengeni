@@ -18,14 +18,13 @@
  * sharing additionally uses an owner-fenced, versioned database capability.
  */
 import { sql, type SQL } from "drizzle-orm";
-import {
-  rawRows,
-  setSubjectRlsContext,
-  withRlsContext,
-  withWorkspaceSubjectRls,
-} from "../database";
+import { rawRows, withRlsContext, withWorkspaceSubjectRls } from "../database";
 import type { Database } from "../database";
 import { nestedPostgresSqlState } from "../persistence-errors";
+import {
+  recordSubscriptionAccountAdministrator,
+  setSubscriptionAdministrationSubject,
+} from "./account-administrator";
 import { resolveSubscriptionConnectionId } from "../subscription-core-repository";
 import {
   subscriptionCoreConnectionKind,
@@ -123,7 +122,8 @@ const ACCESS_COLUMNS = sql`connection.id::text as id, connection.allowed_model_i
 /**
  * Runs an access route's reads and writes: under the subject's workspace RLS
  * for a workspace's connection, otherwise in the organization scope once the
- * subject's organization administration overview is readable.
+ * subject's organization administration overview is readable, or the request
+ * proved account administration for this organization.
  */
 export async function withSubscriptionCoreAccessScope<T>(
   db: Database,
@@ -131,7 +131,10 @@ export async function withSubscriptionCoreAccessScope<T>(
   use: (tx: Database) => Promise<T>,
 ): Promise<T> {
   if (target.workspaceId !== null)
-    return await withWorkspaceSubjectRls(db, target.workspaceId, target.subjectId, use);
+    return await withWorkspaceSubjectRls(db, target.workspaceId, target.subjectId, async (tx) => {
+      await recordSubscriptionAccountAdministrator(tx, target);
+      return await use(tx);
+    });
   return await withRlsContext(
     db,
     { accountId: target.accountId, workspaceId: null },
@@ -141,10 +144,11 @@ export async function withSubscriptionCoreAccessScope<T>(
       // take it before the overview too (not only inside the sharing routine).
       await tx.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended(
         ${`organization-membership:${target.accountId}`}, 0))`);
-      await setSubjectRlsContext(tx, target.subjectId);
-      await tx.execute(
-        sql`select get_organization_administration_overview(${target.accountId}::uuid, ${target.subjectId})`,
-      );
+      if (!(await setSubscriptionAdministrationSubject(tx, target))) {
+        await tx.execute(
+          sql`select get_organization_administration_overview(${target.accountId}::uuid, ${target.subjectId})`,
+        );
+      }
       return await use(tx);
     },
   );
