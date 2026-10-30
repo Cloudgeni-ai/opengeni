@@ -105,6 +105,28 @@ describe("managed auth form", () => {
     ).toMatchObject({ switchTo: "signin" });
   });
 
+  test("tells an address the deployment doesn't allow that it can't sign in, not to retry", () => {
+    const failure = managedAuthFailure(
+      "signin",
+      new AuthApiError(403, "SIGN_IN_EMAIL_NOT_ALLOWED", null, "sign in email not allowed"),
+    );
+    expect(failure).toEqual({
+      fields: {},
+      message: "This email address can't sign in here. Ask whoever runs this service to allow it.",
+      switchTo: null,
+      canResendVerification: false,
+    });
+  });
+
+  test("keeps the generic retry message for a session that couldn't be created", () => {
+    expect(
+      managedAuthFailure(
+        "signin",
+        new AuthApiError(401, "FAILED_TO_CREATE_SESSION", null, "Failed to create session"),
+      ).message,
+    ).toBe("We couldn't sign you in. Please try again.");
+  });
+
   test("opens Sign up only for the exact mode=signup deep link", () => {
     expect(
       managedAuthModeFromSearch(

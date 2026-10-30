@@ -18,6 +18,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
 import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-adapter";
+import { managedAuthRefusal } from "../auth/managed-passkeys";
 import { admitManagedSignInMutation } from "./managed-sign-in-methods";
 import { parseRequestBody } from "../http/request-body";
 
@@ -236,11 +237,16 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
     ) {
       return context.json({ error: "invalid_grant" }, 400);
     }
+    // A refusal from the session hook (the address was taken off the allowed
+    // list after the web sign-in) is a denial, not a server failure.
     const session = await runManagedAuthProvider(grant.providerId, () =>
       authContext.internalAdapter.createSession(grant.userId, false, {
         userAgent: nativeAppSessionUserAgent(grant.platform, grant.deviceName),
       }),
-    );
+    ).catch((error: unknown) => {
+      if (managedAuthRefusal(error)) return null;
+      throw error;
+    });
     if (!session?.token || new Date(session.expiresAt).getTime() <= Date.now()) {
       return context.json({ error: "access_denied" }, 403);
     }

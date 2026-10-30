@@ -20720,6 +20720,15 @@ export const MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE = "NEW_SIGNUPS_PAUSED" as cons
  */
 export const MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE = "SIGNUP_EMAIL_NOT_ALLOWED" as const;
 
+/**
+ * Error code returned (HTTP 403, `{ code, message }`) when a deployment that
+ * restricts accounts to listed email addresses (`allowedUserEmails`) refuses to
+ * sign in an address that isn't on the list. Email sign-in decides it before
+ * the password is checked, so the refusal says nothing about the password.
+ * OAuth sign-in refusals redirect with `error=sign_in_email_not_allowed` instead.
+ */
+export const MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE = "SIGN_IN_EMAIL_NOT_ALLOWED" as const;
+
 // The negotiated capability handshake document (sandbox contract C.3). ONE shape;
 // collapses the parallel per-module definitions. A capability cell is always
 // present with `available`/`transport` + a `reason` when unavailable — never

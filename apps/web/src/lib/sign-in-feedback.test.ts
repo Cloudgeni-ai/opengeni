@@ -70,6 +70,12 @@ test("a refused social sign-up for an unapproved address says who to ask", () =>
   expect(message).not.toContain("Try again");
 });
 
+test("a refused social sign-in for an address that isn't allowed says who to ask", () => {
+  expect(readSignInCallbackError("?error=sign_in_email_not_allowed")).toBe(
+    "This email address can't sign in here. Ask whoever runs this service to allow it.",
+  );
+});
+
 test("unchallenged OAuth signup directs the human through signup verification", () => {
   expect(readSignInCallbackError("?error=signup_challenge_required")).toContain(
     "complete verification",
