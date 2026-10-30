@@ -22254,6 +22254,7 @@
         "$.limits.defaultVisibilityLocked": "boolean!",
         "$.limits.onlyMeAllowed": "boolean!",
         "$.organizationId": "string!",
+        "$.personalWorkspaceMonthlyCredits": "integer! null",
         "$.personalWorkspaces": "boolean!",
         "$.updatedAt": "string! null"
       }
@@ -29944,6 +29945,7 @@
         "$": "object",
         "$.adminsSeePrivateSchedules": "boolean?",
         "$.defaultVisibility": "ref(SessionVisibility)?",
+        "$.personalWorkspaceMonthlyCredits": "integer? null",
         "$.personalWorkspaces": "boolean?"
       }
     },
