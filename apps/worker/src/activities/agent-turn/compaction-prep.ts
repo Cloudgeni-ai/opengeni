@@ -5,7 +5,7 @@ import {
 import {
   ACTIVE_SESSION_HISTORY_COMPACTION_RATIO,
   hasPendingSteerAfterContextCompaction,
-  isSessionCompactionRequested,
+  sessionCompactionRequestTrigger,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -540,7 +540,12 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       workspaceMemory,
       rig: rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
     });
-    const requested = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+    const requestTrigger = await sessionCompactionRequestTrigger(
+      db,
+      input.workspaceId,
+      input.sessionId,
+    );
+    const requested = requestTrigger !== null;
     let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
     if (requested) {
       try {
@@ -561,7 +566,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             {
               force: true,
               clearRequestedCompaction: true,
-              trigger: "operator",
+              trigger: requestTrigger ?? "operator",
               materializeHistory: media.materializeScreenshotHistory,
               projectModelInput: compactionModelHistoryProjector,
               ...compactionModeOptions,
@@ -641,7 +646,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       }
       if (outcome.events.length > 0) {
         if (outcome.compacted) {
-          recordContextCompaction(observability, "operator");
+          recordContextCompaction(observability, requestTrigger ?? "operator");
         }
         await publishCompactionOutcomeEvents(outcome.events);
       }
@@ -727,7 +732,12 @@ export async function runPostAgentCompaction(
   }
 
   if (compactionOnlyTurn) {
-    const requested = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+    const requestTrigger = await sessionCompactionRequestTrigger(
+      db,
+      input.workspaceId,
+      input.sessionId,
+    );
+    const requested = requestTrigger !== null;
     let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
     if (
       requested &&
@@ -764,7 +774,7 @@ export async function runPostAgentCompaction(
             {
               force: true,
               clearRequestedCompaction: true,
-              trigger: "operator",
+              trigger: requestTrigger ?? "operator",
               projectModelInput: compactionModelHistoryProjector,
               ...compactionModeOptions,
             },
@@ -841,7 +851,7 @@ export async function runPostAgentCompaction(
       }
       if (outcome.events.length > 0) {
         if (outcome.compacted) {
-          recordContextCompaction(observability, "operator");
+          recordContextCompaction(observability, requestTrigger ?? "operator");
         }
         await publishCompactionOutcomeEvents(outcome.events);
       }
@@ -874,7 +884,8 @@ export async function runPostAgentCompaction(
     preparedPortable ||
     (remoteCompactionRequester && session.codexCompactionMode === "remote_v2")
   ) {
-    const forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+    const forced =
+      (await sessionCompactionRequestTrigger(db, input.workspaceId, input.sessionId)) !== null;
     const thresholdTokens = compactionThresholdTokens(eventing.modelRunSettings);
     if (
       forced ||
@@ -910,12 +921,12 @@ export async function runPostAgentCompaction(
     attempt.triggerType === "system.update.delivered" ||
     portableModelSwitchPending
   ) {
-    let forced = false;
+    let forcedTrigger: Awaited<ReturnType<typeof sessionCompactionRequestTrigger>> = null;
     try {
       // Operator /compact (the slash command) sets a durable request flag;
       // observe it without consuming it so a failed/stale attempt cannot
       // lose the request. The replacement transaction clears it on success.
-      forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+      forcedTrigger = await sessionCompactionRequestTrigger(db, input.workspaceId, input.sessionId);
       const outcome = await waitForTurnOperation(
         maybeCompactContext(
           db,
@@ -935,11 +946,11 @@ export async function runPostAgentCompaction(
           // resolution uses the built-in Responses summarizer with the same
           // session prompt-cache key as the main model calls.
           compactSummarizer,
-          forced
+          forcedTrigger !== null
             ? {
                 force: true,
                 clearRequestedCompaction: true,
-                trigger: "operator",
+                trigger: forcedTrigger,
                 materializeHistory: media.materializeScreenshotHistory,
                 projectModelInput: compactionModelHistoryProjector,
                 ...compactionModeOptions,
@@ -956,7 +967,7 @@ export async function runPostAgentCompaction(
       );
       if (outcome.events.length > 0) {
         if (outcome.compacted) {
-          const compactionTrigger = forced ? "operator" : undefined;
+          const compactionTrigger = forcedTrigger ?? undefined;
           recordContextCompaction(observability, compactionTrigger ?? "auto");
         }
         await publishCompactionOutcomeEvents(outcome.events);
@@ -1000,7 +1011,7 @@ export async function runPostAgentCompaction(
           attemptId: input.attemptId,
         },
         {
-          clearRequestedCompaction: forced,
+          clearRequestedCompaction: forcedTrigger !== null,
           publishLiveEvents: publishCompactionLiveEvents,
           providerRejection: compactionProviderRejection(compactError),
         },
@@ -1026,7 +1037,7 @@ export async function runPostAgentCompaction(
           turnStatus: "failed",
           sessionStatus: "idle",
           activeTurnId: null,
-          ...(forced && !landmark.requestConsumed
+          ...(forcedTrigger !== null && !landmark.requestConsumed
             ? { consumeRequestedCompactionFailure: true }
             : {}),
         }))

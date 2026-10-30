@@ -1120,6 +1120,27 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * started stops being waited for; null before one started. */
   private readonly restoredTargets = new Map<string, number | null>();
   private readonly targetPhysicalGenerations = new Map<string, string>();
+  /**
+   * What a tab's ended debugger attachment knew of its document, kept until
+   * the tab is attached again. Another extension adding a frame (a password
+   * manager's inline menu) ends the attachment without changing the page;
+   * when the new attachment finds the same document, it keeps the old
+   * authority, so an observation made just before still holds.
+   */
+  private readonly endedAttachments = new Map<
+    string,
+    {
+      authorityGeneration: string;
+      /** The authority minted when the attachment ended; a later end replaces it. */
+      replacedBy: string;
+      loaderId: string;
+      frameId: string;
+      accessibility: CdpAccessibilitySnapshot | null;
+      accessibilityBounded: boolean;
+      /** The ended attachment's drawn document; the same document has still drawn. */
+      inputDrawnDocument?: string;
+    }
+  >();
   private connection: BrowserCdpConnection | null = null;
   private connectionPromise: Promise<BrowserCdpConnection> | null = null;
   private selectedTargetId: string | null = null;
@@ -1827,6 +1848,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.firstSeenAt.clear();
     this.attachingSessions.clear();
     this.targetPhysicalGenerations.clear();
+    this.endedAttachments.clear();
     this.forgetAutoAttachments();
     this.ownedDownloads.clear();
     const connection = this.connection;
@@ -1880,6 +1902,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.firstSeenAt.clear();
     this.attachingSessions.clear();
     this.targetPhysicalGenerations.clear();
+    this.endedAttachments.clear();
     this.forgetAutoAttachments();
     this.ownedDownloads.clear();
     this.connection?.close();
@@ -3411,9 +3434,33 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               this.attachingSessions.get(targetId) !== sessionId)
           )
             return;
-          // A new attachment must invalidate old controls even when the tab,
-          // loader and frame ids are unchanged. Other tabs keep their authority.
-          this.targetPhysicalGenerations.set(targetId, randomUUID());
+          // Commands and controls of the ended attachment never reach a new
+          // one, even when the tab, loader and frame ids are unchanged. Other
+          // tabs keep their authority. A new attachment that finds the same
+          // document takes the ended one's authority back (attachTarget).
+          const replaced = this.targetPhysicalGeneration(targetId);
+          const replacedBy = randomUUID();
+          const ended = this.states.get(targetId);
+          const earlier = this.endedAttachments.get(targetId);
+          if (ended?.sessionId === sessionId) {
+            this.endedAttachments.set(targetId, {
+              authorityGeneration: ended.authorityGeneration,
+              replacedBy,
+              loaderId: ended.frame.loaderId,
+              frameId: ended.frame.id,
+              accessibility: ended.accessibility,
+              accessibilityBounded: ended.accessibilityBounded,
+              ...(ended.inputDrawnDocument !== undefined
+                ? { inputDrawnDocument: ended.inputDrawnDocument }
+                : {}),
+            });
+          } else if (earlier?.replacedBy === replaced) {
+            // An attachment that ended before it was ready knew nothing new.
+            this.endedAttachments.set(targetId, { ...earlier, replacedBy });
+          } else {
+            this.endedAttachments.delete(targetId);
+          }
+          this.targetPhysicalGenerations.set(targetId, replacedBy);
           this.attachingSessions.delete(targetId);
           this.removeState(targetId, true);
         }),
@@ -3772,6 +3819,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.attaching.clear();
     this.attachingSessions.clear();
     this.targetPhysicalGenerations.clear();
+    this.endedAttachments.clear();
     this.forgetAutoAttachments();
     this.selectedTargetId = null;
     this.userAgentMetadataPromise = null;
@@ -4098,6 +4146,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     this.crashedTargets.delete(info.targetId);
     this.unansweredTabs.delete(info.targetId);
+    // The same document as when the tab's last attachment ended keeps that
+    // attachment's authority: its target, document and frame generations and
+    // element references.
+    const ended = this.endedAttachments.get(info.targetId);
+    this.endedAttachments.delete(info.targetId);
+    const resumed =
+      ended?.replacedBy === authorityGeneration &&
+      ended.loaderId === frame.loaderId &&
+      ended.frameId === frame.id
+        ? ended
+        : null;
+    const stateAuthority = resumed?.authorityGeneration ?? authorityGeneration;
     // A reopened tab whose page this attachment started shows it once it
     // has loaded, as a tab Chrome restored itself does.
     const startedRestoredLoad = typeof this.restoredTargets.get(info.targetId) === "number";
@@ -4105,7 +4165,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const state: TargetState = {
       targetId: info.targetId,
       sessionId,
-      authorityGeneration,
+      authorityGeneration: stateAuthority,
       actionEffectCount: 0,
       ...(startedRestoredLoad ? { startedRestoredPage: true as const } : {}),
       unsettledHitTargetGuards: [],
@@ -4113,13 +4173,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       frame,
       documentGeneration: documentGeneration(
         this.controllerGeneration,
-        authorityGeneration,
+        stateAuthority,
         info.targetId,
         frame.loaderId,
       ),
       frameGeneration: frameGeneration(
         this.controllerGeneration,
-        authorityGeneration,
+        stateAuthority,
         info.targetId,
         frame.id,
       ),
@@ -4128,11 +4188,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       mainFrameCommits: 0,
       documentCommits: 0,
       inputFence: null,
-      accessibility: null,
+      // Element references of a resumed document resolve as before; the next
+      // full read still rebuilds the snapshot.
+      accessibility: resumed?.accessibility ?? null,
       accessibilityRebuiltAt: 0,
       accessibilityNodeCount: null,
       accessibilityRebuildDue: true,
-      accessibilityBounded: false,
+      accessibilityBounded: resumed?.accessibilityBounded ?? false,
+      // A resumed document keeps its generation, and a document that drew
+      // once still draws: input to it needs no new capture, which another
+      // extension's frame in the page could refuse.
+      ...(resumed?.inputDrawnDocument !== undefined
+        ? { inputDrawnDocument: resumed.inputDrawnDocument }
+        : {}),
       dialog: null,
       diagnostics: {
         consoleErrorCount: 0,
@@ -4243,6 +4311,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         sessionId,
       ),
     );
+    if (resumed) this.targetPhysicalGenerations.set(info.targetId, stateAuthority);
     this.states.set(info.targetId, state);
     if (this.engine === "chromium") {
       try {
@@ -10980,6 +11049,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!preserveFirstSeen) {
       this.firstSeenAt.delete(targetId);
       this.targetViewports.delete(targetId);
+      this.endedAttachments.delete(targetId);
       this.restoredTargets.delete(targetId);
     }
   }
@@ -10995,6 +11065,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const forget = () => {
       if (this.states.get(state.targetId) !== state) return;
       this.targetPhysicalGenerations.set(state.targetId, randomUUID());
+      // A crashed page is never the same document again.
+      this.endedAttachments.delete(state.targetId);
       this.removeState(state.targetId, true);
     };
     void this.ensureConnection()

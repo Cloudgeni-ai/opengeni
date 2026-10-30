@@ -8,7 +8,7 @@ import { prepareClaudeSubscriptionCredential } from "../claude-workspace-connect
 import { requireAccessGrant } from "@opengeni/core";
 import { ClaudeSubscriptionUsage, ClaudeSubscriptionSetupTokenRequest } from "@opengeni/contracts";
 
-import { requireOrganizationCodexHuman } from "./codex";
+import { requireOrganizationSubscriptionAdministrator } from "./codex";
 import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
@@ -75,7 +75,7 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
     if (mutation && !c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
     if (organization) {
       const accountId = c.req.param("organizationId")!;
-      const human = await requireOrganizationCodexHuman(c, deps, accountId);
+      const human = await requireOrganizationSubscriptionAdministrator(c, deps, accountId);
       return {
         core: true,
         accountId,
@@ -126,7 +126,11 @@ export function registerClaudeSubscriptionAccountRoutes(app: Hono, deps: ApiRout
       const actor = organization
         ? {
             organizationId: c.req.param("organizationId")!,
-            ...(await requireOrganizationCodexHuman(c, deps, c.req.param("organizationId")!)),
+            ...(await requireOrganizationSubscriptionAdministrator(
+              c,
+              deps,
+              c.req.param("organizationId")!,
+            )),
           }
         : null;
       const requestWorkspaceId = organization ? null : c.req.param("workspaceId")!;
