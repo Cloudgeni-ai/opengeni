@@ -35,6 +35,7 @@ import {
   getScheduledTask,
   getSession,
   getSessionBotIdentity,
+  getSlackAgentForSession,
   getSlackBotPostOperation,
   availableSlackBotConnectionMetadata,
   sharedOrganizationSlackBots,
@@ -241,12 +242,14 @@ export type SlackHomeBlock =
       type: "section";
       block_id?: string;
       text: { type: "mrkdwn" | "plain_text"; text: string; emoji?: boolean };
-      accessory?: {
-        type: "button";
-        action_id: string;
-        text: { type: "plain_text"; text: string; emoji?: boolean };
-        url: string;
-      };
+      accessory?:
+        | {
+            type: "button";
+            action_id: string;
+            text: { type: "plain_text"; text: string; emoji?: boolean };
+            url: string;
+          }
+        | { type: "image"; image_url: string; alt_text: string };
     }
   | {
       type: "context";
@@ -1690,8 +1693,28 @@ export class OpenGeniSlackBotClient {
     if (!sessionId || !hasOpenGeniSlackBotIdentityScope(this.connection.grantedScopes)) {
       return undefined;
     }
+    // A Slack agent's chat posts as the agent, whatever the chat is titled.
+    // Once the agent is deleted its chats post as the app.
+    const slackAgent = await getSlackAgentForSession(this.db, { workspaceId, sessionId }).catch(
+      () => null,
+    );
+    if (slackAgent?.agentChat) {
+      if (!slackAgent.agent) return undefined;
+      return this.postIdentity(slackAgent.agent.targetWorkspaceId, {
+        title: slackAgent.agent.name,
+        avatar: slackAgent.agent.avatar,
+      });
+    }
     const bot = await getSessionBotIdentity(this.db, workspaceId, sessionId).catch(() => null);
     if (!bot?.avatar || !bot.title) return undefined;
+    return this.postIdentity(workspaceId, { title: bot.title, avatar: bot.avatar });
+  }
+
+  /** How posts are signed with a given name and avatar. Requires the identity scope. */
+  postIdentity(
+    workspaceId: string,
+    bot: { title: string; avatar: Parameters<typeof sessionAvatarImageUrl>[2]["avatar"] },
+  ): SlackBotPostIdentity {
     const username = [...bot.title.replace(/\s+/gu, " ")].slice(0, SLACK_BOT_USERNAME_MAX).join("");
     const secret = this.settings.slackSigningSecret;
     const base = this.settings.publicBaseUrl;

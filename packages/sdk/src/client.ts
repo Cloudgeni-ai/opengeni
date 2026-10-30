@@ -58,6 +58,13 @@ import type {
   ListBotTemplatesResponse,
   UpdateBotTemplateRequest,
   WorkspaceBotTemplate,
+  CreateSlackAgentRequest,
+  SlackAgentChannelListResponse,
+  SlackAgentIntroRequest,
+  SlackAgentIntroResponse,
+  SlackAgentListResponse,
+  SlackAgentResponse,
+  UpdateSlackAgentRequest,
   CreateAutomationTemplateRequest,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
@@ -10566,6 +10573,76 @@ export class OpenGeniClient {
     await this.requestJson<{ ok: boolean }>(
       "PUT",
       `/v1/workspaces/${workspaceId}/integrations/slack/channel-routes`,
+      request,
+    );
+  }
+
+  /** Every Slack agent in the workspace's organization. Any member may read them. */
+  async listOpenGeniSlackAgents(workspaceId: string): Promise<SlackAgentListResponse> {
+    return await this.requestJson<SlackAgentListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents`,
+    );
+  }
+
+  /** Create a Slack agent that always works in `workspaceId`. */
+  async createOpenGeniSlackAgent(
+    workspaceId: string,
+    request: CreateSlackAgentRequest,
+  ): Promise<SlackAgentResponse> {
+    return await this.requestJson<SlackAgentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents`,
+      request,
+    );
+  }
+
+  /** Change a Slack agent; `workspaceId` is the workspace the agent works in. */
+  async updateOpenGeniSlackAgent(
+    workspaceId: string,
+    agentId: string,
+    request: UpdateSlackAgentRequest,
+  ): Promise<SlackAgentResponse> {
+    return await this.requestJson<SlackAgentResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}`,
+      request,
+    );
+  }
+
+  /** Delete a Slack agent; `workspaceId` is the workspace the agent works in. */
+  async deleteOpenGeniSlackAgent(
+    workspaceId: string,
+    agentId: string,
+  ): Promise<{ deleted: boolean }> {
+    return await this.requestJson<{ deleted: boolean }>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}`,
+    );
+  }
+
+  /** Slack channels the Opengeni app is already in, where the agent can be introduced. */
+  async listOpenGeniSlackAgentChannels(
+    workspaceId: string,
+    agentId: string,
+    cursor?: string,
+  ): Promise<SlackAgentChannelListResponse> {
+    const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+    return await this.requestJson<SlackAgentChannelListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/channels${query}`,
+    );
+  }
+
+  /** Post a short intro of the agent in each chosen channel. */
+  async postOpenGeniSlackAgentIntro(
+    workspaceId: string,
+    agentId: string,
+    request: SlackAgentIntroRequest,
+  ): Promise<SlackAgentIntroResponse> {
+    return await this.requestJson<SlackAgentIntroResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/agents/${encodeURIComponent(agentId)}/intro`,
       request,
     );
   }

@@ -77,6 +77,7 @@ import {
   readOrganizationCodexUsage,
 } from "./organization-codex-usage";
 export * from "./organization-slack-bots";
+export * from "./slack-agents";
 export * from "./voice-transcription-settlement";
 import {
   connectionMetadataColumns,
@@ -14151,6 +14152,8 @@ export type SlackBotUserLink = {
    * one-time onboarding hint, or `null` when the hint has not been shown.
    */
   firstTaskHintInteractionId: string | null;
+  /** When this person muted occasional update messages about new agents. */
+  updatesMutedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -14186,6 +14189,10 @@ export type SlackInteractionInboxEntry = {
   retryAt: Date | null;
   lastErrorCode: string | null;
   reactionContextCheckpoint: unknown | null;
+  /** A request passed on to one exact Slack agent by another chat. */
+  targetSlackAgentId?: string | null;
+  handoffFromInteractionId?: string | null;
+  handoffFromSlackAgentId?: string | null;
   processedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -14265,6 +14272,13 @@ export type SlackInteraction = {
    * and a workspace line on every message).
    */
   startMessageLine: string | null;
+  /** The Slack agent this chat was started for. Null for plain Opengeni. */
+  slackAgentId: string | null;
+  /** The agent whose chat passed this thread on, which it never hands back to. */
+  handoffFromSlackAgentId: string | null;
+  /** The latest Slack message this chat was given, and who sent it. */
+  lastInboundProviderEventId: string | null;
+  lastInboundSlackUserId: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -14342,7 +14356,10 @@ export async function saveSlackBotUserLink(
   db: Database,
   // The one-time onboarding hint claim is deliberately not writable here: a
   // re-link of the same Slack identity keeps whatever was already shown.
-  input: Omit<SlackBotUserLink, "id" | "createdAt" | "updatedAt" | "firstTaskHintInteractionId">,
+  input: Omit<
+    SlackBotUserLink,
+    "id" | "createdAt" | "updatedAt" | "firstTaskHintInteractionId" | "updatesMutedAt"
+  >,
 ): Promise<SlackBotUserLink> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -14887,6 +14904,10 @@ export async function getOrCreateSlackInteraction(
     // Owned by `bindSlackInteractionSession`, frozen with the bound session.
     | "sessionDefaultsLine"
     | "startMessageLine"
+    | "slackAgentId"
+    | "handoffFromSlackAgentId"
+    | "lastInboundProviderEventId"
+    | "lastInboundSlackUserId"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
@@ -14894,6 +14915,8 @@ export async function getOrCreateSlackInteraction(
   > & {
     initiatingSlackUserId?: string | null;
     routedWorkspaceLabel?: string | null;
+    slackAgentId?: string | null;
+    handoffFromSlackAgentId?: string | null;
   },
 ): Promise<{ created: boolean; interaction: SlackInteraction }> {
   const outcome = await withRlsContext(db, input, async (scopedDb) => {
@@ -14903,6 +14926,8 @@ export async function getOrCreateSlackInteraction(
         ...input,
         initiatingSlackUserId: input.initiatingSlackUserId ?? null,
         routedWorkspaceLabel: input.routedWorkspaceLabel ?? null,
+        slackAgentId: input.slackAgentId ?? null,
+        handoffFromSlackAgentId: input.handoffFromSlackAgentId ?? null,
       })
       .onConflictDoNothing()
       .returning();
@@ -15677,6 +15702,145 @@ export async function rekeySlackInteractionRoute(
   });
 }
 
+/**
+ * Free a thread's route key so another chat can take the thread over: a
+ * handoff to another Slack agent, or a person naming a different agent in the
+ * thread. The old chat keeps its channel and thread, so anything it still
+ * delivers lands in the same thread; it just no longer receives new messages.
+ *
+ * Idempotent for one interaction: the retired key is derived from its id.
+ */
+export async function retireSlackInteractionRoute(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "routeKey">,
+  /**
+   * Why the chat lost its thread. A hand-off retires to `:moved:<id>`, which
+   * lets the same chat finish an interrupted hand-off; a person moving the
+   * thread to another agent retires to `:switched:<id>`, which does not.
+   */
+  reason: "handoff" | "switch" = "handoff",
+): Promise<SlackInteraction | null> {
+  // Idempotent: a key that is already retired stays as it is.
+  const alreadyRetired =
+    input.routeKey.endsWith(`:moved:${input.id}`) ||
+    input.routeKey.endsWith(`:switched:${input.id}`);
+  const suffix = reason === "switch" ? `:switched:${input.id}` : `:moved:${input.id}`;
+  const retiredKey = alreadyRetired ? input.routeKey : `${input.routeKey.slice(0, 200)}${suffix}`;
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .update(schema.slackInteractions)
+      .set({ routeKey: retiredKey, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+        ),
+      )
+      .returning();
+    return row ? mapSlackInteraction(row) : null;
+  });
+}
+
+/** Remember the latest Slack message a chat was given and who sent it. */
+export async function recordSlackInteractionInbound(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    providerEventId: string;
+    slackUserId: string;
+  },
+): Promise<void> {
+  await withRlsContext(db, input, async (scopedDb) => {
+    await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        lastInboundProviderEventId: input.providerEventId,
+        lastInboundSlackUserId: input.slackUserId,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+        ),
+      );
+  });
+}
+
+/**
+ * The Slack event a turn is answering, by its `slack:<provider event id>`
+ * client event id. A delivered user message has no `turn_id`; the turn points
+ * back at it through `trigger_event_id`, so that is read first.
+ *
+ * `turnFound` is false only when the turn is unknown. A known turn started by
+ * something other than a Slack message has a null `providerEventId`.
+ */
+export async function getSlackProviderEventIdForTurn(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string },
+): Promise<{ turnFound: boolean; providerEventId: string | null }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [trigger] = await scopedDb
+      .select({ clientEventId: schema.sessionEvents.clientEventId })
+      .from(schema.sessionTurns)
+      .leftJoin(
+        schema.sessionEvents,
+        and(
+          eq(schema.sessionEvents.id, schema.sessionTurns.triggerEventId),
+          eq(schema.sessionEvents.workspaceId, schema.sessionTurns.workspaceId),
+          eq(schema.sessionEvents.sessionId, schema.sessionTurns.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, input.turnId),
+        ),
+      )
+      .limit(1);
+    if (trigger?.clientEventId?.startsWith("slack:")) {
+      return { turnFound: true, providerEventId: trigger.clientEventId.slice("slack:".length) };
+    }
+    const [row] = await scopedDb
+      .select({ clientEventId: schema.sessionEvents.clientEventId })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.turnId, input.turnId),
+          sql`${schema.sessionEvents.clientEventId} like 'slack:%'`,
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    const fromTurnId = row?.clientEventId ? row.clientEventId.slice("slack:".length) : null;
+    return { turnFound: trigger !== undefined || fromTurnId !== null, providerEventId: fromTurnId };
+  });
+}
+
+/** The inbox row of one Slack event, read under the installation's HOME tenancy. */
+export async function getSlackInteractionInboxByProviderEvent(
+  db: Database,
+  home: { accountId: string; workspaceId: string },
+  input: { connectionId: string; providerEventId: string },
+): Promise<SlackInteractionInboxEntry | null> {
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackInteractionInbox)
+      .where(
+        and(
+          eq(schema.slackInteractionInbox.connectionId, input.connectionId),
+          eq(schema.slackInteractionInbox.providerEventId, input.providerEventId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackInteractionInbox(row) : null;
+  });
+}
+
 export async function claimSlackInteractionDelivery(
   db: Database,
   claimHolderId: string,
@@ -15965,6 +16129,17 @@ function mapSlackInteractionInbox(
     lastErrorCode: slackRowNullableString(row, "lastErrorCode", "last_error_code"),
     reactionContextCheckpoint:
       slackRowValue(row, "reactionContextCheckpoint", "reaction_context_checkpoint") ?? null,
+    targetSlackAgentId: slackRowNullableString(row, "targetSlackAgentId", "target_slack_agent_id"),
+    handoffFromInteractionId: slackRowNullableString(
+      row,
+      "handoffFromInteractionId",
+      "handoff_from_interaction_id",
+    ),
+    handoffFromSlackAgentId: slackRowNullableString(
+      row,
+      "handoffFromSlackAgentId",
+      "handoff_from_slack_agent_id",
+    ),
     processedAt: slackRowNullableDate(row, "processedAt", "processed_at"),
     createdAt: slackRowDate(row, "createdAt", "created_at"),
     updatedAt: slackRowDate(row, "updatedAt", "updated_at"),
@@ -16056,6 +16231,22 @@ function mapSlackInteraction(
       "session_defaults_line",
     ),
     startMessageLine: slackRowNullableString(row, "startMessageLine", "start_message_line"),
+    slackAgentId: slackRowNullableString(row, "slackAgentId", "slack_agent_id"),
+    handoffFromSlackAgentId: slackRowNullableString(
+      row,
+      "handoffFromSlackAgentId",
+      "handoff_from_slack_agent_id",
+    ),
+    lastInboundProviderEventId: slackRowNullableString(
+      row,
+      "lastInboundProviderEventId",
+      "last_inbound_provider_event_id",
+    ),
+    lastInboundSlackUserId: slackRowNullableString(
+      row,
+      "lastInboundSlackUserId",
+      "last_inbound_slack_user_id",
+    ),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
       row,
