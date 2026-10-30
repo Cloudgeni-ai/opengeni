@@ -32,6 +32,7 @@ import {
   scheduledTaskRunUnattendedSetting,
   stableJson,
   TurnExecutionPolicyV1,
+  withSessionUnattendedMetadata,
   type McpConnectionAccountSelection,
   type ScheduledTask,
   type ScheduledTaskDegradedAccount,
@@ -3073,7 +3074,10 @@ async function recoverBoundScheduledTaskDispatch(input: {
       session.sandboxGroupId !== session.id ||
       session.channelId !== null ||
       session.codexCompactionMode !== generatedBinding.codexCompactionMode ||
-      stableJson(session.metadata) !== stableJson(expectedMetadata) ||
+      // Session reads project the frozen `started_unattended` column into the
+      // reserved unattended key; the scheduler never writes that key itself.
+      stableJson(withSessionUnattendedMetadata(session.metadata, false)) !==
+        stableJson(expectedMetadata) ||
       session.createdBy.kind !== "service" ||
       session.createdBy.subjectId !== "scheduler" ||
       stableJson(session.createdByContext) !==
