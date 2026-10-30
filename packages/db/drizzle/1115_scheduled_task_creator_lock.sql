@@ -24,7 +24,7 @@ BEGIN
       CONTINUE;
     END IF;
     IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-      RAISE EXCEPTION '1110 scheduled task execution digest drift in %', routine
+      RAISE EXCEPTION '1115 scheduled task execution digest drift in %', routine
         USING ERRCODE = '55000';
     END IF;
     EXECUTE replace(definition, anchor, anchor || $a$, 'creator_locked'$a$);

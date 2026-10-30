@@ -28,7 +28,7 @@ BEGIN
       $a$OR session_row.skills IS DISTINCT FROM '[]'::jsonb$a$, '')))
       / length($a$OR session_row.skills IS DISTINCT FROM '[]'::jsonb$a$) <> 1
   THEN
-    RAISE EXCEPTION '1111 scheduled generated session fence drift'
+    RAISE EXCEPTION '1116 scheduled generated session fence drift'
       USING ERRCODE = '55000';
   END IF;
   definition := replace(definition, $a$OR session_row.skills IS DISTINCT FROM '[]'::jsonb$a$,

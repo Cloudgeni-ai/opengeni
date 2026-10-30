@@ -172,7 +172,7 @@ BEGIN
   END IF;
   FOREACH edit SLICE 1 IN ARRAY edits LOOP
     IF (length(definition) - length(replace(definition, edit[1], ''))) / length(edit[1]) <> 1 THEN
-      RAISE EXCEPTION '1112 session usage limit command drift at %', edit[1]
+      RAISE EXCEPTION '1117 session usage limit command drift at %', edit[1]
         USING ERRCODE = '55000';
     END IF;
     definition := replace(definition, edit[1], edit[2]);
