@@ -71,12 +71,15 @@ function app(mode: "dual" | "broker", allowedUserEmails: string[]) {
   });
 }
 
-/** Opens the add-account window's transaction and submits email and password. */
+/**
+ * Opens the add-account window's transaction and submits email and password,
+ * once per entry in `passwords`, as the window does when the person retries.
+ */
 async function addAccount(
   target: ReturnType<typeof app>,
   email: string,
-  password: string,
-): Promise<{ completion: Response; after: ManagedAuthSessionSetProjection }> {
+  ...passwords: [string, ...string[]]
+): Promise<{ completion: Response; earlier: Response[]; after: ManagedAuthSessionSetProjection }> {
   // In-process requests share one client address; each attempt here stands
   // for a different person, so the per-client login-transaction limit
   // mustn't decide the outcome.
@@ -105,22 +108,28 @@ async function addAccount(
   expect(begin.status).toBe(200);
   const transaction = (await begin.json()) as { id: string };
   const transactionCookie = oneCookie(begin, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE);
-  const completion = await target.request("/v1/auth/session-set/transactions/email-password", {
-    method: "POST",
-    headers: headers(`${authorityCookie}; ${transactionCookie}`),
-    body: JSON.stringify({
-      operationId: crypto.randomUUID(),
-      expectedGeneration: initial.generation,
-      transactionId: transaction.id,
-      email,
-      password,
-    }),
-  });
+  const completions: Response[] = [];
+  for (const password of passwords) {
+    completions.push(
+      await target.request("/v1/auth/session-set/transactions/email-password", {
+        method: "POST",
+        headers: headers(`${authorityCookie}; ${transactionCookie}`),
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          expectedGeneration: initial.generation,
+          transactionId: transaction.id,
+          email,
+          password,
+        }),
+      }),
+    );
+  }
   const afterResponse = await target.request("/v1/auth/session-set", {
     headers: { cookie: authorityCookie },
   });
   return {
-    completion,
+    completion: completions.at(-1)!,
+    earlier: completions.slice(0, -1),
     after: (await afterResponse.json()) as ManagedAuthSessionSetProjection,
   };
 }
@@ -199,6 +208,19 @@ for (const mode of ["dual", "broker"] as const) {
       expect(completion.status).toBe(200);
       expect(after.slots).toHaveLength(1);
       expect(after.slots[0]?.verifiedClaim).toEqual({ kind: "email", value: kept });
+    }, 60_000);
+
+    test("after a wrong password, the right one in the same window adds the account", async () => {
+      if (!shared || !client) return;
+      const { completion, earlier, after } = await addAccount(
+        app(mode, [kept]),
+        kept,
+        "wrong-password-123",
+        PASSWORD,
+      );
+      expect(earlier.map((response) => response.status)).toEqual([401]);
+      expect(completion.status).toBe(200);
+      expect(after.slots).toHaveLength(1);
     }, 60_000);
   });
 }
