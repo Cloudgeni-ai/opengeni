@@ -57,9 +57,9 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     training:
       "No. Microsoft does not use prompts or outputs to train models without permission, and they are not available to OpenAI.",
     retention:
-      "Abuse monitoring may store flagged prompts and outputs for human review in the resource's geography; the period is not stated (unknown). Responses API conversation state is kept for 30 days by default, and Opengeni does not turn that storage off on Azure.",
+      "Abuse monitoring may store flagged prompts and outputs for human review in the resource's geography; the period is not stated (unknown). Responses API response data is kept for 30 days by default, and Opengeni does not turn that storage off on Azure.",
     location:
-      "Data at rest stays in the Azure resource's geography. Global deployments may process prompts in any Azure geography; Data Zone EU deployments process only in EU member states.",
+      "Data at rest stays in the Azure resource's geography. Global deployments may process prompts in any geography where the model is deployed; Data Zone EU deployments process only in EU member states.",
     sources: [
       "https://learn.microsoft.com/en-us/azure/ai-foundry/responsible-ai/openai/data-privacy",
       "https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/abuse-monitoring",
@@ -73,9 +73,10 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     training: NOT_STATED,
     retention: NOT_STATED,
     location:
-      "Processed by Fireworks outside Microsoft's systems and outside the EU Data Boundary; the region is not stated (unknown).",
+      "Processed by Fireworks on its own GPUs outside Microsoft facilities, as a Microsoft subprocessor. Microsoft excludes Fireworks on Foundry from its EU Data Boundary commitments. Pay-per-token Data Zone deployments run in US regions; for other deployments the region is not stated (unknown).",
     sources: [
       "https://learn.microsoft.com/en-us/azure/foundry/how-to/fireworks/privacy-compliance-faq",
+      "https://learn.microsoft.com/en-us/azure/foundry/how-to/fireworks/enable-fireworks-models",
     ],
     checkedOn: CHECKED_2026_10_30,
   },
@@ -85,12 +86,13 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     training:
       "No. Neither AWS nor the model's maker uses prompts or outputs to train models, and the model's maker does not receive them.",
     retention:
-      "Depends on the model. Most models keep nothing after the request. Models that require AWS abuse review keep prompts and outputs for up to 30 days inside AWS.",
+      "Depends on the model. AWS stores prompts and outputs only for models on its abuse-detection list, for up to 30 days inside AWS in the region that processed the request, and does not share them with the model's maker. When checked, Claude Opus 5.5 and Sonnet 5.5 were not on that list.",
     location:
       "A global.* inference profile can process in any commercial AWS region; an eu.* profile processes only in EU AWS regions.",
     sources: [
       "https://aws.amazon.com/bedrock/faqs/",
       "https://docs.aws.amazon.com/bedrock/latest/userguide/data-retention.html",
+      "https://docs.aws.amazon.com/bedrock/latest/userguide/abuse-detection.html",
       "https://docs.aws.amazon.com/bedrock/latest/userguide/data-protection.html",
     ],
     checkedOn: CHECKED_2026_10_30,
@@ -100,11 +102,13 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     provider: "Anthropic API",
     training: "No, not without express permission.",
     retention:
-      "Deleted within 30 days of receipt by default; content flagged for usage-policy violations can be kept for up to 2 years. Zero data retention only by separate agreement.",
-    location: "Processed globally; no region is pinned.",
+      "Deleted within 30 days of receipt by default; content flagged by Anthropic's trust and safety systems can be kept for up to 2 years. Zero data retention only by separate agreement.",
+    location:
+      "Inference may run in any geography by default; Opengeni does not set a region, so the Anthropic workspace's own default applies.",
     sources: [
       "https://platform.claude.com/docs/en/build-with-claude/api-and-data-retention",
       "https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data",
+      "https://platform.claude.com/docs/en/build-with-claude/data-residency",
     ],
     checkedOn: CHECKED_2026_10_30,
   },
@@ -112,11 +116,13 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     family: "claude_subscription",
     provider: "Anthropic, under the connected Claude subscription's own terms",
     training:
-      "Personal Claude plans: only if the account's model-improvement setting is on. Team and Enterprise plans follow Anthropic's commercial terms (no training without permission).",
+      "Personal plans (Free, Pro, Max): used for training when the account's model-improvement setting is on, and also for chats flagged for safety review and feedback the user submits. Team and Enterprise plans: not used for training unless the organization opts in or users submit feedback.",
     retention:
-      "Personal plans: with model improvement off, kept up to 30 days after deletion; with it on, up to 5 years in de-identified form; flagged content up to 2 years. Team and Enterprise plans follow the commercial terms.",
-    location: "Processed globally; no region is pinned.",
+      "Personal plans: up to 30 days after deletion with model improvement off, up to 5 years with it on; flagged content up to 2 years; feedback 5 years. Team and Enterprise plans: 30 days by default under the commercial terms.",
+    location: NOT_STATED,
     sources: [
+      "https://code.claude.com/docs/en/data-usage",
+      "https://privacy.claude.com/en/articles/7996885-how-do-you-use-personal-data-in-model-training",
       "https://privacy.claude.com/en/articles/10023548-how-long-do-you-store-my-data",
       "https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data",
     ],
@@ -127,8 +133,9 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     provider: "OpenAI API",
     training: "No, unless the organization opts in.",
     retention:
-      "Abuse-monitoring logs are kept for up to 30 days. Opengeni asks OpenAI not to store responses. Zero data retention only with OpenAI's approval.",
-    location: "Processed in the United States unless a regional endpoint is used.",
+      "Abuse-monitoring logs are kept for up to 30 days, unless the law requires longer. Responses API data is kept for 30 days by default, and Opengeni does not turn this off for chat turns. Zero data retention only with OpenAI's approval.",
+    location:
+      "Not stated for default projects (unknown). Data residency projects and the regional endpoints pin processing to that region.",
     sources: ["https://developers.openai.com/api/docs/guides/your-data"],
     checkedOn: CHECKED_2026_10_30,
   },
@@ -138,11 +145,12 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     training:
       'Personal ChatGPT plans: may be used for training unless the account turns off "Improve the model for everyone". Business, Enterprise and Edu plans: not used for training by default.',
     retention:
-      "Set by the ChatGPT account's terms and settings. Opengeni asks OpenAI not to store responses.",
-    location: "Processed in the United States unless the account has data residency.",
+      "Set by the ChatGPT account's terms and settings. Opengeni asks OpenAI not to store responses on this route.",
+    location:
+      "Not stated (unknown); ChatGPT Enterprise and Edu workspaces can have data residency.",
     sources: [
       "https://help.openai.com/en/articles/7730893-data-controls-faq",
-      "https://developers.openai.com/api/docs/guides/your-data",
+      "https://help.openai.com/en/articles/5722486-how-your-data-is-used-to-improve-model-performance",
     ],
     checkedOn: CHECKED_2026_10_30,
   },
@@ -151,8 +159,9 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     provider: "xAI API",
     training: "No, not without permission.",
     retention:
-      "Kept for 30 days for abuse auditing, then deleted. Zero data retention for enterprise customers by agreement.",
-    location: "Processed in the United States.",
+      "Kept for 30 days for abuse auditing, then deleted. A team admin can turn on zero data retention (self-serve where available, or under an enterprise agreement).",
+    location:
+      "The default endpoint does not guarantee a processing region (unknown); only the US endpoint keeps processing in the US.",
     sources: ["https://docs.x.ai/developers/faq/security"],
     checkedOn: CHECKED_2026_10_30,
   },
@@ -160,8 +169,9 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     family: "xai_subscription",
     provider: "xAI, under the connected SuperGrok subscription's consumer terms",
     training: "May be used to train models; the consumer privacy policy lists training as a use.",
-    retention: NOT_STATED,
-    location: "Processed in the United States.",
+    retention:
+      "No fixed period is stated; xAI keeps personal data while it has an ongoing legitimate business need.",
+    location: "Not stated (unknown).",
     sources: ["https://x.ai/legal/privacy-policy"],
     checkedOn: CHECKED_2026_10_30,
   },
@@ -169,11 +179,16 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     family: "vercel_ai_gateway",
     provider: "Vercel AI Gateway, which forwards to an upstream model provider",
     training:
-      "Vercel does not train on it. The upstream provider's own default applies; Opengeni does not request Vercel's no-training or zero-retention routing.",
+      "Vercel does not train on it. The upstream provider's policy applies; it can be that provider's default or a stricter agreement Vercel has with it. Opengeni's requests do not ask for Vercel's no-training or zero-retention routing; Vercel team or virtual-model settings could still apply it (not checked).",
     retention:
-      "Vercel keeps no prompts or outputs after the request. The upstream provider's own retention applies.",
-    location: "Processed globally; the upstream region is not pinned.",
-    sources: ["https://vercel.com/docs/ai-gateway/capabilities/zdr"],
+      "Vercel keeps no prompts or outputs after the request. The upstream provider's retention applies.",
+    location:
+      "Vercel may handle the request in any of its regions, and no inference region is pinned (a virtual model's own setting is not checked).",
+    sources: [
+      "https://vercel.com/docs/ai-gateway/capabilities/zdr",
+      "https://vercel.com/docs/ai-gateway/capabilities/disallow-prompt-training",
+      "https://vercel.com/docs/ai-gateway/security-and-compliance/regional-inference",
+    ],
     checkedOn: CHECKED_2026_10_30,
   },
   google_vertex: {
@@ -181,10 +196,11 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     provider: "Google Cloud Vertex AI (Gemini)",
     training: "No, not without permission.",
     retention:
-      "Google may log prompts for abuse monitoring and cache them briefly; the period is not stated (unknown).",
-    location: "Processed globally unless a regional endpoint is used.",
+      "Google caches data for up to 24 hours by default. Under the online Google Cloud terms, prompts its abuse checks flag may be kept for up to 90 days with possible human review; Google Frontier Models also log prompts and responses for up to 30 days. Customers with a Google Cloud Master Agreement are exempt from the flagged-prompt logging by default.",
+    location: "Processed in any region unless a regional endpoint is used.",
     sources: [
       "https://docs.cloud.google.com/gemini-enterprise-agent-platform/resources/zero-data-retention",
+      "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/abuse-monitoring",
     ],
     checkedOn: CHECKED_2026_10_30,
   },
@@ -194,8 +210,9 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     training:
       "OpenRouter uses prompts only if the account opts in. The upstream provider OpenRouter routes to applies its own policy; an account setting can exclude providers that train.",
     retention:
-      "OpenRouter keeps prompts only if the account opts in, or when legally required. The upstream provider's own retention applies.",
-    location: "Processed globally; the upstream region is not pinned.",
+      "OpenRouter stores prompts only if the account opts in, or when content is flagged as potential child sexual abuse material; it keeps request metadata. The upstream provider's own retention applies.",
+    location:
+      "Not pinned to a region (OpenRouter's in-region routing is not used); the upstream region is not stated (unknown).",
     sources: [
       "https://openrouter.ai/docs/guides/privacy/data-collection",
       "https://openrouter.ai/docs/guides/privacy/logging",
@@ -205,11 +222,17 @@ export const PROVIDER_DATA_POLICIES: Readonly<
   opper: {
     family: "opper",
     provider: "Opper, an EU-hosted gateway that forwards to an upstream model provider",
-    training: NOT_STATED,
-    retention: "Configurable per Opper account; the default is not stated (unknown).",
+    training: "Opper does not train on it. The upstream provider's policy applies.",
+    retention:
+      "By default Opper stores usage metadata only, not prompts or responses; an account can turn on tracing for 1 to 30 days. Upstream retention depends on the route.",
     location:
-      "Opper's gateway is hosted in the EU; the upstream model's region depends on the model.",
-    sources: ["https://docs.opper.ai"],
+      "Opper's gateway is hosted in the EU (Stockholm); the upstream model's region depends on the model.",
+    sources: [
+      "https://docs.opper.ai",
+      "https://opper.ai/pricing",
+      "https://opper.ai/ai-compliance",
+      "https://docs.opper.ai/control-plane/zero-data-retention",
+    ],
     checkedOn: CHECKED_2026_10_30,
   },
   unknown: {
@@ -217,7 +240,7 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     provider: "A provider this deployment does not describe (custom or self-hosted)",
     training: "Unknown.",
     retention: "Unknown.",
-    location: "Unknown unless this route declares a region below.",
+    location: "Unknown unless this route declares a region above.",
     sources: [],
     checkedOn: null,
   },

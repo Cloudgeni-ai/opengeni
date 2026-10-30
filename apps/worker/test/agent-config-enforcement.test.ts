@@ -682,6 +682,8 @@ function assertCapabilitySurface(
     enabled("humanInput") && captured.buildOptions.humanInputEnabled !== false,
   );
   expect(captured.names.includes("list_models")).toBe(enabled("subagents"));
+  // Privacy answers come from server facts under every configuration.
+  expect(captured.names).toContain("privacy_facts");
   expect(captured.names.includes("image_generation")).toBe(enabled("media"));
   expect(captured.names.includes("skill_read")).toBe(enabled("skills"));
   for (const name of SKILL_MANAGEMENT_TOOLS) {
@@ -870,6 +872,7 @@ describe("agent configuration reaches the production model request", () => {
     assertCapabilitySurface(captured, config);
     expect(captured.names).toContain("request_human_input");
     expect(captured.names).toContain("skill_read");
+    expect(captured.names).toContain("privacy_facts");
     expect(captured.names).not.toContain("web_search");
     expect(captured.names).not.toContain("list_models");
     expect(captured.names).not.toContain("skill_search");

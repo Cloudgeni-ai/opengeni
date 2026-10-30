@@ -2,11 +2,11 @@
 
 Privacy questions are answered from server facts. One bullet joins "Rules for
 getting work done" in both the legacy CORE and the modular base behavior (about
-350 bytes): for questions about privacy, data retention, training on data,
-which model or provider serves the chat, or where data is processed, call
-`privacy_facts` and answer only from what it returns, link its policies, say
-what is unknown, and never claim more than it states (for example that data
-stays in the EU). `privacy_facts` joins the always-visible first-request tools.
+210 bytes): answer questions about privacy, retention, training, the model or
+provider, or where data is processed only from `privacy_facts`, link its
+policies, say what is unknown, and never claim more than it states. The tool
+description says when to call it. `privacy_facts` joins the always-visible
+first-request tools.
 Before, agents answered these questions from general knowledge and could
 over-claim. The legacy locks change by that one bullet; legacy and modular stay
 sentence-identical.

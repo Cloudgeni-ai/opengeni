@@ -1,12 +1,7 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 import type { ConfiguredModel, ResolvedModelProvider, Settings } from "@opengeni/config";
-import type { ModelResidencyV1 } from "@opengeni/contracts";
-import {
-  getOrganizationRetentionPolicy,
-  isWorkspaceEuOnly,
-  nestedPostgresSqlState,
-  type Database,
-} from "@opengeni/db";
+import { COMPUTER_SCREENSHOT_RETENTION_MS, type ModelResidencyV1 } from "@opengeni/contracts";
+import { isWorkspaceEuOnly, type Database } from "@opengeni/db";
 import {
   PROVIDER_DATA_POLICIES,
   type ProviderDataPolicy,
@@ -26,6 +21,8 @@ export type PrivacyFactsRoute = {
     id: string;
     label: string;
     kind: string;
+    /** The wire API: "responses", "chat" or "anthropic-messages". */
+    api: string;
     wireProfile: string | null;
     builtin: boolean;
     baseUrl: string | null;
@@ -42,12 +39,6 @@ export type PrivacyFactsRoute = {
 export type PrivacyFactsLive = {
   /** True when the deployment or this workspace requires EU-only inference. */
   euOnly: boolean | null;
-  /** The organization's rule for a departing member's content; null when unreadable. */
-  memberRetention:
-    | { mode: "retain" }
-    | { mode: "delete_after"; days: number }
-    | { mode: "not_visible" }
-    | null;
 };
 
 export type PrivacyFactsDeployment = {
@@ -78,6 +69,12 @@ const EXACT_HOST_FAMILIES: Readonly<Record<string, ProviderDataPolicyFamily>> = 
 const BEDROCK_MODEL_ID =
   /^(?:(?:global|us|us-gov|eu|apac|jp|au|ca)\.)?(?:anthropic|amazon|meta|mistral|cohere|ai21|deepseek|openai|qwen|writer)\.[a-z0-9]/iu;
 
+/**
+ * A Bedrock endpoint or a bridge to it: a host with a `bedrock` label part,
+ * such as `bedrock-runtime.eu-west-1.amazonaws.com` or an in-cluster bridge.
+ */
+const BEDROCK_HOST = /(?:^|[.-])bedrock(?:[.-]|$)/iu;
+
 /** Fireworks models offered through Azure AI Foundry are named `FW-…`. */
 const AZURE_FIREWORKS_MODEL_ID = /^fw-/iu;
 
@@ -104,10 +101,20 @@ function isAzureHost(host: string | null): boolean {
   return host !== null && AZURE_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
 }
 
-function azureFamily(upstreamModelId: string | null): ProviderDataPolicyFamily {
-  return upstreamModelId && AZURE_FIREWORKS_MODEL_ID.test(upstreamModelId)
-    ? "azure_foundry_fireworks"
-    : "azure_openai";
+/**
+ * An Azure route. Only the Responses API is certainly an Azure OpenAI model
+ * sold by Azure; Fireworks models are named `FW-…`. Other Azure-hosted models
+ * (Claude through Anthropic's Messages API, partner and community models) are
+ * processed by others under other terms, so they stay unknown.
+ */
+function azureFamily(route: PrivacyFactsRoute, declaredAzure: boolean): ProviderDataPolicyFamily {
+  const upstream = route.upstreamModelId;
+  if (upstream && AZURE_FIREWORKS_MODEL_ID.test(upstream)) return "azure_foundry_fireworks";
+  const api = route.provider?.api;
+  if (api === "responses" || (declaredAzure && api !== "anthropic-messages")) {
+    return "azure_openai";
+  }
+  return "unknown";
 }
 
 /**
@@ -129,12 +136,18 @@ export function providerDataPolicyFamily(route: PrivacyFactsRoute): ProviderData
   if (kind.startsWith("openrouter-")) return "openrouter";
   if (kind.startsWith("opper-")) return "opper";
   if (kind.startsWith("direct-openai-")) return "openai_api";
-  if (kind.startsWith("direct-azure-")) return azureFamily(upstream);
+  if (kind.startsWith("direct-azure-")) return azureFamily(route, false);
+  // A workspace's own OpenAI-compatible server is described by nothing here.
+  if (kind === "direct-compatible-workspace") return "unknown";
   const deploymentType = route.residency?.deploymentType;
-  if (deploymentType?.startsWith("azure_")) return azureFamily(upstream);
+  if (deploymentType?.startsWith("azure_")) return azureFamily(route, true);
   if (deploymentType?.startsWith("bedrock_")) return "amazon_bedrock";
-  if (upstream && BEDROCK_MODEL_ID.test(upstream)) return "amazon_bedrock";
-  if (provider.wireProfile === "azure-openai" || isAzureHost(host)) return azureFamily(upstream);
+  if (upstream && BEDROCK_MODEL_ID.test(upstream) && host && BEDROCK_HOST.test(host)) {
+    return "amazon_bedrock";
+  }
+  if (provider.wireProfile === "azure-openai" || isAzureHost(host)) {
+    return azureFamily(route, false);
+  }
   if (host && EXACT_HOST_FAMILIES[host]) return EXACT_HOST_FAMILIES[host]!;
   // The built-in OpenAI provider without a base URL calls api.openai.com.
   if (provider.builtin && provider.wireProfile === "openai" && !host) return "openai_api";
@@ -209,17 +222,7 @@ function policyLines(heading: string, policy: ProviderDataPolicy): string[] {
   ];
 }
 
-function memberRetentionText(value: PrivacyFactsLive["memberRetention"]): string {
-  if (!value) return "When a member leaves the organization: unknown (could not be read).";
-  switch (value.mode) {
-    case "retain":
-      return "When a member leaves the organization: their content is kept (the organization's setting).";
-    case "delete_after":
-      return `When a member leaves the organization: their personal content is deleted ${value.days} days after they leave (the organization's setting).`;
-    case "not_visible":
-      return "When a member leaves the organization: set by an organization admin in organization settings; only admins can read it.";
-  }
-}
+const RETAINED_IMAGE_DAYS = Math.round(COMPUTER_SCREENSHOT_RETENTION_MS / 86_400_000);
 
 export function renderPrivacyFacts(input: {
   route: PrivacyFactsRoute;
@@ -254,7 +257,7 @@ export function renderPrivacyFacts(input: {
       "",
       ...(upstreamFamily
         ? policyLines(
-            "Upstream provider behind the gateway",
+            "Upstream provider behind the gateway (that provider's public default for its own API customers; Vercel's agreement with it may differ)",
             PROVIDER_DATA_POLICIES[upstreamFamily],
           )
         : ["Upstream provider behind the gateway: not pinned by this route (unknown)."]),
@@ -264,11 +267,12 @@ export function renderPrivacyFacts(input: {
     "",
     "Opengeni (this workspace):",
     "- The Opengeni software does not train models on chat content.",
-    "- Chats, files and Knowledge stay in the workspace until someone deletes them; Opengeni does not delete them by age. One exception: when a workspace's stored chat images (screenshots and viewed images) exceed its storage limit, the oldest images are removed.",
+    "- Chats, files and Knowledge stay in the workspace until someone deletes them; Opengeni does not delete them by age.",
+    `- Exception: images kept from tool results in chats (screenshots and images the agent viewed) are deleted ${RETAINED_IMAGE_DAYS} days after they are stored, and the oldest go sooner when the workspace's storage limit for them is reached.`,
     deployment.sessionArchiveIdleDays !== null
-      ? `- Chats idle for ${deployment.sessionArchiveIdleDays} days become read-only and move to long-term storage; they are not deleted.`
+      ? `- Chats idle for ${deployment.sessionArchiveIdleDays} days, unless marked to stay live, become read-only and move to long-term storage; they are not deleted.`
       : "- Idle chats are not moved to long-term storage on this deployment.",
-    `- ${memberRetentionText(live.memberRetention)}`,
+    "- When a member leaves the organization, an organization admin's setting in organization settings decides whether their content is kept or deleted after a set number of days.",
     `- Privacy policy: ${deployment.privacyPolicyUrl ?? "not configured on this deployment"}`,
     `- Terms of service: ${deployment.termsOfServiceUrl ?? "not configured on this deployment"}`,
     deployment.supportEmail
@@ -306,6 +310,7 @@ export function privacyFactsRouteForTurn(input: {
         id: provider.id,
         label: provider.label,
         kind: provider.kind,
+        api: provider.api,
         wireProfile: provider.wireProfile,
         builtin: provider.builtin,
         baseUrl: provider.baseUrl ?? null,
@@ -324,6 +329,7 @@ export function privacyFactsRouteForTurn(input: {
       id: azure ? "azure" : "openai",
       label: azure ? "Azure OpenAI" : "OpenAI",
       kind: "api-key",
+      api: "responses",
       wireProfile: azure ? "azure-openai" : "openai",
       builtin: true,
       baseUrl:
@@ -340,44 +346,25 @@ export function privacyFactsRouteForTurn(input: {
 
 /**
  * Reads the live settings. A failed read becomes unknown in the answer rather
- * than failing the tool; a person who may not read the organization's rule
- * is told where it lives.
+ * than failing the tool. The organization's departing-member rule is
+ * admin-only and the output can be seen by everyone in a shared chat, so the
+ * tool names where that rule lives instead of reading it.
  */
 export async function loadPrivacyFactsLive(input: {
   db: Database;
   accountId: string;
   workspaceId: string;
-  actorSubjectId: string | null;
   deploymentEuOnly: boolean;
   isEuOnly?: typeof isWorkspaceEuOnly;
-  getRetentionPolicy?: typeof getOrganizationRetentionPolicy;
 }): Promise<PrivacyFactsLive> {
   const readEuOnly = input.isEuOnly ?? isWorkspaceEuOnly;
-  const readRetention = input.getRetentionPolicy ?? getOrganizationRetentionPolicy;
   const euOnly = input.deploymentEuOnly
     ? true
     : await readEuOnly(input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
       }).catch(() => null);
-  let memberRetention: PrivacyFactsLive["memberRetention"] = null;
-  if (input.actorSubjectId) {
-    try {
-      const policy = await readRetention(input.db, {
-        organizationId: input.accountId,
-        actorSubjectId: input.actorSubjectId,
-      });
-      memberRetention =
-        policy.mode === "delete_after" && policy.retentionDays !== null
-          ? { mode: "delete_after", days: policy.retentionDays }
-          : { mode: "retain" };
-    } catch (error) {
-      memberRetention = nestedPostgresSqlState(error) === "42501" ? { mode: "not_visible" } : null;
-    }
-  } else {
-    memberRetention = { mode: "not_visible" };
-  }
-  return { euOnly, memberRetention };
+  return { euOnly };
 }
 
 export function createPrivacyFactsAttemptToolDefinition(input: {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ModelResidencyV1 } from "@opengeni/contracts";
+import { COMPUTER_SCREENSHOT_RETENTION_MS, type ModelResidencyV1 } from "@opengeni/contracts";
 import {
   PRIVACY_FACTS_TOOL_NAME,
   createPrivacyFactsAttemptToolDefinition,
@@ -11,6 +11,7 @@ import {
   type PrivacyFactsLive,
   type PrivacyFactsRoute,
 } from "../src/activities/agent-turn/privacy-facts";
+import { normalizedCodexRequestBody } from "@opengeni/codex";
 import {
   NOT_STATED,
   PROVIDER_DATA_POLICIES,
@@ -36,11 +37,12 @@ const EU_BEDROCK: ModelResidencyV1 = {
 function route(
   overrides: Partial<PrivacyFactsRoute> & {
     kind?: string;
+    api?: string;
     baseUrl?: string | null;
     wireProfile?: string | null;
   },
 ): PrivacyFactsRoute {
-  const { kind, baseUrl, wireProfile, ...rest } = overrides;
+  const { kind, api, baseUrl, wireProfile, ...rest } = overrides;
   return {
     modelId: "m",
     modelLabel: "Model",
@@ -48,6 +50,7 @@ function route(
       id: "p",
       label: "Provider",
       kind: kind ?? "api-key",
+      api: api ?? "responses",
       wireProfile: wireProfile === undefined ? "openai" : wireProfile,
       builtin: false,
       baseUrl: baseUrl === undefined ? null : baseUrl,
@@ -66,7 +69,7 @@ const DEPLOYMENT: PrivacyFactsDeployment = {
   supportEmail: "support@opengeni.ai",
   sessionArchiveIdleDays: 30,
 };
-const LIVE_OFF: PrivacyFactsLive = { euOnly: false, memberRetention: { mode: "retain" } };
+const LIVE_OFF: PrivacyFactsLive = { euOnly: false };
 
 describe("provider data policy table", () => {
   test("every row is complete and every known row cites provider documentation", () => {
@@ -90,8 +93,32 @@ describe("provider data policy table", () => {
   test("gaps stay unknown rather than guessed", () => {
     expect(PROVIDER_DATA_POLICIES.azure_foundry_fireworks.training).toBe(NOT_STATED);
     expect(PROVIDER_DATA_POLICIES.azure_foundry_fireworks.retention).toBe(NOT_STATED);
-    expect(PROVIDER_DATA_POLICIES.xai_subscription.retention).toBe(NOT_STATED);
+    expect(PROVIDER_DATA_POLICIES.claude_subscription.location).toBe(NOT_STATED);
     expect(PROVIDER_DATA_POLICIES.unknown.training).toBe("Unknown.");
+  });
+});
+
+describe("Opengeni's own storage claims in the table", () => {
+  test("say what the request code does with provider response storage", () => {
+    // The Codex transport forces store:false, so that row may say so.
+    const codex = normalizedCodexRequestBody(
+      { model: "gpt-6-luna", input: [], store: true },
+      (slug) => slug,
+    );
+    expect(codex.store).toBe(false);
+    expect(PROVIDER_DATA_POLICIES.codex_subscription.retention).toContain(
+      "Opengeni asks OpenAI not to store responses",
+    );
+    // Main chat turns on Azure and the OpenAI API leave `store` at its default.
+    expect(PROVIDER_DATA_POLICIES.openai_api.retention).toContain(
+      "Opengeni does not turn this off for chat turns",
+    );
+    expect(PROVIDER_DATA_POLICIES.azure_openai.retention).toContain(
+      "Opengeni does not turn that storage off on Azure",
+    );
+    for (const family of ["openai_api", "azure_openai", "vercel_ai_gateway"] as const) {
+      expect(PROVIDER_DATA_POLICIES[family].retention).not.toContain("asks OpenAI not to store");
+    }
   });
 });
 
@@ -114,12 +141,21 @@ describe("providerDataPolicyFamily", () => {
     ],
     [
       "azure-flash Fireworks on Foundry",
-      route({ wireProfile: "openai", baseUrl: AZURE_NEU, upstreamModelId: "FW-GLM-5.3-Flash" }),
+      route({
+        api: "chat",
+        wireProfile: "openai",
+        baseUrl: AZURE_NEU,
+        upstreamModelId: "FW-GLM-5.3-Flash",
+      }),
       "azure_foundry_fireworks",
     ],
     [
       "bedrock global profile behind the bridge",
-      route({ baseUrl: BEDROCK_BRIDGE, upstreamModelId: "global.anthropic.claude-opus-5-5" }),
+      route({
+        api: "anthropic-messages",
+        baseUrl: BEDROCK_BRIDGE,
+        upstreamModelId: "global.anthropic.claude-opus-5-5",
+      }),
       "amazon_bedrock",
     ],
     [
@@ -184,6 +220,56 @@ describe("providerDataPolicyFamily", () => {
       route({ baseUrl: "https://openai.azure.com.evil.example/v1" }),
       "unknown",
     ],
+    [
+      "Bedrock endpoint host",
+      route({
+        baseUrl: "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1",
+        upstreamModelId: "eu.anthropic.claude-sonnet-5-5",
+      }),
+      "amazon_bedrock",
+    ],
+    [
+      "a Bedrock-looking model id on a self-hosted server is not Bedrock",
+      route({ baseUrl: "http://vllm.internal:8000/v1", upstreamModelId: "qwen.qwen3-32b" }),
+      "unknown",
+    ],
+    [
+      "a Bedrock-looking model id on a workspace's own endpoint is not Bedrock",
+      route({
+        kind: "direct-compatible-workspace",
+        baseUrl: "https://my-bedrock.example.com/v1",
+        upstreamModelId: "openai.gpt-oss-120b",
+      }),
+      "unknown",
+    ],
+    [
+      "Claude through Anthropic's Messages API on an Azure host is not Azure OpenAI",
+      route({
+        api: "anthropic-messages",
+        baseUrl: "https://example.services.ai.azure.com/anthropic",
+        upstreamModelId: "claude-opus-5-5",
+      }),
+      "unknown",
+    ],
+    [
+      "a partner model over chat on an Azure host is not Azure OpenAI",
+      route({
+        api: "chat",
+        baseUrl: "https://example.services.ai.azure.com/models",
+        upstreamModelId: "Some-Partner-Model",
+      }),
+      "unknown",
+    ],
+    [
+      "Claude on a declared Azure route is still not Azure OpenAI",
+      route({
+        api: "anthropic-messages",
+        baseUrl: "https://example.services.ai.azure.com/anthropic",
+        upstreamModelId: "claude-opus-5-5",
+        residency: EU_AZURE,
+      }),
+      "unknown",
+    ],
     ["no provider", { ...route({}), provider: null }, "unknown"],
   ] as const)("%s", (_name, input, family) => {
     expect(providerDataPolicyFamily(input)).toBe(family);
@@ -238,21 +324,31 @@ describe("renderPrivacyFacts", () => {
     expect(text).toContain("Sources (checked 2026-10-30): https://learn.microsoft.com/");
     expect(text).toContain("Privacy policy: https://opengeni.ai/privacy");
     expect(text).toContain("support@opengeni.ai");
-    expect(text).toContain("Chats idle for 30 days become read-only");
+    expect(text).toContain("Chats idle for 30 days, unless marked to stay live, become read-only");
     expect(text).not.toContain("Declared as processing in the EU");
+  });
+
+  test("Opengeni's own retention lines follow the code that enforces them", () => {
+    const text = renderPrivacyFacts({ route: route({}), live: LIVE_OFF, deployment: DEPLOYMENT });
+    const days = COMPUTER_SCREENSHOT_RETENTION_MS / 86_400_000;
+    expect(Number.isInteger(days)).toBe(true);
+    expect(text).toContain(`are deleted ${days} days after they are stored`);
+    expect(text).toContain("Opengeni does not delete them by age.");
+    // The departing-member rule is admin-only; the tool names where it lives.
+    expect(text).toContain("an organization admin's setting in organization settings decides");
+    expect(text).not.toMatch(/deleted \d+ days after they leave/u);
   });
 
   test("EU-only on with an EU data zone route states the declared regions", () => {
     const text = renderPrivacyFacts({
       route: route({ wireProfile: "azure-openai", baseUrl: AZURE_NEU, residency: EU_AZURE }),
-      live: { euOnly: true, memberRetention: { mode: "delete_after", days: 60 } },
+      live: { euOnly: true },
       deployment: DEPLOYMENT,
     });
     expect(text).toContain(
       "Where this route runs: Declared as processing in the EU (swedencentral), deployment type azure_data_zone.",
     );
     expect(text).toContain("EU-only: on.");
-    expect(text).toContain("deleted 60 days after they leave");
   });
 
   test("a gateway route shows its pinned upstream, or says the upstream is unknown", () => {
@@ -270,14 +366,14 @@ describe("renderPrivacyFacts", () => {
       deployment: DEPLOYMENT,
     });
     expect(pinned).toContain(
-      "Upstream provider behind the gateway: Google Cloud Vertex AI (Gemini)",
+      "Upstream provider behind the gateway (that provider's public default for its own API customers; Vercel's agreement with it may differ): Google Cloud Vertex AI (Gemini)",
     );
   });
 
   test("unknown routes, unreadable settings and missing links are stated as such", () => {
     const text = renderPrivacyFacts({
       route: { ...route({ baseUrl: "http://vllm.internal:8000/v1" }), credentialSource: null },
-      live: { euOnly: null, memberRetention: null },
+      live: { euOnly: null },
       deployment: {
         privacyPolicyUrl: null,
         termsOfServiceUrl: null,
@@ -289,7 +385,6 @@ describe("renderPrivacyFacts", () => {
     expect(text).toContain("Sources: none; this provider is not in Opengeni's reviewed table.");
     expect(text).toContain("Paid through: Unknown.");
     expect(text).toContain("EU-only: unknown (could not be read).");
-    expect(text).toContain("When a member leaves the organization: unknown (could not be read).");
     expect(text).toContain("Privacy policy: not configured on this deployment");
     expect(text).toContain("no contact configured on this deployment");
     expect(text).toContain("Idle chats are not moved to long-term storage");
@@ -327,10 +422,9 @@ describe("renderPrivacyFacts", () => {
 });
 
 describe("loadPrivacyFactsLive", () => {
-  const db = {} as never;
-  const base = { db, accountId: "a", workspaceId: "w", actorSubjectId: "user:1" };
+  const base = { db: {} as never, accountId: "a", workspaceId: "w" };
 
-  test("deployment EU-only wins without a read; an admin sees the member rule", async () => {
+  test("deployment EU-only wins without a read", async () => {
     let euReads = 0;
     const live = await loadPrivacyFactsLive({
       ...base,
@@ -339,46 +433,24 @@ describe("loadPrivacyFactsLive", () => {
         euReads += 1;
         return false;
       },
-      getRetentionPolicy: async () => ({ mode: "delete_after", retentionDays: 45 }) as never,
     });
     expect(euReads).toBe(0);
-    expect(live).toEqual({ euOnly: true, memberRetention: { mode: "delete_after", days: 45 } });
+    expect(live).toEqual({ euOnly: true });
   });
 
-  test("a non-admin refusal is not_visible; other failures are unknown", async () => {
-    const refused = await loadPrivacyFactsLive({
-      ...base,
-      deploymentEuOnly: false,
-      isEuOnly: async () => true,
-      getRetentionPolicy: async () => {
-        throw Object.assign(new Error("organization administration required"), { code: "42501" });
-      },
-    });
-    expect(refused).toEqual({ euOnly: true, memberRetention: { mode: "not_visible" } });
-    const failed = await loadPrivacyFactsLive({
-      ...base,
-      deploymentEuOnly: false,
-      isEuOnly: async () => {
-        throw new Error("db down");
-      },
-      getRetentionPolicy: async () => {
-        throw new Error("db down");
-      },
-    });
-    expect(failed).toEqual({ euOnly: null, memberRetention: null });
-  });
-
-  test("a turn without a person cannot read the admin-only rule", async () => {
-    const live = await loadPrivacyFactsLive({
-      ...base,
-      actorSubjectId: null,
-      deploymentEuOnly: false,
-      isEuOnly: async () => false,
-      getRetentionPolicy: async () => {
-        throw new Error("must not be called");
-      },
-    });
-    expect(live.memberRetention).toEqual({ mode: "not_visible" });
+  test("reads the workspace setting, and a failed read is unknown", async () => {
+    expect(
+      await loadPrivacyFactsLive({ ...base, deploymentEuOnly: false, isEuOnly: async () => true }),
+    ).toEqual({ euOnly: true });
+    expect(
+      await loadPrivacyFactsLive({
+        ...base,
+        deploymentEuOnly: false,
+        isEuOnly: async () => {
+          throw new Error("db down");
+        },
+      }),
+    ).toEqual({ euOnly: null });
   });
 });
 

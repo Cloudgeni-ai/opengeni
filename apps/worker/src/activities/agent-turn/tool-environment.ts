@@ -934,7 +934,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           db,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          actorSubjectId: turn.initiatingHumanSubjectId ?? null,
           deploymentEuOnly: runSettings.requiredModelGeography === "eu",
         }),
     }),
