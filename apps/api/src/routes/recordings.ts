@@ -89,6 +89,7 @@ import {
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
+import { meetingCalendarLookup, meetingCalendarTitle } from "../meeting-calendar-title";
 import { errorMessage } from "@opengeni/contracts/values";
 
 const UPLOAD_URL_SECONDS = 15 * 60;
@@ -705,25 +706,52 @@ export function registerRecordingRoutes(
     // Computer or tab audio makes the microphone the owner, named in the live
     // preview and the transcript. The name Opengeni has for them comes first;
     // an embedding app's own users may have none, so theirs is next.
+    const startedAt = body.startedAt ? new Date(body.startedAt) : new Date();
+    // Both lookups run at once; neither failing stops the recording.
+    const [memberName, calendarTitle] = await Promise.all([
+      recordingMicrophoneIsOwner(body.tracks)
+        ? workspaceMemberDisplayName(db, actor).catch((error: unknown) => {
+            // The recording starts regardless; the microphone stays unnamed until then.
+            observability?.warn("couldn't read the recording owner's name", {
+              workspaceId: actor.workspaceId,
+              error: errorMessage(error),
+            });
+            return null;
+          })
+        : null,
+      // Without a name from the person, the owner's calendar event at the
+      // time names it. Capture is already running, so this never delays it.
+      body.title === undefined || body.titleSource === "app"
+        ? meetingCalendarTitle(
+            meetingCalendarLookup({
+              db,
+              settings: deps.settings,
+              workspaceId: actor.workspaceId,
+              subjectId: actor.subjectId,
+              ...(deps.meetingCalendarFetch ? { fetch: deps.meetingCalendarFetch } : {}),
+              onProblem: (problem) =>
+                observability?.warn("couldn't read the recording owner's calendar", {
+                  workspaceId: actor.workspaceId,
+                  providerDomain: problem.providerDomain,
+                  reason: problem.reason,
+                }),
+            }),
+            { subjectId: actor.subjectId, at: startedAt },
+          )
+        : null,
+    ]);
     const ownerName = recordingMicrophoneIsOwner(body.tracks)
-      ? ((await workspaceMemberDisplayName(db, actor).catch((error: unknown) => {
-          // The recording starts regardless; the microphone stays unnamed until then.
-          observability?.warn("couldn't read the recording owner's name", {
-            workspaceId: actor.workspaceId,
-            error: errorMessage(error),
-          });
-          return null;
-        })) ??
-        body.ownerName ??
-        null)
+      ? (memberName ?? body.ownerName ?? null)
       : null;
     const result = await guard(() =>
       createRecording(db, {
         ...actor,
         recordingId: body.recordingId,
-        title: body.title,
+        ...(calendarTitle
+          ? { title: calendarTitle, titleSource: "calendar" as const }
+          : { title: body.title, titleSource: body.titleSource }),
         visibility: body.visibility ?? settings.defaultVisibility ?? "private",
-        startedAt: body.startedAt ? new Date(body.startedAt) : undefined,
+        startedAt,
         externalRef: body.externalRef,
         metadata: body.metadata,
         tracks: body.tracks,

@@ -17,7 +17,8 @@ import { registerEnrollmentRoutes } from "../src/routes/enrollments";
 import { registerMachineRoutes } from "../src/routes/machines";
 
 // A Member of a shared workspace is a full teammate: signed in as themselves
-// with enrollments:read, they connect a machine only they can use, approve or
+// with enrollments:read, they connect a machine only they can use (Only me is
+// their connect command's default), approve or
 // decline its pairing code, and change or remove that machine. They cannot
 // connect a workspace or organization machine, change one, or reach another
 // person's Only me machine. Credentials acting for them without
@@ -262,7 +263,7 @@ afterAll(async () => {
 }, 60_000);
 
 describe("a Member connects and changes their own Only me machine", () => {
-  test("connect command: Only me works, This workspace is refused with a sentence", async () => {
+  test("connect command: Only me works and is the default, This workspace is refused with a sentence", async () => {
     if (!shared || !client || !app) return;
     const team = await teamWithMachines();
     const base = `/v1/workspaces/${team.workspaceId}/enrollments`;
@@ -294,8 +295,18 @@ describe("a Member connects and changes their own Only me machine", () => {
         403,
       ),
     ).toContain("Only workspace admins can connect a machine for the whole workspace.");
-    // Omitting the scope keeps the legacy workspace command, so it is refused too.
-    await refusal(await call(team.member.cookie, "POST", `${base}/token`, {}), 403);
+    // Omitting the scope gives the member an Only me command, never a refusal.
+    const defaulted = await call(team.member.cookie, "POST", `${base}/token`, {});
+    expect(defaulted.status).toBe(201);
+    expect(((await defaulted.json()) as { scope: string }).scope).toBe("user");
+    // Someone who may connect workspace machines keeps the original default.
+    const manager = await joinAsMember(team.accountId, team.workspaceId, "manager", [
+      ...MEMBER_PERMISSIONS,
+      "enrollments:manage",
+    ]);
+    const managerDefault = await call(manager.cookie, "POST", `${base}/token`, {});
+    expect(managerDefault.status).toBe(201);
+    expect(((await managerDefault.json()) as { scope: string }).scope).toBe("workspace");
 
     // The member sees their own machine and the workspace one, never the colleague's.
     const listed = await call(team.member.cookie, "GET", base);

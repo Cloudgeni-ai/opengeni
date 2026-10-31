@@ -77,6 +77,29 @@ export const GENERATED_ARTIFACT_CHECKS: readonly GeneratedArtifactCheck[] = [
   },
 ];
 
+export type RegeneratedArtifact = Pick<GeneratedArtifactCheck, "name" | "artifacts" | "regenerate">;
+
+/**
+ * Generated files the merge batcher regenerates when they are the only files
+ * a queued PR conflicts with main in, instead of ejecting the PR: every
+ * re-rendered artifact above plus the public API snapshot. Two PRs that both
+ * regenerated one of these conflict in Git although neither did anything
+ * wrong. See scripts/ci/regenerate-merge.ts.
+ */
+export const REGENERATED_ON_CONFLICT: readonly RegeneratedArtifact[] = [
+  ...GENERATED_ARTIFACT_CHECKS,
+  {
+    name: "Public API snapshot",
+    artifacts: ["scripts/public-api/surface.gen.json"],
+    regenerate: "bun run public-api:refresh",
+  },
+];
+
+/** Whether the entry keeps this file current: it is an artifact or inside an artifact directory. */
+export function regenerates(entry: RegeneratedArtifact, path: string): boolean {
+  return entry.artifacts.some((artifact) => path === artifact || path.startsWith(`${artifact}/`));
+}
+
 /**
  * Generated files (`*.gen.*`, `*.generated.*`) this step does not re-render,
  * with the reason. A new generated file must be added here or above.

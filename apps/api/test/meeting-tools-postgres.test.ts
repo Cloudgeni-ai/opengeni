@@ -14,6 +14,7 @@ import {
   createWorkspace,
   ensureManagedAccessForUser,
   finalizeRecording,
+  getRecording,
   listRecordingNotes,
   markRecordingChunksUploaded,
   reserveRecordingChunks,
@@ -97,7 +98,8 @@ async function fixture() {
   const actor = { workspaceId, subjectId: owner };
 
   async function meeting(input: {
-    title: string;
+    /** Unnamed, as a meeting nobody named, when not given. */
+    title?: string;
     visibility: "private" | "workspace";
     segments?: Array<{ at: number; label: string; text: string }>;
     /** Another workspace (and its organization) to store it in; this one by default. */
@@ -109,7 +111,7 @@ async function fixture() {
       ...storedIn,
       accountId: input.in?.accountId ?? accountId,
       recordingId,
-      title: input.title,
+      ...(input.title === undefined ? {} : { title: input.title }),
       visibility: input.visibility,
       tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
     });
@@ -443,6 +445,75 @@ describe("meeting tools", () => {
     expect(
       await outsider("meeting_notes_save", { meetingId: hidden, notes: "x", expectedRevision: 0 }),
     ).toMatchObject({ found: false });
+  });
+
+  test("saving notes with a name names a meeting nobody named, never one a person named", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const tools = toolsFor(scope.grantFor(scope.owner), crypto.randomUUID());
+    const titleOf = async (recordingId: string) =>
+      await getRecording(client!.db, { ...scope.actor, recordingId });
+
+    const unnamed = await scope.meeting({ visibility: "workspace" });
+    expect((await titleOf(unnamed)).titleSource).toBe("default");
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: unnamed,
+        notes: "## Decisions\n\n- Ship it.",
+        expectedRevision: 0,
+        title: "Launch go/no-go",
+      }),
+    ).toEqual({ saved: true, revision: 1, titleUsed: true, isError: false });
+    expect(await titleOf(unnamed)).toMatchObject({
+      title: "Launch go/no-go",
+      titleSource: "conversation",
+    });
+
+    const named = await scope.meeting({ title: "Budget", visibility: "workspace" });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: named,
+        notes: "Notes.",
+        expectedRevision: 0,
+        title: "Something generated",
+      }),
+    ).toEqual({ saved: true, revision: 1, titleUsed: false, isError: false });
+    expect(await titleOf(named)).toMatchObject({ title: "Budget", titleSource: "person" });
+
+    // A refused save names nothing.
+    const stale = await scope.meeting({ visibility: "workspace" });
+    await tools("meeting_notes_save", { meetingId: stale, notes: "a", expectedRevision: 0 });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: stale,
+        notes: "b",
+        expectedRevision: 0,
+        title: "Too late",
+      }),
+    ).toMatchObject({ isError: true, error: { code: "notes_changed" } });
+    expect((await titleOf(stale)).titleSource).toBe("default");
+
+    // A name that can't be used never costs the notes: blank is ignored and
+    // a long one is shortened.
+    const blank = await scope.meeting({ visibility: "workspace" });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: blank,
+        notes: "Notes.",
+        expectedRevision: 0,
+        title: "   ",
+      }),
+    ).toEqual({ saved: true, revision: 1, titleUsed: false, isError: false });
+    const long = await scope.meeting({ visibility: "workspace" });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: long,
+        notes: "Notes.",
+        expectedRevision: 0,
+        title: "Roadmap ".repeat(60),
+      }),
+    ).toMatchObject({ saved: true, titleUsed: true });
+    expect((await titleOf(long)).title.length).toBeLessThanOrEqual(300);
   });
 
   test("the person's own Only me meetings from their other workspaces of the organization, never another organization's", async () => {

@@ -18,7 +18,7 @@ test("the summary prompt asks for the notes in the agreed order, with the mentio
   expect(prompt).toContain("[Display name](person:<personId>)");
   expect(prompt).toContain("[Display name](speaker:<label>)");
   expect(prompt).toContain(
-    `meeting_notes_save: meetingId ${id}, the Markdown as notes, and expectedRevision 0`,
+    `meeting_notes_save: meetingId ${id}, the Markdown as notes, the name as title, and expectedRevision 0`,
   );
   expect(prompt).toContain("If that revision is above 0");
 });
@@ -35,4 +35,24 @@ test("a meeting without a title is named plainly", () => {
   expect(meetingSummaryPrompt({ recordingId: id, title: "  " })).toStartWith(
     `Write the notes for this meeting (meeting id ${id})`,
   );
+});
+
+test("the notes name the meeting, in its language", () => {
+  const prompt = meetingSummaryPrompt({ recordingId: id, title: null });
+  expect(prompt).toContain("Name the meeting too: a title of at most eight words");
+  expect(prompt).toContain("in the meeting's language");
+  expect(prompt).toContain("The name is kept only if nobody named the meeting yet.");
+});
+
+test("a date or an app's guess is not passed off as the meeting's name", () => {
+  for (const titleSource of ["default", "app"] as const) {
+    expect(
+      meetingSummaryPrompt({ recordingId: id, title: "Zoom meeting", titleSource }),
+    ).toStartWith(`Write the notes for this meeting (meeting id ${id})`);
+  }
+  for (const titleSource of ["person", "calendar", "conversation"] as const) {
+    expect(
+      meetingSummaryPrompt({ recordingId: id, title: "Acme renewal", titleSource }),
+    ).toStartWith(`Write the notes for the meeting "Acme renewal" (meeting id ${id})`);
+  }
 });

@@ -189,7 +189,11 @@ export async function startMeetingSummary(
     workspaceId: input.workspaceId,
     visibility: recording.visibility === "private" ? "user_private" : "workspace_shared",
     meetingSummary: { recordingId: recording.id, ownerSubjectId: recording.ownerSubjectId },
-    initialMessage: meetingSummaryPrompt({ recordingId: recording.id, title: recording.title }),
+    initialMessage: meetingSummaryPrompt({
+      recordingId: recording.id,
+      title: recording.title,
+      titleSource: recording.titleSource,
+    }),
     surface: "system",
     metrics: service.observability,
     resources: [],

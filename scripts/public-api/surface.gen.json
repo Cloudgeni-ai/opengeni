@@ -1854,6 +1854,28 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/agent-call-phones",
+      "sdk": [
+        "OpenGeniClient.getAgentCallHostPhones"
+      ],
+      "request": [],
+      "response": [
+        "AgentCallHostPhones"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/agent-call-phones",
+      "sdk": [
+        "OpenGeniClient.setAgentCallHostPhones"
+      ],
+      "request": [],
+      "response": [
+        "AgentCallHostPhones"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/agent-calls/:callId",
       "sdk": [
         "OpenGeniClient.getAgentCall"
@@ -10595,6 +10617,17 @@
         "$.workspaceId": "string!"
       }
     },
+    "AgentCallHostPhones": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.phones": "integer!",
+        "$.teammates": "boolean!",
+        "$.updatedAt": "string!"
+      }
+    },
     "AgentCallState": {
       "io": [
         "output"
@@ -11662,7 +11695,9 @@
       "shape": {
         "$": "object",
         "$.accountId": "string!",
+        "$.apiDebtMicros": "integer?",
         "$.balanceMicros": "integer!",
+        "$.creditsMicros": "integer?",
         "$.currency": "const!=[\"\\\"usd\\\"\"]",
         "$.generalBalanceMicros": "integer?",
         "$.heldCreditMicros": "integer?",
@@ -15327,6 +15362,7 @@
         "$.recordingId": "string!",
         "$.startedAt": "string?",
         "$.title": "string?",
+        "$.titleSource": "ref(RecordingCreateTitleSource)?",
         "$.tracks": "array!",
         "$.tracks[]": "object",
         "$.tracks[].mimeType": "string!",
@@ -16724,6 +16760,17 @@
         "$.workspaceId": "string!"
       }
     },
+    "FeedbackBreadcrumb": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.at": "string!",
+        "$.kind": "enum!=[\"\\\"lifecycle\\\"\",\"\\\"navigation\\\"\",\"\\\"network\\\"\"]",
+        "$.label": "string!"
+      }
+    },
     "FeedbackContext": {
       "io": [
         "input",
@@ -16732,6 +16779,8 @@
       "shape": {
         "$": "object",
         "$.appVersion": "string?",
+        "$.breadcrumbs": "array?",
+        "$.breadcrumbs[]": "ref(FeedbackBreadcrumb)",
         "$.buildNumber": "string?",
         "$.deviceModel": "string?",
         "$.locale": "string?",
@@ -16740,7 +16789,12 @@
         "$.platform": "string?",
         "$.recentErrors": "array?",
         "$.recentErrors[]": "ref(FeedbackRecentError)",
+        "$.recentExceptions": "array?",
+        "$.recentExceptions[]": "ref(FeedbackRecentException)",
+        "$.recentRequests": "array?",
+        "$.recentRequests[]": "ref(FeedbackRecentRequest)",
         "$.screen": "string?",
+        "$.sessionId": "string?",
         "$.source": "enum!=[\"\\\"desktop\\\"\",\"\\\"mobile\\\"\",\"\\\"web\\\"\"]",
         "$.timeZone": "string?",
         "$.trigger": "enum?=[\"\\\"menu\\\"\",\"\\\"shake\\\"\"]"
@@ -16758,6 +16812,33 @@
         "$.screen": "string?",
         "$.status": "integer?",
         "$.title": "string?"
+      }
+    },
+    "FeedbackRecentException": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.at": "string!",
+        "$.kind": "enum!=[\"\\\"error\\\"\",\"\\\"resource\\\"\",\"\\\"unhandled_rejection\\\"\"]",
+        "$.message": "string!",
+        "$.source": "string?",
+        "$.stack": "string?"
+      }
+    },
+    "FeedbackRecentRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.at": "string!",
+        "$.correlationId": "string?",
+        "$.durationMs": "integer!",
+        "$.method": "string!",
+        "$.path": "string!",
+        "$.status": "integer!"
       }
     },
     "FeedbackScreenshot": {
@@ -22075,6 +22156,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.allowPersonalWorkspaces": "boolean!",
         "$.createdAt": "string!",
         "$.enabled": "boolean!",
         "$.organizationId": "string!",
@@ -22200,6 +22282,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.crossProviderFailoverAvailable": "boolean?",
         "$.locked": "array!",
         "$.locked[]": "ref(ModelAccountSettingKey)",
         "$.organizationId": "string!",
@@ -22330,6 +22413,7 @@
         "$.limits.defaultVisibilityLocked": "boolean!",
         "$.limits.onlyMeAllowed": "boolean!",
         "$.organizationId": "string!",
+        "$.personalWorkspaceMonthlyCredits": "integer! null",
         "$.personalWorkspaces": "boolean!",
         "$.updatedAt": "string! null"
       }
@@ -23703,6 +23787,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.allowPersonalWorkspaces": "boolean?",
         "$.enabled": "boolean?",
         "$.timeoutMs": "integer?",
         "$.url": "string!",
@@ -23843,6 +23928,7 @@
         "$.startedAt": "string!",
         "$.state": "ref(RecordingState)!",
         "$.title": "string!",
+        "$.titleSource": "ref(RecordingTitleSource)?",
         "$.tracks": "array!",
         "$.tracks[]": "ref(RecordingTrack)",
         "$.transcript": "ref(RecordingTranscriptVersion)! null",
@@ -23902,6 +23988,14 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"h264-mp4\\\"\",\"\\\"vp9-webm\\\"\"]"
+      }
+    },
+    "RecordingCreateTitleSource": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"app\\\"\",\"\\\"person\\\"\"]"
       }
     },
     "RecordingDiarization": {
@@ -24057,6 +24151,14 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"capturing\\\"\",\"\\\"failed\\\"\",\"\\\"processing\\\"\",\"\\\"ready\\\"\"]"
+      }
+    },
+    "RecordingTitleSource": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"app\\\"\",\"\\\"calendar\\\"\",\"\\\"conversation\\\"\",\"\\\"default\\\"\",\"\\\"person\\\"\"]"
       }
     },
     "RecordingTrack": {
@@ -30041,6 +30143,7 @@
         "$": "object",
         "$.adminsSeePrivateSchedules": "boolean?",
         "$.defaultVisibility": "ref(SessionVisibility)?",
+        "$.personalWorkspaceMonthlyCredits": "integer? null",
         "$.personalWorkspaces": "boolean?"
       }
     },
@@ -31800,6 +31903,7 @@
         "$.sourceSessionId": "string! null",
         "$.updatedAt": "string!",
         "$.viewerAccess": "enum!=[\"\\\"manage\\\"\",\"\\\"use\\\"\"]",
+        "$.viewerCanMakePrivate": "boolean!",
         "$.visibility": "ref(SessionVisibility)!",
         "$.workspaceId": "string!"
       }
@@ -32487,6 +32591,7 @@
       "shape": {
         "$": "object",
         "$.canEdit": "boolean!",
+        "$.crossProviderFailoverAvailable": "boolean?",
         "$.entrySources": "object!",
         "$.entrySources.fallbackOrder": "object!",
         "$.entrySources.fallbackOrder{}": "enum=[\"\\\"organization\\\"\",\"\\\"workspace\\\"\"]",
@@ -32540,6 +32645,7 @@
         "$.id": "string!",
         "$.label": "string!",
         "$.logoUrl": "string?",
+        "$.organizationAllowed": "boolean?",
         "$.policyAllowed": "boolean?",
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",
@@ -33110,6 +33216,7 @@
       "AddDocumentRequest": "type",
       "AddWorkspaceMemberRequest": "type",
       "AgentCall": "type",
+      "AgentCallHostPhones": "type",
       "AgentCallState": "type",
       "AgentCapabilities": "type",
       "AgentCapabilityId": "type",
@@ -33631,8 +33738,11 @@
       "ExternalVaultProviderKind": "type",
       "FeatureUnavailableReason": "type",
       "Feedback": "type",
+      "FeedbackBreadcrumb": "type",
       "FeedbackContext": "type",
       "FeedbackRecentError": "type",
+      "FeedbackRecentException": "type",
+      "FeedbackRecentRequest": "type",
       "FeedbackScreenshot": "type",
       "FeedbackScreenshotUpload": "type",
       "FeedbackSentiment": "type",
@@ -35124,6 +35234,7 @@
       "isTransientRequestError": "value",
       "OPENGENI_API_CONTRACT_HEADER": "value",
       "OPENGENI_API_CONTRACT_REVISION": "value",
+      "OPENGENI_CORRELATION_HEADER": "value",
       "OPENGENI_MAINTENANCE_ERROR_CODE": "value",
       "OpenGeniAllowanceExhaustedError": "value",
       "OpenGeniApiContractMismatchError": "value",
@@ -38488,6 +38599,7 @@
       "SessionAppProps": "type",
       "SessionAppSurfaces": "type",
       "SessionShellSlots": "type",
+      "SessionStarter": "type",
       "SessionUiFeatures": "type",
       "SessionUiPreset": "type",
       "SessionViewState": "type"
@@ -38521,13 +38633,16 @@
       "isEffectivelyRunning": "value",
       "isRunningStatus": "value",
       "LOOSE_MATCH_BELOW": "value",
+      "OpenedChat": "type",
       "partitionPinnedSessions": "value",
       "PinnedSessionLists": "type",
       "rankLabel": "value",
       "recencyGroupFor": "value",
+      "RecentHomeEntry": "type",
       "recentSessionModelPresentation": "value",
       "recentSessionsForHome": "value",
       "recentSessionStatus": "value",
+      "recentSessionsWithOpened": "value",
       "relativeTimeLabel": "value",
       "resolveRenameSubmission": "value",
       "SESSION_AUTOMATION_WAIT_LABEL": "value",
@@ -40130,6 +40245,7 @@
       "fsWrite",
       "getAccessContext",
       "getAgentCall",
+      "getAgentCallHostPhones",
       "getAgentLearningSettings",
       "getAttachedBrowser",
       "getAuthRun",
@@ -40533,6 +40649,7 @@
       "sendEvent",
       "sendMessage",
       "sendTestEvent",
+      "setAgentCallHostPhones",
       "setAtlassianLifecycle",
       "setClaudeSubscriptionAccountAllocator",
       "setClaudeSubscriptionRotationSettings",
@@ -40885,6 +41002,7 @@
       "fsWrite",
       "getAccessContext",
       "getAgentCall",
+      "getAgentCallHostPhones",
       "getAgentLearningSettings",
       "getAttachedBrowser",
       "getAuthRun",
@@ -41281,6 +41399,7 @@
       "sendEvent",
       "sendMessage",
       "sendTestEvent",
+      "setAgentCallHostPhones",
       "setAtlassianLifecycle",
       "setClaudeSubscriptionAccountAllocator",
       "setClaudeSubscriptionRotationSettings",
@@ -41648,6 +41767,7 @@
       "fsWrite",
       "getAccessContext",
       "getAgentCall",
+      "getAgentCallHostPhones",
       "getAgentLearningSettings",
       "getAttachedBrowser",
       "getAuthRun",
@@ -42068,6 +42188,7 @@
       "sendEvent",
       "sendMessage",
       "sendTestEvent",
+      "setAgentCallHostPhones",
       "setAtlassianLifecycle",
       "setClaudeSubscriptionAccountAllocator",
       "setClaudeSubscriptionRotationSettings",
@@ -43389,6 +43510,9 @@
       "getAgentCall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCall\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getAgentCallHostPhones": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCallHostPhones\",\"optional\":false,\"type\":\"Identifier\"}}]}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getAgentLearningSettings": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"context\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"personal\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentLearningContext\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentLearningSettingsRecord\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -44652,6 +44776,9 @@
       ],
       "sendTestEvent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SendTestEventRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SendTestEventResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setAgentCallHostPhones": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"phones\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"teammates\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCallHostPhones\",\"optional\":false,\"type\":\"Identifier\"}}]}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setAtlassianLifecycle": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"qualifier\":{\"name\":\"AtlassianLifecycleActionRequest\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/atlassian\"},\"type\":\"TSImportType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"ConnectionResponse\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"./types\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -45973,6 +46100,9 @@
       "getAgentCall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCall\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getAgentCallHostPhones": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCallHostPhones\",\"optional\":false,\"type\":\"Identifier\"}}]}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getAgentLearningSettings": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"context\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"personal\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentLearningContext\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentLearningSettingsRecord\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -47186,6 +47316,9 @@
       "sendTestEvent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SendTestEventRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SendTestEventResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "setAgentCallHostPhones": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"phones\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"teammates\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCallHostPhones\",\"optional\":false,\"type\":\"Identifier\"}}]}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "setAtlassianLifecycle": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"qualifier\":{\"name\":\"AtlassianLifecycleActionRequest\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/atlassian\"},\"type\":\"TSImportType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"ConnectionResponse\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"./types\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -48296,6 +48429,9 @@
       ],
       "getAgentCall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCall\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "getAgentCallHostPhones": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCallHostPhones\",\"optional\":false,\"type\":\"Identifier\"}}]}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "getAgentLearningSettings": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"context\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"personal\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentLearningContext\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentLearningSettingsRecord\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -49452,6 +49588,9 @@
       ],
       "sendTestEvent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SendTestEventRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SendTestEventResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setAgentCallHostPhones": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"phones\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"teammates\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCallHostPhones\",\"optional\":false,\"type\":\"Identifier\"}}]}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setAtlassianLifecycle": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"qualifier\":{\"name\":\"AtlassianLifecycleActionRequest\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/atlassian\"},\"type\":\"TSImportType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"ConnectionResponse\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"./types\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -50807,6 +50946,9 @@
       "getAgentCall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCall\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getAgentCallHostPhones": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCallHostPhones\",\"optional\":false,\"type\":\"Identifier\"}}]}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getAgentLearningSettings": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"context\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"personal\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentLearningContext\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentLearningSettingsRecord\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -51998,6 +52140,9 @@
       ],
       "sendTestEvent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SendTestEventRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SendTestEventResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setAgentCallHostPhones": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"phones\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"teammates\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCallHostPhones\",\"optional\":false,\"type\":\"Identifier\"}}]}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setAtlassianLifecycle": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"qualifier\":{\"name\":\"AtlassianLifecycleActionRequest\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/atlassian\"},\"type\":\"TSImportType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"ConnectionResponse\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"./types\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -53135,6 +53280,9 @@
       "getAgentCall": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCall\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getAgentCallHostPhones": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCallHostPhones\",\"optional\":false,\"type\":\"Identifier\"}}]}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getAgentLearningSettings": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"literal\":{\"type\":\"Literal\",\"value\":\"context\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"personal\"},\"type\":\"TSLiteralType\"},{\"literal\":{\"type\":\"Literal\",\"value\":\"workspace\"},\"type\":\"TSLiteralType\"}]},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentLearningContext\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentLearningSettingsRecord\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -54326,6 +54474,9 @@
       ],
       "sendTestEvent": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SendTestEventRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SendTestEventResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "setAgentCallHostPhones": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"phones\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSNumberKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"teammates\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AgentCallHostPhones\",\"optional\":false,\"type\":\"Identifier\"}}]}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "setAtlassianLifecycle": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"qualifier\":{\"name\":\"AtlassianLifecycleActionRequest\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"@opengeni/contracts/atlassian\"},\"type\":\"TSImportType\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"qualifier\":{\"name\":\"ConnectionResponse\",\"optional\":false,\"type\":\"Identifier\"},\"source\":{\"type\":\"Literal\",\"value\":\"./types\"},\"type\":\"TSImportType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

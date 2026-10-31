@@ -37,6 +37,14 @@ export const recordingTrackKindValues = ["audio", "video"] as const;
 // Migration 0945. "browser": an agent's browser recording, kept out of meeting lists.
 // Migration 0962. "dictation": speech recorded to type it; private and short-lived.
 export const recordingPurposeValues = ["meeting", "browser", "dictation"] as const;
+// Migration 1132. Where a recording's title came from; see RecordingTitleSource.
+export const recordingTitleSourceValues = [
+  "person",
+  "calendar",
+  "conversation",
+  "app",
+  "default",
+] as const;
 export const recordingChunkStateValues = ["pending", "uploaded"] as const;
 export const recordingTranscriptVersionStateValues = [
   "queued",
@@ -85,6 +93,10 @@ export const recordings = pgTable(
       .array()
       .default(sql`'{}'::uuid[]`),
     title: text("title").notNull(),
+    // Migration 1132. Rows from before it are "person": nothing replaces their titles.
+    titleSource: text("title_source", { enum: recordingTitleSourceValues })
+      .notNull()
+      .default("person"),
     purpose: text("purpose", { enum: recordingPurposeValues }).notNull().default("meeting"),
     // Migration 0945. Why a browser recording's video could not be made.
     errorCode: text("error_code"),

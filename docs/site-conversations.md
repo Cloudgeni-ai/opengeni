@@ -316,6 +316,10 @@ without rewriting it; CI runs this before package builds, which otherwise
 regenerate the file and can hide stale committed bytes. The generated-runtime
 SDK tests execute those bytes through the real host bridge and preview transport;
 the Site conversations browser test also executes the injected script tag.
+The file keeps the bundle's names and holds about one statement per line
+(`scripts/mergeable-script-module.ts`), so PRs that change different SDK code
+merge without conflicts. Regenerate after merging main only when Git reports a
+conflict in it.
 
 `GET /v1/workspaces/:id/sessions?view=page&originSiteId=<uuid>` combines Site
 origin with ordinary project/search/date/visibility filters before pagination.

@@ -4595,8 +4595,18 @@ export type WorkspaceModelCatalogModel = ClientModel & {
     | undefined;
   credentialReadiness: ModelCredentialReadinessV1;
   creditFunding?: "promotional" | "general" | "unavailable" | undefined;
-  /** Exact workspace-policy verdict without exposing provider identity. */
+  /**
+   * Exact verdict of the policy the workspace runs with (its own lists within
+   * its organization's, and its credit switch), without exposing provider
+   * identity.
+   */
   policyAllowed?: boolean | undefined;
+  /**
+   * False when the organization's allowlist, a ceiling the workspace's own
+   * list can't widen, excludes the model. Absent when the organization allows
+   * every model, and from older servers. Ignores the credit switch.
+   */
+  organizationAllowed?: boolean | undefined;
   availability: ModelAvailabilityV1;
 };
 
@@ -4789,7 +4799,8 @@ export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewa
 
 /**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for
- * that dimension; an empty array is an explicit total block.
+ * that dimension; an empty array is an explicit total block. A model runs only
+ * when both this list and `organization` allow it.
  */
 export type WorkspaceModelAccessPolicy = {
   allowedProviders: string[] | null;
@@ -4799,7 +4810,10 @@ export type WorkspaceModelAccessPolicy = {
    * default it follows, or no restriction. Absent from older servers.
    */
   source?: "workspace" | "organization" | "none" | undefined;
-  /** The organization default the workspace follows without its own policy. */
+  /**
+   * The organization's list: what the workspace uses without its own policy,
+   * and a ceiling its own policy can only narrow.
+   */
   organization?: {
     allowedProviders: string[] | null;
     allowedModels: string[] | null;
@@ -4815,6 +4829,8 @@ export type WorkspaceModelAccessPolicy = {
 /**
  * Model defaults every workspace in an organization follows until it sets its
  * own (`GET/PATCH /v1/organizations/:id/model-defaults`, owners and admins).
+ * The allowlists are the exception: a ceiling every workspace stays within,
+ * which a workspace's own allowlist can only narrow.
  */
 export type OrganizationModelDefaults = {
   sessionDefaults: { model: string; reasoningEffort: ReasoningEffort } | null;
@@ -4913,6 +4929,11 @@ export type OrganizationModelAccountSettings = {
   locked: ModelAccountSettingKey[];
   version: number;
   updatedAt: string | null;
+  /**
+   * False when this deployment doesn't switch models when subscriptions run
+   * out, so `crossProviderFailover` has no effect here. Absent from older servers.
+   */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
@@ -4946,6 +4967,8 @@ export type WorkspaceModelAccountSettings = ModelAccountSettingsView & {
   version: number;
   updatedAt: string | null;
   canEdit: boolean;
+  /** As on the organization's settings: false when switching models is off here. */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
@@ -5161,6 +5184,12 @@ export type OrganizationPrivacySettings = {
   defaultVisibility: "private" | "workspace";
   /** Whether people have their own Personal workspace to see and work in. */
   personalWorkspaces: boolean;
+  /**
+   * The most each person can spend from the organization's credits in their
+   * own Personal workspace each calendar month (UTC), in USD micros; null for
+   * no limit. Work paid by their own model plans or keys doesn't count.
+   */
+  personalWorkspaceMonthlyCredits: number | null;
   /** Whether admins see that other people's Only me schedules exist, and can pause them. */
   adminsSeePrivateSchedules: boolean;
   limits: {
@@ -5179,6 +5208,8 @@ export type UpdateOrganizationPrivacySettingsRequest = {
   adminsSeePrivateSchedules?: boolean;
   /** Off: people no longer see or start new work in their Personal workspace. */
   personalWorkspaces?: boolean;
+  /** USD micros a month per person; null removes the limit. */
+  personalWorkspaceMonthlyCredits?: number | null;
 };
 
 /**
@@ -7116,6 +7147,19 @@ export type AgentCall = {
   endedAt: string | null;
   /** Whether this phone (app credential) took the call; null when unknown. */
   answeredHere: boolean | null;
+};
+
+/**
+ * Phones a product embedding Opengeni rings for agent calls itself, from the
+ * `session.agentCall.ringing` webhook with its own push credentials. Agents
+ * count them alongside the person's Opengeni app phones.
+ */
+export type AgentCallHostPhones = {
+  /** How many of the person's phones the product rings for agents, 1..20. */
+  phones: number;
+  /** Whether agents working for other members of a shared workspace may ring them too. */
+  teammates: boolean;
+  updatedAt: string;
 };
 
 // --- Organization-wide session list (org API key or organization owner) -----------------------

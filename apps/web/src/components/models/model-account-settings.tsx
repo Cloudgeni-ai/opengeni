@@ -200,6 +200,7 @@ function AccountRuleRows({
   onChange,
   fallbackOrder,
   modelLabel,
+  switchingAvailable,
 }: {
   values: ModelAccountSettingValues;
   saving: string | null;
@@ -215,6 +216,8 @@ function AccountRuleRows({
   /** The fallback order editor. */
   fallbackOrder: ReactNode;
   modelLabel: (id: string) => string;
+  /** False when this deployment doesn't switch models: no switch or order to show. */
+  switchingAvailable: boolean;
 }) {
   const providers = rotationProviders(values.rotation).filter(
     (provider) => accountCounts === undefined || (accountCounts[provider] ?? 0) >= 2,
@@ -275,19 +278,21 @@ function AccountRuleRows({
         "personalConnectionsAllowed",
         values.personalConnectionsAllowed ? switchRow("personalFallbackAllowed") : null,
       )}
-      {switchRow(
-        "crossProviderFailover",
-        values.crossProviderFailover ? (
-          <SettingRow
-            label={RULES.fallbackOrder.label}
-            description={
-              <FallbackSummary lines={fallbackLines(values.fallbackOrder, modelLabel)} />
-            }
-            hint={hints.fallbackOrder}
-            control={fallbackOrder}
-          />
-        ) : null,
-      )}
+      {switchingAvailable
+        ? switchRow(
+            "crossProviderFailover",
+            values.crossProviderFailover ? (
+              <SettingRow
+                label={RULES.fallbackOrder.label}
+                description={
+                  <FallbackSummary lines={fallbackLines(values.fallbackOrder, modelLabel)} />
+                }
+                hint={hints.fallbackOrder}
+                control={fallbackOrder}
+              />
+            ) : null,
+          )
+        : null}
     </>
   );
 }
@@ -468,6 +473,7 @@ export function OrganizationAccountRulesSection({
             )}
             onChange={(key, change) => void state.update(key, change)}
             modelLabel={modelLabel}
+            switchingAvailable={organization.crossProviderFailoverAvailable !== false}
             fallbackOrder={
               <FallbackOrderControl
                 order={organization.values.fallbackOrder}
@@ -655,9 +661,16 @@ export function useWorkspaceModelAccountSettings(
  * A locked rule is the organization's, so it is never a change.
  */
 export function accountRuleChanges(
-  settings: Pick<WorkspaceModelAccountSettings, "values" | "sources" | "entrySources">,
+  settings: Pick<
+    WorkspaceModelAccountSettings,
+    "values" | "sources" | "entrySources" | "crossProviderFailoverAvailable"
+  >,
 ): string[] {
-  const own = (rule: AccountRule) => settings.sources[rule] === "workspace";
+  // Switching rules do nothing on a deployment that doesn't switch models.
+  const inert = (rule: AccountRule) =>
+    settings.crossProviderFailoverAvailable === false &&
+    (rule === "crossProviderFailover" || rule === "fallbackOrder");
+  const own = (rule: AccountRule) => settings.sources[rule] === "workspace" && !inert(rule);
   const { values } = settings;
   return [
     ...(own("rotation")
@@ -804,6 +817,7 @@ export function WorkspaceAccountRulesSection({
           )}
           onChange={(key, change) => void state.update(key, change)}
           modelLabel={modelLabel}
+          switchingAvailable={settings.crossProviderFailoverAvailable !== false}
           fallbackOrder={
             <FallbackOrderControl
               order={settings.values.fallbackOrder}

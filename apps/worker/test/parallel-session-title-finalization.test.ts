@@ -195,6 +195,7 @@ for (const persistence of ["committed", "failed", "independent"] as const) {
             operation(),
           finalizeTurnOpStreamOps: async () => {},
           compactionModeOptions: {},
+          searchRecords: { form: "assistant" },
         } as unknown as Parameters<typeof runTurnStreamAttempt>[0]),
       ).rejects.toBe(unavailable);
       expect(order).toEqual(
