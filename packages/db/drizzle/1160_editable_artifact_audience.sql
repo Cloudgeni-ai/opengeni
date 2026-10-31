@@ -6,7 +6,8 @@
 -- keeps exactly the audience it has today and the previous release, which
 -- never writes these columns, keeps creating workspace artifacts.
 -- `owner_subject_id` names the person who may change the audience; Only me
--- requires one.
+-- requires one. The check is added NOT VALID, so it binds every new write at
+-- once without scanning the table under this lock; 1162 validates it.
 --
 -- Every read, edit, export, live session and catalog projection is decided by
 -- `opengeni_private.authorize_editable_artifact_actor`, so the rule lives
@@ -32,7 +33,7 @@ BEGIN
       ADD CONSTRAINT editable_artifacts_visibility_chk CHECK (
         visibility IN ('workspace_shared', 'user_private')
         AND (visibility = 'workspace_shared' OR owner_subject_id IS NOT NULL)
-      );
+      ) NOT VALID;
   END IF;
 END
 $constraint$;
