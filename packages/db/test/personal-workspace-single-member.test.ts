@@ -19,6 +19,7 @@ import {
   namedSubjectHasLiveWorkspaceAuthority,
   type DbClient,
 } from "../src";
+import { resolveAppActionTargets } from "../src/app-action-targets";
 
 setDefaultTimeout(120_000);
 
@@ -467,6 +468,46 @@ describe("a row in a Personal workspace is never membership to the runtime", () 
     );
     // The shared workspace's membership is unaffected.
     expect(await getWorkspaceGrant(client.db, org.owner, org.sharedWorkspaceId)).not.toBeNull();
+
+    // An approval card in a shared chat names nothing inside the Personal
+    // workspace, and a Personal workspace has no member to name.
+    const connectionId = await shared!.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${org.organizationId}, true),
+        set_config('opengeni.workspace_id', ${org.personalWorkspaceId}, true),
+        set_config('opengeni.subject_id', ${org.owner}, true)`;
+      const [row] = await tx<{ id: string }[]>`
+        insert into connections (account_id, workspace_id, subject_id, provider_domain, kind,
+          status, credential_encrypted, metadata)
+        values (${org.organizationId}, ${org.personalWorkspaceId}, ${org.owner},
+          'gmail.example', 'oauth2', 'active', 'sealed',
+          ${tx.json({ email: "owner@example.test" })})
+        returning id::text as id`;
+      return row!.id;
+    });
+    const removal = {
+      id: "deleteConnection",
+      pathParameters: { workspaceId: org.personalWorkspaceId, connectionId },
+      body: { expectedVersion: 1 },
+    };
+    const fromShared = {
+      accountId: org.organizationId,
+      workspaceId: org.sharedWorkspaceId,
+      subjectId: org.owner,
+    };
+    expect(await resolveAppActionTargets(client.db, fromShared, removal)).toEqual({});
+    const fromPersonal = { ...fromShared, workspaceId: org.personalWorkspaceId };
+    expect(
+      (
+        await resolveAppActionTargets(client.db, fromPersonal, {
+          id: "removeWorkspaceMember",
+          pathParameters: { workspaceId: org.personalWorkspaceId, subjectId: org.owner },
+        })
+      ).subjectId,
+    ).toEqual({ kind: "member" });
+    // The owner's own chat in Personal still names the connection.
+    expect(
+      (await resolveAppActionTargets(client.db, fromPersonal, removal)).connectionId,
+    ).toMatchObject({ kind: "connection", account: "owner@example.test" });
 
     // The owner's live authority still comes from the pointer.
     expect(
