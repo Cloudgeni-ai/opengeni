@@ -11,7 +11,10 @@
 -- 1. teaches the owner-only grant issuer the `connection` kind, so a person
 --    can turn their own login on or off in a workspace;
 -- 2. turns a new login on in the shared workspace it was added from, whatever
---    path added it, so things start usable where they are added;
+--    path added it, so things start usable where they are added. The existing
+--    owner-authority binder that every personal login insert already runs
+--    issues the grant next to the authority it creates, so no new privileged
+--    routine or trigger is added;
 -- 3. keeps every place an existing login already works: each shared
 --    workspace its owner belongs to.
 --
@@ -166,41 +169,74 @@ END
 $$;
 $create$, data_schema);
 
+  -- The connections insert trigger calls this binder for every personal
+  -- login. Its signature, owner and grants are unchanged; it now also turns
+  -- the new login on in the workspace it was added from, unless that is its
+  -- owner's Personal workspace, where every own login works without a grant.
   EXECUTE format($create$
-CREATE OR REPLACE FUNCTION opengeni_private.turn_on_own_login_where_added() RETURNS trigger
+CREATE OR REPLACE FUNCTION opengeni_private.bind_connection_owner_authority(p_account_id uuid, p_subject_id text, p_connection_id uuid DEFAULT NULL::uuid, p_workspace_id uuid DEFAULT NULL::uuid, OUT membership_id uuid, OUT authority_id uuid) RETURNS record
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', %1$I, 'opengeni_private', 'pg_temp'
     AS $$
 DECLARE
-  previous_lifecycle text := current_setting('opengeni.organization_tenancy_lifecycle', true);
-BEGIN
-  -- The owner role reads memberships and writes grants under FORCE ROW LEVEL
-  -- SECURITY only inside this lifecycle.
-  PERFORM set_config(
-    'opengeni.organization_tenancy_lifecycle', 'personal_resource_grant_management', true
+  previous_lifecycle text := pg_catalog.current_setting(
+    'opengeni.organization_tenancy_lifecycle', true
   );
-  -- A Personal workspace needs no grant: every own login works there.
-  IF NOT EXISTS (
-    SELECT 1 FROM organization_memberships membership
-    WHERE membership.id = NEW.owner_organization_membership_id
-      AND membership.account_id = NEW.account_id
-      AND membership.personal_workspace_id = NEW.workspace_id
-  ) THEN
-    INSERT INTO organization_user_resource_grants (
-      account_id, authority_id, owner_organization_membership_id, workspace_id,
-      session_id, action, mode, context, authority_epoch, generation, status
-    ) VALUES (
-      NEW.account_id, NEW.authority_id, NEW.owner_organization_membership_id, NEW.workspace_id,
-      NULL, 'connection.use', 'always', 'workspace_shared', NULL, 1, 'active'
-    )
-    ON CONFLICT DO NOTHING;
+  personal_workspace uuid;
+BEGIN
+  membership_id := NULL;
+  authority_id := NULL;
+  IF pg_catalog.pg_trigger_depth() = 0
+    OR p_account_id IS NULL OR p_subject_id IS NULL
+    OR p_account_id IS DISTINCT FROM nullif(
+      pg_catalog.current_setting('opengeni.account_id', true), ''
+    )::uuid
+  THEN
+    RETURN;
   END IF;
-  PERFORM set_config(
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle', 'connection_authority_binding', true
+  );
+  SELECT membership.id, membership.personal_workspace_id
+    INTO membership_id, personal_workspace
+  FROM organization_memberships membership
+  WHERE membership.account_id = p_account_id
+    AND membership.subject_id = p_subject_id
+    AND membership.status = 'active' AND membership.revoked_at IS NULL
+  FOR SHARE;
+  IF membership_id IS NOT NULL AND p_connection_id IS NOT NULL
+    AND p_workspace_id IS NOT NULL
+  THEN
+    authority_id := pg_catalog.gen_random_uuid();
+    INSERT INTO organization_user_resource_authorities (
+      id, account_id, organization_membership_id, resource_kind, resource_id,
+      origin_workspace_id, generation, status
+    ) VALUES (
+      authority_id, p_account_id, membership_id, 'connection', p_connection_id,
+      p_workspace_id, 1, 'active'
+    );
+    IF personal_workspace IS DISTINCT FROM p_workspace_id THEN
+      -- The owner role writes grants under FORCE ROW LEVEL SECURITY only
+      -- inside this lifecycle.
+      PERFORM pg_catalog.set_config(
+        'opengeni.organization_tenancy_lifecycle', 'personal_resource_grant_management', true
+      );
+      INSERT INTO organization_user_resource_grants (
+        account_id, authority_id, owner_organization_membership_id, workspace_id,
+        session_id, action, mode, context, authority_epoch, generation, status
+      ) VALUES (
+        p_account_id, authority_id, membership_id, p_workspace_id,
+        NULL, 'connection.use', 'always', 'workspace_shared', NULL, 1, 'active'
+      )
+      ON CONFLICT DO NOTHING;
+    END IF;
+  END IF;
+  PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle', coalesce(previous_lifecycle, ''), true
   );
-  RETURN NULL;
+  RETURN;
 EXCEPTION WHEN OTHERS THEN
-  PERFORM set_config(
+  PERFORM pg_catalog.set_config(
     'opengeni.organization_tenancy_lifecycle', coalesce(previous_lifecycle, ''), true
   );
   RAISE;
@@ -209,19 +245,6 @@ $$;
 $create$, data_schema);
 END
 $install$;
-
-REVOKE ALL ON FUNCTION opengeni_private.turn_on_own_login_where_added() FROM PUBLIC;
-
-DROP TRIGGER IF EXISTS connections_turn_on_own_login_where_added ON connections;
-CREATE TRIGGER connections_turn_on_own_login_where_added
-  AFTER INSERT ON connections
-  FOR EACH ROW
-  WHEN (
-    NEW.authority_scope = 'user'
-    AND NEW.authority_id IS NOT NULL
-    AND NEW.owner_organization_membership_id IS NOT NULL
-  )
-  EXECUTE FUNCTION opengeni_private.turn_on_own_login_where_added();
 
 -- Nothing that works today stops working: until now an own login worked in
 -- every shared workspace its owner belongs to, so it starts turned on in each

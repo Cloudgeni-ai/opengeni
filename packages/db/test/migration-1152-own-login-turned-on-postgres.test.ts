@@ -102,4 +102,54 @@ describe("1152 turns existing own logins on where their owners work (real Postgr
         'organization_user_resource_grants')`;
     expect(forced.every((row) => row.forced)).toBe(true);
   }, 180_000);
+
+  test("a new login starts turned on in the shared workspace it was added from, not elsewhere", async () => {
+    if (!owned) return;
+    const [account] = await owned.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('own login added') returning id`;
+    const accountId = account!.id;
+    const personal = await workspace(accountId, "adder personal");
+    const shared = await workspace(accountId, "added from");
+    const other = await workspace(accountId, "also a member");
+    const subjectId = `user:${crypto.randomUUID()}`;
+    await owned.admin`
+      insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+      values (${accountId}, ${subjectId}, 'active', ${personal})`;
+    await owned.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${accountId}, ${shared}, ${subjectId}), (${accountId}, ${other}, ${subjectId})`;
+    const add = (workspaceId: string, providerDomain: string) =>
+      owned!.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<{ authorityId: string; lifecycle: string }[]>`
+          insert into connections (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+          values (${accountId}, ${workspaceId}, ${subjectId}, ${providerDomain}, 'oauth2', 'ciphertext')
+          returning authority_id as "authorityId",
+            current_setting('opengeni.organization_tenancy_lifecycle', true) as lifecycle`;
+        return row!;
+      });
+
+    const fromShared = await add(shared, "linear.app");
+    expect(await turnedOnIn(fromShared.authorityId)).toEqual([shared]);
+    // The binder leaves the caller's lifecycle as it found it.
+    expect(fromShared.lifecycle ?? "").toBe("");
+
+    const fromPersonal = await add(personal, "notion.so");
+    expect(await turnedOnIn(fromPersonal.authorityId)).toEqual([]);
+
+    // A workspace login has no owner and gets no grant.
+    const workspaceLogin = await owned.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${accountId}, true)`;
+      await tx`select set_config('opengeni.workspace_id', ${shared}, true)`;
+      await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+      const [row] = await tx<{ authorityId: string | null; scope: string }[]>`
+        insert into connections (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+        values (${accountId}, ${shared}, null, 'slack.com', 'oauth2', 'ciphertext')
+        returning authority_id as "authorityId", authority_scope as scope`;
+      return row!;
+    });
+    expect(workspaceLogin).toEqual({ authorityId: null, scope: "workspace" });
+  }, 180_000);
 });
