@@ -7871,6 +7871,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:write"
   },
   {
+    "id": "removeSessionResources",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove",
+    "request": [
+      "RemoveSessionResourcesRequest"
+    ],
+    "response": [
+      "Session"
+    ],
+    "permission": "sessions:control"
+  },
+  {
     "id": "removeWorkspaceMember",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/members/:subjectId",

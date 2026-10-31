@@ -4195,6 +4195,8 @@ function SessionChatPane(props: {
             </LazyPart>
           ) : null}
 
+          {repositories.removalDialog}
+
           {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
 
           {/* One slim status row above the composer: the agent's wait, queue,

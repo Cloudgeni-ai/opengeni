@@ -1961,6 +1961,11 @@ export type Session = {
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
   resources: ResourceRef[];
+  /**
+   * Repositories a person removed from this chat, newest per repository. The
+   * agent can't attach one again; a person attaching it again ends its record.
+   */
+  removedRepositories?: SessionRemovedRepository[] | undefined;
   skills: SessionSkill[];
   tools: ToolRef[];
   toolPolicy: SessionToolPolicy;
@@ -2826,6 +2831,7 @@ export const SESSION_EVENT_TYPES = [
   "session.tool_policy.updated",
   "session.agent.updated",
   "session.skills.updated",
+  "session.resources.removed",
   "session.model_settings.updated",
   // An authorized person or host changed the task root's usage limit.
   "session.usage_limit.updated",
@@ -11388,6 +11394,25 @@ export type UpdateSessionSkillsRequest = {
   skills: SessionSkillInput[];
   /** The session's current `toolPolicyVersion` (shared CAS). */
   expectedVersion: number;
+};
+
+/**
+ * `POST .../sessions/:id/resources/remove`. Removes attached repositories from
+ * the session and its child sessions. Access ends on the next Git or GitHub
+ * call; the next turn removes the repository folders. Repositories that are
+ * not attached are ignored.
+ */
+export type RemoveSessionResourcesRequest = {
+  resources: Array<{ kind: "repository"; uri: string }>;
+};
+
+/** One repository removed from a session (`Session.removedRepositories`). */
+export type SessionRemovedRepository = {
+  id: string;
+  resource: RepositoryResourceRef;
+  removedAt: string;
+  /** True until the next turn has removed the folder from the sandbox. */
+  sandboxCleanupPending: boolean;
 };
 
 /** `PUT .../sessions/:id/agent`. Omitted agent fields keep their current values. */
