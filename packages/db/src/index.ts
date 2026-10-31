@@ -97,17 +97,24 @@ export * from "./subscription-plans";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 export * from "./subscription-plan-maintenance";
 import {
+  byokFeeFunding,
   chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
+  paidCreditReceipt,
+  receiptCreatedAt,
   planCreditDebit,
   planPostUseCreditAllocations,
+  readBillingBalance,
   type CreditUsage,
 } from "./credit-balances";
+import { chainedReceipt, feeDebtRepaid, paidCreditMark } from "./paid-credit";
 export {
   apiSpendableCreditMicros,
+  byokFeeSpendableMicros,
   chargeBillingOrigin,
   getBillingBalance,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   spendableCreditMicros,
   VOICE_CREDIT_USAGE,
@@ -305,7 +312,11 @@ export {
 } from "./accepted-subscription-authority";
 
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
-import { storedBillingOrigin, type BillingOrigin } from "@opengeni/contracts";
+import {
+  BYOK_PLATFORM_FEE_TYPE,
+  storedBillingOrigin,
+  type BillingOrigin,
+} from "@opengeni/contracts";
 import {
   normalizeOrganizationAccessPolicy,
   type OrganizationAccessPolicy,
@@ -6672,6 +6683,18 @@ export async function applyCreditLedgerEntryOnce(
       // Funding and usage adjustments share the expiry boundary too.
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      // Paid-for credit, refunds of it and unpaid credit record what they
+      // change in paid credit (paid-credit.ts).
+      const receipt = await paidCreditReceipt(scopedDb, {
+        accountId: input.accountId,
+        settledAt,
+        type: input.type,
+        amountMicros: input.amountMicros,
+        eligibleModelIds: input.eligibleModelIds ?? null,
+        metadata: input.metadata,
+        sourceType: input.sourceType ?? null,
+        sourceId: input.sourceId ?? null,
+      });
       const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
@@ -6683,9 +6706,9 @@ export async function applyCreditLedgerEntryOnce(
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
           idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
+          metadata: { ...input.metadata, ...receipt.metadata },
           occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
+          createdAt: receipt.createdAt,
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
@@ -6905,6 +6928,9 @@ export async function applyCreditDebitAfterUse(
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
     throw new Error("post-use credit debit requires a positive, safe integer micro amount");
   }
+  if (input.type === BYOK_PLATFORM_FEE_TYPE) {
+    throw new Error("a bring-your-own-key fee settles with applyByokPlatformFeeDebit");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
@@ -6924,61 +6950,154 @@ export async function applyCreditDebitAfterUse(
           input.usage,
         );
       }
-      const inserted = await scopedDb
-        .insert(schema.creditLedgerEntries)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId ?? null,
-          type: input.type,
-          amountMicros: -input.amountMicros,
-          sourceType: input.sourceType,
-          sourceId: input.sourceId,
-          usageOrigin,
-          idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
-          occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
-        })
-        .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
-        .returning({ id: schema.creditLedgerEntries.id });
-      if (inserted.length === 0) {
-        const [prior] = await scopedDb
-          .select({
-            accountId: schema.creditLedgerEntries.accountId,
-            workspaceId: schema.creditLedgerEntries.workspaceId,
-            type: schema.creditLedgerEntries.type,
-            amountMicros: schema.creditLedgerEntries.amountMicros,
-            sourceType: schema.creditLedgerEntries.sourceType,
-            sourceId: schema.creditLedgerEntries.sourceId,
-          })
-          .from(schema.creditLedgerEntries)
-          .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
-        if (
-          !prior ||
-          prior.accountId !== input.accountId ||
-          prior.workspaceId !== (input.workspaceId ?? null) ||
-          prior.type !== input.type ||
-          prior.amountMicros !== -input.amountMicros ||
-          prior.sourceType !== input.sourceType ||
-          prior.sourceId !== input.sourceId
-        ) {
-          throw new Error(
-            "post-use credit debit idempotency key conflicts with a different charge",
-          );
-        }
-      } else if (allocations.length) {
+      const insertedId = await insertPostUseDebit(scopedDb, input, usageOrigin, settledAt);
+      if (insertedId && allocations.length) {
         await scopedDb.insert(schema.creditDebitAllocations).values(
           allocations.map((allocation) => ({
             ...allocation,
             accountId: input.accountId,
-            debitEntryId: inserted[0]!.id,
+            debitEntryId: insertedId,
           })),
         );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
-        debitedMicros: inserted.length ? input.amountMicros : 0,
+        debitedMicros: insertedId ? input.amountMicros : 0,
       };
+    },
+  );
+}
+
+/**
+ * Insert an already-consumed charge once. A replay of the same idempotency
+ * key must be the same charge. Returns the new row's id, or null on replay.
+ */
+async function insertPostUseDebit(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    type: string;
+    amountMicros: number;
+    sourceType: string;
+    sourceId: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+  },
+  usageOrigin: BillingOrigin,
+  settledAt: string,
+  createdAt: SQL = sql`${settledAt}::timestamptz`,
+): Promise<string | null> {
+  const inserted = await scopedDb
+    .insert(schema.creditLedgerEntries)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId ?? null,
+      type: input.type,
+      amountMicros: -input.amountMicros,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      usageOrigin,
+      idempotencyKey: input.idempotencyKey,
+      metadata: input.metadata ?? {},
+      occurredAt: input.occurredAt ?? new Date(),
+      createdAt,
+    })
+    .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
+    .returning({ id: schema.creditLedgerEntries.id });
+  if (inserted.length) return inserted[0]!.id;
+  const [prior] = await scopedDb
+    .select({
+      accountId: schema.creditLedgerEntries.accountId,
+      workspaceId: schema.creditLedgerEntries.workspaceId,
+      type: schema.creditLedgerEntries.type,
+      amountMicros: schema.creditLedgerEntries.amountMicros,
+      sourceType: schema.creditLedgerEntries.sourceType,
+      sourceId: schema.creditLedgerEntries.sourceId,
+    })
+    .from(schema.creditLedgerEntries)
+    .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
+  if (
+    !prior ||
+    prior.accountId !== input.accountId ||
+    prior.workspaceId !== (input.workspaceId ?? null) ||
+    prior.type !== input.type ||
+    prior.amountMicros !== -input.amountMicros ||
+    prior.sourceType !== input.sourceType ||
+    prior.sourceId !== input.sourceId
+  ) {
+    throw new Error("post-use credit debit idempotency key conflicts with a different charge");
+  }
+  return null;
+}
+
+/**
+ * Settle one bring-your-own-key platform fee (`byok_platform_fee`), payable
+ * only from paid credit: an active paid plan's credit first (app use), then
+ * paid credits; the rest is fee debt the next top-up repays. Its row records
+ * the split (`planPaidMicros`, `creditPaidMicros`, `unfundedMicros`) and a
+ * paid-credit mark (paid-credit.ts). One balance read under the account lock.
+ */
+export async function applyByokPlatformFeeDebit(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    amountMicros: number;
+    sourceType: string;
+    sourceId: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
+  },
+): Promise<{
+  debitedMicros: number;
+  planPaidMicros: number;
+  creditPaidMicros: number;
+  unfundedMicros: number;
+}> {
+  if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
+    throw new Error("post-use credit debit requires a positive, safe integer micro amount");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+      const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
+      const { balance, paid } = await readBillingBalance(
+        scopedDb,
+        input.accountId,
+        undefined,
+        settledAt,
+        true,
+      );
+      const funding = byokFeeFunding(balance, paid, input.amountMicros, usageOrigin);
+      const insertedId = await insertPostUseDebit(
+        scopedDb,
+        {
+          ...input,
+          type: BYOK_PLATFORM_FEE_TYPE,
+          metadata: {
+            ...input.metadata,
+            ...chainedReceipt(
+              paid,
+              { type: BYOK_PLATFORM_FEE_TYPE, amountMicros: input.amountMicros },
+              { ...funding, ...paidCreditMark(paid), ...feeDebtRepaid(paid) },
+            ),
+          },
+        },
+        usageOrigin,
+        settledAt,
+        receiptCreatedAt(settledAt, paid),
+      );
+      return insertedId
+        ? { debitedMicros: input.amountMicros, ...funding }
+        : { debitedMicros: 0, planPaidMicros: 0, creditPaidMicros: 0, unfundedMicros: 0 };
     },
   );
 }
