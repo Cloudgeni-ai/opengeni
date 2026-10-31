@@ -103,8 +103,9 @@ pub(super) struct ClaimedDisk {
 impl ClaimedDisk {
     /// Makes the disk as long as `config` asks for, and tells the paused
     /// guest of `vm` if that is longer than it knows: the guest learns it
-    /// as it next runs, and grows its file system to fit. Returns its
-    /// length, or why it could not be done.
+    /// as it next runs, and grows its file system to fit before it answers
+    /// the restore notice, which says the length. Returns its length, or
+    /// why it could not be done.
     pub(super) async fn lengthen<E: Engine>(
         self,
         engine: &E,
