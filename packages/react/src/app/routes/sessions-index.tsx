@@ -53,7 +53,7 @@ import {
   type SessionRealtimeModel,
 } from "@opengeni/sdk";
 import { Link, type PageHost, useNavigate, usePage } from "../lib/navigation";
-import { ChevronDownIcon, CreditCardIcon, FolderIcon, LockIcon, PlusIcon } from "lucide-react";
+import { CreditCardIcon, LockIcon } from "lucide-react";
 import {
   createElement,
   lazy,
@@ -73,7 +73,6 @@ import {
   ChannelCreateDialog,
   type ProjectAudience,
 } from "../components/rail/channel-create-dialog";
-import { ProjectGlyph } from "../components/rail/project-glyph";
 import { ConsoleComposer, useDraftAttachments } from "../components/Composer";
 import { NewSessionStarters } from "../components/new-session-starters";
 import { NewSessionDraftSyncNotice } from "../components/new-session-draft-sync-notice";
@@ -90,6 +89,12 @@ import {
   visibilitySummary,
 } from "../components/session/new-session-settings-menu";
 import {
+  SessionSetupStrip,
+  runsOnSetupIcon,
+  visibilitySetupIcon,
+  type SessionSetupSetting,
+} from "../components/session/new-session-setup-strip";
+import {
   NO_SESSION_USAGE_LIMIT,
   parseSessionUsageLimitDraft,
   sessionUsageLimitCapability,
@@ -103,14 +108,6 @@ import {
 } from "../components/repository-picker";
 import { Button } from "../../ui/button";
 import { sessionDisplayTitle } from "../lib/session-rename";
-import {
-  DropdownMenu,
-  DropdownMenuCheck,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "../../ui/dropdown-menu";
 import { Notice } from "../../ui/notice";
 import { CreditRefusalNotice } from "../components/credits/credit-refusal-notice";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
@@ -223,7 +220,7 @@ import {
   resolveAmbientNewSessionProjectChannelId,
   resolveHydratedNewSessionProjectSelection,
 } from "./sessions-index-hydration";
-import type { Channel, SandboxBackend, Session } from "../types";
+import type { SandboxBackend, Session } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
 import { BotLaunchStrip, type BotLaunchState } from "../components/bots/bot-launch-strip";
 import { BotTemplateShortcuts } from "../components/bots/bot-template-shortcuts";
@@ -563,7 +560,8 @@ function SessionsIndexRouteContent({
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
   const fleet = useWorkspaceMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
-  // "+" > Runs on: where the new chat runs and on which environment or folder.
+  // Runs on (a setup chip above the message): where the new chat runs and on
+  // which environment or folder.
   const runsOnChoices = {
     draft,
     machines,
@@ -1807,6 +1805,51 @@ function SessionsIndexRouteContent({
       selectedPolicyRow?.catalog.creditFunding === "unavailable");
   const openCreditTopup = () => setCreditTopupOpen(true);
 
+  // Where the chat runs and who can see it are chosen beside the project chip,
+  // above the message, and only when there is something to choose.
+  const setupDisabled = busy || newSessionDraft.loading;
+  const runsOnSetup: SessionSetupSetting | null = hasRunsOnChoices(runsOnChoices)
+    ? {
+        label: "Runs on",
+        summary: runsOnSummary(runsOnChoices),
+        icon: runsOnSetupIcon(runsOnChoices),
+        disabled: setupDisabled,
+        renderMenu: () => (
+          <RunsOnMenuBody
+            {...runsOnChoices}
+            disabled={setupDisabled}
+            onChange={setDraft}
+            onComputeChange={setExplicitComputeDraft}
+            onRetryMachines={() => void fleet.refresh()}
+          />
+        ),
+      }
+    : null;
+  const visibilitySetup: SessionSetupSetting | null = hasVisibilityChoice({
+    personalWorkspace,
+    canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
+  })
+    ? {
+        label: "Visibility",
+        summary: visibilitySummary(draft.visibility),
+        icon: visibilitySetupIcon(draft.visibility),
+        disabled: setupDisabled,
+        renderMenu: (close) => (
+          <VisibilityMenuBody
+            value={draft.visibility}
+            disabled={setupDisabled}
+            onChange={(visibility) => {
+              visibilityChosenRef.current = true;
+              // A shared chat can't go in an Only me project.
+              if (visibility === "workspace" && selectedProjectOnlyMe) selectProject(null);
+              setDraft((current) => ({ ...current, visibility }));
+              close();
+            }}
+          />
+        ),
+      }
+    : null;
+
   return createElement(
     LightboxProvider,
     null,
@@ -1974,50 +2017,6 @@ function SessionsIndexRouteContent({
                   onToolSelectionChange={(selection) => {
                     changeConnectorSelection(selection);
                   }}
-                  {...(hasRunsOnChoices(runsOnChoices)
-                    ? {
-                        runsOn: {
-                          summary: runsOnSummary(runsOnChoices),
-                          disabled: busy || newSessionDraft.loading,
-                          panel: (
-                            <RunsOnMenuBody
-                              {...runsOnChoices}
-                              disabled={busy || newSessionDraft.loading}
-                              onChange={setDraft}
-                              onComputeChange={setExplicitComputeDraft}
-                              onRetryMachines={() => void fleet.refresh()}
-                            />
-                          ),
-                        },
-                      }
-                    : {})}
-                  {...(hasVisibilityChoice({
-                    personalWorkspace,
-                    canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
-                  })
-                    ? {
-                        visibility: {
-                          summary: visibilitySummary(draft.visibility),
-                          disabled: busy || newSessionDraft.loading,
-                          panel: (
-                            <VisibilityMenuBody
-                              value={draft.visibility}
-                              disabled={busy || newSessionDraft.loading}
-                              onChange={(visibility) => {
-                                visibilityChosenRef.current = true;
-                                // A shared chat can't go in an Only me project.
-                                if (visibility === "workspace" && selectedProjectOnlyMe)
-                                  selectProject(null);
-                                setDraft((current) => ({
-                                  ...current,
-                                  visibility,
-                                }));
-                              }}
-                            />
-                          ),
-                        },
-                      }
-                    : {})}
                   {...(usageLimitCapability === "enabled"
                     ? {
                         usageLimit: {
@@ -2163,7 +2162,7 @@ function SessionsIndexRouteContent({
               </>
             }
             header={
-              chatList || botLaunch ? (
+              chatList || botLaunch || runsOnSetup || visibilitySetup ? (
                 <>
                   {botLaunch ? (
                     <BotLaunchStrip
@@ -2172,19 +2171,25 @@ function SessionsIndexRouteContent({
                       onDismiss={dismissBotLaunch}
                     />
                   ) : null}
-                  {chatList ? (
+                  {chatList || runsOnSetup || visibilitySetup ? (
                     <SessionSetupStrip
                       disabled={busy || newSessionDraft.loading}
-                      channels={
-                        canCreatePrivateChat
-                          ? channelsQuery.channels
-                          : channelsQuery.channels.filter(
-                              (channel) => channel.visibility !== "private",
-                            )
+                      project={
+                        chatList
+                          ? {
+                              channels: canCreatePrivateChat
+                                ? channelsQuery.channels
+                                : channelsQuery.channels.filter(
+                                    (channel) => channel.visibility !== "private",
+                                  ),
+                              selectedChannelId,
+                              onChange: selectProject,
+                              onCreate: () => setProjectDialogOpen(true),
+                            }
+                          : null
                       }
-                      selectedChannelId={selectedChannelId}
-                      onChannelChange={selectProject}
-                      onCreateProject={() => setProjectDialogOpen(true)}
+                      runsOn={runsOnSetup}
+                      visibility={visibilitySetup}
                     />
                   ) : null}
                 </>
@@ -2465,35 +2470,6 @@ function RecentSessionRow({
   );
 }
 
-// Setup selections sit above the prompt so the footer remains an action row.
-// Repo stays out of the compute band so that band only shows when rigs /
-// machines exist. Tools and repos live under “+” at every width.
-function SessionSetupStrip({
-  disabled,
-  channels,
-  selectedChannelId,
-  onChannelChange,
-  onCreateProject,
-}: {
-  disabled: boolean;
-  channels: Channel[];
-  selectedChannelId: string | null;
-  onChannelChange: (channelId: string | null) => void;
-  onCreateProject: () => void;
-}) {
-  return (
-    <div className="flex min-w-0 items-center gap-1.5 border-b border-border/70 px-3 py-2 sm:px-4">
-      <SessionFolderPicker
-        channels={channels}
-        selectedChannelId={selectedChannelId}
-        disabled={disabled}
-        onChange={onChannelChange}
-        onCreateProject={onCreateProject}
-      />
-    </div>
-  );
-}
-
 /** Keep model policy adjacent to voice/send in the bottom action row. */
 function SessionModelControl({
   hasImageAttachments,
@@ -2541,67 +2517,6 @@ function SessionModelControl({
         context.setLatencyMode(latencyMode);
       }}
     />
-  );
-}
-
-function SessionFolderPicker({
-  channels,
-  selectedChannelId,
-  disabled,
-  onChange,
-  onCreateProject,
-}: {
-  channels: Channel[];
-  selectedChannelId: string | null;
-  disabled: boolean;
-  onChange: (channelId: string | null) => void;
-  onCreateProject: () => void;
-}) {
-  const selected = channels.find((channel) => channel.id === selectedChannelId) ?? null;
-  const label = selected?.name ?? "Default";
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={disabled}
-          aria-label={`Project: ${label}${selected?.visibility === "private" ? ", Only me" : ""}`}
-          title={label}
-          className="h-8 min-w-0 max-w-[12rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg sm:shrink-0"
-        >
-          <ProjectGlyph project={selected} />
-          <span className="min-w-0 truncate">{label}</span>
-          {selected?.visibility === "private" ? (
-            <LockIcon aria-hidden="true" className="size-3 shrink-0" />
-          ) : null}
-          <ChevronDownIcon className="size-3 shrink-0" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-60">
-        <DropdownMenuLabel>Save new session in</DropdownMenuLabel>
-        <DropdownMenuItem onSelect={() => onChange(null)}>
-          <FolderIcon />
-          <span className="min-w-0 flex-1 truncate">Default</span>
-          <DropdownMenuCheck checked={selectedChannelId === null} />
-        </DropdownMenuItem>
-        {channels.map((channel) => (
-          <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
-            <ProjectGlyph project={channel} className="size-4" />
-            <span className="min-w-0 flex-1 truncate">{channel.name}</span>
-            {channel.visibility === "private" ? (
-              <LockIcon aria-label="Only me" className="size-3.5 shrink-0 text-fg-subtle" />
-            ) : null}
-            <DropdownMenuCheck checked={channel.id === selectedChannelId} />
-          </DropdownMenuItem>
-        ))}
-        <DropdownMenuItem onSelect={onCreateProject}>
-          <PlusIcon />
-          New project
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 
@@ -2904,7 +2819,7 @@ function ComputeTargetControl(props: {
     fleetLoading: fleet.loading,
   });
 
-  // Where it runs is chosen under "+" > Runs on. Only what needs attention
+  // Where it runs is chosen with the Runs on chip above the message. Only what needs attention
   // shows under the composer: why Send waits on where it runs (with a retry
   // for a failed machine load), a catalog that couldn't be verified, and the
   // personal resources this chat will use.
