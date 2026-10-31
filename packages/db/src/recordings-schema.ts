@@ -244,6 +244,28 @@ export const recordingTranscriptSegments = pgTable(
 /** Word timing inside a segment, in milliseconds from the recording start. */
 export type RecordingWordTiming = { text: string; startMs: number; endMs: number };
 
+/**
+ * Migration 1148. One transcribed piece of one track, kept with its version
+ * while the version is processing so a retry reuses it instead of asking
+ * (and paying) the provider again. Removed when the version completes or fails.
+ */
+export const recordingTranscriptPieceResults = pgTable(
+  "recording_transcript_piece_results",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    recordingId: uuid("recording_id").notNull(),
+    versionId: uuid("version_id").notNull(),
+    trackNumber: integer("track_number").notNull(),
+    pieceIndex: integer("piece_index").notNull(),
+    /** SHA-256 of what was asked: model, options, the piece and the audio. */
+    requestKey: text("request_key").notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.versionId, table.trackNumber, table.pieceIndex] })],
+);
+
 export const recordingPeople = pgTable(
   "recording_people",
   {

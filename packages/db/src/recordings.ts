@@ -2503,6 +2503,7 @@ export async function completeRecordingTranscriptVersion(
       })
       .where(eq(schema.recordingTranscriptVersions.id, version.id))
       .returning();
+    await deletePieceResults(tx, input.workspaceId, version.id);
     const labels = new Set(
       ordered.map((segment) => segment.speakerLabel).filter((label): label is string => !!label),
     );
@@ -2687,6 +2688,126 @@ export async function completeRecordingTranscriptVersion(
 }
 
 /** Record that a version cannot be made. The recording fails only if it has no transcript. */
+/** One piece of one track a provider already transcribed for a version still being made. */
+export type RecordingTranscriptPieceResult = {
+  trackNumber: number;
+  pieceIndex: number;
+  /** SHA-256 of what was asked; a result is reused only for the same question. */
+  requestKey: string;
+  result: Record<string, unknown>;
+};
+
+/**
+ * The pieces a version's earlier attempts already got back, so a retry
+ * reuses them instead of asking and paying the provider again. Empty unless
+ * the version is processing under this owner.
+ */
+export async function listRecordingTranscriptPieceResults(
+  db: Database,
+  input: RecordingActor & { versionId: string; processingOwner: string },
+): Promise<RecordingTranscriptPieceResult[]> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    return await tx
+      .select({
+        trackNumber: schema.recordingTranscriptPieceResults.trackNumber,
+        pieceIndex: schema.recordingTranscriptPieceResults.pieceIndex,
+        requestKey: schema.recordingTranscriptPieceResults.requestKey,
+        result: schema.recordingTranscriptPieceResults.result,
+      })
+      .from(schema.recordingTranscriptPieceResults)
+      .innerJoin(
+        schema.recordingTranscriptVersions,
+        and(
+          eq(
+            schema.recordingTranscriptVersions.workspaceId,
+            schema.recordingTranscriptPieceResults.workspaceId,
+          ),
+          eq(
+            schema.recordingTranscriptVersions.id,
+            schema.recordingTranscriptPieceResults.versionId,
+          ),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.recordingTranscriptPieceResults.workspaceId, input.workspaceId),
+          eq(schema.recordingTranscriptPieceResults.versionId, input.versionId),
+          eq(schema.recordingTranscriptVersions.state, "processing"),
+          eq(schema.recordingTranscriptVersions.processingOwner, input.processingOwner),
+        ),
+      );
+  });
+}
+
+/**
+ * Keep a piece a provider transcribed, while the version is still being
+ * made by this owner; a later answer for the same piece replaces it.
+ * Returns whether it was kept.
+ */
+export async function saveRecordingTranscriptPieceResult(
+  db: Database,
+  input: RecordingActor & {
+    versionId: string;
+    processingOwner: string;
+  } & RecordingTranscriptPieceResult,
+): Promise<boolean> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [version] = await tx
+      .select({
+        accountId: schema.recordingTranscriptVersions.accountId,
+        recordingId: schema.recordingTranscriptVersions.recordingId,
+      })
+      .from(schema.recordingTranscriptVersions)
+      .where(
+        and(
+          eq(schema.recordingTranscriptVersions.workspaceId, input.workspaceId),
+          eq(schema.recordingTranscriptVersions.id, input.versionId),
+          eq(schema.recordingTranscriptVersions.state, "processing"),
+          eq(schema.recordingTranscriptVersions.processingOwner, input.processingOwner),
+        ),
+      )
+      .for("share");
+    if (!version) return false;
+    await tx
+      .insert(schema.recordingTranscriptPieceResults)
+      .values({
+        accountId: version.accountId,
+        workspaceId: input.workspaceId,
+        recordingId: version.recordingId,
+        versionId: input.versionId,
+        trackNumber: input.trackNumber,
+        pieceIndex: input.pieceIndex,
+        requestKey: input.requestKey,
+        result: input.result,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.recordingTranscriptPieceResults.versionId,
+          schema.recordingTranscriptPieceResults.trackNumber,
+          schema.recordingTranscriptPieceResults.pieceIndex,
+        ],
+        set: {
+          requestKey: input.requestKey,
+          result: input.result,
+          createdAt: sql`clock_timestamp()`,
+        },
+      });
+    return true;
+  });
+}
+
+/** A finished version no longer needs the pieces kept for its retries. */
+async function deletePieceResults(tx: Database, workspaceId: string, versionId: string) {
+  await tx
+    .delete(schema.recordingTranscriptPieceResults)
+    .where(
+      and(
+        eq(schema.recordingTranscriptPieceResults.workspaceId, workspaceId),
+        eq(schema.recordingTranscriptPieceResults.versionId, versionId),
+      ),
+    );
+}
+
 export async function failRecordingTranscriptVersion(
   db: Database,
   input: RecordingActor & { versionId: string; processingOwner: string; errorCode: string },
@@ -2711,6 +2832,7 @@ export async function failRecordingTranscriptVersion(
       )
       .returning();
     if (!failed) return null;
+    await deletePieceResults(tx, input.workspaceId, failed.id);
     const recording = await lockRecording(tx, input.workspaceId, failed.recordingId);
     const [current] = await tx
       .select({ id: schema.recordingTranscriptVersions.id })
