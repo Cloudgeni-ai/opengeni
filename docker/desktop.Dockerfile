@@ -347,6 +347,8 @@ ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 
 # ---- Layer 1: headless tool layer (parity with docker/sandbox.Dockerfile) ----
+# Agents' shell loops mint idempotency keys with $(uuidgen); on Debian it comes
+# from uuid-runtime, not util-linux, and the build proves it prints a v4 UUID.
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     printf '%s\n' \
@@ -355,7 +357,7 @@ RUN set -eux; \
     base_packages=" \
         bash ca-certificates coreutils curl gpg git jq openssh-client postgresql-client \
         fuse3 procps rclone ripgrep unzip wget python3 python3-pip python3-venv python-is-python3 \
-        apt-transport-https net-tools netcat-openbsd sudo util-linux xxd file \
+        apt-transport-https net-tools netcat-openbsd sudo util-linux uuid-runtime xxd file \
     "; \
     for attempt in 1 2 3; do \
         rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
@@ -363,7 +365,8 @@ RUN set -eux; \
         if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); \
     done; \
     rm -rf /var/lib/apt/lists/*; \
-    psql --version
+    psql --version; \
+    uuidgen | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
 
 # Node.js LTS from NodeSource. Pin the 20.x LTS line instead of inheriting the
 # distribution's moving Node release, mirroring the gh keyring+repo layer.

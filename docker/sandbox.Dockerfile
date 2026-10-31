@@ -359,6 +359,8 @@ ARG TARGETARCH
 ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.47-1~deb13u1
 ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261022T170820Z
 
+# Agents' shell loops mint idempotency keys with $(uuidgen); on Debian it comes
+# from uuid-runtime, not util-linux, and the build proves it prints a v4 UUID.
 RUN set -eux; \
     printf '%s\n' \
       "deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main" \
@@ -382,6 +384,7 @@ RUN set -eux; \
         ripgrep \
         unzip \
         util-linux \
+        uuid-runtime \
         wget \
         xvfb \
         x11vnc \
@@ -418,6 +421,7 @@ RUN set -eux; \
     printf '%s\n' /usr/lib/chromium/chromium > /etc/opengeni/browser-engine; \
     test -x /usr/lib/chromium/chromium; \
     psql --version; \
+    uuidgen | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'; \
     dbus-uuidgen --ensure=/var/lib/dbus/machine-id; \
     ln -sf /var/lib/dbus/machine-id /etc/machine-id
 
