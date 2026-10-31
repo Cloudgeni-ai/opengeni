@@ -140,4 +140,21 @@ describe("regenerating a merge of main", () => {
       "is not checked out at",
     );
   });
+
+  test("a blobless clone is refused before merging, since its merge can't check out", async () => {
+    const repo = divergent();
+    repo.git("config", "uploadpack.allowFilter", "true");
+    const cwd = mkdtempSync(join(tmpdir(), "regenerate-merge-clone-"));
+    repos.push(cwd);
+    const git = (...args: string[]) => {
+      const child = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      if (child.exitCode !== 0)
+        throw new Error(`git ${args.join(" ")}: ${child.stderr.toString()}`);
+    };
+    git("clone", "-q", "--no-checkout", "--filter=blob:none", `file://${repo.cwd}`, ".");
+    git("checkout", "-q", "--detach", repo.head);
+    await expect(regenerateMerge({ ...options(repo), cwd })).rejects.toThrow(
+      "The checkout is a partial clone",
+    );
+  });
 });

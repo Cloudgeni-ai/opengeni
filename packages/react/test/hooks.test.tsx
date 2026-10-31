@@ -3289,13 +3289,22 @@ describe("useComposer queue-vs-steer", () => {
     await flush();
 
     await flushing(async () => await hook.result.current.pause());
-    expect(hook.result.current.stoppingAttempt).toBeNull();
+    // The receipt still reports physical settlement, so the current attempt is
+    // shown stopping before any queue snapshot refresh arrives.
+    expect(hook.result.current.stoppingAttempt).toBe("current");
     expect(hook.result.current.effectiveControl).toMatchObject({
       state: "paused",
       controlVersion: 4,
     });
 
+    // A snapshot that is still behind the receipt does not end the projection.
+    await hook.rerender({ ...queueSnapshot([]).effectiveControl, controlVersion: 3 });
+    expect(hook.result.current.stoppingAttempt).toBe("current");
+
+    // Once the authoritative control catches up, the queue snapshot owns the
+    // stopping projection, in the same render.
     await hook.rerender({ ...pendingControl, settlement: null });
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     expect(hook.result.current.effectiveControl?.state).toBe("paused");
     await hook.unmount();
   });
@@ -3349,10 +3358,13 @@ describe("useComposer queue-vs-steer", () => {
 
     await flushing(async () => await hook.result.current.pause());
     expect(hook.result.current.effectiveControl?.controlEtag).toBe("control-4");
+    // Nothing was interrupted, so nothing is shown stopping.
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     await flushing(async () => await hook.result.current.resume());
 
     expect(resumeEtags).toEqual(["control-4"]);
     expect(hook.result.current.effectiveControl?.controlEtag).toBe("control-5");
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     await hook.unmount();
   });
 

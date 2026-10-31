@@ -239,6 +239,21 @@ admitted and revalidated against a `connected_machine.use` grant. Workspace acce
 loss removes workspace resources immediately without deleting the user's resources;
 cross-organization visibility remains impossible.
 
+### Available here
+
+Workspace settings › Available here shows what agent turns in one workspace can
+use, grouped by owner: the workspace's own things, the organization's things
+that reach the workspace, and the viewer's own things. It reads the same lists
+each kind's own page reads (connector installations, Connected Machines, rigs,
+vaults, Skills and Knowledge), so it never shows anything those pages would not:
+other people's personal resources never appear, and a kind the viewer may not
+list is left out instead of shown as an error. Each row says who manages it
+(workspace admins for connectors and machines, workspace members and admins for
+rigs, vaults, Skills and Knowledge, organization owners for organization things,
+only the owner for personal things) and opens the thing's own page. Model plans
+and keys stay on Organization settings › Models, which already shows each
+one's owner; the page links there for people who may open it.
+
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
 Migration `0219_organization_tenancy_managed_human_provisioning.sql` adds the
@@ -1255,8 +1270,10 @@ App), `variable-sets:manage`, `enrollments:manage` (enrolling and changing
 workspace and organization machines; a signed-in Member connects and changes
 their own Only me machine with `enrollments:read`, see
 [Connected Machines](connected-machines.md#connect-a-machine)),
-`capabilities:manage` (integration and plugin install, workspace
-tool policy) and `secrets:read`. Routes where a newly granted permission would
+`capabilities:manage` (workspace tool policy, auto-approval, and changing or
+turning off an integration that is on; Members add integrations and plugins
+with `connections:write`, see [Capability Catalog](capabilities.md)) and
+`secrets:read`. Routes where a newly granted permission would
 otherwise reach workspace-wide configuration check the settings power
 explicitly: workspace-owned model-provider keys and the Slack bot need
 `capabilities:manage`, and the workspace default Sandbox Environment needs

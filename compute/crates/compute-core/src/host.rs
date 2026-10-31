@@ -20,7 +20,7 @@ use admission::FirstWake;
 pub(crate) use admission::WakeRoom;
 pub use admission::{Capacity, CpuCapacity, CreateRoom, Size};
 pub use disk::{DiskCapacity, DiskSpace, Resource};
-pub use outgrowth::MemoryLevels;
+pub use outgrowth::{MemoryLevels, ShrinkCause};
 pub use spare::Claims;
 pub(crate) use squeeze::{Balloon, Squeeze};
 
@@ -500,14 +500,19 @@ pub enum Action {
         keep: u64,
         /// Which request this is.
         request: ShrinkRequest,
+        /// Why the host asks it.
+        cause: ShrinkCause,
     },
-    /// End the sandbox's running VM: its guest could not be shrunk and the
-    /// host is still short with every running sandbox held to its request.
-    /// Report it with [`Input::Lost`] once it has ended; it is then
-    /// restored from its last copy as any lost VM is.
+    /// End the sandbox's running VM: its guest could not be shrunk, and
+    /// the host is still short with every running sandbox held to its
+    /// request, or the kernel still cannot hold it to its bound. Report it
+    /// with [`Input::Lost`] once it has ended; it is then restored from its
+    /// last copy as any lost VM is.
     EndForMemory {
         /// The sandbox.
         sandbox: SandboxId,
+        /// Why the host ends it.
+        cause: ShrinkCause,
     },
     /// Set the sandbox's running VM's `memory.low` to `low` and its
     /// `memory.high` to `high` (`None` for none). A VM starts, resumes and

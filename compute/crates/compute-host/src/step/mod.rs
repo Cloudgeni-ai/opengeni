@@ -699,11 +699,10 @@ impl<E: Engine, S: Store> Job<E, S> {
                 |error| tracing::debug!(id = %self.id, %error, "the VM's process is not named"),
             )
             .ok();
-        // The VMM syncs the disk while it takes the snapshot, so the check
-        // that vouches for the disk starts first. The snapshot resets the
-        // VMM's record of which pages changed, so the record of the base
-        // they changed from is withdrawn before it, whatever becomes of
-        // the snapshot.
+        // A VM whose disk check failed is not snapshotted at all. The
+        // snapshot resets the VMM's record of which pages changed, so the
+        // record of the base they changed from is withdrawn before it,
+        // whatever becomes of the snapshot.
         let (starting, paths) = (Arc::clone(&live.memory.disk), self.paths.clone());
         // A failed watch is final, which the caller finds on it.
         blocking(move || starting.begin().and_then(|()| withdraw_base(&paths)))
