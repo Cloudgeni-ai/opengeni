@@ -603,7 +603,7 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, pg_temp"],
       },
-      // 1119: created without runtime EXECUTE until its follow-up release.
+      // 1172: created without runtime EXECUTE until its follow-up release.
       {
         name: "read_external_identity_v1(uuid, text, text)",
         owner: "opengeni_migrator",
@@ -4047,7 +4047,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 withheld; 0978's, 0984's, 0988's, 1002's, 1060's, 1091's, 1107's and 1119's stay deferred", () => {
+describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 withheld; 0978's, 0984's, 0988's, 1002's, 1060's, 1091's, 1107's and 1172's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,

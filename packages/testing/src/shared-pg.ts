@@ -1230,7 +1230,7 @@ export async function acquireSharedTestDatabase(
  * routines (1002), the EU-only inference change function (1060) and the
  * secret history scrub's reader and cell writer (1091), the agent call and
  * native push v2 routines (1107), and the lock-free external identity read
- * (1119). Tests that exercise them run as they will
+ * (1172). Tests that exercise them run as they will
  * once they are granted.
  */
 export async function grantDeferredRuntimeAccess(

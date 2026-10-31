@@ -127,7 +127,7 @@ export async function lockExternalWorkspaceMembershipLifecycleShared(
 const EXTERNAL_IDENTITY_READ = "opengeni_private.read_external_identity_v1(uuid, text, text)";
 
 /**
- * Whether the runtime may call the lock-free external identity read yet. 1119
+ * Whether the runtime may call the lock-free external identity read yet. 1172
  * creates it withheld: a release that does not know it rejects a runtime
  * EXECUTE grant on it, so a later migration grants it once this release is the
  * previous one. Until then authentication takes the fence exclusively, as

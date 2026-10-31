@@ -58,7 +58,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * account-administrator grant (1103), which records a request's verified
  * account:admin proof for one transaction, agent calls' device lookup,
  * register, claim, device count, busy check and ring (1107), and the lock-free
- * read of a known external identity (1119). Each is
+ * read of a known external identity (1172). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -108,7 +108,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * call routines and the native push v2 functions that carry the iOS VoIP
  * token; until they are granted, native push keeps its v1 functions, no phone
  * takes calls and agents cannot place one.
- * 1119 withholds the lock-free external identity read; until it is granted,
+ * 1172 withholds the lock-free external identity read; until it is granted,
  * authenticating an external user takes the organization membership fence
  * exclusively, as before.
  */
