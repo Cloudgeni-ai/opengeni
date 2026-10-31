@@ -94,6 +94,8 @@ export interface GitHub {
   branchHead(name: string): Promise<string | null>;
   commit(sha: string): Promise<CommitSummary>;
   runs(branch: string, sha: string): Promise<RunSummary[]>;
+  /** Names of the jobs that failed or timed out in this attempt of a run. */
+  failedJobs(runId: number, attempt: number): Promise<string[]>;
   /** Runs of the regeneration workflow for exactly this PR head, newest first. */
   regenerations(pull: number, head: string): Promise<RunSummary[]>;
   /** Start the regeneration workflow from main: merge `main` into the PR head and regenerate. */
@@ -496,6 +498,21 @@ export class RestGitHub implements GitHub {
         attempt: r.run_attempt,
         url: r.html_url,
       }));
+  }
+
+  async failedJobs(runId: number, attempt: number) {
+    const failed: string[] = [];
+    // CI has about 65 jobs; the cap only bounds a runaway listing.
+    for (let page = 1; page <= 5; page++) {
+      const data = await this.get<{
+        total_count: number;
+        jobs: { name: string; conclusion: string | null }[];
+      }>(`actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100&page=${page}`);
+      for (const job of data.jobs)
+        if (job.conclusion === "failure" || job.conclusion === "timed_out") failed.push(job.name);
+      if (page * 100 >= data.total_count || !data.jobs.length) return failed;
+    }
+    throw new Error(`Run ${runId} has more jobs than the batcher lists`);
   }
 
   async regenerations(pull: number, head: string) {

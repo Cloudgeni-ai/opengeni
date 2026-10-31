@@ -70,6 +70,7 @@ const {
   AllowedModelsFormPage,
   AllowedModelsRow,
   OpengeniCreditsSwitchRow,
+  allowedModelsSummary,
   modelAccessPolicyDraft,
   modelAccessPolicyRequest,
   usableModelCount,
@@ -728,6 +729,73 @@ describe("Use Opengeni credits", () => {
     } finally {
       await view.cleanup();
     }
+  });
+
+  /** A workspace allowing every model, under an organization that allows only Codex. */
+  const ceilingPolicy: WorkspaceModelAccessPolicy = {
+    allowedProviders: null,
+    allowedModels: null,
+    source: "workspace",
+    organization: { allowedProviders: null, allowedModels: ["codex/gpt-5.6-sol"] },
+    allowCreditModels: true,
+  };
+  const ceilingCatalog: WorkspaceModelCatalogModel[] = [
+    { ...model("codex/gpt-5.6-sol", "codex", "Codex"), organizationAllowed: true },
+    { ...model("gpt-6-sol", "openai", "Opengeni", false, "credits"), organizationAllowed: false },
+  ];
+
+  test("a workspace's own list stays within its organization's", async () => {
+    getWorkspaceModelAccessPolicy.mockImplementation(async () => ceilingPolicy);
+    getWorkspaceModelCatalog.mockImplementation(async () => ({ models: ceilingCatalog }));
+    const view = await render(
+      <AllowedModelsFormPage
+        workspaceId="workspace-a"
+        canManage
+        onClose={() => undefined}
+        organizationName="Acme"
+      />,
+    );
+    try {
+      const text = () => view.container.textContent ?? "";
+      expect(text()).toContain("within what Acme allows");
+      expect(text()).toContain("This workspace has its own list, within Acme’s.");
+      expect(text()).toContain("Every model Acme allows, including models from accounts");
+      // The first switch is "Use Acme’s allowed models"; the second, "Allow every model".
+      const switches = view.container.querySelectorAll<HTMLButtonElement>('button[role="switch"]');
+      await act(async () => switches[1]!.click());
+      const box = (label: string) =>
+        view.container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+      // Only what the organization allows is picked; the rest is locked.
+      expect(box("codex/gpt-5.6-sol").checked).toBe(true);
+      expect(box("gpt-6-sol").checked).toBe(false);
+      expect(box("gpt-6-sol").disabled).toBe(true);
+      expect(text()).toContain("Not allowed by organization");
+      expect(text()).toContain("1 model allowed");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("counts only what the organization allows", () => {
+    const unrestricted = modelAccessPolicyDraft(ceilingPolicy, ceilingCatalog);
+    expect(allowedModelsSummary({ saved: unrestricted, models: ceilingCatalog })).toBe(
+      "1 of 2 models",
+    );
+    expect(usableModelCount(ceilingCatalog, unrestricted, true)).toBe(1);
+    // A list saved before the organization narrowed counts only what can run.
+    const wider = modelAccessPolicyDraft(
+      { ...ceilingPolicy, allowedModels: ["codex/gpt-5.6-sol", "gpt-6-sol"] },
+      ceilingCatalog,
+    );
+    expect(allowedModelsSummary({ saved: wider, models: ceilingCatalog })).toBe("1 model");
+    // The organization's own page has no ceiling above it.
+    const organizationOwn = modelAccessPolicyDraft(
+      { allowedProviders: null, allowedModels: null },
+      ceilingCatalog,
+    );
+    expect(allowedModelsSummary({ saved: organizationOwn, models: ceilingCatalog })).toBe(
+      "All models",
+    );
   });
 
   test("counts only ready, allowed models that credits don't block", () => {

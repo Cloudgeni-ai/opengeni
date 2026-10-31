@@ -443,6 +443,15 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
       kind: "run",
       modelId: "target/model",
     });
+    // The organization's list is a ceiling the workspace's own list can't widen.
+    await fixture.admin`insert into organization_model_defaults(account_id, allowed_models)
+      values (${org.accountId}::uuid, array['home/model'])`;
+    expect(await evaluate(fixture.client.db, home, work)).toMatchObject({ kind: "wait" });
+    await fixture.admin`update organization_model_defaults set allowed_models = array['home/model', 'target/model'] where account_id = ${org.accountId}::uuid`;
+    expect(await evaluate(fixture.client.db, home, work)).toMatchObject({
+      kind: "run",
+      modelId: "target/model",
+    });
   });
 
   test("B1 no-mapping diagnostic preserves home success and explicit untiered targets", async () => {
@@ -1241,7 +1250,7 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
     ).resolves.toHaveProperty("operationId");
   });
 
-  test("D-42 frozen target shared pools never widen with live organization settings", async () => {
+  test("D-42/D-51 a frozen carrier without shared capacity never widens; either legacy shared pool uses the shared accounts reaching the workspace", async () => {
     for (const pool of ["none", "workspace", "organization"] as const) {
       const org = await fixture.organization();
       const source = await fixture.connection(org, home);
@@ -1259,7 +1268,10 @@ describe.skipIf(!realDb)("B1 failover on real PostgreSQL as non-owner app role",
         values (${org.accountId}::uuid, ${org.workspaceId}::uuid, ${target.adapter.provider}, 'session_turn',
           ${work.identity.turnId}::uuid, '[]'::jsonb, ${pool}, ${pool === "none" ? "missing" : pool})`;
       });
-      if (pool === "organization")
+      // Who manages a shared account no longer divides shared capacity (D-51):
+      // the destination is an organization account, and a carrier that
+      // accepted either legacy shared pool may use it.
+      if (pool !== "none")
         expect(await place(fixture.client.db, home, work)).toMatchObject({
           kind: "run",
           connectionId: destination,
