@@ -54,9 +54,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * control worker's content-free queued-turn hold summary (0988), the API's
  * inventory of browsers an agent session holds (1002), the only writer of
  * the EU-only inference setting and its history (1060), the secret history
- * scrub's reader and cell writer (1091) and the subscription
+ * scrub's reader and cell writer (1091), the subscription
  * account-administrator grant (1103), which records a request's verified
- * account:admin proof for one transaction. Each is
+ * account:admin proof for one transaction, and agent calls' device lookup,
+ * register, claim, device count, busy check and ring (1107). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -76,6 +77,12 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "grant_subscription_account_administrator(jsonb)",
+  "native_push_device_v2(text)",
+  "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+  "claim_native_push_deliveries_v2(uuid, integer, integer)",
+  "agent_call_device_count_v1(text, boolean)",
+  "agent_call_ringing_v1(text)",
+  "ring_agent_call_v1(uuid, boolean)",
 ] as const;
 
 /**
@@ -97,7 +104,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * only they reach as pending. 1103 withholds the subscription
  * account-administrator grant; until it is granted, only organization
  * membership administrators administer the organization's subscription
- * accounts.
+ * accounts. 1107 withholds the agent call routines and the native push v2
+ * functions that carry the iOS VoIP token; until they are granted, native push
+ * keeps its v1 functions, no phone takes calls and agents cannot place one.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -106,11 +115,18 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "grant_subscription_account_administrator(jsonb)",
+  "native_push_device_v2(text)",
+  "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+  "claim_native_push_deliveries_v2(uuid, integer, integer)",
+  "agent_call_device_count_v1(text, boolean)",
+  "agent_call_ringing_v1(text)",
+  "ring_agent_call_v1(uuid, boolean)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
  * The tables each runtime definer reads or writes as its owner. Once they all
- * exist, the routine must exist too.
+ * exist, the routine must exist too. Target-schema tables are named bare,
+ * `opengeni_private` tables with their schema.
  */
 const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   Record<(typeof RUNTIME_DEFINER_ROUTINES)[number], readonly string[]>
@@ -170,6 +186,26 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "session_history_items_repair_audit",
   ],
   "grant_subscription_account_administrator(jsonb)": ["organization_memberships"],
+  "native_push_device_v2(text)": ["opengeni_private.native_push_devices", "auth_sessions"],
+  "register_native_push_device_v2(text, text, text, text, text, text[], text)": [
+    "opengeni_private.native_push_devices",
+    "auth_sessions",
+  ],
+  "claim_native_push_deliveries_v2(uuid, integer, integer)": [
+    "opengeni_private.native_push_deliveries",
+    "opengeni_private.native_push_devices",
+  ],
+  "agent_call_device_count_v1(text, boolean)": [
+    "opengeni_private.native_push_devices",
+    "auth_sessions",
+  ],
+  "agent_call_ringing_v1(text)": ["agent_calls"],
+  "ring_agent_call_v1(uuid, boolean)": [
+    "agent_calls",
+    "opengeni_private.native_push_deliveries",
+    "opengeni_private.native_push_devices",
+    "auth_sessions",
+  ],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -763,6 +799,74 @@ const VARIABLE_SET_AUTHORITY_ROUTINES = [
   "materialize_scoped_variable_set_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
   "materialize_scoped_variable_set_for_session(uuid, uuid, uuid, uuid)",
 ] as const;
+
+/**
+ * Release N of removed-feature retirement: these relations are no longer read
+ * by their application features. Keep their exact ACL/RLS contracts while
+ * present, but allow release N+1 to drop them. This inventory is deliberately
+ * explicit; a prefix match must never make a new, live table optional.
+ */
+export const RETIRING_FEATURE_TABLES = {
+  automations: [
+    "automation_run_event_links",
+    "automation_runs",
+    "automation_sources",
+    "automation_trigger_events",
+    "automation_trigger_revisions",
+    "automation_triggers",
+    "automation_webhook_endpoints",
+  ],
+  prReview: [
+    "pr_review_app_registrations",
+    "pr_review_managed_github_authority_nonces",
+    "pr_review_managed_github_routes",
+    "pr_review_repository_bindings",
+  ],
+  transcriptionRecordings: [
+    "transcription_recording_chunks",
+    "transcription_recording_objects",
+    "transcription_recording_segments",
+    "transcription_recordings",
+  ],
+  subscription: [
+    "claude_capacity_waiters",
+    "claude_credential_leases",
+    "claude_rotation_settings",
+    "claude_session_account_pins",
+    "claude_subscription_account_usage",
+    "claude_subscription_credentials",
+    "codex_capacity_waiters",
+    "codex_apps_settings",
+    "codex_credential_leases",
+    "codex_rotation_settings",
+    "codex_subscription_credentials",
+    "codex_turn_source_bindings",
+    "organization_codex_rotation_settings",
+    "subscription_provider_cutovers",
+    "workspace_codex_subscription_preferences",
+    "xai_capacity_waiters",
+    "xai_credential_leases",
+    "xai_rotation_settings",
+    "xai_session_account_pins",
+    "xai_subscription_credentials",
+  ],
+  variableSets: [
+    "session_variable_set_attachments",
+    "workspace_variable_set_variables",
+    "workspace_variable_sets",
+  ],
+} as const;
+const RETIRING_FEATURE_TABLE_NAMES: ReadonlySet<string> = new Set(
+  Object.values(RETIRING_FEATURE_TABLES).flat(),
+);
+const RETIRING_VARIABLE_SET_ROUTINES: ReadonlySet<string> = new Set([
+  ...VARIABLE_SET_AUTHORITY_ROUTINES,
+  "scheduled_variable_set_expected_generation_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
+]);
+const RETIRING_SUBSCRIPTION_TARGET_ROUTINES: ReadonlySet<string> = new Set([
+  "resolve_workspace_codex_subscription_source(uuid, uuid)",
+  "capture_legacy_codex_turn_sources(uuid, uuid)",
+]);
 const VAULT_CAPABILITY_PREDICATE_ROUTINE = "vault_authority_capability_active(text)";
 const VAULT_CAPABILITY_TABLE = "vault_authority_capabilities";
 /** Vault routines (0739): the application role's only way into the vault tables. */
@@ -1773,6 +1877,7 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  */
 export const FORCE_RLS_TABLES = [
   "additional_organization_creation_receipts",
+  "agent_calls",
   "agent_instruction_operations",
   "agent_learning_revisions",
   "agent_learning_snapshots",
@@ -2733,6 +2838,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
 
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
+  "agent_calls",
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
@@ -3167,6 +3273,8 @@ export type RuntimeDatabasePosture = {
    * receipt the database holds (migration 0712's readiness function).
    */
   subscriptionProviderCutoverReceipts: string[];
+  /** Catalog evidence for dropping receipts only after their feature tables. */
+  retiringFeatureTablesPresent?: { subscription: boolean; variableSets: boolean };
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -3249,6 +3357,8 @@ export async function inspectRuntimeDatabasePosture(
           variable_set_cutover_present: boolean;
           codex_cutover_activation_present: boolean;
           receipt_reader_present: boolean;
+          retiring_subscription_present: boolean;
+          retiring_variable_sets_present: boolean;
         }
       >(
         await tx.execute(sql`
@@ -3271,7 +3381,21 @@ export async function inspectRuntimeDatabasePosture(
             to_regprocedure('opengeni_private.subscription_codex_cutover_v1_active()')
               is not null as codex_cutover_activation_present,
             to_regprocedure('opengeni_private.subscription_provider_cutover_committed(text)')
-              is not null as receipt_reader_present
+              is not null as receipt_reader_present,
+            exists (
+              select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = ${targetSchema} and c.relkind in ('r', 'p')
+                and c.relname in (
+                  select jsonb_array_elements_text(${JSON.stringify(RETIRING_FEATURE_TABLES.subscription)}::jsonb)
+                )
+            ) as retiring_subscription_present,
+            exists (
+              select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = ${targetSchema} and c.relkind in ('r', 'p')
+                and c.relname in (
+                  select jsonb_array_elements_text(${JSON.stringify(RETIRING_FEATURE_TABLES.variableSets)}::jsonb)
+                )
+            ) as retiring_variable_sets_present
           from pg_roles r
           join pg_database d on d.datname = current_database()
           where r.rolname = current_user
@@ -3300,6 +3424,10 @@ export async function inspectRuntimeDatabasePosture(
 
       const sessionVariableSetAttachmentsCutoverPresent =
         identity.variable_set_cutover_present === true;
+      const retiringFeatureTablesPresent = {
+        subscription: identity.retiring_subscription_present,
+        variableSets: identity.retiring_variable_sets_present,
+      };
       // Migration 0751: any retired subscription object still present (a
       // dropped one, or the Codex name of a renamed one) means the drained
       // retirement migration has not run. Read from the catalogs by name (no
@@ -3389,6 +3517,7 @@ export async function inspectRuntimeDatabasePosture(
           retiredSubscriptionObjects,
           subscriptionCodexCutoverActivationPresent,
           subscriptionProviderCutoverReceipts,
+          retiringFeatureTablesPresent,
         };
       }
 
@@ -3648,6 +3777,7 @@ export async function inspectRuntimeDatabasePosture(
         retiredSubscriptionObjects,
         subscriptionCodexCutoverActivationPresent,
         subscriptionProviderCutoverReceipts,
+        retiringFeatureTablesPresent,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -3769,19 +3899,34 @@ export function evaluateRuntimeDatabasePosture(
     violations.push(retiredSubscriptionObjectViolation(object));
   }
 
-  if (!posture.subscriptionCodexCutoverActivationPresent)
+  // Receipts remain mandatory while any legacy table survives. In particular,
+  // absence of a receipt must not admit the old full-DML provider posture.
+  const retiringSubscriptionPresent =
+    posture.retiringFeatureTablesPresent?.subscription !== false ||
+    posture.tables.some((table) =>
+      (RETIRING_FEATURE_TABLES.subscription as readonly string[]).includes(table.name),
+    );
+  const retiringVariableSetsPresent =
+    posture.retiringFeatureTablesPresent?.variableSets !== false ||
+    posture.tables.some((table) =>
+      (RETIRING_FEATURE_TABLES.variableSets as readonly string[]).includes(table.name),
+    );
+  if (retiringSubscriptionPresent && !posture.subscriptionCodexCutoverActivationPresent)
     violations.push(
       "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
     );
   for (const [provider, migration] of Object.entries(SUBSCRIPTION_PROVIDER_CUTOVER_MIGRATIONS)) {
-    if (!posture.subscriptionProviderCutoverReceipts.includes(provider)) {
+    if (
+      retiringSubscriptionPresent &&
+      !posture.subscriptionProviderCutoverReceipts.includes(provider)
+    ) {
       violations.push(
         `database is missing the ${provider} subscription-core cutover receipt (${migration}); apply the pending migrations first`,
       );
     }
   }
 
-  if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
+  if (retiringVariableSetsPresent && !posture.sessionVariableSetAttachmentsCutoverPresent) {
     violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
   }
 
@@ -3881,6 +4026,11 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  // RUNTIME_DEFINER_ROUTINE_TABLES names private tables with their schema.
+  const definerTableByName = new Map<string, { owner: string }>([
+    ...tableByName,
+    ...posture.privateTables.map((table) => [`opengeni_private.${table.name}`, table] as const),
+  ]);
   for (const table of posture.privateTables) {
     if (DECLARED_PRIVATE_TABLES.has(table.name)) {
       // Keep table-level flags exact for required-grant checks below. Column
@@ -3962,6 +4112,12 @@ export function evaluateRuntimeDatabasePosture(
     safeSearchPath(matches[0]!) === true;
   for (const expectedRoutine of SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES) {
     const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+    if (
+      matches.length === 0 &&
+      !retiringSubscriptionPresent &&
+      (SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES as readonly string[]).includes(expectedRoutine)
+    )
+      continue;
     if (!hardenedPrivateRoutine(matches)) {
       violations.push(
         `subscription M3 precursor private routine ${expectedRoutine} is missing or unsafe`,
@@ -4093,11 +4249,15 @@ export function evaluateRuntimeDatabasePosture(
     );
   }
   const catalogTables = new Set(tableByName.keys());
-  const missingRuntimeTables = difference(directRuntimeTables, catalogTables);
+  const missingRuntimeTables = difference(directRuntimeTables, catalogTables).filter(
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
+  );
   if (missingRuntimeTables.length > 0) {
     violations.push(`runtime privilege tables are missing: ${missingRuntimeTables.join(", ")}`);
   }
-  const missingTables = difference(protectedTables, catalogTables);
+  const missingTables = difference(protectedTables, catalogTables).filter(
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
+  );
   if (missingTables.length > 0) {
     violations.push(`protected tables are missing: ${missingTables.join(", ")}`);
   }
@@ -4209,6 +4369,18 @@ export function evaluateRuntimeDatabasePosture(
   }
   for (const expectedRoutine of targetSchemaCapabilityRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === expectedRoutine);
+    if (
+      matches.length === 0 &&
+      !retiringVariableSetsPresent &&
+      RETIRING_VARIABLE_SET_ROUTINES.has(expectedRoutine)
+    )
+      continue;
+    if (
+      matches.length === 0 &&
+      !retiringSubscriptionPresent &&
+      RETIRING_SUBSCRIPTION_TARGET_ROUTINES.has(expectedRoutine)
+    )
+      continue;
     if (matches.length !== 1) {
       violations.push(
         `target-schema runtime capability ${expectedRoutine} is missing or ambiguous`,
@@ -5351,12 +5523,16 @@ export function evaluateRuntimeDatabasePosture(
     const variableSetCapabilityRoutines = posture.privateRoutines.filter(
       (routine) => routine.name === VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE,
     );
-    if (variableSetCapabilityTables.length !== 1) {
+    const variableSetCapabilityPresent =
+      retiringVariableSetsPresent ||
+      variableSetCapabilityTables.length > 0 ||
+      variableSetCapabilityRoutines.length > 0;
+    if (variableSetCapabilityPresent && variableSetCapabilityTables.length !== 1) {
       violations.push(
         `variable-set capability table ${VARIABLE_SET_CAPABILITY_TABLE} is missing or ambiguous`,
       );
     }
-    if (variableSetCapabilityRoutines.length !== 1) {
+    if (variableSetCapabilityPresent && variableSetCapabilityRoutines.length !== 1) {
       violations.push(
         `variable-set capability predicate ${VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
       );
@@ -6347,7 +6523,9 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(...unknownRoutineViolations(routine, "opengeni_private", expectedRole));
     }
     if (RUNTIME_DEFINER_ROUTINE_NAMES.has(routine.name)) {
-      violations.push(...runtimeDefinerRoutineViolations(routine, tableByName, targetSchema));
+      violations.push(
+        ...runtimeDefinerRoutineViolations(routine, definerTableByName, targetSchema),
+      );
     }
     if (routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE) {
       if (
@@ -6508,7 +6686,7 @@ export function evaluateRuntimeDatabasePosture(
   }
   for (const name of RUNTIME_DEFINER_ROUTINES) {
     if (
-      RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => tableByName.has(table)) &&
+      RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => definerTableByName.has(table)) &&
       posture.privateRoutines.filter((routine) => routine.name === name).length !== 1
     ) {
       violations.push(`runtime definer ${name} is missing or ambiguous`);

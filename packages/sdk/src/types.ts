@@ -2713,6 +2713,8 @@ export const SESSION_EVENT_TYPES = [
   "session.humanInput.requested",
   "session.notification.posted",
   "session.notification.withdrawn",
+  "session.agentCall.ringing",
+  "session.agentCall.settled",
   "session.context.compaction.requested",
   "session.context.compaction.started",
   "session.context.compacted",
@@ -4209,6 +4211,7 @@ export type FirstPartyMcpToolName =
   | "notify_user"
   | "notification_withdraw"
   | "inbox_tidy"
+  | "call_user"
   | "goal_set"
   | "goal_update"
   | "goal_progress"
@@ -4592,8 +4595,18 @@ export type WorkspaceModelCatalogModel = ClientModel & {
     | undefined;
   credentialReadiness: ModelCredentialReadinessV1;
   creditFunding?: "promotional" | "general" | "unavailable" | undefined;
-  /** Exact workspace-policy verdict without exposing provider identity. */
+  /**
+   * Exact verdict of the policy the workspace runs with (its own lists within
+   * its organization's, and its credit switch), without exposing provider
+   * identity.
+   */
   policyAllowed?: boolean | undefined;
+  /**
+   * False when the organization's allowlist, a ceiling the workspace's own
+   * list can't widen, excludes the model. Absent when the organization allows
+   * every model, and from older servers. Ignores the credit switch.
+   */
+  organizationAllowed?: boolean | undefined;
   availability: ModelAvailabilityV1;
 };
 
@@ -4786,7 +4799,8 @@ export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewa
 
 /**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for
- * that dimension; an empty array is an explicit total block.
+ * that dimension; an empty array is an explicit total block. A model runs only
+ * when both this list and `organization` allow it.
  */
 export type WorkspaceModelAccessPolicy = {
   allowedProviders: string[] | null;
@@ -4796,7 +4810,10 @@ export type WorkspaceModelAccessPolicy = {
    * default it follows, or no restriction. Absent from older servers.
    */
   source?: "workspace" | "organization" | "none" | undefined;
-  /** The organization default the workspace follows without its own policy. */
+  /**
+   * The organization's list: what the workspace uses without its own policy,
+   * and a ceiling its own policy can only narrow.
+   */
   organization?: {
     allowedProviders: string[] | null;
     allowedModels: string[] | null;
@@ -4812,6 +4829,8 @@ export type WorkspaceModelAccessPolicy = {
 /**
  * Model defaults every workspace in an organization follows until it sets its
  * own (`GET/PATCH /v1/organizations/:id/model-defaults`, owners and admins).
+ * The allowlists are the exception: a ceiling every workspace stays within,
+ * which a workspace's own allowlist can only narrow.
  */
 export type OrganizationModelDefaults = {
   sessionDefaults: { model: string; reasoningEffort: ReasoningEffort } | null;
@@ -7058,7 +7077,15 @@ export type NativeAppToken = {
  * `needs_input` (a question or an approval), `reply_ready` (a turn finished),
  * `failed` (a turn failed) and `agent` (the agent chose to notify).
  */
-export type NativePushRule = "needs_input" | "reply_ready" | "failed" | "agent";
+export type NativePushRule =
+  | "needs_input"
+  | "reply_ready"
+  | "failed"
+  | "agent"
+  /** Agents working for this person may ring this phone (off unless the person turns it on). */
+  | "call"
+  /** Agents of other members of a shared workspace may ring it too; needs `call`. */
+  | "call_members";
 
 export type RegisterNativePushDeviceInput = {
   platform: NativeAppPlatform;
@@ -7069,6 +7096,8 @@ export type RegisterNativePushDeviceInput = {
   /** The APNs device token (hex) or FCM registration token. */
   token: string;
   rules: NativePushRule[];
+  /** iOS PushKit token that agent calls ring; iOS keeps no call rules without it. */
+  voipToken?: string | null;
 };
 
 /** This app credential's push registration. */
@@ -7078,7 +7107,31 @@ export type NativePushDevice = {
   environment: "development" | "production";
   token: string;
   rules: NativePushRule[];
+  voipToken?: string | null;
   updatedAt: string;
+};
+
+/** Where an agent's call to a person stands. */
+export type AgentCallState = "ringing" | "answered" | "declined" | "missed" | "cancelled";
+
+/**
+ * An agent ringing a person's phones (`call_user`). Only the person called can
+ * read, answer or decline it. Answering opens the chat's voice call.
+ */
+export type AgentCall = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  /** Who the ring screen shows as calling. */
+  callerLabel: string | null;
+  /** Why the agent calls, in a few words. */
+  reason: string;
+  state: AgentCallState;
+  ringUntil: string;
+  createdAt: string;
+  endedAt: string | null;
+  /** Whether this phone (app credential) took the call; null when unknown. */
+  answeredHere: boolean | null;
 };
 
 // --- Organization-wide session list (org API key or organization owner) -----------------------

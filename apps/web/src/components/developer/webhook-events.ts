@@ -66,6 +66,22 @@ export const WEBHOOK_EVENT_GROUPS: readonly WebhookEventGroup[] = [
     ],
   },
   {
+    label: "Calls",
+    workspaceOnly: true,
+    events: [
+      {
+        type: "session.agentCall.ringing",
+        label: "Agent calling",
+        description: "An agent is ringing someone's phone, so your app can ring too.",
+      },
+      {
+        type: "session.agentCall.settled",
+        label: "Agent call ended",
+        description: "The call was answered, declined, missed or cancelled.",
+      },
+    ],
+  },
+  {
     label: "Usage",
     workspaceOnly: true,
     events: [

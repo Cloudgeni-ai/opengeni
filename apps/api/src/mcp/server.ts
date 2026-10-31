@@ -15,6 +15,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { assertGoalResumeAllowed, MissingPermissionRefusal } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
+import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import {
@@ -321,6 +322,7 @@ import {
   validateScheduledTaskTarget,
   updateScheduledTaskForApi,
   triggerScheduledTaskForGrant,
+  manualScheduledTaskTriggerBillingOrigin,
   validatedScheduledTaskUpdate,
   withScheduledTaskEvents,
   withScheduledTaskRunEventOccurrences,
@@ -1323,6 +1325,18 @@ export function buildOpenGeniMcpServer(
   // when new, their phones (see notification-tools.ts).
   if (sessionId !== null) {
     registerNotificationTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      attempt: () => exactAgentCommandContext(grant, sessionId),
+      json,
+    });
+    // Calling the person: their phones ring (see agent-call-tools.ts).
+    registerAgentCallTools({
       server,
       deps,
       grant,
@@ -2432,6 +2446,8 @@ export function buildOpenGeniMcpServer(
                 taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null,
               action: "agent_run:create",
               quantity: 1,
+              // The run is API use when the caller or the task is.
+              billingOrigin: await manualScheduledTaskTriggerBillingOrigin(deps.db, grant, task.id),
               model: await resolveScheduledTaskPreflightModel(deps.db, catalogSettings, task),
             },
           );

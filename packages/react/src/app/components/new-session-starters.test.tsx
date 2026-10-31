@@ -147,3 +147,56 @@ test("help with everyday things gets six plain everyday asks, with no services t
     container.remove();
   }
 });
+
+test("a host's own starters replace Opengeni's, whatever the signup answer", async () => {
+  const onSelect = mock((_prompt: string) => {});
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const hostStarters = [
+    {
+      id: "chart",
+      title: "Make a chart",
+      description: "From the selected data.",
+      prompt: "Make a chart from the selected data.",
+      icon: <svg data-icon="chart" />,
+    },
+    { id: "formula", title: "Write a formula", prompt: "Help me write a formula." },
+  ];
+  try {
+    for (const set of ["general", "everyday", "product"] as const) {
+      await act(async () =>
+        root.render(
+          <NewSessionStarters
+            set={set}
+            workspaceId="w1"
+            hostStarters={hostStarters}
+            onSelect={onSelect}
+          />,
+        ),
+      );
+      const buttons = [...container.querySelectorAll("button")];
+      expect(buttons.map((button) => button.dataset.starter)).toEqual(["chart", "formula"]);
+      expect(container.querySelector("a")).toBeNull();
+      expect(container.textContent).not.toMatch(/Slack|GitHub|Linear|Plan a trip/);
+    }
+    expect(container.querySelector('[data-icon="chart"]')?.closest("[aria-hidden]")).not.toBeNull();
+    // A starter without a description shows just its title.
+    expect(
+      container.querySelector('[data-starter="formula"]')?.querySelectorAll("span span"),
+    ).toHaveLength(1);
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-starter="formula"]')!.click(),
+    );
+    expect(onSelect.mock.calls).toEqual([["Help me write a formula."]]);
+
+    // An empty list shows no suggestions at all.
+    await act(async () =>
+      root.render(<NewSessionStarters hostStarters={[]} onSelect={onSelect} />),
+    );
+    expect(container.querySelector("section")).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

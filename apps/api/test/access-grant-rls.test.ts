@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
 import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
@@ -26,6 +26,11 @@ function grant(overrides: Partial<AccessGrant> = {}): AccessGrant {
   };
 }
 
+// Agent requests are billed like their chat; its frozen origin is read once.
+let turnOrigin: ReturnType<typeof spyOn<typeof db, "readTurnBillingOrigin">>;
+beforeEach(() => {
+  turnOrigin = spyOn(db, "readTurnBillingOrigin").mockResolvedValue("app");
+});
 afterEach(() => {
   mock.restore();
 });
@@ -45,9 +50,11 @@ describe("access-grant session RLS context", () => {
       { db: {} } as never,
       grant(),
       async () => {
+        // An unverified person credential (no app sign-in proof) is API use.
         expect(db.currentCreditDebitAttribution()).toEqual({
           kind: "human",
           initiatingHumanSubjectId: "user:access-grant-rls-test",
+          billingOrigin: "api",
         });
         return "ok";
       },
@@ -86,11 +93,13 @@ describe("access-grant session RLS context", () => {
           kind: "turn",
           turnId,
           initiatingHumanSubjectId: "user:owner",
+          billingOrigin: "app",
         });
         return "ok";
       }),
     ).resolves.toBe("ok");
     expect(liveAttempt).toHaveBeenCalledWith({}, access, sessionId);
+    expect(turnOrigin).toHaveBeenCalledWith({}, { accountId, workspaceId, turnId });
     expect(actors).toEqual([
       {
         subjectId: "worker:first-party-mcp",
@@ -290,7 +299,10 @@ describe("access-grant session RLS context", () => {
       { db: {} } as never,
       grant({ principalKind: "api_key", subjectId: "key:opaque" }),
       async () => {
-        expect(db.currentCreditDebitAttribution()).toEqual({ kind: "service" });
+        expect(db.currentCreditDebitAttribution()).toEqual({
+          kind: "service",
+          billingOrigin: "api",
+        });
       },
     );
     expect(db.currentCreditDebitAttribution()).toEqual({ kind: "unknown" });

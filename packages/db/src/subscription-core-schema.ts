@@ -498,18 +498,3 @@ export const subscriptionAppsDesignations = pgTable(
     ),
   }),
 );
-
-export const subscriptionProviderCutovers = pgTable(
-  "subscription_provider_cutovers",
-  {
-    accountId: uuid("account_id").notNull(),
-    provider: text("provider").notNull(),
-    enabled: boolean("enabled").notNull().default(false),
-    version: bigint("version", { mode: "number" }).notNull().default(1),
-    updatedBySubjectId: text("updated_by_subject_id"),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    identity: primaryKey({ columns: [table.accountId, table.provider] }),
-  }),
-);

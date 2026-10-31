@@ -103,6 +103,10 @@ export function registerFeedbackRoutes(app: Hono, deps: ApiRouteDeps): void {
           principalKind: grant.principalKind ?? null,
           request: parsed,
           screenshots,
+          server: {
+            version: deps.settings.serverVersion,
+            revision: deps.settings.deploymentRevision,
+          },
         });
       let result;
       if (parsed.sessionId) {

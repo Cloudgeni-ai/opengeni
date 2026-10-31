@@ -1815,7 +1815,7 @@
       "id": 37,
       "type": "timeseries",
       "title": "Sandboxes held back",
-      "description": "Running sandboxes whose borrowed memory the host holds back now, idle ones and those in use. A sandbox held back runs, slower if it needs more than it may keep. Over their bound: sandboxes holding more than their bound while the host is below its low watermark, because the kernel cannot compress what they borrowed (data compressed already, or a full zswap pool or swap device); their guests are shrunk next.",
+      "description": "Running sandboxes whose borrowed memory the host holds back now, idle ones and those in use. A sandbox held back runs, slower if it needs more than it may keep. Over their bound: sandboxes holding more than their bound while the host is below its low watermark, because the kernel cannot compress what they borrowed (data compressed already, or a full zswap pool or swap device); their guests are shrunk next. Still being brought down: sandboxes above their bound the kernel is still slow to start compressing, aging their pages first; they count over their bound after a minute without coming down.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1869,6 +1869,13 @@
           "refId": "B",
           "expr": "sum(compute_memory_over_bound{host_name=~\"$host\"})",
           "legendFormat": "over their bound",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "sum(compute_memory_bringing_down{host_name=~\"$host\"})",
+          "legendFormat": "still being brought down",
           "editorMode": "code",
           "range": true
         }

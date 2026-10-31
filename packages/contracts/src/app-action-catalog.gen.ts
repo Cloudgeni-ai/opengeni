@@ -238,6 +238,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "answerAgentCall",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-calls/:callId/answer",
+    "request": [
+      "AgentCallActionRequest"
+    ],
+    "response": [
+      "AgentCall"
+    ]
+  },
+  {
     "id": "answerMcpConnectionRequest",
     "method": "POST",
     "path": "/v1/mcp-connections/requests/:request",
@@ -1475,6 +1486,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "PreferenceRegistryMutationResponse"
     ],
     "permission": "workspace:read"
+  },
+  {
+    "id": "declineAgentCall",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-calls/:callId/decline",
+    "request": [
+      "AgentCallActionRequest"
+    ],
+    "response": [
+      "AgentCall"
+    ]
   },
   {
     "id": "defineSiteDataCollection",
@@ -2956,6 +2978,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AccessContext"
+    ]
+  },
+  {
+    "id": "getAgentCall",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-calls/:callId",
+    "request": [],
+    "query": [
+      "device"
+    ],
+    "response": [
+      "AgentCall"
     ]
   },
   {

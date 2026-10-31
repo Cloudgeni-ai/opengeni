@@ -41,9 +41,9 @@ import {
 import {
   decodeSubscriptionCoreClaudeQuota,
   SUBSCRIPTION_CORE_CLAUDE_CLAIMABLE_WINDOW_IDS,
-  SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES,
   type SubscriptionCoreClaudeCredential,
 } from "./subscription-core-claude-adapter";
+import { claudeSubscriptionUpstreamModelId } from "@opengeni/contracts/claude-subscription-model-ids";
 import { decodeSubscriptionQuota } from "./subscription-core-repository";
 
 /** The Claude usage endpoint (the legacy `requestClaudeUsage` URL). */
@@ -131,10 +131,8 @@ export function subscriptionCoreClaudeUpstreamModelIds(
 ): string[] {
   const upstream = new Set<string>();
   for (const modelId of productModelIds) {
-    for (const prefix of SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES) {
-      if (modelId.startsWith(`${prefix}/`) && modelId.length > prefix.length + 1)
-        upstream.add(modelId.slice(prefix.length + 1));
-    }
+    const id = claudeSubscriptionUpstreamModelId(modelId);
+    if (id !== null) upstream.add(id);
   }
   return [...upstream].sort();
 }

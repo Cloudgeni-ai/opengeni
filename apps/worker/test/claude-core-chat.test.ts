@@ -20,7 +20,7 @@ import {
 import {
   buildClaudeCoreRequestAuthorization,
   CLAUDE_CORE_SETTINGS_PLACEHOLDER_TOKEN,
-  claudeCoreModelScope,
+  withClaudeCoreConnectionCredential,
   claudeCoreSettingsCredential,
   claudeCoreSettingsPlaceholderToken,
   claudeCoreRequestOutcomeUnknown,
@@ -864,19 +864,36 @@ describe("Claude response inspection", () => {
 });
 
 describe("Claude model scope and provider ids", () => {
-  test("the scope follows the product model's own prefix", () => {
-    expect(claudeCoreModelScope("organization-claude-subscription/claude-sonnet-5")).toBe(
+  test("a core-placed credential reaches every Claude subscription list", () => {
+    const catalog = withClaudeConnectionCatalog(
+      withClaudeConnectionCatalog(
+        testSettings({ claudeSubscriptionEnabled: true }),
+        { claude_subscription: { models: [{ upstreamModelId: "claude-sonnet-5" }] } },
+        "workspace",
+      ),
+      { claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] } },
       "organization",
     );
-    expect(claudeCoreModelScope("workspace-claude-subscription/claude-sonnet-5")).toBe("workspace");
-    expect(claudeCoreModelScope("supergrok/grok-4")).toBe("organization");
-    // A workspace-scoped model runs on organization connections on the core,
-    // so workspace policy must allow it under both identities.
-    expect(
-      db.subscriptionCoreClaudeModelPolicyProviderIds(
-        "workspace-claude-subscription/claude-sonnet-5",
-      ),
-    ).toEqual(["workspace-claude-subscription", "organization-claude-subscription"]);
+    const binding = { connectionId: "20000000-0000-4000-8000-000000000003", credentialVersion: 3 };
+    const settings = withClaudeCoreConnectionCredential(catalog, "placeholder-bearer", binding);
+    const providers = parseModelProvidersJson(settings.modelProvidersJson);
+    for (const id of ["workspace-claude-subscription", "organization-claude-subscription"]) {
+      const provider = providers.find((candidate) => candidate.id === id);
+      expect(provider?.apiKey).toBe("placeholder-bearer");
+      expect(provider?.anthropic?.credentialBinding).toEqual(binding);
+    }
+    // Workspace model policy treats every Claude subscription provider id as
+    // one provider, so every id form names all of them.
+    for (const modelId of [
+      "claude/claude-sonnet-5",
+      "workspace-claude-subscription/claude-sonnet-5",
+      "organization-claude-subscription/claude-sonnet-5",
+    ])
+      expect(db.subscriptionCoreClaudeModelPolicyProviderIds(modelId)).toEqual([
+        "claude-subscription",
+        "workspace-claude-subscription",
+        "organization-claude-subscription",
+      ]);
     expect(db.subscriptionCoreClaudeModelPolicyProviderIds("supergrok/grok-4")).toEqual([
       "organization-claude-subscription",
     ]);

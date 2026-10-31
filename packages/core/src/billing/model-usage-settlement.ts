@@ -15,7 +15,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { createHash } from "node:crypto";
-import type { LatencyMode } from "@opengeni/contracts";
+import type { BillingOrigin, LatencyMode } from "@opengeni/contracts";
 import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usage";
 import {
   applyCreditDebitUpToBalance,
@@ -90,6 +90,11 @@ export type ModelUsageSettlementInput = {
   processingResidency?: UsageEventProcessingResidency;
   /** Non-secret correlation fields added to the credit debit metadata. */
   debitMetadata?: Record<string, unknown>;
+  /**
+   * Funding origin of the call (`BillingOrigin`). Omitted resolves from the
+   * debit's turn or the request's origin (API work spends credits only).
+   */
+  billingOrigin?: BillingOrigin;
   /** Best-effort metrics hook after a committed debit. */
   onCreditsDebited?: (result: { debitedMicros: number; grantDebitedMicros: number }) => void;
   /** Content-free per-task usage limit diagnostics (closed-set labels only). */
@@ -411,6 +416,7 @@ export async function settleModelUsage(
       sourceType: "model_response",
       sourceId: input.sourceId,
       idempotencyKey: `credit:model_usage_debit:${input.sourceId}`,
+      ...(input.billingOrigin ? { usageOrigin: input.billingOrigin } : {}),
       metadata: {
         model: input.model,
         ...input.debitMetadata,
