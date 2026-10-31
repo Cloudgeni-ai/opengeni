@@ -33,7 +33,9 @@ test("a failed privacy snapshot withholds pixels before capture and leaves unrel
     await expect(fixture.driver.captureScreenshot("target-1")).rejects.toThrow("page redaction");
     expect(fixture.calls.some((call) => call.method === "Page.captureScreenshot")).toBe(false);
     fixture.setProtectionSnapshot({ strings: [], documents: [] });
-    expect((await fixture.driver.captureScreenshot("target-2")).data.byteLength).toBeGreaterThan(0);
+    expect(
+      (await fixture.driver.captureScreenshot("target-2", { format: "jpeg" })).data.byteLength,
+    ).toBeGreaterThan(0);
   } finally {
     await fixture.driver.close();
   }

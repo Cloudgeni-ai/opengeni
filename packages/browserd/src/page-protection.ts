@@ -8,6 +8,7 @@ export function sensitiveFieldReason(
   tag: string,
   attributes: Readonly<Record<string, string>>,
   editable: boolean,
+  purpose: "read" | "remember" = "read",
 ): ProtectedReason | null {
   const type = tag === "input" ? (attributes.type ?? "text").toLowerCase() : "";
   const autocomplete = (attributes.autocomplete ?? "").toLowerCase();
@@ -18,6 +19,8 @@ export function sensitiveFieldReason(
     /card.?(?:number|num\b)|credit.?card|cvv|cvc|\bcsc\b|security.?code|(?:card|cc|payment).{0,12}?exp|exp(?:iry|iration)?.?(?:date|month|year|mm|yy)/iu.test(
       name,
     ) || /^(?:expiry|expiration|exp)$/iu.test(name);
+  const paymentSecretName = (name: string) =>
+    /card.?(?:number|num\b)|credit.?card|cvv|cvc|\bcsc\b|security.?code/iu.test(name);
   // Preserve existing explicitly named payment containers as protected too,
   // without hiding headings such as "credit-card-offers".
   const paymentContainer = [attributes.name ?? "", attributes.id ?? ""].some((name) =>
@@ -34,8 +37,22 @@ export function sensitiveFieldReason(
         attributes.placeholder ?? "",
         attributes["data-elements-stable-field-name"] ?? "",
       ].some(paymentName))
-  )
-    return "payment";
+  ) {
+    if (purpose === "read") return "payment";
+    // Expiry dates, cardholder names and select options stay protected in
+    // place, but common words and years must not become session secrets.
+    return /(?:^|\s)cc-(?:number|csc)(?:\s|$)/u.test(autocomplete) ||
+      [
+        attributes.name ?? "",
+        attributes.id ?? "",
+        attributes["aria-label"] ?? "",
+        attributes.placeholder ?? "",
+        attributes["data-elements-stable-field-name"] ?? "",
+      ].some(paymentSecretName)
+      ? "payment"
+      : null;
+  }
+  if (purpose === "remember") return null;
   if (
     type === "hidden" ||
     ["data-private", "data-sensitive", "data-opengeni-private"].some((key) => key in attributes)
@@ -76,7 +93,6 @@ export function pageProtection(snapshot: unknown): PageProtection {
     return strings[index as number] as string;
   };
   const found: PageProtection = { nodes: new Map(), values: [], payment: false };
-  let count = 0;
   for (const document of snapshot.documents) {
     if (!isRecord(document) || !isRecord(document.nodes))
       throw new Error("invalid page protection document");
@@ -86,9 +102,19 @@ export function pageProtection(snapshot: unknown): PageProtection {
       if (!Array.isArray(nodes[key])) throw new Error("invalid page protection nodes");
     }
     const backendIds = nodes.backendNodeId as unknown[];
-    count += backendIds.length;
-    if (count > 100_000) throw new Error("page exceeds the redaction node bound");
     const reasons: Array<ProtectedReason | null> = [];
+    const memoryReasons: Array<ProtectedReason | null> = [];
+    const remember = (value: string, reason: ProtectedReason | null | undefined) => {
+      if (!value || !reason) return;
+      // Only actual card numbers/CVCs from primary payment fields enter
+      // memory, not labels, option years or arbitrary hidden/private text.
+      const digits = value.replace(/[\s-]/gu, "");
+      if (
+        reason === "password" ||
+        (reason === "payment" && /^(?:[0-9]{3,4}|[0-9]{12,19})$/u.test(digits))
+      )
+        found.values.push(value);
+    };
     for (let index = 0; index < backendIds.length; index++) {
       const attributes: Record<string, string> = {};
       const raw = (nodes.attributes as unknown[])[index];
@@ -100,19 +126,21 @@ export function pageProtection(snapshot: unknown): PageProtection {
       if (!Number.isSafeInteger(parent) || (parent as number) < -1 || (parent as number) >= index)
         throw new Error("invalid page protection parent");
       const inherited = (parent as number) >= 0 ? (reasons[parent as number] ?? null) : null;
-      const ownReason = sensitiveFieldReason(
-        stringAt((nodes.nodeName as unknown[])[index]).toLowerCase(),
-        attributes,
-        "contenteditable" in attributes && attributes.contenteditable !== "false",
-      );
+      const tag = stringAt((nodes.nodeName as unknown[])[index]).toLowerCase();
+      const editable = "contenteditable" in attributes && attributes.contenteditable !== "false";
+      const ownReason = sensitiveFieldReason(tag, attributes, editable);
       const reason = ownReason ?? inherited;
       reasons.push(reason);
+      const memoryReason =
+        sensitiveFieldReason(tag, attributes, editable, "remember") ??
+        ((parent as number) >= 0 ? memoryReasons[parent as number] : null);
+      memoryReasons.push(memoryReason ?? null);
       if (reason) {
         if (!Number.isSafeInteger(backendIds[index]))
           throw new Error("invalid protected backend node");
         found.nodes.set(protectedNodeKey(frameId, backendIds[index] as number), reason);
         const text = stringAt((nodes.nodeValue as unknown[])[index]);
-        if (text) found.values.push(text);
+        remember(text, memoryReason);
         if (reason === "payment" || ownReason === "payment") found.payment = true;
       }
     }
@@ -136,7 +164,7 @@ export function pageProtection(snapshot: unknown): PageProtection {
           throw new Error("invalid protected input index");
         if (reasons[index as number]) {
           const value = stringAt(values.value[at]);
-          if (value) found.values.push(value);
+          remember(value, memoryReasons[index as number]);
         }
       }
     }

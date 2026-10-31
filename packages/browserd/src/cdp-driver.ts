@@ -5929,10 +5929,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** Read-only renderer snapshot, including closed shadow roots. A failure
    * withholds output rather than assuming there were no sensitive fields. */
-  private async readPageProtection(
-    state: TargetState,
-    deadline = Date.now() + 5_000,
-  ): Promise<PageProtection> {
+  private async readPageProtection(state: TargetState, deadline?: number): Promise<PageProtection> {
     this.assertCurrentTargetState(state);
     const connection = await this.ensureConnection();
     const combined: PageProtection = { nodes: new Map(), values: [], payment: false };
@@ -5941,13 +5938,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ...[...state.oopifs.values()].map((frame) => frame.sessionId),
     ];
     for (const sessionId of new Set(sessions)) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0)
+      // Ordinary reads retain the connection's existing per-command deadline.
+      // Captures pass their own end-to-end deadline; do not add a shorter
+      // aggregate timeout merely because a page has several child frames.
+      const remaining = deadline === undefined ? undefined : deadline - Date.now();
+      if (remaining !== undefined && remaining <= 0)
         throw new CdpCommandTimeoutError("DOMSnapshot.captureSnapshot", sessionId);
       const snapshot = await connection.send(
         "DOMSnapshot.captureSnapshot",
         { computedStyles: [] },
-        { sessionId, timeoutMs: remaining },
+        { sessionId, ...(remaining === undefined ? {} : { timeoutMs: remaining }) },
       );
       const protection = pageProtection(snapshot);
       if (this.typedSecrets.containsPaymentValue((snapshot as { strings: string[] }).strings))

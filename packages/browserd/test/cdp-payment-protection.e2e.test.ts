@@ -12,6 +12,52 @@ const GROUPED = "4000 0000 0000 0002";
 const CVC = "731";
 
 e2e(
+  "ordinary hidden metadata and expiry years do not poison later page reads or image eligibility",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-payment-metadata-");
+    const runner = await ManagedBrowserRunner.create({
+      profileDirectory: join(directory, "profile"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    const ordinary = `<h1>Product catalog</h1><input type=hidden name=id value=40123456789012>
+    <input type=hidden name=currency value=USD><p>Total 10 USD, ordered 2027-01-05, variant 40123456789012</p>`;
+    try {
+      const initial = await driver.start(`data:text/html,${encodeURIComponent(ordinary)}`);
+      for (const observation of [initial, await driver.observe(initial.target.id)]) {
+        expect(JSON.stringify(observation.semantic)).toContain(
+          "Total 10 USD, ordered 2027-01-05, variant 40123456789012",
+        );
+      }
+      expect((await driver.captureScreenshot(initial.target.id)).data.byteLength).toBeGreaterThan(
+        100,
+      );
+      await driver.openTarget(
+        `data:text/html,${encodeURIComponent('<label>Expiry year<select autocomplete="cc-exp-year"><option>2027</option></select></label>')}`,
+      );
+      const later = await driver.openTarget(`data:text/html,${encodeURIComponent(ordinary)}`);
+      expect(JSON.stringify(later.semantic)).toContain(
+        "Total 10 USD, ordered 2027-01-05, variant 40123456789012",
+      );
+      expect((await driver.captureScreenshot(later.target.id)).data.byteLength).toBeGreaterThan(
+        100,
+      );
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+e2e(
   "payment values, formatted fills and image refusals share one protection boundary",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-payment-protection-");

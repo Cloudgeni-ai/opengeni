@@ -63,8 +63,86 @@ test("snapshot protection includes flattened closed roots, inherited private tex
   expect(protection.payment).toBe(true);
   expect(protection.nodes.get(protectedNodeKey("frame-a", 2))).toBe("payment");
   expect(protection.nodes.get(protectedNodeKey("frame-b", 2))).toBeUndefined();
-  expect(protection.values).toEqual(["private note", "731"]);
+  expect(protection.values).toEqual(["731"]);
   expect(protection.nodes.get(protectedNodeKey("frame-a", 3))).toBe("private");
+});
+
+test("hidden metadata, private prose and expiry options are protected in place, not remembered as secrets", () => {
+  const strings = [
+    "frame-a",
+    "DIV",
+    "INPUT",
+    "SELECT",
+    "OPTION",
+    "#text",
+    "",
+    "type",
+    "hidden",
+    "name",
+    "id",
+    "currency",
+    "40123456789012",
+    "USD",
+    "autocomplete",
+    "cc-exp-year",
+    "2027",
+    "data-private",
+    "private prose",
+  ];
+  const protection = pageProtection({
+    strings,
+    documents: [
+      {
+        frameId: 0,
+        nodes: {
+          backendNodeId: [1, 2, 3, 4, 5, 6, 7, 8],
+          parentIndex: [-1, 0, 0, 0, 3, 4, 0, 6],
+          nodeName: [1, 2, 2, 3, 4, 5, 1, 5],
+          nodeValue: [-1, -1, -1, -1, -1, 16, -1, 18],
+          attributes: [[], [7, 8, 9, 10], [7, 8, 9, 11], [14, 15], [], [], [17, 6], []],
+          inputValue: { index: [1, 2], value: [12, 13] },
+          textValue: { index: [3], value: [16] },
+        },
+      },
+    ],
+  });
+  expect(protection.payment).toBe(true);
+  expect(protection.values).toEqual([]);
+  expect(protection.nodes.get(protectedNodeKey("frame-a", 2))).toBe("private");
+  expect(protection.nodes.get(protectedNodeKey("frame-a", 6))).toBe("payment");
+  expect(protection.nodes.get(protectedNodeKey("frame-a", 8))).toBe("private");
+  const browserPolicy = new Function(
+    `return (${SENSITIVE_FIELD_REASON_SOURCE})`,
+  )() as typeof sensitiveFieldReason;
+  for (const attrs of [
+    { type: "hidden" },
+    { autocomplete: "cc-exp-year" },
+    { "data-private": "" },
+  ]) {
+    expect(browserPolicy("input", attrs, false, "remember")).toBeNull();
+    expect(sensitiveFieldReason("input", attrs, false, "remember")).toBeNull();
+  }
+});
+
+test("a large snapshot retains its privacy projection without a separate node-count rejection", () => {
+  const count = 100_001;
+  const protection = pageProtection({
+    strings: ["frame-a", "DIV", ""],
+    documents: [
+      {
+        frameId: 0,
+        nodes: {
+          backendNodeId: Array.from({ length: count }, (_, index) => index + 1),
+          parentIndex: [-1, ...Array(count - 1).fill(0)],
+          nodeName: Array(count).fill(1),
+          nodeValue: Array(count).fill(-1),
+          attributes: Array.from({ length: count }, () => []),
+        },
+      },
+    ],
+  });
+  expect(protection.payment).toBe(false);
+  expect(protection.nodes.size).toBe(0);
 });
 
 test.each([

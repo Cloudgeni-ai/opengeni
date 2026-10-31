@@ -1,5 +1,6 @@
 ---
 "@opengeni/contracts": patch
+"@opengeni/browser-extension": patch
 ---
 
 Keep known numeric secrets masked when payment widgets add digit grouping, and
@@ -10,3 +11,7 @@ shadow roots. Payment fills accept formatting-only grouping, not changed digits.
 Browser tabs that encounter payment fields or known card data withhold screenshots,
 live frames and video while preserving semantic controls and unrelated tabs. Privacy-discovery and masking
 failures withhold output instead of returning unprotected data.
+The Chrome extension admits the read-only privacy snapshot method. Hidden
+metadata and expiry options stay protected in place without becoming session
+secrets; remembered card numbers and security codes cannot age out behind
+unrelated values.

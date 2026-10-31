@@ -2343,11 +2343,16 @@ shadow roots; out-of-process frames are read through their own sessions.
 Snapshots stay inside the controller. Known values are masked before semantic
 normalization and on result delivery, including digit-grouped numeric secrets
 and three-digit CVCs. Protection discovery or masking failure withholds output.
+Only primary password/card-field values are remembered; hidden metadata and
+expiry options are protected in place. Card values do not age out of memory.
 After a browser tab encounters payment fields or known card data, its screenshots,
 live frames and recordings are refused (semantic controls and unrelated tabs
 remain usable). This state is shared across controllers for that tab in the
 browserd process; it is not
 a claim of pixel-level redaction or arbitrary canvas/OCR protection.
+Transient pixels between DOM checks and desktop captures of the browser are
+outside that per-tab guarantee. Attached Chrome admits the read-only snapshot
+through the matching extension method allowlist.
 
 Computer cursor badges carry the source chat's display title and a bounded PNG
 of its existing sidebar avatar. The API resolves image access as the caller and

@@ -39,6 +39,20 @@ describe("TypedSecretMemory", () => {
     );
   });
 
+  test("payment values cannot be evicted by later remembered values", () => {
+    const id = randomUUID();
+    const memory = TypedSecretMemory.forSession("browser", id);
+    memory.remember({ card: "4000000000000002", cvc: "731" });
+    for (let index = 0; index < 300; index++)
+      memory.remember({ other: `unrelated-value-${index}` });
+    const replacement = TypedSecretMemory.forSession("browser", id);
+    expect(replacement.redact("4000 0000 0000 0002 / 731")).toBe("[secret] / [secret]");
+    expect(replacement.containsPaymentValue(["4000 0000 0000 0002"])).toBe(true);
+    expect(replacement.containsPaymentValue(["40123456789012"])).toBe(false);
+    expect(Object.values(replacement.merged() ?? {})).toContain("4000000000000002");
+    expect(Object.values(replacement.merged() ?? {})).toContain("731");
+  });
+
   test("one session shares its memory across controllers, and sessions stay apart", () => {
     const sessionId = randomUUID();
     TypedSecretMemory.forSession("browser", sessionId).remember({
