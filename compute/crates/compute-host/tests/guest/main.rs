@@ -339,7 +339,9 @@ impl Host {
         found.pop().unwrap()
     }
 
-    /// Removes every sandbox, ends the agent and deletes its files.
+    /// Removes every sandbox, ends the agent and the VMs it left (the
+    /// ready sandboxes it keeps are not in its list), and deletes its
+    /// files.
     async fn finish(mut self) {
         for sandbox in self.status().await.sandboxes {
             let reply = self
@@ -353,6 +355,7 @@ impl Host {
             assert_eq!(reply, Reply::Done);
         }
         self.end();
+        end_vms();
         let _ = std::fs::remove_dir_all(&self.root);
     }
 
@@ -383,29 +386,35 @@ impl Drop for Host {
                     PathBuf::from(dir).join(format!("{name}-failed-agent.log")),
                 );
             }
-            if let Ok(vms) = std::fs::read_dir(CGROUP) {
-                let vms: Vec<PathBuf> = vms
-                    .flatten()
-                    .map(|vm| vm.path())
-                    .filter(|vm| vm.is_dir())
-                    .collect();
-                for vm in &vms {
-                    let _ = std::fs::write(vm.join("cgroup.kill"), "1");
-                }
-                // The next test's VMs take the same names and taps, which
-                // are busy until these processes are gone.
-                let deadline = std::time::Instant::now() + Duration::from_secs(10);
-                while std::time::Instant::now() < deadline
-                    && vms.iter().any(|vm| {
-                        std::fs::read_to_string(vm.join("cgroup.events"))
-                            .is_ok_and(|events| events.contains("populated 1"))
-                    })
-                {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-            }
+            end_vms();
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+}
+
+/// Ends every VM the tests started, so the next test starts with none:
+/// its VMs take the same names and taps, which are busy until these
+/// processes are gone, and it counts the VMs that run.
+fn end_vms() {
+    let Ok(vms) = std::fs::read_dir(CGROUP) else {
+        return;
+    };
+    let vms: Vec<PathBuf> = vms
+        .flatten()
+        .map(|vm| vm.path())
+        .filter(|vm| vm.is_dir())
+        .collect();
+    for vm in &vms {
+        let _ = std::fs::write(vm.join("cgroup.kill"), "1");
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline
+        && vms.iter().any(|vm| {
+            std::fs::read_to_string(vm.join("cgroup.events"))
+                .is_ok_and(|events| events.contains("populated 1"))
+        })
+    {
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
