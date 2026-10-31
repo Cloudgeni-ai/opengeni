@@ -14,7 +14,9 @@ import { selectCodexCredentialId } from "@opengeni/codex";
 import { directPersonalConnectionSubjectId } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import {
+  API_CREDITS_REQUIRED_MESSAGE,
   type AllowanceExhaustedRefusal,
+  type BillingOrigin,
   type SessionEvent,
   type SessionUsageLimitReachedRefusal,
   type SessionTurn,
@@ -350,6 +352,8 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
   modelId?: string;
   /** The session whose task root usage limit gates this request. */
   sessionId?: string;
+  /** The turn's frozen funding origin; API work spends credits only. */
+  billingOrigin?: BillingOrigin;
   serializedRunState?: () => string | null;
 }): Promise<number | undefined> {
   try {
@@ -365,6 +369,7 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
       input.initiatingHumanSubjectId,
       input.modelId,
       input.sessionId,
+      input.billingOrigin,
     );
   } catch (limitError) {
     // An unreadable usage state blocks the request as an infrastructure
@@ -401,6 +406,7 @@ export async function ensureRunAllowed(
   initiatingHumanSubjectId: string | null = null,
   modelId?: string,
   sessionId?: string,
+  billingOrigin: BillingOrigin = "app",
 ): Promise<number | undefined> {
   let creditPolicyRevision: number | undefined;
   // Per-task usage limit: independent of funding, so it applies to
@@ -440,10 +446,20 @@ export async function ensureRunAllowed(
     chargesOpenGeniCredits &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
-    const balance = await getSpendableCreditBalance(db, accountId, modelId);
+    const balance = await getSpendableCreditBalance(
+      db,
+      accountId,
+      modelId,
+      undefined,
+      undefined,
+      billingOrigin,
+    );
     creditPolicyRevision = balance.creditPolicyRevision;
     if (balance.balanceMicros <= 0) {
-      throw new Error("insufficient workspace credits");
+      // Plan credit never pays for API work: say which balance is empty.
+      throw new Error(
+        billingOrigin === "api" ? API_CREDITS_REQUIRED_MESSAGE : "insufficient workspace credits",
+      );
     }
   }
   const refusal = await checkWorkspaceAllowance(db, {

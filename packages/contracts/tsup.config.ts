@@ -6,6 +6,7 @@ export default defineConfig({
   entry: [
     "src/modal-native-proof-v2.ts",
     "src/allowance-refusal.ts",
+    "src/billing-origin.ts",
     "src/timeline-order.ts",
     "src/learning-refusal.ts",
     "src/values.ts",

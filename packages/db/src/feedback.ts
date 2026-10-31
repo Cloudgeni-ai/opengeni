@@ -7,7 +7,7 @@ import {
   type FeedbackSubmissionResponse,
 } from "@opengeni/contracts";
 import { withWorkspaceSubjectRls, type Database } from "./database";
-import { feedbackSubmissions, sessions, sessionTurns } from "./schema";
+import { feedbackSubmissions, sessionEventCursors, sessions, sessionTurns } from "./schema";
 import { fromPostgresLosslessText } from "./lossless-json";
 
 export class FeedbackConflictError extends Error {}
@@ -15,6 +15,31 @@ export class FeedbackTargetNotFoundError extends Error {}
 
 /** A screenshot as stored on the row: its public metadata plus where the bytes are. */
 export type StoredFeedbackScreenshot = FeedbackScreenshot & { objectKey: string };
+
+/**
+ * What the server records with a report, for whoever investigates it: the
+ * server build that received it and, when the report names the chat in view
+ * and its author can read that chat, the chat's state and latest turn at that
+ * moment. Stored once with the report; never returned to clients.
+ */
+export interface FeedbackDiagnostics {
+  server: { version?: string; revision?: string };
+  session?: {
+    id: string;
+    status: string;
+    visibility: string;
+    lastSequence: number;
+    latestTurn?: {
+      id: string;
+      status: string;
+      model: string;
+      reasoningEffort: string;
+      createdAt: string;
+      startedAt: string | null;
+      finishedAt: string | null;
+    };
+  };
+}
 
 /** Object key for one screenshot. The digest makes a different image a different object. */
 export function feedbackScreenshotObjectKey(input: {
@@ -76,6 +101,8 @@ export async function createFeedback(
     principalKind: string | null;
     request: CreateFeedbackRequest;
     screenshots?: StoredFeedbackScreenshot[];
+    /** The receiving server's version and deployment revision, when known. */
+    server?: { version?: string | undefined; revision?: string | undefined };
   },
 ): Promise<FeedbackSubmissionResponse> {
   const request = CreateFeedbackRequest.parse(input.request);
@@ -105,6 +132,65 @@ export async function createFeedback(
         if (!turn) throw new FeedbackTargetNotFoundError("Turn not found");
       }
     }
+    const diagnostics: FeedbackDiagnostics = {
+      server: {
+        ...(input.server?.version ? { version: input.server.version } : {}),
+        ...(input.server?.revision ? { revision: input.server.revision } : {}),
+      },
+    };
+    // The chat in view, read with the author's own access: a chat they cannot
+    // read is simply not described.
+    const inView = request.sessionId ?? request.context?.sessionId;
+    if (inView) {
+      const [session] = await tx
+        .select({
+          id: sessions.id,
+          status: sessions.status,
+          visibility: sessions.visibility,
+          lastSequence: sessionEventCursors.lastSequence,
+        })
+        .from(sessions)
+        .leftJoin(sessionEventCursors, eq(sessionEventCursors.sessionId, sessions.id))
+        .where(and(eq(sessions.workspaceId, input.workspaceId), eq(sessions.id, inView)))
+        .limit(1);
+      if (session) {
+        const [turn] = await tx
+          .select({
+            id: sessionTurns.id,
+            status: sessionTurns.status,
+            model: sessionTurns.model,
+            reasoningEffort: sessionTurns.reasoningEffort,
+            createdAt: sessionTurns.createdAt,
+            startedAt: sessionTurns.startedAt,
+            finishedAt: sessionTurns.finishedAt,
+          })
+          .from(sessionTurns)
+          .where(
+            and(
+              eq(sessionTurns.workspaceId, input.workspaceId),
+              eq(sessionTurns.sessionId, session.id),
+            ),
+          )
+          .orderBy(desc(sessionTurns.position), desc(sessionTurns.createdAt))
+          .limit(1);
+        diagnostics.session = {
+          id: session.id,
+          status: session.status,
+          visibility: session.visibility,
+          lastSequence: session.lastSequence ?? 0,
+          ...(turn
+            ? {
+                latestTurn: {
+                  ...turn,
+                  createdAt: turn.createdAt.toISOString(),
+                  startedAt: turn.startedAt?.toISOString() ?? null,
+                  finishedAt: turn.finishedAt?.toISOString() ?? null,
+                },
+              }
+            : {}),
+        };
+      }
+    }
     const [created] = await tx
       .insert(feedbackSubmissions)
       .values({
@@ -120,6 +206,7 @@ export async function createFeedback(
         commentCodecVersion: request.comment === undefined ? null : 1,
         context: request.context ?? null,
         screenshots,
+        diagnostics: diagnostics as unknown as Record<string, unknown>,
       })
       .onConflictDoNothing({
         target: [

@@ -2,7 +2,10 @@ import {
   isKnowledgeSourceSyncRetirementReason,
   retiredKnowledgeSourceSyncTask,
 } from "@opengeni/contracts/knowledge-source-sync-retirement";
-import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
+import {
+  getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
+  readScheduledTaskBillingOrigin,
+} from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
 export { scheduledTaskSessionTitle } from "./scheduled-task-title";
@@ -135,7 +138,7 @@ import {
   workflowIdForSession,
 } from "./common";
 import { withFirstPartyTools } from "./goals";
-import { agentRunAdmissionDenial } from "@opengeni/core";
+import { agentRunAdmissionDenial, fundedBillingOrigin } from "@opengeni/core";
 import {
   scheduledAlertOccurrenceIdentity,
   scheduledAlertResponderSessionCreateIdempotencyKey,
@@ -1232,12 +1235,28 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           model: targetSessionExecution?.model ?? model,
           requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
           initiatingHumanSubjectId: causalHumanSubjectId,
+          // Runs are billed as whoever set the task up.
+          // An internal (legacy) account stays app even for a task it can't see.
+          billingOrigin: async () =>
+            fundedBillingOrigin(
+              task.accountId,
+              await readScheduledTaskBillingOrigin(db, {
+                accountId: task.accountId,
+                workspaceId: task.workspaceId,
+                taskId: task.id,
+              }),
+            ),
         },
       );
       if (admissionDenial) {
         // Credits and monthly limits clear on their own (top-up, new period):
         // skip this occurrence visibly; a later one is admitted normally.
-        return await refuseAdmission(admissionDenial, true, "agent run admission denied");
+        // A run receipt records API work without credits as out of credits.
+        return await refuseAdmission(
+          admissionDenial === "api_credits_required" ? "insufficient_credits" : admissionDenial,
+          true,
+          "agent run admission denied",
+        );
       }
       if (acceptedTargetSessionId && targetSessionExecutionBase) {
         // An occurrence that targets an existing task tree counts against

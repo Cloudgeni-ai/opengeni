@@ -3268,6 +3268,11 @@ The runtime secret must provide values such as:
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
 - `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
+- `OPENGENI_BILLING_LEGACY_ACCOUNT_IDS` lists accounts kept on the billing terms
+  from before the app/API split (any credit pays any use, no own-key fee); it
+  defaults to our internal accounts (CloudGeni's host account and our own
+  team's organizations) and `none` lists no account. See
+  [billing-origin.md](billing-origin.md#internal-accounts-cloudgeni-and-our-team).
 - `OPENGENI_SUBSCRIPTION_PLANS_ENABLED=false` is the default. Enabling it opts into
   subscription API/webhook plan writes (and the separately integrated maintenance
   service); prepaid top-ups remain independent. Configure the operator runtime
@@ -4010,10 +4015,12 @@ Service endpoints:
 API and worker health responses include the non-fatal warning
 `github_app_bot_identity_unavailable` when that process has partial workspace
 GitHub App configuration, cannot derive the App bot identity, and has no
-complete `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` fallback. Compare
-the warning across API and worker processes: a difference means attach and turn
-startup would declare different stable Git identity environment keys. The
-warning never includes provider credentials and does not change liveness.
+complete `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` fallback. On the
+worker it means App repositories commit without the bot identity. Commit
+identity is per repository (each mounted repository's local git config), not
+sandbox environment, so the warning no longer affects attach and turn
+environment parity. The warning never includes provider credentials and does
+not change liveness.
 
 Useful settings:
 

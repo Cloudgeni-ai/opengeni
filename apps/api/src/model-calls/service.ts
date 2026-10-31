@@ -9,6 +9,7 @@ import {
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs, type ConfiguredModel, type Settings } from "@opengeni/config";
 import {
+  API_CREDITS_REQUIRED_CODE,
   modelCallProcessingResidency,
   type ModelCallProcessingResidencyV1,
   type EntitlementsPort,
@@ -69,6 +70,7 @@ import {
 import { XaiSubscriptionReloginRequired } from "@opengeni/xai-subscription";
 import { PendingUsageSettlements } from "./pending-usage-settlements";
 import {
+  billingOriginForAccessGrant,
   creditDebitAttributionForGrant,
   withAccessGrantSessionRlsContext,
 } from "../access-grant-rls";
@@ -170,6 +172,9 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       // refused once the limit is reached. Other callers have no task.
       const usageLimitSessionId = attemptSessionId(input.grant);
       const sourceId = `model_call:${input.requestId}`;
+      // Who pays: API work spends credits only, never plan credit. Decided
+      // before custody opens, so a failed read leaves no marker behind.
+      const billingOrigin = await billingOriginForAccessGrant(deps, input.grant);
       if (usageLimitSessionId) {
         if (pendingSettlements.full) {
           // Never drop a retained receipt to make room for another call.
@@ -216,12 +221,13 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           chargesOpenGeniCredits,
           countsTowardTokenCap,
           subjectId: input.subjectId,
+          billingOrigin,
         });
         if (!admission.allowed) {
           throw new ModelCallError({
             status: admission.denial === "insufficient_credits" ? 402 : 429,
             type: "insufficient_quota",
-            code: admission.denial,
+            code: admission.apiCreditsRequired ? API_CREDITS_REQUIRED_CODE : admission.denial,
             message: admission.message,
           });
         }
@@ -326,6 +332,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
               logSettlementFailure(error);
             },
             debitMetadata: { modelCallId: input.requestId },
+            billingOrigin,
           }),
         ).catch(async (error: unknown) => {
           logSettlementFailure(error);

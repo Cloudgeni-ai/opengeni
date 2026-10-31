@@ -8,6 +8,7 @@ import type {
   SessionEventMutation,
 } from "@opengeni/db";
 import type {
+  BillingOrigin,
   CodexCredentialPolicySnapshotV1,
   ModelContextContributionSummary,
   SessionStatus,
@@ -114,6 +115,8 @@ export type BillingState = {
   isExternallyBilledTurn: boolean;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
+  /** The turn's frozen funding origin: API work spends credits only. */
+  billingOrigin?: BillingOrigin;
 };
 
 export type SandboxRuntimeState = {
@@ -331,6 +334,7 @@ export function createTurnContext(input: {
       isExternallyBilledTurn: false,
       chargesOpenGeniCredits: true,
       countsTowardTokenCap: true,
+      billingOrigin: "app",
     },
     sandboxState: {
       resolvedSandbox: null,

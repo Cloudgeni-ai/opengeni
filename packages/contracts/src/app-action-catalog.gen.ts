@@ -151,7 +151,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyActivationResponse"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "actOnMemorySlackPublication",
@@ -235,6 +235,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ExternalAuthRunResponse"
+    ]
+  },
+  {
+    "id": "answerAgentCall",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-calls/:callId/answer",
+    "request": [
+      "AgentCallActionRequest"
+    ],
+    "response": [
+      "AgentCall"
     ]
   },
   {
@@ -1410,7 +1421,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyRevision"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "createWorkspaceInstructionPolicyOnboardingProposal",
@@ -1422,7 +1433,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyOnboardingProposal"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "createWorkspaceOpenRouterCustomModel",
@@ -1471,6 +1482,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "PreferenceRegistryMutationResponse"
     ],
     "permission": "workspace:read"
+  },
+  {
+    "id": "declineAgentCall",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-calls/:callId/decline",
+    "request": [
+      "AgentCallActionRequest"
+    ],
+    "response": [
+      "AgentCall"
+    ]
   },
   {
     "id": "defineSiteDataCollection",
@@ -2948,6 +2970,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AccessContext"
+    ]
+  },
+  {
+    "id": "getAgentCall",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-calls/:callId",
+    "request": [],
+    "query": [
+      "device"
+    ],
+    "response": [
+      "AgentCall"
     ]
   },
   {
@@ -4583,7 +4617,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyRevision"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "importSiteData",
@@ -8191,7 +8225,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceInstructionPolicyActivationResponse"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "rotateEventSourceSecret",

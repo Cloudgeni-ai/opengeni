@@ -446,6 +446,14 @@ pub struct Outgrowth {
     /// request, or the kernel unable to hold a sandbox to its bound,
     /// before a shrink.
     pub hold: Duration,
+    /// How long a sandbox above its bound may go without coming down a
+    /// step while the engine is still bringing it down, before it counts
+    /// as one the kernel cannot hold: before the kernel compresses a VM
+    /// that has just written gigabytes it ages its pages, which on a busy
+    /// host takes many seconds before the first megabytes compress. Once
+    /// the engine has brought it down as far as the kernel takes, `hold`
+    /// counts instead.
+    pub descent: Duration,
     /// How long a guest has to answer a shrink before it counts as unable;
     /// the guest answers with what it managed well within it.
     pub answer: Duration,
@@ -464,6 +472,7 @@ impl Default for Outgrowth {
     fn default() -> Self {
         Self {
             hold: Duration::from_secs(10),
+            descent: Duration::from_secs(60),
             answer: Duration::from_secs(15),
             settle: Duration::from_secs(10),
             least: 256 << 20,

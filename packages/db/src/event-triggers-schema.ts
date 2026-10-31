@@ -43,6 +43,11 @@ export const eventSources = pgTable(
     statusReasonCode: text("status_reason_code"),
     statusReasonDetail: text("status_reason_detail"),
     secretEncrypted: text("secret_encrypted"),
+    // Migration 1128: 'api' once an API caller set or received the signing
+    // secret, or named a workspace MCP source's URL (`BillingOrigin`); its
+    // deliveries are then API use. Never turned back; null means only the
+    // app has held it.
+    secretBillingOrigin: text("secret_billing_origin"),
     externalKey: text("external_key"),
     mcpServerId: text("mcp_server_id"),
     // Migration 1103: a workspace MCP source listens to this URL, signed in

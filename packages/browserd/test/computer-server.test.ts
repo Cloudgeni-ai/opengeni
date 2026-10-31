@@ -35,6 +35,33 @@ const rotatedControlToken = `control.${"d".repeat(48)}`;
 const rotatedViewToken = `view.${"w".repeat(48)}`;
 
 describe("Computer routes on the placement interaction server", () => {
+  test("passes bounded display identity to the driver without changing the control binding", async () => {
+    let received: ComputerSupervisorDriverContext | undefined;
+    await withServer(
+      async ({ server, reference }) => {
+        const identity = { label: "Research agent", avatarPng: "aWNvbg==" };
+        const created = await request(server, "/v1/computer-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: { ...createBody(reference), cursorIdentity: identity },
+        });
+        expect(created.status).toBe(201);
+        expect(received?.cursorIdentity).toEqual(identity);
+        expect(received?.computerSessionId).toBe(reference.computerSessionId);
+        const invalid = await request(server, "/v1/computer-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: { ...createBody(reference), cursorIdentity: { label: "x".repeat(201) } },
+        });
+        expect(invalid.status).toBe(400);
+      },
+      {
+        onComputerContext: (context) => {
+          received = context;
+        },
+      },
+    );
+  });
   test("keeps a large queued frame stream open while the socket drains", async () => {
     await withServer(async ({ server, reference, getDriver }) => {
       const created = await request(server, "/v1/computer-sessions", {
@@ -949,6 +976,7 @@ async function withServer(
   }) => Promise<void>,
   options: {
     rfbPort?: number;
+    onComputerContext?: (context: ComputerSupervisorDriverContext) => void;
     onUnexpectedError?: (error: unknown, context: ControllerFailureContext) => void;
   } = {},
 ): Promise<void> {
@@ -964,6 +992,7 @@ async function withServer(
     rootDirectory: join(directory, "computer-state"),
     environmentAllocator: fixtureEnvironmentAllocator(options.rfbPort ?? null),
     createDriver: async (context) => {
+      options.onComputerContext?.(context);
       driver = new FixtureComputerDriver(context, options.rfbPort !== undefined);
       return driver;
     },
