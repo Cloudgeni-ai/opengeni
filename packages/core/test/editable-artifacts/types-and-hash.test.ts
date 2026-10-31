@@ -20,6 +20,7 @@ import {
   stableHex,
   transactionRequest,
 } from "./fixtures";
+import { hashEditableArtifactCreateRequest } from "../../src/domain/editable-artifacts/hash";
 
 describe("editable artifact stable identity and causality", () => {
   test("accepts fixed-width stable ids and rejects ambiguous encodings", () => {
@@ -177,5 +178,29 @@ describe("editable artifact canonical intent boundary", () => {
       }),
     ).rejects.toThrow("Accessor property");
     expect(getterCalled).toBe(false);
+  });
+});
+
+describe("editable artifact audience in request identity", () => {
+  test("a shared request hashes exactly as before audiences, and Only me is a different request", () => {
+    const base = { modality: "document" as const, title: "Plan" };
+    const legacy = hashEditableArtifactCreateRequest(base);
+    expect(
+      hashEditableArtifactCreateRequest({
+        ...base,
+        audience: { visibility: "workspace_shared", ownerSubjectId: "user:owner" },
+      }),
+    ).toBe(legacy);
+    const onlyMe = hashEditableArtifactCreateRequest({
+      ...base,
+      audience: { visibility: "user_private", ownerSubjectId: "user:owner" },
+    });
+    expect(onlyMe).not.toBe(legacy);
+    expect(
+      hashEditableArtifactCreateRequest({
+        ...base,
+        audience: { visibility: "user_private", ownerSubjectId: "user:someone-else" },
+      }),
+    ).not.toBe(onlyMe);
   });
 });

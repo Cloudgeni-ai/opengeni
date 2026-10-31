@@ -13,6 +13,8 @@ import { Switch } from "@opengeni/react/ui/switch";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import { matchingConnectionAccounts } from "@opengeni/react/app/components/capabilities/session-connection-accounts";
 import {
+  ADD_ACCOUNT_LIMIT_COPY,
+  addAccountLimit,
   connectionAccountRows,
   type AccountOriginWorkspace,
 } from "@opengeni/react/app/components/capabilities/connection-account-rows";
@@ -46,6 +48,8 @@ export type CatalogConnectedAccountsManagement = {
   onRemove: (account: ConnectionMetadata) => Promise<boolean | void>;
   /** Sign in a further account; omit when the connector holds a single account. */
   onAdd?: () => void;
+  /** Who a further account would belong to, so Add follows the account rule. */
+  addOwnership?: "personal" | "workspace";
 };
 
 export type CatalogConnectedAccountsProps = {
@@ -226,8 +230,22 @@ export function CatalogConnectedAccounts({
     labelOf: (account) => connectionSignInLabel(account, item.name),
   });
   const busy = management?.busy === true;
+  // A service that can't tell accounts apart allows one per person; an account
+  // connected before it could is signed in again once. Say so instead of Add.
+  const limit =
+    management?.onAdd && management.addOwnership
+      ? addAccountLimit(accounts, {
+          viewerSubjectId: management.viewerSubjectId,
+          ownership: management.addOwnership,
+        })
+      : null;
   const addAction =
-    management?.onAdd && management.canWrite && !accessDenied && !loadFailed && connections ? (
+    management?.onAdd &&
+    management.canWrite &&
+    !limit &&
+    !accessDenied &&
+    !loadFailed &&
+    connections ? (
       <Button
         type="button"
         variant="outline"
@@ -279,80 +297,91 @@ export function CatalogConnectedAccounts({
       ) : accounts.length === 0 ? (
         <p className="m-0 text-sm text-fg-muted">No accounts connected to this connector.</p>
       ) : (
-        <ul
-          aria-label={`${item.name} connected accounts`}
-          className="m-0 list-none divide-y divide-border p-0"
-        >
-          {accounts.map((account) => {
-            const row = rows.get(account.id)!;
-            const label = row.label;
-            const unfinished = connectedAccountSignInUnfinished(account);
-            // Re-signing in refreshes the same row wherever it was added.
-            const reconnect =
-              management?.onReconnect &&
-              account.kind === "oauth2" &&
-              account.status !== "active" &&
-              canReconnectConnectedAccount(account, management, workspaceId)
-                ? management.onReconnect
-                : null;
-            const removable = canRemoveConnectedAccount(account, management, workspaceId);
-            return (
-              <li
-                key={account.id}
-                className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 py-3 first:pt-0 last:pb-0"
-              >
-                <div className="min-w-0 flex-1 basis-48">
-                  <p className="m-0 break-words text-sm leading-5 font-medium text-fg">{label}</p>
-                  <div className="mt-1 flex flex-wrap items-center gap-2">
-                    <MetaChip>{row.scope}</MetaChip>
+        <>
+          {limit && management?.canWrite ? (
+            <p className="m-0 mb-3 text-sm text-fg-muted">{ADD_ACCOUNT_LIMIT_COPY[limit]}</p>
+          ) : null}
+          <ul
+            aria-label={`${item.name} connected accounts`}
+            className="m-0 list-none divide-y divide-border p-0"
+          >
+            {accounts.map((account) => {
+              const row = rows.get(account.id)!;
+              const label = row.label;
+              const unfinished = connectedAccountSignInUnfinished(account);
+              // Re-signing in refreshes the same row wherever it was added. An
+              // account from before its service could be identified offers it too.
+              const reconnect =
+                management?.onReconnect &&
+                account.kind === "oauth2" &&
+                (account.status !== "active" ||
+                  (limit === "reconnect" && account.accountIdentity === "reconnect")) &&
+                canReconnectConnectedAccount(account, management, workspaceId)
+                  ? management.onReconnect
+                  : null;
+              const removable = canRemoveConnectedAccount(account, management, workspaceId);
+              return (
+                <li
+                  key={account.id}
+                  className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 py-3 first:pt-0 last:pb-0"
+                >
+                  <div className="min-w-0 flex-1 basis-48">
+                    <p className="m-0 break-words text-sm leading-5 font-medium text-fg">{label}</p>
+                    <div className="mt-1 flex flex-wrap items-center gap-2">
+                      <MetaChip>{row.scope}</MetaChip>
+                    </div>
                   </div>
-                </div>
-                {unfinished ? (
-                  <StatusBadge status="needs_reconnect" variant="dot">
-                    Sign-in not finished
-                  </StatusBadge>
-                ) : (
-                  <StatusBadge status={ACCOUNT_STATUS[account.status]} variant="dot" />
-                )}
-                {reconnect || removable ? (
-                  <div className="flex shrink-0 items-center gap-2">
-                    {reconnect ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="min-h-9"
-                        disabled={busy}
-                        aria-label={`Reconnect ${label}`}
-                        onClick={() => reconnect(account)}
-                      >
-                        <RefreshCwIcon aria-hidden="true" />
-                        Reconnect
-                      </Button>
-                    ) : null}
-                    {removable ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="min-h-9 text-fg-muted hover:text-status-failed"
-                        disabled={busy}
-                        aria-label={`Remove ${label}`}
-                        onClick={() => setRemoveTarget({ account, label, origin: row.origin })}
-                      >
-                        <TrashIcon aria-hidden="true" />
-                        Remove
-                      </Button>
-                    ) : null}
-                  </div>
-                ) : null}
-                {onTurnOnHere && ownLoginHasHereSwitch(account, management?.viewerSubjectId) ? (
-                  <OwnLoginHereSwitch account={account} label={label} onTurnOnHere={onTurnOnHere} />
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
+                  {unfinished ? (
+                    <StatusBadge status="needs_reconnect" variant="dot">
+                      Sign-in not finished
+                    </StatusBadge>
+                  ) : (
+                    <StatusBadge status={ACCOUNT_STATUS[account.status]} variant="dot" />
+                  )}
+                  {reconnect || removable ? (
+                    <div className="flex shrink-0 items-center gap-2">
+                      {reconnect ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="min-h-9"
+                          disabled={busy}
+                          aria-label={`Reconnect ${label}`}
+                          onClick={() => reconnect(account)}
+                        >
+                          <RefreshCwIcon aria-hidden="true" />
+                          Reconnect
+                        </Button>
+                      ) : null}
+                      {removable ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="min-h-9 text-fg-muted hover:text-status-failed"
+                          disabled={busy}
+                          aria-label={`Remove ${label}`}
+                          onClick={() => setRemoveTarget({ account, label, origin: row.origin })}
+                        >
+                          <TrashIcon aria-hidden="true" />
+                          Remove
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {onTurnOnHere && ownLoginHasHereSwitch(account, management?.viewerSubjectId) ? (
+                    <OwnLoginHereSwitch
+                      account={account}
+                      label={label}
+                      onTurnOnHere={onTurnOnHere}
+                    />
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </>
       )}
       {management ? (
         <ConfirmDialog

@@ -8,6 +8,7 @@ export const WORKSPACE_WEBHOOK_EVENT_TYPES = [
   "turn.completed",
   "turn.failed",
   "turn.cancelled",
+  "turn.superseded",
   "session.status.changed",
   "session.requiresAction",
   "session.humanInput.requested",

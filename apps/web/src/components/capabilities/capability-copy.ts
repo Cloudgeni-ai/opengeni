@@ -65,6 +65,7 @@ export function catalogConnectAccess(
   item: CapabilityCatalogItem,
   grant: SetupGrant | null | undefined,
   workspaceKind: "personal" | "shared" | null | undefined,
+  memberIntegrationSetup?: "members" | "admins",
 ): CatalogConnectAccess {
   const fixedPersonal =
     workspaceKind === "personal" ||
@@ -72,7 +73,7 @@ export function catalogConnectAccess(
     (item.enabled && item.connectionRef?.subjectScope === "subject");
   if (!grant || item.kind !== "mcp" || item.enabled)
     return { personalOnly: fixedPersonal, blocked: null };
-  const access = personalIntegrationSetupAccess(grant, item);
+  const access = personalIntegrationSetupAccess(grant, item, memberIntegrationSetup);
   if (access) return { personalOnly: fixedPersonal || access === "personal", blocked: null };
   const canConnectOwn =
     grant.permissions.includes(PERSONAL_INTEGRATION_SETUP_PERMISSION) ||
@@ -97,9 +98,9 @@ export function catalogConnectAccess(
 export function addConnectionErrorCopy(error: unknown): { title: string; description: string } {
   if (apiErrorFacts(error).status === 403)
     return {
-      title: "Only an admin can add connections",
+      title: "You can't add connections here",
       description:
-        "Ask a workspace admin to add this MCP server. Once it's on, you can connect your own account.",
+        "Ask a workspace admin to add this MCP server, or for access to add connections.",
     };
   return capabilityErrorToast(error, "Couldn't add the connection");
 }

@@ -15,6 +15,10 @@ import {
 } from "@opengeni/contracts/message-time-zone";
 import type { WorkspaceBackgroundCommandListResponse } from "./types";
 import type {
+  EditableArtifactResource,
+  UpdateEditableArtifactVisibilityRequest,
+} from "./editable-artifact-resources";
+import type {
   InsightsSiteUsageQuery,
   InsightsSiteUsageResponse,
 } from "@opengeni/contracts/insights-usage";
@@ -9155,6 +9159,25 @@ export class OpenGeniClient {
     return await this.requestJson<UpdateWorkspaceArtifactVisibilityResponse>(
       "PUT",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/visibility`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Change who can open a document, spreadsheet or presentation: the whole
+   * workspace, or only you. Only its owner can, from the app.
+   */
+  async updateEditableArtifactVisibility(
+    workspaceId: string,
+    artifactId: string,
+    request: UpdateEditableArtifactVisibilityRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<EditableArtifactResource> {
+    return await this.requestJson<EditableArtifactResource>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/visibility`,
       request,
       undefined,
       options,

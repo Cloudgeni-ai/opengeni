@@ -1671,6 +1671,54 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     expect(invalid[0]?.valid).toBe(false);
   });
 
+  test("the index reads only small single-file personal SKILL.md text, only on request", async () => {
+    if (!client) return;
+    const f = await fixture("automatic");
+    const owner = { ...f.context, subjectId: f.human.actor.subjectId };
+    const small = skillMarkdown("Always reply in Norwegian.");
+    const save = (scope: "user" | "workspace", files: { path: string; content: string }[]) =>
+      saveSkill(client!.db, {
+        ...f.input,
+        scope,
+        operationId: crypto.randomUUID(),
+        skillId: crypto.randomUUID(),
+        stableKey: `inline-${crypto.randomUUID()}`,
+        files,
+      });
+    const personal = await save("user", [{ path: "SKILL.md", content: small }]);
+    const folder = await save("user", [
+      { path: "SKILL.md", content: small },
+      { path: "references/context.txt", content: "context" },
+    ]);
+    const large = await save("user", [
+      { path: "SKILL.md", content: skillMarkdown("x".repeat(300)) },
+    ]);
+    const workspace = await save("workspace", [{ path: "SKILL.md", content: small }]);
+    const cap = Buffer.byteLength(small) + 10;
+    const byId = new Map(
+      (await listSkillDescriptors(client.db, owner, { personalSkillMarkdownMaxBytes: cap })).map(
+        (entry) => [entry.id, entry.personalSkillMarkdown],
+      ),
+    );
+    expect(byId.get(personal.skillId)).toBe(small);
+    expect(byId.get(folder.skillId)).toBeNull();
+    expect(byId.get(large.skillId)).toBeNull();
+    expect(byId.get(workspace.skillId)).toBeNull();
+    for (const entry of await listSkillDescriptors(client.db, owner))
+      expect(entry).not.toHaveProperty("personalSkillMarkdown");
+    // Another person in the workspace sees neither the Skill nor its text.
+    const others = await listSkillDescriptors(
+      client.db,
+      { ...f.context, subjectId: "another-human" },
+      { personalSkillMarkdownMaxBytes: cap },
+    );
+    expect(others.map((entry) => entry.id)).toEqual([workspace.skillId]);
+    expect(others[0]?.personalSkillMarkdown).toBeNull();
+    await expect(
+      listSkillDescriptors(client.db, owner, { personalSkillMarkdownMaxBytes: 0 }),
+    ).rejects.toThrow("positive integer");
+  });
+
   test("explicit Review first keeps agent Skills pending until human approval", async () => {
     if (!client) return;
     const f = await fixture("suggest");

@@ -292,7 +292,7 @@ impl World {
             Action::Lend { loan } => panic!("{loan:?} lent, but nothing borrows here"),
             Action::Discard { sandbox } => panic!("{sandbox:?} discarded, but nothing is spare"),
             Action::Shrink { sandbox, .. }
-            | Action::EndForMemory { sandbox }
+            | Action::EndForMemory { sandbox, .. }
             | Action::Bound { sandbox, .. } => {
                 panic!("{sandbox:?} bounded, but this host has no rule for outgrowth")
             }

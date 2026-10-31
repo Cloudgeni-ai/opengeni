@@ -12027,6 +12027,12 @@ export const Channel = /* @__PURE__ */ defineSchema(() =>
     avatar: SessionAvatar.nullable().default(null),
     pinned: primitives.boolean,
     sortOrder: primitives.nonnegativeInteger,
+    /**
+     * Who sees it, like a chat: the workspace, or only its owner ("private",
+     * Only me). Only its owner sees an Only me project, which holds only their
+     * own Only me chats and Sites. Absent from servers that predate it.
+     */
+    visibility: z.enum(["private", "workspace"]).default("workspace"),
     createdBy: primitives.nullableString,
     createdAt: primitives.string,
     updatedAt: primitives.string,
@@ -12039,6 +12045,11 @@ export const CreateChannelRequest = /* @__PURE__ */ defineSchema(() =>
     name: primitives.string.trim().min(1).max(80),
     description: z.string().max(2000).optional(),
     avatar: SessionAvatar.nullable().optional(),
+    /**
+     * Omitted, a person's project is shared with the workspace and an agent's
+     * follows its chat: Only me when made in an Only me chat.
+     */
+    visibility: z.enum(["private", "workspace"]).optional(),
   }),
 );
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
@@ -12050,6 +12061,12 @@ export const UpdateChannelRequest = /* @__PURE__ */ defineSchema(() =>
     /** null clears it; omitted keeps it. */
     avatar: SessionAvatar.nullable().optional(),
     pinned: primitives.optionalBoolean,
+    /**
+     * "workspace" shares the owner's Only me project with the workspace. A
+     * shared project cannot be made Only me; only its owner, signed in,
+     * changes it.
+     */
+    visibility: z.literal("workspace").optional(),
   }),
 );
 export type UpdateChannelRequest = z.infer<typeof UpdateChannelRequest>;
@@ -12416,6 +12433,8 @@ export type IncidentTelemetryPreflight = z.infer<typeof IncidentTelemetryPreflig
  * They bound create/update requests and freshly accepted occurrence snapshots;
  * already-stored tasks are read back through the unbounded storage shape so a
  * legacy row can never become unreadable or undispatchable by a later cap.
+ * Inline `agentConfig.skills` are outside these byte caps: they are bounded by
+ * the Skill limits, exactly as on session create (see ScheduledTaskSkill).
  */
 export const SCHEDULED_TASK_NAME_MAX_BYTES = 512;
 export const SCHEDULED_TASK_PROMPT_MAX_BYTES = 64 * 1024;
@@ -12452,6 +12471,19 @@ function scheduledTaskJsonUtf8Bytes(value: unknown): number {
   } catch {
     return Number.POSITIVE_INFINITY;
   }
+}
+
+/**
+ * An agent config without its inline Skills, for the byte caps. A chat the
+ * task starts takes the same Skills a session create does, so they are bounded
+ * by the Skill limits rather than by the size of the rest of the config.
+ */
+function scheduledTaskAgentConfigWithoutSkills(agentConfig: unknown): unknown {
+  if (!agentConfig || typeof agentConfig !== "object" || Array.isArray(agentConfig)) {
+    return agentConfig;
+  }
+  const { skills: _skills, ...rest } = agentConfig as Record<string, unknown>;
+  return rest;
 }
 
 /**
@@ -12792,7 +12824,10 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ /* @__PURE__ */ def
           "Omit sandboxBackend and select machineTarget for a separate agent; existing-chat schedules inherit the chat's machine",
       });
     }
-    if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
+    if (
+      scheduledTaskJsonUtf8Bytes(scheduledTaskAgentConfigWithoutSkills(value)) >
+      SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES
+    ) {
       context.addIssue({
         code: "custom",
         message: `scheduled task agent config exceeds ${SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES} UTF-8 bytes`,
@@ -13275,7 +13310,16 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
     })
     .strict()
     .superRefine((value, context) => {
-      if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES) {
+      // The task's inline Skills are bounded by the Skill limits it was saved
+      // under, so a task that passed ingress can always be accepted.
+      const measured = {
+        ...value,
+        task: {
+          ...value.task,
+          agentConfig: scheduledTaskAgentConfigWithoutSkills(value.task.agentConfig),
+        },
+      };
+      if (scheduledTaskJsonUtf8Bytes(measured) > SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES) {
         context.addIssue({
           code: "custom",
           message: `scheduled accepted execution exceeds ${SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES} UTF-8 bytes`,
@@ -14281,6 +14325,15 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
     verifiedInstallAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     verifiedInstallVersion: z.number().int().positive().nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()),
+    /**
+     * Whether this OAuth MCP account can be told apart from another account of
+     * the same service: `verified` (its account is known), `reconnect` (the
+     * service identifies accounts but this one predates that or its check
+     * failed; sign in again once before adding another), or `single` (the
+     * service doesn't say which account it is, so each person can connect
+     * one). Absent for other connections and from older servers.
+     */
+    accountIdentity: z.enum(["verified", "reconnect", "single"]).optional(),
     createdBySubjectId: primitives.nullableString,
     updatedBySubjectId: primitives.nullableString,
     createdAt: primitives.string,
@@ -14815,6 +14868,11 @@ export const CapabilityCatalogResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     items: z.array(CapabilityCatalogItem),
     installations: z.array(CapabilityInstallation),
+    /**
+     * Who the organization lets turn integrations on: members (the default)
+     * or only integration admins. Older servers omit it; treat that as members.
+     */
+    memberIntegrationSetup: z.enum(["members", "admins"]).optional(),
   }),
 );
 export type CapabilityCatalogResponse = z.infer<typeof CapabilityCatalogResponse>;
@@ -15437,11 +15495,12 @@ export const InstallApiIntegrationRequest = /* @__PURE__ */ defineSchema(() =>
       allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
       // Selected write/destructive tools (preview approvalMode "ask") that run
       // without per-call human approval, for unattended/scheduled work. Custom and
-      // curated Integrations alike; requires capabilities:manage and re-passes
-      // organization acquisition policy. A curated definition may forbid it per
-      // operation (IntegrationDefinition.autoApproval). Declarative: omission restores
-      // approval for every "ask" tool. Session approval policy, connector Block,
-      // and action policies still apply.
+      // curated Integrations alike; requires capabilities:manage (members install
+      // without it) and re-passes organization acquisition policy. A curated
+      // definition may forbid it per operation (IntegrationDefinition.autoApproval).
+      // Omission keeps an earlier choice only for the same account and unchanged
+      // operations; otherwise every "ask" tool needs approval. Session approval
+      // policy, connector Block, and action policies still apply.
       autoApprovedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
     })
     .strict(),

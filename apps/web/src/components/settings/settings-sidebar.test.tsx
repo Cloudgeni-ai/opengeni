@@ -303,6 +303,8 @@ test("search finds settings by name and keeps the keyboard in the rail", async (
     await type("voice");
     expect(results().map((result) => result.textContent)).toEqual([
       "Voice inputWorkspace · General",
+      "Default voice modelOrganization · Models",
+      "ElevenLabsOrganization · Models",
     ]);
     expect(results()[0]?.getAttribute("aria-current")).toBeNull();
     // The page you're on is marked as current.
@@ -312,7 +314,7 @@ test("search finds settings by name and keeps the keyboard in the rail", async (
 
     // Down moves into the results, up returns to the field, Escape clears.
     await type("models");
-    expect(results()).toHaveLength(2);
+    expect(results()).toHaveLength(4);
     await key(field(), "ArrowDown");
     expect(document.activeElement).toBe(results()[0]!);
     await key(results()[0]!, "ArrowDown");

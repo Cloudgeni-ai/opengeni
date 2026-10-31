@@ -135,7 +135,8 @@ test("session artifact lists retain live authorization while batching metadata t
     return authorize(input);
   };
   let transactions = 0;
-  const legacyExpectedTransactions = 42;
+  // One per item and its metadata, plus the one read of who can open them all.
+  const legacyExpectedTransactions = 43;
   const start = performance.now();
   const response = await withDatabaseTimingObserver(
     (observation) => {
@@ -156,8 +157,9 @@ test("session artifact lists retain live authorization while batching metadata t
   );
   expect(authorizations).toBe(20);
   // Session authorization and candidate scan, twenty unchanged live authorization transactions,
-  // and three metadata reads (8 + 8 + 4), rather than one per item.
-  expect(transactions).toBe(25);
+  // three metadata reads (8 + 8 + 4), rather than one per item, and one read of
+  // who can open them all.
+  expect(transactions).toBe(26);
   console.info(
     "session-editable-work",
     JSON.stringify({ authorizations, transactions, durationMs: performance.now() - start }),
