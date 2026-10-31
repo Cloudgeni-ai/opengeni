@@ -446,6 +446,8 @@ import type {
   UserMessageEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
+  UpdateFileReachRequest,
+  UpdateFileReachResponse,
   UpdateFileVisibilityRequest,
   UpdateFileVisibilityResponse,
   ConnectionMetadata,
@@ -8218,6 +8220,27 @@ export class OpenGeniClient {
     return await this.requestJson<UpdateFileVisibilityResponse>(
       "PUT",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(fileId)}/visibility`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Change where your Only me file works besides the workspace that stores it
+   * and your Personal workspace: your other workspaces of this organization,
+   * or all of them (null). It stays Only me in each. Only the file's owner
+   * can, from the workspace that stores it.
+   */
+  async updateFileReach(
+    workspaceId: string,
+    fileId: string,
+    request: UpdateFileReachRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<UpdateFileReachResponse> {
+    return await this.requestJson<UpdateFileReachResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(fileId)}/reach`,
       request,
       undefined,
       options,

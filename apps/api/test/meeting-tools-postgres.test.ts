@@ -20,6 +20,7 @@ import {
   reserveRecordingChunks,
   saveRecordingNote,
   startRecordingLiveTrack,
+  updateRecording,
   updateRecordingSpeakers,
   type DbClient,
 } from "@opengeni/db";
@@ -537,6 +538,17 @@ describe("meeting tools", () => {
     });
     const tools = toolsFor(scope.grantFor(scope.owner));
 
+    // A new one works only where it was recorded, and in their Personal
+    // workspace, until they turn it on here too.
+    expect((await tools("meetings_search", { query: "pipeline" })).meetings).toEqual([]);
+    expect(await tools("meeting_read", { meetingId: own })).toMatchObject({ found: false });
+    await updateRecording(client.db, {
+      workspaceId: sales.workspaceId,
+      subjectId: scope.owner,
+      recordingId: own,
+      reachWorkspaceIds: [scope.workspaceId],
+    });
+
     const found = await tools("meetings_search", { query: "pipeline" });
     expect(found.meetings).toMatchObject([
       { id: own, title: "Pipeline review", visibility: "only_me", recordedIn: "Sales" },
@@ -581,7 +593,8 @@ describe("meeting tools", () => {
     expect(await tools("meeting_read", { meetingId: foreign })).toMatchObject({ found: false });
     expect(JSON.stringify(await tools("meetings_search", {}))).not.toContain("board");
 
-    // Only allowed to read in Finance: the agent can read it there, never write.
+    // Only allowed to read in Finance: the agent can read it there, never
+    // write. From before meetings had a list, it works in all their workspaces.
     const finance = await scope.workspace("Finance", {
       accountId: scope.accountId,
       permissions: ["sessions:read"],
@@ -592,6 +605,7 @@ describe("meeting tools", () => {
       segments: [{ at: 0, label: "speaker_0", text: "Budget holds." }],
       in: finance,
     });
+    await shared!.admin`update recordings set reach_workspace_ids = null where id = ${budget}`;
     expect((await tools("meeting_read", { meetingId: budget })).lines).toContain("Budget holds.");
     expect(
       await tools("meeting_notes_save", { meetingId: budget, notes: "x", expectedRevision: 0 }),
@@ -603,6 +617,21 @@ describe("meeting tools", () => {
     expect((await tools("meetings_search", {})).meetings.map((m: { id: string }) => m.id)).toEqual([
       budget,
     ]);
+
+    // Turned off here again, it leaves this workspace.
+    const quarterly = await scope.meeting({
+      title: "Quarterly",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Quarter closes." }],
+      in: finance,
+    });
+    await shared!.admin`update recordings set reach_workspace_ids = ${[scope.workspaceId]}::uuid[]
+      where id = ${quarterly}`;
+    expect((await tools("meeting_read", { meetingId: quarterly })).lines).toContain(
+      "Quarter closes.",
+    );
+    await shared!.admin`update recordings set reach_workspace_ids = '{}' where id = ${quarterly}`;
+    expect(await tools("meeting_read", { meetingId: quarterly })).toMatchObject({ found: false });
   });
 
   test("a meeting-summary chat reaches only its own meeting", async () => {

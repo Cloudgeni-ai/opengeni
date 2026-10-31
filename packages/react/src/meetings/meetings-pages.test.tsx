@@ -239,6 +239,90 @@ describe("Meetings list", () => {
     }
   });
 
+  test("the owner chooses where their Only me meeting works, and leaves a workspace they turn it off in", async () => {
+    const fixture = createMeetingsFixture({ otherWorkspaces: true });
+    const personal = "c3d4e5f6-a7b8-4c9d-8e0f-2a3b4c5d6e7f";
+    const left: string[] = [];
+    const page = (reachWorkspaces?: { id: string; name: string; personal?: boolean }[]) => (
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={ELSEWHERE_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        reachWorkspaces={reachWorkspaces}
+        organizationName="Acme"
+        onBack={() => left.push("back")}
+      />
+    );
+    const openMenu = async (container: HTMLElement) => {
+      const trigger = container.querySelector<HTMLElement>(
+        '[aria-label="More actions for Pipeline review"]',
+      );
+      await act(async () => {
+        trigger!.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }),
+        );
+      });
+      await settle(50);
+      return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    };
+    // Without the person's workspaces, the page doesn't offer the choice.
+    const bare = await render(page());
+    try {
+      await waitForText(bare.container, "recorded in Sales");
+      const items = await openMenu(bare.container);
+      expect(items.map((item) => item.textContent?.trim())).not.toContain("Available in…");
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    } finally {
+      await bare.unmount();
+    }
+
+    const view = await render(
+      page([
+        { id: fixture.workspaceId, name: "Design" },
+        { id: "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e", name: "Sales" },
+        { id: personal, name: "Ingrid", personal: true },
+      ]),
+    );
+    try {
+      await waitForText(view.container, "recorded in Sales");
+      const item = (await openMenu(view.container)).find(
+        (candidate) => candidate.textContent?.trim() === "Available in…",
+      );
+      expect(item).toBeDefined();
+      await act(async () => item!.click());
+      await settle(100);
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+      const text = dialog.textContent ?? "";
+      expect(text).toContain("It stays Only me");
+      expect(text).toContain("Belongs to you. Only you manage it.");
+      // The workspace storing it is always ticked; Personal always has it, so no row.
+      const box = (label: string) => {
+        const element = [...dialog.querySelectorAll("label")].find(
+          (each) => each.textContent === label,
+        );
+        return element ? (document.getElementById(element.htmlFor) as HTMLInputElement) : null;
+      };
+      expect(box("Sales")?.disabled).toBe(true);
+      expect(box("Sales")?.checked).toBe(true);
+      expect(box("Your Personal workspace")).toBeNull();
+      expect(text).not.toContain("will no longer show");
+      // Turning it off where it was opened says it will leave, then leaves.
+      await act(async () => box("Design (this workspace)")!.click());
+      expect(dialog.textContent).toContain("It will no longer show in this workspace");
+      const save = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Save",
+      )!;
+      await act(async () => save.click());
+      await waitFor(() => left.length > 0);
+      expect(left).toEqual(["back"]);
+      const saved = await fixture.client.getRecording(fixture.workspaceId, ELSEWHERE_RECORDING_ID);
+      expect(saved.reachWorkspaceIds).toEqual([]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("search finds meetings by transcript words and says what it searches", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
