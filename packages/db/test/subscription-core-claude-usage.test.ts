@@ -228,6 +228,8 @@ describe("decodeQuota", () => {
     expect(quota.exhaustedUntil).toBeNull();
     const opusReset = Date.parse("2026-10-14T00:00:00.000Z");
     expect(quota.modelCooldowns).toEqual({
+      "claude/claude-opus-4-1": opusReset,
+      "claude/claude-opus-4-5": opusReset,
       "organization-claude-subscription/claude-opus-4-1": opusReset,
       "workspace-claude-subscription/claude-opus-4-1": opusReset,
       "organization-claude-subscription/claude-opus-4-5": opusReset,
@@ -405,6 +407,7 @@ describe("early reset: availability and the claimed blocks a reading ends", () =
       windowIds,
     });
     const workspaceOpus = "workspace-claude-subscription/claude-opus-4-6";
+    const canonicalOpus = "claude/claude-opus-4-6";
 
     const fiveHour = decode(
       { "anthropic-ratelimit-unified-representative-claim": "five_hour" },
@@ -414,6 +417,7 @@ describe("early reset: availability and the claimed blocks a reading ends", () =
     expect(fiveHour.modelCooldownClaims).toEqual({
       [opus]: claim(["five_hour"]),
       [workspaceOpus]: claim(["five_hour"]),
+      [canonicalOpus]: claim(["five_hour"]),
     });
 
     // A full Opus window and the refusal's own claim both explain the cooldown.

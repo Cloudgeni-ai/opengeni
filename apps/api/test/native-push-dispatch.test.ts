@@ -10,7 +10,11 @@ import {
   nativePushData,
   nativePushRingsCall,
 } from "../src/native-push-dispatch";
-import { nativeAppRedirectAllowed, pkceS256Challenge } from "../src/routes/native-app-auth";
+import {
+  nativeAppRedirectAllowed,
+  pkceS256Challenge,
+  unregisteredNativeRedirectMessage,
+} from "../src/routes/native-app-auth";
 
 const payload: ClaimedNativePushDelivery["payload"] = {
   rule: "needs_input",
@@ -280,6 +284,32 @@ describe("native app sign-in helpers", () => {
     expect(
       nativeAppRedirectAllowed("https://app.example.com/office/auth-callback.html", ["opengeni"]),
     ).toBe(false);
+  });
+
+  test("an add-in installed from another address is told to reinstall from the current page", () => {
+    const addin = { name: "Opengeni", installUrl: "https://app.example.com/excel" };
+    expect(
+      unregisteredNativeRedirectMessage("https://old.example.net/office/auth-callback.html", addin),
+    ).toBe(
+      "This copy of the Opengeni add-in is out of date: it was installed from an address that no longer signs in. Remove it from Excel, add the current one from https://app.example.com/excel, then sign in again.",
+    );
+    expect(
+      unregisteredNativeRedirectMessage("https://old.example.net/office/auth-callback.html", {
+        name: "Acme",
+        installUrl: null,
+      }),
+    ).toBe(
+      "This copy of the Acme add-in is out of date: it was installed from an address that no longer signs in. Remove it from Excel, add the current one, then sign in again.",
+    );
+    for (const other of [
+      "evil://auth/callback",
+      "https://old.example.net/office/other.html",
+      "not a url",
+    ]) {
+      expect(unregisteredNativeRedirectMessage(other, addin)).toBe(
+        "Unregistered native app redirect",
+      );
+    }
   });
 
   test("PKCE S256 matches RFC 7636 appendix B", () => {

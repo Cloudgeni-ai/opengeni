@@ -19,6 +19,11 @@ import {
   type ResolvedAgentConfig,
   type ToolRef,
 } from "@opengeni/contracts";
+import {
+  CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX,
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  isClaudeSubscriptionProviderId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
 
 export const SESSION_TITLE_MODEL_TOOL_NAME = "opengeni__set_session_title";
 
@@ -134,10 +139,13 @@ export function sessionTitleRoute(input: {
     const title = input.resolveTurnModel(CODEX_SESSION_TITLE_MODEL_ID);
     return title && title.provider.id === turn.provider.id ? sameAccount(title) : turnRoute;
   }
-  if (turn.provider.kind?.startsWith("claude-subscription-")) {
+  if (isClaudeSubscriptionProviderId(turn.provider.id)) {
     if (turn.configured.upstreamModelId === CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID)
       return turnRoute;
-    const titleModelId = `${turn.provider.id}/${CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID}`;
+    const titleModelId =
+      turn.provider.id === CLAUDE_SUBSCRIPTION_PROVIDER_ID
+        ? `${CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX}${CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID}`
+        : `${turn.provider.id}/${CLAUDE_SESSION_TITLE_UPSTREAM_MODEL_ID}`;
     const listed = input.resolveTurnModel(titleModelId);
     if (listed && listed.provider.id === turn.provider.id) return sameAccount(listed);
     // Every Claude subscription can serve Haiku even when the connection's

@@ -1,6 +1,9 @@
 // The few GitHub calls the batcher needs. All state lives in GitHub itself:
 // queued PRs, the batch/* branch with its manifest commit, and its CI runs.
 
+import type { RepoFile, TreeEntry } from "./renumber";
+import { REGENERATE_WORKFLOW, regenerationTitle, unzipText } from "./regenerate";
+
 export class GitHubError extends Error {
   constructor(
     readonly status: number,
@@ -8,6 +11,16 @@ export class GitHubError extends Error {
     readonly body: string,
   ) {
     super(`GitHub ${status} for ${path}: ${body.slice(0, 300)}`);
+  }
+}
+
+/** A request that never got an answer: the network failed or it timed out. */
+export class GitHubNetworkError extends Error {
+  constructor(
+    readonly path: string,
+    readonly failure: unknown,
+  ) {
+    super(`No answer from GitHub for ${path}: ${String(failure).slice(0, 300)}`);
   }
 }
 
@@ -57,6 +70,8 @@ export interface CommitSummary {
   tree: string;
   message: string;
   date: number;
+  /** Parent commit SHAs, first parent first. */
+  parents: string[];
 }
 
 export type MergeResult = { kind: "merged"; sha: string; tree: string } | { kind: "conflict" };
@@ -70,14 +85,32 @@ export interface GitHub {
   pullFiles(number: number): Promise<PullFile[] | null>;
   /** Paths of the files directly in a directory at a commit. */
   listDirectory(path: string, ref: string): Promise<string[]>;
-  compareFiles(base: string, head: string): Promise<{ files: string[]; mergeBase: string } | null>;
+  /** These files at a commit, keyed by path; a path that is not a file there is absent. */
+  readFiles(ref: string, paths: string[]): Promise<Map<string, RepoFile>>;
+  /** Files `head` changes since its merge base with `base`; null files when too many to list. */
+  compareFiles(base: string, head: string): Promise<{ files: string[] | null; mergeBase: string }>;
   branches(prefix: string): Promise<{ name: string; sha: string }[]>;
+  /** The head of exactly this branch, or null when it no longer exists. */
+  branchHead(name: string): Promise<string | null>;
   commit(sha: string): Promise<CommitSummary>;
   runs(branch: string, sha: string): Promise<RunSummary[]>;
+  /** Names of the jobs that failed or timed out in this attempt of a run. */
+  failedJobs(runId: number, attempt: number): Promise<string[]>;
+  /** Runs of the regeneration workflow for exactly this PR head, newest first. */
+  regenerations(pull: number, head: string): Promise<RunSummary[]>;
+  /** Start the regeneration workflow from main: merge `main` into the PR head and regenerate. */
+  dispatchRegeneration(pull: number, head: string, main: string): Promise<void>;
+  /** The text of one file in a run's artifact, or null when the run has no such file. */
+  artifactText(runId: number, artifact: string, file: string): Promise<string | null>;
+  /** Store file content given in base64; returns the blob SHA. */
+  createBlob(content: string): Promise<string>;
   createBranch(name: string, sha: string): Promise<void>;
   deleteBranch(name: string): Promise<void>;
   mergeInto(branch: string, head: string, message: string): Promise<MergeResult>;
   createCommit(tree: string, parents: string[], message: string): Promise<string>;
+  createTree(baseTree: string, entries: TreeEntry[]): Promise<string>;
+  /** Move a branch forward to a descendant of its head; fails with 422 otherwise. */
+  updateBranch(name: string, sha: string): Promise<void>;
   mergePull(
     number: number,
     input: { sha: string; method: "squash" | "merge"; title?: string; message: string },
@@ -85,6 +118,8 @@ export interface GitHub {
   cancelRun(id: number): Promise<void>;
   rerunFailedJobs(id: number): Promise<void>;
   comment(number: number, body: string): Promise<void>;
+  /** The bodies of a PR's comments created or edited at or after `since` (epoch ms). */
+  commentBodies(number: number, since: number): Promise<string[]>;
   removeLabel(number: number, label: string): Promise<void>;
   addLabel(number: number, label: string): Promise<void>;
   /** Creates the label unless it already exists. */
@@ -98,6 +133,29 @@ const time = (value: unknown) => {
   const parsed = typeof value === "string" ? Date.parse(value) : NaN;
   return Number.isFinite(parsed) ? parsed : null;
 };
+
+/** GraphQL gives a tree entry's mode as a number, like 33188; Git writes it in octal, "100644". */
+export function gitFileMode(mode: number): string {
+  return mode.toString(8);
+}
+
+/**
+ * A failure that says nothing about the request itself: GitHub down or
+ * throttling, or no answer at all. Anything else, including a bug in our own
+ * code, would fail the same way again.
+ */
+export function isTransientGitHubFailure(error: unknown): boolean {
+  if (error instanceof GitHubError)
+    return (
+      error.status >= 500 ||
+      error.status === 429 ||
+      (error.status === 403 && /rate limit/i.test(error.body))
+    );
+  return error instanceof GitHubNetworkError;
+}
+
+/** A branch name as URL path segments, so no part of it can change the request path. */
+const branchPath = (name: string) => name.split("/").map(encodeURIComponent).join("/");
 
 /**
  * When a PR that carries the queue label was last given it, from its newest
@@ -134,17 +192,24 @@ export class RestGitHub implements GitHub {
   private async request(method: string, path: string, body?: unknown, okStatuses: number[] = []) {
     const url = path.startsWith("https://") ? path : `${this.api}/${path}`;
     for (let attempt = 1; ; attempt++) {
-      const response = await this.fetchImpl(url, {
-        method,
-        headers: {
-          authorization: `Bearer ${this.token}`,
-          accept: "application/vnd.github+json",
-          "x-github-api-version": "2022-11-28",
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(60_000),
-      });
+      let response: Response;
+      try {
+        response = await this.fetchImpl(url, {
+          method,
+          headers: {
+            authorization: `Bearer ${this.token}`,
+            accept: "application/vnd.github+json",
+            "x-github-api-version": "2022-11-28",
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          signal: AbortSignal.timeout(60_000),
+        });
+      } catch (error) {
+        // fetch rejects only when no response arrived (network failure or the
+        // signal's timeout); a write's outcome is then unknown and re-observed.
+        throw new GitHubNetworkError(path, error);
+      }
       if (response.ok || okStatuses.includes(response.status)) {
         const text = await response.text();
         return { status: response.status, data: text ? (JSON.parse(text) as unknown) : null };
@@ -314,8 +379,64 @@ export class RestGitHub implements GitHub {
       f.previous_filename ? [f.filename, f.previous_filename] : [f.filename],
     );
     // The compare API lists at most 300 files; more is reported as unknown.
-    if ((data.files ?? []).length >= 300) return null;
-    return { files, mergeBase: data.merge_base_commit.sha };
+    const listed = (data.files ?? []).length < 300;
+    return { files: listed ? files : null, mergeBase: data.merge_base_commit.sha };
+  }
+
+  async readFiles(ref: string, paths: string[]) {
+    const files = new Map<string, RepoFile>();
+    if (!/^[0-9a-f]{40}$/.test(ref)) throw new Error(`Not a commit SHA: ${ref}`);
+    const [owner, name] = this.repository.split("/");
+    const directory = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
+    for (let start = 0; start < paths.length; start += 40) {
+      const chunk = paths.slice(start, start + 40);
+      const directories = [...new Set(chunk.map(directory))];
+      // Expressions travel as variables; a path never becomes query text.
+      const variables: Record<string, unknown> = { owner, name };
+      const fields: string[] = [];
+      chunk.forEach((path, index) => {
+        variables[`f${index}`] = `${ref}:${path}`;
+        fields.push(
+          `f${index}: object(expression: $f${index}) { ... on Blob { oid text isBinary isTruncated } }`,
+        );
+      });
+      directories.forEach((path, index) => {
+        variables[`d${index}`] = `${ref}:${path}`;
+        fields.push(
+          `d${index}: object(expression: $d${index}) { ... on Tree { entries { name mode type } } }`,
+        );
+      });
+      const declared = Object.keys(variables)
+        .filter((key) => key !== "owner" && key !== "name")
+        .map((key) => `$${key}: String!`)
+        .join(", ");
+      type Blob = { oid: string; text: string | null; isBinary: boolean; isTruncated: boolean };
+      type Tree = { entries: { name: string; mode: number; type: string }[] };
+      const data = await this.graphql<{ repository: Record<string, Blob | Tree | null> }>(
+        `query($owner: String!, $name: String!, ${declared}) {
+          repository(owner: $owner, name: $name) { ${fields.join("\n")} }
+        }`,
+        variables,
+      );
+      const modes = new Map<string, string>();
+      directories.forEach((path, index) => {
+        const tree = data.repository[`d${index}`] as Tree | null;
+        for (const entry of tree?.entries ?? [])
+          if (entry.type === "blob")
+            modes.set(path ? `${path}/${entry.name}` : entry.name, gitFileMode(entry.mode));
+      });
+      chunk.forEach((path, index) => {
+        const blob = data.repository[`f${index}`] as Blob | null;
+        const mode = modes.get(path);
+        if (!blob?.oid || mode === undefined) return;
+        files.set(path, {
+          oid: blob.oid,
+          mode,
+          text: blob.isBinary || blob.isTruncated ? null : blob.text,
+        });
+      });
+    }
+    return files;
   }
 
   async branches(prefix: string) {
@@ -325,18 +446,31 @@ export class RestGitHub implements GitHub {
     return refs.map((r) => ({ name: r.ref.slice("refs/heads/".length), sha: r.object.sha }));
   }
 
+  async branchHead(name: string) {
+    const { status, data } = await this.request(
+      "GET",
+      `git/ref/heads/${branchPath(name)}`,
+      undefined,
+      [404],
+    );
+    if (status === 404) return null;
+    return (data as { object: { sha: string } }).object.sha;
+  }
+
   async commit(sha: string) {
     const data = await this.get<{
       sha: string;
       tree: { sha: string };
       message: string;
       committer: { date: string };
+      parents: { sha: string }[];
     }>(`git/commits/${sha}`);
     return {
       sha: data.sha,
       tree: data.tree.sha,
       message: data.message,
       date: time(data.committer.date) ?? 0,
+      parents: data.parents.map((parent) => parent.sha),
     };
   }
 
@@ -366,6 +500,103 @@ export class RestGitHub implements GitHub {
       }));
   }
 
+  async failedJobs(runId: number, attempt: number) {
+    const failed: string[] = [];
+    // CI has about 65 jobs; the cap only bounds a runaway listing.
+    for (let page = 1; page <= 5; page++) {
+      const data = await this.get<{
+        total_count: number;
+        jobs: { name: string; conclusion: string | null }[];
+      }>(`actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100&page=${page}`);
+      for (const job of data.jobs)
+        if (job.conclusion === "failure" || job.conclusion === "timed_out") failed.push(job.name);
+      if (page * 100 >= data.total_count || !data.jobs.length) return failed;
+    }
+    throw new Error(`Run ${runId} has more jobs than the batcher lists`);
+  }
+
+  async regenerations(pull: number, head: string) {
+    const workflow = REGENERATE_WORKFLOW.slice(REGENERATE_WORKFLOW.lastIndexOf("/") + 1);
+    const data = await this.get<{
+      workflow_runs: {
+        id: number;
+        path: string;
+        event: string;
+        head_branch: string;
+        display_title: string;
+        status: string;
+        conclusion: string | null;
+        run_attempt: number;
+        html_url: string;
+      }[];
+    }>(`actions/workflows/${workflow}/runs?event=workflow_dispatch&branch=main&per_page=100`);
+    const title = regenerationTitle(pull, head);
+    // Only main's copy of the workflow, run for exactly this head, counts.
+    return data.workflow_runs
+      .filter(
+        (r) =>
+          r.path === REGENERATE_WORKFLOW &&
+          r.event === "workflow_dispatch" &&
+          r.head_branch === "main" &&
+          r.display_title === title,
+      )
+      .sort((a, b) => b.id - a.id)
+      .map((r) => ({
+        id: r.id,
+        workflow: r.path,
+        status: r.status,
+        conclusion: r.conclusion,
+        attempt: r.run_attempt,
+        url: r.html_url,
+      }));
+  }
+
+  async dispatchRegeneration(pull: number, head: string, main: string) {
+    const workflow = REGENERATE_WORKFLOW.slice(REGENERATE_WORKFLOW.lastIndexOf("/") + 1);
+    await this.request("POST", `actions/workflows/${workflow}/dispatches`, {
+      ref: "main",
+      inputs: { pull: String(pull), head, main },
+    });
+  }
+
+  async artifactText(runId: number, artifact: string, file: string) {
+    const data = await this.get<{
+      artifacts: { name: string; expired: boolean; archive_download_url: string }[];
+    }>(`actions/runs/${runId}/artifacts?name=${encodeURIComponent(artifact)}&per_page=10`);
+    const found = data.artifacts.find((a) => a.name === artifact && !a.expired);
+    if (!found) return null;
+    const url = found.archive_download_url;
+    const fetchOnce = async (target: string, authorized: boolean) => {
+      try {
+        return await this.fetchImpl(target, {
+          headers: authorized
+            ? {
+                authorization: `Bearer ${this.token}`,
+                accept: "application/vnd.github+json",
+                "x-github-api-version": "2022-11-28",
+              }
+            : {},
+          redirect: "manual",
+          signal: AbortSignal.timeout(60_000),
+        });
+      } catch (error) {
+        throw new GitHubNetworkError(target, error);
+      }
+    };
+    // GitHub answers with a redirect to short-lived storage, which takes no token.
+    let response = await fetchOnce(url, true);
+    const location = response.headers.get("location");
+    if (response.status >= 300 && response.status < 400 && location)
+      response = await fetchOnce(location, false);
+    if (!response.ok) throw new GitHubError(response.status, url, await response.text());
+    return unzipText(new Uint8Array(await response.arrayBuffer()), file);
+  }
+
+  async createBlob(content: string) {
+    const { data } = await this.request("POST", "git/blobs", { content, encoding: "base64" });
+    return (data as { sha: string }).sha;
+  }
+
   async createBranch(name: string, sha: string) {
     await this.request("POST", "git/refs", { ref: `refs/heads/${name}`, sha });
   }
@@ -391,6 +622,18 @@ export class RestGitHub implements GitHub {
   async createCommit(tree: string, parents: string[], message: string) {
     const { data } = await this.request("POST", "git/commits", { tree, parents, message });
     return (data as { sha: string }).sha;
+  }
+
+  async createTree(baseTree: string, entries: TreeEntry[]) {
+    const { data } = await this.request("POST", "git/trees", {
+      base_tree: baseTree,
+      tree: entries.map((entry) => ({ ...entry, type: "blob" })),
+    });
+    return (data as { sha: string }).sha;
+  }
+
+  async updateBranch(name: string, sha: string) {
+    await this.request("PATCH", `git/refs/heads/${branchPath(name)}`, { sha, force: false });
   }
 
   async mergePull(
@@ -426,6 +669,19 @@ export class RestGitHub implements GitHub {
 
   async comment(number: number, body: string) {
     await this.request("POST", `issues/${number}/comments`, { body });
+  }
+
+  async commentBodies(number: number, since: number) {
+    const bodies: string[] = [];
+    const after = encodeURIComponent(new Date(since).toISOString());
+    for (let page = 1; page <= 30; page++) {
+      const data = await this.get<{ body?: string | null }[]>(
+        `issues/${number}/comments?since=${after}&per_page=100&page=${page}`,
+      );
+      bodies.push(...data.map((comment) => comment.body ?? ""));
+      if (data.length < 100) break;
+    }
+    return bodies;
   }
 
   async removeLabel(number: number, label: string) {

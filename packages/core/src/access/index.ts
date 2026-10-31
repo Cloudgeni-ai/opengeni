@@ -177,6 +177,33 @@ export function requireApiKeyDelegationContext(
  * the value the cookie branch produced.
  */
 const canonicalManagedCookieContexts = new WeakSet<AccessContext>();
+/**
+ * Grants resolved for a person signed in to Opengeni's own web, desktop or
+ * mobile apps (a canonical managed or local human session). Funding origin
+ * only (`BillingOrigin` app): never an authorization input.
+ */
+const appCredentialGrants = new WeakSet<AccessGrant>();
+
+/** Was this exact grant resolved for a person signed in to Opengeni's own apps? */
+export function isAppCredentialGrant(grant: AccessGrant): boolean {
+  return appCredentialGrants.has(grant);
+}
+
+/**
+ * Mark the grants of a just-stamped canonical app context (cookie, native app
+ * credential or local install) so work they start outside a turn (a model
+ * call, dictation, a search) is billed as app use.
+ */
+function markAppCredentialGrants(context: AccessContext): void {
+  for (const grant of context.workspaceGrants) {
+    if (
+      isCanonicalManagedHumanSession(context, grant) ||
+      isCanonicalLocalHumanSession(context, grant)
+    ) {
+      appCredentialGrants.add(grant);
+    }
+  }
+}
 /** Downstream legacy credentials cannot encode a partially selected admin. */
 export function requireExplicitPermissionDelegation(
   grant: Pick<AccessGrant, "permissions" | "permissionMode">,
@@ -840,6 +867,9 @@ export function accessGrantAuthorizationFromContext(
     canonicalLocalHumanSession: isCanonicalLocalHumanSession(context, grant),
   };
   resolvedAccessGrantAuthorizations.add(authorization);
+  if (authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession) {
+    appCredentialGrants.add(grant);
+  }
   if (contextIntegrity && developerSetupApiKeyContexts.has(context)) {
     developerSetupAuthorizations.set(authorization, grant);
     developerSetupGrants.add(grant);
@@ -1848,6 +1878,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
       subjectLabel: "Local dev",
     });
     canonicalLocalHumanContexts.add(context);
+    markAppCredentialGrants(context);
     return context;
   }
 
@@ -1892,6 +1923,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;
     }
@@ -1925,6 +1957,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;
     }
