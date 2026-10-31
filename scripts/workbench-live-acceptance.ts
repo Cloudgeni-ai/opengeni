@@ -50,7 +50,7 @@ const TERMINAL_SELECTOR = "[data-opengeni-terminal]";
 const INTERACTIVE_TERMINAL_SELECTOR =
   '[data-opengeni-terminal][data-opengeni-terminal-status="open"]' +
   '[data-opengeni-terminal-interactive="true"]';
-const SESSION_CHROME_STEERING_TEST_ID = "session-chrome-steering";
+const SESSION_CHROME_STOPPING_TEST_ID = "session-chrome-stopping";
 const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
 const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
   "performance.capture-usable-workbench",
@@ -1477,17 +1477,24 @@ function isRunningControlCommandMarkerEvent(event: SessionEvent, marker: string)
   return state === "running";
 }
 
+/** SessionChrome's receipt-backed stopping copy for each control. */
+export const LIVE_STOPPING_STATE_TEXT = {
+  steer: "Previous work stopping",
+  pause: "Current work stopping",
+} as const;
+
 /**
  * The production session route renders control state in SessionChrome. Match
- * both its stable test id and the exact authoritative stopping projection so
- * the optimistic "Changing direction" state cannot satisfy this proof.
+ * both its stable stopping-chip test id and the exact receipt-backed copy for
+ * the control, so the optimistic "Changing direction" state, or the other
+ * control's copy, cannot satisfy this proof.
  */
 export function liveStoppingStateLocator(
   page: Pick<Page, "getByTestId">,
   control: "steer" | "pause",
 ): Locator {
-  return page.getByTestId(SESSION_CHROME_STEERING_TEST_ID).filter({
-    hasText: control === "steer" ? "Stopping previous work" : "Stopping current work",
+  return page.getByTestId(SESSION_CHROME_STOPPING_TEST_ID).filter({
+    hasText: LIVE_STOPPING_STATE_TEXT[control],
   });
 }
 
@@ -1855,7 +1862,7 @@ async function proveLivePauseCancellation(input: {
   }
   if (
     observedStoppingState.visible &&
-    !observedStoppingState.text.includes("Stopping current work")
+    !observedStoppingState.text.includes(LIVE_STOPPING_STATE_TEXT.pause)
   ) {
     throw new Error("Pause rendered misleading control-state copy while cancellation settled");
   }

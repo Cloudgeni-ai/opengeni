@@ -592,11 +592,11 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
       },
-      // 1103: created without runtime EXECUTE until its follow-up release.
+      // 1103 created it without runtime EXECUTE; 1149 granted it.
       {
         name: "grant_subscription_account_administrator(jsonb)",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
         securityDefiner: true,
         triggerCallable: false,
@@ -4045,7 +4045,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's, 1060's, 1091's and 1107's stay deferred", () => {
+describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 withheld; 0978's, 0984's, 0988's, 1002's, 1060's, 1091's and 1107's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4176,7 +4176,6 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
-      "grant_subscription_account_administrator(jsonb)",
       "native_push_device_v2(text)",
       "register_native_push_device_v2(text, text, text, text, text, text[], text)",
       "claim_native_push_deliveries_v2(uuid, integer, integer)",
@@ -4185,6 +4184,9 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "ring_agent_call_v1(uuid, boolean)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
+    expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
+      "runtime role lacks EXECUTE on private routine grant_subscription_account_administrator(jsonb)",
+    );
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
       runtimePosture.RUNTIME_DEFINER_ROUTINES.filter(
         (name) =>

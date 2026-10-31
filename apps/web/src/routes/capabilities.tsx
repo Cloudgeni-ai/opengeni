@@ -167,7 +167,12 @@ import {
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
 } from "@/lib/personal-github-oauth";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canAddWorkspaceIntegrations,
+  canChangeWorkspaceIntegrations,
+  canManageWorkspaceIntegrations,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 import { request } from "@/api";
 import { LoadErrorState } from "@opengeni/react/app/components/common";
 import { userErrorText } from "@opengeni/react/ui/api-error";
@@ -254,11 +259,21 @@ export function fetchOAuthReturnRows(
   return Promise.all([client.listCapabilities(workspaceId), fetchConnections()]);
 }
 
-export function canManageApiIntegrations(
+/**
+ * What the viewer may do with plugins and API integrations here, matching the
+ * API: members add (unless their organization keeps that for admins) and
+ * remove; changing what is already set up stays with integration admins.
+ */
+export function apiIntegrationAccess(
   accessContext: AccessContext | null,
   workspaceId: string,
-): boolean {
-  return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
+  memberIntegrationSetup?: "members" | "admins",
+): { add: boolean; manage: boolean; change: boolean } {
+  return {
+    add: canAddWorkspaceIntegrations(accessContext, workspaceId, memberIntegrationSetup),
+    manage: canManageWorkspaceIntegrations(accessContext, workspaceId),
+    change: canChangeWorkspaceIntegrations(accessContext, workspaceId),
+  };
 }
 
 type CapabilitiesRouteProps = {
@@ -304,6 +319,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     apiIntegrationInstances,
     socialConnections,
     slackInstallationBindings,
+    memberIntegrationSetup,
     loading,
     loadError,
     refresh,
@@ -511,12 +527,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   );
   const connectionsLoaded = connections !== null;
   const connectionsRetryable = connectionsLoadFailed && !connectionsAccessDenied;
-  const canManageApiIntegrationInstances = canManageApiIntegrations(
+  const integrationAccess = apiIntegrationAccess(
     context.accessContext,
     workspaceId,
+    memberIntegrationSetup,
   );
-  // Skills are shared team procedures that Members may install and manage;
-  // plugins can add connections and MCP servers and stay administrative.
+  // Skills are shared team procedures that Members may install and manage.
   const canManageSkills = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
@@ -834,6 +850,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         selectedItem,
         context.accessContext?.workspaceGrants.find((grant) => grant.workspaceId === workspaceId),
         currentWorkspace?.kind,
+        memberIntegrationSetup,
       )
     : null;
   const selectedSetupUnavailable = selectedItem
@@ -1779,6 +1796,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         canManageSocial={canManageSocial}
         socialSetupAvailable={selectedSocialSetupAvailable}
         canManageSkills={canManageSkills}
+        canTurnOff={integrationAccess.change}
         onAction={(action) => void handleAction(action)}
         onConnectAccount={() => setAccountConnectOpen(true)}
         onRetryAuthInspection={
@@ -2124,7 +2142,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       <CustomApiSection
                         instances={visibleCustomApiInstances}
                         connections={connections}
-                        canManage={canManageApiIntegrationInstances}
+                        canAdd={integrationAccess.add}
+                        canManage={integrationAccess.manage}
+                        canChange={integrationAccess.change}
                         busyKey={customApiBusyKey}
                         onConnect={openCustomApi}
                         onUpdate={(instance) => editCustomApi(instance, "update")}
@@ -2265,7 +2285,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       workspaceId={workspaceId}
                       connections={connections}
                       canManage={canManageSkills}
-                      canManagePlugins={canManageApiIntegrationInstances}
+                      canManagePlugins={integrationAccess.manage}
+                      canInstallPlugins={integrationAccess.add}
+                      canUpdatePlugins={integrationAccess.change}
                       items={items}
                       logoUrl={logoUrl}
                       busyCatalogId={busyId}
@@ -2384,7 +2406,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           <CustomApiSetupDialog
             state={customApi}
             connections={connections}
-            canManage={canManageApiIntegrationInstances}
+            canManage={integrationAccess.add}
             onOpenChange={(open) => dispatchCustomApi({ type: open ? "open" : "close" })}
             onDraftChange={(patch) => dispatchCustomApi({ type: "draft", patch })}
             onPreview={() => void previewCustomApi()}

@@ -507,7 +507,8 @@ function acceptsMimeType(model: RecordingTranscriptionModelSpec, mimeType: strin
 /**
  * Errors from providers that speak the recording error vocabulary become
  * voice input errors. Rejections that mean nothing was transcribed
- * (unauthorized, quota, rate limits) are safe to try another provider with.
+ * (unauthorized, quota, rate limits) are safe to try another provider with,
+ * and keep the provider's own code for a meeting to report.
  */
 export function asTranscriptionServiceError(error: unknown): unknown {
   if (!(error instanceof RecordingTranscriptionError)) return error;
@@ -520,6 +521,7 @@ export function asTranscriptionServiceError(error: unknown): unknown {
         code: "unavailable",
         message: "Transcription is unavailable.",
         retryable: error.retryable,
+        providerCode: error.code,
       });
     case "invalid_audio":
       return new TranscriptionServiceError({
@@ -563,11 +565,13 @@ export function asTranscriptionServiceError(error: unknown): unknown {
 
 /**
  * Errors from the voice input adapters become recording errors, for the
- * meeting pipeline, which speaks that vocabulary.
+ * meeting pipeline, which speaks that vocabulary. The provider's own code,
+ * when the adapter kept it, says why more exactly than voice input's.
  */
 export function asRecordingTranscriptionError(error: unknown): unknown {
   if (!(error instanceof TranscriptionServiceError)) return error;
   const code = ((): RecordingTranscriptionError["code"] => {
+    if (error.providerCode) return error.providerCode;
     switch (error.code) {
       case "invalid_audio":
         return "invalid_audio";

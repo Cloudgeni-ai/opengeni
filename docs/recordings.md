@@ -49,6 +49,43 @@ workspace's as `language` (null detects), and the React recorder starts on it
 unless the host passes `defaultLanguage`. Naming the language matters for
 close languages: without it, Norwegian can come back as Danish or Swedish.
 
+## Names
+
+Nobody has to name a meeting. Each recording keeps where its `title` came
+from as `titleSource`, and a title from a better source replaces one from a
+weaker source, in this order:
+
+1. `person`: someone typed or chose it, at start (`title` on create) or by
+   renaming it (`PATCH …/recordings/:recordingId`). Nothing replaces it.
+2. `calendar`: the event on the owner's own connected calendar at the time
+   the recording started. The create request looks it up when it has no
+   `title` from a person, in the owner's personal Google Calendar connection
+   (when the deployment enables Google Calendar) and Outlook Calendar
+   (Microsoft Graph with a `Calendars.Read` or `Calendars.ReadWrite` grant).
+   It picks an event under way at the start, or starting within ten minutes,
+   nearest to the start; it skips all-day, out-of-office, focus-time and
+   working-location events, ones the owner declined or that were cancelled,
+   and private or confidential ones, whose names must not reach a meeting
+   others may see. The lookup is bounded to three seconds and any failure
+   leaves the title as it was. Capture runs before the server has the
+   recording, so it never delays recording; the recorder shows the name
+   once the server has it (`serverTitle` in the upload status).
+3. `conversation`: written with the meeting's notes. The built-in summary
+   (below) passes a short name to `meeting_notes_save` as `title`, in the
+   meeting's language; it is kept only while the title is from a weaker
+   source. Any agent saving notes may pass one under the same rule.
+4. `app`: a guess by the recording app, such as "Zoom meeting" from the
+   desktop app's call detection (`titleSource: "app"` on create).
+5. `default`: none was given. The server stores `Recording 2026-10-30 13:51
+   UTC`, and the React pages show it as the viewer's local "Meeting, 30 Oct,
+   13:51".
+
+Rows from before `titleSource` existed (migration 1132) are `person`, so
+nothing renames them. Meeting window and browser tab titles are not read:
+on macOS that needs the Screen Recording or Accessibility permission, which
+the recorder otherwise never asks for, and most call apps' titles don't name
+the meeting.
+
 ## Capture contract
 
 Clients record locally first, so a dropped connection, a reload or a crash

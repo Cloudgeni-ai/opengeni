@@ -35,6 +35,7 @@ const demoInputs = {
   commandUx: resolve(__dirname, "command-ux.html"),
   sessionHistoryImport: resolve(__dirname, "session-history-import.html"),
   embeddedChat: resolve(__dirname, "embedded-chat.html"),
+  embeddedMeeting: resolve(__dirname, "embedded-meeting.html"),
 };
 
 export default defineConfig({

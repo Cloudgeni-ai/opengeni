@@ -402,6 +402,8 @@ export const OrganizationCredentialProvider = /* @__PURE__ */ defineSchema(() =>
   }).extend({
     organizationId: primitives.uuid,
     workspaceFilter: IntegrationWorkspaceFilter.nullable(),
+    /** Members' Personal workspaces; `workspaceFilter` picks shared ones only. */
+    allowPersonalWorkspaces: primitives.boolean,
   }),
 );
 export type OrganizationCredentialProvider = z.infer<typeof OrganizationCredentialProvider>;
@@ -411,6 +413,8 @@ export const PutOrganizationCredentialProviderRequest =
     PutWorkspaceCredentialProviderRequest.extend({
       /** Required; null explicitly covers all non-personal workspaces. PUT replaces configuration. */
       workspaceFilter: IntegrationWorkspaceFilter.nullable(),
+      /** Also cover members' Personal workspaces. Defaults to false; PUT replaces configuration. */
+      allowPersonalWorkspaces: primitives.optionalBoolean,
     }),
   );
 export type PutOrganizationCredentialProviderRequest = z.input<

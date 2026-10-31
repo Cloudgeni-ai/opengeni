@@ -226,7 +226,7 @@ export function NativeConnectSetup({
           {failed && (
             <div
               role="alert"
-              className="flex flex-wrap items-center justify-between gap-3 text-status-error"
+              className="flex flex-wrap items-center justify-between gap-3 text-danger"
             >
               Could not start setup.{" "}
               <Button variant="outline" onClick={() => setRetry((value) => value + 1)}>

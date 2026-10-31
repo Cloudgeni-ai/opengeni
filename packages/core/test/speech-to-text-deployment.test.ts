@@ -1,18 +1,23 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing/settings";
 import {
+  asRecordingTranscriptionError,
+  asTranscriptionServiceError,
   createSpeechToTextDeployment,
   createTranscriptionService,
   dictationProviders,
   meetingModelFor,
   meetingModelWithoutCreditsFor,
+  responseError,
   speechToTextModelFor,
   transcriptText,
+  withoutFallback,
 } from "../src/transcription-service";
 import {
   RecordingTranscriptionError,
   type RecordingTranscriptionProvider,
 } from "../src/recording-transcription";
+import { TranscriptionServiceError } from "../src/transcription";
 import { textModelCapabilities } from "../src/transcription-service/text-models";
 import { openAiLanguage } from "../src/transcription-service/providers/openai-realtime";
 import { createOpenAiTranscriptionProvider } from "../src/transcription-service/providers/openai";
@@ -601,6 +606,111 @@ describe("dictation over the shared providers", () => {
     await expect(service.transcribe({ ...request, providerId: "openai" })).rejects.toMatchObject({
       code: "unavailable",
     });
+  });
+});
+
+describe("a provider out of credit", () => {
+  const audio = { bytes: new Uint8Array([1, 2, 3]), mimeType: "audio/wav", fileName: "a.wav" };
+  const request = {
+    workspaceId: "workspace",
+    accountId: "account",
+    subjectId: "subject",
+    requestId: "request",
+    audio: new Uint8Array([1, 2, 3]),
+    mimeType: "audio/webm",
+  };
+  const failingOpenAi = (status: number, body: unknown) =>
+    createOpenAiTranscriptionProvider({
+      apiKey: "key",
+      baseUrl: "https://api.example.test/v1",
+      model: "gpt-4o-transcribe",
+      fetch: (async () => Response.json(body, { status })) as unknown as typeof fetch,
+    });
+  const meetingError = async (provider: RecordingTranscriptionProvider) => {
+    try {
+      await provider.transcribe({ audio, model: "gpt-4o-transcribe", diarize: false }, {});
+    } catch (error) {
+      return asRecordingTranscriptionError(error) as RecordingTranscriptionError;
+    }
+    throw new Error("expected a failure");
+  };
+
+  test("a meeting says the OpenAI account is out of credit, not that its key is wrong", async () => {
+    const spent = await meetingError(
+      failingOpenAi(429, {
+        error: {
+          message: "You exceeded your current quota, please check your plan and billing details.",
+          type: "insufficient_quota",
+          code: "insufficient_quota",
+        },
+      }),
+    );
+    expect([spent.code, spent.retryable]).toEqual(["quota_exceeded", false]);
+    const rejected = await meetingError(
+      failingOpenAi(401, {
+        error: { message: "Incorrect API key provided.", code: "invalid_api_key" },
+      }),
+    );
+    expect(rejected.code).toBe("unauthorized");
+    // A busy provider is neither.
+    const busy = await meetingError(
+      failingOpenAi(429, {
+        error: {
+          message: "Rate limit reached for requests. Please try again in 20s.",
+          type: "requests",
+          code: "rate_limit_exceeded",
+        },
+      }),
+    );
+    expect(busy.code).toBe("provider");
+  });
+
+  test("the provider's code survives the trip through voice input and back", () => {
+    for (const code of ["quota_exceeded", "unauthorized", "rate_limited"] as const) {
+      const original = new RecordingTranscriptionError("no", code, code === "rate_limited");
+      const voice = asTranscriptionServiceError(original) as TranscriptionServiceError;
+      expect([voice.code, voice.fallbackSafe]).toEqual(["unavailable", true]);
+      const meeting = asRecordingTranscriptionError(voice) as RecordingTranscriptionError;
+      expect([meeting.code, meeting.retryable]).toEqual([code, code === "rate_limited"]);
+    }
+    // A subscription keeps it too, though nothing falls back from it.
+    const pinned = withoutFallback(responseError(402, { error: { code: "insufficient_quota" } }));
+    expect(pinned.fallbackSafe).toBe(false);
+    expect((asRecordingTranscriptionError(pinned) as RecordingTranscriptionError).code).toBe(
+      "quota_exceeded",
+    );
+  });
+
+  test("a spent provider still lets dictation fall back to the next one", async () => {
+    const settings = testSettings({ voiceInputProviderOrder: "openai" });
+    const deployment = createSpeechToTextDeployment(
+      { settings },
+      {
+        isEuOnly: async () => false,
+        providers: [
+          fakeTextProvider("first", "workspace_subscription", async () => {
+            throw new RecordingTranscriptionError("no credit", "quota_exceeded", false);
+          }),
+          fakeTextProvider("second", "workspace_subscription", async () => ({
+            languages: [],
+            audioMilliseconds: null,
+            diarized: false,
+            words: [
+              {
+                text: "Hello",
+                startMilliseconds: 0,
+                endMilliseconds: 1,
+                speaker: null,
+                spaceBefore: false,
+              },
+            ],
+          })),
+        ],
+      },
+    );
+    const service = createTranscriptionService({ settings, db: {} as never, deployment });
+    const result = await service.transcribe({ ...request, preferredProvider: "first" });
+    expect(result).toMatchObject({ text: "Hello", providerId: "second" });
   });
 });
 
