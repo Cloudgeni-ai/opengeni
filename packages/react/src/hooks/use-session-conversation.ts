@@ -123,6 +123,7 @@ export function useSessionConversation(
     busySend: host?.busySend,
     offerQueue: host?.offerQueue,
     effectiveControl: queue.effectiveControl ?? detail.session?.effectiveControl,
+    stoppingPreviousAttempt: queue.effectiveControl ? queue.stoppingPreviousAttempt : undefined,
     // As in the console and the native screen: a turn that is still current
     // (running or recovering) means a Send waits. A turn parked on provider
     // capacity does not: the Send replaces it and starts right away.

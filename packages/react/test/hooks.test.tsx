@@ -173,6 +173,15 @@ function queueSnapshot(
   };
 }
 
+function queueStoppingSettlement() {
+  return {
+    state: "stopping" as const,
+    attemptCount: 1,
+    interruptionPendingCount: 0,
+    quiescencePendingCount: 1,
+  };
+}
+
 describe("useWorkspaceSessions", () => {
   test("compact reads use the optional summary transport and retain causal revisions", async () => {
     let reads = 0;
@@ -660,6 +669,64 @@ describe("useTurnQueue", () => {
     await flush(250);
     expect(listCalls).toBe(2);
     expect(hook.result.current.queue[0]?.id).toBe("turn-2");
+    await hook.unmount();
+  });
+
+  test("a refresh for an observed event does not adopt a queue read that started before it", async () => {
+    const paused = {
+      ...queueSnapshot([]).effectiveControl,
+      state: "paused" as const,
+      directState: "paused" as const,
+      controlVersion: 4,
+      controlEtag: "control-4",
+    };
+    let requests = 0;
+    let releaseStale!: () => void;
+    const staleGate = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        // The second read starts while the paused attempt is still stopping
+        // and answers only after the attempt has quiesced.
+        if (request === 2) await staleGate;
+        return new Response(
+          JSON.stringify(
+            queueSnapshot([], {
+              version: request,
+              effectiveControl: paused,
+              stoppingPreviousAttempt: request <= 2,
+            }),
+          ),
+          { headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(requests).toBe(1);
+    expect(hook.result.current.stoppingPreviousAttempt).toBe(true);
+
+    // Another reader of the same session queue starts before quiescence.
+    const staleRead = client.getQueue(WORKSPACE_ID, SESSION_ID);
+    await flush();
+    expect(requests).toBe(2);
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "attempt_quiesced" })]);
+    await flush(250);
+    releaseStale();
+    await staleRead;
+    await flush();
+
+    expect(requests).toBe(3);
+    expect(hook.result.current.snapshot?.version).toBe(3);
+    expect(hook.result.current.stoppingPreviousAttempt).toBe(false);
     await hook.unmount();
   });
 
@@ -3289,14 +3356,111 @@ describe("useComposer queue-vs-steer", () => {
     await flush();
 
     await flushing(async () => await hook.result.current.pause());
-    expect(hook.result.current.stoppingAttempt).toBeNull();
+    // The response proves the Pause interrupted live work.
+    expect(hook.result.current.stoppingAttempt).toBe("current");
     expect(hook.result.current.effectiveControl).toMatchObject({
       state: "paused",
       controlVersion: 4,
     });
 
+    // The queue snapshot at the Pause revision catches up but is still settling.
+    await hook.rerender(pendingControl);
+    expect(hook.result.current.stoppingAttempt).toBe("current");
     await hook.rerender({ ...pendingControl, settlement: null });
     expect(hook.result.current.effectiveControl?.state).toBe("paused");
+    expect(hook.result.current.stoppingAttempt).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a Pause that interrupted live work stays stopping until that attempt quiesces", async () => {
+    const active = queueSnapshot([]).effectiveControl;
+    const paused = {
+      ...active,
+      state: "paused" as const,
+      directState: "paused" as const,
+      controlVersion: 4,
+      controlEtag: "control-4",
+    };
+    const pauseResponse = (interruptionCount: number): SessionControlResponse => ({
+      receipt: promptReceipt(null, "session.paused"),
+      effectiveControl: paused,
+      interruptionCount,
+      wakeCount: 0,
+      cancelledSessionCount: 0,
+      cancelledTurnCount: 0,
+    });
+    let interruptionCount = 1;
+    const client = fakeClient({ pauseSession: async () => pauseResponse(interruptionCount) });
+    type Props = {
+      events: SessionEvent[];
+      effectiveControl: SessionQueueSnapshot["effectiveControl"];
+      stoppingPreviousAttempt?: boolean;
+    };
+    const earlierQuiescence = makeEvent(5, "session.queue.changed", {
+      operation: "attempt_quiesced",
+    });
+    const hook = await renderHook(
+      (props: Props) =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: props.events,
+          effectiveControl: props.effectiveControl,
+          stoppingPreviousAttempt: props.stoppingPreviousAttempt,
+        }),
+      { events: [earlierQuiescence], effectiveControl: active } as Props,
+    );
+    await flush();
+
+    await flushing(async () => await hook.result.current.pause());
+    // A quiescence from before the Pause does not end it.
+    expect(hook.result.current.stoppingAttempt).toBe("current");
+
+    const pausedEvent = makeEvent(6, "session.control.paused");
+    await hook.rerender({ events: [earlierQuiescence, pausedEvent], effectiveControl: active });
+    expect(hook.result.current.stoppingAttempt).toBe("current");
+    // A snapshot from before the Pause cannot end it either.
+    await hook.rerender({
+      events: [earlierQuiescence, pausedEvent],
+      effectiveControl: active,
+      stoppingPreviousAttempt: false,
+    });
+    expect(hook.result.current.stoppingAttempt).toBe("current");
+    // A snapshot at the Pause that still reports the stopping attempt keeps it.
+    await hook.rerender({
+      events: [earlierQuiescence, pausedEvent],
+      effectiveControl: { ...paused, settlement: queueStoppingSettlement() },
+      stoppingPreviousAttempt: true,
+    });
+    expect(hook.result.current.stoppingAttempt).toBe("current");
+
+    await hook.rerender({
+      events: [
+        earlierQuiescence,
+        pausedEvent,
+        makeEvent(7, "session.queue.changed", { operation: "attempt_quiesced" }),
+      ],
+      effectiveControl: { ...paused, settlement: queueStoppingSettlement() },
+      stoppingPreviousAttempt: true,
+    });
+    expect(hook.result.current.stoppingAttempt).toBeNull();
+
+    // A settled snapshot ends a later stopping Pause even without its event.
+    await hook.rerender({ events: [], effectiveControl: active });
+    await flushing(async () => await hook.result.current.pause());
+    expect(hook.result.current.stoppingAttempt).toBe("current");
+    await hook.rerender({
+      events: [],
+      effectiveControl: { ...paused, settlement: queueStoppingSettlement() },
+      stoppingPreviousAttempt: false,
+    });
+    expect(hook.result.current.stoppingAttempt).toBeNull();
+
+    // A Pause that interrupted nothing has nothing to stop.
+    interruptionCount = 0;
+    await hook.rerender({ events: [], effectiveControl: active });
+    await flushing(async () => await hook.result.current.pause());
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     await hook.unmount();
   });
 

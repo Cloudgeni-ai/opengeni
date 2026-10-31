@@ -222,12 +222,18 @@ export function useTurnQueue(
   );
 
   const load = useCallback(
-    async (rejectOnFailure = false): Promise<void> => {
+    async (rejectOnFailure = false, fresh = false): Promise<void> => {
       if (!sessionId) return;
       const ownedTargetKey = `${workspaceId}\u0000${sessionId}`;
       const ticket = ++readGeneration.current;
       try {
-        const fetched = await client.getQueue(workspaceId, sessionId);
+        // A refresh for an observed event must not join a read that started
+        // before the event: that read can return the state the event replaced
+        // (for example a stopping attempt that has since quiesced), and no
+        // later event would correct it.
+        const fetched = fresh
+          ? await client.getQueue(workspaceId, sessionId, { fresh: true })
+          : await client.getQueue(workspaceId, sessionId);
         if (targetKeyRef.current !== ownedTargetKey) return;
         transientStreakRef.current = null;
         cancelTransientRetry();
@@ -327,7 +333,7 @@ export function useTurnQueue(
     return registerSessionReconciler(sessionId, "queue", load);
   }, [enabled, load, registerSessionReconciler, sessionId]);
 
-  const scheduleRefresh = useDebouncedCallback(() => void load());
+  const scheduleRefresh = useDebouncedCallback(() => void load(false, true));
   const freshSnapshot = stateTargetKey === targetKey ? snapshot : null;
   const freshLoading = stateTargetKey === targetKey ? loading : enabled;
   useSessionEventTrigger(

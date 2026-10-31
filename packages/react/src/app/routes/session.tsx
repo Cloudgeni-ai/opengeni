@@ -2855,6 +2855,9 @@ function SessionChatPane(props: {
     }),
     sendBlocked: () => composerSendBlocker() !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
+    stoppingPreviousAttempt: props.queue.effectiveControl
+      ? props.queue.stoppingPreviousAttempt
+      : undefined,
     sendDestination: () =>
       promptSendDestination({
         status: props.session.status,
