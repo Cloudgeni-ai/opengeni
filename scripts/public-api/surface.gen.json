@@ -12938,7 +12938,8 @@
         "$.installations": "array!",
         "$.installations[]": "ref(CapabilityInstallation)",
         "$.items": "array!",
-        "$.items[]": "ref(CapabilityCatalogItem)"
+        "$.items[]": "ref(CapabilityCatalogItem)",
+        "$.memberIntegrationSetup": "ref(PersonalIntegrationSetupPolicy)?"
       }
     },
     "CapabilityCatalogTier": {
@@ -23076,7 +23077,8 @@
     },
     "PersonalIntegrationSetupPolicy": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"admins\\\"\",\"\\\"members\\\"\"]"

@@ -7743,6 +7743,11 @@ export type CreateCapabilityCatalogItemInput = {
   installUrl?: string | null;
   authModel?: string | null;
   metadata?: Record<string, unknown>;
+  /**
+   * Insert only: an existing workspace row with this id is returned unchanged
+   * instead of being rewritten (a member adding a server never edits one).
+   */
+  createOnly?: boolean;
 };
 
 export type ImportBatch = {
@@ -10418,14 +10423,24 @@ export async function upsertCapabilityCatalogItem(
         metadata: values.metadata,
         updatedAt: values.updatedAt,
       };
-      const [row] = await scopedDb
-        .insert(schema.capabilityCatalogItems)
-        .values(values)
-        .onConflictDoUpdate({
-          target: [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id],
-          set: updateValues,
-        })
-        .returning();
+      const insert = scopedDb.insert(schema.capabilityCatalogItems).values(values);
+      const target = [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id];
+      const [row] = input.createOnly
+        ? await insert.onConflictDoNothing({ target }).returning()
+        : await insert.onConflictDoUpdate({ target, set: updateValues }).returning();
+      if (!row && input.createOnly) {
+        const [existing] = await scopedDb
+          .select()
+          .from(schema.capabilityCatalogItems)
+          .where(
+            and(
+              eq(schema.capabilityCatalogItems.workspaceId, input.workspaceId),
+              eq(schema.capabilityCatalogItems.id, input.id),
+            ),
+          )
+          .limit(1);
+        if (existing) return mapCapabilityCatalogItem(existing);
+      }
       if (!row) {
         throw new Error("Failed to upsert capability catalog item");
       }

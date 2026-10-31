@@ -9379,6 +9379,11 @@ export type CapabilityInstallation = {
 export type CapabilityCatalogResponse = {
   items: CapabilityCatalogItem[];
   installations: CapabilityInstallation[];
+  /**
+   * Who the organization lets turn integrations on: members (the default) or
+   * only integration admins. Older servers omit it; treat that as members.
+   */
+  memberIntegrationSetup?: "members" | "admins" | undefined;
 };
 
 export type CreateCapabilityCatalogItemRequest = {
