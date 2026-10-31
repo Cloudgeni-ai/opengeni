@@ -10,9 +10,12 @@ import { join } from "node:path";
  * therefore renders with the parent's size or colour, or none at all. Flag
  * every size- or colour-shaped class in the app and SDK sources that the
  * stylesheets they ship with do not define.
+ *
+ * It lives in apps/web because apps/web depends on @opengeni/react, so PR CI
+ * selects it for changes in either package.
  */
 
-const repo = join(import.meta.dir, "..");
+const repo = join(import.meta.dir, "../../..");
 
 /** Names that only make sense as a font size, with or without the `og-` prefix. */
 const SIZE_SHAPED =
@@ -22,7 +25,7 @@ const COLOUR_UTILITY =
   /^(text|bg|border(?:-[xytrblse])?|ring-offset|ring|outline|fill|stroke|divide|decoration|caret|accent|from|via|to)-(.+)$/;
 /** A value that reads as a colour token rather than a width, style or keyword. */
 const COLOUR_WORD =
-  /(?:^|-)(?:og|fg|bg|muted|subtle|surface|status|success|warning|error|danger|info|accent|primary|secondary|brand|destructive|foreground|background|canvas|hover|selection|ring|card|popover|sidebar|chart)(?:-|$)/;
+  /(?:^|-)(?:og|fg|bg|muted|subtle|surface|status|success|warning|error|danger|info|accent|primary|secondary|brand|destructive|foreground|background|canvas|hover|selection|ring|card|popover|sidebar|chart|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose|slate|gray|zinc|neutral|stone)(?:-|$)/;
 /**
  * A whole class token, optionally behind variants (`sm:`, `group-hover/row:`,
  * `data-[size=sm]:`) and with an optional modifier or important suffix
@@ -100,7 +103,7 @@ describe("theme class guard", () => {
     ).toEqual(["text-control", "text-og-lg"]);
     expect(
       unknownThemeClasses(
-        "border border-warning/40 bg-warning/10 hover:text-og-muted data-[on=true]:bg-og-surface text-status-error! ring-og-ring/40",
+        "border border-warning/40 bg-warning/10 hover:text-og-muted data-[on=true]:bg-og-surface text-status-error! ring-og-ring/40 text-red bg-amber-450 text-red-500 bg-emerald-600/20",
         theme,
       ),
     ).toEqual([
@@ -110,6 +113,8 @@ describe("theme class guard", () => {
       "bg-og-surface",
       "text-status-error",
       "ring-og-ring",
+      "text-red",
+      "bg-amber-450",
     ]);
     expect(
       unknownThemeClasses(
