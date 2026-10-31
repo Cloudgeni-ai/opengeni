@@ -134,6 +134,7 @@ import {
 } from "@opengeni/react/app/lib/models-route";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import { notifyModelConnectionsChanged } from "@opengeni/react/app/lib/shared-query";
 import { useOrganizationModelDefaults } from "./use-organization-model-defaults";
 import {
   AccountRuleLocksPage,
@@ -431,6 +432,22 @@ export function WorkspaceModelsPageBody({
   );
 
   const backToList = () => nav.openAccount(undefined);
+  // Another workspace's own subscription account shared with this one: its
+  // tag names that workspace where known, and this workspace's admins can stop
+  // using it here (a Personal workspace is never shared with).
+  const sharedByName = (id: string) => workspaces.find((candidate) => candidate.id === id)?.name;
+  const removeShared =
+    canManageSettings && !personal
+      ? (kind: "codex" | "supergrok" | "claude_subscription") => async (accountId: string) => {
+          await client.removeModelConnectionFromWorkspace({
+            workspaceId,
+            kind,
+            connectionId: accountId,
+          });
+          await notifyModelConnectionsChanged(client).catch(() => undefined);
+          toast.success(`Removed from ${workspaceName}`);
+        }
+      : null;
   // "Models for: [Defaults ▾]", on the Defaults (or Overview) and on each workspace's page.
   const scopePicker = (
     <ModelsScopePicker
@@ -452,6 +469,8 @@ export function WorkspaceModelsPageBody({
       personal && organizationAdmin
         ? (id) => nav.openView("model-access", accountKey("codex", id, true))
         : undefined,
+    workspaceNameOf: sharedByName,
+    removeFromWorkspace: removeShared?.("codex"),
     backToList,
   };
   const orgCodexPlaces: OrgCodexPlaces = {
@@ -473,6 +492,8 @@ export function WorkspaceModelsPageBody({
     sharePersonal: organizationAdmin
       ? (id) => nav.openView("model-access", accountKey("supergrok", id, true))
       : undefined,
+    workspaceName: sharedByName,
+    removeFromWorkspace: removeShared?.("supergrok"),
     backToList,
   };
   const orgGrokPlaces: SuperGrokPlaces = {
@@ -496,6 +517,8 @@ export function WorkspaceModelsPageBody({
     sharePersonal: organizationAdmin
       ? (id) => nav.openView("model-access", accountKey("claude", id, true))
       : undefined,
+    workspaceName: sharedByName,
+    removeFromWorkspace: removeShared?.("claude_subscription"),
     backToList,
   };
   const orgClaudePlaces: ClaudePlaces = {
@@ -524,6 +547,7 @@ export function WorkspaceModelsPageBody({
     scope: ownLabels,
     openConnect: () => nav.openView("connect:codex", account),
     ownTurns,
+    removeFromWorkspace: undefined,
   };
   const ownGrokPlaces: SuperGrokPlaces = {
     ...grokPlaces,
@@ -532,12 +556,14 @@ export function WorkspaceModelsPageBody({
       nav.openView("connect:supergrok", id ? accountKey("supergrok", id) : account),
     sharePersonal: undefined,
     ownTurns,
+    removeFromWorkspace: undefined,
   };
   const ownClaudePlaces: ClaudePlaces = {
     ...claudePlaces,
     scope: ownLabels,
     sharePersonal: undefined,
     ownTurns,
+    removeFromWorkspace: undefined,
   };
   const ownCodexRows = {
     ...ownCodex,
@@ -1661,15 +1687,19 @@ function workspaceOwnedNote(
 ): string {
   const here = where.personal ? "your Personal workspace" : where.workspaceName;
   if (provider === "codex") {
-    return `This account will belong to ${here} only. Use it for Codex Apps or to redeem usage limit resets. To share an account with other workspaces, connect it from Connect provider.`;
+    return where.personal
+      ? `This account will belong to ${here} only. Use it for Codex Apps or to redeem usage limit resets.`
+      : `This account will belong to ${here}. Use it for Codex Apps or to redeem usage limit resets. ${here}'s admins can also share it with other workspaces they manage.`;
   }
   if (where.personal && provider !== "supergrok" && provider !== "claude_subscription") {
     return "This key will belong to your Personal workspace, so only you use it.";
   }
-  if (where.personal && provider === "supergrok") {
+  if (where.personal && (provider === "supergrok" || provider === "claude_subscription")) {
     return "This account will be yours: it pays for your work in your Personal workspace, and for your own messages in other workspaces where you turn it on.";
   }
-  return `This ${provider === "supergrok" || provider === "claude_subscription" ? "account" : "key"} will belong to ${here} only, for a team that pays with its own. To share one with other workspaces, connect it from Connect provider.`;
+  if (provider === "supergrok" || provider === "claude_subscription")
+    return `This account will belong to ${here}, for a team that pays with its own. ${here}'s admins can also share it with other workspaces they manage.`;
+  return `This key will belong to ${here} only, for a team that pays with its own. To share one with other workspaces, connect it from Connect provider.`;
 }
 
 /** On an organization key's page: when a key owned by this workspace is the right tool. */

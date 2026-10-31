@@ -3,6 +3,12 @@ export type SubscriptionCorePoolAccount = {
   allowedModelIds?: string[] | null;
   /** Organization list only: who the account reaches. */
   reach?: import("./administration").SubscriptionCoreConnectionReach;
+  /**
+   * The workspace whose own account this is, or null for the organization's
+   * and personal accounts. In another workspace's list it was shared there
+   * by its owner (D-52), and that workspace can only remove it.
+   */
+  ownerWorkspaceId?: string | null;
   id: string;
   scope: "workspace" | "user" | "organization";
   providerAccountId: string | null;

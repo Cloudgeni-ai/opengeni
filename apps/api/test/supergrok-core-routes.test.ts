@@ -409,6 +409,7 @@ const PUBLIC_SHAPE = {
     "label",
     "lastError",
     "lastRefreshAt",
+    "ownerWorkspaceId",
     "plan",
     "quota",
     "scope",
@@ -610,9 +611,17 @@ describe.skipIf(!realDb)("SuperGrok routes on the shared core (M4 X2b)", () => {
     const access = await request(accessPath);
     expect(access.status).toBe(200);
     const accessBody = await access.json();
+    // A workspace's own account serves its workspace, which manages it (D-52).
     expect(accessBody).toMatchObject({
-      policy: { allowedModels: null, allowedWorkspaces: null, allowPersonalWorkspaces: false },
+      policy: {
+        allowedModels: null,
+        allowedWorkspaces: [workspaceId],
+        allowPersonalWorkspaces: false,
+      },
       personalWorkspacesSupported: false,
+      peopleSupported: false,
+      localWorkspaceIds: [workspaceId],
+      managedByWorkspaceId: workspaceId,
     });
     const restricted = await request(accessPath, {
       method: "PUT",

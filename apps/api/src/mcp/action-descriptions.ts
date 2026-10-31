@@ -194,7 +194,13 @@ const RULES: Rule[] = [
     method: "PUT",
     pattern: /\/model-connections\/:kind\/:connectionId\/access$/,
     text: () =>
-      "Change which workspaces and which models a model connection can serve. Workspaces: all (optionally including Personal workspaces), selected ones, or none. Models: all including new ones, or only chosen ones. Applies to new chats and schedules; running work keeps going.",
+      "Change which workspaces and which models a model connection can serve. Workspaces: all (optionally including Personal workspaces), selected ones, or none. Models: all including new ones, or only chosen ones. A workspace's own subscription account stays its workspace's when shared with selected workspaces; serving all workspaces, Personal workspaces or people needs moveToOrganization: true on the organization route, after which only organization admins manage it. Applies to new chats and schedules; running work keeps going.",
+  },
+  {
+    method: "DELETE",
+    pattern: /\/model-connections\/:kind\/:connectionId\/access$/,
+    text: () =>
+      "Stop this workspace from using another workspace's own subscription account that was shared with it. Only that workspace's admins or the organization's can share it here again.",
   },
   {
     method: "GET",

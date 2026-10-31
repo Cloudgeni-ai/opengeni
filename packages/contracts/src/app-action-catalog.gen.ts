@@ -7862,6 +7862,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "capabilities:manage"
   },
   {
+    "id": "removeModelConnectionFromWorkspace",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "removeWorkspaceMember",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/members/:subjectId",

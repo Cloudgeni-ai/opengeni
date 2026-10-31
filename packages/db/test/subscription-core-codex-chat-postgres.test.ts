@@ -2219,7 +2219,7 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
     );
   }
 
-  test("a managed account keeps serving its pin across organization reach edits; people are refused", async () => {
+  test("a managed account keeps serving its pin across organization reach edits; people need a move", async () => {
     const org = await organization();
     const managed = await managedConnection(org, "managed-pin");
     const admin = {
@@ -2252,9 +2252,9 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
         allowedPeople: [org.ownerMembershipId],
         version: 1,
       }),
-    ).rejects.toThrow("cannot be limited to people");
-    // Every shared workspace (which makes it the organization's), then back
-    // to only this workspace: the pin keeps running throughout.
+    ).rejects.toThrow("Move this account to the organization");
+    // Every shared workspace (an explicit move to the organization), then
+    // back to only this workspace: the pin keeps running throughout.
     for (const [version, allowedWorkspaces] of [
       [1, null],
       [2, [org.sharedWorkspaceId]],
@@ -2264,6 +2264,7 @@ describe.skipIf(!realDb)("a workspace-managed Codex account under organization r
           allowedModels: null,
           allowedWorkspaces: allowedWorkspaces ? [...allowedWorkspaces] : null,
           allowPersonalWorkspaces: false,
+          ...(allowedWorkspaces === null ? { moveToOrganization: true as const } : {}),
           version,
         }),
       ).toMatchObject({ version: version + 1 });

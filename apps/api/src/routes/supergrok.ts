@@ -119,6 +119,7 @@ function accountJson(row: XaiSubscriptionAccountMetadata, activeCredentialId: st
   return {
     id: row.id,
     scope: row.scope,
+    ownerWorkspaceId: row.ownerWorkspaceId ?? null,
     subject: row.providerAccountId ?? row.accountEmail ?? row.id,
     email: row.accountEmail,
     label: row.label,

@@ -11841,6 +11841,22 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Stops a workspace from using another workspace's own subscription account
+   * that was shared with it. Only the owning workspace or the organization
+   * changes the account otherwise. Requires workspace admin.
+   */
+  async removeModelConnectionFromWorkspace(target: {
+    workspaceId: string;
+    kind: "codex" | "supergrok" | "claude_subscription";
+    connectionId: string;
+  }): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${encodeURIComponent(target.workspaceId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
+    );
+  }
+
   async listOrganizationSuperGrokAccounts(
     organizationId: string,
   ): Promise<SuperGrokAccountsResponse> {

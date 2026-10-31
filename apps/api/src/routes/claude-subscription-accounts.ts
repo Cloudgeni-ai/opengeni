@@ -34,6 +34,7 @@ function accountJson(account: ClaudeSubscriptionAccountMetadata, activeId: strin
   return {
     id: account.id,
     scope: account.scope,
+    ownerWorkspaceId: account.ownerWorkspaceId ?? null,
     subject: account.providerAccountId ?? account.id,
     email: account.accountEmail,
     label: account.label,

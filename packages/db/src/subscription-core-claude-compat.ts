@@ -72,6 +72,7 @@ export function projectSubscriptionCoreClaudeAccount(
   return {
     id: row.id,
     scope,
+    ownerWorkspaceId: row.managed_by_workspace_id ?? null,
     providerAccountId: row.provider_account_id,
     allowedModelIds: row.allowed_model_ids,
     label: row.label,
