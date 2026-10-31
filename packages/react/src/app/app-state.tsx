@@ -1019,8 +1019,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     setLatencyMode("standard");
   }, [clientConfig, pathname, workspaces]);
 
-  const selectedInstalledRepositories = githubRepos.filter((repo) => selectedRepoIds.has(repo.id));
-  const selectedInstallationId = selectedInstalledRepositories[0]?.installationId ?? null;
   const repositoryGroups = useMemo(() => groupRepositories(githubRepos), [githubRepos]);
   const toolMcpServers = useMemo(
     () => mergeMcpServerOptions(selectableMcpServers(clientConfig), workspaceMcpServers),
@@ -2199,16 +2197,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   function toggleGitHubRepository(repo: GitHubRepository) {
-    if (
-      selectedInstallationId !== null &&
-      selectedInstallationId !== repo.installationId &&
-      !selectedRepoIds.has(repo.id)
-    ) {
-      toast.info("This session uses one GitHub token", {
-        description: "Clear selected repositories to choose repositories from another account.",
-      });
-      return;
-    }
     setSelectedRepoIds((current) => {
       const next = new Set(current);
       if (next.has(repo.id)) {
@@ -2663,7 +2651,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           busy,
           repoBusy,
           githubAppBusy,
-          selectedInstallationId,
           repositoryGroups,
           toolMcpServers,
           workspaceDefaultToolIds,
@@ -2783,7 +2770,6 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     resetSessionView,
     resetWorkspaceIntegrations,
     selectedCapabilityToolIds,
-    selectedInstallationId,
     selectedRepoIds,
     selectedRepoRefs,
     session,
