@@ -39,11 +39,11 @@ import {
   getOrganizationCredentialProvider,
   getWorkspaceCredentialProvider,
   getWorkspaceWebhook,
-  integrationWorkspaceFilterMatches,
   listOrganizationWebhooks,
   listWorkspaceWebhookDeliveries,
   listWorkspaceWebhooks,
   organizationCredentialProviderReaches,
+  organizationWebhookReaches,
   redeliverWorkspaceWebhookDelivery,
   resolveInitiatingHuman,
   resolveWorkspaceCredentialProvider,
@@ -457,11 +457,7 @@ export function registerWorkspaceIntegrationRoutes(
             }
           : null,
         webhooks: organizationWebhooks
-          .filter(
-            (webhook) =>
-              webhook.enabled &&
-              integrationWorkspaceFilterMatches(webhook.workspaceFilter, workspace),
-          )
+          .filter((webhook) => webhook.enabled && organizationWebhookReaches(webhook, workspace))
           .map((webhook) => ({
             id: webhook.id,
             url: webhook.url,
