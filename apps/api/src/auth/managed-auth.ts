@@ -2,6 +2,7 @@ import { requireSignupChallenge } from "./signup-challenge";
 import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
 import {
   MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
+  MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE,
   MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE,
 } from "@opengeni/contracts";
 import {
@@ -147,12 +148,49 @@ export function managedAuthSignupEmailNotAllowed(
 }
 
 /**
+ * Thrown when a deployment that restricts accounts to `allowedUserEmails` is
+ * asked to sign in an address that isn't on the list. Without it, the session
+ * hook's refusal reached the person as Better Auth's generic
+ * `401 FAILED_TO_CREATE_SESSION`, which reads like an outage. Better Auth
+ * returns it as `403 { code: "SIGN_IN_EMAIL_NOT_ALLOWED" }`; an OAuth callback
+ * redirects with `error=sign_in_email_not_allowed` (see
+ * {@link managedAuthOAuthCallbackRefusal}).
+ */
+export class ManagedAuthSignInEmailNotAllowedError extends APIError {
+  constructor() {
+    super("FORBIDDEN", {
+      code: MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE,
+      message: "sign in email not allowed",
+    });
+  }
+}
+
+/**
+ * True when email sign-in must be refused because the deployment restricts
+ * accounts to listed addresses and this one isn't listed. Email sign-in checks
+ * this before Better Auth verifies the password, so the same refusal comes
+ * back whether the password was right, wrong, or the account doesn't exist.
+ */
+export function managedAuthSignInEmailNotAllowed(
+  settings: Pick<Settings, "allowedUserEmails">,
+  email: unknown,
+): boolean {
+  return (
+    settings.allowedUserEmails !== undefined &&
+    typeof email === "string" &&
+    email.trim() !== "" &&
+    !managedUserEmailAllowed(settings.allowedUserEmails, email)
+  );
+}
+
+/**
  * A user-create refusal raised during an OAuth callback becomes the callback's
  * `error=` redirect value. Better Auth 1.7 redirects with the error's code;
  * the sign-in page and clients read the documented values (`signup_disabled`,
- * `signup_email_not_allowed`, `signup_challenge_required`), which are each
- * refusal's message with spaces as underscores, as Better Auth 1.6 built them.
- * Refusals on every other path keep their typed JSON code.
+ * `signup_email_not_allowed`, `signup_challenge_required`,
+ * `sign_in_email_not_allowed`), which are each refusal's message with spaces
+ * as underscores, as Better Auth 1.6 built them. Refusals on every other path
+ * keep their typed JSON code.
  */
 export function managedAuthOAuthCallbackRefusal(error: unknown, path: string | undefined): unknown {
   if (!(error instanceof APIError) || !path?.startsWith("/callback/")) return error;
@@ -451,6 +489,17 @@ export function createManagedAuth(
         db,
         settings.betterAuthSecret ?? MANAGED_AUTH_EMAIL_THROTTLE_FALLBACK_KEY,
         async ({ path, body }) => {
+          // An address the deployment doesn't allow can never get a session,
+          // so email sign-in says so before the password is checked: the
+          // answer is the same for a right or wrong password. The session
+          // hook below refuses every other sign-in path the same way.
+          if (path === "/sign-in/email") {
+            const email = (body as { email?: unknown } | undefined)?.email;
+            if (managedAuthSignInEmailNotAllowed(settings, email)) {
+              throw new ManagedAuthSignInEmailNotAllowedError();
+            }
+            return;
+          }
           // Email sign-up refusals are decided before the endpoint runs:
           // when email verification is required, Better Auth answers a 403
           // from the user-create hook with its generic "check your email"
@@ -709,18 +758,22 @@ export function createManagedAuth(
       },
       session: {
         create: {
-          before: async (session) => {
+          before: async (session, context) => {
             if (settings.allowedUserEmails !== undefined) {
               const result = await pool.query<{ email: string; email_verified: boolean }>(
                 "select email, email_verified from auth_users where id = $1",
                 [session.userId],
               );
               const user = result.rows[0];
-              if (
-                !user?.email_verified ||
-                !managedUserEmailAllowed(settings.allowedUserEmails, user.email)
-              )
-                return false;
+              // opengeni-ops proves staging candidates by these exact checks
+              // (release/staging-admission-source.ts); keep their wording.
+              if (user && !managedUserEmailAllowed(settings.allowedUserEmails, user.email)) {
+                throw managedAuthOAuthCallbackRefusal(
+                  new ManagedAuthSignInEmailNotAllowedError(),
+                  context?.path,
+                );
+              }
+              if (!user?.email_verified) return false;
             }
             const providerId = currentManagedAuthProviderId();
             await ensureCanonicalHumanIdentityForAuthUser(db, session.userId);
