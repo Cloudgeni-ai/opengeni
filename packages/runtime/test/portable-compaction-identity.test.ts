@@ -186,7 +186,8 @@ describe("portable compaction provider identity", () => {
         }),
         ...(prepared ? { preparedRequest } : {}),
       });
-      expect(azureRequests[0]!.store).toBeUndefined();
+      // Azure accepts store:false; a prepared request's own value never wins.
+      expect(azureRequests[0]!.store).toBe(false);
       expect(openaiRequests[0]!.store).toBe(false);
     });
   }
