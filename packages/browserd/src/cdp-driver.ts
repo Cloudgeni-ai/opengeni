@@ -107,6 +107,12 @@ import type {
 import type { AgentBrowserJsonCommand, OwnedManagedBrowserProcess } from "./runner";
 import type { BrowserPasskeyManager } from "./passkeys";
 import { TypedSecretMemory } from "./typed-secrets";
+import {
+  pageProtection,
+  protectedNodeKey,
+  SENSITIVE_FIELD_REASON_SOURCE,
+  type PageProtection,
+} from "./page-protection";
 import { reportUnexpectedDispatchError } from "./controller-diagnostics";
 import {
   completeClientHints,
@@ -2097,9 +2103,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             `${dialogSummary(state.dialog, this.typedSecrets.merged())} Page reads are unavailable until it is handled. ${DIALOG_GUIDANCE}`,
           );
         }
-        return this.typedSecrets.redact(
-          await this.untilDialog(state, async () => await this.readDomUnlocked(state, request)),
-        );
+        return await this.untilDialog(state, async () => {
+          if (request.kind !== "count") await this.readPageProtection(state);
+          const result = await this.readDomUnlocked(state, request);
+          if (request.kind !== "count") await this.readPageProtection(state);
+          return this.typedSecrets.redact(result);
+        });
       },
       { read: true },
     );
@@ -2595,7 +2604,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const connection = await this.ensureConnection();
-    const sessionId = await this.withTarget(targetId, async (state) => state.sessionId);
+    const recordingState = await this.withTarget(targetId, async (state) => {
+      await this.assertImagesAllowed(state);
+      return state;
+    });
+    const sessionId = recordingState.sessionId;
     let ended = false;
     const timers = new Set<ReturnType<typeof setTimeout>>();
     const end = (error: Error | null) => {
@@ -2622,18 +2635,28 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           typeof params.metadata?.timestamp === "number"
             ? params.metadata.timestamp * 1_000
             : Date.now();
-        try {
-          onFrame(Buffer.from(params.data, "base64"), at);
-        } finally {
-          const timer = setTimeout(() => {
-            timers.delete(timer);
-            if (ended) return;
+        void (async () => {
+          try {
+            // Inspect before releasing every frame, not merely when the
+            // recording starts: a checkout may open while it is running.
+            await this.assertImagesAllowed(recordingState);
+            if (!ended) onFrame(Buffer.from(params.data as string, "base64"), at);
+          } catch (error) {
+            end(error instanceof Error ? error : new Error("browser recording redaction failed"));
             void connection
-              .send("Page.screencastFrameAck", { sessionId: frameSession }, { sessionId })
+              .send("Page.stopScreencast", {}, { sessionId, timeoutMs: 2_000 })
               .catch(() => undefined);
-          }, RECORDING_FRAME_ACK_DELAY_MS);
-          timers.add(timer);
-        }
+          } finally {
+            const timer = setTimeout(() => {
+              timers.delete(timer);
+              if (ended) return;
+              void connection
+                .send("Page.screencastFrameAck", { sessionId: frameSession }, { sessionId })
+                .catch(() => undefined);
+            }, RECORDING_FRAME_ACK_DELAY_MS);
+            timers.add(timer);
+          }
+        })();
       },
       sessionId,
     );
@@ -2807,6 +2830,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const parsed = BrowserActionCommand.parse(commandInput);
     // Remembered before dispatch: a failed action can still leave the value typed.
     this.typedSecrets.remember(parsed.secretValues);
+    if (this.typedSecrets.containsPaymentValue(Object.values(parsed.secretValues ?? {}))) {
+      this.typedSecrets.protectPaymentImages(this.browserTargetIdOf(parsed.targetId));
+    }
     const secretValues = this.typedSecrets.merged(parsed.secretValues);
     const command = materializeCommandSecrets(parsed);
     // Input counts as sent once an effectful command left browserd, so a later
@@ -5051,6 +5077,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         clip: { x: metrics.viewport.x, y: metrics.viewport.y, width: 1, height: 1, scale: 1 },
       },
       FRAME_CAPTURE_TIMEOUT_MS,
+      { internalDraw: true },
     ).then(
       () => true,
       () => false,
@@ -5124,9 +5151,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     params: Readonly<Record<string, unknown>>,
     timeoutMs: number,
-    options: { frame?: boolean } = {},
+    options: { frame?: boolean; internalDraw?: boolean } = {},
   ): Promise<T> {
     const deadline = Date.now() + timeoutMs;
+    if (!options.internalDraw) await this.assertImagesAllowed(state, deadline);
     while (state.capturesRunning.size > 0) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
@@ -5155,7 +5183,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     void running.then(() => state.capturesRunning.delete(running));
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await Promise.race([
+      const response = await Promise.race([
         answered,
         new Promise<never>((_, reject) => {
           timer = setTimeout(
@@ -5164,6 +5192,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
         }),
       ]);
+      if (!options.internalDraw) await this.assertImagesAllowed(state, deadline);
+      return response;
     } finally {
       clearTimeout(timer);
     }
@@ -5850,6 +5880,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return true;
       };
       let nodes: CdpAxNode[];
+      const protectionBefore = await this.readPageProtection(state);
       try {
         nodes = await this.collectAccessibilityFrames(state.sessionId, before, budget);
         if (state.oopifs.size > 0)
@@ -5867,6 +5898,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         continue;
       }
       nodes = await this.withPageFacts(state, nodes, before);
+      const protectionAfter = await this.readPageProtection(state);
+      nodes = this.protectAccessibility(nodes, protectionBefore, protectionAfter);
       let accessibility: CdpAccessibilitySnapshot;
       try {
         accessibility = normalizeCdpAccessibilityTree({
@@ -5892,6 +5925,70 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return accessibility;
     }
     throw new Error("browser frame tree did not settle for a bounded accessibility observation");
+  }
+
+  /** Read-only renderer snapshot, including closed shadow roots. A failure
+   * withholds output rather than assuming there were no sensitive fields. */
+  private async readPageProtection(
+    state: TargetState,
+    deadline = Date.now() + 5_000,
+  ): Promise<PageProtection> {
+    this.assertCurrentTargetState(state);
+    const connection = await this.ensureConnection();
+    const combined: PageProtection = { nodes: new Map(), values: [], payment: false };
+    const sessions = [
+      state.sessionId,
+      ...[...state.oopifs.values()].map((frame) => frame.sessionId),
+    ];
+    for (const sessionId of new Set(sessions)) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0)
+        throw new CdpCommandTimeoutError("DOMSnapshot.captureSnapshot", sessionId);
+      const snapshot = await connection.send(
+        "DOMSnapshot.captureSnapshot",
+        { computedStyles: [] },
+        { sessionId, timeoutMs: remaining },
+      );
+      const protection = pageProtection(snapshot);
+      if (this.typedSecrets.containsPaymentValue((snapshot as { strings: string[] }).strings))
+        combined.payment = true;
+      for (const [key, reason] of protection.nodes) combined.nodes.set(key, reason);
+      combined.values.push(...protection.values);
+      combined.payment ||= protection.payment;
+    }
+    if (combined.payment) this.typedSecrets.protectPaymentImages(state.targetId);
+    this.typedSecrets.remember(
+      Object.fromEntries(combined.values.map((value, index) => [`protected:${index}`, value])),
+    );
+    this.assertCurrentTargetState(state);
+    return combined;
+  }
+
+  private protectAccessibility(nodes: CdpAxNode[], ...protections: PageProtection[]): CdpAxNode[] {
+    return this.typedSecrets.redact(
+      nodes.map((node) => {
+        const key =
+          typeof node.frameId === "string" && typeof node.backendDOMNodeId === "number"
+            ? protectedNodeKey(node.frameId, node.backendDOMNodeId)
+            : null;
+        const reason =
+          key === null
+            ? undefined
+            : protections.map((protection) => protection.nodes.get(key)).find(Boolean);
+        return reason ? { ...node, protectedReason: reason } : node;
+      }),
+    );
+  }
+
+  private async assertImagesAllowed(state: TargetState, deadline?: number): Promise<void> {
+    if (!this.typedSecrets.paymentImagesProtected(state.targetId))
+      await this.readPageProtection(state, deadline);
+    if (this.typedSecrets.paymentImagesProtected(state.targetId)) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "images of this browser tab are withheld after payment data is encountered; use semantic observation and controls",
+      );
+    }
   }
 
   /**
@@ -7993,7 +8090,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let snapshot: CdpAccessibilitySnapshot;
     try {
       snapshot = normalizeCdpAccessibilityTree({
-        nodes: response.nodes as CdpAxNode[],
+        nodes: this.protectAccessibility(
+          (response.nodes as CdpAxNode[]).map((node) => ({
+            ...node,
+            frameId: node.frameId ?? entry.frameId ?? state.frame.id,
+          })),
+          await this.readPageProtection(state),
+        ),
         controllerGeneration: this.controllerGeneration,
         targetId: state.targetId,
         documentGeneration: state.documentGeneration,
@@ -8108,7 +8211,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const current = normalizeCdpAccessibilityTree({
       nodes: namespaceCdpAccessibilityFrame(
         frame.id,
-        response.nodes as CdpAxNode[],
+        this.protectAccessibility(
+          (response.nodes as CdpAxNode[]).map((node) => ({
+            ...node,
+            frameId: node.frameId ?? frame.id,
+          })),
+          await this.readPageProtection(state),
+        ),
         `${frame.id}\0${frame.loaderId}`,
       ),
       controllerGeneration: this.controllerGeneration,
@@ -13852,17 +13961,11 @@ const PAGE_FACTS_EXPRESSION = `(() => {
 const PROTECTED_CONTENT_FUNCTION = `function(element, range) {
   const privateSelector = "[data-private], [data-sensitive], [data-opengeni-private]";
   const sensitiveReason = (node) => {
-    const nodeTag = String(node.tagName || "").toLowerCase();
-    const type = nodeTag === "input" ? String(node.getAttribute("type") || "text").toLowerCase() : "";
-    const autocomplete = String(node.getAttribute("autocomplete") || "").toLowerCase();
-    const fieldName = String(node.getAttribute("name") || "") + " " + String(node.getAttribute("id") || "");
-    if (type === "password" || /(?:current|new)-password|one-time-code/.test(autocomplete)) return "password";
-    if (/(?:^|\\s)cc-/.test(autocomplete) || /(?:card.?number|credit.?card|cvv|cvc|security.?code|expiry|expiration)/i.test(fieldName)) return "payment";
-    if (type === "hidden" || node.matches(privateSelector)) return "private";
-    return null;
+    return (${SENSITIVE_FIELD_REASON_SOURCE})(String(node.tagName || "").toLowerCase(), Object.fromEntries(Array.from(node.attributes || [], attr => [attr.name, attr.value])), node.isContentEditable === true);
   };
   let reason = sensitiveReason(element);
-  for (let ancestor = element.parentElement; !reason && ancestor; ancestor = ancestor.parentElement) {
+  const parentOf = node => node.parentElement || node.getRootNode()?.host || null;
+  for (let ancestor = parentOf(element); !reason && ancestor; ancestor = parentOf(ancestor)) {
     reason = sensitiveReason(ancestor);
   }
   if (reason) return reason;
@@ -14198,7 +14301,15 @@ const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   await Promise.resolve();
   if (!(this instanceof Element) || !this.isConnected) return false;
   const tag = String(this.tagName || "").toLowerCase();
-  if (tag === "input" || tag === "textarea") return String(this.value) === String(expected);
+  if (tag === "input" || tag === "textarea") {
+    const actual = String(this.value);
+    if (actual === String(expected)) return true;
+    const reason = (${SENSITIVE_FIELD_REASON_SOURCE})(tag, Object.fromEntries(Array.from(this.attributes, attr => [attr.name, attr.value])), this.isContentEditable === true);
+    // Only payment fields may ignore site-added grouping. No stripping of
+    // digits, letters, decimal points, slashes or other meaningful changes.
+    return reason === "payment" && /^[0-9\\s-]+$/.test(actual) && /^[0-9\\s-]+$/.test(String(expected)) &&
+      actual.replace(/[\\s-]/g, "") === String(expected).replace(/[\\s-]/g, "");
+  }
   if (this.isContentEditable === true) return String(this.textContent || "") === String(expected);
   return false;
 }`;

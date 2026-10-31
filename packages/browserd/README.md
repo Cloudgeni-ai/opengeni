@@ -4,6 +4,22 @@ Placement-resident browser controller. It launches and owns the managed
 browser, target generations and operation receipts, and exposes only Opengeni
 interaction contracts. CDP endpoints are not product APIs.
 
+Payment fields never expose their values in semantic observations or DOM
+reads. Known numeric secrets remain masked when a widget groups their digits;
+three-digit security codes are remembered as well. A fill accepts only
+formatting-only digit grouping in a classified payment field, not changed
+digits or reformatted ordinary fields. DOM snapshots find protected fields in
+frames and flattened author shadow roots, including closed roots; a failed
+privacy read withholds output rather than assuming a page is public.
+
+Once payment fields or known card data are encountered, that browser tab withholds
+screenshots, live-view images and recording frames. Unrelated tabs remain usable.
+Use semantic observation and controls
+to finish the form. This deliberately refuses images rather than promising
+race-free pixel masking. The flag and known-value memory survive controller
+replacement within a browserd process, not a process restart. Arbitrary
+canvas-rendered content is not identified by the DOM policy.
+
 Browserd starts Chrome or Chromium itself with a private profile and a
 loopback-only DevTools port, and is the browser's only CDP client. It connects
 without an Origin header, attaches each

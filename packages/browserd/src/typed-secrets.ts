@@ -3,6 +3,7 @@ import {
   INTERACTION_SECRET_MASK_OPTIONS,
   type InteractionSecretValues,
   SecretValueMemory,
+  maskSecretValues,
 } from "@opengeni/contracts";
 
 /** Most distinct secret values one controller remembers; the oldest drop first. */
@@ -13,6 +14,7 @@ const MAX_REMEMBERED_SECRETS = 256;
  * runs: it can be reattached at any time, and dropping its values would show
  * them again. */
 const sessions = new Map<string, SecretValueMemory>();
+const paymentSessions = new Map<string, Set<string>>();
 
 function newMemory(): SecretValueMemory {
   return new SecretValueMemory({
@@ -34,10 +36,37 @@ function newMemory(): SecretValueMemory {
  *
  * This is the shared known-value `SecretValueMemory` (the one agent tool
  * results use) with the interaction options: `[secret]` as the label, a
- * four-character minimum and identifier keys left alone.
+ * three-character minimum (including CVCs) and identifier keys left alone.
  */
 export class TypedSecretMemory {
   private localMemory: SecretValueMemory | null = null;
+  private readonly localPaymentTargets = new Set<string>();
+
+  protectPaymentImages(targetId: string): void {
+    if (this.sessionKey === null) this.localPaymentTargets.add(targetId);
+    else {
+      const targets = paymentSessions.get(this.sessionKey) ?? new Set<string>();
+      targets.add(targetId);
+      paymentSessions.set(this.sessionKey, targets);
+    }
+  }
+
+  paymentImagesProtected(targetId: string): boolean {
+    return (
+      this.localPaymentTargets.has(targetId) ||
+      (this.sessionKey !== null && paymentSessions.get(this.sessionKey)?.has(targetId) === true)
+    );
+  }
+
+  containsPaymentValue(value: unknown): boolean {
+    const entries = (this.memory(false)?.entries() ?? []).filter(
+      ({ value }) => /^[0-9\s-]+$/u.test(value) && value.replace(/[\s-]/gu, "").length >= 12,
+    );
+    return (
+      entries.length > 0 &&
+      maskSecretValues(value, entries, INTERACTION_SECRET_MASK_OPTIONS) !== value
+    );
+  }
 
   /** A memory of its own (tests, one-off use); forSession shares one per session. */
   constructor(private readonly sessionKey: string | null = null) {}
@@ -90,7 +119,13 @@ export class TypedSecretMemory {
       value: secret,
       label: INTERACTION_REDACTED_SECRET,
     }));
-    const memory = this.memory(false) ?? newMemory();
-    return memory.maskWith(value, extra, "interaction");
+    // Browser output is a security boundary: unlike best-effort masking in
+    // general telemetry, a masking error must withhold the result, not return
+    // the original plaintext. The pure engine propagates such failures.
+    return maskSecretValues(
+      value,
+      [...(this.memory(false)?.entries() ?? []), ...extra],
+      INTERACTION_SECRET_MASK_OPTIONS,
+    );
   }
 }
