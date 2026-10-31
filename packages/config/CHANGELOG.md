@@ -1,5 +1,29 @@
 # @opengeni/config
 
+## 6.3.1
+
+### Minor Changes
+
+- 32bc3e9: App use is paid from monthly plan credit; API use (organization and personal API keys, products on the SDK, outside agents over MCP) is paid from credits only. Each turn freezes its funding origin, sub-agents and tools inherit their chat's, and API work with no credits is refused with `402 api_credits_required` and an Add credits action (`1128_billing_usage_origin`, rolling; it adds `billing_origin` to the scheduled-task execution exclusion lists in place, keeping 1115's `creator_locked`). See `docs/billing-origin.md`. A schedule an API caller edits or runs by hand, or an automation an API caller's test event or replay fires, is API use from then on, and so is an automation fired by a webhook whose signing secret or custom format an API caller set or received (`event_sources.secret_billing_origin`), and so is an automation fired by a workspace MCP source an API caller pointed at a server's URL. The agent tools that create and change webhook sources mark them the same way for an outside agent or an agent in an API chat. A custom webhook format can no longer read its event type or ids from the header its signature is in, so a shared token is never stored in events or the delivery log; one stored before reads that header as absent. Intake also drops any header that contains the source's secret and replaces copies of it in the kept body with `[secret]`, so a `url_token` secret echoed by the app or a proxy is never kept. The web app shows an API turn refused for lack of credits as a credit stop. Paid tools in the app are paid from plan credit too, the Free plan's included. Internal accounts (CloudGeni's host account and our own team's organizations) keep today's billing through `OPENGENI_BILLING_LEGACY_ACCOUNT_IDS` (listed by default). The SDK keeps the `add_credits` and `upgrade_plan` refusal actions and names the fix in its messages.
+- 40b79c9: Claude subscription models no longer disappear from a workspace when the Claude accounts serving it are not managed by that workspace. The catalog, model admission and cross-provider failover now count every Claude account that serves the workspace, the same accounts placement already used, for both the `workspace-claude-subscription/` and `organization-claude-subscription/` model ids. Readers also accept the upcoming canonical `claude/<model>` ids (provider `claude-subscription`), which a later release starts writing; the two legacy ids stay accepted as aliases.
+- 99159e9: A session can now mix GitHub repositories from several GitHub App installations and from your personal GitHub. Each mounted repository commits as its own identity: the Opengeni app's bot for App repositories, your `users.noreply.github.com` address for repositories used through your GitHub. The worker writes `user.name`/`user.email` into each repository's local git config (marked `opengeni.managedIdentity`; an identity you set yourself is kept) instead of one sandbox-wide `GIT_AUTHOR_*`/`GIT_COMMITTER_*` identity, so a sandbox with both no longer fails setup with "repository resources require different Git commit identities". New sandboxes no longer carry a bot identity in their environment, so the sandbox viewer and terminal create the same environment as the worker and a session with only personal repositories never commits as the bot. Sandboxes created before this change keep their pinned environment; a `git` wrapper written to the per-turn CLI wrapper directory (`$HOME/.opengeni/bin`, ahead of the real git on PATH) runs git without the baked identity when the repository has a managed identity, and passes through otherwise. A deployment-configured `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` stays the default identity for App and host repositories. `applyGitAuthPointerEnvironment` from `@opengeni/config` ignores its deprecated identity argument; `GitCredentialBindingSeed` in `@opengeni/runtime` gains an optional `identity`.
+
+  The repository picker shows one row per repository. A repository reachable both through the Opengeni app and your GitHub has an "Acts as" choice when selected (you by default when your GitHub can write to it), and repositories from any number of App installations can be selected together with your own. The picker footer is now "GitHub access", with "Your GitHub" (connect, or choose which repositories Opengeni may use) and "Opengeni app" (installations and "Install on another account"). Automations can also select repositories from several installations. `RepositoryContextPickerProps` drops `selectedInstallationId` and gains `personalGitHubManageUrl`; the app context drops `selectedInstallationId`.
+
+### Patch Changes
+
+- Updated dependencies [d91058a]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [923c161]
+- Updated dependencies [40b79c9]
+- Updated dependencies [d872b12]
+- Updated dependencies [008d073]
+- Updated dependencies [af8fb16]
+- Updated dependencies [1afdda0]
+  - @opengeni/contracts@6.3.0
+  - @opengeni/codex@6.3.0
+  - @opengeni/xai-subscription@6.3.0
+
 ## 6.2.1
 
 ### Minor Changes
