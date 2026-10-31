@@ -244,10 +244,14 @@ cross-organization visibility remains impossible.
 Workspace settings › Available here shows what agent turns in one workspace can
 use, grouped by owner: the workspace's own things, the organization's things
 that reach the workspace, and the viewer's own things. It reads the same lists
-each kind's own page reads (connector installations, Connected Machines, rigs,
+each kind's own page reads (the connector catalog, Connected Machines, rigs,
 vaults, Skills and Knowledge), so it never shows anything those pages would not:
 other people's personal resources never appear, and a kind the viewer may not
-list is left out instead of shown as an error. Each row says who manages it
+list is left out instead of shown as an error. Connectors are the workspace's
+own installations, the organization's connectors that reach the workspace (one
+the workspace turned off is left out, and one whose organization setup is
+broken is marked unavailable), and, in a Personal workspace, the owner's Only
+me connectors carried in from other workspaces. Each row says who manages it
 (workspace admins for connectors and machines, workspace members and admins for
 rigs, vaults, Skills and Knowledge, organization owners for organization things,
 only the owner for personal things) and opens the thing's own page. Model plans
