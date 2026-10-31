@@ -188,7 +188,10 @@ no required job results, so canary admission refuses them; canary and staging
 pick the newest fully green SHA, which is the batch's last commit. The last
 commit's landed-content check covers them.
 
-Anything else, including missing or unreadable evidence, runs as before.
+Anything else, including missing or unreadable evidence, runs as before. A
+GitHub read that fails with a 5xx, a 429, a timeout or a network error is
+retried three times with backoff first, so a brief GitHub outage doesn't cost
+a landed batch its receipt.
 
 ## Main CI cadence
 

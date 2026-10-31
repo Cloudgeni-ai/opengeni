@@ -302,10 +302,16 @@ export function nextBatch(
     );
     if (!group.length) continue;
     const rest = pending.slice(index + 1);
-    if (group.some(alone)) {
-      const first = group[0]!;
-      const others = group.filter((p) => p !== first).map((p) => p.number);
-      return { kind: "build", members: [first], pending: others.length ? [others, ...rest] : rest };
+    // A member that runs alone goes first; the others stay together, so the
+    // group is not tested one member at a time.
+    const single = group.find(alone);
+    if (single) {
+      const others = group.filter((p) => p !== single).map((p) => p.number);
+      return {
+        kind: "build",
+        members: [single],
+        pending: others.length ? [others, ...rest] : rest,
+      };
     }
     return { kind: "build", members: group.slice(0, settings.maxBatch), pending: rest };
   }
