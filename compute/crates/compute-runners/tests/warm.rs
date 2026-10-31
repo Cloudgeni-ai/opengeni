@@ -410,6 +410,50 @@ async fn a_refresh_ends_with_its_builder_when_leading_ends() {
     keeping.await.unwrap();
 }
 
+/// A service stopped while it builds kills its builder before it ends.
+#[tokio::test]
+async fn a_refresh_stopped_ends_its_builder() {
+    let fake = Fake::start().await;
+    {
+        let mut world = fake.world();
+        world.head = "b".repeat(40);
+        world.process_delay = Duration::from_secs(30);
+    }
+    let github = Arc::new(Github::new(
+        reqwest::Client::new(),
+        &fake.base,
+        &fake.base,
+        Scope::parse("acme/web").unwrap(),
+        Credentials::Token("the-token".into()),
+    ));
+    let compute = Compute::new(reqwest::Client::new(), &fake.base, "key");
+    let (current_tx, _current) = watch::channel("runner-base".to_owned());
+    let (_leading_tx, leading) = watch::channel(true);
+    let stop = CancellationToken::new();
+    let keeping = tokio::spawn(warm::keep(
+        settings(),
+        github,
+        compute,
+        free_room(),
+        current_tx,
+        leading,
+        stop.clone(),
+    ));
+    fake.until("the clone running in a builder", |world| {
+        world.processes.len() == 1
+    })
+    .await;
+    let builder = fake.world().processes[0].sandbox.clone();
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(10), keeping)
+        .await
+        .expect("the service ends")
+        .unwrap();
+    let world = fake.world();
+    assert!(world.killed.contains(&builder), "the builder goes");
+    assert!(world.templates.is_empty(), "nothing saved");
+}
+
 /// One refresh: cloned with the token in its environment alone, prepared,
 /// written out, saved, and its builder gone.
 fn the_refresh_ran_as_it_should(world: &fake::World) {

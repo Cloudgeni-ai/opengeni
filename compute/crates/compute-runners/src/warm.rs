@@ -187,10 +187,12 @@ pub async fn keep(
                             });
                         if let Some(commit) = commit {
                             tried = Some(now_s());
-                            let refreshed = tokio::select! {
-                                refreshed = refresh(&settings, &github, &compute, &commit, &mut leading) => refreshed,
-                                () = stop.cancelled() => return,
-                            };
+                            let refreshed =
+                                refresh(&settings, &github, &compute, &commit, &mut leading, &stop)
+                                    .await;
+                            if stop.is_cancelled() {
+                                return;
+                            }
                             match refreshed {
                                 Ok(made) => {
                                     tracing::info!(template = %made.name, "runners start from a fresh warm template");
@@ -290,13 +292,16 @@ async fn clear_builders(compute: &Compute, pool: &str) {
 }
 
 /// Prepares a template at `commit` and saves it, unless this replica stops
-/// leading first. The builder goes either way.
+/// leading or is stopped first. The builder goes either way. Saving is
+/// never cut short: the template it makes is whole, and the replica
+/// leading next adopts it.
 async fn refresh(
     settings: &Settings,
     github: &Github,
     compute: &Compute,
     commit: &str,
     leading: &mut watch::Receiver<bool>,
+    stop: &CancellationToken,
 ) -> Result<Ours> {
     let short = &commit[..COMMIT_DIGITS];
     let at = now_s();
@@ -314,9 +319,17 @@ async fn refresh(
         })
         .await
         .context("starting a template builder")?;
-    let made = tokio::select! {
-        made = prepare(settings, github, compute, &builder, commit, &name) => made,
+    let prepared = tokio::select! {
+        prepared = prepare(settings, github, compute, &builder, commit) => prepared,
         _ = leading.wait_for(|leads| !*leads) => Err(anyhow!("this replica stopped leading")),
+        () = stop.cancelled() => Err(anyhow!("stopping")),
+    };
+    let made = match prepared {
+        Ok(()) if *leading.borrow() && !stop.is_cancelled() => {
+            compute.snapshot(&builder.id, &name).await
+        }
+        Ok(()) => Err(anyhow!("this replica stopped leading, or is stopping")),
+        Err(error) => Err(error),
     };
     if let Err(error) = compute.kill(&builder.id).await {
         tracing::warn!(sandbox = %builder.id, error = format!("{error:#}"), "killing a template builder failed");
@@ -330,14 +343,15 @@ async fn refresh(
     })
 }
 
+/// Clones the repository at `commit` in `builder`, runs the prepare command
+/// there and writes the disk out.
 async fn prepare(
     settings: &Settings,
     github: &Github,
     compute: &Compute,
     builder: &Created,
     commit: &str,
-    name: &str,
-) -> Result<Snapshot> {
+) -> Result<()> {
     let started = tokio::time::Instant::now();
     let repo_name = settings.repo.rsplit('/').next().unwrap_or(&settings.repo);
     let dir = format!(
@@ -402,7 +416,7 @@ async fn prepare(
     if synced.exit_code != 0 {
         bail!("sync exited {}", synced.exit_code);
     }
-    compute.snapshot(&builder.id, name).await
+    Ok(())
 }
 
 /// Deletes the pool's templates older than `kept`.
