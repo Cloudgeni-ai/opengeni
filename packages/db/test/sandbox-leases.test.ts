@@ -1,4 +1,3 @@
-import { createLegacyVariableSet } from "./helpers/legacy-variable-sets";
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import {
   acquireRestrictedRuntimeTestDatabase,
@@ -1276,28 +1275,21 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       await blocker;
     }
 
-    // A workspace owns both the selected variable set and the selecting
-    // session. Deletion must detach that relationship through the session
-    // activity gate before the parent cascade reaches workspace_variable_sets.
-    const selectedVariableSet = await createLegacyVariableSet(db, {
-      accountId,
-      workspaceId,
-      name: "workspace deletion fixture",
-    });
+    // Historical selections remain in session rows after their retired tables
+    // disappear; they cannot make ordinary workspace deletion query old tables.
+    const selectedVariableSetId = crypto.randomUUID();
     await withWorkspaceSessionActivityRls(db, workspaceId, async (tx) => {
       await tx.execute(sql`
         update sessions
-        set variable_set_ids = ${JSON.stringify([selectedVariableSet.id])}::jsonb,
-            variable_set_id = ${selectedVariableSet.id}::uuid,
+        set variable_set_ids = ${JSON.stringify([selectedVariableSetId])}::jsonb,
+            variable_set_id = ${selectedVariableSetId}::uuid,
             updated_at = now()
         where workspace_id = ${workspaceId} and id = ${recoveringSessionId}
       `);
     });
-    const [attachmentBeforeDelete] = await admin<{ count: number }[]>`
-      select count(*)::int as count
-      from session_variable_set_attachments
-      where workspace_id = ${workspaceId}`;
-    expect(attachmentBeforeDelete?.count).toBe(1);
+    const [attachmentBeforeDelete] = await admin<{ selected: string }[]>`
+      select variable_set_id as selected from sessions where id = ${recoveringSessionId}`;
+    expect(attachmentBeforeDelete?.selected).toBe(selectedVariableSetId);
 
     const deleteObservations: WorkspaceDeleteObservation[] = [];
     const deleted = await deleteWorkspaceIfQuiescent(db, {

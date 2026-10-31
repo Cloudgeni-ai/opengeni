@@ -1358,46 +1358,34 @@ describe("DB integration", () => {
     }
   });
 
-  test("RLS policies isolate workspace variable-set rows for a non-owner app role", async () => {
+  test("retired Variable Set tables remain absent for a non-owner app role", async () => {
     const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
     const appDbClient = createDb(appRoleUrl);
     try {
       const grantA = await testGrant(dbClient.db);
-      const grantB = await testGrant(dbClient.db);
-      await seedWorkspaceVariableSetRows(dbClient.db, grantB);
-
       for (const table of ["workspace_variable_sets", "workspace_variable_set_variables"]) {
         const hidden = await appDbClient.db.execute(
-          dbSql<{
-            count: string;
-          }>`select count(*)::text as count from ${dbSql.raw(table)}`,
+          dbSql<{ absent: boolean }>`select to_regclass(${table}) is null as absent`,
         );
-        expect(Number(hidden[0]?.count ?? 0)).toBe(0);
+        expect(hidden[0]?.absent).toBe(true);
       }
-
-      await withRlsContext(appDbClient.db, grantA, async (db) => {
-        await seedWorkspaceVariableSetRows(db, grantA);
-      });
-
       for (const table of ["workspace_variable_sets", "workspace_variable_set_variables"]) {
         const visible = await withRlsContext(
           appDbClient.db,
           grantA,
           async (db) =>
             await db.execute(
-              dbSql<{
-                workspace_id: string;
-              }>`select workspace_id::text from ${dbSql.raw(table)}`,
+              dbSql<{ absent: boolean }>`select to_regclass(${table}) is null as absent`,
             ),
         );
-        expect(visible.map((row) => row.workspace_id)).toEqual([grantA.workspaceId]);
+        expect(visible[0]?.absent).toBe(true);
       }
 
       await expect(
         withRlsContext(appDbClient.db, grantA, async (db) => {
           await db.execute(dbSql`
           insert into workspace_variable_sets (account_id, workspace_id, name)
-          values (${grantA.accountId}, ${grantB.workspaceId}, ${`mismatched-${crypto.randomUUID()}`})
+          values (${grantA.accountId}, ${grantA.workspaceId}, ${`retired-${crypto.randomUUID()}`})
         `);
         }),
       ).rejects.toThrow();
@@ -1621,22 +1609,6 @@ async function seedCapabilityAndSocialRows(
   await db.execute(dbSql`
     insert into social_posts (account_id, workspace_id, connection_id, provider, external_post_id, text, published_at)
     values (${grant.accountId}, ${grant.workspaceId}, ${connectionId}, 'linkedin', ${`post-${suffix}`}, 'RLS post', now())
-  `);
-}
-
-async function seedWorkspaceVariableSetRows(
-  db: ReturnType<typeof createDb>["db"],
-  grant: AccessGrant,
-): Promise<void> {
-  const suffix = crypto.randomUUID();
-  const variableSetId = crypto.randomUUID();
-  await db.execute(dbSql`
-    insert into workspace_variable_sets (id, account_id, workspace_id, name)
-    values (${variableSetId}, ${grant.accountId}, ${grant.workspaceId}, ${`rls-variable-set-${suffix}`})
-  `);
-  await db.execute(dbSql`
-    insert into workspace_variable_set_variables (account_id, workspace_id, variable_set_id, name, value_encrypted)
-    values (${grant.accountId}, ${grant.workspaceId}, ${variableSetId}, 'RLS_TOKEN', 'v1:placeholder:placeholder')
   `);
 }
 

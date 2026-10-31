@@ -27,9 +27,7 @@ realTest(
     // Production must explicitly replace those live dependencies before dropping
     // columns; passing this test proves neither write nor authorization safety.
     await database!.admin.unsafe(`
-    ALTER TABLE sessions DROP COLUMN variable_set_ids CASCADE, DROP COLUMN variable_set_id CASCADE,
-      DROP COLUMN codex_pinned_credential_id CASCADE, DROP COLUMN codex_last_credential_id CASCADE,
-      DROP COLUMN codex_pin_source CASCADE;
+    ALTER TABLE sessions DROP COLUMN variable_set_ids CASCADE, DROP COLUMN variable_set_id CASCADE;
     ALTER TABLE scheduled_tasks DROP COLUMN variable_set_id CASCADE;
     ALTER TABLE rig_versions DROP COLUMN default_variable_set_ids CASCADE;
     ALTER TABLE connections DROP COLUMN claude_usage_snapshot CASCADE;
