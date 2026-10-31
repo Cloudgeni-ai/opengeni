@@ -145,6 +145,82 @@ test("a large snapshot retains its privacy projection without a separate node-co
   expect(protection.nodes.size).toBe(0);
 });
 
+test("a named payment wrapper cannot make its expiry options or postal field permanent secrets", () => {
+  const protection = pageProtection({
+    strings: [
+      "frame-a",
+      "DIV",
+      "SELECT",
+      "OPTION",
+      "#text",
+      "INPUT",
+      "",
+      "id",
+      "credit-card",
+      "autocomplete",
+      "cc-exp-year",
+      "2027",
+      "name",
+      "postal",
+      "0150",
+    ],
+    documents: [
+      {
+        frameId: 0,
+        nodes: {
+          backendNodeId: [1, 2, 3, 4, 5],
+          parentIndex: [-1, 0, 1, 2, 0],
+          nodeName: [1, 2, 3, 4, 5],
+          nodeValue: [-1, -1, -1, 11, -1],
+          attributes: [[7, 8], [9, 10], [], [], [12, 13]],
+          inputValue: { index: [4], value: [14] },
+          textValue: { index: [1], value: [11] },
+        },
+      },
+    ],
+  });
+  expect(protection.payment).toBe(true);
+  expect(protection.values).toEqual([]);
+  expect(protection.nodes.get(protectedNodeKey("frame-a", 5))).toBe("payment");
+  expect(sensitiveFieldReason("div", { id: "credit-card" }, false, "remember")).toBeNull();
+});
+
+test("an actual contenteditable card field remembers its own complete text, not nested form values", () => {
+  const protection = pageProtection({
+    strings: [
+      "frame-a",
+      "DIV",
+      "SPAN",
+      "#text",
+      "INPUT",
+      "",
+      "id",
+      "card-number",
+      "contenteditable",
+      "true",
+      "4000 0000 ",
+      "0000 0002",
+      "name",
+      "postal",
+      "0150",
+    ],
+    documents: [
+      {
+        frameId: 0,
+        nodes: {
+          backendNodeId: [1, 2, 3, 4, 5],
+          parentIndex: [-1, 0, 1, 0, 0],
+          nodeName: [1, 2, 3, 3, 4],
+          nodeValue: [-1, -1, 10, 11, -1],
+          attributes: [[6, 7, 8, 9], [], [], [], [12, 13]],
+          inputValue: { index: [4], value: [14] },
+        },
+      },
+    ],
+  });
+  expect(protection.values).toEqual(["4000 0000 0000 0002"]);
+});
+
 test.each([
   null,
   {},

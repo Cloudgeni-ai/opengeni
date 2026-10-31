@@ -10,6 +10,7 @@ export function sensitiveFieldReason(
   editable: boolean,
   purpose: "read" | "remember" = "read",
 ): ProtectedReason | null {
+  if (purpose === "remember" && !["input", "textarea"].includes(tag) && !editable) return null;
   const type = tag === "input" ? (attributes.type ?? "text").toLowerCase() : "";
   const autocomplete = (attributes.autocomplete ?? "").toLowerCase();
   if (type === "password" || /(?:current|new)-password|one-time-code/u.test(autocomplete))
@@ -104,6 +105,8 @@ export function pageProtection(snapshot: unknown): PageProtection {
     const backendIds = nodes.backendNodeId as unknown[];
     const reasons: Array<ProtectedReason | null> = [];
     const memoryReasons: Array<ProtectedReason | null> = [];
+    const editableRoots: Array<number | null> = [];
+    const editableText = new Map<number, string>();
     const remember = (value: string, reason: ProtectedReason | null | undefined) => {
       if (!value || !reason) return;
       // Only actual card numbers/CVCs from primary payment fields enter
@@ -131,19 +134,35 @@ export function pageProtection(snapshot: unknown): PageProtection {
       const ownReason = sensitiveFieldReason(tag, attributes, editable);
       const reason = ownReason ?? inherited;
       reasons.push(reason);
-      const memoryReason =
-        sensitiveFieldReason(tag, attributes, editable, "remember") ??
-        ((parent as number) >= 0 ? memoryReasons[parent as number] : null);
-      memoryReasons.push(memoryReason ?? null);
+      // Protection inherits; permission to remember does not. A named
+      // payment wrapper must not turn its expiry options or postal code
+      // into permanent secrets.
+      const memoryReason = sensitiveFieldReason(tag, attributes, editable, "remember");
+      memoryReasons.push(memoryReason);
+      const editableRoot =
+        editable && memoryReason
+          ? index
+          : !["input", "textarea", "select", "option"].includes(tag) &&
+              attributes.contenteditable !== "false" &&
+              (parent as number) >= 0
+            ? (editableRoots[parent as number] ?? null)
+            : null;
+      editableRoots.push(editableRoot);
       if (reason) {
         if (!Number.isSafeInteger(backendIds[index]))
           throw new Error("invalid protected backend node");
         found.nodes.set(protectedNodeKey(frameId, backendIds[index] as number), reason);
         const text = stringAt((nodes.nodeValue as unknown[])[index]);
         remember(text, memoryReason);
+        // An actual contenteditable field stores its value in descendant
+        // text nodes, not inputValue. Collect only that field's text; nested
+        // form controls above break the inheritance.
+        if (tag === "#text" && editableRoot !== null)
+          editableText.set(editableRoot, (editableText.get(editableRoot) ?? "") + text);
         if (reason === "payment" || ownReason === "payment") found.payment = true;
       }
     }
+    for (const [index, text] of editableText) remember(text, memoryReasons[index]);
     for (const key of ["inputValue", "textValue"]) {
       const values = nodes[key];
       if (values === undefined) continue;

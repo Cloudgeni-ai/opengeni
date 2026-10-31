@@ -15,3 +15,6 @@ The Chrome extension admits the read-only privacy snapshot method. Hidden
 metadata and expiry options stay protected in place without becoming session
 secrets; remembered card numbers and security codes cannot age out behind
 unrelated values.
+The extension advertises the additive privacy capability to the native agent;
+older extensions receive the existing update-required refusal and start
+Chrome's update check before protected reads are allowed.

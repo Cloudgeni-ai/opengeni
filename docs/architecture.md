@@ -2353,6 +2353,10 @@ a claim of pixel-level redaction or arbitrary canvas/OCR protection.
 Transient pixels between DOM checks and desktop captures of the browser are
 outside that per-tab guarantee. Attached Chrome admits the read-only snapshot
 through the matching extension method allowlist.
+The extension advertises that read-only capability in its existing handshake;
+an agent needing it refuses an older extension as `extension_outdated`, which
+starts Chrome's existing update check. Older agents ignore the additive field,
+so extension-first rollout remains compatible.
 
 Computer cursor badges carry the source chat's display title and a bounded PNG
 of its existing sidebar avatar. The API resolves image access as the caller and

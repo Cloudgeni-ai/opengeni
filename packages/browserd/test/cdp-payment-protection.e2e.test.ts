@@ -40,7 +40,7 @@ e2e(
         100,
       );
       await driver.openTarget(
-        `data:text/html,${encodeURIComponent('<label>Expiry year<select autocomplete="cc-exp-year"><option>2027</option></select></label>')}`,
+        `data:text/html,${encodeURIComponent('<div id="credit-card"><label>Expiry year<select autocomplete="cc-exp-year"><option>2027</option></select></label><label>Postal code<input name="postal" value="0150"></label></div>')}`,
       );
       const later = await driver.openTarget(`data:text/html,${encodeURIComponent(ordinary)}`);
       expect(JSON.stringify(later.semantic)).toContain(
@@ -49,6 +49,10 @@ e2e(
       expect((await driver.captureScreenshot(later.target.id)).data.byteLength).toBeGreaterThan(
         100,
       );
+      const yearAndPostal = await driver.openTarget(
+        "data:text/html,<h1>Order 2027-01-05 to 0150 Oslo</h1>",
+      );
+      expect(JSON.stringify(yearAndPostal.semantic)).toContain("Order 2027-01-05 to 0150 Oslo");
     } finally {
       await driver.close();
       await rm(directory, { recursive: true, force: true });

@@ -25,8 +25,11 @@ canvas-rendered content is not identified by the DOM policy.
 Before/after DOM checks do not attest transient pixels that appear and vanish
 between checks. Desktop screenshots of a headed browser are a separate surface
 and are not protected by this per-tab guard. Attached Chrome requires the
-extension version that admits the read-only DOMSnapshot privacy method; an
-older extension refuses the read rather than returning unprotected content.
+extension version that admits the read-only DOMSnapshot privacy method. The
+agent's existing bridge handshake refuses extensions without that capability
+as `extension_outdated`, which starts Chrome's update check before any privacy
+read can run. The additive capability remains compatible with older agents,
+so publish the extension before rolling out the new agent.
 
 Browserd starts Chrome or Chromium itself with a private profile and a
 loopback-only DevTools port, and is the browser's only CDP client. It connects

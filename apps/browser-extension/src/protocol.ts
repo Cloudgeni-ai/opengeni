@@ -48,6 +48,8 @@ export type ExtensionDevice = {
     diagnostics: true;
     rawCdp: false;
     linkedComputer: true;
+    /** Read-only DOMSnapshot privacy discovery, including closed roots. */
+    paymentFieldPrivacy: true;
   };
 };
 
