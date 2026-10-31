@@ -7,10 +7,12 @@ export const ModelConnectionAccessPolicy = /* @__PURE__ */ defineSchema(() =>
     .object({
       allowedModels: z.array(primitives.string.trim().min(1).max(256)).max(500).nullable(),
       /**
-       * Organization-pool grants: the shared workspaces that may use the account,
-       * or null for every shared workspace, including ones created later. A
-       * workspace's own copy (`localWorkspaceIds` in the response) is reported
-       * separately and is never cleared by this list.
+       * The shared workspaces that may use the account, or null for every
+       * shared workspace, including ones created later. A workspace's own
+       * account (`managedByWorkspaceId` in the response) always keeps serving
+       * its workspace, whatever this list says. On a workspace's own route
+       * this is the list of workspaces it serves; that route can add only
+       * workspaces the caller also administers.
        */
       allowedWorkspaces: z.array(primitives.uuid).max(500).nullable(),
       allowPersonalWorkspaces: primitives.boolean,
@@ -23,6 +25,13 @@ export const ModelConnectionAccessPolicy = /* @__PURE__ */ defineSchema(() =>
       allowedPeople: z.array(primitives.uuid).max(1000).nullable().optional(),
       /** Explicit owner consent to convert a personal subscription into a shared account. */
       sharePersonal: z.literal(true).optional(),
+      /**
+       * Explicit consent to make a workspace's own account the organization's,
+       * so that workspace's administrators no longer manage it. Required on the
+       * organization route before a workspace's own account can serve every
+       * shared workspace, Personal workspaces or chosen people.
+       */
+      moveToOrganization: z.literal(true).optional(),
       version: primitives.positiveInteger,
     })
     .strict(),

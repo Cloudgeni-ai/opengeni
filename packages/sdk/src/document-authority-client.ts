@@ -4,8 +4,6 @@ import type {
   ApiKey,
   UpdateOrganizationApiKeyRequest,
   Document,
-  IssueUserResourceGrantRequest,
-  UserResourceGrantMutationResponse,
   DocumentBase,
   FileDownloadUrlResponse,
   DocumentAuthorityReclassification,
@@ -45,19 +43,6 @@ export class OpenGeniDocumentAuthorityClient extends OpenGeniCoreClient {
     return await this.requestJson<ApiKey>(
       "PATCH",
       `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
-      request,
-    );
-  }
-
-  /** Issue an exact-session or standing personal-resource grant. */
-  async issueUserResourceGrant(
-    workspaceId: string,
-    authorityId: string,
-    request: IssueUserResourceGrantRequest,
-  ): Promise<UserResourceGrantMutationResponse> {
-    return await this.requestJson<UserResourceGrantMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
       request,
     );
   }

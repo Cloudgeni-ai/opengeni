@@ -134,6 +134,7 @@ import {
 } from "@opengeni/react/app/lib/models-route";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import { notifyModelConnectionsChanged } from "@opengeni/react/app/lib/shared-query";
 import { useOrganizationModelDefaults } from "./use-organization-model-defaults";
 import {
   AccountRuleLocksPage,
@@ -143,7 +144,6 @@ import {
   type WorkspaceModelAccountSettingsState,
 } from "./model-account-settings";
 import { ModelsScopePicker } from "./models-scope-picker";
-import { PersonalFallbackPreference } from "./model-account-policy-controls";
 import { compactionSummary } from "./model-compaction-page";
 
 /* ----------------------------------------------------------------------------
@@ -350,10 +350,11 @@ export function WorkspaceModelsPageBody({
   });
   // A person's own subscriptions are kept in their Personal workspace and
   // serve them anywhere in the organization (SUB-OWN-03). On a shared
-  // workspace's page anyone who connects their own lists and manages them
-  // here too, read through their Personal workspace.
+  // workspace's page everyone who can connect accounts, owners and admins
+  // included, lists and manages their own here too, read through their
+  // Personal workspace, and turns each on for their own messages here (D-53).
   const ownWorkspaceId =
-    workspacePage && !personal && !organizationAdmin && canManageConnections
+    workspacePage && !personal && canManageConnections
       ? workspaces.find((each) => each.personal)?.id
       : undefined;
   const ownScope = {
@@ -431,6 +432,22 @@ export function WorkspaceModelsPageBody({
   );
 
   const backToList = () => nav.openAccount(undefined);
+  // Another workspace's own subscription account shared with this one: its
+  // tag names that workspace where known, and this workspace's admins can stop
+  // using it here (a Personal workspace is never shared with).
+  const sharedByName = (id: string) => workspaces.find((candidate) => candidate.id === id)?.name;
+  const removeShared =
+    canManageSettings && !personal
+      ? (kind: "codex" | "supergrok" | "claude_subscription") => async (accountId: string) => {
+          await client.removeModelConnectionFromWorkspace({
+            workspaceId,
+            kind,
+            connectionId: accountId,
+          });
+          await notifyModelConnectionsChanged(client).catch(() => undefined);
+          toast.success(`Removed from ${workspaceName}`);
+        }
+      : null;
   // "Models for: [Defaults ▾]", on the Defaults (or Overview) and on each workspace's page.
   const scopePicker = (
     <ModelsScopePicker
@@ -452,6 +469,8 @@ export function WorkspaceModelsPageBody({
       personal && organizationAdmin
         ? (id) => nav.openView("model-access", accountKey("codex", id, true))
         : undefined,
+    workspaceNameOf: sharedByName,
+    removeFromWorkspace: removeShared?.("codex"),
     backToList,
   };
   const orgCodexPlaces: OrgCodexPlaces = {
@@ -473,6 +492,8 @@ export function WorkspaceModelsPageBody({
     sharePersonal: organizationAdmin
       ? (id) => nav.openView("model-access", accountKey("supergrok", id, true))
       : undefined,
+    workspaceName: sharedByName,
+    removeFromWorkspace: removeShared?.("supergrok"),
     backToList,
   };
   const orgGrokPlaces: SuperGrokPlaces = {
@@ -496,6 +517,8 @@ export function WorkspaceModelsPageBody({
     sharePersonal: organizationAdmin
       ? (id) => nav.openView("model-access", accountKey("claude", id, true))
       : undefined,
+    workspaceName: sharedByName,
+    removeFromWorkspace: removeShared?.("claude_subscription"),
     backToList,
   };
   const orgClaudePlaces: ClaudePlaces = {
@@ -515,12 +538,16 @@ export function WorkspaceModelsPageBody({
   // opened, reconnected and removed here. Their accounts are read through your
   // Personal workspace, which keeps them.
   const ownLabels = { ...labels, workspace: labels.user };
+  // Where your own subscription can be turned on for your messages.
+  const ownTurns = personal ? undefined : { workspaceId, workspaceName };
   // Signing one in again keeps it yours: the step opens with its account.
   const ownCodexPlaces: CodexPlaces = {
     ...codexPlaces,
     personal: true,
     scope: ownLabels,
     openConnect: () => nav.openView("connect:codex", account),
+    ownTurns,
+    removeFromWorkspace: undefined,
   };
   const ownGrokPlaces: SuperGrokPlaces = {
     ...grokPlaces,
@@ -528,11 +555,15 @@ export function WorkspaceModelsPageBody({
     openConnect: (id) =>
       nav.openView("connect:supergrok", id ? accountKey("supergrok", id) : account),
     sharePersonal: undefined,
+    ownTurns,
+    removeFromWorkspace: undefined,
   };
   const ownClaudePlaces: ClaudePlaces = {
     ...claudePlaces,
     scope: ownLabels,
     sharePersonal: undefined,
+    ownTurns,
+    removeFromWorkspace: undefined,
   };
   const ownCodexRows = {
     ...ownCodex,
@@ -1006,7 +1037,7 @@ export function WorkspaceModelsPageBody({
         {workspaceOwnedNote(provider, { workspaceName, personal })}
       </p>
     ) : onlyMe ? (
-      <p className="m-0 text-sm leading-5 text-fg-muted">{OWN_SUBSCRIPTION_NOTE}</p>
+      <p className="m-0 text-sm leading-5 text-fg-muted">{ownSubscriptionNote(workspaceName)}</p>
     ) : // A subscription's admin chooses who uses it below.
     workspaceAdminConnects && provider !== "supergrok" && provider !== "claude_subscription" ? (
       <p className="m-0 text-sm leading-5 text-fg-muted">
@@ -1330,7 +1361,6 @@ export function WorkspaceModelsPageBody({
             workspaceName={personal ? "your Personal workspace" : workspaceName}
             defaultRules={accountRules.overview?.organization.values}
             accountRules={workspaceAccountRules}
-            organizationId={organizationId}
             personal={personal}
             organizationName={organizationName}
             revision={revision}
@@ -1645,9 +1675,10 @@ export function payerPhrase(
   }
 }
 
-/** Where a person's own subscription pays, connected from a shared workspace. */
-const OWN_SUBSCRIPTION_NOTE =
-  "It will be yours: it pays for your work in your Personal workspace and in chats you keep to yourself. Nobody else can use it.";
+/** Where a person's own subscription pays, connected from a shared workspace (D-53). */
+function ownSubscriptionNote(workspaceName: string): string {
+  return `It will be yours. It pays for your Personal workspace and for the messages you send in ${workspaceName}, where it starts turned on. Nobody else can use it.`;
+}
 
 /** What an account owned by this workspace is, on its connect step, for owners and admins. */
 function workspaceOwnedNote(
@@ -1656,15 +1687,19 @@ function workspaceOwnedNote(
 ): string {
   const here = where.personal ? "your Personal workspace" : where.workspaceName;
   if (provider === "codex") {
-    return `This account will belong to ${here} only. Use it for Codex Apps or to redeem usage limit resets. To share an account with other workspaces, connect it from Connect provider.`;
+    return where.personal
+      ? `This account will belong to ${here} only. Use it for Codex Apps or to redeem usage limit resets.`
+      : `This account will belong to ${here}. Use it for Codex Apps or to redeem usage limit resets. ${here}'s admins can also share it with other workspaces they manage.`;
   }
   if (where.personal && provider !== "supergrok" && provider !== "claude_subscription") {
     return "This key will belong to your Personal workspace, so only you use it.";
   }
-  if (where.personal && provider === "supergrok") {
-    return "This account will be yours: it pays for your work in your Personal workspace and in chats you keep to yourself.";
+  if (where.personal && (provider === "supergrok" || provider === "claude_subscription")) {
+    return "This account will be yours: it pays for your work in your Personal workspace, and for your own messages in other workspaces where you turn it on.";
   }
-  return `This ${provider === "supergrok" || provider === "claude_subscription" ? "account" : "key"} will belong to ${here} only, for a team that pays with its own. To share one with other workspaces, connect it from Connect provider.`;
+  if (provider === "supergrok" || provider === "claude_subscription")
+    return `This account will belong to ${here}, for a team that pays with its own. ${here}'s admins can also share it with other workspaces they manage.`;
+  return `This key will belong to ${here} only, for a team that pays with its own. To share one with other workspaces, connect it from Connect provider.`;
 }
 
 /** On an organization key's page: when a key owned by this workspace is the right tool. */
@@ -1707,7 +1742,6 @@ function ModelsList({
   workspaceName,
   defaultRules,
   accountRules,
-  organizationId,
   personal,
   organizationName,
   revision,
@@ -1729,7 +1763,6 @@ function ModelsList({
   /** The default subscription rules, when this person can read them. */
   defaultRules?: ModelAccountSettingValues | undefined;
   accountRules: WorkspaceModelAccountSettingsState;
-  organizationId: string | undefined;
   /** A Personal workspace follows the organization's account rules and has none of its own. */
   personal: boolean;
   /** The organization whose defaults this workspace follows until it changes them. */
@@ -1813,13 +1846,6 @@ function ModelsList({
           state={accountRules}
         />
       )}
-      <PersonalFallbackPreference
-        organizationId={organizationId}
-        allowed={
-          accountRules.settings?.values.personalConnectionsAllowed === true &&
-          accountRules.settings.values.personalFallbackAllowed
-        }
-      />
       {providerSections}
     </SectionStack>
   );

@@ -22,6 +22,7 @@ import {
   legacyMcpClientError,
   listOwnConnectionMetadata,
   requireEnvironmentEncryption,
+  turnOnOwnLoginHere,
   withMcpStreamableHttpClient,
   type McpStreamableHttpClient,
 } from "@opengeni/core";
@@ -1153,7 +1154,37 @@ async function completeMcpOAuthCallbackWithinDeadline(
       ...(verification.tools ? { mcpTools: verification.tools } : {}),
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
+    // The personal login this callback saved, to turn on where it was connected.
+    let persisted: ConnectionMetadata | null = null;
     const persist = async (scopedDb: Database) => {
+      persisted = null;
+      const connection = await persistConnection(scopedDb);
+      persisted = connection ?? null;
+      return connection;
+    };
+    // Connecting your own login again, or reconnecting it, from a shared
+    // workspace turns it on there (D-54). A new login is already on where it
+    // was added. Best effort: the login is saved either way, and its row in
+    // this workspace can turn it on.
+    const turnOnPersistedLoginHere = async () => {
+      const connection = persisted as ConnectionMetadata | null;
+      if (!ownerSubjectId || !connection?.authorityId) return;
+      try {
+        await turnOnOwnLoginHere(db, {
+          accountId: state!.accountId,
+          workspaceId: state!.workspaceId,
+          subjectId: ownerSubjectId,
+          authorityId: connection.authorityId,
+        });
+      } catch (error) {
+        console.warn("[api] could not turn on an own login where it was connected", {
+          workspaceId: state!.workspaceId,
+          connectionId: connection.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+    const persistConnection = async (scopedDb: Database) => {
       await requireOAuthCallbackGrant(scopedDb, state!, ownerPermission);
       // Serialize the entire owner/resource bucket, including providers with no
       // identity proof. Locking only a known identity lets unknown callbacks race it.
@@ -1181,6 +1212,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         accountId: state.accountId,
         workspaceId: state.workspaceId,
         subjectId: state.subjectId,
+        reach: "anywhere",
         includeInactive: true,
       }))
         accounts.set(connection.id, connection);
@@ -1275,6 +1307,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           integrationKey,
         ),
       );
+      await turnOnPersistedLoginHere();
       return { redirectTo: state.returnUrl!, exactReturn: true };
     }
     const connection = await runCallbackDatabaseStage(deadline, "persist", db, (scopedDb) =>
@@ -1285,6 +1318,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         message: "connection changed during OAuth reconnect; start again",
       });
     }
+    await turnOnPersistedLoginHere();
     // Carry the canonical providerDomain (not just the id) so the SPA can build
     // the enable connectionRef straight from the redirect, without a listConnections
     // round-trip that could fail (transient, or a grant lacking connections:read)
