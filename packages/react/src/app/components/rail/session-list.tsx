@@ -244,6 +244,7 @@ import {
   sessionBrowsePreferencesCustomized,
   type SessionBrowsePreferences,
   sessionBrowsePreferenceStorageId,
+  useCollapsedSessionSections,
   writeSessionBrowsePreferences,
 } from "../../lib/session-browse-preferences";
 import { railRowCreator } from "../../lib/creator-initials";
@@ -1765,22 +1766,22 @@ export function SessionList() {
       pageGeneration,
     ],
   );
-  // Workstreams open on first paint. A user collapse is local interaction
-  // state; new or newly loaded sections therefore remain open by default.
-  const [collapsedChannelSections, setCollapsedChannelSections] = useState<ReadonlySet<string>>(
-    () => new Set(),
+  // Sections open by default. The ones this person collapsed are remembered
+  // per workspace on this device, so they stay collapsed after a reload while
+  // new or newly loaded sections still open.
+  const [collapsedChannelSections, setCollapsedChannelSections] =
+    useCollapsedSessionSections(browsePreferenceStorageId);
+  const toggleChannelSection = useCallback(
+    (sectionKey: string) => {
+      setCollapsedChannelSections((current) => {
+        const next = new Set(current);
+        if (next.has(sectionKey)) next.delete(sectionKey);
+        else next.add(sectionKey);
+        return next;
+      });
+    },
+    [setCollapsedChannelSections],
   );
-  useEffect(() => {
-    setCollapsedChannelSections(new Set());
-  }, [rail.workspaceId]);
-  const toggleChannelSection = useCallback((sectionKey: string) => {
-    setCollapsedChannelSections((current) => {
-      const next = new Set(current);
-      if (next.has(sectionKey)) next.delete(sectionKey);
-      else next.add(sectionKey);
-      return next;
-    });
-  }, []);
   const submitCreateChannel = useCallback(async () => {
     const name = channelNameDraft.trim();
     if (!name) return;
@@ -1884,7 +1885,7 @@ export function SessionList() {
         }
       }
     },
-    [context, refreshSessionPages, verifySessionChannelMove],
+    [context, refreshSessionPages, setCollapsedChannelSections, verifySessionChannelMove],
   );
   const saveProjectProfile = useCallback(
     async (project: Channel, change: UpdateChannelRequest): Promise<boolean> => {
@@ -2279,7 +2280,7 @@ export function SessionList() {
         });
       }
     },
-    [context, rail.workspaceId, refreshSessionPages],
+    [context, rail.workspaceId, refreshSessionPages, setCollapsedChannelSections],
   );
   const siteRowActions = useMemo<SiteRowActions | null>(
     () =>
