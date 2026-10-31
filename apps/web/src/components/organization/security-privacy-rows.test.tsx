@@ -59,6 +59,7 @@ beforeEach(() => {
     organizationId: identity.organizationId,
     defaultVisibility: "workspace",
     personalWorkspaces: true,
+    personalWorkspaceMonthlyCredits: null,
     adminsSeePrivateSchedules: true,
     limits: {
       onlyMeAllowed: true,

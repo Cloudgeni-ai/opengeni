@@ -16,6 +16,7 @@ import {
   SessionStatus as SessionStatusBadge,
   SESSION_STATUS_META,
   StatusDot,
+  StatusPill,
 } from "../../../components/session-status";
 import { sessionDisplayStatus, type SessionDisplayStatus } from "../../../session-status-model";
 import { ModelMark } from "../../../components/model-mark";
@@ -515,13 +516,12 @@ export function SessionHeader({
                 imply the session is still "Running"/"Idle" under a pause gate. */}
             {!sessionControlPaused(session) ? (
               waiting ? (
-                <span
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-0.5 text-control font-medium text-fg-muted"
+                <StatusPill
+                  className="border-border bg-surface text-fg-muted"
                   data-session-wait-badge=""
                 >
-                  <span aria-hidden className="size-1.5 rounded-full bg-current" />
                   Waiting
-                </span>
+                </StatusPill>
               ) : (
                 <SessionStatusBadge status={displayStatus} label={startupLabel} />
               )

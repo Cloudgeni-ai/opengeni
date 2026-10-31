@@ -3,6 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import {
   GENERATED_ARTIFACT_CHECKS,
   GENERATED_ARTIFACTS_NOT_RECHECKED,
+  REGENERATED_ON_CONFLICT,
+  regenerates,
   runGeneratedArtifactChecks,
   staleArtifactAnnotation,
 } from "./check-generated-artifacts";
@@ -42,6 +44,22 @@ test("every check names existing artifacts, a regenerate command and Batch's enf
     expect(staleArtifactAnnotation(check)).toContain(`Run \`${check.regenerate}\``);
     expect(staleArtifactAnnotation(check).startsWith("::error ")).toBe(true);
   }
+});
+
+test("the merge batcher regenerates existing artifacts with plain commands", () => {
+  const rootPackage = JSON.parse(readFileSync("package.json", "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  for (const entry of REGENERATED_ON_CONFLICT) {
+    for (const artifact of entry.artifacts) expect(existsSync(artifact)).toBe(true);
+    // scripts/ci/regenerate-merge.ts runs it as these words, without a shell.
+    expect(entry.regenerate).toMatch(/^bun( [\w@./:-]+)+$/);
+    const script = /^bun run ([\w:-]+)$/.exec(entry.regenerate)?.[1];
+    if (script) expect(rootPackage.scripts[script]).toBeDefined();
+  }
+  const snapshot = REGENERATED_ON_CONFLICT.find((entry) => entry.name === "Public API snapshot")!;
+  expect(regenerates(snapshot, "scripts/public-api/surface.gen.json")).toBe(true);
+  expect(regenerates(snapshot, "scripts/public-api/surface.gen.json.bak")).toBe(false);
 });
 
 test("a failing check is reported as stale with its output", async () => {

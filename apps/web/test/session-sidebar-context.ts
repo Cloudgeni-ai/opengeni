@@ -1084,7 +1084,6 @@ const context = {
   manualRepos: [],
   repositoryGroups: [],
   repositoryValidationError: null,
-  selectedInstallationId: null,
   busy: false,
   repoBusy: false,
   githubAppBusy: false,

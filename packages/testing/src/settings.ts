@@ -1,5 +1,6 @@
 import {
   DEFAULT_AGENT_INSTRUCTIONS,
+  DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   DEFAULT_MODEL_COST_POLICY_JSON,
@@ -11,6 +12,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     slackAccessMode: "limited",
     microsoftTeamsToolsEnabled: false,
     microsoftTeamsAllowedWorkspaceIds: [],
+    billingLegacyAccountIds: [...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS],
     teamsBotEnabled: false,
     teamsBotAllowedTenantIds: [],
     teamsBotAllowedChannelIds: [],

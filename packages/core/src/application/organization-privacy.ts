@@ -27,7 +27,9 @@ export type PrivacySettings = Pick<
   | "privacyOnlyMeAllowed"
   | "privacyWorkspaceDefaultRequired"
   | "privacyAdminScheduleSummariesRequired"
->;
+> &
+  // Setting the Personal workspace limit takes the same switch as workspace budgets.
+  Partial<Pick<Settings, "usageAllowancesEnabled">>;
 
 export type PrivacyDeploymentLimits = OrganizationPrivacySettings["limits"];
 
@@ -132,6 +134,7 @@ function settingsResponse(
     organizationId,
     ...effectiveOrganizationPrivacy(preferences, limits),
     personalWorkspaces: preferences.personalWorkspacesEnabled,
+    personalWorkspaceMonthlyCredits: preferences.personalWorkspaceMonthlyCredits,
     limits,
     updatedAt: preferences.updatedAt,
   };
@@ -173,6 +176,17 @@ export async function updateOrganizationPrivacySettings(
       "Admins always see that Only me schedules exist here.",
     );
   }
+  // Like a workspace budget, a limit takes every API and worker that enforces
+  // it. Removing one is always allowed.
+  if (
+    input.request.personalWorkspaceMonthlyCredits !== undefined &&
+    input.request.personalWorkspaceMonthlyCredits !== null &&
+    deps.settings.usageAllowancesEnabled !== true
+  ) {
+    throw new OrganizationPrivacyLockedError(
+      "Usage allowance changes are not enabled. Upgrade every API and worker before enabling usage allowances.",
+    );
+  }
   const preferences = await updateOrganizationPrivacyPreferences(deps.db, {
     organizationId: input.organizationId,
     actorSubjectId: input.actorSubjectId,
@@ -189,6 +203,9 @@ export async function updateOrganizationPrivacySettings(
       : {}),
     ...(input.request.personalWorkspaces !== undefined
       ? { personalWorkspacesEnabled: input.request.personalWorkspaces }
+      : {}),
+    ...(input.request.personalWorkspaceMonthlyCredits !== undefined
+      ? { personalWorkspaceMonthlyCredits: input.request.personalWorkspaceMonthlyCredits }
       : {}),
   });
   return settingsResponse(input.organizationId, preferences, limits);

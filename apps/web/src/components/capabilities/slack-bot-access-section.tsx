@@ -1,14 +1,39 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { administersOrganization } from "@opengeni/react/app/lib/workspaces";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { Button } from "@opengeni/react/ui/button";
 import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import { CheckboxField } from "@opengeni/react/ui/field";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { Notice } from "@opengeni/react/ui/notice";
-import type { ConnectionMetadata } from "@opengeni/react/app/types";
+import type { AccessContext, ClientConfig, ConnectionMetadata } from "@opengeni/react/app/types";
+
+/**
+ * Who may share a workspace's Slack bot with other workspaces: an
+ * organization owner or admin who also manages this workspace's
+ * integrations, the same rule the server applies.
+ */
+export function canShareSlackBotWithOrganization(input: {
+  accessContext: AccessContext;
+  clientConfig: Pick<ClientConfig, "productAccessMode"> & {
+    auth: Pick<ClientConfig["auth"], "mode">;
+  };
+  connection: Pick<ConnectionMetadata, "accountId" | "workspaceId">;
+}): boolean {
+  const { accessContext, connection } = input;
+  return (
+    administersOrganization({
+      accessContext,
+      clientConfig: input.clientConfig,
+      accountId: connection.accountId,
+    }) &&
+    hasWorkspacePermission(accessContext, connection.workspaceId, "connections:write") &&
+    hasWorkspacePermission(accessContext, connection.workspaceId, "capabilities:manage")
+  );
+}
 
 export function SlackBotAccessSection({
   connection,
@@ -17,7 +42,7 @@ export function SlackBotAccessSection({
   connection: ConnectionMetadata;
   onSaved: () => Promise<void>;
 }) {
-  const { client, accessContext, workspaces } = useAppContext();
+  const { client, accessContext, clientConfig, workspaces } = useAppContext();
   const [saved, setSaved] = useState<{ enabled: boolean; workspaceIds?: string[] | null } | null>(
     null,
   );
@@ -27,9 +52,7 @@ export function SlackBotAccessSection({
   const [mode, setMode] = useState("home");
   const [ids, setIds] = useState<string[]>([]);
   const [revision, setRevision] = useState(0);
-  const canManage =
-    hasAccountPermission(accessContext, connection.accountId, "account:admin") &&
-    hasWorkspacePermission(accessContext, connection.workspaceId, "connections:write");
+  const canManage = canShareSlackBotWithOrganization({ accessContext, clientConfig, connection });
   const choices = workspaces.filter((workspace) => workspace.accountId === connection.accountId);
   const name = (id: string) =>
     workspaces.find((workspace) => workspace.id === id)?.name ?? "Another workspace";

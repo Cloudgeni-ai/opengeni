@@ -41,6 +41,11 @@ const BOUNDS: [f64; 12] = [
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 15.0, 60.0,
 ];
 
+/// Upper bounds of the renewal gap histogram's buckets, in seconds. Hosts
+/// renew every 3⅓ s, so a gap of 5 s or more is a renewal or more that
+/// went unanswered, and one near the lease's term froze the host's VMs.
+const GAP_BOUNDS: [f64; 9] = [5.0, 7.5, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 60.0];
+
 /// A response's outcome for [`Metrics`]: the public API's error code, set
 /// by the error's response. A response without one is `ok` when it
 /// succeeded and `rejected` when axum refused the request before a
@@ -109,10 +114,31 @@ struct Latency {
     sum: f64,
 }
 
+/// How long one host's renewal count stood still each time before it
+/// moved again.
+#[derive(Debug, Default)]
+struct Gaps {
+    buckets: [u64; GAP_BOUNDS.len()],
+    count: u64,
+    sum: f64,
+}
+
+impl Gaps {
+    fn observe(&mut self, gap: Duration) {
+        let seconds = gap.as_secs_f64();
+        if let Some(bucket) = GAP_BOUNDS.iter().position(|bound| seconds <= *bound) {
+            self.buckets[bucket] += 1;
+        }
+        self.count += 1;
+        self.sum += seconds;
+    }
+}
+
 /// What only the leader knows, kept while it leads.
 #[derive(Debug, Default)]
 struct Led {
     still: BTreeMap<HostId, Duration>,
+    gaps: BTreeMap<HostId, Gaps>,
     group: Option<GroupSeen>,
 }
 
@@ -178,9 +204,20 @@ impl Metrics {
         }
     }
 
-    /// Notes how long each host's renewal count has stood still.
+    /// Notes how long each host's renewal count has stood still. A count
+    /// that stands still for less than it did at the last note moved
+    /// meanwhile, which ends the gap the last note saw.
     pub fn still(&self, still: impl IntoIterator<Item = (HostId, Duration)>) {
-        locked(&self.led).still = still.into_iter().collect();
+        let still: BTreeMap<HostId, Duration> = still.into_iter().collect();
+        let mut led = locked(&self.led);
+        let led = &mut *led;
+        for (host, before) in &led.still {
+            if still.get(host).is_some_and(|now| now < before) {
+                led.gaps.entry(*host).or_default().observe(*before);
+            }
+        }
+        led.gaps.retain(|host, _| still.contains_key(host));
+        led.still = still;
     }
 
     /// Notes a host given up on, and why.
@@ -472,6 +509,42 @@ fn render_fleet(out: &mut Text, hosts: &[Known], led: &Led) {
                 still.as_secs_f64(),
             );
         }
+    }
+    out.family(
+        "compute_fleet_host_renewal_gap_seconds",
+        "histogram",
+        "How long a host's renewal count stood still before it moved again, as the leader watched it. Hosts renew every 3.3 s: longer gaps are renewals that went unanswered, and a gap within the guard's lead of the lease's term froze the host's VMs.",
+    );
+    for host in &counted {
+        let Some(gaps) = led.gaps.get(&host.target.host) else {
+            continue;
+        };
+        let labels = [("host_name", host.target.name.as_str())];
+        let mut cumulative = 0;
+        for (bound, count) in GAP_BOUNDS.iter().zip(gaps.buckets) {
+            cumulative += count;
+            let le = bound.to_string();
+            out.sample(
+                "compute_fleet_host_renewal_gap_seconds_bucket",
+                &[labels[0], ("le", &le)],
+                cumulative,
+            );
+        }
+        out.sample(
+            "compute_fleet_host_renewal_gap_seconds_bucket",
+            &[labels[0], ("le", "+Inf")],
+            gaps.count,
+        );
+        out.float(
+            "compute_fleet_host_renewal_gap_seconds_sum",
+            &labels,
+            gaps.sum,
+        );
+        out.sample(
+            "compute_fleet_host_renewal_gap_seconds_count",
+            &labels,
+            gaps.count,
+        );
     }
     if let Some(group) = &led.group {
         render_group(out, group);

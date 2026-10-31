@@ -105,7 +105,7 @@ pub const RESULTS: [&str; 14] = [
 /// Which way a stream's bytes went.
 pub const DIRECTIONS: [&str; 2] = ["to_guest", "to_client"];
 /// Things that must never happen.
-pub const ALARMS: [&str; 8] = [
+pub const ALARMS: [&str; 9] = [
     "only_copy_kept",
     "verification_failed",
     "quarantined",
@@ -114,6 +114,7 @@ pub const ALARMS: [&str; 8] = [
     "programs_lost",
     "ended_for_memory",
     "oom_killed",
+    "fenced",
 ];
 /// How a guest asked to shrink for host memory answered.
 pub const SHRINK_OUTCOMES: [&str; 3] = ["freed", "spent", "failed"];

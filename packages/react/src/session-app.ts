@@ -16,3 +16,4 @@ export {
   type SessionUiPreset,
 } from "./app/lib/session-ui-features";
 export type { SessionShellSlots } from "./app/components/rail/rail-sections";
+export type { SessionStarter } from "./app/components/new-session-starters";

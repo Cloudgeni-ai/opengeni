@@ -1,4 +1,5 @@
 import { useAppApi } from "../lib/app-api";
+import { useAppHost } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
 import { t } from "../lib/console-text";
@@ -155,10 +156,12 @@ import {
 import {
   recentSessionModelPresentation,
   recentSessionStatus,
-  recentSessionsForHome,
+  recentSessionsWithOpened,
   relativeTimeLabel,
   sessionRepoLabel,
+  type OpenedChat,
 } from "../../session-list-model";
+import { readChatDirectory, useChatDirectoryVersion } from "../lib/actions/chat-directory";
 import { newChatWording, signupStarterSet } from "../lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
@@ -266,6 +269,7 @@ function SessionsIndexRouteContent({
   const api = useAppApi();
   const page = usePage();
   const starters = useSessionUiFeature("starters");
+  const hostStarters = useAppHost().starters;
   const addCredits = useSessionUiFeature("addCredits");
   // Without the chat list, the new-chat page shows no other chats either: no
   // recent chats and no project picker that files the chat among them.
@@ -2220,6 +2224,7 @@ function SessionsIndexRouteContent({
           <NewSessionStarters
             workspaceId={workspaceId}
             set={starterSet}
+            hostStarters={hostStarters}
             fileUploads={context.clientConfig.fileUploads.enabled === true}
             disabled={busy || newSessionDraft.loading}
             onSelect={(prompt) => {
@@ -2273,6 +2278,7 @@ function reportDraftSaveFailure(draft: {
 // the model picker — never raw wire ids as the primary display.
 function RecentSessions({ workspaceId }: { workspaceId: string }) {
   const { workspaceSessionListEvent } = useOpenGeni();
+  const subjectId = useAppContext().accessContext.subjectId;
   const hintsAvailable =
     workspaceSessionListEvent?.workspaceId === workspaceId && workspaceSessionListEvent.available;
   const { sessions, pinned, refresh, error } = useWorkspaceSessions({
@@ -2284,8 +2290,24 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
   });
   useSessionListHintRefresh(refresh, error);
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  // Pins are server-authoritative and sit above running and recency rows.
-  const recent = useMemo(() => recentSessionsForHome(t, sessions, pinned, 6), [pinned, sessions]);
+  // The chats the person opened here lead (kept across reloads, so the pane
+  // of an app that reopens often still shows them); then pins, which are
+  // server-authoritative, then running and recency rows.
+  const directoryVersion = useChatDirectoryVersion(subjectId);
+  const opened = useMemo<OpenedChat[]>(() => {
+    void directoryVersion;
+    const directory = readChatDirectory(subjectId, workspaceId);
+    return directory.recent.flatMap((id) => {
+      const record = directory.rows.get(id);
+      return record && record.workspaceId === workspaceId && !record.archived
+        ? [{ id, title: record.title, openedAt: record.updatedAt }]
+        : [];
+    });
+  }, [directoryVersion, subjectId, workspaceId]);
+  const recent = useMemo(
+    () => recentSessionsWithOpened(t, sessions, pinned, opened, 6),
+    [opened, pinned, sessions],
+  );
 
   if (recent.length === 0) {
     return null;
@@ -2299,16 +2321,45 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
       {/* flex-col, not grid: a grid auto track grows to a nowrap row's full
           min-content width, defeating truncate and overflowing the page. */}
       <ul className="flex min-w-0 flex-col divide-y divide-border/60">
-        {recent.map((session) => (
-          <RecentSessionRow
-            key={session.id}
-            workspaceId={workspaceId}
-            session={session}
-            catalogRows={modelCatalog.rows}
-          />
-        ))}
+        {recent.map((entry) =>
+          entry.kind === "session" ? (
+            <RecentSessionRow
+              key={entry.session.id}
+              workspaceId={workspaceId}
+              session={entry.session}
+              catalogRows={modelCatalog.rows}
+            />
+          ) : (
+            <OpenedChatRow key={entry.chat.id} workspaceId={workspaceId} chat={entry.chat} />
+          ),
+        )}
       </ul>
     </section>
+  );
+}
+
+/**
+ * A chat opened here that the current page of the list doesn't hold: its
+ * title and when it was opened. Its status isn't known here, so the row keeps
+ * the dot's place without claiming one.
+ */
+function OpenedChatRow({ workspaceId, chat }: { workspaceId: string; chat: OpenedChat }) {
+  return (
+    <li className="min-w-0">
+      <Link
+        to="/workspaces/$workspaceId/sessions/$sessionId"
+        params={{ workspaceId, sessionId: chat.id }}
+        className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-hover"
+      >
+        <span aria-hidden className="inline-block size-2 shrink-0" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm text-fg group-hover:text-fg">{chat.title}</span>
+        </span>
+        <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">
+          {chat.openedAt > 0 ? relativeTimeLabel(t, new Date(chat.openedAt).toISOString()) : null}
+        </span>
+      </Link>
+    </li>
   );
 }
 
@@ -2517,10 +2568,10 @@ function workspaceRepositoryPickerProps(
     selectedPersonalGitHubRepoIds: context.selectedPersonalGitHubRepoIds,
     selectedPersonalGitHubRepoRefs: context.selectedPersonalGitHubRepoRefs,
     personalGitHubBusy: context.personalGitHubBusy,
+    personalGitHubManageUrl: `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=integration:github`,
     groups: context.repositoryGroups,
     selectedRepoIds: context.selectedRepoIds,
     selectedRepoRefs: context.selectedRepoRefs,
-    selectedInstallationId: context.selectedInstallationId,
     manualRepos: context.manualRepos,
     manualOpen: context.manualReposOpen,
     githubAppOpen: context.githubAppOpen,
@@ -2605,11 +2656,7 @@ function workspaceRepositoryPickerProps(
         selectWorkspaceRepository: (matched, ref) => {
           assertCurrent();
           context.setSelectedRepoIds((current) => {
-            const next =
-              context.selectedInstallationId !== null &&
-              context.selectedInstallationId !== matched.installationId
-                ? new Set<number>()
-                : new Set(current);
+            const next = new Set(current);
             next.add(matched.id);
             return next;
           });

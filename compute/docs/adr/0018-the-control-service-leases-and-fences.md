@@ -27,7 +27,8 @@ can be built and tested.
   serves any request.
 - **Hosts renew their lease through the service.** An agent started with a
   host id and a control address registers, which gives it a host epoch,
-  then renews every third of the lease time T (10 s) with its capacity:
+  then renews every 3⅓ s, nine times in the lease time T (30 s), with
+  its capacity:
   free memory and disk, ready clones per shape, awake sandboxes. A
   renewal is one row update, and capacity changes are sent at most once a
   second. Replicas read changed host rows every 250 ms into a view in
@@ -72,7 +73,8 @@ can be built and tested.
   host, and a failed read counts as still running. Meanwhile the host's
   sandboxes stay its own: a wake retries until its own deadline. New
   sandboxes go to other hosts, since every replica's placement passes
-  over a host it has read no renewal from for T. The wait trades a truly hung
+  over a host it has read no renewal from for three renewal intervals
+  (10 s), or T if that is shorter. The wait trades a truly hung
   host's recovery time (up to two minutes, not T plus margin) for keeping
   every program on a host that was only out of reach.
 - **A cut-off host stops its VMs, with or without its agent.** The host's
@@ -80,7 +82,7 @@ can be built and tested.
   T; a failed or unanswered renewal never extends it. A guard process, one
   per host, steps every 100 ms on that clock, and decides each step from
   the time, the deadline and what the kernel reports alone, never from
-  what an earlier step asked for: from a second before the deadline it
+  what an earlier step asked for: from three seconds before the deadline it
   asks for the cgroup that holds every VM to freeze until `cgroup.events`
   reports `frozen 1`; from the deadline, until the VMs are frozen or gone
   (`populated 0`), it writes `cgroup.kill` on every step into each VM's
@@ -116,7 +118,7 @@ can be built and tested.
   renewal's send that a VM can still run is (T + W) / (1 − ρ) + S, and the
   earliest the leader gives up is (T + M) / (1 + ρ). The terms are valid
   only if the second is later: `LeaseTerms::validate` refuses any margin
-  below the least that makes it so (4.27 s for T = 10 s; the margin is
+  below the least that makes it so (4.68 s for T = 30 s; the margin is
   5 s), any ρ of 10 % or more, a watchdog that is not whole seconds, and
   fewer than two renewals per term. The guarantee rests on stated
   assumptions: the kernel's timers run (a kernel hung hard enough to stop
@@ -190,6 +192,43 @@ can be built and tested.
   suggested while a member is stalled. Only zonal groups are supported,
   since a fence must name the instance's zone. Hosts outside a group rely
   on their deadline, guard and watchdog alone.
+- **T is 30 s, so hosts ride out ordinary blips.** With T at 10 s, a
+  host's renewals had to get through within about 9 s of the last one
+  answered, or the guard froze every VM on it and, a second later, killed
+  the ones it could not freeze. Real hosts missed that: links between
+  sites that drop for 10 to 20 s, a host whose disk stalls (its agent
+  slow for seconds), and the service's own rolling restarts each left
+  hosts unanswered for longer, and busy VMs that would not freeze in time
+  were killed, programs and all. At 30 s a host has nine renewals per
+  term and freezes only after 27 s without an answer. The cost is
+  recovery: the leader gives up on a host that is truly gone 20 s later
+  (T plus margin, 35 s), and a cloud host is fenced through its API
+  before that anyway. Placement does not wait that long: it passes over a
+  host after three missed renewals, as it did before. Renewals never wait
+  on the agent either: they carry the agent's latest reading of what the
+  host can take on, read on a task of its own once a second, so a busy
+  agent cannot hold them up. An agent that has not answered one for a
+  minute is stuck rather than busy: its process stops itself, renewing
+  the lease as any stop does, and the agent systemd starts again takes
+  back the VMs, which run on meanwhile, so a stuck agent neither keeps
+  its sandboxes out of reach for good nor costs their programs. A stop
+  that has not ended a minute later (it waits on writes a stuck disk may
+  never finish) ends the process at once, as systemd's stop timeout
+  would; a host that cannot start its agent again lets its lease lapse,
+  and the service moves its sandboxes. A gap is
+  visible before it costs anything:
+  the host warns once two renewals in a row go unanswered, with how long
+  its lease has left, the service records how long each host went
+  unheard (`compute_fleet_host_renewal_gap_seconds`), and a VM the guard
+  kills raises the host's `fenced` alarm, with the VM's end recorded as
+  `fenced`. A host only re-registers under terms equal to its own, so a
+  release that changes them rolls out service first, hosts promptly
+  after; a host on the old terms renews meanwhile, but one whose lease
+  runs out cannot register again until it is upgraded. The leader gives
+  up on a host after its own term, so the service must never be rolled
+  back below the release while hosts run it: an older leader would give
+  up on a host 20 s before its VMs stop, and wake its sandboxes elsewhere
+  while they still run. Roll hosts back first.
 - **A host that comes back is fenced until it has caught up.** It
   registers again only once its last registration lapsed (the store
   refuses while that one is live, since its VMs may still run), and lists
