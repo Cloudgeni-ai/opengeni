@@ -48,6 +48,7 @@ export * from "./knowledge-entries-schema";
 export * from "./subscription-core-schema";
 import type { ResolvedAgentConfig, SessionAvatar, SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
+import type { SessionEventPayloadTruncation } from "@opengeni/contracts";
 import {
   bigint,
   boolean,
@@ -108,6 +109,16 @@ const opengeniPrivateSchema = pgSchema("opengeni_private");
 
 /** Who asked for a pending context compaction (`sessions.compact_request_trigger`). */
 export type CompactRequestTrigger = "operator" | "proactive";
+
+/**
+ * A pending tool call's output as its agent.toolCall.output event carries it,
+ * bounded on write like the event itself; `truncation` is present only when
+ * the bound omitted part of the value.
+ */
+export type PendingToolCallEventOutput = {
+  value: unknown;
+  truncation?: SessionEventPayloadTruncation;
+};
 
 export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
 
@@ -10461,7 +10472,7 @@ export const sessionPendingToolCalls = pgTable(
     modelToolOutputTruncationTokens: integer("model_tool_output_truncation_tokens"),
     resultItem: losslessOrderedJson("result_item_ordered").$type<Record<string, unknown>>(),
     resultItemCodecVersion: losslessCodecVersion("result_item_codec_version"),
-    eventOutput: losslessJsonb("event_output").$type<{ value: unknown }>(),
+    eventOutput: losslessJsonb("event_output").$type<PendingToolCallEventOutput>(),
     eventOutputCodecVersion: losslessCodecVersion("event_output_codec_version"),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
     /** Private state of an MCP server question that paused this call; never in events. */
