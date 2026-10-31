@@ -12,6 +12,7 @@ export function sensitiveFieldReason(
 ): ProtectedReason | null {
   if (purpose === "remember" && !["input", "textarea"].includes(tag) && !editable) return null;
   const type = tag === "input" ? (attributes.type ?? "text").toLowerCase() : "";
+  if (purpose === "remember" && type === "hidden") return null;
   const autocomplete = (attributes.autocomplete ?? "").toLowerCase();
   if (type === "password" || /(?:current|new)-password|one-time-code/u.test(autocomplete))
     return "password";
@@ -21,7 +22,8 @@ export function sensitiveFieldReason(
       name,
     ) || /^(?:expiry|expiration|exp)$/iu.test(name);
   const paymentSecretName = (name: string) =>
-    /card.?(?:number|num\b)|credit.?card|cvv|cvc|\bcsc\b|security.?code/iu.test(name);
+    /card.?(?:number|num\b)|cvv|cvc|\bcsc\b|security.?code/iu.test(name) ||
+    /^credit.?card$/iu.test(name);
   // Preserve existing explicitly named payment containers as protected too,
   // without hiding headings such as "credit-card-offers".
   const paymentContainer = [attributes.name ?? "", attributes.id ?? ""].some((name) =>
@@ -105,16 +107,22 @@ export function pageProtection(snapshot: unknown): PageProtection {
     const backendIds = nodes.backendNodeId as unknown[];
     const reasons: Array<ProtectedReason | null> = [];
     const memoryReasons: Array<ProtectedReason | null> = [];
+    const paymentFields: boolean[] = [];
     const editableRoots: Array<number | null> = [];
     const editableText = new Map<number, string>();
-    const remember = (value: string, reason: ProtectedReason | null | undefined) => {
-      if (!value || !reason) return;
+    const remember = (
+      value: string,
+      reason: ProtectedReason | null | undefined,
+      paymentField = false,
+    ) => {
+      if (!value || (!reason && !paymentField)) return;
       // Only actual card numbers/CVCs from primary payment fields enter
       // memory, not labels, option years or arbitrary hidden/private text.
       const digits = value.replace(/[\s-]/gu, "");
       if (
         reason === "password" ||
-        (reason === "payment" && /^(?:[0-9]{3,4}|[0-9]{12,19})$/u.test(digits))
+        (reason === "payment" && /^(?:[0-9]{3,4}|[0-9]{12,19})$/u.test(digits)) ||
+        (paymentField && /^[0-9]{12,19}$/u.test(digits))
       )
         found.values.push(value);
     };
@@ -139,8 +147,16 @@ export function pageProtection(snapshot: unknown): PageProtection {
       // into permanent secrets.
       const memoryReason = sensitiveFieldReason(tag, attributes, editable, "remember");
       memoryReasons.push(memoryReason);
+      // Autofill may populate an unnamed field inside a payment wrapper.
+      // Remember a complete card-sized number there, never a 3–4 digit
+      // year/postcode or hidden metadata inherited from the wrapper.
+      const paymentField =
+        reason === "payment" &&
+        attributes.type?.toLowerCase() !== "hidden" &&
+        (["input", "textarea"].includes(tag) || editable);
+      paymentFields.push(paymentField);
       const editableRoot =
-        editable && memoryReason
+        editable && (memoryReason || paymentField)
           ? index
           : !["input", "textarea", "select", "option"].includes(tag) &&
               attributes.contenteditable !== "false" &&
@@ -162,7 +178,8 @@ export function pageProtection(snapshot: unknown): PageProtection {
         if (reason === "payment" || ownReason === "payment") found.payment = true;
       }
     }
-    for (const [index, text] of editableText) remember(text, memoryReasons[index]);
+    for (const [index, text] of editableText)
+      remember(text, memoryReasons[index], paymentFields[index]);
     for (const key of ["inputValue", "textValue"]) {
       const values = nodes[key];
       if (values === undefined) continue;
@@ -183,7 +200,7 @@ export function pageProtection(snapshot: unknown): PageProtection {
           throw new Error("invalid protected input index");
         if (reasons[index as number]) {
           const value = stringAt(values.value[at]);
-          remember(value, memoryReasons[index as number]);
+          remember(value, memoryReasons[index as number], paymentFields[index as number]);
         }
       }
     }

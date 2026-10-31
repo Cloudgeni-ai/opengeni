@@ -27,6 +27,46 @@ describe("sensitiveFieldReason", () => {
     expect(sensitiveFieldReason(tag, attrs, editable)).toBe(reason);
     expect(browserPolicy(tag, attrs, editable)).toBe(reason);
   });
+  test.each(["credit_card[year]", "credit_card[zip]"])(
+    "%s protects its field without remembering ordinary numeric values",
+    (name) => {
+      for (const policy of [sensitiveFieldReason, browserPolicy]) {
+        expect(policy("input", { name }, false)).toBe("payment");
+        expect(policy("input", { name }, false, "remember")).toBeNull();
+      }
+    },
+  );
+});
+
+test("an unnamed payment field remembers full card numbers but not hidden numeric metadata", () => {
+  const protection = pageProtection({
+    strings: [
+      "frame-a",
+      "DIV",
+      "INPUT",
+      "id",
+      "credit-card",
+      "type",
+      "hidden",
+      "4000 0000 0000 0002",
+      "40123456789012",
+    ],
+    documents: [
+      {
+        frameId: 0,
+        nodes: {
+          backendNodeId: [1, 2, 3],
+          parentIndex: [-1, 0, 0],
+          nodeName: [1, 2, 2],
+          nodeValue: [-1, -1, -1],
+          attributes: [[3, 4], [], [5, 6]],
+          inputValue: { index: [1, 2], value: [7, 8] },
+        },
+      },
+    ],
+  });
+  expect(protection.payment).toBe(true);
+  expect(protection.values).toEqual(["4000 0000 0000 0002"]);
 });
 
 test("snapshot protection includes flattened closed roots, inherited private text, values and frame scoping", () => {

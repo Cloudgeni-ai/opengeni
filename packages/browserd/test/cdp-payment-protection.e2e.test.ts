@@ -39,9 +39,10 @@ e2e(
       expect((await driver.captureScreenshot(initial.target.id)).data.byteLength).toBeGreaterThan(
         100,
       );
-      await driver.openTarget(
-        `data:text/html,${encodeURIComponent('<div id="credit-card"><label>Expiry year<select autocomplete="cc-exp-year"><option>2027</option></select></label><label>Postal code<input name="postal" value="0150"></label></div>')}`,
+      const autofilled = await driver.openTarget(
+        `data:text/html,${encodeURIComponent(`<div id="credit-card"><label>Expiry year<select autocomplete="cc-exp-year"><option>2027</option></select></label><label>Postal code<input name="credit_card[zip]" value="0150"></label><input name="credit_card[year]" value="2027"><input value="${GROUPED}"><input type="hidden" value="40123456789012"></div><output>${GROUPED}</output>`)}`,
       );
+      expect(JSON.stringify(autofilled.semantic)).not.toContain(GROUPED);
       const later = await driver.openTarget(`data:text/html,${encodeURIComponent(ordinary)}`);
       expect(JSON.stringify(later.semantic)).toContain(
         "Total 10 USD, ordered 2027-01-05, variant 40123456789012",
