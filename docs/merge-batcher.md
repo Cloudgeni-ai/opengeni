@@ -24,7 +24,15 @@ deterministic Version check.
 
 A PR leaves the queue with a comment saying why when it conflicts with `main`
 or fails CI on its own on top of `main`. Fix it and add the label again.
-Pushing a new head while queued simply restarts its batch.
+
+The members of the running batch carry the `in-batch` label. The batcher adds
+it when the batch starts and removes it when they land, leave the queue or the
+batch is abandoned. It does this at the end of every pass, and a label failure
+never stops batching. Don't push to an `in-batch` PR, remove its `queue-ready`
+label or close it: any change to one member cancels the whole batch, so every
+other member's CI starts again. The batcher wakes as soon as an `in-batch` PR
+changes, rebuilds the batch without it, and comments on that PR with the
+members it restarted. Pushing to a queued PR that is not `in-batch` is fine.
 
 Database migrations need unique numbers, and two PRs can add the same number
 without a Git conflict. A queued PR that adds a migration whose number `main`
@@ -66,7 +74,8 @@ The numbered directories are listed in `NUMBERED_FILES`
    is split too; a priority PR queued since goes first.
 
 A batch is rebuilt from scratch whenever `main` moves under it, a member gets a
-new head or leaves the queue.
+new head or leaves the queue. The rebuild happens in the same pass, without the
+changed PR (its new head waits for PR CI), and keeps any bisection in progress.
 
 ## Main CI records the batch result
 
