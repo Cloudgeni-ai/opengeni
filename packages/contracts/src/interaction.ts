@@ -4363,7 +4363,7 @@ export function withoutInteractionSecretValues<T extends { secretValues?: unknow
 
 export const INTERACTION_REDACTED_SECRET = "[secret]";
 /** Values shorter than this are not searched for: they would redact noise. */
-export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 4;
+export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 3;
 
 /** Identifier-like keys keep their strings untouched (generations, refs,
  * digests, image payloads, timestamps): redacting inside them would corrupt
@@ -4372,7 +4372,7 @@ export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 4;
 const NON_TEXT_KEY = /^(id|ref|data|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
 
 /** How browser and desktop results are masked: the shared known-value engine
- * with the `[secret]` marker, a four-character minimum (typed values are
+ * with the `[secret]` marker, a three-character minimum (including CVCs; typed values are
  * often short) for values, their lines and clipped starts (at the end of any
  * text too), and identifier keys left alone. */
 export const INTERACTION_SECRET_MASK_OPTIONS: SecretValueMaskOptions = {
@@ -4381,7 +4381,9 @@ export const INTERACTION_SECRET_MASK_OPTIONS: SecretValueMaskOptions = {
   lines: "all",
   // Typed values are short: every form (lines, percent-encoded) may be clipped.
   clippedForms: "all",
-  clippedMinChars: INTERACTION_MIN_REDACTED_SECRET_CHARS,
+  // A complete CVC may have three digits; a three-character prefix of a
+  // longer password is not distinctive enough to remove from ordinary text.
+  clippedMinChars: 4,
   clippedMinShare: 0,
   // An observed field or label clipped to its width ends partway through.
   clippedTextEndMinChars: 0,
