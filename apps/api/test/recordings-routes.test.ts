@@ -20,7 +20,7 @@ import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createSpeechToTextDeployment } from "@opengeni/core/transcription-service";
 import { createApp, type AppDependencies } from "../src/app";
-import { meetingLanguage } from "../src/routes/recordings";
+import { meetingKeyterms, meetingLanguage } from "../src/routes/recordings";
 
 let shared: SharedTestDatabase;
 let db: DbClient;
@@ -941,6 +941,58 @@ describe("recording routes", () => {
     expect(meetingLanguage(undefined, settings)).toBe("no");
     expect(meetingLanguage("en", settings)).toBe("en");
     expect(meetingLanguage(undefined, {})).toBeUndefined();
+  });
+
+  test("every meeting listens for the workspace's words, after its own", async () => {
+    const scope = await fixture();
+    await shared.admin`
+      update workspaces set settings = settings
+        || '{"recordings":{"keyterms":["Tripletex","Vatra"]}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const listened = async (keyterms?: string[]) => {
+      const recordingId = crypto.randomUUID();
+      await scope.owner.call("POST", "/recordings", {
+        recordingId,
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }],
+        ...(keyterms ? { transcription: { keyterms } } : {}),
+      });
+      const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1]);
+      const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+        trackNumber: 0,
+        chunks: [
+          {
+            chunkNumber: 0,
+            byteLength: bytes.byteLength,
+            sha256: sha(bytes),
+            startMilliseconds: 0,
+            durationMilliseconds: 1_000,
+          },
+        ],
+      });
+      scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+      await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+        trackNumber: 0,
+        chunkNumbers: [0],
+      });
+      const finalized = await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+      expect(finalized.status).toBe(200);
+      const [{ options }] = await shared.admin`
+        select options from recording_transcript_versions where recording_id = ${recordingId}`;
+      return options.keyterms;
+    };
+    // Every meeting listens for the workspace's words.
+    expect(await listened()).toEqual(["Tripletex", "Vatra"]);
+    // A meeting's own come first, and a word is listened for once.
+    expect(await listened(["Pelle", "vatra"])).toEqual(["Pelle", "vatra", "Tripletex"]);
+  });
+
+  test("the words a meeting listens for stop at what one request takes", () => {
+    const many = Array.from({ length: 100 }, (_, index) => `word ${index}`);
+    expect(meetingKeyterms(["Pelle"], many)).toHaveLength(100);
+    expect(meetingKeyterms(["Pelle"], many)[0]).toBe("Pelle");
+    expect(meetingKeyterms(undefined, undefined)).toEqual([]);
   });
 
   test("remembering a voice needs recognition on and the person's agreement", async () => {
