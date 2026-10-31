@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- online-safety-exception: unbatched-data: changes only chats that are both pinned and archived, a handful of rows; session_pins keeps one small row per person and chat they pinned or archived
 -- A chat opened from search could be pinned while it was archived. Archiving
 -- unpins, but pinning did not restore, so the chat was marked pinned yet never
 -- appeared under Pinned, which lists active chats only. Pinning now restores
