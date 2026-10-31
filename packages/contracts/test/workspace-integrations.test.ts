@@ -286,6 +286,7 @@ test("organization webhooks accept session event types only; usage events stay p
     enabled: true,
     description: null,
     workspaceFilter: null,
+    allowedWorkspaceIds: null,
     createdAt: "2026-09-01T00:00:00Z",
     updatedAt: "2026-09-01T00:00:00Z",
   };
@@ -295,6 +296,28 @@ test("organization webhooks accept session event types only; usage events stay p
   expect(
     OrganizationWebhook.safeParse({ ...webhook, eventTypes: ["usage.exhausted"] }).success,
   ).toBe(false);
+});
+
+test("organization webhooks pick shared workspaces by id; omitting the list is allowed", () => {
+  const base = {
+    url: "https://hooks.example.com/og",
+    workspaceFilter: null,
+    eventTypes: ["turn.completed"],
+  };
+  expect(CreateOrganizationWebhookRequest.safeParse(base).success).toBe(true);
+  expect(
+    CreateOrganizationWebhookRequest.safeParse({
+      ...base,
+      allowedWorkspaceIds: [crypto.randomUUID()],
+    }).success,
+  ).toBe(true);
+  expect(
+    CreateOrganizationWebhookRequest.safeParse({ ...base, allowedWorkspaceIds: ["nope"] }).success,
+  ).toBe(false);
+  expect(
+    UpdateOrganizationWebhookRequest.safeParse({ workspaceFilter: null, allowedWorkspaceIds: null })
+      .success,
+  ).toBe(true);
 });
 
 test("signed pre-upgrade session and usage webhook bodies default to the workspace lane", async () => {

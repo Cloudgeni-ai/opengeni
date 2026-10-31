@@ -10,7 +10,9 @@ import {
   createSession,
   deleteOrganizationCredentialProvider,
   encryptEnvironmentValue,
+  OrganizationIntegrationWorkspaceError,
   resolveWorkspaceCredentialProvider,
+  updateOrganizationWebhook,
   upsertOrganizationCredentialProvider,
   type DbClient,
 } from "@opengeni/db";
@@ -587,6 +589,107 @@ describe("workspace integration routes", () => {
       expect(await resolveWorkspaceCredentialProvider(client.db, personal)).toBeNull();
     } finally {
       await deleteOrganizationCredentialProvider(client.db, { accountId });
+      await shared!.admin`delete from organization_webhooks where account_id = ${accountId}`;
+    }
+  });
+
+  test("the organization provider and webhooks work only in the shared workspaces it picks", async () => {
+    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+    const otherWorkspaceId = crypto.randomUUID();
+    await shared!.admin`
+      insert into workspaces (id, account_id, name)
+      values (${otherWorkspaceId}, ${accountId}, 'Other team')`;
+    await shared!.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${otherWorkspaceId}, ${accountId})`;
+    const here = { accountId, workspaceId };
+    const other = { accountId, workspaceId: otherWorkspaceId };
+    const configure = async (allowedWorkspaceIds: string[] | null | undefined) =>
+      await upsertOrganizationCredentialProvider(client.db, {
+        accountId,
+        url: "https://org.example/credentials",
+        enabled: true,
+        timeoutMs: 5000,
+        workspaceFilter: null,
+        ...(allowedWorkspaceIds === undefined ? {} : { allowedWorkspaceIds }),
+        createdBySubjectId: subjectId,
+        secretEncrypted: encryptEnvironmentValue(key, "ogcp_org_secret"),
+      });
+    const deliveriesFor = async (eventId: string) =>
+      await shared!.admin<{ webhook_id: string }[]>`
+        select webhook_id from organization_webhook_deliveries where event_id = ${eventId}`;
+    try {
+      expect((await configure([otherWorkspaceId])).allowedWorkspaceIds).toEqual([otherWorkspaceId]);
+      expect(await resolveWorkspaceCredentialProvider(client.db, here)).toBeNull();
+      expect(await resolveWorkspaceCredentialProvider(client.db, other)).toMatchObject({
+        url: "https://org.example/credentials",
+      });
+      expect((await (await call("GET", "/inherited-integrations")).json()).credentialProvider).toBe(
+        null,
+      );
+
+      // A write that leaves the list out keeps it, so an older client never widens it.
+      expect((await configure(undefined)).allowedWorkspaceIds).toEqual([otherWorkspaceId]);
+      expect(await resolveWorkspaceCredentialProvider(client.db, here)).toBeNull();
+      // null is every shared workspace again.
+      expect((await configure(null)).allowedWorkspaceIds).toBeNull();
+      expect(await resolveWorkspaceCredentialProvider(client.db, here)).toMatchObject({
+        url: "https://org.example/credentials",
+      });
+
+      // Only the organization's shared workspaces can be picked, deduplicated and sorted.
+      await expect(configure([crypto.randomUUID()])).rejects.toBeInstanceOf(
+        OrganizationIntegrationWorkspaceError,
+      );
+      const both = [workspaceId, otherWorkspaceId].sort();
+      expect(
+        (await configure([otherWorkspaceId, workspaceId, otherWorkspaceId])).allowedWorkspaceIds,
+      ).toEqual(both);
+
+      const webhook = await createOrganizationWebhook(client.db, {
+        accountId,
+        url: "https://org.example/events",
+        secretEncrypted: encryptEnvironmentValue(key, "whsec_org_secret"),
+        eventTypes: ["session.status.changed"],
+        enabled: true,
+        description: null,
+        workspaceFilter: null,
+        allowedWorkspaceIds: [otherWorkspaceId],
+        createdBySubjectId: subjectId,
+      });
+      expect(webhook.allowedWorkspaceIds).toEqual([otherWorkspaceId]);
+      expect((await (await call("GET", "/inherited-integrations")).json()).webhooks).toEqual([]);
+      const [skipped] = await appendSessionEvents(client.db, workspaceId, sessionId, [
+        { type: "session.status.changed", payload: { status: "idle", reason: "done" } },
+      ]);
+      expect(await deliveriesFor(skipped!.id)).toEqual([]);
+
+      await updateOrganizationWebhook(client.db, {
+        accountId,
+        webhookId: webhook.id,
+        allowedWorkspaceIds: [workspaceId],
+      });
+      expect(
+        (await (await call("GET", "/inherited-integrations")).json()).webhooks.map(
+          (entry: { id: string }) => entry.id,
+        ),
+      ).toEqual([webhook.id]);
+      const [sent] = await appendSessionEvents(client.db, workspaceId, sessionId, [
+        { type: "session.status.changed", payload: { status: "running", reason: "again" } },
+      ]);
+      expect(await deliveriesFor(sent!.id)).toEqual([{ webhook_id: webhook.id }]);
+      // Updating something else keeps the list.
+      expect(
+        (await updateOrganizationWebhook(client.db, {
+          accountId,
+          webhookId: webhook.id,
+          description: "Events",
+        }))!.allowedWorkspaceIds,
+      ).toEqual([workspaceId]);
+    } finally {
+      await deleteOrganizationCredentialProvider(client.db, { accountId });
+      await shared!
+        .admin`delete from organization_webhook_deliveries where account_id = ${accountId}`;
       await shared!.admin`delete from organization_webhooks where account_id = ${accountId}`;
     }
   });

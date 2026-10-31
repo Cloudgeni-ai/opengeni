@@ -1,9 +1,6 @@
 // Developer > Credential provider: the settings card, the provider's page with
 // Test connection, and the Connect / Edit form page.
-import type {
-  IntegrationWorkspaceFilter,
-  WorkspaceInheritedIntegrationsResponse,
-} from "@opengeni/sdk";
+import type { WorkspaceInheritedIntegrationsResponse } from "@opengeni/sdk";
 import {
   CalendarIcon,
   ClockIcon,
@@ -67,7 +64,7 @@ import {
   type Load,
 } from "./shared";
 import { CodeSample, CREDENTIAL_PROVIDER_GUIDE_URL, EndpointTestResult } from "./test-result";
-import { WorkspaceFilterField } from "./workspace-filter-field";
+import { WorkspaceFilterField, type RegistrationReach } from "./workspace-filter-field";
 
 type InheritedProvider = WorkspaceInheritedIntegrationsResponse["credentialProvider"];
 
@@ -140,7 +137,7 @@ export function CredentialProviderSection({
           }
           description={
             organization
-              ? workspaceFilterLabel(provider.workspaceFilter, provider.allowPersonalWorkspaces)
+              ? workspaceFilterLabel(provider)
               : inherited
                 ? "Runs here use it instead of your organization's provider."
                 : "Runs in this workspace ask it for credentials."
@@ -513,11 +510,7 @@ export function CredentialProviderPage({
             {displayUrl(provider.url)}
           </span>,
           fromOrganization ? <span key="by">set by your organization</span> : null,
-          organization ? (
-            <span key="filter">
-              {workspaceFilterLabel(provider.workspaceFilter, provider.allowPersonalWorkspaces)}
-            </span>
-          ) : null,
+          organization ? <span key="filter">{workspaceFilterLabel(provider)}</span> : null,
         ]}
         actions={actions}
       />
@@ -531,9 +524,7 @@ export function CredentialProviderPage({
               {Math.round(provider.timeoutMs / 1000)} seconds
             </DetailAsideItem>
             {organization ? (
-              <DetailAsideItem label="Workspaces">
-                {workspaceFilterLabel(provider.workspaceFilter, provider.allowPersonalWorkspaces)}
-              </DetailAsideItem>
+              <DetailAsideItem label="Workspaces">{workspaceFilterLabel(provider)}</DetailAsideItem>
             ) : null}
             {!fromOrganization ? (
               <>
@@ -715,9 +706,11 @@ function ProviderForm({
   const inherited = state.kind === "ready" ? state.value.inherited : null;
   const organization = api.scope === "organization";
   const [url, setUrl] = useState(own?.url ?? "");
-  const [filter, setFilter] = useState<IntegrationWorkspaceFilter | null>(
-    own?.workspaceFilter ?? null,
-  );
+  const [reach, setReach] = useState<RegistrationReach>({
+    filter: own?.workspaceFilter ?? null,
+    workspaceIds: own?.allowedWorkspaceIds ?? null,
+  });
+  const filter = reach.filter;
   const [personalWorkspaces, setPersonalWorkspaces] = useState(
     own?.allowPersonalWorkspaces ?? false,
   );
@@ -752,6 +745,9 @@ function ProviderForm({
     if (organization && filter && !filter.externalSource.trim()) {
       nextErrors.filter = "Enter the external source, or use it for every shared workspace.";
     }
+    if (organization && reach.workspaceIds?.length === 0 && !personalWorkspaces) {
+      nextErrors.filter = "Pick at least one workspace, or turn on Personal workspaces.";
+    }
     setErrors(nextErrors);
     if (nextErrors.url || nextErrors.filter) return false;
     try {
@@ -763,6 +759,7 @@ function ProviderForm({
           ? {
               workspaceFilter: filter ? { externalSource: filter.externalSource.trim() } : null,
               allowPersonalWorkspaces: personalWorkspaces,
+              allowedWorkspaceIds: reach.workspaceIds,
             }
           : {}),
       });
@@ -822,12 +819,13 @@ function ProviderForm({
         </Field>
         {organization ? (
           <WorkspaceFilterField
-            value={filter}
+            value={reach}
             error={errors.filter}
             onChange={(next) => {
-              setFilter(next);
+              setReach(next);
               setErrors((value) => ({ ...value, filter: undefined }));
             }}
+            listWorkspaces={api.listSharedWorkspaces}
             personalWorkspaces={{ checked: personalWorkspaces, onChange: setPersonalWorkspaces }}
           />
         ) : null}

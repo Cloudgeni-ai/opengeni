@@ -15234,6 +15234,8 @@
       ],
       "shape": {
         "$": "object",
+        "$.allowedWorkspaceIds": "array? null",
+        "$.allowedWorkspaceIds[]": "string",
         "$.description": "string? null",
         "$.enabled": "boolean?",
         "$.eventTypes": "array!",
@@ -22142,6 +22144,8 @@
       "shape": {
         "$": "object",
         "$.allowPersonalWorkspaces": "boolean!",
+        "$.allowedWorkspaceIds": "array! null",
+        "$.allowedWorkspaceIds[]": "string",
         "$.createdAt": "string!",
         "$.enabled": "boolean!",
         "$.organizationId": "string!",
@@ -22807,6 +22811,8 @@
       ],
       "shape": {
         "$": "object",
+        "$.allowedWorkspaceIds": "array! null",
+        "$.allowedWorkspaceIds[]": "string",
         "$.createdAt": "string!",
         "$.description": "string! null",
         "$.enabled": "boolean!",
@@ -23773,6 +23779,8 @@
       "shape": {
         "$": "object",
         "$.allowPersonalWorkspaces": "boolean?",
+        "$.allowedWorkspaceIds": "array? null",
+        "$.allowedWorkspaceIds[]": "string",
         "$.enabled": "boolean?",
         "$.timeoutMs": "integer?",
         "$.url": "string!",
@@ -30151,6 +30159,8 @@
       ],
       "shape": {
         "$": "object",
+        "$.allowedWorkspaceIds": "array? null",
+        "$.allowedWorkspaceIds[]": "string",
         "$.description": "string? null",
         "$.enabled": "boolean?",
         "$.eventTypes": "array?",
