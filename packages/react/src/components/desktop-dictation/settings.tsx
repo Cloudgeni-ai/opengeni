@@ -31,7 +31,7 @@ import { Section } from "../../ui/section";
 import { SelectMenu, type SelectOption } from "../../ui/select-menu";
 import { SettingRow } from "../../ui/setting-row";
 import { Switch } from "../../ui/switch";
-import { Textarea } from "../../ui/textarea";
+import { WordListRow } from "../../ui/word-list-row";
 import { acceleratorFromKey, desktopShortcutLabel, sameDesktopShortcut } from "./shortcuts";
 
 /** At most this many shortcuts, as the app keeps them. */
@@ -58,8 +58,6 @@ const ACTION_PREFIX = "action:";
 const NONE = "none";
 const KEYS = "keys";
 /** As the app keeps them. */
-const VOCABULARY_MAX = 100;
-const VOCABULARY_TERM_MAX = 50;
 
 export type UseDesktopDictationResult = {
   /** The app's dictation, or null outside a desktop app that offers it. */
@@ -484,9 +482,21 @@ export function DesktopDictationSettings({
                   ))
                 : null}
               {settings.vocabulary !== undefined ? (
-                <VocabularyRow
-                  vocabulary={settings.vocabulary}
+                <WordListRow
+                  words={settings.vocabulary}
                   saving={saving}
+                  text={{
+                    label: t("desktopDictation.settings.vocabularyLabel"),
+                    description: t("desktopDictation.settings.vocabularyDescription"),
+                    placeholder: t("desktopDictation.settings.vocabularyPlaceholder"),
+                    termTooLong: (term, max) =>
+                      t("desktopDictation.settings.vocabularyTermTooLong", {
+                        term,
+                        max: String(max),
+                      }),
+                    tooMany: (max) =>
+                      t("desktopDictation.settings.vocabularyTooMany", { max: String(max) }),
+                  }}
                   onChange={(vocabulary) => void update({ vocabulary })}
                 />
               ) : null}
@@ -678,80 +688,6 @@ function ActionShortcutRow({
       }
     />
   );
-}
-
-/** The names and words dictation listens for, one per line. */
-function VocabularyRow({
-  vocabulary,
-  saving,
-  onChange,
-}: {
-  vocabulary: string[];
-  saving: boolean;
-  onChange: (vocabulary: string[]) => void;
-}) {
-  const t = useOpenGeniText();
-  const saved = vocabulary.join("\n");
-  const [draft, setDraft] = useState(saved);
-  const editing = useRef(false);
-  // The app's list wins while the person isn't typing in it.
-  useEffect(() => {
-    if (!editing.current) setDraft(saved);
-  }, [saved]);
-  const terms = vocabularyTerms(draft);
-  const tooLong = terms.find((term) => term.length > VOCABULARY_TERM_MAX);
-  const tooMany = terms.length > VOCABULARY_MAX;
-  return (
-    <SettingRow
-      variant="stacked"
-      label={t("desktopDictation.settings.vocabularyLabel")}
-      description={t("desktopDictation.settings.vocabularyDescription")}
-      error={
-        tooLong
-          ? t("desktopDictation.settings.vocabularyTermTooLong", {
-              term: tooLong.slice(0, 20),
-              max: String(VOCABULARY_TERM_MAX),
-            })
-          : tooMany
-            ? t("desktopDictation.settings.vocabularyTooMany", { max: String(VOCABULARY_MAX) })
-            : null
-      }
-      control={
-        <Textarea
-          rows={3}
-          value={draft}
-          disabled={saving && !editing.current}
-          placeholder={t("desktopDictation.settings.vocabularyPlaceholder")}
-          aria-label={t("desktopDictation.settings.vocabularyLabel")}
-          aria-invalid={tooLong || tooMany ? true : undefined}
-          onFocus={() => {
-            editing.current = true;
-          }}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={() => {
-            editing.current = false;
-            if (tooLong || tooMany) return;
-            if (terms.join("\n") !== saved) onChange(terms);
-            else setDraft(saved);
-          }}
-        />
-      }
-    />
-  );
-}
-
-/** The terms in what the person typed: one per line or between commas, without repeats. */
-export function vocabularyTerms(text: string): string[] {
-  const seen = new Set<string>();
-  const terms: string[] = [];
-  for (const part of text.split(/[\n,;]/u)) {
-    const term = part.trim().replace(/\s+/gu, " ");
-    const key = term.toLocaleLowerCase();
-    if (!term || seen.has(key)) continue;
-    seen.add(key);
-    terms.push(term);
-  }
-  return terms;
 }
 
 /** Plays one kept dictation's speech at a time. */
