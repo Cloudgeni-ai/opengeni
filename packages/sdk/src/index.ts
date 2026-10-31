@@ -402,6 +402,7 @@ export type {
   PinEditableArtifactVersionRequest,
   ReadEditableArtifactMaterializationOptions,
   ReadEditableArtifactResourceOptions,
+  UpdateEditableArtifactVisibilityRequest,
 } from "./editable-artifact-resources";
 export {
   OpenGeniApiContractMismatchError,
@@ -1381,7 +1382,9 @@ export type {
   KnowledgeSourceSyncLimits,
   KnowledgeSourceSyncRunSummary,
   ScopedKnowledgeScope,
+  ScheduledTaskMcpServer,
   ScheduledTaskScheduleSpec,
+  ScheduledTaskSkill,
   ScheduledTaskStatus,
   ScheduledTaskTriggerType,
   Session,

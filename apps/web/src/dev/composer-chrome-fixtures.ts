@@ -22,7 +22,7 @@ import { FIRST_PARTY_MCP_TOOL_NAMES, type FirstPartyMcpToolName } from "@opengen
 
 import type { SessionToolSelection } from "@opengeni/react/app/components/pickers";
 import {
-  firstPartySessionToolOptions,
+  firstPartySessionToolOptionsFor,
   type McpServerOption,
 } from "@opengeni/react/app/lib/session-tools";
 
@@ -443,7 +443,7 @@ export const galleryToolSelection: SessionToolSelection = {
   ),
 };
 
-export const galleryFirstPartyTools = firstPartySessionToolOptions;
+export const galleryFirstPartyTools = firstPartySessionToolOptionsFor(undefined);
 
 export const screenshotIncomingInputs: SessionPendingInputPreview[] = [
   galleryPendingInput(0, {

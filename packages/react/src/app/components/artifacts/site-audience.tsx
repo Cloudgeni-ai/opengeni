@@ -1,8 +1,9 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { WorkspaceArtifact } from "@opengeni/sdk";
 import { ChevronDownIcon, LayersIcon, Loader2Icon, LockKeyholeIcon, UsersIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { toast } from "../../lib/toast";
+import { useCanLimitToMe } from "../../lib/use-can-limit-to-me";
 
 import { Button } from "../../../ui/button";
 import { ConfirmDialog } from "../../../ui/confirm-dialog";
@@ -17,30 +18,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../
 import { userErrorText } from "../../../ui/api-error";
 
 export type Audience = "private" | "workspace";
-
-/**
- * Whether this person may make something Only me here, from the same answer
- * the chat composer uses. Unknown fails closed: Limit to me is never offered
- * on a guess, because the server refuses it when Only me is off.
- */
-function useCanLimitToMe(client: OpenGeniBrowserClient, workspaceId: string, enabled: boolean) {
-  const [canLimit, setCanLimit] = useState(false);
-  useEffect(() => {
-    setCanLimit(false);
-    if (!enabled) return;
-    let current = true;
-    void client
-      .getSessionTenancyCreateCapabilities(workspaceId)
-      .then((capabilities) => {
-        if (current) setCanLimit(capabilities.canCreatePrivate === true);
-      })
-      .catch(() => undefined);
-    return () => {
-      current = false;
-    };
-  }, [client, enabled, workspaceId]);
-  return canLimit;
-}
 
 /** The words an audience control uses for one kind of thing. */
 type AudienceCopy = {
@@ -86,6 +63,25 @@ export const FILE_AUDIENCE_COPY: AudienceCopy = {
   changeLabel: "Change who can open it",
   limitedToast: "Only you can open it now.",
 };
+
+/** The words for a document's, spreadsheet's or presentation's audience. */
+export function editableArtifactAudienceCopy(
+  noun: "document" | "spreadsheet" | "presentation",
+): AudienceCopy {
+  const Noun = `${noun.charAt(0).toUpperCase()}${noun.slice(1)}`;
+  return {
+    noun,
+    Noun,
+    onlyMeDescription: `Only you can open this ${noun}.`,
+    workspaceDescription: (workspaceName) => `Everyone in ${workspaceName} can open this ${noun}.`,
+    shareConfirm: (workspaceName) =>
+      `Everyone in ${workspaceName} will be able to open this ${noun}. The chat it was made in keeps its own audience.`,
+    limitConfirm: `Only you will be able to open this ${noun}. Other people in the workspace lose access to it, even if they have it open.`,
+    whoCan: `Who can open this ${noun}`,
+    changeLabel: "Change who can open it",
+    limitedToast: "Only you can open it now.",
+  };
+}
 
 export type AudienceControls = {
   chip: ReactNode;

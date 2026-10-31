@@ -123,6 +123,7 @@ import { meetingMentionResolver } from "./meeting-mentions";
 import { MeetingNotepad, MeetingNotesSection, MeetingSummary } from "./meeting-notes";
 import { useMeetingRecorder, type MeetingRecorder } from "./recorder-context";
 import { MeetingsOverlayScope } from "./overlay-scope";
+import { StickyBarEdge, useStuckToTop } from "./sticky-bar-edge";
 
 const defaultText = createOpenGeniText();
 
@@ -991,6 +992,10 @@ function MeetingDetailPageForRecording({
     enabled: previewing && !recordingHere,
   });
   const player = useRef<MeetingPlayerHandle>(null);
+  // The player's bar pins to the top while the page scrolls; pinned, it covers
+  // the host scroller's top padding too (sticky-bar-edge.tsx).
+  const [playerBar, setPlayerBar] = useState<HTMLDivElement | null>(null);
+  const playerPinned = useStuckToTop(playerBar);
   const [position, setPosition] = useState(0);
   const [renaming, setRenaming] = useState(false);
   const [choosingReach, setChoosingReach] = useState(false);
@@ -1829,7 +1834,8 @@ function MeetingDetailPageForRecording({
       </div>
       {sources.length > 0 && !recording.audioDeletedAt ? (
         // A direct child of the page, so it stays in view through the whole transcript.
-        <div className="sticky top-0 z-10 -mx-1 mt-4 bg-bg px-1 pt-2 pb-2">
+        <div ref={setPlayerBar} className="sticky top-0 z-10 -mx-1 mt-4 bg-bg px-1 pt-2 pb-2">
+          {playerPinned ? <StickyBarEdge edge="top" /> : null}
           <MeetingPlayer
             ref={player}
             sources={sources}

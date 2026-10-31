@@ -2087,6 +2087,8 @@ describe("ComputerSession frame stream", () => {
     await dispatch(sockets[0]!, "open");
     await dispatch(sockets[0]!, "message", { data: frameMessage("window-1", 2).buffer });
     await dispatch(sockets[0]!, "message", { data: frameMessage("window-1", 1).buffer });
+    await waitForFrameSequence(() => hook.result.current, 2);
+    // The older frame 1 arrived after 2; it gets the same settle time as before.
     await flush(10);
     expect(hook.result.current.frame?.sequence).toBe(2);
 
@@ -2125,14 +2127,15 @@ describe("ComputerSession frame stream", () => {
     try {
       await dispatch(sockets[0]!, "open");
       await dispatch(sockets[0]!, "message", { data: frameMessage("window-1", 100).buffer });
-      await flush(10);
-      expect(hook.result.current.frame?.sequence).toBe(100);
+      await waitForFrameSequence(() => hook.result.current, 100);
       await flush(1_100);
       expect(sockets).toHaveLength(2);
       await dispatch(sockets[1]!, "open");
       await dispatch(sockets[1]!, "message", { data: frameMessage("window-1", 2).buffer });
       await dispatch(sockets[1]!, "message", { data: frameMessage("window-1", 1).buffer });
       await dispatch(sockets[0]!, "message", { data: frameMessage("window-1", 101).buffer });
+      await waitForFrameSequence(() => hook.result.current, 2);
+      // Frame 1 and the detached socket's 101 came after 2; same settle time as before.
       await flush(10);
       expect(hook.result.current.state).toBe("live");
       expect(hook.result.current.frame?.sequence).toBe(2);
@@ -2229,8 +2232,7 @@ describe("ComputerSession frame stream", () => {
         }).finish(),
       ),
     });
-    await flush(10);
-    expect(hook.result.current.frame?.sequence).toBe(1);
+    await waitForFrameSequence(() => hook.result.current, 1);
     await hook.unmount();
   });
 
@@ -3173,7 +3175,10 @@ describe("ComputerViewer", () => {
               }).finish(),
             ),
           });
-          await flush(10);
+          await waitUntil(
+            () => !rendered.container.querySelector("canvas")!.classList.contains("invisible"),
+            "the frame to be painted",
+          );
         };
         const canvas = rendered.container.querySelector("canvas")!;
         const keyboard = rendered.container.querySelector<HTMLTextAreaElement>(
@@ -4480,6 +4485,8 @@ describe("ComputerViewer input reliability", () => {
       expect(fixture.canvas.className).toContain("invisible");
       await canvasMock.finishDecode(0);
       await fixture.frame(2);
+      // Frame 2 is decoding, not painted, while the input below arrives.
+      await canvasMock.decodeStarted(1);
       await actRun(() => {
         fixture.canvas.dispatchEvent(
           new MouseEvent("pointerdown", {
@@ -5131,9 +5138,12 @@ function mockComputerCanvas(deferred = false) {
   })) as unknown as typeof priorContext;
   return {
     painted,
+    /** Wait until the viewer has handed frame decode `index` to the browser. */
+    decodeStarted: async (index: number) => {
+      await waitUntil(() => decodes[index] !== undefined, `frame decode ${index} to start`);
+    },
     finishDecode: async (index: number) => {
-      for (let tick = 0; tick < 100 && !decodes[index]; tick += 1) await flush(1);
-      expect(decodes[index]).toBeDefined();
+      await waitUntil(() => decodes[index] !== undefined, `frame decode ${index} to start`);
       await actRun(() => decodes[index]!.resolve(decodes[index]!.bitmap));
       await flush();
     },
@@ -5266,6 +5276,29 @@ async function renderComputerInputFixture(
 
 async function dispatch(socket: FakeComputerSocket, type: string, event: any = {}): Promise<void> {
   await act(async () => socket.emit(type, event));
+}
+
+/**
+ * Frame publication waits on real asynchronous work (WebCrypto digests and
+ * image decoding), whose duration depends on the runner. Wait for the
+ * observable result itself, bounded, instead of a fixed sleep.
+ */
+async function waitUntil(condition: () => boolean, description: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`timed out after 5s waiting for ${description}`);
+    await flush(5);
+  }
+}
+
+async function waitForFrameSequence(
+  current: () => { frame: { sequence: number } | null } | null | undefined,
+  sequence: number,
+): Promise<void> {
+  await waitUntil(
+    () => current()?.frame?.sequence === sequence,
+    `frame ${sequence} to be published`,
+  );
 }
 
 function relayMessage(tag: number, body: Uint8Array): ArrayBuffer {
