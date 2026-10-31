@@ -58,7 +58,12 @@ export function numberedFiles(paths: string[]): NumberedFile[] {
     for (const { directory, pattern } of NUMBERED_FILES) {
       if (!path.startsWith(directory)) continue;
       const match = pattern.exec(path.slice(directory.length));
-      if (match) found.push({ slot: `${directory}${Number(match[1])}`, number: match[1]!, path });
+      if (match)
+        found.push({
+          slot: `${directory}${Number(match[1])}`,
+          number: match[1]!,
+          path,
+        });
     }
   return found;
 }
@@ -78,7 +83,8 @@ export function takenNumbers(
 /** Whether the batcher moves this numbered file to a free number itself. */
 export function renumberable(file: NumberedFile): boolean {
   return NUMBERED_FILES.some(
-    ({ directory, renumber }) => renumber === true && file.path.startsWith(directory),
+    ({ directory, renumber }) =>
+      renumber === true && file.path.startsWith(directory),
   );
 }
 
@@ -86,12 +92,17 @@ export function renumberable(file: NumberedFile): boolean {
  * Why a change's added numbered files cannot land on main: the first one whose
  * number main already uses for another file, or null.
  */
-export function numberTaken(added: NumberedFile[], onMain: NumberedFile[]): string | null {
+export function numberTaken(
+  added: NumberedFile[],
+  onMain: NumberedFile[],
+): string | null {
   const [first] = takenNumbers(added, onMain);
   if (!first) return null;
   const { file, other } = first;
   const name = (path: string) => path.slice(path.lastIndexOf("/") + 1);
-  const entry = NUMBERED_FILES.find(({ directory }) => file.path.startsWith(directory))!;
+  const entry = NUMBERED_FILES.find(({ directory }) =>
+    file.path.startsWith(directory),
+  )!;
   return `\`${name(file.path)}\` uses number ${file.number}, which main already uses for \`${name(other)}\`. ${entry.fix(name(file.path))}`;
 }
 
@@ -220,9 +231,20 @@ export type Action =
   | { kind: "eject"; number: number; reason: string }
   | { kind: "renumber"; number: number; paths: string[] }
   | { kind: "regenerate"; number: number }
-  | { kind: "build"; members: QueuedPull[]; pending: number[][]; blame?: string[] }
+  | {
+      kind: "build";
+      members: QueuedPull[];
+      pending: number[][];
+      blame?: string[];
+    }
   /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
-  | { kind: "hold"; number: number; headSha: string; headAt: number; behind: boolean }
+  | {
+      kind: "hold";
+      number: number;
+      headSha: string;
+      headAt: number;
+      behind: boolean;
+    }
   | { kind: "wait"; until: number };
 
 export type Verdict =
@@ -235,25 +257,52 @@ export type Verdict =
 
 const PASSING = new Set(["success", "skipped", "neutral"]);
 
+/**
+ * Attempts a batch run GitHub cancelled may use. A cancelled run (a job past
+ * its time limit, or a GitHub outage) says nothing about the batch: the
+ * batcher abandons a batch before it cancels its runs, so it never judges one
+ * it cancelled itself. Such a run is retried instead of bisected, up to this
+ * many attempts, so a test that hangs every time is still judged.
+ */
+export const CANCELLED_RUN_ATTEMPTS = 3;
+
 /** A finished run that did not pass. */
-export function failedRun(run: Pick<BatchRun, "status" | "conclusion">): boolean {
+export function failedRun(
+  run: Pick<BatchRun, "status" | "conclusion">,
+): boolean {
   return run.status === "completed" && !PASSING.has(run.conclusion ?? "");
 }
 
 export function isControlPlane(files: string[]): boolean {
-  return files.some((file) => CONTROL_PLANE.some((pattern) => pattern.test(file)));
+  return files.some((file) =>
+    CONTROL_PLANE.some((pattern) => pattern.test(file)),
+  );
 }
 
 /** Every workflow the batch push started must pass, and CI must be one of them. */
-export function verdict(batch: Batch, now: number, settings: Settings): Verdict {
+export function verdict(
+  batch: Batch,
+  now: number,
+  settings: Settings,
+): Verdict {
   const ci = batch.runs.filter((run) => run.workflow === CI_WORKFLOW);
   if (!ci.length)
     return now - batch.createdAt > settings.startTimeoutMs
       ? { kind: "missing" }
       : { kind: "running" };
-  if (batch.runs.some((run) => run.status !== "completed")) return { kind: "running" };
+  if (batch.runs.some((run) => run.status !== "completed"))
+    return { kind: "running" };
   const failed = batch.runs.filter((run) => !PASSING.has(run.conclusion ?? ""));
   if (!failed.length) return { kind: "passed" };
+  // Bisecting a batch GitHub cancelled would test every half again for a
+  // failure none of its PRs caused.
+  if (
+    failed.every(
+      (run) =>
+        run.conclusion === "cancelled" && run.attempt < CANCELLED_RUN_ATTEMPTS,
+    )
+  )
+    return { kind: "retry", runs: failed };
   // One cheap retry of only the failed jobs absorbs flaky tests before blame.
   if (failed.every((run) => run.attempt < 2))
     return repeatsBlame(batch, failed)
@@ -272,13 +321,16 @@ function repeatsBlame(batch: Batch, failed: BatchRun[]): boolean {
   const blame = new Set(batch.manifest.blame ?? []);
   if (!blame.size || batch.manifest.members.length < 2) return false;
   return failed.every(
-    (run) => !!run.failedJobs?.length && run.failedJobs.every((job) => blame.has(job)),
+    (run) =>
+      !!run.failedJobs?.length && run.failedJobs.every((job) => blame.has(job)),
   );
 }
 
 /** The jobs a failed verdict confirms, added to what the bisection blamed before. */
 function blamed(before: string[], runs: BatchRun[]): string[] {
-  return [...new Set([...before, ...runs.flatMap((run) => run.failedJobs ?? [])])].sort();
+  return [
+    ...new Set([...before, ...runs.flatMap((run) => run.failedJobs ?? [])]),
+  ].sort();
 }
 
 function fifo(a: QueuedPull, b: QueuedPull) {
@@ -309,7 +361,9 @@ export function nextBatch(
   settings: Settings,
   blame: string[] = [],
 ): Action | null {
-  const version = pulls.filter((p) => p.version && p.conflict === null).sort(fifo)[0];
+  const version = pulls
+    .filter((p) => p.version && p.conflict === null)
+    .sort(fifo)[0];
   // The batcher never renumbers a Version PR, so green and current is enough.
   if (version)
     return version.greenAt !== null && !version.behind
@@ -323,7 +377,13 @@ export function nextBatch(
         };
 
   const ready = pulls
-    .filter((p) => p.greenAt !== null && p.conflict === null && !p.renumber.length && !p.regenerate)
+    .filter(
+      (p) =>
+        p.greenAt !== null &&
+        p.conflict === null &&
+        !p.renumber.length &&
+        !p.regenerate,
+    )
     .sort(fifo);
   if (!ready.length) return null;
   const alone = (p: QueuedPull) => p.controlPlane;
@@ -344,9 +404,9 @@ export function nextBatch(
   }
 
   for (let index = 0; index < pending.length; index++) {
-    const group = pending[index]!.map((n) => ready.find((p) => p.number === n)).filter(
-      (p): p is QueuedPull => p !== undefined,
-    );
+    const group = pending[index]!.map((n) =>
+      ready.find((p) => p.number === n),
+    ).filter((p): p is QueuedPull => p !== undefined);
     if (!group.length) continue;
     const rest = pending.slice(index + 1);
     // Only a group of the bisection is judged against what it blamed; a
@@ -364,10 +424,16 @@ export function nextBatch(
         ...carried,
       };
     }
-    return { kind: "build", members: group.slice(0, settings.maxBatch), pending: rest, ...carried };
+    return {
+      kind: "build",
+      members: group.slice(0, settings.maxBatch),
+      pending: rest,
+      ...carried,
+    };
   }
 
-  if (alone(ready[0]!)) return { kind: "build", members: [ready[0]!], pending: [] };
+  if (alone(ready[0]!))
+    return { kind: "build", members: [ready[0]!], pending: [] };
   const members = compatible(
     ready.filter((p) => !p.controlPlane),
     settings,
@@ -381,7 +447,10 @@ export function nextBatch(
 }
 
 /** Up to maxBatch PRs in order, skipping any that adds a number an earlier one adds. */
-function compatible(candidates: QueuedPull[], settings: Settings): QueuedPull[] {
+function compatible(
+  candidates: QueuedPull[],
+  settings: Settings,
+): QueuedPull[] {
   const members: QueuedPull[] = [];
   const taken = new Set<string>();
   for (const pull of candidates) {
@@ -399,7 +468,9 @@ function split<T>(items: T[]): [T[], T[]] {
 }
 
 /** The running batch: the newest one, as `decide` treats any others as extra. */
-export function runningBatch<T extends { createdAt: number }>(batches: T[]): T | undefined {
+export function runningBatch<T extends { createdAt: number }>(
+  batches: T[],
+): T | undefined {
   return [...batches].sort((a, b) => b.createdAt - a.createdAt)[0];
 }
 
@@ -420,7 +491,10 @@ export function inBatchChanges(
 }
 
 /** Decide everything one pass should do, in order. */
-export function decide(observation: Observation, settings: Settings = DEFAULT_SETTINGS): Action[] {
+export function decide(
+  observation: Observation,
+  settings: Settings = DEFAULT_SETTINGS,
+): Action[] {
   const { now, mainSha } = observation;
   const actions: Action[] = [];
   let pulls = observation.pulls;
@@ -430,14 +504,27 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
 
   for (const pull of pulls)
     if (pull.conflict !== null)
-      actions.push({ kind: "eject", number: pull.number, reason: pull.conflict });
-    else if (pull.regenerate) actions.push({ kind: "regenerate", number: pull.number });
+      actions.push({
+        kind: "eject",
+        number: pull.number,
+        reason: pull.conflict,
+      });
+    else if (pull.regenerate)
+      actions.push({ kind: "regenerate", number: pull.number });
     else if (pull.renumber.length)
-      actions.push({ kind: "renumber", number: pull.number, paths: pull.renumber });
+      actions.push({
+        kind: "renumber",
+        number: pull.number,
+        paths: pull.renumber,
+      });
 
   const batch = runningBatch(observation.batches);
   for (const extra of observation.batches.filter((b) => b !== batch))
-    actions.push({ kind: "abandon", batch: extra, reason: "only one batch runs at a time" });
+    actions.push({
+      kind: "abandon",
+      batch: extra,
+      reason: "only one batch runs at a time",
+    });
 
   if (batch) {
     const { manifest } = batch;
@@ -448,12 +535,15 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     // A new head that tests to the same tree (main merged in again, a rebase)
     // changes nothing this batch tests, so it does not restart it.
     const left = manifest.members.find(
-      (m) => byNumber.get(m.number)?.headSha !== (batch.sameTree?.[m.number] ?? m.head),
+      (m) =>
+        byNumber.get(m.number)?.headSha !==
+        (batch.sameTree?.[m.number] ?? m.head),
     );
     // A priority PR goes into the next batch; it never cancels a running one.
     let reason: string | null = null;
     let changed: number | undefined;
-    if (manifest.base !== mainSha) reason = "main moved since the batch was built";
+    if (manifest.base !== mainSha)
+      reason = "main moved since the batch was built";
     else if (left) {
       changed = left.number;
       reason = byNumber.has(left.number)
@@ -471,7 +561,11 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
       const result = verdict(batch, now, settings);
       if (result.kind === "running") return actions;
       if (result.kind === "missing") {
-        actions.push({ kind: "abandon", batch, reason: "its CI never started" });
+        actions.push({
+          kind: "abandon",
+          batch,
+          reason: "its CI never started",
+        });
       } else if (result.kind === "retry") {
         actions.push({ kind: "retry", batch, runs: result.runs });
         return actions;
@@ -490,7 +584,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         });
         blame = blamed(blame, result.runs);
         if (numbers.length === 1) {
-          const run = result.runs.find((r) => r.workflow === CI_WORKFLOW) ?? result.runs[0]!;
+          const run =
+            result.runs.find((r) => r.workflow === CI_WORKFLOW) ??
+            result.runs[0]!;
           actions.push({
             kind: "eject",
             number: numbers[0]!,
@@ -552,9 +648,12 @@ export function parseManifest(message: string): Manifest | null {
           !sha.test(m.tree),
       ) ||
       !Array.isArray(value.pending) ||
-      value.pending.some((g) => !Array.isArray(g) || g.some((n) => !Number.isSafeInteger(n))) ||
+      value.pending.some(
+        (g) => !Array.isArray(g) || g.some((n) => !Number.isSafeInteger(n)),
+      ) ||
       (value.blame !== undefined &&
-        (!Array.isArray(value.blame) || value.blame.some((job) => typeof job !== "string")))
+        (!Array.isArray(value.blame) ||
+          value.blame.some((job) => typeof job !== "string")))
     )
       return null;
     return value;
