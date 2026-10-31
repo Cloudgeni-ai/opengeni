@@ -47,8 +47,8 @@ jobs:
           (github.event.workflow_run.path == '.github/workflows/ci.yml' && startsWith(github.event.workflow_run.head_branch, 'batch/'))))) }}
     # One pass at a time. The group is on the job, not the workflow, so a run
     # whose job is skipped never replaces a pending pass. A pass never runs PR
-    # code: it checks out only scripts/batcher from main and talks to the
-    # GitHub API.
+    # code: it checks out only scripts/batcher and the migration-ordinals module
+    # it plans renumbering with, from main, and talks to the GitHub API.
     concurrency:
       group: merge-batcher
       cancel-in-progress: false
@@ -67,7 +67,14 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: main
-          sparse-checkout: scripts/batcher
+          # Non-cone patterns so one file can be listed: the root files (as
+          # cone mode gives, including .bun-version), the batcher and its module.
+          sparse-checkout: |
+            /*
+            !/*/
+            /scripts/batcher/
+            /scripts/migration-ordinals.ts
+          sparse-checkout-cone-mode: false
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:

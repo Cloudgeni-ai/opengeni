@@ -130,13 +130,8 @@ export function requireApiKeyDelegationContext(
   const authority = accountScopedApiKeyWorkspaceAuthority(context);
   const external = externalActorContexts.get(context);
   const ceiling = authority ?? external;
-  if (
-    ceiling?.permissionMode === "explicit" &&
-    permissions.some((permission) => !ceilingCovers(ceiling.permissions, permission))
-  ) {
-    throw new HTTPException(403, {
-      message: "cannot delegate a permission outside the organization key policy",
-    });
+  if (ceiling?.permissionMode === "explicit") {
+    requirePermissionsWithinCeiling(ceiling.permissions, permissions);
   }
   if (
     ceiling?.permissionMode === "explicit" &&
@@ -187,13 +182,8 @@ export function requireExplicitPermissionDelegation(
   grant: Pick<AccessGrant, "permissions" | "permissionMode">,
   requested: Permission[],
 ): void {
-  if (
-    grant.permissionMode === "explicit" &&
-    requested.some((permission) => !ceilingCovers(grant.permissions, permission))
-  ) {
-    throw new HTTPException(403, {
-      message: "cannot delegate a permission outside the organization key policy",
-    });
+  if (grant.permissionMode === "explicit") {
+    requirePermissionsWithinCeiling(grant.permissions, requested);
   }
   if (
     grant.permissionMode === "explicit" &&
@@ -1774,6 +1764,33 @@ function grantsPersonalIntegrationSetup(
 /** A ceiling (organization key policy) covers a requested permission. */
 const ceilingCovers = (ceiling: readonly Permission[], permission: Permission): boolean =>
   permissionSetCovers(ceiling, permission);
+
+/**
+ * Refuse a delegation that states a permission the ceiling does not hold. A
+ * deprecated name keeps its exact meaning here, as it does for every legacy
+ * requirement (Q-16), so it is refused even when the ceiling holds its
+ * canonical equivalent; the refusal then names that equivalent so the caller
+ * can state it instead.
+ */
+function requirePermissionsWithinCeiling(
+  ceiling: readonly Permission[],
+  requested: readonly Permission[],
+): void {
+  const outside = requested.filter((permission) => !ceilingCovers(ceiling, permission));
+  if (outside.length === 0) return;
+  const deprecated = outside.find((permission) => {
+    const canonical = normalizePermission(permission) as Permission;
+    return canonical !== permission && ceilingCovers(ceiling, canonical);
+  });
+  if (deprecated) {
+    throw new HTTPException(403, {
+      message: `${deprecated} is a deprecated permission name; state ${normalizePermission(deprecated)} instead`,
+    });
+  }
+  throw new HTTPException(403, {
+    message: "cannot delegate a permission outside the organization key policy",
+  });
+}
 
 /**
  * Stored roles and API keys keep their legacy variable-set names (Q-16): a

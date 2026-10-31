@@ -31,9 +31,11 @@ function pull(number: number, extra: Partial<QueuedPull> = {}): QueuedPull {
     queuedAt: NOW - 30 * MINUTE + number,
     greenAt: NOW - 20 * MINUTE,
     conflict: null,
+    renumber: [],
     slots: [],
     priority: false,
     version: false,
+    behind: false,
     controlPlane: false,
     ...extra,
   };
@@ -149,8 +151,44 @@ describe("nextBatch", () => {
       NOW,
       DEFAULT_SETTINGS,
     );
-    // The Version PR is urgent, so it goes first and alone.
+    // A queued Version PR holds the queue, so it goes first and alone.
     expect(barrier?.kind === "build" && barrier.members.map((p) => p.number)).toEqual([2]);
+  });
+
+  test("a queued Version PR holds everything else until it is green and current", () => {
+    const others = [pull(1), pull(2, { priority: true }), pull(3, { controlPlane: true })];
+    const waiting = pull(5, { version: true, greenAt: null, headAt: NOW - 60_000 });
+    expect(nextBatch([...others, waiting], [[1], [2]], NOW, DEFAULT_SETTINGS)).toEqual({
+      kind: "hold",
+      number: 5,
+      headSha: waiting.headSha,
+      headAt: NOW - 60_000,
+      behind: false,
+    });
+    const behind = pull(5, { version: true, behind: true });
+    expect(nextBatch([...others, behind], [], NOW, DEFAULT_SETTINGS)).toMatchObject({
+      kind: "hold",
+      number: 5,
+      behind: true,
+    });
+    // Green and current: it builds alone and keeps a bisection for later.
+    const green = pull(5, { version: true });
+    expect(nextBatch([...others, green], [[1], [2]], NOW, DEFAULT_SETTINGS)).toEqual({
+      kind: "build",
+      members: [green],
+      pending: [[1], [2]],
+    });
+  });
+
+  test("a running batch finishes while a Version PR holds the queue", () => {
+    const waiting = pull(5, { version: true, greenAt: null });
+    const running = batch([1, 2], { runs: [run({ status: "in_progress", conclusion: null })] });
+    expect(decide(observe([pull(1), pull(2), waiting], [running]))).toEqual([]);
+    const passed = batch([1, 2], { runs: [run()] });
+    expect(decide(observe([pull(1), pull(2), pull(3), waiting], [passed]))).toEqual([
+      { kind: "land", batch: passed },
+      { kind: "hold", number: 5, headSha: waiting.headSha, headAt: 0, behind: false },
+    ]);
   });
 
   test("priority PRs go first, together", () => {
@@ -168,6 +206,20 @@ describe("nextBatch", () => {
     );
     expect(action).toMatchObject({ kind: "build", pending: [[4]] });
     expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([3]);
+  });
+
+  test("a retested group runs its CI change alone first and keeps the rest together", () => {
+    const pulls = [pull(1), pull(2), pull(3, { controlPlane: true }), pull(4)];
+    const first = nextBatch(pulls, [[1, 2, 3, 4]], NOW, DEFAULT_SETTINGS);
+    expect(first).toMatchObject({ kind: "build", pending: [[1, 2, 4]] });
+    expect(first?.kind === "build" && first.members.map((p) => p.number)).toEqual([3]);
+    const rest = nextBatch(
+      pulls.filter((p) => p.number !== 3),
+      [[1, 2, 4]],
+      NOW,
+      DEFAULT_SETTINGS,
+    );
+    expect(rest?.kind === "build" && rest.members.map((p) => p.number)).toEqual([1, 2, 4]);
   });
 
   test("keeps PRs that add the same numbered file out of one batch", () => {
@@ -190,6 +242,13 @@ describe("decide", () => {
       number: 1,
       reason: "it conflicts with main.",
     });
+    expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([2]);
+  });
+
+  test("moves a migration main took the number of, and batches the PR only after that", () => {
+    const moving = ["packages/db/drizzle/1071_usage_residency.sql"];
+    const actions = decide(observe([pull(1, { renumber: moving }), pull(2)]));
+    expect(actions[0]).toEqual({ kind: "renumber", number: 1, paths: moving });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([2]);
   });
 
@@ -262,6 +321,10 @@ describe("decide", () => {
     expect(moved[0]).not.toHaveProperty("changed");
     const changed = decide(observe([pull(1, { headSha: sha(77) })], [batch([1])]));
     expect(changed[0]).toMatchObject({ kind: "abandon", reason: "#1 has a new head", changed: 1 });
+    const sameTree = decide(
+      observe([pull(1, { headSha: sha(77) })], [batch([1], { sameTree: { 1: sha(77) } })]),
+    );
+    expect(sameTree.some((a) => a.kind === "abandon")).toBe(false);
     const left = decide(observe([pull(2)], [batch([1, 2])]));
     expect(left[0]).toMatchObject({ kind: "abandon", reason: "#1 left the queue", changed: 1 });
     // The rest is rebuilt at once, without waiting for the batching window.

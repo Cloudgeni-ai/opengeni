@@ -2900,6 +2900,10 @@ runtime-role/RLS posture.
 Readiness is forward-compatible only for entirely unknown, securely shaped
 objects; named-object ACL, RLS and capability contracts remain exact. Unknown
 callable SECURITY DEFINER routines require a prior explicit binary contract.
+The explicit removed-feature retirement inventory additionally permits absent
+legacy tables while preserving their exact contracts when present; it does not
+authorize dropping live SQL dependencies. See
+[retirement sequencing](migrations-expand-contract.md#retiring-removed-feature-schema).
 The pinned previous-binary inspector/evaluator CI and its release bootstrap are
 documented in [expand/contract migrations](migrations-expand-contract.md#pinned-previous-binary-readiness).
 The migration runner partitions the live pending ledger into a posture-inert rolling prefix,
