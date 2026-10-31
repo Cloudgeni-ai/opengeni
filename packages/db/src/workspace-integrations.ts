@@ -59,6 +59,7 @@ export function selectWorkspaceCredentialProvider<
     accountId: string;
     enabled: boolean;
     workspaceFilter: IntegrationWorkspaceFilter | null;
+    allowPersonalWorkspaces: boolean;
   },
 >(
   scope: WorkspaceIntegrationScope,
@@ -80,12 +81,27 @@ export function selectWorkspaceCredentialProvider<
       provider.workspaceId === scope.workspaceId
       ? provider
       : null;
-  return workspace.kind === "shared" &&
-    organizationProvider?.enabled &&
+  return organizationProvider?.enabled &&
     organizationProvider.accountId === scope.accountId &&
-    integrationWorkspaceFilterMatches(organizationProvider.workspaceFilter, workspace)
+    organizationCredentialProviderReaches(organizationProvider, workspace)
     ? organizationProvider
     : null;
+}
+
+/**
+ * Whether an organization's credential provider covers a workspace: its filter
+ * picks shared workspaces, its Personal switch picks members' Personal ones.
+ */
+export function organizationCredentialProviderReaches(
+  provider: {
+    workspaceFilter: IntegrationWorkspaceFilter | null;
+    allowPersonalWorkspaces: boolean;
+  },
+  workspace: { externalSource: string | null; kind: "personal" | "shared" },
+): boolean {
+  return workspace.kind === "personal"
+    ? provider.allowPersonalWorkspaces
+    : integrationWorkspaceFilterMatches(provider.workspaceFilter, workspace);
 }
 
 /** Hold through read + create/update so only the winning create returns a secret. */
@@ -134,7 +150,10 @@ export function integrationWorkspaceFilterMatches(
   return filter === null || filter.externalSource === workspace.externalSource;
 }
 
-/** Only absence inherits organization configuration; Personal never inherits. */
+/**
+ * Only absence inherits organization configuration. A Personal workspace
+ * inherits only from a provider whose Personal switch is on.
+ */
 export async function resolveWorkspaceCredentialProvider(
   db: Database,
   scope: WorkspaceIntegrationScope,
@@ -159,15 +178,17 @@ export async function resolveWorkspaceCredentialProvider(
       sql`select get_workspace_kind(${scope.accountId}::uuid, ${scope.workspaceId}::uuid) as kind`,
     );
     const classifiedWorkspace = { ...workspace, kind: classification!.kind };
-    const selectedWorkspace = selectWorkspaceCredentialProvider<
-      WorkspaceCredentialProviderRow,
-      OrganizationCredentialProviderRow
-    >(scope, classifiedWorkspace, provider, null);
-    if (provider || classifiedWorkspace.kind === "personal") return selectedWorkspace;
+    if (provider) {
+      return selectWorkspaceCredentialProvider<
+        WorkspaceCredentialProviderRow,
+        OrganizationCredentialProviderRow
+      >(scope, classifiedWorkspace, provider, null);
+    }
     const [organizationProvider] = await rawRows<OrganizationCredentialProviderRow>(
       scopedDb,
       sql`select id, account_id as "accountId", url, secret_encrypted as "secretEncrypted",
         enabled, timeout_ms as "timeoutMs", workspace_filter as "workspaceFilter",
+        allow_personal_workspaces as "allowPersonalWorkspaces",
         created_by_subject_id as "createdBySubjectId", created_at as "createdAt", updated_at as "updatedAt"
         from opengeni_private.resolve_organization_credential_provider_v1(
           ${scope.accountId}::uuid, ${scope.workspaceId}::uuid
@@ -202,6 +223,8 @@ export async function upsertOrganizationCredentialProvider(
     enabled: boolean;
     timeoutMs: number;
     workspaceFilter: IntegrationWorkspaceFilter | null;
+    /** Replaced on every write, like the rest; omitted means off. */
+    allowPersonalWorkspaces?: boolean;
     createdBySubjectId: string | null;
   },
 ): Promise<OrganizationCredentialProviderRow> {
@@ -211,6 +234,7 @@ export async function upsertOrganizationCredentialProvider(
       enabled: input.enabled,
       timeoutMs: input.timeoutMs,
       workspaceFilter: input.workspaceFilter,
+      allowPersonalWorkspaces: input.allowPersonalWorkspaces ?? false,
       updatedAt: sql`now()`,
     };
     if (input.secretEncrypted === undefined) {

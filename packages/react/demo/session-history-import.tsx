@@ -30,7 +30,7 @@ createRoot(document.getElementById("root")!).render(
   <main className="og-root mx-auto flex h-full max-w-4xl flex-col bg-og-bg p-4 text-og-fg">
     <header className="shrink-0 border-b border-og-border pb-3">
       <h1 className="text-lg font-medium">Customer migration plan</h1>
-      <p className="text-sm text-og-muted">March 1, 2024 · Sample imported conversation</p>
+      <p className="text-sm text-og-fg-muted">March 1, 2024 · Sample imported conversation</p>
     </header>
     <SessionConversation
       client={client}

@@ -34,10 +34,12 @@ import type {
   ScheduledTaskEvents,
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
+  ScheduledTaskSkill,
   SessionAutomationWaitSummary,
   SessionAvatar,
 } from "@opengeni/contracts";
 export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
+export type { ScheduledTaskSkill } from "@opengeni/contracts";
 export type {
   McpElicitationAnswer,
   McpElicitationApprovalRequest,
@@ -1093,6 +1095,14 @@ export type ConnectionMetadata = {
   verifiedInstallAt?: string | null;
   verifiedInstallVersion?: number | null;
   metadata: Record<string, unknown>;
+  /**
+   * Whether this OAuth MCP account can be told apart from another account of
+   * the same service: `verified` (its account is known), `reconnect` (sign in
+   * again once before adding another), or `single` (the service doesn't say
+   * which account it is, so each person can connect one). Absent for other
+   * connections and from older servers.
+   */
+  accountIdentity?: "verified" | "reconnect" | "single" | undefined;
   createdBySubjectId: string | null;
   updatedBySubjectId: string | null;
   createdAt: string;
@@ -3787,7 +3797,16 @@ export type ScheduledTaskAgentConfig = {
   approvalTimeoutSeconds?: number | undefined;
   /** Whether the chats this task starts run unattended; see the request type. */
   unattended?: boolean | undefined;
+  /** Remote MCP servers attached to each chat the task starts. */
+  mcpServers?: ScheduledTaskMcpServer[] | undefined;
+  /** Memory, agent reach and inline Skills of each chat the task starts. */
+  memoryScope?: SessionMemoryScope | undefined;
+  agentAccess?: SessionAgentAccess | undefined;
+  skills?: ScheduledTaskSkill[] | undefined;
 };
+
+/** A session-create MCP server without static headers, for chats a task starts. */
+export type ScheduledTaskMcpServer = Omit<SessionMcpServerInput, "headers">;
 
 export type ScopedKnowledgeScope =
   | { kind: "organization"; workspaceId: null; subjectId: null }
@@ -3857,6 +3876,12 @@ export type ScheduledTask = {
   /** Vaults every run may resolve secret references from (the task vault is always included). */
   vaultPolicy?: VaultPolicy | undefined;
   metadata: Record<string, unknown>;
+  /**
+   * Present and true when the task was created locked: only its creator (the
+   * same key or signed service identity) can change, run, resume or delete
+   * it, never an agent. A workspace admin can still pause it.
+   */
+  creatorLocked?: true | undefined;
   createdAt: string;
   updatedAt: string;
   /** Read-only: what `refreshScheduledTaskAccess` would change, for a viewer who can act on it. */
@@ -4929,6 +4954,11 @@ export type OrganizationModelAccountSettings = {
   locked: ModelAccountSettingKey[];
   version: number;
   updatedAt: string | null;
+  /**
+   * False when this deployment doesn't switch models when subscriptions run
+   * out, so `crossProviderFailover` has no effect here. Absent from older servers.
+   */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
@@ -4962,6 +4992,8 @@ export type WorkspaceModelAccountSettings = ModelAccountSettingsView & {
   version: number;
   updatedAt: string | null;
   canEdit: boolean;
+  /** As on the organization's settings: false when switching models is off here. */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
@@ -5177,6 +5209,12 @@ export type OrganizationPrivacySettings = {
   defaultVisibility: "private" | "workspace";
   /** Whether people have their own Personal workspace to see and work in. */
   personalWorkspaces: boolean;
+  /**
+   * The most each person can spend from the organization's credits in their
+   * own Personal workspace each calendar month (UTC), in USD micros; null for
+   * no limit. Work paid by their own model plans or keys doesn't count.
+   */
+  personalWorkspaceMonthlyCredits: number | null;
   /** Whether admins see that other people's Only me schedules exist, and can pause them. */
   adminsSeePrivateSchedules: boolean;
   limits: {
@@ -5195,6 +5233,8 @@ export type UpdateOrganizationPrivacySettingsRequest = {
   adminsSeePrivateSchedules?: boolean;
   /** Off: people no longer see or start new work in their Personal workspace. */
   personalWorkspaces?: boolean;
+  /** USD micros a month per person; null removes the limit. */
+  personalWorkspaceMonthlyCredits?: number | null;
 };
 
 /**
@@ -7926,6 +7966,20 @@ export type ScheduledTaskAgentConfigInput = {
    * an existing chat follows that chat.
    */
   unattended?: boolean | undefined;
+  bundledSkillIds?: BundledSkillId[] | undefined;
+  /**
+   * Remote MCP servers attached to each chat the task starts, as on session
+   * create. Static headers are not stored: credentials come from the
+   * workspace credential provider or `connectionRef`.
+   */
+  mcpServers?: ScheduledTaskMcpServer[] | undefined;
+  /**
+   * Memory, agent reach and inline Skills of each chat the task starts, as on
+   * session create. Only a task that starts its own chats can carry them.
+   */
+  memoryScope?: SessionMemoryScope | undefined;
+  agentAccess?: SessionAgentAccess | undefined;
+  skills?: ScheduledTaskSkill[] | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {
@@ -7962,6 +8016,12 @@ export type CreateAgentScheduledTaskRequest = {
   /** Vault narrowing for every run; omission adds none. */
   vaultPolicy?: VaultPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /**
+   * Lock the task to its creator: only the same key or signed service
+   * identity can later change, run, resume or delete it, and no agent can.
+   * A workspace admin can still pause it. Set once at creation.
+   */
+  creatorLocked?: boolean | undefined;
 };
 
 export type CreateKnowledgeSourceSyncScheduledTaskRequest = {
@@ -7987,6 +8047,8 @@ export type CreateSessionScheduledTaskRequest = {
   /** Event triggers that also post into the chat; `once` makes this a "wake me when". */
   events?: ScheduledTaskEventsInput | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /** Lock the task to its creator; see the agent-task request. */
+  creatorLocked?: boolean | undefined;
 };
 
 export type CreateScheduledTaskRequest =
@@ -8284,8 +8346,9 @@ export type RigVerificationHealth = {
 };
 
 /**
- * Workspace-shared channel organizing root sessions ("workstreams") by work
- * type in the rail. Pure organizational metadata.
+ * A project ("channel") organizing root sessions ("workstreams") by work type
+ * in the rail. Pure organizational metadata, shared with the workspace or
+ * Only me, like a chat.
  */
 export type Channel = {
   id: string;
@@ -8300,6 +8363,13 @@ export type Channel = {
   avatar?: SessionAvatar | null | undefined;
   pinned: boolean;
   sortOrder: number;
+  /**
+   * Who sees it: the workspace, or only its owner ("private", Only me). An
+   * Only me project holds only its owner's own Only me chats and Sites.
+   * Absent from servers that predate project audiences, where every project
+   * is shared.
+   */
+  visibility?: "private" | "workspace" | undefined;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -8309,6 +8379,11 @@ export type CreateChannelRequest = {
   name: string;
   description?: string;
   avatar?: SessionAvatar | null;
+  /**
+   * Omitted, a person's project is shared with the workspace and an agent's
+   * follows its chat: Only me when made in an Only me chat.
+   */
+  visibility?: "private" | "workspace";
 };
 
 export type UpdateChannelRequest = {
@@ -8317,6 +8392,12 @@ export type UpdateChannelRequest = {
   /** null clears it; omitted keeps it. */
   avatar?: SessionAvatar | null;
   pinned?: boolean;
+  /**
+   * "workspace" shares the owner's Only me project with the workspace. A
+   * shared project cannot be made Only me; only its owner, signed in,
+   * changes it.
+   */
+  visibility?: "workspace";
 };
 
 /** Complete workspace project order. It is replaced atomically after a drag. */
@@ -9306,6 +9387,11 @@ export type CapabilityInstallation = {
 export type CapabilityCatalogResponse = {
   items: CapabilityCatalogItem[];
   installations: CapabilityInstallation[];
+  /**
+   * Who the organization lets turn integrations on: members (the default) or
+   * only integration admins. Older servers omit it; treat that as members.
+   */
+  memberIntegrationSetup?: "members" | "admins" | undefined;
 };
 
 export type CreateCapabilityCatalogItemRequest = {

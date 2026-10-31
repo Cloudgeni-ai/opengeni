@@ -462,6 +462,14 @@ export async function createCatalogItem(input: {
   accountId: string;
   workspaceId: string;
   payload: CreateCapabilityCatalogItemRequest;
+  /**
+   * The caller is a member, not an integration admin: they add a new server
+   * and never change or shadow one that exists (a built-in, configured or
+   * registry entry, or another workspace entry), and the server id is always
+   * derived from the capability id. Their organization must let members turn
+   * on integrations. See `INTEGRATION_SETUP_PERMISSION`.
+   */
+  memberCreate?: { settings: Settings } | undefined;
 }): Promise<CapabilityCatalogItem> {
   const id = input.payload.id?.trim() || generatedCapabilityId(input.payload);
 
@@ -497,6 +505,44 @@ export async function createCatalogItem(input: {
     input.payload.source === "registry"
       ? "manual"
       : input.payload.source;
+  if (input.memberCreate) {
+    if (
+      input.payload.metadata.mcpServerId !== undefined &&
+      input.payload.metadata.mcpServerId !== mcpServerIdForCapability(id, {})
+    )
+      throw new HTTPException(403, { message: "Only an admin can choose a server's tool ID" });
+    await requireMemberIntegrationSetupAllowed(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    });
+    const catalog = await buildCapabilityCatalog({
+      db: input.db,
+      workspaceId: input.workspaceId,
+      settings: input.memberCreate.settings,
+    });
+    const existing =
+      catalog.items.find((candidate) => candidate.id === id) ??
+      (await getCapabilityCatalogItem(input.db, input.workspaceId, id));
+    if (existing && !sameMemberCatalogEntry(existing, input.workspaceId, input.payload))
+      throw new HTTPException(409, {
+        message: "A connection with this ID already exists. Only an admin can change it.",
+      });
+    if (existing) return existing;
+    // Nor may the new server take the tool ID another connection runs under.
+    const serverId = mcpServerIdForCapability(id, {});
+    if (
+      catalog.items.some(
+        (candidate) =>
+          candidate.kind === "mcp" &&
+          candidate.id !== id &&
+          mcpServerIdForCapability(candidate.id, candidate.metadata) === serverId,
+      ) ||
+      input.memberCreate.settings.mcpServers.some((server) => server.id === serverId)
+    )
+      throw new HTTPException(409, {
+        message: "A connection with this ID already exists. Only an admin can change it.",
+      });
+  }
   const metadata = {
     ...input.payload.metadata,
     ...(input.payload.kind === "mcp" &&
@@ -505,7 +551,7 @@ export async function createCatalogItem(input: {
       ? { mcpServerId: mcpServerIdForCapability(id, input.payload.metadata) }
       : {}),
   };
-  return await upsertCapabilityCatalogItem(input.db, {
+  const saved = await upsertCapabilityCatalogItem(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     id,
@@ -520,7 +566,28 @@ export async function createCatalogItem(input: {
     installUrl: input.payload.installUrl ?? null,
     authModel: input.payload.authModel?.trim() || null,
     metadata,
+    ...(input.memberCreate ? { createOnly: true } : {}),
   });
+  // Another request created this id first: a member never rewrites it.
+  if (input.memberCreate && !sameMemberCatalogEntry(saved, input.workspaceId, input.payload))
+    throw new HTTPException(409, {
+      message: "A connection with this ID already exists. Only an admin can change it.",
+    });
+  return saved;
+}
+
+/** An existing entry a member's add request may return as its own result: the
+ * same workspace's MCP server at the same address. */
+function sameMemberCatalogEntry(
+  existing: CapabilityCatalogItem,
+  workspaceId: string,
+  payload: CreateCapabilityCatalogItemRequest,
+): boolean {
+  return (
+    existing.workspaceId === workspaceId &&
+    existing.kind === payload.kind &&
+    existing.endpointUrl === (payload.endpointUrl ?? null)
+  );
 }
 
 type EnableCapabilityInput = {
@@ -536,6 +603,14 @@ type EnableCapabilityInput = {
    * change nothing else. See {@link assertPersonalIntegrationSetupRequest}.
    */
   personalSetup?: boolean;
+  /**
+   * The caller is a member, not an integration admin (see
+   * `INTEGRATION_SETUP_PERMISSION`): turn any integration on if it is not on
+   * yet, with their own or a shared account, but never change one that is
+   * already on, turn back on one an admin turned off, or choose its tool
+   * approval. See {@link assertMemberIntegrationSetupRequest}.
+   */
+  memberSetup?: boolean;
   payload: EnableCapabilityRequest;
   probeMcpServer?: McpCapabilityProbe;
   /** Where a workspace MCP server's advertised icon is stored as its catalog logo. */
@@ -554,13 +629,15 @@ export async function enableCapability(
   input: EnableCapabilityInput,
 ): Promise<CapabilityInstallation> {
   const prepared = await prepareCapabilityEnable(input);
-  const installation = await prepared.commit(input.db);
-  // Personal setup never turns back on what an admin turned off.
-  if (input.personalSetup && installation.status !== "active")
+  return await prepared.commit(input.db);
+}
+
+/** Personal and member setup never turn back on what an admin turned off. */
+function assertSetupLeftInstallationOn(installation: CapabilityInstallation): void {
+  if (installation.status !== "active")
     throw new HTTPException(409, {
       message: "An admin turned this integration off; ask them to turn it back on",
     });
-  return installation;
 }
 
 /**
@@ -596,11 +673,40 @@ function assertPersonalIntegrationSetupRequest(
     });
 }
 
-function assertPersonalIntegrationSetupAllowed(policy: OrganizationIntegrationPolicy): void {
+/**
+ * What a member may enable: anything not on yet, but tool approval stays with
+ * admins. An explicit `requireApproval` overrides the catalog's recommendation,
+ * so only asking for every tool (which can never widen it) is accepted.
+ */
+function assertMemberIntegrationSetupRequest(payload: EnableCapabilityRequest): void {
+  if (
+    Object.hasOwn(payload.config ?? {}, "requireApproval") &&
+    payload.config.requireApproval !== true
+  )
+    throw new HTTPException(403, {
+      message: "Only an admin can choose which tools run without asking",
+    });
+}
+
+/**
+ * Personal and member setup both need the organization to let members turn on
+ * integrations (`personalIntegrationSetup: "members"`, the default).
+ */
+export function assertMemberIntegrationSetupAllowed(policy: OrganizationIntegrationPolicy): void {
   if (policy.personalIntegrationSetup !== "members")
     throw new HTTPException(403, {
       message: "Your organization lets only admins turn on integrations",
     });
+}
+
+/** {@link assertMemberIntegrationSetupAllowed} for a route without its own policy transaction. */
+export async function requireMemberIntegrationSetupAllowed(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+): Promise<void> {
+  await withOrganizationIntegrationPolicyFence(db, scope, async (_tx, policy) =>
+    assertMemberIntegrationSetupAllowed(policy),
+  );
 }
 
 /** Probe outside a durable Connect commit; persist the exact prepared settings
@@ -644,6 +750,10 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     assertPersonalIntegrationSetupRequest(item, input.payload);
     // Create-only: an existing installation is returned unchanged.
     input.payload.onlyIfUninstalled = true;
+  } else if (input.memberSetup) {
+    assertMemberIntegrationSetupRequest(input.payload);
+    // Create-only: an existing installation is returned unchanged.
+    input.payload.onlyIfUninstalled = true;
   }
   let installationMetadata = input.payload.metadata;
   // Credential-header storage is written exclusively by this flow; strip the
@@ -671,7 +781,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       input.db,
       input,
       async (tx, policy) => {
-        if (input.personalSetup) assertPersonalIntegrationSetupAllowed(policy);
+        if (input.personalSetup || input.memberSetup) assertMemberIntegrationSetupAllowed(policy);
         const existing = await unchangedMcpInstallation(
           { ...input, db: tx },
           item,
@@ -696,6 +806,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
                 message: "Capability installation changed; reload before reconciling",
               });
             }
+            if (input.personalSetup || input.memberSetup) assertSetupLeftInstallationOn(current);
             return current;
           }),
       };
@@ -764,11 +875,15 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   };
   return {
     commit: (db: Database) =>
-      item.kind === "mcp" && input.personalSetup
+      item.kind === "mcp" && (input.personalSetup || input.memberSetup)
         ? withOrganizationIntegrationPolicyFence(db, installation, async (tx, policy) => {
-            assertPersonalIntegrationSetupAllowed(policy);
+            assertMemberIntegrationSetupAllowed(policy);
             assertOrganizationIntegrationAllowed(policy, "custom:mcp");
-            return withServerLogo(tx, await enableCapabilityInstallation(tx, installation));
+            if (input.verifiedConnection)
+              await validateVerifiedMcpConnection({ ...input, db: tx }, item);
+            const enabled = await enableCapabilityInstallation(tx, installation);
+            assertSetupLeftInstallationOn(enabled);
+            return withServerLogo(tx, enabled);
           })
         : item.kind === "mcp"
           ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {

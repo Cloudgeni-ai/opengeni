@@ -9177,10 +9177,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * waits for the pointer to rest applies it later still; so the hit is
    * tested again on the frame's next drawn frames until it lands, for as
    * long as the page is watched for a reaction. The move is real input, so a
-   * refusal after it is an unknown outcome. Returns the action point; null
-   * when the target is not hover-revealed; or, when it stays unreachable,
-   * null, or `unreactedSince`, the effect count from before the move, when
-   * the page provably did not react to it (see watchPageReaction).
+   * refusal after it is an unknown outcome. Chromium routes a move into a
+   * frame rendered in its own process only once it knows where that frame
+   * draws, so a move can land on the page holding the frame instead and
+   * leave nothing in the frame under the pointer; a person's pointer keeps
+   * moving and reaches it, so the move is sent again (at most
+   * HOVER_MOVE_ATTEMPTS in all) while the frame shows no pointer. Returns the
+   * action point; null when the target is not hover-revealed; or, when it
+   * stays unreachable, null, or `unreactedSince`, the effect count from
+   * before the first move, when the page provably did not react to any move
+   * (see watchPageReaction).
    */
   private async revealByHover(
     state: TargetState,
@@ -9200,24 +9206,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const watch = await this.watchPageReaction(state);
     const effectsBeforeMove = state.actionEffectCount;
     try {
-      const movedAt = performance.now();
-      await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-        type: "mouseMoved",
-        x: point.x,
-        y: point.y,
-      });
-      const remainingMs = Math.max(0, PAGE_REACTION_WINDOW_MS - (performance.now() - movedAt));
-      if (
-        (await this.callOnNode(
+      const firstMovedAt = performance.now();
+      let movedAt = firstMovedAt;
+      for (let moves = 1; ; moves += 1) {
+        await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: point.x,
+          y: point.y,
+        });
+        const remainingMs = Math.max(0, PAGE_REACTION_WINDOW_MS - (performance.now() - movedAt));
+        const hover = await this.callOnNode(
           state,
           backendDOMNodeId,
           HOVER_HIT_TEST_FUNCTION,
           [{ value: remainingMs }],
           { isolatedFrameId: frameId },
-        )) === true
-      )
-        return await this.centerPoint(state, backendDOMNodeId);
-      return watch && (await watch.unchanged()) ? { unreactedSince: effectsBeforeMove } : null;
+        );
+        if (hover === "hit") return await this.centerPoint(state, backendDOMNodeId);
+        if (hover !== "unpointed" || moves >= HOVER_MOVE_ATTEMPTS) break;
+        movedAt = performance.now();
+      }
+      // A move sent again is watched for a whole window after it, too.
+      return watch && (await watch.unchanged(movedAt - firstMovedAt))
+        ? { unreactedSince: effectsBeforeMove }
+        : null;
     } finally {
       watch?.release();
     }
@@ -9228,15 +9240,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * the tab, each in the session that renders it: besides the target's frame,
    * the move reaches the frames holding it, as the pointer passes into them,
    * and whichever frame the pointer leaves. After it, `unchanged` watches
-   * each until PAGE_REACTION_WINDOW_MS after the move (and two drawn frames)
-   * and tells whether nothing changed in any (no element, attribute or text,
-   * no focus or address change), so the page did not act on the move; it
-   * answers as soon as one changes. Hover styling alone changes none of
-   * these. Null where it cannot watch them all.
+   * each until PAGE_REACTION_WINDOW_MS after the move, or after the last of
+   * the moves when `sinceFirstMoveMs` says how long after the first it came
+   * (and two drawn frames), and tells whether nothing changed in any (no
+   * element, attribute or text, no focus or address change), so the page did
+   * not act on the moves; it answers as soon as one changes. Hover styling
+   * alone changes none of these. Null where it cannot watch them all.
    */
-  private async watchPageReaction(
-    state: TargetState,
-  ): Promise<{ unchanged: () => Promise<boolean>; release: () => void } | null> {
+  private async watchPageReaction(state: TargetState): Promise<{
+    unchanged: (sinceFirstMoveMs?: number) => Promise<boolean>;
+    release: () => void;
+  } | null> {
     if (this.engine === "lightpanda") return null;
     const connection = await this.ensureConnection();
     const watches: Array<{ sessionId: string; objectId: string }> = [];
@@ -9310,12 +9324,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return {
         // Unchanged only when every document stayed unchanged; the first one
         // that changed answers at once.
-        unchanged: () =>
+        unchanged: (sinceFirstMoveMs = 0) =>
           new Promise<boolean>((resolve) => {
             let pending = watches.length;
             if (pending === 0) resolve(false);
             for (const watch of watches)
-              void call(watch, PAGE_REACTION_READ_FUNCTION, [{ value: PAGE_REACTION_WINDOW_MS }])
+              void call(watch, PAGE_REACTION_READ_FUNCTION, [
+                { value: PAGE_REACTION_WINDOW_MS + Math.max(0, sinceFirstMoveMs) },
+              ])
                 .catch(() => null)
                 .then((read) => {
                   if (!isRecord(read?.result) || read.result.value !== true) resolve(false);
@@ -12407,14 +12423,17 @@ const HIT_TEST_FUNCTION = `function() {
   return Boolean(hit && owns(element, hit));
 }`;
 
-/** The hit test after a hover's move (see revealByHover): true as soon as
- * the target's centre reaches it; false once the frame has drawn two frames
- * and `windowMs` has passed without it. A frame that does not draw (a hidden
- * tab, or an engine without animation frames) is tested every 50 ms. Runs
- * in an isolated world, so the page's own timers cannot hold it. */
+/** The hit test after a hover's move (see revealByHover): "hit" as soon as
+ * the target's centre reaches it; "unpointed" once the frame has drawn two
+ * frames with nothing in it under the pointer, so the move has not reached
+ * the frame (a move the frame received has applied its hover by then, even
+ * where it waits for the next frame); "missed" once `windowMs` has passed
+ * as well without a hit. A frame that does not draw (a hidden tab, or an
+ * engine without animation frames) is tested every 50 ms. Runs in an
+ * isolated world, so the page's own timers cannot hold it. */
 const HOVER_HIT_TEST_FUNCTION = `async function(windowMs) {
   const element = this instanceof Element ? this : this.parentElement;
-  if (!(element instanceof Element)) return false;
+  if (!(element instanceof Element)) return "missed";
   ${HIT_HELPERS}
   const hits = () => {
     if (!element.isConnected) return false;
@@ -12425,8 +12444,10 @@ const HOVER_HIT_TEST_FUNCTION = `async function(windowMs) {
   const deadline = performance.now() + windowMs;
   const draws = typeof requestAnimationFrame === "function" && document.visibilityState !== "hidden";
   for (let frames = 0; ; frames += 1) {
-    if (hits()) return true;
-    if (!element.isConnected || ((frames >= 2 || !draws) && performance.now() >= deadline)) return false;
+    if (hits()) return "hit";
+    if (!element.isConnected) return "missed";
+    if (frames >= 2 && document.querySelector(":hover") === null) return "unpointed";
+    if ((frames >= 2 || !draws) && performance.now() >= deadline) return "missed";
     await new Promise((resolve) => {
       setTimeout(resolve, 50);
       if (draws) requestAnimationFrame(() => setTimeout(resolve, 0));
@@ -13797,6 +13818,10 @@ const DECORATION_PRESS_FUNCTION = `function() {
  * before a refusal counts as definite: long enough for a menu or row that
  * waits for the pointer to rest (commonly 100 to 300 ms). */
 const PAGE_REACTION_WINDOW_MS = 500;
+
+/** Most moves a hover sends while the target's frame shows nothing under
+ * the pointer (see revealByHover). */
+const HOVER_MOVE_ATTEMPTS = 3;
 
 /** Starts watching a frame's document for any change (see
  * watchPageReaction). Runs in an isolated world and returns the watch, which

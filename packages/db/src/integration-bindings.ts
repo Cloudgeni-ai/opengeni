@@ -50,6 +50,19 @@ export class IntegrationFacetBindingOwnershipConflictError extends Error {
   readonly name = "IntegrationFacetBindingOwnershipConflictError";
 }
 
+/**
+ * A member's add would change an integration that is already set up (another
+ * instance, a newer revision for the other instances, or a configured server).
+ * Members only add; changing what is already on stays with integration admins.
+ */
+export class IntegrationChangeRequiresAdminError extends Error {
+  readonly name = "IntegrationChangeRequiresAdminError";
+
+  constructor(message = "This integration is already set up. Only an admin can change it.") {
+    super(message);
+  }
+}
+
 export function integrationBindingKey(
   connectionId: string | null | undefined,
   requested?: string | null,

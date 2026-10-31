@@ -1028,7 +1028,7 @@ function ComputerSessionGroup(props: {
             <span
               className={cn(
                 "size-1.5 rounded-full",
-                session.lifecycle === "active" ? "bg-og-status-running" : "bg-og-muted",
+                session.lifecycle === "active" ? "bg-og-status-running" : "bg-og-fg-subtle",
               )}
             />
             <span className="min-w-0 flex-1">
@@ -2219,7 +2219,7 @@ function ComputerStatusBar(props: {
       <span
         className={cn(
           "size-1.5 rounded-full",
-          props.connectionState === "live" ? "bg-og-status-running" : "bg-og-muted",
+          props.connectionState === "live" ? "bg-og-status-running" : "bg-og-fg-subtle",
         )}
       />
       <span>

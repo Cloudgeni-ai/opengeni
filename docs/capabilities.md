@@ -2,8 +2,23 @@
 
 Opengeni exposes a workspace-level Capabilities control-plane read model for external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
 
-Capability, Plugin, API Integration, and Integration Facet mutations
-require the narrow `capabilities:manage` permission. Shared-workspace admins
+Adding integrations is member work: installing and removing Plugins and API
+Integrations, adding custom MCP catalog entries, turning on any catalog
+integration that is not on yet (with a personal or a shared account), and
+configuring an installed integration's facets and sources need
+`connections:write`, which ordinary Members hold, or `capabilities:manage`
+(`INTEGRATION_SETUP_PERMISSION` and `canAddIntegrations` in
+`packages/contracts/src/personal-integration-setup.ts`). A member's add is
+create-only: it never changes an installation that is already on, turns back
+on one an admin turned off, rewrites or shadows an existing catalog entry, or
+picks a server's tool ID, and the organization's integration policy (its
+allowlist, and `personalIntegrationSetup: "admins"`) still decides.
+What stays integration administration (`capabilities:manage`): connector and
+session-MCP tool permissions (Allow/Ask/Block), `autoApprovedTools` and any
+explicit MCP `requireApproval` other than `true`, changing an integration that
+is already set up (updating a plugin or a custom API to a new revision,
+reconnecting or rebinding a shared account, or turning a server back on), and
+turning one off for everyone. Members can remove what an admin added. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
 member-management or API-key-delegation powers of `workspace:admin`.
@@ -898,7 +913,7 @@ Ordinary new sessions include two first-party Opengeni tools:
   endpoint not yet in the workspace catalog. The agent may propose a name and
   exact URL, but cannot register or contact the server. The signed-in human
   reviews/edits the address and creates a catalog entry with the ordinary
-  `capabilities:manage` permission; credential setup, enablement, and session
+  `connections:write` permission; credential setup, enablement, and session
   tool selection then use the existing protected flows. Search the catalog
   first; API/GraphQL definition import remains its separate preview wizard.
 
@@ -953,9 +968,9 @@ as connecting your own account, so it needs only `connections:personal`
 (included in `connections:write`), not `capabilities:manage`: the instance
 resolves credentials for that person alone. The card itself also needs
 `sessions:control` to add the tools to the chat and continue it. A
-workspace-owned account or a custom source needs `connections:write`, and
-binding an instance that is not already bound to the same account still needs
-`capabilities:manage`. Where this client cannot connect a personal account
+workspace-owned account, a custom source, or binding an instance that is not
+already bound to the same account needs `connections:write`. Where this client
+cannot connect a personal account
 (for example a shared service identity), the card says so instead of offering
 Connect.
 

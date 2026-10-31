@@ -1,5 +1,95 @@
 # @opengeni/api-router
 
+## 6.3.1
+
+### Minor Changes
+
+- d91058a: Agents can call a person. The new `call_user` tool rings the person's phones with the system's incoming-call screen (CallKit on iOS, through a PushKit VoIP push) when something cannot wait, waits up to 40 seconds while it rings, and returns `answered`, `declined`, `missed` or `cancelled`. Answering opens the chat's voice call, which starts by saying why the agent called. Nothing rings until the person turns on "Let agents call this iPhone" on that phone (native push rule `call`); "Teammates' agents too" (`call_members`) lets agents of other workspace members call them. One call rings a person at a time, a chat calls at most three times an hour, and after a decline it cannot call again for 15 minutes. A missed call leaves a "Missed call" notification. New: `session.agentCall.ringing` and `session.agentCall.settled` events (also subscribable by workspace webhooks, so a product can ring its own app with its own push credentials), `GET /v1/workspaces/:workspaceId/agent-calls/:callId` with `/answer` and `/decline`, the SDK's `getAgentCall`, `answerAgentCall` and `declineAgentCall`, the native push device's `voipToken`, and in `@opengeni/react-native` `useIncomingAgentCalls` and `useNativeVoipToken`.
+- c35704f: Meetings name themselves. Nobody has to type a name: a meeting started without one is named after the event on its owner's connected Google or Outlook calendar at the time it started, or else, once its notes are written, from what was said (the built-in summary passes a short name to `meeting_notes_save` as the new `title`). A name someone types, at start or by renaming, always wins and is never replaced. Recordings carry `titleSource` (`person`, `calendar`, `conversation`, `app` or `default`; migration 1132 adds it, and existing recordings are `person`), and create requests may pass `titleSource: "app"` for a title the app only guessed, such as the desktop app's "Zoom meeting". The web and phone recorders no longer send a made-up date name, the recorder shows the calendar name once the server has it (`serverTitle` in the upload status), and the meeting page shows the new name when the notes arrive. Private, declined, cancelled and all-day events are never used, and the calendar lookup never holds up capture.
+- f4ad926: New organizations start with "Switch models when subscriptions run out" on: when a chat's subscriptions run out, it continues on a subscription model of the same tier from another provider instead of waiting, and never falls back to Opengeni credits. Existing organizations keep their stored value. Rolling migration 1144 changes only the value the new-organization seed writes. Switching still takes effect only where the deployment turns it on (`OPENGENI_SUBSCRIPTION_CROSS_PROVIDER_FAILOVER_ENABLED`, off by default). Organization and workspace model-account settings now report `crossProviderFailoverAvailable`, and the settings pages hide the switch and its fallback order while the deployment doesn't switch models, instead of showing a setting that does nothing.
+- e53c5ad: An organization's credential provider can now also serve its members' Personal workspaces. Organization settings → Developer → credential provider has a "Personal workspaces" checkbox, off by default, so existing providers keep their current reach. Through the API it is `allowPersonalWorkspaces` on `PUT /v1/organizations/:organizationId/credential-provider`; like every field there it is replaced on each PUT, so leaving it out turns it off.
+
+  The workspace filter still selects shared workspaces only, and the checkbox alone decides Personal workspaces. A Personal workspace's own provider still wins over the organization's. Requests from a Personal workspace carry its workspace ID and, for turns, the member as `initiatingHuman`. Organization webhooks still never cover Personal workspaces, because they would send a member's private chat activity to the organization's endpoint.
+
+- a550481: An organization can now limit what each person spends from its credits in their own Personal workspace each month. Organization settings → Billing has a "Personal workspaces" section with a monthly limit per person, off by default. Through the API it is `personalWorkspaceMonthlyCredits` (USD micros, `null` for no limit) on `GET`/`PATCH /v1/organizations/:organizationId/privacy-settings`, next to the existing Personal workspaces switch, and the same owners, admins and administration-capable organization keys change it. Agents can't, even with full access, as with workspace budgets. Setting a limit needs `OPENGENI_USAGE_ALLOWANCES_ENABLED`; removing one doesn't.
+
+  The limit acts as the monthly budget of every Personal workspace that has no budget of its own: usage reads report it with `resetsAt` at the next calendar month (UTC), and work stops with the usual `allowance_exhausted` refusal once it is spent. It counts the month's spending so far, including before it was set. Work paid by the person's own model plans or keys spends no credits and never counts. The person sees the limit on their Usage page.
+
+- 1afdda0: An organization's Allowed models list is now a ceiling for every workspace in it. A workspace's own list only narrows it: a model runs only when both lists allow its provider and both allow the model, so a workspace that allows every model allows exactly what its organization allows, and listing a model the organization doesn't allow never lets it run. Before, a workspace's own list replaced the organization's. The combined policy applies at the API edges, the omitted-model default, goal admission, subscription placement and failover, and the worker's model gate. The workspace model catalog adds `organizationAllowed` (false when the organization's list rules a model out, omitted when it allows every model), and the Allowed models form shows those models locked. `GET /v1/workspaces/:workspaceId/model-policy` still returns the workspace's own lists as saved, next to the `organization` lists.
+
+### Patch Changes
+
+- ced76d5: Claude's web-search citation tags no longer show as raw markup in chat. With Anthropic's native web search, Claude marks quotes with `cite` tags that the API turns into citations only in ordinary answer text, so an answer given through the `wait_for_input` reply arrived with the tags intact. The Claude transport now rewrites them in that reply into the quoted text linked to the search result the tag's index names (or plain text when the index names no result). Chat timelines (web, desktop and mobile), copied text, Slack and Teams also show any remaining tag as its text, while fenced and inline code keep their contents exactly; nested tags are replaced innermost first. A Slack message an earlier release already started keeps that release's bytes on retry. `@opengeni/contracts/claude-cite-tags` exports `hasClaudeCiteTag`, `rewriteClaudeCiteTags` and the `ClaudeCiteSource` type.
+- c0b945b: A signed-in teammate without `enrollments:manage` who mints a Connected Machine connect command without a `scope` now gets an Only me (`user`) command instead of a refusal. Machine managers, keys and services keep the original workspace default.
+- d39663d: When a member is suspended, removed from the organization or removed from a workspace, the confirmation says that schedules they own stop running. A schedule stopped because its owner's access changed now also says what happens when the owner has left: it can't run as them again, so someone else can set it up as theirs or delete it.
+- 008d073: Members of a shared workspace can now edit its instructions and review the agent's proposed changes to them, like shared Skills and Knowledge. Anyone who can start chats there (`sessions:create`), acting as themselves, may create drafts, import the earlier persona, propose onboarding instructions, activate and roll back, and approve or reject instruction proposals; the Knowledge page shows these controls to them. Viewers still can't, and tokens that only carry `sessions:create` (an agent's own, a worker's, an organization or workspace API key's, or another product's person) are refused, so agents still change instructions only through agent learning. A member's personal API key, or a chat they gave full access, acts as that member, like their connected agent, within what they allowed. The workspace's learning settings stay with admins and the Personal owner. New `requireWorkspaceContributorGrant` / `workspaceContributionAuthorized` in `@opengeni/core` and `canContributeWorkspaceContent` in `@opengeni/react`.
+- d0295f8: People who can start chats in a shared workspace (`sessions:create`) can now read its budget configuration: `GET /v1/workspaces/:workspaceId/allowance` and `/allowance/state` (`getWorkspaceAllowance`, `getWorkspaceAllowanceState`), alongside the remaining amount `/usage/me` already showed them. They still can't read other members' usage or change budgets or member limits, and agents, services, session-bound tokens and anyone using Opengeni through another product (a product's user in an embedded chat or Site, or asUser through an organization key) stay refused. The app action catalog lists these reads under `sessions:create`.
+- e8b24d1: Regular members can do more without an admin. Anyone who can start chats in a workspace can now edit or delete its shared bot templates (only the creator or an admin can make one Only me; templates now report `viewerCanMakePrivate`, and the Edit dialog offers Only me only when it is true). Members can record social posts through a connection they can see, and posts through workspace-owned connections still need workspace settings access. Organization admins, not only the owner, can now share a workspace's Slack bot with other workspaces when they manage that workspace's integrations.
+- 99159e9: A session can now mix GitHub repositories from several GitHub App installations and from your personal GitHub. Each mounted repository commits as its own identity: the Opengeni app's bot for App repositories, your `users.noreply.github.com` address for repositories used through your GitHub. The worker writes `user.name`/`user.email` into each repository's local git config (marked `opengeni.managedIdentity`; an identity you set yourself is kept) instead of one sandbox-wide `GIT_AUTHOR_*`/`GIT_COMMITTER_*` identity, so a sandbox with both no longer fails setup with "repository resources require different Git commit identities". New sandboxes no longer carry a bot identity in their environment, so the sandbox viewer and terminal create the same environment as the worker and a session with only personal repositories never commits as the bot. Sandboxes created before this change keep their pinned environment; a `git` wrapper written to the per-turn CLI wrapper directory (`$HOME/.opengeni/bin`, ahead of the real git on PATH) runs git without the baked identity when the repository has a managed identity, and passes through otherwise. A deployment-configured `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` stays the default identity for App and host repositories. `applyGitAuthPointerEnvironment` from `@opengeni/config` ignores its deprecated identity argument; `GitCredentialBindingSeed` in `@opengeni/runtime` gains an optional `identity`.
+
+  The repository picker shows one row per repository. A repository reachable both through the Opengeni app and your GitHub has an "Acts as" choice when selected (you by default when your GitHub can write to it), and repositories from any number of App installations can be selected together with your own. The picker footer is now "GitHub access", with "Your GitHub" (connect, or choose which repositories Opengeni may use) and "Opengeni app" (installations and "Install on another account"). Automations can also select repositories from several installations. `RepositoryContextPickerProps` drops `selectedInstallationId` and gains `personalGitHubManageUrl`; the app context drops `selectedInstallationId`.
+
+- 1987adf: The phone and desktop apps can give a session full access. `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/admin-access` required a same-origin browser request from every caller, so the apps, which sign in with their own bearer credential and send no browser origin, always got 403 and showed "Couldn't give full access". A bearer caller now skips the browser-origin check, as other bearer-friendly routes already do; a cookie session still has to be same-origin, and only the person themselves can give it.
+- 5c1177a: The owner of a Personal workspace can now change its credential profile, remove secrets from its chats' stored history, configure Memory-to-Slack publishing and set its Slack task policy, like a workspace admin does in a shared workspace. These routes now use the workspace settings check (a workspace admin, or the verified owner of the Personal workspace); delegated owner lookalikes and non-admin members of shared workspaces are still refused.
+- 139a2be: On a deployment that only lets listed email addresses in (`allowedUserEmails`), someone whose address isn't listed now gets a clear refusal at sign-in instead of the generic `401 FAILED_TO_CREATE_SESSION`, which read like an outage. Email sign-in answers `403 { code: "SIGN_IN_EMAIL_NOT_ALLOWED" }` before the password is checked, so a right, wrong or unknown password gets the same answer. Passkey sign-in returns the same code, and Google or GitHub sign-in redirects with `error=sign_in_email_not_allowed`. The sign-in page (also used by the desktop and phone apps) says "This email can't sign in here. Ask your admin for access." A phone or desktop app whose address was removed between web sign-in and code redemption still gets `403 access_denied`. New `MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE` in `@opengeni/contracts`.
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [b5c112c]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [c2e0db6]
+- Updated dependencies [923c161]
+- Updated dependencies [e104fbb]
+- Updated dependencies [ced76d5]
+- Updated dependencies [40b79c9]
+- Updated dependencies [4260008]
+- Updated dependencies [d872b12]
+- Updated dependencies [64beb77]
+- Updated dependencies [c35704f]
+- Updated dependencies [98542ad]
+- Updated dependencies [6bbd24f]
+- Updated dependencies [008d073]
+- Updated dependencies [d0295f8]
+- Updated dependencies [e8b24d1]
+- Updated dependencies [99159e9]
+- Updated dependencies [f4ad926]
+- Updated dependencies [e53c5ad]
+- Updated dependencies [83520e5]
+- Updated dependencies [a550481]
+- Updated dependencies [278ad58]
+- Updated dependencies [59d708c]
+- Updated dependencies [79605f2]
+- Updated dependencies [af8fb16]
+- Updated dependencies [bb16142]
+- Updated dependencies [94ba6a2]
+- Updated dependencies [3a47d0b]
+- Updated dependencies [139a2be]
+- Updated dependencies [2c3a01c]
+- Updated dependencies [1afdda0]
+  - @opengeni/contracts@6.3.0
+  - @opengeni/db@6.3.0
+  - @opengeni/core@6.3.0
+  - @opengeni/config@6.3.0
+  - @opengeni/runtime@6.3.0
+  - @opengeni/codemode@6.3.0
+  - @opengeni/artifact-tool@6.3.0
+  - @opengeni/capabilities@6.3.0
+  - @opengeni/codex@6.3.0
+  - @opengeni/documents@6.3.0
+  - @opengeni/events@6.3.0
+  - @opengeni/github@6.3.0
+  - @opengeni/interaction@6.3.0
+  - @opengeni/observability@6.3.0
+  - @opengeni/storage@6.3.0
+  - @opengeni/tool-gateway@6.3.0
+  - @opengeni/vaults@6.3.0
+  - @opengeni/vaults-bitwarden@6.3.0
+  - @opengeni/vaults-keeper@6.3.0
+  - @opengeni/vaults-onepassword@6.3.0
+  - @opengeni/vaults-protonpass@6.3.0
+  - @opengeni/agent-proto@6.3.0
+  - @opengeni/network@6.3.0
+  - @opengeni/xai-subscription@6.3.0
+
 ## 6.2.1
 
 ### Patch Changes

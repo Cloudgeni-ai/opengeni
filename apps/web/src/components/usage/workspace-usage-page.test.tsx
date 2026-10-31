@@ -127,7 +127,7 @@ describe("Workspace usage page", () => {
     }
   });
 
-  test("a Personal workspace shows the owner's own use and that budgets are for shared workspaces", async () => {
+  test("a Personal workspace without a limit shows the owner's own use", async () => {
     usage = {
       period: "month",
       workspace: { ...row("workspace", 31_402, null), subjectId: undefined },
@@ -137,12 +137,40 @@ describe("Workspace usage page", () => {
     const rendered = await render("Solo org");
     try {
       expect(rendered.text).toContain(`${formatCredits(31_402)} used this month`);
-      expect(rendered.text).toContain("Your Personal workspace uses Solo org's credits");
+      expect(rendered.text).toContain(
+        "Your Personal workspace uses Solo org's credits with no monthly limit.",
+      );
       expect(rendered.text).not.toContain("Set a budget");
       expect(budgetOptions.length).toBeGreaterThan(0);
       for (const options of budgetOptions) {
         expect(options).toEqual({ roster: false, budget: false });
       }
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a Personal workspace under the organization's limit per person shows that limit, not a workspace budget", async () => {
+    usage = {
+      period: "month",
+      workspace: {
+        ...row("workspace", 50_000_000, 50_000_000),
+        subjectId: undefined,
+        fraction: 1,
+        status: "exhausted",
+        resetsAt: "2026-12-01T00:00:00.000Z",
+      },
+      members: [row(viewer, 50_000_000, null)],
+      nextCursor: null,
+    };
+    const rendered = await render("Solo org");
+    try {
+      expect(rendered.text).toContain(
+        "What your Personal workspace can spend from Solo org's credits each month.",
+      );
+      expect(rendered.text).toContain("An organization owner or admin can raise this limit.");
+      expect(rendered.text).not.toContain("Workspace budget");
+      expect(rendered.text).not.toContain("the workspace budget applies to everyone");
     } finally {
       await rendered.unmount();
     }

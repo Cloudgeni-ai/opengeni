@@ -65,6 +65,9 @@ const COPIED = [
   // only to that same person's fork, a policy pin never does.
   "codex_pinned_credential_id",
   "codex_pin_source",
+  // The fork's first request repeats the source's history, so it keeps the
+  // source's search-record form (docs/web-search.md).
+  "search_records_as_input",
 ] as const;
 
 const fresh = (value: unknown) => () => value;
@@ -379,6 +382,7 @@ async function configuredSource(org: Org) {
   // Settings changed after creation carry over too.
   await shared.admin`update sessions set keep_live = true, title = 'Release plan',
     title_source = 'user', description = 'Owns the release checklist',
+    search_records_as_input = true,
     avatar = ${shared.admin.json({ kind: "emoji", emoji: "🚀", hue: 210 })}
     where id = ${session.id}`;
   return session.id;
@@ -497,6 +501,7 @@ describe("a fork is the same agent as its source", () => {
       "keep_live",
       "instructions",
       "max_nested_agent_depth_override",
+      "search_records_as_input",
     ]) {
       expect({ column, value: source[column] }).not.toEqual({ column, value: blank[column] });
     }

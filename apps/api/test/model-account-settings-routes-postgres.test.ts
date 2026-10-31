@@ -216,11 +216,14 @@ describe.skipIf(!realDb)("model-account settings routes", () => {
       "workspace",
     );
     expect(overridden.json.canEdit).toBe(true);
+    // This deployment doesn't switch models, and every response says so.
+    expect(overridden.json.crossProviderFailoverAvailable).toBe(false);
 
     // Beta: the member reads but does not administer it.
     const betaRead = await call(member, "GET", betaPath);
     expect(betaRead.status).toBe(200);
     expect(betaRead.json.canEdit).toBe(false);
+    expect(betaRead.json.crossProviderFailoverAvailable).toBe(false);
     expect(
       (await call(member, "PATCH", betaPath, { personalConnectionsAllowed: false })).status,
     ).toBe(403);
@@ -230,6 +233,11 @@ describe.skipIf(!realDb)("model-account settings routes", () => {
       locked: ["personalConnectionsAllowed"],
     });
     expect(locked.status).toBe(200);
+    expect(locked.json.crossProviderFailoverAvailable).toBe(false);
+    const lockedOverview = await call(owner, "GET", `${organizationPath}/overview`);
+    expect(
+      (lockedOverview.json.organization as Record<string, unknown>).crossProviderFailoverAvailable,
+    ).toBe(false);
     const afterLock = await call(member, "GET", alphaPath);
     expect(
       (afterLock.json.overrides as Record<string, unknown>).personalConnectionsAllowed,

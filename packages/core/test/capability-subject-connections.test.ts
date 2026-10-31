@@ -367,8 +367,15 @@ describe("subject-owned capability connection references", () => {
           },
         });
         expect((await getConnectorToolPermissions(input)).defaultPermission).toBe("block");
+        // The choice belongs to the login: it is kept where the login was
+        // connected, not in the workspace it was made from.
         expect(
-          await listConnectorToolPermissionPolicies(db, { ...origin, connectionId: remote.id }),
+          (
+            await listConnectorToolPermissionPolicies(db, { ...origin, connectionId: remote.id })
+          ).map((row) => row.policy),
+        ).toEqual(["block"]);
+        expect(
+          await listConnectorToolPermissionPolicies(db, { ...workspace, connectionId: remote.id }),
         ).toEqual([]);
         expect(
           await listConnectorToolPermissionPolicies(db, { ...workspace, connectionId: local.id }),
@@ -406,7 +413,7 @@ describe("subject-owned capability connection references", () => {
         ).rejects.toThrow();
         expect(
           (
-            await listConnectorToolPermissionPolicies(db, { ...workspace, connectionId: remote.id })
+            await listConnectorToolPermissionPolicies(db, { ...origin, connectionId: remote.id })
           ).map((row) => row.policy),
         ).toEqual(["block"]);
       } finally {

@@ -34,6 +34,7 @@ describe("workspace credential provider precedence", () => {
     accountId: "account",
     enabled: true,
     workspaceFilter: { externalSource: "product" },
+    allowPersonalWorkspaces: false,
   };
   test("enabled workspace wins; disabled workspace opts out; only absence inherits", () => {
     expect(selectWorkspaceCredentialProvider(scope, workspace, provider, organization)).toBe(
@@ -51,12 +52,50 @@ describe("workspace credential provider precedence", () => {
       organization,
     );
   });
-  test("Personal never inherits but keeps its own provider", () => {
+  test("Personal inherits only with the Personal switch, and keeps its own provider", () => {
     const personal = { ...workspace, kind: "personal" as const };
     expect(selectWorkspaceCredentialProvider(scope, personal, null, organization)).toBeNull();
     expect(selectWorkspaceCredentialProvider(scope, personal, provider, organization)).toBe(
       provider,
     );
+    const reachesPersonal = { ...organization, allowPersonalWorkspaces: true };
+    expect(selectWorkspaceCredentialProvider(scope, personal, null, reachesPersonal)).toBe(
+      reachesPersonal,
+    );
+    // The filter selects shared workspaces only; the switch alone decides Personal.
+    expect(
+      selectWorkspaceCredentialProvider(
+        scope,
+        { ...personal, externalSource: null },
+        null,
+        reachesPersonal,
+      ),
+    ).toBe(reachesPersonal);
+    expect(selectWorkspaceCredentialProvider(scope, personal, provider, reachesPersonal)).toBe(
+      provider,
+    );
+    expect(
+      selectWorkspaceCredentialProvider(
+        scope,
+        personal,
+        { ...provider, enabled: false },
+        reachesPersonal,
+      ),
+    ).toBeNull();
+    expect(
+      selectWorkspaceCredentialProvider(scope, personal, null, {
+        ...reachesPersonal,
+        enabled: false,
+      }),
+    ).toBeNull();
+  });
+  test("the Personal switch never widens shared workspaces", () => {
+    expect(
+      selectWorkspaceCredentialProvider(scope, { ...workspace, externalSource: "other" }, null, {
+        ...organization,
+        allowPersonalWorkspaces: true,
+      }),
+    ).toBeNull();
   });
   test("organization must be enabled and match exact source/account", () => {
     expect(

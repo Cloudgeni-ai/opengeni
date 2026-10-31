@@ -2,9 +2,12 @@ import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 import {
+  applyCreditDebitAfterUse,
+  checkWorkspaceAllowance,
   createDb,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getOrganizationPrivacyPreferences,
+  getWorkspaceUsage,
   personalWorkspaceClosedToNewWork,
   updateOrganizationPrivacyPreferences,
 } from "../src/index";
@@ -94,4 +97,97 @@ test("only an owner or admin turns Personal workspaces off", async () => {
   expect(
     (await getOrganizationPrivacyPreferences(client.db, organizationId)).personalWorkspacesEnabled,
   ).toBe(true);
+});
+
+test("an organization's per-person monthly limit stops Personal-workspace spending, nothing else", async () => {
+  const userId = `personal-limit-${crypto.randomUUID()}`;
+  const provisioned = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Personal limit owner",
+  });
+  const membership = provisioned.organizationMemberships[0]!;
+  const accountId = membership.organizationId;
+  const personal = { accountId, workspaceId: membership.personalWorkspaceId };
+  const sharedWorkspaceId = provisioned.accessContext.workspaceGrants.find(
+    (grant) => grant.accountId === accountId && grant.workspaceId !== personal.workspaceId,
+  )?.workspaceId;
+  if (!sharedWorkspaceId) throw new Error("fixture has no shared workspace");
+  const sharedScope = { accountId, workspaceId: sharedWorkspaceId };
+  const charge = (scope: typeof personal, micros: number) => {
+    const key = crypto.randomUUID();
+    return applyCreditDebitAfterUse(client.db, {
+      ...scope,
+      type: "test",
+      amountMicros: micros,
+      sourceType: "test",
+      sourceId: key,
+      idempotencyKey: key,
+    });
+  };
+  const setLimit = (credits: number | null) =>
+    updateOrganizationPrivacyPreferences(client.db, {
+      organizationId: accountId,
+      actorSubjectId: `user:${userId}`,
+      personalWorkspaceMonthlyCredits: credits,
+    });
+
+  // Off by default: no limit anywhere.
+  expect(
+    (await getOrganizationPrivacyPreferences(client.db, accountId)).personalWorkspaceMonthlyCredits,
+  ).toBeNull();
+  await charge(personal, 400_000);
+  expect((await getWorkspaceUsage(client.db, personal)).workspace.limit).toBeNull();
+  expect(await checkWorkspaceAllowance(client.db, personal)).toBeNull();
+
+  // $1 a month: this month's spending so far counts against it.
+  const limited = await setLimit(1_000_000);
+  expect(limited.personalWorkspaceMonthlyCredits).toBe(1_000_000);
+  // The other choices are untouched.
+  expect(limited.personalWorkspacesEnabled).toBe(true);
+  const usage = await getWorkspaceUsage(client.db, personal);
+  expect(usage.workspace).toMatchObject({
+    limit: 1_000_000,
+    used: 400_000,
+    remaining: 600_000,
+    status: "ok",
+    includedCredits: 1_000_000,
+  });
+  expect(usage.workspace.resetsAt).not.toBeNull();
+  expect(await checkWorkspaceAllowance(client.db, personal)).toBeNull();
+
+  await charge(personal, 600_000);
+  expect(await checkWorkspaceAllowance(client.db, personal)).toMatchObject({
+    code: "allowance_exhausted",
+    scope: "workspace",
+    resetsAt: usage.workspace.resetsAt,
+  });
+  // Work paid by the person's own plans or keys spends no credits and goes on.
+  expect(
+    await checkWorkspaceAllowance(client.db, { ...personal, fundedWithoutCredits: true }),
+  ).toBeNull();
+  // Shared workspaces keep their own budgets, or none.
+  await charge(sharedScope, 5_000_000);
+  expect((await getWorkspaceUsage(client.db, sharedScope)).workspace.limit).toBeNull();
+  expect(await checkWorkspaceAllowance(client.db, sharedScope)).toBeNull();
+  // A past month keeps no record of the limit.
+  expect(
+    (await getWorkspaceUsage(client.db, { ...personal, period: "2020-01" })).workspace.limit,
+  ).toBeNull();
+
+  // Removing the limit lets work go on at once.
+  expect((await setLimit(null)).personalWorkspaceMonthlyCredits).toBeNull();
+  expect(await checkWorkspaceAllowance(client.db, personal)).toBeNull();
+
+  await expect(setLimit(-1)).rejects.toThrow();
+  await expect(
+    updateOrganizationPrivacyPreferences(client.db, {
+      organizationId: accountId,
+      actorSubjectId: `user:stranger-${crypto.randomUUID()}`,
+      personalWorkspaceMonthlyCredits: 0,
+    }),
+  ).rejects.toThrow();
+  expect(
+    (await getOrganizationPrivacyPreferences(client.db, accountId)).personalWorkspaceMonthlyCredits,
+  ).toBeNull();
 });
