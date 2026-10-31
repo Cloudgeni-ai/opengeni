@@ -637,7 +637,7 @@ describe.skipIf(!realDb)("shared personal choice with a FORCE-RLS-bound schema o
     expect(stored!.authority).toEqual(frozen.authority);
   });
 
-  test("D-53 your own subscription turned on in a workspace serves only your own turns there", async () => {
+  test("SUB-ELIG-05 D-53: your own subscription turned on in a workspace serves only your own turns there", async () => {
     const f = await fixture();
     const own = await connect(f, f.participant);
     const creatorOwn = await connect(f, f.creator);
