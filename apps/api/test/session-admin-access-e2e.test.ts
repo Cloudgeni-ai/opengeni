@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash, randomBytes } from "node:crypto";
 import {
   organizationAccessPresetPermissions,
   type OrganizationWorkspaceScope,
@@ -53,6 +54,35 @@ function sessionCookie(response: Response): string {
 
 function browser(cookie: string): Record<string, string> {
   return { cookie, origin, "sec-fetch-site": "same-origin", "content-type": "application/json" };
+}
+
+/** The phone app's own credential, from the native sign-in its person approved in a browser. */
+async function phoneCredential(app: ReturnType<typeof createApp>, cookie: string): Promise<string> {
+  const verifier = randomBytes(48).toString("base64url");
+  const authorize = await app.request("/v1/native-app/authorize", {
+    method: "POST",
+    headers: browser(cookie),
+    body: JSON.stringify({
+      redirectUri: "opengeni://auth/callback",
+      codeChallenge: createHash("sha256").update(verifier).digest("base64url"),
+      codeChallengeMethod: "S256",
+      platform: "ios",
+      deviceName: "Maja's iPhone",
+    }),
+  });
+  expect(authorize.status).toBe(200);
+  const { redirectUrl } = (await authorize.json()) as { redirectUrl: string };
+  const token = await app.request("/v1/native-app/token", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      code: new URL(redirectUrl).searchParams.get("code"),
+      codeVerifier: verifier,
+      redirectUri: "opengeni://auth/callback",
+    }),
+  });
+  expect(token.status).toBe(200);
+  return ((await token.json()) as { accessToken: string }).accessToken;
 }
 
 describe("session admin access end to end", () => {
@@ -158,6 +188,22 @@ describe("session admin access end to end", () => {
     expect(
       await (await app.request(sessionAccess(own), { headers: { cookie } })).json(),
     ).toMatchObject({ active: false, allowed: true, canGrant: true });
+
+    // The phone app gives it with its own credential: no browser origin to show.
+    const phone = { authorization: `Bearer ${await phoneCredential(app, cookie)}` };
+    const byPhone = await app.request(sessionAccess(own), {
+      method: "PUT",
+      headers: { ...phone, "content-type": "application/json" },
+      body: JSON.stringify({ durationHours: 1 }),
+    });
+    expect(byPhone.status).toBe(200);
+    expect(await byPhone.json()).toMatchObject({ active: true, grantedBy: { subjectId } });
+    expect(
+      (await app.request(sessionAccess(own), { method: "DELETE", headers: phone })).status,
+    ).toBe(200);
+    expect(
+      await (await app.request(sessionAccess(own), { headers: { cookie } })).json(),
+    ).toMatchObject({ active: false });
 
     // An agent acting as the person with their full access gives it as them;
     // one with less can't, so it can never widen its own access.
