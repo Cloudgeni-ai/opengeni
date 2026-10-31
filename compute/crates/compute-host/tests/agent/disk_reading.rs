@@ -12,7 +12,7 @@ use std::time::Duration;
 use compute_core::{DiskPolicy, DiskSpace, HostPolicy};
 use compute_engine::Writes;
 use compute_host::fleet::{LeaseGate, boot_now};
-use compute_host::protocol::{DiskStatus, Id, ImageId, LevelName, SandboxConfig};
+use compute_host::protocol::{DiskStatus, Id, ImageId, LevelName, SandboxConfig, SleepConfig};
 use compute_host::{Directory, DiskGauge, Handle, HostAgent, HostError};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
@@ -25,6 +25,14 @@ const PLENTY: u64 = 1 << 50;
 /// How long work that waits for a reading is watched not to finish:
 /// several samples, none of which takes a reading.
 const WAITS: Duration = Duration::from_millis(300);
+
+/// Saves after an hour idle, so the host may save it, but none of these
+/// tests sees it sleep.
+const SAVES_LATER: SleepConfig = SleepConfig {
+    pause_after_ms: Some(3_600_000),
+    save_after_ms: Some(3_600_000),
+    ..NEVER
+};
 
 struct Host {
     handle: Handle,
@@ -86,8 +94,17 @@ impl Host {
     }
 
     fn create(&self, id: Id, image: Option<ImageId>) -> JoinHandle<Result<(), HostError>> {
+        self.create_as(id, image, SAVES_LATER)
+    }
+
+    fn create_as(
+        &self,
+        id: Id,
+        image: Option<ImageId>,
+        sleep: SleepConfig,
+    ) -> JoinHandle<Result<(), HostError>> {
         let handle = self.handle.clone();
-        let mut config = SandboxConfig::new(1, 128, NEVER);
+        let mut config = SandboxConfig::new(1, 128, sleep);
         if let Some(image) = image {
             config = config.with_image(image);
         }
@@ -107,6 +124,19 @@ impl Host {
         assert!(first > 2, "first files {first}, save {save}");
         (first, save)
     }
+}
+
+/// A sandbox the host never saves on its own, such as a CI runner, books
+/// no save from its create on, only its disk's growth, which takes no
+/// inodes; one it may save books its save.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_the_host_never_saves_books_no_save() {
+    let host = Host::start(None).await;
+    host.read(PLENTY).await;
+    host.create_as(id(1), None, NEVER).await.unwrap().unwrap();
+    assert_eq!(host.read(PLENTY).await.inodes_booked, 0);
+    host.create(id(2), None).await.unwrap().unwrap();
+    assert!(host.read(PLENTY).await.inodes_booked > 0, "its save");
 }
 
 /// A create short of inodes by no more than what an earlier create's

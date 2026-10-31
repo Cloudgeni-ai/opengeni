@@ -370,9 +370,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // claimed the wake is checked and booked without it; its disk is
         // judged by the copy's own then (see `Self::adopted_room`).
         let unclaimed = self.size(&config, Some(0));
-        match self.can_create(id, &config, unclaimed, true) {
-            Ok(Room::Now) => {}
-            Ok(Room::AfterReading) => {
+        let policy = match self.can_create(id, &config, unclaimed, true) {
+            Ok((Room::Now, policy)) => policy,
+            Ok((Room::AfterReading, _)) => {
                 let waiting = AfterReading::Adopt(id, Box::new(config), owner, from_files, reply);
                 self.after_reading(waiting);
                 return;
@@ -381,7 +381,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let _ = reply.send(Err(error));
                 return;
             }
-        }
+        };
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
             Err(problem) => {
@@ -399,7 +399,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         self.preparing.insert(id.0);
         let by_ms = first_wake_by_ms();
-        self.input(self.first_wake(id, unclaimed, true, by_ms));
+        self.input(self.first_wake(id, unclaimed, policy, true, by_ms));
         let mut record = Record::new(id, ordinal, allocation, config);
         record.first_wake_by_ms = Some(by_ms);
         self.claim_copy(id, record, owner, from_files, reply);

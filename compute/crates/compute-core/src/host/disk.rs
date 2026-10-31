@@ -170,10 +170,29 @@ impl DiskRoom {
 
 impl Sandbox {
     /// Whether it books disk for its next save: its VM holds state no copy
-    /// has yet, or it is waking into one.
+    /// has yet, or it is waking into one, and the host may save it without
+    /// being asked (see [`crate::SleepPolicy::saves`]) or is saving it. One
+    /// the host never saves so books its save only when one is asked for,
+    /// which then waits for room as a checkpoint does; see
+    /// [`Self::save_need`].
     pub(super) fn books_save(&self) -> bool {
-        self.reserves()
-            || (self.state.level.has_process() && self.state.durability == Durability::Volatile)
+        let unsaved = self.reserves()
+            || (self.state.level.has_process() && self.state.durability == Durability::Volatile);
+        let saving = self
+            .in_flight
+            .is_some_and(|flight| flight.step == Step::Save);
+        unsaved && (self.policy().saves() || saving)
+    }
+
+    /// What a save of it books besides what it already does: the save
+    /// itself for one that does not book it ahead (see
+    /// [`Self::books_save`]).
+    pub(super) fn save_need(&self) -> DiskSpace {
+        if self.policy().saves() {
+            DiskSpace::default()
+        } else {
+            self.save_space()
+        }
     }
 
     /// What its next save may need at most.
@@ -207,6 +226,16 @@ impl Sandbox {
         self.booking(true).saturating_sub(self.booking(false))
     }
 
+    /// What `step` of it, admitted against the disk, books besides what it
+    /// already does: [`Self::checkpoint_need`] or [`Self::save_need`].
+    pub(super) fn write_need(&self, step: Step) -> DiskSpace {
+        match step {
+            Step::Checkpoint => self.checkpoint_need(),
+            Step::Save => self.save_need(),
+            _ => DiskSpace::default(),
+        }
+    }
+
     /// [`Self::disk_booking`], with a step that books the whole disk
     /// running or not.
     fn booking(&self, whole_disk: bool) -> DiskSpace {
@@ -229,11 +258,13 @@ impl Sandbox {
     }
 
     /// What a wake of it books besides what it already does: its next
-    /// save, its disk's growth, and from object storage its local copy.
+    /// save if the host may save it unasked, its disk's growth, and from
+    /// object storage its local copy.
     pub(super) fn disk_need(&self) -> DiskSpace {
-        let mut awake = self
-            .save_space()
-            .add(DiskSpace::bytes(self.local_disk.growth));
+        let mut awake = DiskSpace::bytes(self.local_disk.growth);
+        if self.policy().saves() {
+            awake = awake.add(self.save_space());
+        }
         if self.local_disk.hydrating || self.state.level == Level::Remote {
             awake = awake.add(DiskSpace::save(self.size.fetch));
         }
@@ -412,12 +443,12 @@ impl Host {
     }
 
     /// While the disk cannot book what is booked already, what the wakes
-    /// refused and still held need and what queued checkpoints add, has
-    /// idle sandboxes that may live in object storage give up their local
-    /// copies, least recently used first, as many at once as may be
-    /// evicted. Waits for those to finish and for a reading taken after
-    /// them before giving up more, since what a local copy takes is only
-    /// known from the disk. Returns whether any floor changed.
+    /// refused and still held need and what queued checkpoints and saves
+    /// add, has idle sandboxes that may live in object storage give up
+    /// their local copies, least recently used first, as many at once as
+    /// may be evicted. Waits for those to finish and for a reading taken
+    /// after them before giving up more, since what a local copy takes is
+    /// only known from the disk. Returns whether any floor changed.
     pub(super) fn keep_disk(&mut self, now: At) -> bool {
         let Some(mut room) = self.disk_room() else {
             return false;
@@ -427,10 +458,11 @@ impl Host {
             .iter()
             .filter_map(|id| self.sandboxes.get(id))
             .fold(DiskSpace::default(), |sum, slot| sum.add(slot.disk_need()));
-        let held = self.queues[Step::Checkpoint.index()]
-            .iter()
-            .filter_map(|key| self.sandboxes.get(&key.sandbox))
-            .fold(held, |sum, slot| sum.add(slot.checkpoint_need()));
+        let held = [Step::Checkpoint, Step::Save]
+            .into_iter()
+            .flat_map(|step| self.queues[step.index()].iter().map(move |key| (step, key)))
+            .filter_map(|(step, key)| Some((step, self.sandboxes.get(&key.sandbox)?)))
+            .fold(held, |sum, (step, slot)| sum.add(slot.write_need(step)));
         let leaving = self
             .sandboxes
             .values()

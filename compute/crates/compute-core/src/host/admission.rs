@@ -12,6 +12,7 @@ use super::disk::{DiskRoom, DiskSpace, Resource};
 use super::{Action, Host, Notice, Squeeze};
 use crate::ids::SandboxId;
 use crate::level::{Level, Priority, Step};
+use crate::policy::SleepPolicy;
 use crate::sandbox::{QueueKey, Sandbox};
 use crate::time::At;
 
@@ -31,7 +32,8 @@ pub struct Size {
     /// sandbox reserves none.
     pub cpu: u64,
     /// Bytes of local disk one save of its VM may write at most, booked
-    /// while its VM holds state not saved yet; see [`crate::DiskPolicy`].
+    /// while its VM holds state not saved yet and the host may save it
+    /// unasked, or while a save runs; see [`crate::DiskPolicy`].
     pub save: u64,
     /// Bytes its disk may grow by at most while its VM runs, booked while
     /// it is awake or waking, until [`crate::Input::DiskGrowth`] measures
@@ -135,6 +137,8 @@ const COMPRESSED_PERCENT: u8 = 25;
 pub(super) struct FirstWake {
     /// What the sandbox may take of host memory.
     pub(super) size: Size,
+    /// Whether the host may save it unasked; see [`Sandbox::books_save`].
+    pub(super) saves: bool,
     /// Whether that wake fetches it from object storage.
     pub(super) remote: bool,
     /// When the booking lapses.
@@ -142,11 +146,25 @@ pub(super) struct FirstWake {
 }
 
 impl FirstWake {
+    /// The first wake of a sandbox of `size` that sleeps by `policy`,
+    /// booked until `until`; with `remote` it fetches the sandbox.
+    pub(super) const fn new(size: Size, policy: SleepPolicy, remote: bool, until: At) -> Self {
+        Self {
+            size,
+            saves: policy.saves(),
+            remote,
+            until,
+        }
+    }
+
     /// What the wake books on local disk, as the sandbox does once added:
-    /// its next save, what its disk may grow by, and from object storage
-    /// its local copy.
+    /// its next save if the host may save it unasked, what its disk may
+    /// grow by, and from object storage its local copy.
     pub(super) fn disk(&self) -> DiskSpace {
-        let mut disk = DiskSpace::save(self.size.save).add(DiskSpace::bytes(self.size.disk));
+        let mut disk = DiskSpace::bytes(self.size.disk);
+        if self.saves {
+            disk = disk.add(DiskSpace::save(self.size.save));
+        }
         if self.remote {
             disk = disk.add(DiskSpace::save(self.size.fetch));
         }
@@ -365,16 +383,17 @@ impl Host {
     /// adopted here and woken at once. Its first wake must fit as a wake
     /// queued behind those already queued would: memory counting the
     /// instant relief a wake may wait for, processor time, and the local
-    /// disk the wake books, from object storage with `remote`, together
-    /// with `files`, what is written for it before it joins the core (its
-    /// first files). What it books already with [`crate::Input::Creating`]
-    /// counts as free for it.
+    /// disk the wake books for a sandbox that sleeps by `policy`, from
+    /// object storage with `remote`, together with `files`, what is written
+    /// for it before it joins the core (its first files). What it books
+    /// already with [`crate::Input::Creating`] counts as free for it.
     #[must_use]
     pub fn create_room(
         &self,
         now: At,
         sandbox: SandboxId,
         size: Size,
+        policy: SleepPolicy,
         remote: bool,
         files: DiskSpace,
     ) -> CreateRoom {
@@ -397,13 +416,7 @@ impl Host {
             if let Some(own) = own {
                 room.give_back(own.disk());
             }
-            let disk = FirstWake {
-                size,
-                remote,
-                until: now,
-            }
-            .disk()
-            .add(files);
+            let disk = FirstWake::new(size, policy, remote, now).disk().add(files);
             if let Err(short) = room.take(disk) {
                 if !room.may_take(disk, self.disk_spent) {
                     return CreateRoom::Short(short.resource, short.needed, short.free);
@@ -633,15 +646,24 @@ impl Host {
         changed
     }
 
-    /// Starts queued checkpoints while their limit allows and the disk
-    /// left can book what each adds while it runs (see
-    /// [`Sandbox::checkpoint_need`]). One that does not fit stays queued
-    /// without holding up those behind it, and is tried again at every
-    /// decision, a disk reading's among them; [`Host::keep_disk`] makes
-    /// room for it meanwhile.
-    pub(super) fn admit_checkpoints(&mut self, left: Option<&mut Left>, out: &mut Vec<Action>) {
-        let index = Step::Checkpoint.index();
-        let limit = self.policy.limits.get(Step::Checkpoint);
+    /// Starts queued checkpoints or saves, `step`, while their limit allows
+    /// and the disk left can book what each adds while it runs (see
+    /// [`Sandbox::checkpoint_need`] and [`Sandbox::save_need`]). One that
+    /// does not fit stays queued without holding up those behind it, and is
+    /// tried again at every decision, a disk reading's among them;
+    /// [`Host::keep_disk`] makes room for it meanwhile. A save that adds
+    /// nothing starts even on an overdrawn disk: it books its image ahead,
+    /// and one that relieves memory must not wait. A checkpoint always
+    /// waits for room: its image stays beside the next save its sandbox
+    /// goes on booking.
+    pub(super) fn admit_writes(
+        &mut self,
+        step: Step,
+        left: Option<&mut Left>,
+        out: &mut Vec<Action>,
+    ) {
+        let index = step.index();
+        let limit = self.policy.limits.get(step);
         let mut disk = left.and_then(|left| left.disk.as_mut());
         let keys: Vec<QueueKey> = self.queues[index].iter().copied().collect();
         for key in keys {
@@ -651,15 +673,17 @@ impl Host {
             let need = self
                 .sandboxes
                 .get(&key.sandbox)
-                .map_or_else(DiskSpace::default, Sandbox::checkpoint_need);
-            if disk
-                .as_deref_mut()
-                .is_some_and(|room| room.take(need).is_err())
+                .map_or_else(DiskSpace::default, |slot| slot.write_need(step));
+            let checked = step == Step::Checkpoint || need != DiskSpace::default();
+            if checked
+                && disk
+                    .as_deref_mut()
+                    .is_some_and(|room| room.take(need).is_err())
             {
                 continue;
             }
             self.queues[index].remove(&key);
-            self.start(Step::Checkpoint, key, out);
+            self.start(step, key, out);
         }
     }
 

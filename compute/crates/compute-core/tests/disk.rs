@@ -1,7 +1,8 @@
-//! Disk for saves: every VM whose state is not saved yet books what its
-//! next save may write, a wake the disk cannot book is refused at once, and
-//! in the background idle sandboxes in object storage give up their local
-//! copies while the disk is short.
+//! Disk for saves: every VM whose state is not saved yet and that the host
+//! may save unasked books what its next save may write, one it never saves
+//! so books its save only once one is asked for, a wake the disk cannot
+//! book is refused at once, and in the background idle sandboxes in object
+//! storage give up their local copies while the disk is short.
 
 use std::time::Duration;
 
@@ -57,10 +58,14 @@ impl Rig {
     }
 
     fn add_sized(&mut self, id: u128, state: State, size: Size) {
+        self.add_with(id, state, size, rules());
+    }
+
+    fn add_with(&mut self, id: u128, state: State, size: Size, policy: SleepPolicy) {
         self.send(Input::Add {
             sandbox: SandboxId(id),
             state,
-            policy: rules(),
+            policy,
             size,
             last_activity: self.now,
         });
@@ -285,6 +290,126 @@ fn bookings_are_rebuilt_from_states_after_a_restart() {
     let disk = rig.host.disk().unwrap();
     assert_eq!((disk.booked.bytes, disk.booked.inodes), (2 * GIB, 32));
     assert_eq!(disk.free().bytes, 7 * GIB);
+}
+
+fn steps(actions: &[Action]) -> Vec<(u128, Step)> {
+    started(actions)
+        .into_iter()
+        .map(|(id, step, _)| (id, step))
+        .collect()
+}
+
+/// A VM the host never saves on its own, such as a CI runner's, books no
+/// save it would never take: only what its disk may grow by. A save asked
+/// for, as when its host is drained, books one once it can, and waits for
+/// room meanwhile, which idle copies in object storage make.
+#[test]
+fn a_vm_the_host_never_saves_books_its_save_only_once_one_is_asked_for() {
+    let mut rig = Rig::new();
+    // Saves of 4 GiB, and a disk that may grow by 1 GiB.
+    let size = Size {
+        disk: GIB,
+        ..Size::whole(4 * GIB)
+    };
+    rig.add_with(1, State::RUNNING, size, SleepPolicy::NEVER);
+    rig.add(2, archived());
+    // 4 GiB available, 1 GiB of it reserved: room for its disk's growth,
+    // not for its save as well.
+    rig.at(1);
+    assert_eq!(steps(&rig.disk(4 * GIB, 10_000)), []);
+    assert_eq!(rig.booked(), GIB, "only its disk's growth");
+
+    let actions = rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Saved,
+    });
+    let [(1, Step::Pause, op)] = started(&actions)[..] else {
+        panic!("no pause: {actions:?}");
+    };
+    // Paused, it books nothing more, but what its disk grew by stays
+    // booked until a reading. Its save does not fit: the archived copy
+    // makes room.
+    let actions = rig.finish(1, op);
+    let [(2, Step::Evict, evict)] = started(&actions)[..] else {
+        panic!("no evict: {actions:?}");
+    };
+    assert_eq!(rig.booked(), GIB);
+    assert_eq!(steps(&rig.finish(2, evict)), []);
+    // A reading after it shows room: the save starts, and books its image
+    // while it runs.
+    let actions = rig.disk(5 * GIB, 10_000);
+    let [(1, Step::Save, op)] = started(&actions)[..] else {
+        panic!("no save: {actions:?}");
+    };
+    assert_eq!(rig.booked(), 4 * GIB);
+    // What it wrote stays booked until a reading shows it, also once its
+    // VM process has ended.
+    let actions = rig.finish(1, op);
+    assert_eq!(rig.booked(), 4 * GIB);
+    let [(1, Step::Drop, op)] = started(&actions)[..] else {
+        panic!("no drop: {actions:?}");
+    };
+    rig.finish(1, op);
+    assert_eq!(rig.level(1), Level::Saved);
+    assert_eq!(rig.booked(), 4 * GIB);
+    rig.disk(GIB, 10_000);
+    assert_eq!(rig.booked(), 0);
+}
+
+/// What a failed save of a VM the host never saves on its own wrote is
+/// counted once, and one that wrote nothing books nothing after it.
+#[test]
+fn a_failed_save_of_a_vm_the_host_never_saves_is_counted_once() {
+    let mut rig = Rig::new();
+    let paused = State::new(Level::Paused, Durability::Volatile, false);
+    rig.add_with(1, paused, Size::whole(2 * GIB), SleepPolicy::NEVER);
+    rig.disk(10 * GIB, 10_000);
+    assert_eq!(rig.booked(), 0);
+    let actions = rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Saved,
+    });
+    let [(1, Step::Save, op)] = started(&actions)[..] else {
+        panic!("no save: {actions:?}");
+    };
+    assert_eq!(rig.booked(), 2 * GIB);
+    let failed = |op, wrote| Input::Finished {
+        sandbox: SandboxId(1),
+        op,
+        outcome: Outcome::Failed(compute_core::Failure::Transient),
+        wrote,
+    };
+    rig.send(failed(op, true));
+    assert_eq!(rig.booked(), 2 * GIB, "what it wrote, once");
+    rig.disk(9 * GIB, 10_000);
+    assert_eq!(rig.booked(), 0);
+
+    // Its retry, after a backoff, books its save again; one that wrote
+    // nothing gives that up at once.
+    let actions = rig.at(3600);
+    let [(1, Step::Save, op)] = started(&actions)[..] else {
+        panic!("no retry: {actions:?}");
+    };
+    assert_eq!(rig.booked(), 2 * GIB);
+    rig.send(failed(op, false));
+    assert_eq!(rig.booked(), 0);
+}
+
+/// A save that relieves memory books its image ahead, so it starts even
+/// on an overdrawn disk.
+#[test]
+fn a_save_booked_ahead_starts_on_an_overdrawn_disk() {
+    let mut rig = Rig::new();
+    rig.add(1, State::new(Level::Paused, Durability::Volatile, false));
+    rig.add(2, State::RUNNING);
+    // Both book a save of 1 GiB, beyond the 1 GiB the disk has.
+    rig.disk(2 * GIB, 10_000);
+    assert!(rig.host.disk().unwrap().free().bytes == 0);
+    let actions = rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Saved,
+    });
+    assert!(steps(&actions).contains(&(1, Step::Save)), "{actions:?}");
 }
 
 #[test]

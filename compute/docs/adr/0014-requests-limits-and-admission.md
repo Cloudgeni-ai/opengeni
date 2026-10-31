@@ -337,10 +337,20 @@ pick a VM.
   held (anonymous, kernel, socket and huge-page memory and the cache that
   stays), which one read gives at once.
 - Local disk is booked the same way, because a full disk blocks the very
-  saves that relieve memory. Every VM whose state is not saved yet books
-  its worst-case next save: its memory size once where files share extents
-  (XFS), twice where they do not (the merge writes a whole new image), plus
-  64 MiB and a few inodes. Bookings plus a kept-back reserve
+  saves that relieve memory. Every VM whose state is not saved yet, and
+  that the host may save without being asked (its sleep settings save it
+  after some idle time or checkpoint it), books its worst-case next save:
+  its memory size once where files share extents (XFS), twice where they
+  do not (the merge writes a whole new image), plus 64 MiB and a few
+  inodes. A VM the host never saves on its own, such as a CI runner's,
+  which ends when its job does, books no save it would never take: on a
+  host of large runners those bookings alone would refuse creates and
+  wakes for disk that stays free. A save asked of it (a request to sleep,
+  as when its host is drained) books one once the disk can, and waits
+  for room meanwhile as a checkpoint does, idle copies in object storage
+  giving up their local disk for it. A save booked ahead never waits for
+  room, even on an overdrawn disk, since it relieves memory and writes
+  into its own booking. Bookings plus a kept-back reserve
   (`--disk-reserve-mib`, `--disk-reserve-inodes`; by default a twentieth
   of the filesystem, at least 1 GiB and 1024 inodes) stay within what the
   filesystem has free, read every sample. A booking whose save has written
