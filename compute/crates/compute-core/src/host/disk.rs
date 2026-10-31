@@ -437,7 +437,7 @@ impl Host {
     /// a host that books no disk. Short by no more than what bookings that
     /// ended since the last reading stood for, it awaits the next reading
     /// (see [`Self::disk_awaits_reading`]), which decides it, as a create
-    /// does.
+    /// does; before the first reading, it awaits that one.
     #[must_use]
     pub fn save_room(&self, sandbox: SandboxId) -> CreateRoom {
         let Some(slot) = self.sandboxes.get(&sandbox) else {
@@ -450,6 +450,9 @@ impl Host {
             return CreateRoom::Fits;
         };
         let save = slot.save_space();
+        if self.disk.is_none() {
+            return CreateRoom::AwaitsReading(Resource::Disk, save.bytes, 0);
+        }
         match room.take(save) {
             Ok(()) => CreateRoom::Fits,
             Err(short) if room.may_take(save, self.disk_spent) => {

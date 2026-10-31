@@ -351,8 +351,9 @@ pick a VM.
   while the disk cannot book it, so its VM is never paused for a save
   that would then wait for room. A request short by no more than what
   bookings that ended since the last reading stood for waits for the next
-  reading, about a second, which decides it, as a create does; its VM
-  runs meanwhile. Bookings plus a kept-back reserve
+  reading, about a second, which decides it, as a create does, and one
+  asked before the host's first reading waits for that; its VM runs
+  meanwhile. Bookings plus a kept-back reserve
   (`--disk-reserve-mib`, `--disk-reserve-inodes`; by default a twentieth
   of the filesystem, at least 1 GiB and 1024 inodes) stay within what the
   filesystem has free, read every sample. A booking whose save has written

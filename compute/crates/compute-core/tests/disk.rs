@@ -364,6 +364,11 @@ fn a_vm_the_host_never_saves_books_its_save_only_from_a_request_on() {
 fn a_save_short_only_of_what_ended_since_the_last_reading_awaits_the_next() {
     let mut rig = Rig::new();
     rig.add_with(1, State::RUNNING, Size::whole(2 * GIB), SleepPolicy::NEVER);
+    // Before the first reading, only that reading can tell.
+    assert_eq!(
+        rig.host.save_room(SandboxId(1)),
+        CreateRoom::AwaitsReading(Resource::Disk, 2 * GIB, 0)
+    );
     // 4 GiB available, 1 GiB of it reserved; a spare VM's copy of 2 GiB
     // just ended.
     rig.disk(4 * GIB, 10_000);
