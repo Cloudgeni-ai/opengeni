@@ -295,11 +295,12 @@ export function readyAt(pull: QueuedPull): number {
  * once it is green and current with main, and nothing else builds before it
  * lands, so a release operator gets a stable main. Then priority PRs go
  * first, and ready PRs in queue order fill the rest of their batch, so
- * priority PRs that arrive one at a time do not each take a round alone. A
- * failed batch's remaining halves come next; then ready PRs in queue order.
- * CI and batcher changes run alone. A PR already in a failed batch's halves,
- * priority or not, keeps its place there: building it again would retest the
- * batch that just failed, unsplit, on every pass.
+ * priority PRs that arrive one at a time do not each take a round alone; while
+ * a failed batch is being split, they go without the fill, so its halves are
+ * not pushed back. Those halves come next; then ready PRs in queue order. CI
+ * and batcher changes run alone. A priority PR already in a failed batch's
+ * halves keeps its place there: building every priority PR again would retest
+ * the batch that just failed, unsplit, on every pass.
  */
 export function nextBatch(
   pulls: QueuedPull[],
@@ -332,9 +333,9 @@ export function nextBatch(
   if (urgent.length) {
     const first = urgent[0]!;
     if (alone(first)) return { kind: "build", members: [first], pending };
-    // Priority PRs first, so a split keeps them in the first half; the oldest
-    // ready PRs fill the rest without waiting for the batching window.
-    const fill = ready.filter((p) => !p.priority && !bisecting.has(p.number));
+    // The oldest ready PRs fill the rest without waiting for the batching
+    // window, after the priority PRs.
+    const fill = pending.length ? [] : ready.filter((p) => !p.priority);
     const members = compatible(
       [...urgent, ...fill].filter((p) => !alone(p)),
       settings,
@@ -498,8 +499,14 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
           pulls = pulls.filter((p) => p.number !== numbers[0]);
           pending = manifest.pending;
         } else {
-          // Bisect: test the first half now and keep the second half next in line.
-          const [first, second] = split(numbers);
+          // Bisect: test the first half now and keep the second half next in
+          // line. Priority PRs among others are tested on their own first, so
+          // a broken fill delays them one round and a broken one is found in one.
+          const urgent = numbers.filter((n) => byNumber.get(n)?.priority);
+          const [first, second] =
+            urgent.length && urgent.length < numbers.length
+              ? [urgent, numbers.filter((n) => !urgent.includes(n))]
+              : split(numbers);
           pending = [first, second, ...manifest.pending];
         }
       }
