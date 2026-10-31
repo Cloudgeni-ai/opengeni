@@ -27,6 +27,7 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { CapabilityPage, CapabilityMark } from "./capability-page";
 import { SlackChannelRoutingDialogBody } from "./slack-channel-routing-dialog";
 import { SlackBotAccessSection } from "./slack-bot-access-section";
+import { SlackAgentUpdatesSection } from "./slack-agent-updates-section";
 import { ConnectorToolPermissions } from "@opengeni/react/app/components/capabilities/connector-tool-permissions";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
 import { IntegrationPage, OptionRow } from "./integration-page";
@@ -560,6 +561,7 @@ function SlackBotDetails(props: {
     <>
       <IntegrationPage model={model} onBack={props.onBack} backLabel="Slack" compactSettings>
         <SlackBotAccessSection connection={props.connection} onSaved={props.refresh} />
+        <SlackAgentUpdatesSection connection={props.connection} />
       </IntegrationPage>
       {adapter.dialogs}
     </>

@@ -3590,6 +3590,19 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:read"
   },
   {
+    "id": "getOpenGeniSlackAgentUpdateSettings",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/agent-updates",
+    "request": [],
+    "query": [
+      "connectionId"
+    ],
+    "response": [
+      "SlackAgentUpdateSettings"
+    ],
+    "permission": "workspace:read"
+  },
+  {
     "id": "getOpenGeniSlackBotOrganizationAccess",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/:connectionId/slack-bot/organization-access",
@@ -7306,6 +7319,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "previewOpenGeniSlackAgentUpdate",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/agent-updates/preview",
+    "request": [
+      "SlackAgentUpdatePreviewRequest"
+    ],
+    "response": [
+      "SlackAgentUpdatePreviewResponse"
+    ]
+  },
+  {
     "id": "previewPlugin",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/plugins/preview",
@@ -8650,6 +8674,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "MemberDefaultExecutionTarget"
     ],
     "permission": "sessions:create"
+  },
+  {
+    "id": "setOpenGeniSlackAgentUpdateSettings",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/agent-updates",
+    "request": [
+      "UpdateSlackAgentUpdateSettingsRequest"
+    ],
+    "response": [
+      "SlackAgentUpdateSettings"
+    ]
   },
   {
     "id": "setOpenGeniSlackBotOrganizationAccess",

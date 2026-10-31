@@ -9,6 +9,7 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
   OPENGENI_SLACK_BOT_IDENTITY_SCOPE,
+  sessionMetadataUnattended,
   slackAgentNameKey,
   type HumanInputQuestion,
   type Permission,
@@ -45,6 +46,8 @@ import {
   requestSecretUseApproval,
   createWorkspace,
   insertSlackAgent,
+  resolveSlackTargetAuthority,
+  updateSlackAgent,
   getSlackChannelRoute,
   grantWorkspaceAccess,
   listInboundEvents,
@@ -62,6 +65,8 @@ import {
 } from "@opengeni/db";
 import {
   acceptSessionUserMessage,
+  listOwnConnectionAccountsForGrant,
+  personalConnectionDelegationSourceForGrant,
   createSlackEventSource,
   createSessionForRequest,
   updateSessionTitle,
@@ -84,11 +89,17 @@ import {
   SLACK_SESSION_INSTRUCTIONS,
   verifySlackUserLinkToken,
 } from "../src/integrations/slack-interactions";
+import { proposeSlackAgentFromChat } from "../src/integrations/slack-agent-proposals";
 import { assertSlackTaskUploadTarget } from "../src/integrations/slack-task-file-upload";
 import {
   slackMrkdwnFromMarkdown,
   slackMrkdwnKeepingClaudeCiteTags,
 } from "../src/integrations/slack-mrkdwn";
+import {
+  OPEN_SLACK_AGENT_FIRST_PARTY_MCP_TOOLS,
+  openSlackAgentGrant,
+  openSlackAgentSubjectId,
+} from "../src/integrations/slack-open-agents";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const signingMaterial = ["slack", "interaction", crypto.randomUUID()].join("-");
@@ -219,6 +230,8 @@ function fakeSlack(
   const posts: SlackPost[] = [];
   const postAttempts: SlackPost[] = [];
   const homePublications: SlackHomePublication[] = [];
+  const openedViews: { triggerId: string; view: Record<string, unknown> }[] = [];
+  const viewOpenFailure: { error: string | null } = { error: null };
   const homeViewHashes = new Map<string, string>();
   const calls: SlackCall[] = [];
   const reactionContexts = new Map<string, SlackReactionContext>();
@@ -548,6 +561,14 @@ function fakeSlack(
       const user = form.get("users") ?? "";
       return Response.json({ ok: true, channel: { id: `D_${user}` } });
     }
+    if (method === "views.open") {
+      if (viewOpenFailure.error) return Response.json({ ok: false, error: viewOpenFailure.error });
+      openedViews.push({
+        triggerId: form.get("trigger_id") ?? "",
+        view: JSON.parse(form.get("view") ?? "null") as Record<string, unknown>,
+      });
+      return Response.json({ ok: true, view: { id: `V_OPEN_${openedViews.length}` } });
+    }
     if (method === "views.publish") {
       const view = JSON.parse(form.get("view") ?? "null") as SlackHomePublication["view"];
       const userId = form.get("user_id") ?? "";
@@ -690,6 +711,8 @@ function fakeSlack(
     posts,
     postAttempts,
     homePublications,
+    openedViews,
+    viewOpenFailure,
     calls,
     reactionContexts,
     privateFiles,
@@ -748,6 +771,9 @@ async function fixture(
     mpimChannels?: string[];
     externalOwnerTeamId?: string;
     guestOwner?: boolean;
+    /** Other Slack people `users.info` reports as guests or from another team. */
+    guestSlackUserIds?: string[];
+    externalSlackUserIds?: string[];
     slackReactionSummon?: WorkspaceSlackReactionSummonSettings;
     slackAccessMode?: Settings["slackAccessMode"];
     /** Omitted keeps the shipped default: both orchestration notices off. */
@@ -896,8 +922,14 @@ async function fixture(
     mpimChannels: new Set(options.mpimChannels ?? []),
     installationTeamId: teamId,
     externalTeamId: options.externalOwnerTeamId ?? "T_EXTERNAL",
-    externalUserIds: new Set(options.externalOwnerTeamId ? [ownerSlackUserId] : []),
-    guestUserIds: new Set(options.guestOwner ? [ownerSlackUserId] : []),
+    externalUserIds: new Set([
+      ...(options.externalOwnerTeamId ? [ownerSlackUserId] : []),
+      ...(options.externalSlackUserIds ?? []),
+    ]),
+    guestUserIds: new Set([
+      ...(options.guestOwner ? [ownerSlackUserId] : []),
+      ...(options.guestSlackUserIds ?? []),
+    ]),
   });
   const wakes: Array<{ sessionId: string }> = [];
   const noop = async () => undefined;
@@ -11701,10 +11733,10 @@ describe("Slack agents", () => {
     ).toBe(true);
   }, 90_000);
 
-  test("the bare command and info list the agents the caller can use", async () => {
+  test("info lists the agents the caller can use", async () => {
     if (!available) return;
     const { value } = await agentFixture();
-    for (const text of ["", "info"]) {
+    for (const text of ["info"]) {
       const response = await value.app.request(
         signedRequest(
           "/v1/integrations/slack/commands",
@@ -11740,5 +11772,1106 @@ describe("Slack agents", () => {
     expect(session!.initial_message).toContain("+analytics hello");
     expect(session!.instructions).toBe(SLACK_SESSION_INSTRUCTIONS);
     expect(value.slack.posts.some((post) => post.text.includes("is on it"))).toBe(false);
+  }, 90_000);
+
+  async function slashCommand(
+    value: Awaited<ReturnType<typeof fixture>>,
+    text: string,
+    options: { userId?: string; channel?: string; triggerId?: string } = {},
+  ) {
+    return await value.app.request(
+      signedRequest(
+        "/v1/integrations/slack/commands",
+        new URLSearchParams({
+          command: "/opengeni",
+          team_id: value.teamId,
+          user_id: options.userId ?? value.ownerSlackUserId,
+          channel_id: options.channel ?? "C_ASK",
+          trigger_id: options.triggerId ?? `trigger-${crypto.randomUUID()}`,
+          text,
+        }).toString(),
+        "application/x-www-form-urlencoded",
+      ),
+    );
+  }
+
+  async function postInteraction(
+    value: Awaited<ReturnType<typeof fixture>>,
+    payload: Record<string, unknown>,
+  ) {
+    return await value.app.request(
+      signedRequest(
+        "/v1/integrations/slack/interactions",
+        new URLSearchParams({ payload: JSON.stringify(payload) }).toString(),
+        "application/x-www-form-urlencoded",
+      ),
+    );
+  }
+
+  type OpenedView = { triggerId: string; view: Record<string, unknown> };
+  type ViewBlock = {
+    type: string;
+    block_id?: string;
+    label?: { text: string };
+    optional?: boolean;
+    text?: { text: string };
+    element?: { options?: { value: string }[]; initial_option?: { value: string } };
+  };
+
+  function viewBlock(opened: OpenedView, blockId: string): ViewBlock | undefined {
+    return (opened.view.blocks as ViewBlock[]).find((block) => block.block_id === blockId);
+  }
+
+  function viewMetadata(opened: OpenedView) {
+    return JSON.parse(String(opened.view.private_metadata)) as Record<string, unknown>;
+  }
+
+  async function submitForm(
+    value: Awaited<ReturnType<typeof fixture>>,
+    opened: OpenedView,
+    input: { viewId: string; agent: string; request: string; userId?: string },
+  ) {
+    const response = await postInteraction(value, {
+      type: "view_submission",
+      team: { id: value.teamId },
+      user: { id: input.userId ?? value.ownerSlackUserId },
+      view: {
+        id: input.viewId,
+        callback_id: opened.view.callback_id,
+        private_metadata: opened.view.private_metadata,
+        state: {
+          values: {
+            opengeni_ask_agent: {
+              agent: { type: "static_select", selected_option: { value: input.agent } },
+            },
+            opengeni_ask_request: {
+              request: { type: "plain_text_input", value: input.request },
+            },
+          },
+        },
+      },
+    });
+    expect(response.status).toBe(200);
+    return (await response.json()) as {
+      response_action: string;
+      errors?: Record<string, string>;
+    };
+  }
+
+  function shortcutPayload(
+    value: Awaited<ReturnType<typeof fixture>>,
+    input: { channel: string; ts: string; text: string; threadTs?: string },
+  ) {
+    return {
+      type: "message_action",
+      callback_id: "opengeni_message",
+      trigger_id: `shortcut-${crypto.randomUUID()}`,
+      team: { id: value.teamId },
+      user: { id: value.ownerSlackUserId },
+      channel: { id: input.channel },
+      message: {
+        ts: input.ts,
+        text: input.text,
+        ...(input.threadTs ? { thread_ts: input.threadTs } : {}),
+      },
+    };
+  }
+
+  test("the bare command opens the Ask form, and falls back to the info card", async () => {
+    if (!available) return;
+    const { value, analytics, ops } = await agentFixture();
+    const response = await slashCommand(value, "", { triggerId: "trigger-ask-1" });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("");
+    expect(value.slack.openedViews).toHaveLength(1);
+    const opened = value.slack.openedViews[0]!;
+    expect(opened.triggerId).toBe("trigger-ask-1");
+    expect(opened.view).toMatchObject({
+      type: "modal",
+      callback_id: "opengeni.ask",
+      title: { text: "Ask Opengeni" },
+      submit: { text: "Ask" },
+    });
+    const picker = viewBlock(opened, "opengeni_ask_agent")!;
+    expect(picker.element!.options!.map((option) => option.value)).toEqual([
+      "opengeni",
+      analytics.id,
+      ops.id,
+    ]);
+    expect(picker.element!.initial_option!.value).toBe("opengeni");
+    expect(viewBlock(opened, "opengeni_ask_request")).toMatchObject({
+      label: { text: "Request" },
+    });
+    expect(viewMetadata(opened)).toEqual({
+      v: 1,
+      src: "command",
+      c: value.connectionId,
+      t: value.teamId,
+      ch: "C_ASK",
+      f: null,
+    });
+
+    // Slack refusing the modal (an expired trigger) answers like `info`.
+    value.slack.viewOpenFailure.error = "expired_trigger_id";
+    const fallback = await slashCommand(value, "");
+    expect(fallback.status).toBe(200);
+    expect(((await fallback.json()) as { text: string }).text).toContain("*Agents you can ask*");
+    value.slack.viewOpenFailure.error = null;
+
+    // Someone who has not linked Slack gets today's link prompt, not the form.
+    const unlinked = await slashCommand(value, "", { userId: value.otherSlackUserId });
+    expect(((await unlinked.json()) as { text: string }).text).toContain(
+      "Link your Slack identity to Opengeni before starting work",
+    );
+    expect(value.slack.openedViews).toHaveLength(1);
+    await drainAll(value.deps);
+    expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
+    expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(0);
+  }, 90_000);
+
+  test("an Ask form submission starts the agent's chat in the command's channel", async () => {
+    if (!available) return;
+    const { value, analytics } = await agentFixture();
+    await slashCommand(value, "");
+    const opened = value.slack.openedViews[0]!;
+
+    expect(
+      await submitForm(value, opened, { viewId: "V_ASK_EMPTY", agent: analytics.id, request: " " }),
+    ).toEqual({
+      response_action: "errors",
+      errors: { opengeni_ask_request: "Write a request." },
+    });
+    expect(
+      await submitForm(value, opened, {
+        viewId: "V_ASK_GONE",
+        agent: crypto.randomUUID(),
+        request: "hello",
+      }),
+    ).toEqual({
+      response_action: "errors",
+      errors: { opengeni_ask_agent: "This agent no longer exists. Choose another." },
+    });
+    // Someone else's submission of a form carrying another team is refused.
+    const forged = await postInteraction(value, {
+      type: "view_submission",
+      team: { id: value.teamId },
+      user: { id: value.ownerSlackUserId },
+      view: {
+        id: "V_ASK_FORGED",
+        callback_id: "opengeni.ask",
+        private_metadata: JSON.stringify({ ...viewMetadata(opened), t: "T_OTHER" }),
+        state: { values: {} },
+      },
+    });
+    expect(forged.status).toBe(400);
+
+    expect(
+      await submitForm(value, opened, {
+        viewId: "V_ASK_1",
+        agent: analytics.id,
+        request: "revenue last week?",
+      }),
+    ).toEqual({ response_action: "clear" });
+    // Slack may deliver the same submission twice; it is one request.
+    await submitForm(value, opened, {
+      viewId: "V_ASK_1",
+      agent: analytics.id,
+      request: "revenue last week?",
+    });
+    await drainAll(value.deps);
+
+    expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
+    const chats = await agentInteractions(value.routed!.workspaceId);
+    expect(chats).toHaveLength(1);
+    expect(chats[0]).toMatchObject({ slack_agent_id: analytics.id });
+    expect(chats[0]!.route_key.startsWith("C_ASK:")).toBe(true);
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions where id = ${chats[0]!.session_id}`;
+    expect(session!.initial_message).toContain("revenue last week?");
+    const first = value.slack.posts.find((post) => post.text.includes("Analytics is on it"));
+    expect(first).toMatchObject({ channel: "C_ASK", threadTimestamp: null, username: "Analytics" });
+
+    // Choosing Opengeni is ordinary routing, as if no agent was named.
+    await submitForm(value, opened, { viewId: "V_ASK_2", agent: "opengeni", request: "hello" });
+    const queued = await shared!.admin<
+      { trigger_kind: string; slack_channel_id: string; target_slack_agent_id: string | null }[]
+    >`select trigger_kind, slack_channel_id, target_slack_agent_id from slack_interaction_inbox
+      where provider_event_id = 'ask:V_ASK_2' and connection_id = ${value.connectionId}`;
+    expect(queued).toEqual([
+      { trigger_kind: "slash_command", slack_channel_id: "C_ASK", target_slack_agent_id: null },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.filter((post) => post.text.includes("is on it"))).toHaveLength(1);
+  }, 90_000);
+
+  test("with agents, the message shortcut opens the form on that message and continues the shortcut", async () => {
+    if (!available) return;
+    const { value, analytics } = await agentFixture();
+    const response = await postInteraction(
+      value,
+      shortcutPayload(value, {
+        channel: "C_SHORT",
+        ts: "1765000010.000100",
+        text: "Revenue dipped on Tuesday.",
+      }),
+    );
+    expect(response.status).toBe(200);
+    await drainAll(value.deps);
+    // Nothing is queued until the form is sent.
+    expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
+    expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(0);
+    expect(value.slack.openedViews).toHaveLength(1);
+    const opened = value.slack.openedViews[0]!;
+    expect(viewBlock(opened, "opengeni_ask_message")!.text!.text).toBe(
+      ">Revenue dipped on Tuesday.",
+    );
+    expect(viewBlock(opened, "opengeni_ask_request")).toMatchObject({
+      label: { text: "Anything to add?" },
+      optional: true,
+    });
+    expect(viewMetadata(opened)).toMatchObject({ src: "shortcut", ch: null });
+
+    expect(
+      await submitForm(value, opened, {
+        viewId: "V_SHORT_1",
+        agent: analytics.id,
+        request: "why?",
+      }),
+    ).toEqual({ response_action: "clear" });
+    await drainAll(value.deps);
+    const [chat] = await agentInteractions(value.routed!.workspaceId);
+    expect(chat).toMatchObject({
+      slack_agent_id: analytics.id,
+      route_key: "C_SHORT:1765000010.000100",
+    });
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions where id = ${chat!.session_id}`;
+    expect(session!.initial_message).toContain("why?");
+    expect(session!.initial_message).toContain("Revenue dipped on Tuesday.");
+
+    // The stored message is used once.
+    expect(
+      await submitForm(value, opened, { viewId: "V_SHORT_2", agent: analytics.id, request: "" }),
+    ).toEqual({
+      response_action: "errors",
+      errors: {
+        opengeni_ask_request: "This form expired. Close it and use the shortcut again.",
+      },
+    });
+  }, 90_000);
+
+  test("choosing another agent on the form for a message in a thread moves the thread", async () => {
+    if (!available) return;
+    const { value, analytics, ops } = await agentFixture();
+    await mention(value, "C_FORM_T", "1765000011.000100", "+analytics revenue?");
+    const [analyticsChat] = await agentInteractions(value.routed!.workspaceId);
+    expect(analyticsChat).toMatchObject({ slack_agent_id: analytics.id });
+
+    const response = await postInteraction(
+      value,
+      shortcutPayload(value, {
+        channel: "C_FORM_T",
+        ts: "1765000011.000300",
+        text: "The API timed out too.",
+        threadTs: "1765000011.000100",
+      }),
+    );
+    expect(response.status).toBe(200);
+    const opened = value.slack.openedViews.at(-1)!;
+    expect(
+      await submitForm(value, opened, { viewId: "V_FORM_T", agent: ops.id, request: "check it" }),
+    ).toEqual({ response_action: "clear" });
+    await drainAll(value.deps);
+
+    const [moved] = await agentInteractions(value.routed!.workspaceId);
+    expect(moved!.route_key).toBe(`C_FORM_T:1765000011.000100:switched:${moved!.id}`);
+    const [opsChat] = await agentInteractions(value.owner.workspaceId);
+    expect(opsChat).toMatchObject({
+      slack_agent_id: ops.id,
+      route_key: "C_FORM_T:1765000011.000100",
+    });
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions where id = ${opsChat!.session_id}`;
+    expect(session!.initial_message).toContain("check it");
+  }, 90_000);
+
+  test("with no agents, the bare command and the shortcut behave as before", async () => {
+    if (!available) return;
+    const value = await fixture({ slackWorkspaceRouting: true });
+    const response = await slashCommand(value, "");
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { text: string };
+    expect(body.text).not.toContain("Agents you can ask");
+
+    const shortcut = await postInteraction(
+      value,
+      shortcutPayload(value, { channel: "C_PLAINSHORT", ts: "1765000011.000100", text: "hi" }),
+    );
+    expect(shortcut.status).toBe(200);
+    await drainAll(value.deps);
+    expect(value.slack.openedViews).toHaveLength(0);
+    expect(value.slack.calls.some((call) => call.method === "views.open")).toBe(false);
+    const [chat] = await agentInteractions(value.owner.workspaceId);
+    expect(chat).toMatchObject({
+      slack_agent_id: null,
+      route_key: "C_PLAINSHORT:1765000011.000100",
+    });
+    // Nothing about the chat changes.
+    const [session] = await shared!.admin<{ instructions: string; tool_policy: unknown }[]>`
+      select instructions, tool_policy from sessions where id = ${chat!.session_id}`;
+    expect(session!.instructions).toBe(SLACK_SESSION_INSTRUCTIONS);
+    expect(JSON.stringify(session!.tool_policy)).not.toContain("slack_agent_propose");
+    expect(JSON.stringify(session!.tool_policy)).not.toContain("slack_agent_handoff");
+
+    // Only a request about agents can propose the first one.
+    await mention(
+      value,
+      "C_FIRSTAGENT",
+      "1765000011.000200",
+      "create a Slack agent called Analytics for revenue questions",
+    );
+    const chats = await agentInteractions(value.owner.workspaceId);
+    const proposing = chats.find((row) => row.route_key === "C_FIRSTAGENT:1765000011.000200");
+    const [first] = await shared!.admin<{ instructions: string; tool_policy: unknown }[]>`
+      select instructions, tool_policy from sessions where id = ${proposing!.session_id}`;
+    expect(first!.instructions).toBe(SLACK_SESSION_INSTRUCTIONS);
+    expect(JSON.stringify(first!.tool_policy)).toContain("slack_agent_propose");
+    expect(JSON.stringify(first!.tool_policy)).not.toContain("slack_agent_handoff");
+  }, 90_000);
+
+  test("App Home's Ask button opens the form with that agent, answered in the person's messages", async () => {
+    if (!available) return;
+    const { value, analytics } = await agentFixture();
+    const response = await postInteraction(value, {
+      type: "block_actions",
+      trigger_id: "trigger-home-1",
+      team: { id: value.teamId },
+      user: { id: value.ownerSlackUserId },
+      view: { type: "home" },
+      actions: [{ action_id: "opengeni.home.ask", action_ts: "1.0", value: analytics.id }],
+    });
+    expect(response.status).toBe(200);
+    expect(value.slack.openedViews).toHaveLength(1);
+    const opened = value.slack.openedViews[0]!;
+    expect(opened.triggerId).toBe("trigger-home-1");
+    expect(viewBlock(opened, "opengeni_ask_agent")!.element!.initial_option!.value).toBe(
+      analytics.id,
+    );
+    expect(viewMetadata(opened)).toMatchObject({ src: "home", ch: null });
+
+    expect(
+      await submitForm(value, opened, {
+        viewId: "V_HOME_1",
+        agent: analytics.id,
+        request: "top customers?",
+      }),
+    ).toEqual({ response_action: "clear" });
+    await drainAll(value.deps);
+    const [chat] = await agentInteractions(value.routed!.workspaceId);
+    expect(chat).toMatchObject({ slack_agent_id: analytics.id });
+    expect(chat!.route_key.startsWith(`D_${value.ownerSlackUserId}:`)).toBe(true);
+  }, 90_000);
+
+  async function proposalFixture() {
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Analytics",
+      linkOther: true,
+      ownerPermissions: ["sessions:create", "sessions:read", "sessions:control", "workspace:admin"],
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, OPENGENI_SLACK_BOT_IDENTITY_SCOPE],
+    });
+    const home = { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId };
+    const ops = await insertSlackAgent(client.db, home, {
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      targetAccountId: value.owner.accountId,
+      targetWorkspaceId: value.owner.workspaceId,
+      name: "Ops Desk",
+      nameKey: slackAgentNameKey("Ops Desk"),
+      description: "Handles incidents.",
+      avatar: { kind: "emoji", emoji: "🛠️", hue: 20 },
+      instructions: "",
+      createdBySubjectId: value.owner.subjectId,
+    });
+    if (ops === "name_taken") throw new Error("fixture agent name taken");
+    await mention(value, "C_PROPOSE", "1765000020.000100", "+ops-desk make a finance agent");
+    const [chat] = await agentInteractions(value.owner.workspaceId);
+    return { value, home, sessionId: chat!.session_id! };
+  }
+
+  function proposalCard(value: Awaited<ReturnType<typeof fixture>>, proposalId: string) {
+    return value.slack.posts.find((post) =>
+      JSON.stringify(post.blocks ?? []).includes(`"value":"${proposalId}"`),
+    );
+  }
+
+  test("a chat proposes an agent; only an admin of its workspace can create it, once", async () => {
+    if (!available) return;
+    const { value, sessionId } = await proposalFixture();
+    const proposed = await proposeSlackAgentFromChat(value.deps, {
+      grant: value.owner as AccessGrant,
+      sessionId,
+      proposal: {
+        name: "Finance",
+        description: "Answers finance questions.",
+        instructions: "Be precise.",
+        avatar: { kind: "emoji", emoji: "💰", hue: 120 },
+      },
+    });
+    expect(proposed.status).toBe("proposed");
+    const proposalId = (proposed as { proposalId: string }).proposalId;
+    const card = proposalCard(value, proposalId)!;
+    expect(card).toMatchObject({
+      channel: "C_PROPOSE",
+      threadTimestamp: "1765000020.000100",
+      text: "New agent: Finance",
+    });
+    const cardJson = JSON.stringify(card.blocks);
+    expect(cardJson).toContain("*New agent: Finance*");
+    expect(cardJson).toContain("Be precise.");
+    expect(cardJson).toContain("Works in *Slack interactions*");
+    expect(cardJson).toContain("+finance");
+
+    const agents = async () =>
+      await shared!.admin<{ id: string; name: string; knowledge_collection_id: string | null }[]>`
+        select id, name, knowledge_collection_id from slack_agents
+        where connection_id = ${value.connectionId} and name = 'Finance'`;
+    const press = async (actionId: string, userId: string) =>
+      await pressSlackButton(value, {
+        post: card,
+        rootTimestamp: "1765000020.000100",
+        actionId,
+        handleId: proposalId,
+        actionTs: `${Date.now()}.${Math.floor(Math.random() * 1e6)}`,
+        userId,
+      });
+
+    // Someone who is not an admin of the workspace is told privately.
+    await press("opengeni.agent_proposal.create", value.otherSlackUserId);
+    await press("opengeni.agent_proposal.cancel", value.otherSlackUserId);
+    expect(await agents()).toHaveLength(0);
+    const otherDm = value.slack.posts
+      .filter((post) => post.channel === `D_${value.otherSlackUserId}`)
+      .map((post) => post.text);
+    expect(otherDm).toEqual([
+      "Only an admin of the Slack interactions workspace can create Finance.",
+      "Only the person who asked or an admin of the Slack interactions workspace can cancel this.",
+    ]);
+    expect(card.text).toBe("New agent: Finance");
+
+    await press("opengeni.agent_proposal.create", value.ownerSlackUserId);
+    const created = await agents();
+    expect(created).toHaveLength(1);
+    expect(created[0]!.id).toBe(proposalId);
+    expect(created[0]!.knowledge_collection_id).not.toBeNull();
+    expect(card.text).toBe(`Finance is ready. Ask it with <@${value.botUserId}> +finance`);
+    expect(JSON.stringify(card.blocks)).toContain(`Created by <@${value.ownerSlackUserId}>`);
+    expect(JSON.stringify(card.blocks)).not.toContain("opengeni.agent_proposal.create");
+
+    // A second press, or a late Cancel, changes nothing.
+    await press("opengeni.agent_proposal.create", value.ownerSlackUserId);
+    await press("opengeni.agent_proposal.cancel", value.ownerSlackUserId);
+    expect(await agents()).toHaveLength(1);
+    expect(card.text).toBe(`Finance is ready. Ask it with <@${value.botUserId}> +finance`);
+
+    // The same name cannot be proposed again.
+    expect(
+      await proposeSlackAgentFromChat(value.deps, {
+        grant: value.owner as AccessGrant,
+        sessionId,
+        proposal: {
+          name: "finance",
+          description: "Again.",
+          avatar: { kind: "emoji", emoji: "💰", hue: 120 },
+        },
+      }),
+    ).toMatchObject({ status: "refused" });
+  }, 90_000);
+
+  test("a proposal can be cancelled, and creating needs the Opengeni app in its workspace", async () => {
+    if (!available) return;
+    const { value, sessionId } = await proposalFixture();
+    const propose = async (name: string, workspace?: string) => {
+      const result = await proposeSlackAgentFromChat(value.deps, {
+        grant: value.owner as AccessGrant,
+        sessionId,
+        proposal: {
+          name,
+          description: "Does things.",
+          ...(workspace ? { workspace } : {}),
+          avatar: { kind: "icon", icon: "chart-line", hue: 200 },
+        },
+      });
+      expect(result.status).toBe("proposed");
+      const proposalId = (result as { proposalId: string }).proposalId;
+      return { proposalId, card: proposalCard(value, proposalId)! };
+    };
+    const cancelled = await propose("Scratch");
+    await pressSlackButton(value, {
+      post: cancelled.card,
+      rootTimestamp: "1765000020.000100",
+      actionId: "opengeni.agent_proposal.cancel",
+      handleId: cancelled.proposalId,
+      actionTs: "1765000021.000001",
+    });
+    expect(cancelled.card.text).toBe("Scratch was not created.");
+    await pressSlackButton(value, {
+      post: cancelled.card,
+      rootTimestamp: "1765000020.000100",
+      actionId: "opengeni.agent_proposal.create",
+      handleId: cancelled.proposalId,
+      actionTs: "1765000021.000002",
+    });
+    expect(cancelled.card.text).toBe("Scratch was not created.");
+
+    // Analytics is a workspace the person administers, but the Opengeni app
+    // is not available there, so Create explains and leaves the card.
+    const elsewhere = await propose("Revenue", "analytics");
+    expect(JSON.stringify(elsewhere.card.blocks)).toContain("Works in *Analytics*");
+    await pressSlackButton(value, {
+      post: elsewhere.card,
+      rootTimestamp: "1765000020.000100",
+      actionId: "opengeni.agent_proposal.create",
+      handleId: elsewhere.proposalId,
+      actionTs: "1765000021.000003",
+    });
+    expect(elsewhere.card.text).toBe("New agent: Revenue");
+    expect(
+      value.slack.posts.some(
+        (post) =>
+          post.channel === `D_${value.ownerSlackUserId}` &&
+          post.text.startsWith("The Opengeni app is not available in the Analytics workspace"),
+      ),
+    ).toBe(true);
+    const [row] = await shared!.admin<{ status: string }[]>`
+      select status from slack_agent_proposals where id = ${elsewhere.proposalId}`;
+    expect(row!.status).toBe("pending");
+
+    // A workspace the person cannot use is refused before any card.
+    expect(
+      await proposeSlackAgentFromChat(value.deps, {
+        grant: value.owner as AccessGrant,
+        sessionId,
+        proposal: {
+          name: "Nowhere",
+          description: "Does things.",
+          workspace: "Nowhere",
+          avatar: { kind: "emoji", emoji: "🌀", hue: 10 },
+        },
+      }),
+    ).toMatchObject({ status: "refused" });
+  }, 90_000);
+});
+
+describe("Open Slack agents", () => {
+  const STRANGER = "U_STRANGER";
+  const GUEST = "U_GUEST";
+  const EXTERNAL = "U_EXTERNAL";
+
+  /**
+   * An install whose "Front Desk" agent works in Analytics. The owner is a
+   * member of Analytics; the other linked person is a member of the home
+   * workspace only; STRANGER never linked.
+   */
+  async function openFixture(options: { open?: boolean } = {}) {
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Analytics",
+      linkOther: true,
+      mpimChannels: ["G_MPIM_OPEN"],
+      guestSlackUserIds: [GUEST],
+      externalSlackUserIds: [EXTERNAL],
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, OPENGENI_SLACK_BOT_IDENTITY_SCOPE],
+    });
+    const home = { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId };
+    const created = await insertSlackAgent(client.db, home, {
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      targetAccountId: value.owner.accountId,
+      targetWorkspaceId: value.routed!.workspaceId,
+      name: "Front Desk",
+      nameKey: slackAgentNameKey("Front Desk"),
+      description: "Answers questions about our products.",
+      avatar: { kind: "emoji", emoji: "🛎️", hue: 30 },
+      instructions: "Be friendly.",
+      createdBySubjectId: value.owner.subjectId,
+    });
+    if (created === "name_taken") throw new Error("fixture agent name taken");
+    let agent = created;
+    const setOpen = async (open: boolean) => {
+      const updated = await updateSlackAgent(client.db, home, {
+        agentId: agent.id,
+        expectedVersion: agent.version,
+        patch: { open },
+      });
+      if (!updated || typeof updated === "string") throw new Error("fixture agent update failed");
+      agent = updated;
+    };
+    if (options.open !== false) await setOpen(true);
+    return { value, home, agent: () => agent, setOpen };
+  }
+
+  async function ask(
+    value: Awaited<ReturnType<typeof fixture>>,
+    input: { user: string; channel: string; ts: string; text: string; threadTs?: string },
+  ) {
+    const response = await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_OPEN_${crypto.randomUUID()}`,
+      event: {
+        type: "app_mention",
+        user: input.user,
+        channel: input.channel,
+        ts: input.ts,
+        ...(input.threadTs ? { thread_ts: input.threadTs } : {}),
+        text: input.text,
+      },
+    });
+    expect(response.status).toBe(200);
+    await drainAll(value.deps);
+  }
+
+  async function chats(workspaceId: string) {
+    return await shared!.admin<
+      {
+        id: string;
+        session_id: string | null;
+        route_key: string;
+        owning_subject_id: string;
+        visibility: string;
+        initiating_slack_user_id: string | null;
+      }[]
+    >`select id, session_id, route_key, owning_subject_id, visibility, initiating_slack_user_id
+      from slack_interactions where workspace_id = ${workspaceId} order by created_at, id`;
+  }
+
+  async function sessionRow(sessionId: string) {
+    const [row] = await shared!.admin<
+      {
+        created_by_kind: string;
+        created_by_subject_id: string;
+        created_by_context: Record<string, unknown>;
+        visibility: string;
+        owner_subject_id: string | null;
+        agent_access: string;
+        memory_scope: string;
+        metadata: Record<string, unknown>;
+        first_party_mcp_tools: string[];
+        first_party_mcp_permissions: string[] | null;
+        vault_policy: Record<string, unknown>;
+        rig_id: string | null;
+        instructions: string | null;
+      }[]
+    >`select created_by_kind, created_by_subject_id, created_by_context, visibility,
+        owner_subject_id, agent_access, memory_scope, metadata, first_party_mcp_tools,
+        first_party_mcp_permissions, vault_policy, rig_id, instructions
+      from sessions where id = ${sessionId}`;
+    return row!;
+  }
+
+  async function turns(sessionId: string) {
+    return await shared!.admin<
+      {
+        initiator_kind: string;
+        initiator_subject_id: string;
+        initiator_context: Record<string, unknown>;
+        personal_connection_delegations: unknown[];
+        mcp_account_bindings: unknown[] | null;
+      }[]
+    >`select initiator_kind, initiator_subject_id, initiator_context,
+        personal_connection_delegations, mcp_account_bindings
+      from session_turns where session_id = ${sessionId} order by position, created_at, id`;
+  }
+
+  const dmTexts = (value: Awaited<ReturnType<typeof fixture>>, user: string) =>
+    value.slack.posts.filter((post) => post.channel === `D_${user}`).map((post) => post.text);
+
+  test("someone outside the workspace gets a chat that runs as the agent, never as a person", async () => {
+    if (!available) return;
+    const { value, agent } = await openFixture();
+    const analytics = value.routed!.workspaceId;
+    await ask(value, {
+      user: STRANGER,
+      channel: "C_OPEN",
+      ts: "1766000000.000100",
+      text: "+front-desk what is the refund policy?",
+    });
+
+    const [chat] = await chats(analytics);
+    const service = openSlackAgentSubjectId(agent().id);
+    expect(chat).toMatchObject({
+      owning_subject_id: service,
+      visibility: "workspace",
+      initiating_slack_user_id: STRANGER,
+    });
+    const session = await sessionRow(chat!.session_id!);
+    expect(session).toMatchObject({
+      created_by_kind: "service",
+      created_by_subject_id: service,
+      visibility: "workspace_shared",
+      agent_access: "session",
+      memory_scope: "off",
+      rig_id: null,
+      vault_policy: { mode: "selected", vaultIds: [] },
+    });
+    // Nobody is waited on: approvals are refused and nothing asks a person.
+    expect(sessionMetadataUnattended(session.metadata)).toBe(true);
+    // The real asker is on the record.
+    expect(session.created_by_context).toMatchObject({
+      slackAgentId: agent().id,
+      slackTeamId: value.teamId,
+      slackUserId: STRANGER,
+      slackChannelId: "C_OPEN",
+    });
+    // Read-only tools and permissions: no secrets, writes, schedules, Slack
+    // channel reads, handoff or other chats.
+    for (const tool of session.first_party_mcp_tools) {
+      expect(OPEN_SLACK_AGENT_FIRST_PARTY_MCP_TOOLS).toContain(tool as never);
+    }
+    expect(session.first_party_mcp_tools).not.toContain("slack_agent_handoff");
+    expect(session.first_party_mcp_tools).not.toContain("slack_bot_channel_history");
+    expect(session.first_party_mcp_tools).not.toContain("knowledge_save");
+    expect(session.first_party_mcp_permissions).not.toBeNull();
+    for (const permission of session.first_party_mcp_permissions!) {
+      expect(permission).not.toMatch(/^(secrets|schedules|knowledge|members|workspace:admin)/u);
+      expect(permission).not.toMatch(/:(write|manage|admin|publish)$/u);
+    }
+    expect(session.instructions).toContain("You are Front Desk");
+    expect(session.instructions).toContain("never anyone's personal accounts");
+
+    const [turn] = await turns(chat!.session_id!);
+    expect(turn).toMatchObject({
+      initiator_kind: "service",
+      initiator_subject_id: service,
+      personal_connection_delegations: [],
+    });
+    expect(turn!.initiator_context).toMatchObject({ slackUserId: STRANGER });
+
+    // The first message: no link (only members can open the chat), no button,
+    // and the one-time notice.
+    const first = value.slack.posts.find((post) => post.text.includes("*Front Desk* is on it"));
+    expect(first).toBeDefined();
+    expect(first!.username).toBe("Front Desk");
+    expect(first!.text).toContain(
+      "_What you tell Front Desk is visible to members of the *Analytics* workspace._",
+    );
+    expect(first!.text).not.toContain("https://");
+    expect(JSON.stringify(first!.blocks ?? [])).not.toContain("opengeni.session.pause");
+    expect(JSON.stringify(first!.blocks ?? [])).not.toContain("https://");
+
+    // The notice is shown once per person and agent.
+    await ask(value, {
+      user: STRANGER,
+      channel: "C_OPEN",
+      ts: "1766000000.000300",
+      text: "+front-desk and shipping?",
+    });
+    const starts = value.slack.posts.filter((post) => post.text.includes("*Front Desk* is on it"));
+    expect(starts).toHaveLength(2);
+    expect(starts[1]!.text).not.toContain("visible to members");
+  }, 90_000);
+
+  test("a non-member cannot open the chat; nobody can sign in as the agent", async () => {
+    if (!available) return;
+    const { value, agent } = await openFixture();
+    const analytics = value.routed!.workspaceId;
+    // The linked person is a member of the home workspace only.
+    await ask(value, {
+      user: value.otherSlackUserId,
+      channel: "C_OPEN_LINKED",
+      ts: "1766000001.000100",
+      text: "+front-desk hello",
+    });
+    const [chat] = await chats(analytics);
+    expect(chat!.owning_subject_id).toBe(openSlackAgentSubjectId(agent().id));
+    expect(await getWorkspaceGrant(client.db, value.otherSubjectId, analytics)).toBeNull();
+    expect(
+      await resolveSlackTargetAuthority(client.db, {
+        subjectId: value.otherSubjectId,
+        targetAccountId: value.owner.accountId,
+        targetWorkspaceId: analytics,
+      }),
+    ).toBeNull();
+    // The agent's principal holds no stored grant anywhere: it exists only
+    // for the message it was minted for.
+    expect(
+      await getWorkspaceGrant(client.db, openSlackAgentSubjectId(agent().id), analytics),
+    ).toBeNull();
+    // A member of Analytics can read it, as with any workspace chat.
+    expect(await getWorkspaceGrant(client.db, value.owner.subjectId, analytics)).not.toBeNull();
+    expect(
+      await getSessionForSubject(client.db, analytics, chat!.session_id!, value.owner.subjectId),
+    ).not.toBeNull();
+  }, 90_000);
+
+  test("members' personal connections never reach an open chat, even when a member asks in it", async () => {
+    if (!available) return;
+    const { value, agent } = await openFixture();
+    const { accountId } = value.owner;
+    const analytics = value.routed!.workspaceId;
+    await activeOrganizationMember(accountId, value.owner.subjectId);
+    await upsertCapabilityCatalogItem(client.db, {
+      accountId,
+      workspaceId: analytics,
+      id: "example-mail",
+      kind: "mcp",
+      source: "manual",
+      name: "Example Mail",
+      description: "Personal connector fixture",
+      category: "integrations",
+      tags: ["fixture"],
+      endpointUrl: "https://mail.example.test/mcp",
+      metadata: { mcpServerId: "example-mail" },
+    });
+    await enableCapabilityInstallation(client.db, {
+      accountId,
+      workspaceId: analytics,
+      capabilityId: "example-mail",
+      kind: "mcp",
+      config: {
+        connectionRef: {
+          providerDomain: "mail.example.test",
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      },
+      metadata: { mcpConnectivity: { status: "ok" } },
+    });
+    // A member connected their own mailbox in the agent's workspace.
+    const personal = await createConnection(client.db, {
+      accountId,
+      workspaceId: analytics,
+      subjectId: value.owner.subjectId,
+      providerDomain: "mail.example.test",
+      kind: "oauth2",
+      credentialEncrypted: "fixture-ciphertext",
+      createdBySubjectId: value.owner.subjectId,
+    });
+
+    await ask(value, {
+      user: STRANGER,
+      channel: "C_OPEN_MAIL",
+      ts: "1766000002.000100",
+      text: "+front-desk summarize the inbox",
+    });
+    const [chat] = await chats(analytics);
+    // The member then asks in the same open chat: it stays the agent's.
+    await ask(value, {
+      user: value.ownerSlackUserId,
+      channel: "C_OPEN_MAIL",
+      ts: "1766000002.000200",
+      text: "use my mailbox",
+      threadTs: "1766000002.000100",
+    });
+    const all = await turns(chat!.session_id!);
+    expect(all).toHaveLength(2);
+    for (const turn of all) {
+      expect(turn.initiator_kind).toBe("service");
+      expect(turn.initiator_subject_id).toBe(openSlackAgentSubjectId(agent().id));
+      expect(turn.personal_connection_delegations).toEqual([]);
+      expect(JSON.stringify(turn)).not.toContain(personal.id);
+    }
+    expect(all[1]!.initiator_context).toMatchObject({ slackUserId: value.ownerSlackUserId });
+    // A member writing in it does not make it wait on a person either.
+    expect(sessionMetadataUnattended((await sessionRow(chat!.session_id!)).metadata)).toBe(true);
+
+    // The grant every open message runs with names no person, so no
+    // personal connection is ever its own.
+    const grant = openSlackAgentGrant(agent(), {
+      slackTeamId: value.teamId,
+      slackUserId: STRANGER,
+      slackChannelId: "C_OPEN_MAIL",
+      providerEventId: "E_PROBE",
+    });
+    expect(personalConnectionDelegationSourceForGrant(grant)).toEqual({ kind: "none" });
+    const own = await listOwnConnectionAccountsForGrant(client.db, grant);
+    expect(own.map((connection) => connection.id)).not.toContain(personal.id);
+    expect(own.every((connection) => connection.subjectId === null)).toBe(true);
+  }, 90_000);
+
+  test("guests, external people and shared conversations are refused before anything starts", async () => {
+    if (!available) return;
+    const { value } = await openFixture();
+    const analytics = value.routed!.workspaceId;
+    await ask(value, {
+      user: GUEST,
+      channel: "C_OPEN_GUEST",
+      ts: "1766000003.000100",
+      text: "+front-desk hi",
+    });
+    await ask(value, {
+      user: EXTERNAL,
+      channel: "C_OPEN_GUEST",
+      ts: "1766000003.000200",
+      text: "+front-desk hi",
+    });
+    await ask(value, {
+      user: STRANGER,
+      channel: "G_MPIM_OPEN",
+      ts: "1766000003.000300",
+      text: "+front-desk hi",
+    });
+    expect(await chats(analytics)).toHaveLength(0);
+    const refusal =
+      "Front Desk doesn't take requests from guests or people outside this Slack workspace. No chat was started.";
+    expect(dmTexts(value, GUEST)).toEqual([refusal]);
+    expect(dmTexts(value, EXTERNAL)).toEqual([refusal]);
+    // A group DM is shared under the workspace's shared-conversation policy,
+    // which refuses first; an open agent never relaxes it.
+    expect(dmTexts(value, STRANGER)).toHaveLength(1);
+    expect(dmTexts(value, STRANGER)[0]).toContain("No conversation content was read");
+  }, 90_000);
+
+  test("a member's chat stays theirs, and a closed agent's open chat stops", async () => {
+    if (!available) return;
+    const { value, agent, setOpen } = await openFixture();
+    const analytics = value.routed!.workspaceId;
+    // A member naming the open agent uses it exactly as before, as themselves.
+    await ask(value, {
+      user: value.ownerSlackUserId,
+      channel: "C_OPEN_MEMBER",
+      ts: "1766000004.000100",
+      text: "+front-desk check my dashboards",
+    });
+    const [memberChat] = await chats(analytics);
+    expect(memberChat).toMatchObject({ owning_subject_id: value.owner.subjectId });
+    const memberSession = await sessionRow(memberChat!.session_id!);
+    expect(memberSession).toMatchObject({
+      created_by_kind: "subject",
+      created_by_subject_id: value.owner.subjectId,
+      agent_access: "workspace",
+    });
+    expect(sessionMetadataUnattended(memberSession.metadata)).toBe(false);
+    const memberStart = value.slack.posts.find((post) => post.text.includes("Front Desk is on it"));
+    expect(memberStart!.text).toContain("https://app.example.test/");
+    expect(memberStart!.text).not.toContain("visible to members");
+
+    // Someone outside the workspace can't continue or take over it.
+    await ask(value, {
+      user: STRANGER,
+      channel: "C_OPEN_MEMBER",
+      ts: "1766000004.000200",
+      text: "what did it find?",
+      threadTs: "1766000004.000100",
+    });
+    await ask(value, {
+      user: value.otherSlackUserId,
+      channel: "C_OPEN_MEMBER",
+      ts: "1766000004.000300",
+      text: "+front-desk what did it find?",
+      threadTs: "1766000004.000100",
+    });
+    expect(await turns(memberChat!.session_id!)).toHaveLength(1);
+    expect(await chats(analytics)).toHaveLength(1);
+    const membersOnly =
+      "Only members of the Analytics workspace can continue this chat. Ask Front Desk in a new message instead.";
+    expect(dmTexts(value, STRANGER)).toEqual([membersOnly]);
+    expect(dmTexts(value, value.otherSlackUserId)).toEqual([membersOnly]);
+
+    // An open chat ends when the agent is closed.
+    await ask(value, {
+      user: STRANGER,
+      channel: "C_OPEN_CLOSE",
+      ts: "1766000005.000100",
+      text: "+front-desk hello",
+    });
+    const openChat = (await chats(analytics)).find(
+      (chat) => chat.owning_subject_id === openSlackAgentSubjectId(agent().id),
+    );
+    expect(openChat).toBeDefined();
+    // A member's shortcut or Ask form there doesn't continue the open chat:
+    // it continues only from a mention or a reply, and the member is told so.
+    await enqueueSlackInteractionInbox(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      connectionId: value.connectionId,
+      providerEventId: `shortcut:open-${crypto.randomUUID()}`,
+      providerMessageId: `shortcut:open-${crypto.randomUUID()}`,
+      slackTeamId: value.teamId,
+      slackUserId: value.ownerSlackUserId,
+      slackChannelId: "C_OPEN_CLOSE",
+      slackMessageTs: "1766000005.000150",
+      slackThreadTs: "1766000005.000100",
+      triggerKind: "message_shortcut",
+      text: "look at this",
+      hasFiles: false,
+    });
+    await drainAll(value.deps);
+    expect(await turns(openChat!.session_id!)).toHaveLength(1);
+    expect(dmTexts(value, value.ownerSlackUserId).at(-1)).toBe(
+      "To ask Front Desk in this thread, mention Opengeni here. Your request wasn't sent.",
+    );
+    await setOpen(false);
+    await ask(value, {
+      user: STRANGER,
+      channel: "C_OPEN_CLOSE",
+      ts: "1766000005.000200",
+      text: "still there?",
+      threadTs: "1766000005.000100",
+    });
+    expect(await turns(openChat!.session_id!)).toHaveLength(1);
+    expect(dmTexts(value, STRANGER).at(-1)).toBe(
+      "Front Desk no longer answers everyone in Slack, so this chat can't continue. Start a new message to ask again.",
+    );
+    // And closed, it answers only members again.
+    await ask(value, {
+      user: STRANGER,
+      channel: "C_OPEN_CLOSE",
+      ts: "1766000005.000300",
+      text: "+front-desk hello again",
+    });
+    expect(dmTexts(value, STRANGER).at(-1)).toContain("Link your Slack identity to Opengeni");
+  }, 90_000);
+
+  test("an open chat never passes a request on to another chat", async () => {
+    if (!available) return;
+    const { value, home } = await openFixture();
+    const analytics = value.routed!.workspaceId;
+    const other = await insertSlackAgent(client.db, home, {
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      targetAccountId: value.owner.accountId,
+      targetWorkspaceId: value.owner.workspaceId,
+      name: "Ops Desk",
+      nameKey: slackAgentNameKey("Ops Desk"),
+      description: "Handles incidents.",
+      avatar: { kind: "emoji", emoji: "📟", hue: 10 },
+      instructions: "",
+      createdBySubjectId: value.owner.subjectId,
+    });
+    expect(other).not.toBe("name_taken");
+    await ask(value, {
+      user: STRANGER,
+      channel: "C_OPEN_HANDOFF",
+      ts: "1766000006.000100",
+      text: "+front-desk the site is down",
+    });
+    const [chat] = await chats(analytics);
+    const grant = { ...(value.owner as AccessGrant), workspaceId: analytics };
+    expect(
+      await handOffSlackAgentChat(value.deps, {
+        grant,
+        sessionId: chat!.session_id!,
+        agent: "Ops Desk",
+        note: "Please look.",
+      }),
+    ).toMatchObject({ status: "refused" });
+    expect(await chats(value.owner.workspaceId)).toHaveLength(0);
+  }, 90_000);
+
+  test("with the agent not open, nothing changes for anyone", async () => {
+    if (!available) return;
+    const { value } = await openFixture({ open: false });
+    await ask(value, {
+      user: STRANGER,
+      channel: "C_CLOSED",
+      ts: "1766000007.000100",
+      text: "+front-desk hello",
+    });
+    expect(await chats(value.routed!.workspaceId)).toHaveLength(0);
+    expect(dmTexts(value, STRANGER)).toHaveLength(1);
+    expect(dmTexts(value, STRANGER)[0]).toStartWith(
+      "Link your Slack identity to Opengeni before starting work:",
+    );
   }, 90_000);
 });

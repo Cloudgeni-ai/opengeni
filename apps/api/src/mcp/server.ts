@@ -192,6 +192,7 @@ import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import {
   AvatarInput,
+  avatarFromToolInput,
   PROJECT_AVATAR_TOOL_GUIDANCE,
   SESSION_PROFILE_TOOL_GUIDANCE,
   projectAvatarFromToolInput,
@@ -421,6 +422,10 @@ import {
   handOffSlackAgentChat,
   listSlackAgentChatsForSession,
 } from "../integrations/slack-interactions";
+import {
+  proposeSlackAgentFromChat,
+  SLACK_AGENT_PROPOSE_TOOL_DESCRIPTION,
+} from "../integrations/slack-agent-proposals";
 import {
   marketplacePluginCapabilityItem,
   marketplacePluginCapabilityItems,
@@ -2915,6 +2920,33 @@ function registerSlackBotTools(
       if (!sessionId) throw new Error("Listing agent chats requires a chat started from Slack");
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       return json(await listSlackAgentChatsForSession(deps, { grant, sessionId, limit }));
+    },
+  );
+
+  server.registerTool(
+    "slack_agent_propose",
+    {
+      description: SLACK_AGENT_PROPOSE_TOOL_DESCRIPTION,
+      inputSchema: {
+        name: z4.string().min(1).max(80),
+        description: z4.string().min(1).max(200),
+        instructions: z4.string().max(8000).optional(),
+        workspace: z4.string().min(1).max(200).optional(),
+        avatar: AvatarInput.unwrap().unwrap(),
+      },
+    },
+    async ({ name, description, instructions, workspace, avatar }) => {
+      if (!sessionId) throw new Error("Proposing an agent requires a chat started from Slack");
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      const exactAvatar = avatarFromToolInput(avatar);
+      if (!exactAvatar) throw new Error("An icon is required");
+      return json(
+        await proposeSlackAgentFromChat(deps, {
+          grant,
+          sessionId,
+          proposal: { name, description, instructions, workspace, avatar: exactAvatar },
+        }),
+      );
     },
   );
 

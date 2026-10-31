@@ -364,6 +364,7 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   slack_bot_delete_message: "deleteMessage",
   slack_agent_handoff: "postSlack",
   slack_agent_chats: "readSlack",
+  slack_agent_propose: "postSlack",
 
   // Accounting
   fiken_companies_list: "readAccounting",

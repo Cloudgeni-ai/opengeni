@@ -2057,6 +2057,18 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
+          // 1152 Slack agent proposals and Ask forms: two full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 2
+            : 0) +
+          // 1153 Slack agent update messages: three full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 3
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2126,7 +2138,9 @@ describe("runtime database posture evaluator", () => {
         1 + // 1105 workspace activity facts: read and insert, FORCE-RLS.
         1 + // 1107 agent calls: read, insert and update, FORCE-RLS.
         1 + // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
-        2; // 1150 Slack agents and their per-person state: full-DML, FORCE-RLS.
+        2 + // 1150 Slack agents and their per-person state: full-DML, FORCE-RLS.
+        2 + // 1152 Slack agent proposals and Ask forms: full-DML, FORCE-RLS.
+        3; // 1153 Slack agent update settings, recipients and deliveries: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -4101,6 +4115,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     "task_note_write_capabilities",
     "auth_sessions",
     "agent_calls",
+    "slack_agent_update_settings",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = ["native_push_devices", "native_push_deliveries"];
@@ -4167,6 +4182,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "agent_call_device_count_v1(text, boolean)",
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
+      "list_due_slack_agent_update_installations_v1(integer)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4181,6 +4197,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "agent_call_device_count_v1(text, boolean)",
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
+      "list_due_slack_agent_update_installations_v1(integer)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
@@ -4238,6 +4255,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "claim_native_push_deliveries_v2(uuid, integer, integer)",
       "ring_agent_call_v1(uuid, boolean)",
+      "list_due_slack_agent_update_installations_v1(integer)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

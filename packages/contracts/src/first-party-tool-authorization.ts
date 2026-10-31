@@ -277,6 +277,8 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   // Slack-started chats only; the server finds the chat's own Slack thread.
   slack_agent_handoff: { sessionRequired: true, allOf: ["sessions:read"] },
   slack_agent_chats: { sessionRequired: true, allOf: ["sessions:read"] },
+  // Posts a card only; creating needs a current admin of the target to confirm.
+  slack_agent_propose: { sessionRequired: true, allOf: ["sessions:read"] },
   fiken_companies_list: { allOf: ["connections:read"] },
   fiken_contacts_list: { allOf: ["connections:read"] },
   fiken_products_list: { allOf: ["connections:read"] },

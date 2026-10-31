@@ -56,8 +56,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * the EU-only inference setting and its history (1060), the secret history
  * scrub's reader and cell writer (1091), the subscription
  * account-administrator grant (1103), which records a request's verified
- * account:admin proof for one transaction, and agent calls' device lookup,
- * register, claim, device count, busy check and ring (1107). Each is
+ * account:admin proof for one transaction, agent calls' device lookup,
+ * register, claim, device count, busy check and ring (1107), and the Slack
+ * agent update sweeper's ids-only inventory of installations that send
+ * updates (1153). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -83,6 +85,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "agent_call_device_count_v1(text, boolean)",
   "agent_call_ringing_v1(text)",
   "ring_agent_call_v1(uuid, boolean)",
+  "list_due_slack_agent_update_installations_v1(integer)",
 ] as const;
 
 /**
@@ -107,6 +110,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * accounts. 1107 withholds the agent call routines and the native push v2
  * functions that carry the iOS VoIP token; until they are granted, native push
  * keeps its v1 functions, no phone takes calls and agents cannot place one.
+ * 1153 withholds the Slack agent update sweeper's inventory; until it is
+ * granted, the sweeper finds nothing and sends no update messages.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -121,6 +126,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "agent_call_device_count_v1(text, boolean)",
   "agent_call_ringing_v1(text)",
   "ring_agent_call_v1(uuid, boolean)",
+  "list_due_slack_agent_update_installations_v1(integer)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -206,6 +212,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "opengeni_private.native_push_devices",
     "auth_sessions",
   ],
+  "list_due_slack_agent_update_installations_v1(integer)": ["slack_agent_update_settings"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -2290,9 +2297,14 @@ export const FORCE_RLS_TABLES = [
   "skill_config_conversion_receipts",
   "skill_source_bindings",
   "skill_write_receipts",
+  "slack_agent_proposals",
+  "slack_agent_update_deliveries",
+  "slack_agent_update_recipients",
+  "slack_agent_update_settings",
   "slack_agent_user_states",
   "slack_agents",
   "slack_app_home_refreshes",
+  "slack_ask_forms",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
   "slack_bot_update_operations",
@@ -2638,10 +2650,15 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_sql_usage",
   "site_tool_allowances",
   "site_viewer_sessions",
+  "slack_agent_proposals",
+  "slack_agent_update_deliveries",
+  "slack_agent_update_recipients",
+  "slack_agent_update_settings",
   "slack_agent_user_states",
   "slack_agents",
   "slack_api_rate_limits",
   "slack_app_home_refreshes",
+  "slack_ask_forms",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
   "slack_bot_update_operations",

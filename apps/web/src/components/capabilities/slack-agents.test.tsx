@@ -479,6 +479,60 @@ describe("Slack agent form", () => {
     });
     await view.unmount();
   });
+
+  const OPEN_DISCLOSURE =
+    "Anyone in Slack can ask Data team. Its answers can use anything it can read in the Platform workspace (Knowledge, files, chats, shared connections). What people tell it is visible to that workspace's members.";
+
+  function openSwitch(host: HTMLElement) {
+    const label = [...host.querySelectorAll("label")].find(
+      (candidate) => candidate.textContent === "Anyone in Slack can use this agent",
+    );
+    if (!label) throw new Error("Missing open switch");
+    return host.querySelector<HTMLElement>(`#${CSS.escape(label.htmlFor)}`)!;
+  }
+
+  test("an organization admin opens an agent to anyone in Slack, seeing what that means", async () => {
+    const existing = agent();
+    const updateOpenGeniSlackAgent = mock(async () => ({ agent: { ...existing, open: true } }));
+    setContext({ updateOpenGeniSlackAgent }, true);
+    const view = await render(<SlackAgentFormPage {...form({ agent: existing })} />);
+    expect(view.host.textContent).toContain(OPEN_DISCLOSURE);
+    const control = openSwitch(view.host);
+    expect(
+      control.hasAttribute("disabled") || control.getAttribute("aria-disabled") === "true",
+    ).toBe(false);
+    await act(async () => control.click());
+    await submit(view.host);
+    expect(updateOpenGeniSlackAgent).toHaveBeenCalledWith(WORKSPACE_ID, existing.id, {
+      expectedVersion: 3,
+      open: true,
+    });
+    await view.unmount();
+  });
+
+  test("a workspace admin can't open an agent, but can close an open one", async () => {
+    setContext({});
+    const closed = await render(<SlackAgentFormPage {...form({ agent: agent() })} />);
+    const locked = openSwitch(closed.host);
+    expect(locked.hasAttribute("disabled") || locked.getAttribute("aria-disabled") === "true").toBe(
+      true,
+    );
+    expect(closed.host.textContent).toContain("Only an organization admin can turn this on.");
+    await closed.unmount();
+
+    const existing = agent({ open: true });
+    const updateOpenGeniSlackAgent = mock(async () => ({ agent: { ...existing, open: false } }));
+    setContext({ updateOpenGeniSlackAgent });
+    const view = await render(<SlackAgentFormPage {...form({ agent: existing })} />);
+    expect(view.host.textContent).toContain(OPEN_DISCLOSURE);
+    await act(async () => openSwitch(view.host).click());
+    await submit(view.host);
+    expect(updateOpenGeniSlackAgent).toHaveBeenCalledWith(WORKSPACE_ID, existing.id, {
+      expectedVersion: 3,
+      open: false,
+    });
+    await view.unmount();
+  });
 });
 
 describe("Introduce in channels", () => {
