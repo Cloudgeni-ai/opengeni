@@ -347,12 +347,14 @@ export function nextBatch(
     // Only a group of the bisection is judged against what it blamed; a
     // priority or Version PR in between drops it, which costs only retries.
     const carried = blame.length ? { blame } : {};
-    if (group.some(alone)) {
-      const first = group[0]!;
-      const others = group.filter((p) => p !== first).map((p) => p.number);
+    // A member that runs alone goes first; the others stay together, so the
+    // group is not tested one member at a time.
+    const single = group.find(alone);
+    if (single) {
+      const others = group.filter((p) => p !== single).map((p) => p.number);
       return {
         kind: "build",
-        members: [first],
+        members: [single],
         pending: others.length ? [others, ...rest] : rest,
         ...carried,
       };

@@ -135,7 +135,6 @@ export type AppContextValue = {
   busy: boolean;
   repoBusy: boolean;
   githubAppBusy: boolean;
-  selectedInstallationId: number | null;
   repositoryGroups: RepositoryGroup[];
   toolMcpServers: McpServerOption[];
   /** Capability MCP servers currently enabled as the workspace default. */

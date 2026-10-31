@@ -118,7 +118,7 @@
     },
     {
       "path": ".github/workflows/regenerate-generated.yml",
-      "sha256": "94f3dc2e80b6377ae93002b205f0ecf9d53eb73577eeaaa96e148a3ae6d4c914"
+      "sha256": "6d938d5933cd67584b1af782a0ceb571f6a5d29a59c03cb79a7d900be1f491ea"
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
@@ -1693,7 +1693,7 @@
       "workflow": ".github/workflows/regenerate-generated.yml",
       "job": "regenerate",
       "step": "Merge main and regenerate the conflicting generated files",
-      "sha256": "4bfacb0824aabb42679b8d80eb8e3b6519f4e0129cad33a4cf062589f11abfb3"
+      "sha256": "5ce7874e92f2715403e67da29588b2116029e2a82f7565a1e1fa49c627b36005"
     },
     {
       "workflow": ".github/workflows/release-acceptance.yml",
