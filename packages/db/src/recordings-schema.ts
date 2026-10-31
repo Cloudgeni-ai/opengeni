@@ -78,6 +78,12 @@ export const recordings = pgTable(
     visibility: text("visibility", { enum: recordingVisibilityValues })
       .notNull()
       .default("user_private"),
+    // Migration 1186. An Only me meeting's other workspaces where it also
+    // works, besides this one and its owner's Personal workspace; null for
+    // every workspace the owner belongs to (meetings from before 1186).
+    reachWorkspaceIds: uuid("reach_workspace_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`),
     title: text("title").notNull(),
     purpose: text("purpose", { enum: recordingPurposeValues }).notNull().default("meeting"),
     // Migration 0945. Why a browser recording's video could not be made.

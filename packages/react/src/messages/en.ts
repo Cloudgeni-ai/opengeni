@@ -2547,6 +2547,21 @@ export const englishMessages = {
   "meetings.detailPage.sharedWithTheWorkspace": "Shared with the workspace",
   /** A person's own Only me meeting opened from another workspace of the same organization. */
   "meetings.detailPage.onlyMeRecordedIn": "Only me · recorded in {workspace}",
+  /** The meeting menu item that opens where the owner's Only me meeting works. */
+  "meetings.detailPage.availableInMenu": "Available in…",
+  /** Title of the dialog choosing the workspaces an Only me meeting works in. */
+  "meetings.detailPage.availableIn": "Available in",
+  "meetings.detailPage.onlyYouSeeItInThese":
+    "It stays Only me: in each of these workspaces, only you and agent turns you start can use it.",
+  /** The workspace that stores the meeting, always ticked. */
+  "meetings.detailPage.recordedThereAlwaysIncluded":
+    "It was recorded there, so it's always included.",
+  "meetings.detailPage.itWillNoLongerShowHere":
+    "It will no longer show in this workspace, and you'll go back to Meetings.",
+  "meetings.detailPage.itNoLongerShowsHere": "This meeting no longer shows in this workspace",
+  "meetings.detailPage.couldnTChangeWhereItWorks": "Couldn't change where this meeting works.",
+  /** Stands in for the organization's name when the app doesn't give it. */
+  "meetings.detailPage.thisOrganization": "this organization",
   /** Names the Summary · Transcript · Notepad switch for screen readers. */
   "meetings.detailPage.show": "Show",
   "meetings.detailPage.speakers": "Speakers",

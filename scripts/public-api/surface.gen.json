@@ -23820,6 +23820,8 @@
         "$.metadata{}": "unknown",
         "$.ownerSubjectId": "string!",
         "$.purpose": "ref(RecordingPurpose)!",
+        "$.reachWorkspaceIds": "array? null",
+        "$.reachWorkspaceIds[]": "string",
         "$.sourceWorkspace": "object? null",
         "$.sourceWorkspace.id": "string!",
         "$.sourceWorkspace.name": "string!",
@@ -30083,6 +30085,8 @@
         "$.metadata{}|3[]": "ref(__schema0)",
         "$.metadata{}|4": "object",
         "$.metadata{}|4{}": "ref(__schema0)",
+        "$.reachWorkspaceIds": "array? null",
+        "$.reachWorkspaceIds[]": "string",
         "$.title": "string?",
         "$.visibility": "ref(SessionVisibility)?"
       }

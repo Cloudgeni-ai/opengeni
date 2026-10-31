@@ -431,6 +431,13 @@ export const UpdateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       title: z.string().trim().min(1).max(300).optional(),
       visibility: RecordingVisibility.optional(),
+      /**
+       * Only the owner, for their Only me meeting: the other workspaces of the
+       * organization where it also works, besides the one that stores it and
+       * their Personal workspace. Null for every workspace they belong to.
+       * Each must be a workspace the owner belongs to.
+       */
+      reachWorkspaceIds: z.array(z.string().uuid()).max(200).nullable().optional(),
       externalRef: externalRef.nullable().optional(),
       metadata: recordingMetadata.optional(),
     })
@@ -611,6 +618,13 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
     workspaceId: z.string(),
     ownerSubjectId: z.string(),
     visibility: RecordingVisibility,
+    /**
+     * An Only me meeting's other workspaces where it also works, besides the
+     * one that stores it and its owner's Personal workspace; null for every
+     * workspace the owner belongs to (meetings from before this list existed).
+     * Shared meetings work only in their workspace and ignore it.
+     */
+    reachWorkspaceIds: z.array(z.string()).nullable().optional(),
     title: z.string(),
     purpose: RecordingPurpose,
     state: RecordingState,
