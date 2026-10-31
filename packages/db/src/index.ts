@@ -25,6 +25,7 @@ export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
+export * from "./session-search-records";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
 export * from "./workspace-model-catalog-inputs";

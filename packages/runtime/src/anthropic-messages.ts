@@ -356,7 +356,15 @@ export function anthropicMessages(
 ): Message[] {
   const messages: Message[] = [];
   let foreignSearch = false;
+  // A runtime-form search record waits for the next user message: inside a
+  // reply it would split it (thinking from its tool call), and it is never
+  // Claude's speech. An assistant-form record keeps its original place.
+  let pendingRecords: Json[] = [];
   const append = (role: Message["role"], content: Json[]) => {
+    if (role === "user" && pendingRecords.length) {
+      content = [...pendingRecords, ...content];
+      pendingRecords = [];
+    }
     if (!content.length) return;
     const previous = messages.at(-1);
     if (previous?.role === role) previous.content.push(...content);
@@ -420,7 +428,9 @@ export function anthropicMessages(
           if (options.webSearch && sameAccount) append("assistant", anthropicWebSearchBlocks(item));
           else {
             if (!sameAccount) foreignSearch = true;
-            append("assistant", contentBlocks(object(projectHostedSearchEvidence(item)).content));
+            const projected = object(projectHostedSearchEvidence(item));
+            if (projected.role === "user") pendingRecords.push(...contentBlocks(projected.content));
+            else append("assistant", contentBlocks(projected.content));
           }
           break;
         }
@@ -441,6 +451,11 @@ export function anthropicMessages(
         ]);
     }
   }
+  // A request that ends in Claude's own reply continues it (a paused search).
+  // A record placed after that reply would end it, and would move once the
+  // reply grows, so records still waiting then reach Claude with the next
+  // user message, in a later request.
+  if (messages.at(-1)?.role !== "assistant") append("user", []);
   withoutUncontinuableSearches(messages);
   // Validate adjacency and pairing before network I/O. Reorder only results within their user message.
   let pending = new Set<string>();

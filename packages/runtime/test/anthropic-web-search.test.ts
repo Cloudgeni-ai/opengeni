@@ -7,6 +7,7 @@ import {
   type ModelRequest,
 } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
+import { maskSecretValues } from "@opengeni/contracts";
 import {
   ANTHROPIC_PAUSE_TURN_MAX_REQUESTS,
   AnthropicMessagesModel,
@@ -18,8 +19,15 @@ import {
   anthropicWebSearchQueries,
 } from "../src/anthropic-web-search";
 import { renderCompactionPromptInputForChat } from "../src/context-compaction";
-import { projectHostedSearchEvidence } from "../src/hosted-search-evidence";
+import { projectHostedSearchEvidence, withSearchRecordForm } from "../src/hosted-search-evidence";
+import { baseModelInputFilterForSettings } from "../src/model-input";
 import { projectHistoryForProvider } from "../src/provider-history-adapter";
+
+/** History as a session in the runtime form hands it to the Claude transport. */
+const inRuntimeForm = (items: any[]): any[] =>
+  items.map((item) =>
+    item.type === "hosted_tool_call" ? withSearchRecordForm(item, "runtime") : item,
+  );
 
 setTracingDisabled(true);
 
@@ -412,18 +420,92 @@ describe("Claude web search replay", () => {
   });
 
   test("without the search tool, stored searches become readable facts with no encrypted data", () => {
-    const body = buildAnthropicRequest(
-      request([...history(), { role: "user", content: "Thanks" }], [lookupTool]),
-      "claude",
-      provider,
-      false,
-    );
-    const wire = JSON.stringify(body.messages);
-    expect(wire).not.toContain("ENC_");
-    expect(wire).not.toContain("server_tool_use");
-    expect(wire).not.toContain("citations");
-    expect(wire).toContain("https://example.com/notes");
-    expect(wire).toContain("opengeni release notes");
+    // In the runtime form the record is runtime input, never Claude's own words
+    // to imitate; a session still in the assistant form keeps its earlier shape.
+    for (const [items, role] of [
+      [inRuntimeForm(history()), "user"],
+      [history(), "assistant"],
+    ] as const) {
+      const body = buildAnthropicRequest(
+        request([...items, { role: "user", content: "Thanks" }], [lookupTool]),
+        "claude",
+        provider,
+        false,
+      );
+      const wire = JSON.stringify(body.messages);
+      expect(wire).not.toContain("ENC_");
+      expect(wire).not.toContain("server_tool_use");
+      expect(wire).not.toContain("citations");
+      expect(wire).toContain("https://example.com/notes");
+      expect(wire).toContain("opengeni release notes");
+      const records = body.messages.filter((entry: any) =>
+        JSON.stringify(entry.content).includes("opengeni release notes"),
+      );
+      expect(records.map((entry: any) => entry.role)).toEqual([role]);
+    }
+  });
+
+  test("a search record never splits a thinking reply from its tool call", () => {
+    const thinking = { type: "thinking", thinking: "Plan", signature: "SIG_1" };
+    const reply = anthropicResponse(
+      message(
+        "msg_1",
+        [thinking, call, results, { type: "tool_use", id: "toolu_1", name: "lookup", input: {} }],
+        "tool_use",
+      ),
+      undefined,
+      new Map([["lookup", { name: "lookup" }]]),
+    ).output;
+    const toolResult = {
+      type: "function_call_result",
+      callId: "toolu_1",
+      name: "lookup",
+      status: "completed",
+      output: "a result",
+    };
+    for (const tail of [[], [{ role: "user", content: "Thanks" }]]) {
+      const input = inRuntimeForm([{ role: "user", content: "Go" }, ...reply, toolResult, ...tail]);
+      // Without the search tool, Claude's own search becomes a readable record.
+      const body = buildAnthropicRequest(request(input, [lookupTool]), "claude", provider, false);
+      expect(body.messages.map((entry: any) => entry.role)).toEqual(["user", "assistant", "user"]);
+      expect(body.messages[1].content.map((block: any) => block.type)).toEqual([
+        "thinking",
+        "tool_use",
+      ]);
+      const next = body.messages[2].content;
+      expect(next[0].type).toBe("tool_result");
+      expect(JSON.stringify(next[1])).toContain("opengeni release notes");
+      expect(next.length).toBe(2 + tail.length);
+    }
+  });
+
+  test("a run's model calls mark Claude's searches with the session's form for its transport", async () => {
+    const settings = { openaiProviderItemIds: "keep" } as any;
+    for (const [form, role] of [
+      ["runtime", "user"],
+      ["assistant", "assistant"],
+    ] as const) {
+      const filter = baseModelInputFilterForSettings(settings, { searchRecordForm: form });
+      const filtered = await filter({
+        modelData: { input: [...history(), { role: "user", content: "Thanks" }], instructions: "" },
+        agent: {} as any,
+        context: undefined,
+      } as any);
+      // Still native, so the same account with the search tool replays it as is.
+      expect(filtered.input.filter((entry: any) => entry.type === "hosted_tool_call")).toHaveLength(
+        1,
+      );
+      const body = buildAnthropicRequest(
+        request(filtered.input, [lookupTool]),
+        "claude",
+        provider,
+        false,
+      );
+      const records = body.messages.filter((entry: any) =>
+        JSON.stringify(entry.content).includes("opengeni release notes"),
+      );
+      expect(records.map((entry: any) => entry.role)).toEqual([role]);
+    }
   });
 
   test("a search deferred behind our tool call continues and its late result replays natively", () => {
@@ -782,6 +864,34 @@ describe("Claude searches across Claude accounts", () => {
     );
   });
 
+  test("a record never ends a reply that the request continues", () => {
+    // The request continues Claude's own reply (as after a paused search), so
+    // the readable record of its earlier search waits for the next user
+    // message instead of ending the reply, and the reply can grow in place.
+    const reply = searchedOn(accountA).slice(0, -1);
+    const first = buildAnthropicRequest(request(inRuntimeForm(reply)), "claude", accountB, false);
+    expect(first.messages.map((entry: any) => entry.role)).toEqual(["user", "assistant"]);
+    expect(JSON.stringify(first.messages)).not.toContain("opengeni release notes");
+    const later = buildAnthropicRequest(
+      request(
+        inRuntimeForm([
+          ...reply,
+          ...anthropicResponse(message("msg_2", [{ type: "text", text: "More." }])).output,
+          { role: "user", content: "Thanks" },
+        ]),
+      ),
+      "claude",
+      accountB,
+      false,
+    );
+    expect(later.messages.map((entry: any) => entry.role)).toEqual(["user", "assistant", "user"]);
+    const [user, answer] = unmarked(first.messages) as any[];
+    const [laterUser, laterAnswer, next] = unmarked(later.messages) as any[];
+    expect(laterUser).toEqual(user);
+    expect(laterAnswer.content.slice(0, answer.content.length)).toEqual(answer.content);
+    expect(JSON.stringify(next.content)).toContain("opengeni release notes");
+  });
+
   test("a conversation that moves accounts between turns keeps working", async () => {
     const sent: any[] = [];
     const fetcher = (async (_url, init) => {
@@ -844,17 +954,44 @@ describe("Claude searches outside the Claude transport", () => {
 
   test("other providers receive readable search facts and plain cited text", () => {
     for (const api of ["responses", "chat"] as const) {
-      const projected = projectHistoryForProvider([item, cited], api);
-      const wire = JSON.stringify(projected);
-      expect(wire).not.toContain("ENC_");
-      expect(wire).not.toContain("anthropic");
-      expect(wire).toContain("https://example.com/notes");
-      expect(wire).toContain("Release notes");
-      expect(wire).toContain("opengeni release notes");
+      for (const [projected, role] of [
+        [projectHistoryForProvider([item, cited], api, { searchRecordForm: "runtime" }), "user"],
+        [projectHistoryForProvider([withSearchRecordForm(item, "runtime"), cited], api), "user"],
+        [projectHistoryForProvider([item, cited], api), "assistant"],
+      ] as const) {
+        const wire = JSON.stringify(projected);
+        expect(wire).not.toContain("ENC_");
+        expect(wire).not.toContain("anthropic");
+        expect(wire).toContain("https://example.com/notes");
+        expect(wire).toContain("Release notes");
+        expect(wire).toContain("opengeni release notes");
+        expect(projected[0]).toMatchObject({ type: "message", role });
+      }
     }
     // Canonical history is untouched for a later switch back to Claude.
     expect(item.providerData.anthropic.blocks).toEqual([call, results]);
     expect(projectHistoryForProvider([item, cited], "anthropic-messages")).toEqual([item, cited]);
+    // Kept native for Claude, marked with the session's form for its transport.
+    const kept = projectHistoryForProvider([item, cited], "anthropic-messages", {
+      searchRecordForm: "runtime",
+    });
+    expect(JSON.stringify(kept)).toBe(JSON.stringify([item, cited]));
+    expect(projectHostedSearchEvidence(kept[0]!)).toMatchObject({ role: "user" });
+  });
+
+  test("a search keeps its session's form when secret masking copies it", () => {
+    const kept = projectHistoryForProvider([item, cited], "anthropic-messages", {
+      searchRecordForm: "runtime",
+    });
+    // Masking happens between the filters and the transport, and rebuilds
+    // any item holding a known secret value.
+    const masked = maskSecretValues(kept, [{ value: "opengeni release notes", label: "[secret]" }]);
+    expect(masked[0]).not.toBe(kept[0]);
+    for (const api of ["responses", "chat"] as const) {
+      const projected = projectHistoryForProvider(masked, api);
+      expect(projected[0]).toMatchObject({ type: "message", role: "user" });
+      expect(JSON.stringify(projected)).not.toContain("opengeni release notes");
+    }
   });
 
   test("the compaction transcript names the query and sources without encrypted pages", () => {

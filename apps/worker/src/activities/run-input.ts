@@ -38,6 +38,11 @@ import {
 } from "@opengeni/runtime";
 import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
 import { RetainedAttachmentUnavailableError } from "./retained-image-unavailable";
+import {
+  projectTurnHistoryForProvider,
+  settleTurnSearchRecords,
+  type TurnSearchRecords,
+} from "./search-record-form";
 
 /** D-37 request-copy projection. C1 is deliberately not wired into turnInput;
  * C2 must supply scoped turn metadata and the D-43 deployment gate. The API
@@ -177,6 +182,12 @@ export type TurnInputOptions = {
   mountedFileResources?: readonly ResourceRef[];
   providerApi: HistoryProviderApi;
   servingProviderId?: string;
+  /**
+   * The turn's hosted web-search record form. Settled here against the
+   * history this input sends, then read by the run's model calls. Without it
+   * searches keep the original `assistant` form.
+   */
+  searchRecords?: TurnSearchRecords;
   /**
    * A turn not served by Codex never sends Codex's opaque remote compaction
    * checkpoint. A model switch rebuilds it before the turn; this is the
@@ -899,7 +910,7 @@ async function messageInput(
   loadActiveHistory: ActiveHistoryLoader = loadActiveHistoryForTurn,
   preparationOptions: Pick<
     TurnInputOptions,
-    "onPreparationPhase" | "servingProviderId" | "omitRemoteCompactionItems"
+    "onPreparationPhase" | "servingProviderId" | "omitRemoteCompactionItems" | "searchRecords"
   > = {},
 ): Promise<PreparedTurnInput> {
   const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
@@ -943,10 +954,22 @@ async function messageInput(
       return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
     },
   );
+  const searchRecords = preparationOptions.searchRecords;
+  if (searchRecords)
+    await settleTurnSearchRecords(
+      db,
+      trigger.workspaceId,
+      trigger.sessionId,
+      searchRecords,
+      canonicalView,
+    );
   const providerView = await measureHistoryPreparationPhase(
     preparationOptions,
     "provider_projection",
-    () => projectHistoryForProvider(canonicalView, providerApi),
+    () =>
+      searchRecords
+        ? projectTurnHistoryForProvider(canonicalView, providerApi, searchRecords)
+        : projectHistoryForProvider(canonicalView, providerApi),
   );
   const referencedHistory = await measureHistoryPreparationPhase(
     preparationOptions,
