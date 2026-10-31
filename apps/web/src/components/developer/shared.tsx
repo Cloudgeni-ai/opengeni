@@ -135,8 +135,12 @@ export function urlHost(url: string): string {
 /** Which workspaces an organization registration reaches, in words. */
 export function workspaceFilterLabel(
   filter: IntegrationWorkspaceFilter | null | undefined,
+  allowPersonalWorkspaces = false,
 ): string {
-  return filter ? `Shared workspaces from ${filter.externalSource}` : "Every shared workspace";
+  const shared = filter
+    ? `Shared workspaces from ${filter.externalSource}`
+    : "Every shared workspace";
+  return allowPersonalWorkspaces ? `${shared}, plus Personal workspaces` : shared;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

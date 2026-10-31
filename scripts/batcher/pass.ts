@@ -478,7 +478,8 @@ async function tryMoveMigrations(
   await gh.createBranch(scratch, pull.headSha);
   try {
     let base = { sha: pull.headSha, tree: (await gh.commit(pull.headSha)).tree };
-    if ((await gh.compareFiles(mainSha, pull.headSha))?.mergeBase !== mainSha) {
+    const branchPoint = (await gh.compareFiles(mainSha, pull.headSha))?.mergeBase;
+    if (branchPoint !== mainSha) {
       const merged = await gh.mergeInto(scratch, mainSha, `Merge main into #${number}`);
       if (merged.kind === "conflict") return await eject(ctx, number, CONFLICTING);
       base = merged;
@@ -499,6 +500,11 @@ async function tryMoveMigrations(
       reserved,
       changed,
       files: await gh.readFiles(base.sha, changed),
+      // Which lines the PR wrote, and what its migration numbers meant then.
+      mainFiles: await gh.readFiles(mainSha, changed),
+      ...(branchPoint
+        ? { branchLedger: (await gh.listDirectory(MIGRATIONS_DIR, branchPoint)).map(fileName) }
+        : {}),
     });
     if (plan.kind === "manual") return await manual(plan.reason);
     const moved = plan.moves.map((m) => `\`${fileName(m.from)}\` to \`${fileName(m.to)}\``);

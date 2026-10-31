@@ -101,12 +101,11 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1060 withholds the EU-only change function; until it is granted the setting
  * cannot be changed and stays off. 1091 withholds the secret history scrub's
  * reader and cell writer; until they are granted, a scrub reports the cells
- * only they reach as pending. 1103 withholds the subscription
- * account-administrator grant; until it is granted, only organization
- * membership administrators administer the organization's subscription
- * accounts. 1107 withholds the agent call routines and the native push v2
- * functions that carry the iOS VoIP token; until they are granted, native push
- * keeps its v1 functions, no phone takes calls and agents cannot place one.
+ * only they reach as pending. 1103 withheld the subscription
+ * account-administrator grant and 1149 granted it. 1107 withholds the agent
+ * call routines and the native push v2 functions that carry the iOS VoIP
+ * token; until they are granted, native push keeps its v1 functions, no phone
+ * takes calls and agents cannot place one.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -114,7 +113,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
-  "grant_subscription_account_administrator(jsonb)",
   "native_push_device_v2(text)",
   "register_native_push_device_v2(text, text, text, text, text, text[], text)",
   "claim_native_push_deliveries_v2(uuid, integer, integer)",
@@ -1877,6 +1875,7 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  */
 export const FORCE_RLS_TABLES = [
   "additional_organization_creation_receipts",
+  "agent_call_host_phones",
   "agent_calls",
   "agent_instruction_operations",
   "agent_learning_revisions",
@@ -2435,6 +2434,8 @@ export const NON_RLS_RUNTIME_TABLES = [
  * table must not silently grant it broader DML than its migration intended.
  */
 export const RUNTIME_FULL_DML_TABLES = [
+  // 1143_agent_call_host_phones: the phones a product embedding Opengeni rings for agent calls.
+  "agent_call_host_phones",
   "agent_run_states",
   "api_keys",
   "audit_events",

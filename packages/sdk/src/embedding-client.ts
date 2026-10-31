@@ -83,7 +83,7 @@ function serializeServiceContext(context: ServiceContext): string {
 
 /** Public product embedding administration, kept out of the native browser client. */
 export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
-  /** Read configuration (null means no configured ceiling). Requires admin or organization-key read authority. */
+  /** Read configuration (null means no configured ceiling). Requires a person who can start chats in the workspace, admin, or organization-key read authority. */
   async getWorkspaceAllowance(
     workspaceId: string,
   ): Promise<import("@opengeni/contracts/usage-allowances").WorkspaceAllowance | null> {

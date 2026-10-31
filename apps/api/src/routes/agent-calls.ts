@@ -1,6 +1,7 @@
-import { AgentCallActionRequest } from "@opengeni/contracts";
+import { AgentCallActionRequest, SetAgentCallHostPhonesRequest } from "@opengeni/contracts";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import type { AccessGrant } from "@opengeni/contracts";
+import { getAgentCallHostPhones, setAgentCallHostPhones } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
@@ -81,4 +82,36 @@ export function registerAgentCallRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post(`${path}/answer`, act("answered"));
   app.post(`${path}/decline`, act("declined"));
+
+  // A product embedding Opengeni that rings its own app from the
+  // session.agentCall.ringing webhook states, acting as the person, how many
+  // of their phones it rings for agents. Only the person sets their own.
+  const hostPhonesPath = "/v1/workspaces/:workspaceId/agent-call-phones";
+  app.get(hostPhonesPath, async (c) => {
+    const grant = await calleeGrant(c, deps);
+    c.header("cache-control", "private, no-store");
+    return c.json({
+      hostPhones: await getAgentCallHostPhones(deps.db, {
+        accountId: grant.accountId,
+        subjectId: grant.subjectId,
+      }),
+    });
+  });
+  app.put(hostPhonesPath, async (c) => {
+    const grant = await calleeGrant(c, deps);
+    const body = parseRequestBody(
+      SetAgentCallHostPhonesRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "Invalid phones" },
+    );
+    c.header("cache-control", "private, no-store");
+    return c.json({
+      hostPhones: await setAgentCallHostPhones(deps.db, {
+        accountId: grant.accountId,
+        subjectId: grant.subjectId,
+        phones: body.phones,
+        teammates: body.teammates ?? false,
+      }),
+    });
+  });
 }

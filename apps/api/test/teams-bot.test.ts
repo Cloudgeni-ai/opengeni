@@ -12,6 +12,7 @@ import {
 import {
   registerTeamsBotRoutes,
   drainTeamsBotOnce,
+  teamsReplyParts,
   teamsTextParts,
 } from "../src/integrations/teams-bot";
 const tenant = "10000000-0000-4000-8000-000000000001";
@@ -245,6 +246,13 @@ describe("Teams actor and transport boundary", () => {
     const parts = teamsTextParts(text);
     expect(parts.join("")).toBe(text);
     expect(parts.every((p) => Buffer.byteLength(p) <= 20000)).toBe(true);
+  });
+  test("a reply shows Claude citation tags as their quoted text", () => {
+    // Built from escapes so no tool that acts on citation tags rewrites this file.
+    const tag = '\u003ccite index="1-2">"FrontierCode v1.1 replaces DeepSWE v1.1"\u003c/cite>';
+    expect(teamsReplyParts(`The news: ${tag}.`)).toEqual([
+      'The news: "FrontierCode v1.1 replaces DeepSWE v1.1".',
+    ]);
   });
 });
 

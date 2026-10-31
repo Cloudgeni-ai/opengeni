@@ -221,7 +221,11 @@ import type {
 } from "../components/session/editable-artifacts-workspace";
 import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
 import { useSessionRouteMemory } from "../lib/last-session-memory";
-import { hasAccountPermission, hasWorkspacePermission } from "../lib/permissions";
+import {
+  canConnectWorkspaceMcpFromChat,
+  hasAccountPermission,
+  hasWorkspacePermission,
+} from "../lib/permissions";
 import { secretSaveTargets } from "../lib/secrets-ui";
 import { chatLearningScope } from "../lib/chat-learning-scope";
 import { currentModelRecovery } from "../lib/model-recovery";
@@ -1174,9 +1178,12 @@ export function SessionRoute({
         const catalogItem = context.workspaceCapabilityCatalog.find(
           (candidate) => candidate.id === item.capability?.id,
         );
-        const canInstall =
-          hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin") &&
-          hasWorkspacePermission(context.accessContext, workspaceId, "connections:write");
+        const canInstall = canConnectWorkspaceMcpFromChat(
+          context.accessContext,
+          workspaceId,
+          catalogItem,
+          context.workspaceMemberIntegrationSetup,
+        );
         const mcpUrl = catalogItem?.mcpUrl ?? catalogItem?.endpointUrl ?? null;
         if (
           canInstall &&
@@ -1241,6 +1248,7 @@ export function SessionRoute({
       context.accessContext,
       context.client,
       context.workspaceCapabilityCatalog,
+      context.workspaceMemberIntegrationSetup,
       workspaceId,
       reconnectTransport,
     ],
@@ -2498,6 +2506,16 @@ function SessionChatPane(props: {
     runsOn.fleet.sessionMachineAccess,
     props.session.activeSandboxId,
   );
+  // The chat is shared with other people in the workspace, so the owner of
+  // the personal machine it runs on gets a heads-up that they see the work on
+  // it. A Personal workspace has nobody else in it.
+  const sharedChat =
+    props.session.tenancy?.visibility === "workspace" &&
+    !isPersonalWorkspace(
+      context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null,
+      context.managedSelfContext,
+    );
+  const showMachineAccess = machineAccess !== null && (!machineAccess.isOwner || sharedChat);
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -4325,7 +4343,7 @@ function SessionChatPane(props: {
                   modelSwitchHeadsUp ||
                   usageLimitNotice ||
                   creditRefusalNotice ||
-                  (machineAccess && !machineAccess.isOwner) ? (
+                  showMachineAccess ? (
                     <>
                       {!sessionAdmissionNeedsDifferentMachine(
                         sessionAdmissionReason(props.session),
@@ -4333,12 +4351,15 @@ function SessionChatPane(props: {
                       ) ? (
                         <SessionMachineAccessNotice
                           access={machineAccess}
+                          shared={sharedChat}
+                          className="px-3.5 pt-2.5 md:px-4"
                           action={
                             <SessionMachinePickerAction
                               runsOn={runsOn}
                               workspaceId={props.session.workspaceId}
                               rigId={props.session.rigId}
                               move={moveRunsOn}
+                              compact={machineAccess?.isOwner === true}
                             />
                           }
                         />

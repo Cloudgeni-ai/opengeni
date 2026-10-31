@@ -172,12 +172,15 @@ function SessionFolderPicker({
           variant="outline"
           size="sm"
           disabled={disabled}
-          aria-label={`Project: ${label}`}
+          aria-label={`Project: ${label}${selected?.visibility === "private" ? ", Only me" : ""}`}
           title={label}
           className={SESSION_SETUP_CHIP_CLASS}
         >
           <ProjectGlyph project={selected} />
           <span className="min-w-0 truncate">{label}</span>
+          {selected?.visibility === "private" ? (
+            <LockIcon aria-hidden="true" className="size-3 shrink-0" />
+          ) : null}
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
@@ -192,6 +195,9 @@ function SessionFolderPicker({
           <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
             <ProjectGlyph project={channel} className="size-4" />
             <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+            {channel.visibility === "private" ? (
+              <LockIcon aria-label="Only me" className="size-3.5 shrink-0 text-fg-subtle" />
+            ) : null}
             <DropdownMenuCheck checked={channel.id === selectedChannelId} />
           </DropdownMenuItem>
         ))}

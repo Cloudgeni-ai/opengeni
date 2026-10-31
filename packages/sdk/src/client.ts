@@ -15,6 +15,10 @@ import {
 } from "@opengeni/contracts/message-time-zone";
 import type { WorkspaceBackgroundCommandListResponse } from "./types";
 import type {
+  EditableArtifactResource,
+  UpdateEditableArtifactVisibilityRequest,
+} from "./editable-artifact-resources";
+import type {
   InsightsSiteUsageQuery,
   InsightsSiteUsageResponse,
 } from "@opengeni/contracts/insights-usage";
@@ -485,6 +489,7 @@ import type {
   NativePushDevice,
   RegisterNativePushDeviceInput,
   AgentCall,
+  AgentCallHostPhones,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
   InstallLibrarySkillRequest,
@@ -9141,6 +9146,25 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Change who can open a document, spreadsheet or presentation: the whole
+   * workspace, or only you. Only its owner can, from the app.
+   */
+  async updateEditableArtifactVisibility(
+    workspaceId: string,
+    artifactId: string,
+    request: UpdateEditableArtifactVisibilityRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<EditableArtifactResource> {
+    return await this.requestJson<EditableArtifactResource>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/visibility`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
   /** A Site's data collections, usage and limits. Needs a manager of the Site. */
   async getSiteData(
     workspaceId: string,
@@ -11113,6 +11137,38 @@ export class OpenGeniClient {
       {},
     );
     return call;
+  }
+
+  /**
+   * The phones your product rings for this person's agent calls, as they last
+   * stated through it; null when none. For products that ring their own app
+   * from the `session.agentCall.ringing` webhook.
+   */
+  async getAgentCallHostPhones(workspaceId: string): Promise<AgentCallHostPhones | null> {
+    const { hostPhones } = await this.requestJson<{ hostPhones: AgentCallHostPhones | null }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-call-phones`,
+    );
+    return hostPhones;
+  }
+
+  /**
+   * State how many of this person's phones your product rings for agent calls
+   * (the phones where they turned agent calls on in your app), so agents can
+   * call them; `phones: 0` removes them. `teammates` lets agents working for
+   * other members of a shared workspace ring them too. Applies across the
+   * person's workspaces in this organization.
+   */
+  async setAgentCallHostPhones(
+    workspaceId: string,
+    input: { phones: number; teammates?: boolean },
+  ): Promise<AgentCallHostPhones | null> {
+    const { hostPhones } = await this.requestJson<{ hostPhones: AgentCallHostPhones | null }>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-call-phones`,
+      input,
+    );
+    return hostPhones;
   }
 
   // --- Organization-wide sessions ----------------------------------------------------------------

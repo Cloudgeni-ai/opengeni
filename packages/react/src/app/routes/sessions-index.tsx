@@ -69,7 +69,10 @@ import {
 import { toast } from "../lib/toast";
 
 import { BillingClassMark } from "../components/billing-class-mark";
-import { ChannelCreateDialog } from "../components/rail/channel-create-dialog";
+import {
+  ChannelCreateDialog,
+  type ProjectAudience,
+} from "../components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "../components/Composer";
 import { NewSessionStarters } from "../components/new-session-starters";
 import { NewSessionDraftSyncNotice } from "../components/new-session-draft-sync-notice";
@@ -332,6 +335,7 @@ function SessionsIndexRouteContent({
   const recentChannelId = selectionHistory.projects[0]?.channelId ?? null;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
+  const [projectAudienceDraft, setProjectAudienceDraft] = useState<ProjectAudience>("workspace");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   // ?botTemplateId= starts this chat as a bot: the template's setup
@@ -493,6 +497,12 @@ function SessionsIndexRouteContent({
     draft.visibility,
     tenancyCapabilities?.canCreatePrivate === true,
   );
+  const canCreatePrivateChat = tenancyCapabilities?.canCreatePrivate === true;
+  // A new project can be Only me wherever a new chat can.
+  const projectAudienceOffered = hasVisibilityChoice({
+    personalWorkspace,
+    canCreatePrivate: canCreatePrivateChat,
+  });
   const personalOwnerScope = resolvePersonalResourceOwnerScope({
     authMode: context.clientConfig.auth.mode,
     authSession: context.authSession,
@@ -757,7 +767,10 @@ function SessionsIndexRouteContent({
   const createProject = useCallback(async () => {
     const name = projectNameDraft.trim();
     if (!name) return;
-    const project = await channelsQuery.create({ name });
+    const project = await channelsQuery.create({
+      name,
+      ...(projectAudienceOffered ? { visibility: projectAudienceDraft } : {}),
+    });
     if (!project) {
       toast.error("Couldn't create the project. The name may already be in use.");
       return;
@@ -765,7 +778,30 @@ function SessionsIndexRouteContent({
     selectProject(project.id);
     setProjectDialogOpen(false);
     setProjectNameDraft("");
-  }, [channelsQuery, projectNameDraft, selectProject]);
+    setProjectAudienceDraft("workspace");
+  }, [
+    channelsQuery,
+    projectAudienceDraft,
+    projectAudienceOffered,
+    projectNameDraft,
+    selectProject,
+  ]);
+
+  // An Only me project holds only Only me chats, so choosing one makes the new
+  // chat Only me. Where Only me is off, its Only me projects take no new chats.
+  const selectedProjectOnlyMe =
+    channelsQuery.channels.find((channel) => channel.id === selectedChannelId)?.visibility ===
+    "private";
+  useEffect(() => {
+    if (!selectedProjectOnlyMe || !tenancyCapabilities) return;
+    if (!canCreatePrivateChat) {
+      selectProject(null, false);
+      return;
+    }
+    setDraft((current) =>
+      current.visibility === "private" ? current : { ...current, visibility: "private" },
+    );
+  }, [canCreatePrivateChat, selectProject, selectedProjectOnlyMe, tenancyCapabilities]);
 
   useEffect(() => {
     const onRequest = (event: Event) => {
@@ -1804,6 +1840,8 @@ function SessionsIndexRouteContent({
             disabled={setupDisabled}
             onChange={(visibility) => {
               visibilityChosenRef.current = true;
+              // A shared chat can't go in an Only me project.
+              if (visibility === "workspace" && selectedProjectOnlyMe) selectProject(null);
               setDraft((current) => ({ ...current, visibility }));
               close();
             }}
@@ -2139,7 +2177,11 @@ function SessionsIndexRouteContent({
                       project={
                         chatList
                           ? {
-                              channels: channelsQuery.channels,
+                              channels: canCreatePrivateChat
+                                ? channelsQuery.channels
+                                : channelsQuery.channels.filter(
+                                    (channel) => channel.visibility !== "private",
+                                  ),
                               selectedChannelId,
                               onChange: selectProject,
                               onCreate: () => setProjectDialogOpen(true),
@@ -2246,10 +2288,18 @@ function SessionsIndexRouteContent({
         open={projectDialogOpen}
         name={projectNameDraft}
         busy={channelsQuery.mutating}
+        audience={
+          projectAudienceOffered
+            ? { value: projectAudienceDraft, onChange: setProjectAudienceDraft }
+            : undefined
+        }
         onNameChange={setProjectNameDraft}
         onOpenChange={(open) => {
           setProjectDialogOpen(open);
-          if (!open) setProjectNameDraft("");
+          if (!open) {
+            setProjectNameDraft("");
+            setProjectAudienceDraft("workspace");
+          }
         }}
         onSubmit={() => void createProject()}
       />

@@ -71,6 +71,8 @@ function menuRow(name: string) {
 
 function setup(props: {
   project?: boolean;
+  channels?: never[];
+  selectedChannelId?: string | null;
   onVisibility?: (value: "private" | "workspace") => void;
   onRig?: (rigId: string) => void;
   disabled?: boolean;
@@ -83,8 +85,8 @@ function setup(props: {
         props.project === false
           ? null
           : {
-              channels: [],
-              selectedChannelId: null,
+              channels: props.channels ?? [],
+              selectedChannelId: props.selectedChannelId ?? null,
               onChange: () => {},
               onCreate: () => {},
             }
@@ -142,6 +144,21 @@ test("without a project chip the strip still offers where it runs and who can se
   expect(container.querySelector('[aria-label^="Project:"]')).toBeNull();
   expect(chip("Runs on")).toBeTruthy();
   expect(chip("Visibility")).toBeTruthy();
+});
+
+test("an Only me project says so on its chip", async () => {
+  const project = (id: string, name: string, visibility: "private" | "workspace") =>
+    ({ id, name, workspaceId: "workspace-1", visibility }) as never;
+  await act(async () =>
+    root.render(
+      setup({
+        channels: [project("p-notes", "Notes", "private"), project("p-team", "Team", "workspace")],
+        selectedChannelId: "p-notes",
+      }),
+    ),
+  );
+  expect(chip("Project").getAttribute("aria-label")).toBe("Project: Notes, Only me");
+  expect(chip("Project").querySelector("svg.lucide-lock")).not.toBeNull();
 });
 
 test("Visibility opens its choices from the chip and closes after a choice", async () => {
