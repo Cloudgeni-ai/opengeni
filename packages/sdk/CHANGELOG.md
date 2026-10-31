@@ -1,5 +1,23 @@
 # @opengeni/sdk
 
+## 6.3.1
+
+### Minor Changes
+
+- d91058a: Agents can call a person. The new `call_user` tool rings the person's phones with the system's incoming-call screen (CallKit on iOS, through a PushKit VoIP push) when something cannot wait, waits up to 40 seconds while it rings, and returns `answered`, `declined`, `missed` or `cancelled`. Answering opens the chat's voice call, which starts by saying why the agent called. Nothing rings until the person turns on "Let agents call this iPhone" on that phone (native push rule `call`); "Teammates' agents too" (`call_members`) lets agents of other workspace members call them. One call rings a person at a time, a chat calls at most three times an hour, and after a decline it cannot call again for 15 minutes. A missed call leaves a "Missed call" notification. New: `session.agentCall.ringing` and `session.agentCall.settled` events (also subscribable by workspace webhooks, so a product can ring its own app with its own push credentials), `GET /v1/workspaces/:workspaceId/agent-calls/:callId` with `/answer` and `/decline`, the SDK's `getAgentCall`, `answerAgentCall` and `declineAgentCall`, the native push device's `voipToken`, and in `@opengeni/react-native` `useIncomingAgentCalls` and `useNativeVoipToken`.
+- d872b12: Feedback reports carry what is needed to debug them, not just a screenshot. A report's `context` can now name the chat in view (`sessionId`) and carry the app's latest API requests (`recentRequests`: method, path without its query, status, duration and the server's correlation id, which finds the request's logs), errors nobody caught and files that failed to load (`recentExceptions`, with stacks), and the steps before it (`breadcrumbs`: screens opened, the app hidden or shown, the network lost or back). The web and desktop console and the phone app record these in memory and send them only with a report; the forms say what is sent. The server also stores, with each report and never shown to clients, its own version and deployment revision and, when the author can read the chat in view, that chat's status, last event sequence and latest turn (status, model, reasoning effort and times) in the new `feedback_submissions.diagnostics` column. `OPENGENI_CORRELATION_HEADER` is exported from `@opengeni/sdk/browser`. The phone app resends a report without the new fields when a server older than the app refuses them.
+
+### Patch Changes
+
+- 32bc3e9: App use is paid from monthly plan credit; API use (organization and personal API keys, products on the SDK, outside agents over MCP) is paid from credits only. Each turn freezes its funding origin, sub-agents and tools inherit their chat's, and API work with no credits is refused with `402 api_credits_required` and an Add credits action (`1128_billing_usage_origin`, rolling; it adds `billing_origin` to the scheduled-task execution exclusion lists in place, keeping 1115's `creator_locked`). See `docs/billing-origin.md`. A schedule an API caller edits or runs by hand, or an automation an API caller's test event or replay fires, is API use from then on, and so is an automation fired by a webhook whose signing secret or custom format an API caller set or received (`event_sources.secret_billing_origin`), and so is an automation fired by a workspace MCP source an API caller pointed at a server's URL. The agent tools that create and change webhook sources mark them the same way for an outside agent or an agent in an API chat. A custom webhook format can no longer read its event type or ids from the header its signature is in, so a shared token is never stored in events or the delivery log; one stored before reads that header as absent. Intake also drops any header that contains the source's secret and replaces copies of it in the kept body with `[secret]`, so a `url_token` secret echoed by the app or a proxy is never kept. The web app shows an API turn refused for lack of credits as a credit stop. Paid tools in the app are paid from plan credit too, the Free plan's included. Internal accounts (CloudGeni's host account and our own team's organizations) keep today's billing through `OPENGENI_BILLING_LEGACY_ACCOUNT_IDS` (listed by default). The SDK keeps the `add_credits` and `upgrade_plan` refusal actions and names the fix in its messages.
+- Updated dependencies [d91058a]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [d872b12]
+- Updated dependencies [008d073]
+- Updated dependencies [af8fb16]
+  - @opengeni/contracts@6.3.0
+  - @opengeni/connect@6.3.0
+
 ## 6.2.1
 
 ### Minor Changes

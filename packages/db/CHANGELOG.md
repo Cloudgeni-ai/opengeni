@@ -1,5 +1,35 @@
 # @opengeni/db
 
+## 6.3.1
+
+### Minor Changes
+
+- d91058a: Agents can call a person. The new `call_user` tool rings the person's phones with the system's incoming-call screen (CallKit on iOS, through a PushKit VoIP push) when something cannot wait, waits up to 40 seconds while it rings, and returns `answered`, `declined`, `missed` or `cancelled`. Answering opens the chat's voice call, which starts by saying why the agent called. Nothing rings until the person turns on "Let agents call this iPhone" on that phone (native push rule `call`); "Teammates' agents too" (`call_members`) lets agents of other workspace members call them. One call rings a person at a time, a chat calls at most three times an hour, and after a decline it cannot call again for 15 minutes. A missed call leaves a "Missed call" notification. New: `session.agentCall.ringing` and `session.agentCall.settled` events (also subscribable by workspace webhooks, so a product can ring its own app with its own push credentials), `GET /v1/workspaces/:workspaceId/agent-calls/:callId` with `/answer` and `/decline`, the SDK's `getAgentCall`, `answerAgentCall` and `declineAgentCall`, the native push device's `voipToken`, and in `@opengeni/react-native` `useIncomingAgentCalls` and `useNativeVoipToken`.
+- 32bc3e9: App use is paid from monthly plan credit; API use (organization and personal API keys, products on the SDK, outside agents over MCP) is paid from credits only. Each turn freezes its funding origin, sub-agents and tools inherit their chat's, and API work with no credits is refused with `402 api_credits_required` and an Add credits action (`1128_billing_usage_origin`, rolling; it adds `billing_origin` to the scheduled-task execution exclusion lists in place, keeping 1115's `creator_locked`). See `docs/billing-origin.md`. A schedule an API caller edits or runs by hand, or an automation an API caller's test event or replay fires, is API use from then on, and so is an automation fired by a webhook whose signing secret or custom format an API caller set or received (`event_sources.secret_billing_origin`), and so is an automation fired by a workspace MCP source an API caller pointed at a server's URL. The agent tools that create and change webhook sources mark them the same way for an outside agent or an agent in an API chat. A custom webhook format can no longer read its event type or ids from the header its signature is in, so a shared token is never stored in events or the delivery log; one stored before reads that header as absent. Intake also drops any header that contains the source's secret and replaces copies of it in the kept body with `[secret]`, so a `url_token` secret echoed by the app or a proxy is never kept. The web app shows an API turn refused for lack of credits as a credit stop. Paid tools in the app are paid from plan credit too, the Free plan's included. Internal accounts (CloudGeni's host account and our own team's organizations) keep today's billing through `OPENGENI_BILLING_LEGACY_ACCOUNT_IDS` (listed by default). The SDK keeps the `add_credits` and `upgrade_plan` refusal actions and names the fix in its messages.
+- d872b12: Feedback reports carry what is needed to debug them, not just a screenshot. A report's `context` can now name the chat in view (`sessionId`) and carry the app's latest API requests (`recentRequests`: method, path without its query, status, duration and the server's correlation id, which finds the request's logs), errors nobody caught and files that failed to load (`recentExceptions`, with stacks), and the steps before it (`breadcrumbs`: screens opened, the app hidden or shown, the network lost or back). The web and desktop console and the phone app record these in memory and send them only with a report; the forms say what is sent. The server also stores, with each report and never shown to clients, its own version and deployment revision and, when the author can read the chat in view, that chat's status, last event sequence and latest turn (status, model, reasoning effort and times) in the new `feedback_submissions.diagnostics` column. `OPENGENI_CORRELATION_HEADER` is exported from `@opengeni/sdk/browser`. The phone app resends a report without the new fields when a server older than the app refuses them.
+
+### Patch Changes
+
+- c2e0db6: Store a pending tool call's replay output within the same 256 KiB bound as its `agent.toolCall.output` event. A tool that returned more than PostgreSQL can hold in one JSONB string (256 MiB) used to fail the whole turn with SQLSTATE 54000; the stored copy now keeps a head and tail preview with a `truncation` marker, and recovery replays that marker on the event.
+- 64beb77: Add an owner-only Free credit signup cutoff (rolling migration 1119). `opengeni_private.set_free_credit_signup_cutoff(not_before, operator, reason, expected_revision)` writes an audited, revision-fenced setting; while it is set, new Free monthly periods go only to organizations whose signup-receipt owner was created at or after the cutoff. No cutoff (the default) changes nothing, and issued periods stay untouched and spendable. `scripts/operator/promotion-decisions.ts` gains `--free-credit-cutoff <timestamp|none>` and `--free-credit-cutoff-history`.
+- 98542ad: A meeting's notes keep naming the right people after its transcript is run again. Speaker links in the notes (`[Name](speaker:speaker_0)`) name the labels of the version they were written about, and a new version numbers its voices afresh, so a link could show no one or a different voice. When another version becomes the shown one, each link now moves to the label whose speech overlaps most of its own (a track label stays itself), and a link with no counterpart becomes its plain text. The rewrite is a new notes revision and a `recording.notes.updated` event, and keeps who wrote the notes and when.
+- 278ad58: Allow explicitly retired feature tables to be removed in a later release while preserving exact owner, privilege, row-level-security and protocol-receipt checks for every table still present.
+- af8fb16: `sandbox_file_publish` called through Codemode from code that a `run_on` exec runs on another machine now publishes the file from that machine, where the code made it, instead of looking for the same path on the chat's active sandbox. The exec's Codemode token names the machine it runs on, the Codemode call records it, and publishing checks access to that machine exactly as `run_on` does. When the machine can no longer be reached, the call fails with `run_on`'s own reason rather than publishing a different file. Model calls and code on the active sandbox resolve paths as before.
+- Updated dependencies [d91058a]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [d872b12]
+- Updated dependencies [008d073]
+- Updated dependencies [99159e9]
+- Updated dependencies [af8fb16]
+  - @opengeni/contracts@6.3.0
+  - @opengeni/config@6.3.0
+  - @opengeni/codemode@6.3.0
+  - @opengeni/codex@6.3.0
+  - @opengeni/observability@6.3.0
+  - @opengeni/network@6.3.0
+  - @opengeni/subscriptions@6.3.0
+  - @opengeni/xai-subscription@6.3.0
+
 ## 6.2.1
 
 ### Minor Changes

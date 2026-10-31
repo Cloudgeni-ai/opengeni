@@ -1,5 +1,38 @@
 # @opengeni/runtime
 
+## 6.3.1
+
+### Minor Changes
+
+- 99159e9: A session can now mix GitHub repositories from several GitHub App installations and from your personal GitHub. Each mounted repository commits as its own identity: the Opengeni app's bot for App repositories, your `users.noreply.github.com` address for repositories used through your GitHub. The worker writes `user.name`/`user.email` into each repository's local git config (marked `opengeni.managedIdentity`; an identity you set yourself is kept) instead of one sandbox-wide `GIT_AUTHOR_*`/`GIT_COMMITTER_*` identity, so a sandbox with both no longer fails setup with "repository resources require different Git commit identities". New sandboxes no longer carry a bot identity in their environment, so the sandbox viewer and terminal create the same environment as the worker and a session with only personal repositories never commits as the bot. Sandboxes created before this change keep their pinned environment; a `git` wrapper written to the per-turn CLI wrapper directory (`$HOME/.opengeni/bin`, ahead of the real git on PATH) runs git without the baked identity when the repository has a managed identity, and passes through otherwise. A deployment-configured `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` stays the default identity for App and host repositories. `applyGitAuthPointerEnvironment` from `@opengeni/config` ignores its deprecated identity argument; `GitCredentialBindingSeed` in `@opengeni/runtime` gains an optional `identity`.
+
+  The repository picker shows one row per repository. A repository reachable both through the Opengeni app and your GitHub has an "Acts as" choice when selected (you by default when your GitHub can write to it), and repositories from any number of App installations can be selected together with your own. The picker footer is now "GitHub access", with "Your GitHub" (connect, or choose which repositories Opengeni may use) and "Opengeni app" (installations and "Install on another account"). Automations can also select repositories from several installations. `RepositoryContextPickerProps` drops `selectedInstallationId` and gains `personalGitHubManageUrl`; the app context drops `selectedInstallationId`.
+
+### Patch Changes
+
+- af8fb16: `sandbox_file_publish` called through Codemode from code that a `run_on` exec runs on another machine now publishes the file from that machine, where the code made it, instead of looking for the same path on the chat's active sandbox. The exec's Codemode token names the machine it runs on, the Codemode call records it, and publishing checks access to that machine exactly as `run_on` does. When the machine can no longer be reached, the call fails with `run_on`'s own reason rather than publishing a different file. Model calls and code on the active sandbox resolve paths as before.
+- 2c3a01c: The agent's Skill index lists every installed Skill instead of dropping the ones that sort last once it reaches 32 KB or 128 entries. The bound is now 96 KB with no entry limit. Entries show an id only when two Skills share a name, which makes a complete index of a typical workspace smaller than the old truncated one. Above the bound, only the longest descriptions are shortened so every Skill stays listed; entries are omitted only if the names alone overflow. `skillCatalogEntryIds(catalog, descriptors)` resolves name-only entries through the descriptors the index was rendered from and still reads indexes rendered before this change.
+- Updated dependencies [d91058a]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [d872b12]
+- Updated dependencies [008d073]
+- Updated dependencies [99159e9]
+- Updated dependencies [af8fb16]
+  - @opengeni/contracts@6.3.0
+  - @opengeni/sdk@6.3.0
+  - @opengeni/config@6.3.0
+  - @opengeni/capabilities@6.3.0
+  - @opengeni/codemode@6.3.0
+  - @opengeni/codex@6.3.0
+  - @opengeni/interaction@6.3.0
+  - @opengeni/observability@6.3.0
+  - @opengeni/tool-gateway@6.3.0
+  - @opengeni/vaults@6.3.0
+  - @opengeni/agent-proto@6.3.0
+  - @opengeni/decisions@6.3.0
+  - @opengeni/network@6.3.0
+  - @opengeni/xai-subscription@6.3.0
+
 ## 6.2.1
 
 ### Minor Changes
