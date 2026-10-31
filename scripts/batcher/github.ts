@@ -110,6 +110,11 @@ export interface GitHub {
   /** The bodies of a PR's comments created or edited at or after `since` (epoch ms). */
   commentBodies(number: number, since: number): Promise<string[]>;
   removeLabel(number: number, label: string): Promise<void>;
+  addLabel(number: number, label: string): Promise<void>;
+  /** Creates the label unless it already exists. */
+  ensureLabel(label: string, color: string, description: string): Promise<void>;
+  /** Numbers of issues and PRs, open or closed, that carry the label. */
+  labelled(label: string): Promise<number[]>;
   disableAutoMerge(pullId: string): Promise<void>;
 }
 
@@ -140,6 +145,27 @@ export function isTransientGitHubFailure(error: unknown): boolean {
 
 /** A branch name as URL path segments, so no part of it can change the request path. */
 const branchPath = (name: string) => name.split("/").map(encodeURIComponent).join("/");
+
+/**
+ * When a PR that carries the queue label was last given it, from its newest
+ * label events. If other labels (such as in-batch, added on every batch) have
+ * pushed that event out of the window, it was added before the oldest event
+ * read, so that time stands in: the PR stays queued instead of leaving.
+ */
+export function queuedTime(
+  events: ({ createdAt: string; label: { name: string } } | null)[],
+  queueLabel: string,
+): number {
+  const times = (name?: string) =>
+    events
+      .filter((e) => e !== null && (name === undefined || e.label?.name === name))
+      .map((e) => time(e!.createdAt))
+      .filter((t): t is number => t !== null);
+  const queued = times(queueLabel);
+  if (queued.length) return Math.max(...queued);
+  const all = times();
+  return all.length ? Math.min(...all) : 0;
+}
 
 export class RestGitHub implements GitHub {
   private readonly api: string;
@@ -240,7 +266,7 @@ export class RestGitHub implements GitHub {
                 id number title headRefOid headRefName isCrossRepository isDraft mergeable
                 autoMergeRequest { enabledAt }
                 labels(first: 30) { nodes { name } }
-                timelineItems(itemTypes: [LABELED_EVENT], last: 30) {
+                timelineItems(itemTypes: [LABELED_EVENT], last: 100) {
                   nodes { ... on LabeledEvent { createdAt label { name } } }
                 }
               }
@@ -252,13 +278,10 @@ export class RestGitHub implements GitHub {
       const { nodes, pageInfo } = data.repository.pullRequests;
       for (const node of nodes) {
         const labels = node.labels.nodes.map((l) => l.name);
-        const labeled = node.timelineItems.nodes
-          .filter((e) => e?.label?.name === queueLabel)
-          .map((e) => time(e!.createdAt))
-          .filter((t): t is number => t !== null);
         const autoMergeAt = node.autoMergeRequest ? time(node.autoMergeRequest.enabledAt) : null;
-        const labeledAt =
-          labels.includes(queueLabel) && labeled.length ? Math.max(...labeled) : null;
+        const labeledAt = labels.includes(queueLabel)
+          ? queuedTime(node.timelineItems.nodes, queueLabel)
+          : null;
         if (labeledAt === null && autoMergeAt === null) continue;
         pulls.push({
           id: node.id,
@@ -560,6 +583,28 @@ export class RestGitHub implements GitHub {
       undefined,
       [404],
     );
+  }
+
+  async addLabel(number: number, label: string) {
+    await this.request("POST", `issues/${number}/labels`, { labels: [label] });
+  }
+
+  async ensureLabel(label: string, color: string, description: string) {
+    // 422 means it already exists.
+    await this.request("POST", "labels", { name: label, color, description }, [422]);
+  }
+
+  async labelled(label: string) {
+    const numbers: number[] = [];
+    // The batcher clears the label as members leave, so few issues carry it.
+    for (let page = 1; page <= 10; page++) {
+      const batch = await this.get<{ number: number }[]>(
+        `issues?labels=${encodeURIComponent(label)}&state=all&per_page=100&page=${page}`,
+      );
+      numbers.push(...batch.map((issue) => issue.number));
+      if (batch.length < 100) break;
+    }
+    return numbers;
   }
 
   async disableAutoMerge(pullId: string) {

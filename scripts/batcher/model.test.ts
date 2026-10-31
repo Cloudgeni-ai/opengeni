@@ -3,6 +3,7 @@ import {
   CI_WORKFLOW,
   DEFAULT_SETTINGS,
   decide,
+  inBatchChanges,
   isControlPlane,
   nextBatch,
   numberTaken,
@@ -303,14 +304,17 @@ describe("decide", () => {
       reason: "main moved since the batch was built",
     });
     expect(moved[1]?.kind).toBe("build");
+    expect(moved[0]).not.toHaveProperty("changed");
     const changed = decide(observe([pull(1, { headSha: sha(77) })], [batch([1])]));
-    expect(changed[0]).toMatchObject({ kind: "abandon", reason: "#1 has a new head" });
+    expect(changed[0]).toMatchObject({ kind: "abandon", reason: "#1 has a new head", changed: 1 });
     const sameTree = decide(
       observe([pull(1, { headSha: sha(77) })], [batch([1], { sameTree: { 1: sha(77) } })]),
     );
     expect(sameTree.some((a) => a.kind === "abandon")).toBe(false);
     const left = decide(observe([pull(2)], [batch([1, 2])]));
-    expect(left[0]).toMatchObject({ kind: "abandon", reason: "#1 left the queue" });
+    expect(left[0]).toMatchObject({ kind: "abandon", reason: "#1 left the queue", changed: 1 });
+    // The rest is rebuilt at once, without waiting for the batching window.
+    expect(left[1]?.kind === "build" && left[1].members.map((p) => p.number)).toEqual([2]);
   });
 
   test("a ready priority PR waits for the running batch, then goes next", () => {
@@ -330,6 +334,14 @@ describe("decide", () => {
     expect(actions).toEqual([
       { kind: "abandon", batch: older, reason: "only one batch runs at a time" },
     ]);
+  });
+});
+
+describe("inBatchChanges", () => {
+  test("adds missing members and removes everyone else", () => {
+    expect(inBatchChanges([1, 2, 3], [2, 4, 5])).toEqual({ add: [1, 3], remove: [4, 5] });
+    expect(inBatchChanges([], [7])).toEqual({ add: [], remove: [7] });
+    expect(inBatchChanges([7], [7])).toEqual({ add: [], remove: [] });
   });
 });
 

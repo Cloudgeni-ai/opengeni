@@ -56,9 +56,18 @@ deterministic Version check.
 
 A PR leaves the queue with a comment saying why when it conflicts with `main`
 or fails CI on its own on top of `main`. Fix it and add the label again.
-Pushing a new head while queued restarts its batch, unless the new head tests
-exactly the same: merging the same `main` into the branch again, or rebasing
-it, leaves the batch running, and it lands the new head.
+
+The members of the running batch carry the `in-batch` label. The batcher adds
+it when the batch starts and removes it when they land, leave the queue or the
+batch is abandoned. It does this at the end of every pass, and a label failure
+never stops batching. Don't push to an `in-batch` PR, remove its `queue-ready`
+label or close it: any change to one member cancels the whole batch, so every
+other member's CI starts again. The batcher wakes as soon as an `in-batch` PR
+changes, rebuilds the batch without it, and comments on that PR with the
+members it restarted. The one exception is a new head that tests exactly the
+same: merging the same `main` into the branch again, or rebasing it, leaves the
+batch running, and it lands the new head. Pushing to a queued PR that is not
+`in-batch` is fine.
 
 Database migrations need unique numbers, and two PRs can add the same number
 without a Git conflict. When `main` already uses the number of a migration a
@@ -115,11 +124,13 @@ never share a batch. The numbered directories are listed in `NUMBERED_FILES`
    is split too; a priority PR queued since goes first.
 
 A batch is rebuilt from scratch whenever `main` moves under it, a member leaves
-the queue, or a member gets a new head that changes what the batch tests. For a
-member's new head, the batcher merges it on a scratch branch at the member's
-place in the candidate; when that gives exactly the tree CI is testing there,
-the batch carries on and lands the new head (the landed-tree check still
-applies). Version PRs always restart.
+the queue, or a member gets a new head that changes what the batch tests. The
+rebuild happens in the same pass, without the changed PR (its new head waits
+for PR CI), and keeps any bisection in progress. For a member's new head, the
+batcher first merges it on a scratch branch at the member's place in the
+candidate; when that gives exactly the tree CI is testing there, the batch
+carries on and lands the new head (the landed-tree check still applies).
+Version PRs always restart.
 
 ## Main CI records the batch result
 

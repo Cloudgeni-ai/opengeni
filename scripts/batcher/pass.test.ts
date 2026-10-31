@@ -9,7 +9,14 @@ import type {
   RunSummary,
 } from "./github";
 import { GitHubError, GitHubNetworkError } from "./github";
-import { CI_WORKFLOW, DEFAULT_SETTINGS, PRIORITY_LABEL, QUEUE_LABEL, parseManifest } from "./model";
+import {
+  CI_WORKFLOW,
+  DEFAULT_SETTINGS,
+  IN_BATCH_LABEL,
+  PRIORITY_LABEL,
+  QUEUE_LABEL,
+  parseManifest,
+} from "./model";
 import { LandingMismatch, PR_WORKFLOW, run } from "./pass";
 import type { RepoFile, TreeEntry } from "./renumber";
 
@@ -32,6 +39,7 @@ interface FakePull {
   mergeable?: "MERGEABLE" | "CONFLICTING";
   merged?: string;
   headRef?: string;
+  conflicting?: boolean;
 }
 
 /**
@@ -69,6 +77,9 @@ class FakeGitHub implements GitHub {
   tooManyFiles = new Set<string>();
   /** The `since` of every comment lookup. */
   commentLookups: number[] = [];
+  /** Lets a test make label writes fail. */
+  labelsFail = false;
+  createdLabels: string[] = [];
 
   constructor() {
     this.root = this.store([], [], "root");
@@ -130,7 +141,8 @@ class FakeGitHub implements GitHub {
         headRef: this.headRef(p),
         sameRepository: true,
         draft: false,
-        mergeable: p.mergeable ?? ("MERGEABLE" as const),
+        mergeable:
+          p.mergeable ?? (p.conflicting ? ("CONFLICTING" as const) : ("MERGEABLE" as const)),
         labels: p.labels,
         labeledAt: NOW - 3_600_000 + p.number,
         autoMergeAt: null,
@@ -338,8 +350,32 @@ class FakeGitHub implements GitHub {
   }
 
   async removeLabel(number: number, label: string) {
+    if (label === IN_BATCH_LABEL && this.labelsFail) throw new Error("labels are down");
     const pull = this.pulls.get(number)!;
     pull.labels = pull.labels.filter((l) => l !== label);
+  }
+
+  async addLabel(number: number, label: string) {
+    if (this.labelsFail) throw new Error("labels are down");
+    const pull = this.pulls.get(number)!;
+    if (!pull.labels.includes(label)) pull.labels.push(label);
+  }
+
+  async ensureLabel(label: string) {
+    if (this.labelsFail) throw new Error("labels are down");
+    if (!this.createdLabels.includes(label)) this.createdLabels.push(label);
+  }
+
+  async labelled(label: string) {
+    return [...this.pulls.values()].filter((p) => p.labels.includes(label)).map((p) => p.number);
+  }
+
+  /** PRs carrying the in-batch label, in number order. */
+  marked() {
+    return [...this.pulls.values()]
+      .filter((p) => p.labels.includes(IN_BATCH_LABEL))
+      .map((p) => p.number)
+      .sort((a, b) => a - b);
   }
 
   async disableAutoMerge() {}
@@ -989,5 +1025,119 @@ describe("a batcher pass", () => {
     const actions = await run(gh, { ...options(), dryRun: true });
     expect(actions.map((a) => a.kind)).toEqual(["build"]);
     expect(gh.log).toEqual([]);
+    expect(gh.marked()).toEqual([]);
+  });
+});
+
+describe("the in-batch label", () => {
+  test("names exactly the running batch's members, from build to landing", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    gh.addPull(3, { files: [".github/workflows/ci.yml"] });
+    await run(gh, options());
+    expect(gh.createdLabels).toEqual([IN_BATCH_LABEL]);
+    expect(gh.marked()).toEqual([1, 2]);
+
+    gh.finishCi(gh.batch().sha, "success");
+    await run(gh, options());
+    // The landed PRs lose it; the CI change now running alone gets it.
+    expect(gh.pulls.get(1)!.merged).toBeDefined();
+    expect(gh.marked()).toEqual([3]);
+
+    gh.finishCi(gh.batch().sha, "success");
+    await run(gh, options());
+    expect(gh.marked()).toEqual([]);
+  });
+
+  test("a pushed member restarts the batch without it, says so on the PR, and moves the label", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    gh.addPull(3);
+    await run(gh, options());
+    const first = gh.batch();
+    gh.runsBySha.set(first.sha, [
+      {
+        id: 7,
+        workflow: CI_WORKFLOW,
+        status: "in_progress",
+        conclusion: null,
+        attempt: 1,
+        url: "u",
+      },
+    ]);
+
+    // A new head is not green yet, so the batch is rebuilt from the other two.
+    Object.assign(gh.pulls.get(2)!, { head: hash("head:2b"), green: false });
+    await run(gh, options());
+    expect(gh.log).toContain("cancel 7");
+    const second = gh.batch();
+    expect(second.manifest.members.map((m) => m.number)).toEqual([1, 3]);
+    expect(gh.marked()).toEqual([1, 3]);
+    expect(gh.comments).toEqual([
+      {
+        number: 2,
+        body: expect.stringContaining(
+          `Merge batch \`${first.manifest.id}\` was cancelled because #2 has a new head while CI was testing it. It restarted CI for #1, #3, which are tested again without this PR.`,
+        ),
+      },
+    ]);
+  });
+
+  test("a member leaving the queue keeps the bisection that was in progress", async () => {
+    const gh = new FakeGitHub();
+    for (const n of [1, 2, 3, 4]) gh.addPull(n);
+    await run(gh, options());
+    gh.finishCi(gh.batch().sha, "failure", 2);
+    await run(gh, options());
+    expect(gh.batch().manifest).toMatchObject({ pending: [[3, 4]] });
+    expect(gh.marked()).toEqual([1, 2]);
+
+    const pull = gh.pulls.get(2)!;
+    pull.labels = pull.labels.filter((l) => l !== QUEUE_LABEL);
+    await run(gh, options());
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(gh.batch().manifest.pending).toEqual([[3, 4]]);
+    expect(gh.marked()).toEqual([1]);
+    expect(gh.comments.at(-1)!.body).toContain("because #2 left the queue");
+  });
+
+  test("an ejected culprit loses the label", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    await run(gh, options());
+    expect(gh.marked()).toEqual([1]);
+    gh.finishCi(gh.batch().sha, "failure", 2);
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.marked()).toEqual([]);
+  });
+
+  test("a member the batcher ejects itself gets no comment blaming it", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    await run(gh, options());
+    gh.pulls.get(2)!.conflicting = true;
+    await run(gh, options());
+    expect(gh.comments.map((c) => c.number)).toEqual([2]);
+    expect(gh.comments[0]!.body).toContain("Removed from the merge queue because it conflicts");
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(gh.marked()).toEqual([1]);
+  });
+
+  test("label failures never stop batching", async () => {
+    const gh = new FakeGitHub();
+    gh.labelsFail = true;
+    const lines: string[] = [];
+    gh.addPull(1);
+    await run(gh, { ...options(), log: (line) => lines.push(line) });
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(lines.some((l) => l.startsWith("Could not mark #1"))).toBe(true);
+
+    gh.finishCi(gh.batch().sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeDefined();
   });
 });
