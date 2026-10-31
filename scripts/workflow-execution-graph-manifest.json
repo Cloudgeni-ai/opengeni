@@ -58,7 +58,7 @@
     },
     {
       "path": ".github/workflows/merge-batcher.yml",
-      "sha256": "181fb1c9671ce9b94efbd0b5f8cd9c47541bddc394a039ad6e5434e9622e6b74"
+      "sha256": "7b965bf132f35ea5bbdc124899473bba1ee8711788cd92af85504b9e7bf87228"
     },
     {
       "path": ".github/workflows/merge-content.yml",
@@ -115,6 +115,10 @@
     {
       "path": ".github/workflows/reconcile-production-packages.yml",
       "sha256": "d05f65de51d9684c0c2ee08ffdacde3ab7a7ae7e1c09322edbd06ef37636014b"
+    },
+    {
+      "path": ".github/workflows/regenerate-generated.yml",
+      "sha256": "94f3dc2e80b6377ae93002b205f0ecf9d53eb73577eeaaa96e148a3ae6d4c914"
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
@@ -1678,6 +1682,18 @@
       "job": "reconcile",
       "step": "Publish missing packages for the healthy production revision",
       "sha256": "403bf534ac1eb6c2465f2260ec881f48c0b5744b28dd51d22e1633e113ddc59c"
+    },
+    {
+      "workflow": ".github/workflows/regenerate-generated.yml",
+      "job": "regenerate",
+      "step": "Check the inputs",
+      "sha256": "82749c7875104179005a29ff8c9f6c4baba271cf43eb213073b05e82c4003b9f"
+    },
+    {
+      "workflow": ".github/workflows/regenerate-generated.yml",
+      "job": "regenerate",
+      "step": "Merge main and regenerate the conflicting generated files",
+      "sha256": "4bfacb0824aabb42679b8d80eb8e3b6519f4e0129cad33a4cf062589f11abfb3"
     },
     {
       "workflow": ".github/workflows/release-acceptance.yml",

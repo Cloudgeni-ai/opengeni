@@ -8,7 +8,7 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
   workflow_run:
-    workflows: [CI, PR CI]
+    workflows: [CI, PR CI, Regenerate generated files]
     types: [completed]
   # labeled and auto_merge_enabled queue a PR. The other types matter only for
   # a PR with the in-batch label: its change ends the running batch, which is
@@ -44,11 +44,13 @@ jobs:
           (github.event.action == 'unlabeled' && github.event.label.name == 'queue-ready'))) ||
         (github.event_name == 'workflow_run' && (
           (github.event.workflow_run.path == '.github/workflows/pr-ci.yml' && github.event.workflow_run.conclusion == 'success') ||
+          (github.event.workflow_run.path == '.github/workflows/regenerate-generated.yml' && github.event.workflow_run.head_branch == 'main') ||
           (github.event.workflow_run.path == '.github/workflows/ci.yml' && startsWith(github.event.workflow_run.head_branch, 'batch/'))))) }}
     # One pass at a time. The group is on the job, not the workflow, so a run
     # whose job is skipped never replaces a pending pass. A pass never runs PR
-    # code: it checks out only scripts/batcher and the migration-ordinals module
-    # it plans renumbering with, from main, and talks to the GitHub API.
+    # code: it checks out only scripts/batcher and the modules it imports (the
+    # migration ordinals it plans renumbering with and the registry of
+    # generated files it regenerates), from main, and talks to the GitHub API.
     concurrency:
       group: merge-batcher
       cancel-in-progress: false
@@ -68,12 +70,13 @@ jobs:
         with:
           ref: main
           # Non-cone patterns so one file can be listed: the root files (as
-          # cone mode gives, including .bun-version), the batcher and its module.
+          # cone mode gives, including .bun-version), the batcher and its modules.
           sparse-checkout: |
             /*
             !/*/
             /scripts/batcher/
             /scripts/migration-ordinals.ts
+            /scripts/ci/check-generated-artifacts.ts
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
