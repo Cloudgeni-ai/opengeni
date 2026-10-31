@@ -553,8 +553,9 @@ describe("a batcher pass", () => {
     gh.finishCi(version.sha, "success");
     await run(gh, options());
     expect(gh.log).toContain("merge #5 merge");
-    // Normal batching resumes, priority first.
-    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+    // Normal batching resumes, priority first, filled with the ready PRs; the
+    // CI change runs alone after.
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2, 4]);
   });
 
   test("a Version PR whose PR CI failed leaves the queue and stops holding it", async () => {
