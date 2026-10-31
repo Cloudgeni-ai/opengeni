@@ -382,6 +382,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 "this host cannot compress memory; ask for saved instead".into(),
             ));
         }
+        // One the host never saves on its own books its save only from
+        // now on: a save the disk cannot take is refused before its VM is
+        // paused for it, as a hand-off would pause it and then wait.
+        if level >= Level::Saved
+            && let CreateRoom::Short(resource, needed, free) = self.core.save_room(id.0)
+        {
+            return Err(HostError::HostFull {
+                id,
+                resource,
+                needed,
+                free,
+            });
+        }
         let trace = self.trace;
         if let Some(slot) = self.slots.get_mut(&id.0) {
             slot.sleep_asked = Some(Why {

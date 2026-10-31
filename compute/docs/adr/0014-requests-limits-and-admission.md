@@ -345,12 +345,11 @@ pick a VM.
   inodes. A VM the host never saves on its own, such as a CI runner's,
   which ends when its job does, books no save it would never take: on a
   host of large runners those bookings alone would refuse creates and
-  wakes for disk that stays free. A save asked of it (a request to sleep,
-  as when its host is drained) books one once the disk can, and waits
-  for room meanwhile as a checkpoint does, idle copies in object storage
-  giving up their local disk for it. A save booked ahead never waits for
-  room, even on an overdrawn disk, since it relieves memory and writes
-  into its own booking. Bookings plus a kept-back reserve
+  wakes for disk that stays free. A save asked of it (a request to sleep
+  to saved or deeper, as a hand-off makes) books its save from the
+  request on, and the host refuses the request at once as host full
+  while the disk cannot book it, so its VM is never paused for a save
+  that would then wait for room. Bookings plus a kept-back reserve
   (`--disk-reserve-mib`, `--disk-reserve-inodes`; by default a twentieth
   of the filesystem, at least 1 GiB and 1024 inodes) stay within what the
   filesystem has free, read every sample. A booking whose save has written

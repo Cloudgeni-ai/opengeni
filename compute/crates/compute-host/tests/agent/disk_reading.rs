@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use compute_core::{DiskPolicy, DiskSpace, HostPolicy};
+use compute_core::{DiskPolicy, DiskSpace, HostPolicy, Level, Priority};
 use compute_engine::Writes;
 use compute_host::fleet::{LeaseGate, boot_now};
 use compute_host::protocol::{DiskStatus, Id, ImageId, LevelName, SandboxConfig, SleepConfig};
@@ -93,6 +93,25 @@ impl Host {
         status.disk.expect("a disk policy")
     }
 
+    async fn level(&self, id: Id) -> LevelName {
+        let status = self.handle.status().await.unwrap();
+        let sandbox = status.sandboxes.into_iter().find(|s| s.id == id);
+        sandbox.expect("a sandbox here").level
+    }
+
+    /// Wakes `id` and waits until it runs.
+    async fn run(&self, id: Id) {
+        self.handle
+            .touch(id, None, Priority::Interactive)
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.level(id).await != LevelName::Running {
+            assert!(Instant::now() < deadline, "it never ran");
+            sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     fn create(&self, id: Id, image: Option<ImageId>) -> JoinHandle<Result<(), HostError>> {
         self.create_as(id, image, SAVES_LATER)
     }
@@ -137,6 +156,31 @@ async fn a_sandbox_the_host_never_saves_books_no_save() {
     assert_eq!(host.read(PLENTY).await.inodes_booked, 0);
     host.create(id(2), None).await.unwrap().unwrap();
     assert!(host.read(PLENTY).await.inodes_booked > 0, "its save");
+}
+
+/// A save asked of such a sandbox, as a hand-off asks for one, is refused
+/// at once while the disk cannot book it, and its VM goes on running: it
+/// is never paused for a save that would then wait for room.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_the_disk_cannot_book_is_refused_before_anything_pauses() {
+    let host = Host::start(None).await;
+    let (_, save) = host.measure(id(9)).await;
+    host.create_as(id(1), None, NEVER).await.unwrap().unwrap();
+    host.run(id(1)).await;
+    // Beside sandbox 9's save, room for one save less an inode.
+    host.read(2 * save - 1).await;
+    let refused = host.handle.sleep(id(1), None, Level::Saved).await;
+    assert!(
+        matches!(refused, Err(HostError::HostFull { .. })),
+        "{refused:?}"
+    );
+    sleep(WAITS).await;
+    assert_eq!(host.level(id(1)).await, LevelName::Running);
+    assert_eq!(host.disk().await.inodes_booked, save, "nothing booked");
+    // With room, it is taken, and books its save at once.
+    host.read(2 * save).await;
+    host.handle.sleep(id(1), None, Level::Saved).await.unwrap();
+    assert_eq!(host.disk().await.inodes_free, 0);
 }
 
 /// A create short of inodes by no more than what an earlier create's

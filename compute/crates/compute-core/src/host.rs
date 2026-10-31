@@ -1177,12 +1177,9 @@ impl Host {
         // have had the guest trim them. A step that certainly wrote
         // nothing, such as one cancelled before it began, books nothing: a
         // checkpoint cancelled so, and due again at once, would otherwise
-        // book an image each time it is tried. A failed save of a sandbox
-        // that books its save only while one runs ends that booking, which
-        // then stands for what it wrote.
+        // book an image each time it is tried.
         let written = match (flight.step, outcome) {
             _ if !wrote => DiskSpace::default(),
-            (Step::Save, Outcome::Failed(_)) if !slot.policy().saves() => DiskSpace::default(),
             (Step::Checkpoint, _) | (Step::Save, Outcome::Failed(_)) => slot.save_space(),
             (Step::Fetch, Outcome::Failed(_)) => DiskSpace::save(slot.size.fetch),
             _ => DiskSpace::default(),
@@ -1198,9 +1195,6 @@ impl Host {
                 .local_disk
                 .booked
                 .saturating_sub(slot.checkpoint_need());
-        } else if !wrote && flight.step == Step::Save {
-            // Nor did a save booked only while it ran write its image.
-            slot.local_disk.booked = slot.local_disk.booked.saturating_sub(slot.save_need());
         } else if flight.step == Step::Pause {
             // Its guest trimmed its disk: until a reading measures the disk
             // again, it may grow by its whole bound, also once it wakes.
@@ -1457,8 +1451,8 @@ impl Host {
         for step in Step::ALL {
             if let Some(left) = left.as_mut().filter(|_| admission::needs_memory(step)) {
                 changed |= self.admit_measured(now, step, left, out);
-            } else if matches!(step, Step::Checkpoint | Step::Save) {
-                self.admit_writes(step, left.as_mut(), out);
+            } else if step == Step::Checkpoint {
+                self.admit_checkpoints(left.as_mut(), out);
             } else {
                 let index = step.index();
                 let limit = self.policy.limits.get(step);

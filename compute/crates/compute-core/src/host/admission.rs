@@ -33,7 +33,7 @@ pub struct Size {
     pub cpu: u64,
     /// Bytes of local disk one save of its VM may write at most, booked
     /// while its VM holds state not saved yet and the host may save it
-    /// unasked, or while a save runs; see [`crate::DiskPolicy`].
+    /// unasked, or a save of it is asked for; see [`crate::DiskPolicy`].
     pub save: u64,
     /// Bytes its disk may grow by at most while its VM runs, booked while
     /// it is awake or waking, until [`crate::Input::DiskGrowth`] measures
@@ -646,24 +646,15 @@ impl Host {
         changed
     }
 
-    /// Starts queued checkpoints or saves, `step`, while their limit allows
-    /// and the disk left can book what each adds while it runs (see
-    /// [`Sandbox::checkpoint_need`] and [`Sandbox::save_need`]). One that
-    /// does not fit stays queued without holding up those behind it, and is
-    /// tried again at every decision, a disk reading's among them;
-    /// [`Host::keep_disk`] makes room for it meanwhile. A save that adds
-    /// nothing starts even on an overdrawn disk: it books its image ahead,
-    /// and one that relieves memory must not wait. A checkpoint always
-    /// waits for room: its image stays beside the next save its sandbox
-    /// goes on booking.
-    pub(super) fn admit_writes(
-        &mut self,
-        step: Step,
-        left: Option<&mut Left>,
-        out: &mut Vec<Action>,
-    ) {
-        let index = step.index();
-        let limit = self.policy.limits.get(step);
+    /// Starts queued checkpoints while their limit allows and the disk
+    /// left can book what each adds while it runs (see
+    /// [`Sandbox::checkpoint_need`]). One that does not fit stays queued
+    /// without holding up those behind it, and is tried again at every
+    /// decision, a disk reading's among them; [`Host::keep_disk`] makes
+    /// room for it meanwhile.
+    pub(super) fn admit_checkpoints(&mut self, left: Option<&mut Left>, out: &mut Vec<Action>) {
+        let index = Step::Checkpoint.index();
+        let limit = self.policy.limits.get(Step::Checkpoint);
         let mut disk = left.and_then(|left| left.disk.as_mut());
         let keys: Vec<QueueKey> = self.queues[index].iter().copied().collect();
         for key in keys {
@@ -673,17 +664,15 @@ impl Host {
             let need = self
                 .sandboxes
                 .get(&key.sandbox)
-                .map_or_else(DiskSpace::default, |slot| slot.write_need(step));
-            let checked = step == Step::Checkpoint || need != DiskSpace::default();
-            if checked
-                && disk
-                    .as_deref_mut()
-                    .is_some_and(|room| room.take(need).is_err())
+                .map_or_else(DiskSpace::default, Sandbox::checkpoint_need);
+            if disk
+                .as_deref_mut()
+                .is_some_and(|room| room.take(need).is_err())
             {
                 continue;
             }
             self.queues[index].remove(&key);
-            self.start(step, key, out);
+            self.start(Step::Checkpoint, key, out);
         }
     }
 
