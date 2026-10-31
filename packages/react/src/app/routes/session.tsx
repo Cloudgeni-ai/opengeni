@@ -3040,7 +3040,8 @@ function SessionChatPane(props: {
             : null,
     awaitingHuman:
       props.session.status === "requires_action" && !sessionAdmissionBlocked(props.session),
-    personalMachineIntent: personalMachineUseIntent(props.session.tenancy),
+    // Moving the chat onto the person's own machine turns it on in this workspace.
+    personalMachineIntent: personalMachineUseIntent(props.session.tenancy, "always"),
     extras: {
       ...(composer.sendPolicy ?? {}),
       ...((props.queue.effectiveControl ?? props.session.effectiveControl)?.controlEtag
