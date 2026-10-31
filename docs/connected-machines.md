@@ -1816,8 +1816,10 @@ place. The machine keeps its enrollment id, sandbox id, credentials and live
 connection, so its chats, schedules and the installed agent are not registered
 again, and the agent keeps running (with its running commands) without a
 restart or an upgrade. On the Machines page, open the machine and choose
-**Who can use it?**. Organization machines are shared with the whole
-organization and cannot be changed here.
+**Who can use it?**. Organization machines belong to the organization and
+cannot be changed here. An organization owner chooses which workspaces they
+work in instead (see
+[Choose where an organization machine works](#choose-where-an-organization-machine-works)).
 
 - Narrowing to **Only me** is done by the person who will own the machine, or by
   a workspace admin who picks that owner. The owner must be an active member who
@@ -1889,6 +1891,37 @@ they gave their full access: a session with admin access or a connected agent
 with full access calls the same two routes as them (the `previewMachineAudience`
 and `changeMachineAudience` admin actions). An agent acting as itself, or one
 with less than the person's full access, is refused.
+
+### Choose where an organization machine works
+
+An organization machine works in the organization's workspaces that an
+organization owner picks, like the organization's model keys and connectors:
+every shared workspace, or chosen ones, plus a separate switch for members'
+Personal workspaces. The workspace it was connected from always has it,
+because its rows live there. A machine connected before this keeps working
+everywhere it did: every shared workspace and every Personal workspace.
+
+On the Machines page, an organization machine shows **Available in** with a
+short summary. Organization owners see **Change** next to it, which opens the
+shared **Available in** picker. Taking workspaces away warns that chats and
+schedules there stop using the machine from their next turn. Nothing is moved
+or rebuilt: the machine list, the fleet
+tools, attempt resolution and direct attaches all check where the machine works
+on every call, so a workspace it no longer works in simply stops seeing it.
+
+`PUT /v1/workspaces/:ws/machines/:enrollmentId/reach` with
+`{ allowedWorkspaceIds: string[] | null, allowPersonalWorkspaces: boolean }`
+sets it (`null` means every shared workspace) and answers `{ reach }`, the same
+shape the machine list reports as `reach` for organization machines
+(`homeWorkspaceId`, `allowedWorkspaceIds`, `allowPersonalWorkspaces`). It needs
+`enrollments:manage` and `account:admin`. The connecting workspace is dropped
+from the list, since it always has the machine, and any id that is not a shared
+workspace of the organization answers `400` with `details.workspaceIds`. A
+workspace machine or an Only me machine answers `409`: those already work only
+in their workspace, or wherever their owner uses them. As with who can use a
+machine, a person makes this change, directly or through an agent they gave
+their full access. Each change records a `connected_machine.reach.changed`
+audit event with the previous and new reach.
 
 ### Zero-click token (fleet / headless)
 

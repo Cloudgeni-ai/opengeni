@@ -755,6 +755,8 @@ import type {
   UpdateSessionAgentRequest,
   UpdateSessionSkillsRequest,
   UpdateRigRequest,
+  UpdateOrganizationComputeReachRequest,
+  OrganizationComputeReachResponse,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceModelAccessPolicyRequest,
   UpdateWorkspaceRequest,
@@ -2824,6 +2826,22 @@ export class OpenGeniClient {
       "PUT",
       `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/audience`,
       input,
+    );
+  }
+
+  /** Change where an organization Connected Machine works: every shared
+   * workspace (`allowedWorkspaceIds: null`) or chosen ones, plus members'
+   * Personal workspaces when switched on. The workspace it was connected from
+   * always has it. Organization owners only. */
+  async updateMachineReach(
+    workspaceId: string,
+    enrollmentId: string,
+    request: UpdateOrganizationComputeReachRequest,
+  ): Promise<OrganizationComputeReachResponse> {
+    return await this.requestJson<OrganizationComputeReachResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/reach`,
+      request,
     );
   }
 
@@ -7967,6 +7985,21 @@ export class OpenGeniClient {
     return await this.requestJson<Rig>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/rigs/${rigId}`,
+      request,
+    );
+  }
+
+  /** Change where an organization Sandbox Environment works: every shared
+   * workspace (`allowedWorkspaceIds: null`) or chosen ones, plus members'
+   * Personal workspaces when switched on. Organization owners only. */
+  async updateRigReach(
+    workspaceId: string,
+    rigId: string,
+    request: UpdateOrganizationComputeReachRequest,
+  ): Promise<OrganizationComputeReachResponse> {
+    return await this.requestJson<OrganizationComputeReachResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/reach`,
       request,
     );
   }

@@ -33,6 +33,11 @@ import { thisComputerSettingsAvailable } from "@/lib/this-computer-page";
 import { ConnectMachineDialog } from "@opengeni/react/app/components/machines/connect-machine-dialog";
 import { WorkspaceCommandsSection } from "@/components/machines/workspace-commands";
 import { MachineAudienceDialog } from "@/components/machines/machine-audience-dialog";
+import {
+  OrganizationComputeReachDialog,
+  organizationComputeReachSummary,
+} from "@/components/organization-compute-reach-dialog";
+import { useOrganizationName } from "@/lib/use-organization-name";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { Button } from "@opengeni/react/ui/button";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
@@ -44,7 +49,7 @@ import {
   apiErrorTechnicalFacts,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
-import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import type { MachineView } from "@opengeni/react/machines";
 
 /** While the connect dialog waits for the new machine, look for it sooner. */
@@ -78,6 +83,8 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const [detailId, setDetailId] = useState<string | null>(null);
   // "Who can use it?" for the open machine.
   const [audienceOpen, setAudienceOpen] = useState(false);
+  // "Available in" for the open organization machine.
+  const [reachOpen, setReachOpen] = useState(false);
   const [detailWindow, setDetailWindow] = useState<MetricWindow>("1h");
   const [detailSeries, setDetailSeries] = useState<MetricSample[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -104,6 +111,17 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
     audienceOpen && selectedMachine?.enrollmentId && selectedMachine.scope !== "organization"
       ? { ...selectedMachine, enrollmentId: selectedMachine.enrollmentId }
       : null;
+  // Organization machines work in the workspaces their organization picks;
+  // organization owners change that.
+  const organizationId = workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
+  const organizationAdmin = organizationId
+    ? hasAccountPermission(accessContext, organizationId, "account:admin")
+    : false;
+  const organizationName =
+    useOrganizationName(organizationId ?? "", organizationAdmin) ?? "your organization";
+  const selectedReach = selectedMachine?.scope === "organization" ? selectedMachine.reach : null;
+  const canChangeReach =
+    Boolean(selectedReach && organizationId && organizationAdmin) && canChangeSelected;
 
   // Fetch the compact card sparkline history for every enrolled machine. Keyed on
   // the SET of enrollment ids (not the 5s-polled array identity) + a 30s refresh,
@@ -268,11 +286,16 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             loadingSeries={detailLoading}
             onBack={() => {
               setAudienceOpen(false);
+              setReachOpen(false);
               setDetailId(null);
             }}
             {...(machines.canManage && subjectId
               ? { onChangeAudience: () => setAudienceOpen(true) }
               : {})}
+            {...(selectedReach
+              ? { reachSummary: organizationComputeReachSummary(selectedReach) }
+              : {})}
+            {...(canChangeReach ? { onChangeReach: () => setReachOpen(true) } : {})}
             {...(machines.canUpdateAgent && canChangeSelected
               ? {
                   onUpdateAgent: requestAgentUpdate,
@@ -478,6 +501,36 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           open
           onOpenChange={setAudienceOpen}
           onChanged={() => void machines.refresh()}
+        />
+      ) : null}
+      {canChangeReach && selectedMachine?.enrollmentId && selectedReach && organizationId ? (
+        <OrganizationComputeReachDialog
+          key={selectedMachine.enrollmentId}
+          open={reachOpen}
+          onOpenChange={setReachOpen}
+          client={client}
+          kind="machine"
+          name={selectedMachine.name}
+          reach={selectedReach}
+          organizationId={organizationId}
+          organizationName={organizationName}
+          hereId={workspaceId}
+          save={async (next) => {
+            const enrollmentId = selectedMachine.enrollmentId!;
+            return (await client.updateMachineReach(workspaceId, enrollmentId, next)).reach;
+          }}
+          onSaved={(reach) => {
+            setReachOpen(false);
+            // Taken out of this workspace: it is no longer listed here.
+            const stillHere =
+              reach.homeWorkspaceId === workspaceId ||
+              (personalWorkspace
+                ? reach.allowPersonalWorkspaces
+                : reach.allowedWorkspaceIds === null ||
+                  reach.allowedWorkspaceIds.includes(workspaceId));
+            if (!stillHere) setDetailId(null);
+            void machines.refresh();
+          }}
         />
       ) : null}
     </ContentPage>

@@ -11881,6 +11881,46 @@ export const RigVerificationHealth = /* @__PURE__ */ defineSchema(() =>
 );
 export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
 
+/**
+ * Where an organization machine or rig works: always in the workspace it was
+ * connected from or made in (`homeWorkspaceId`), plus every shared workspace
+ * of the organization (`allowedWorkspaceIds: null`) or the listed ones, and
+ * members' Personal workspaces when `allowPersonalWorkspaces` is on. Only
+ * organization machines and rigs have it.
+ */
+export const OrganizationComputeReach = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    homeWorkspaceId: primitives.uuid,
+    allowedWorkspaceIds: z.array(primitives.uuid).nullable(),
+    allowPersonalWorkspaces: primitives.boolean,
+  }),
+);
+export type OrganizationComputeReach = z.infer<typeof OrganizationComputeReach>;
+
+/**
+ * PUT /v1/workspaces/:workspaceId/machines/:enrollmentId/reach and
+ * PUT /v1/workspaces/:workspaceId/rigs/:rigId/reach: an organization owner or
+ * admin changes where an organization machine or rig works. The ids are the
+ * organization's shared workspaces; its home workspace always has it.
+ */
+export const UpdateOrganizationComputeReachRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      allowedWorkspaceIds: z.array(primitives.uuid).max(1000).nullable(),
+      allowPersonalWorkspaces: primitives.boolean,
+    })
+    .strict(),
+);
+export type UpdateOrganizationComputeReachRequest = z.infer<
+  typeof UpdateOrganizationComputeReachRequest
+>;
+
+/** The reach an organization machine or rig has after the change. */
+export const OrganizationComputeReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ reach: OrganizationComputeReach }),
+);
+export type OrganizationComputeReachResponse = z.infer<typeof OrganizationComputeReachResponse>;
+
 export const Rig = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
@@ -11901,6 +11941,8 @@ export const Rig = /* @__PURE__ */ defineSchema(() =>
     versionCount: primitives.nonnegativeInteger,
     createdAt: primitives.string,
     updatedAt: primitives.string,
+    /** Where it works; present only for organization rigs. */
+    reach: OrganizationComputeReach.nullable().optional(),
   }),
 );
 export type Rig = z.infer<typeof Rig>;
@@ -21887,6 +21929,8 @@ export const MachineView = /* @__PURE__ */ defineSchema(() =>
     // Per-enrollment desired policy. Null for managed/session sandboxes.
     operationPolicy: MachineOperationPolicy.nullable().default(null),
     metrics: MetricSample.nullable(),
+    /** Where an organization machine works; null for every other machine. */
+    reach: OrganizationComputeReach.nullable().default(null),
   }),
 );
 export type MachineView = z.infer<typeof MachineView>;

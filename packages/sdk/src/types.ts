@@ -8359,6 +8359,32 @@ export type Rig = {
   versionCount: number;
   createdAt: string;
   updatedAt: string;
+  /** Where it works; present only for organization rigs. */
+  reach?: OrganizationComputeReach | null | undefined;
+};
+
+/**
+ * Where an organization machine or rig works: always in the workspace it was
+ * connected from or made in (`homeWorkspaceId`), plus every shared workspace
+ * of the organization (`allowedWorkspaceIds: null`) or the listed ones, and
+ * members' Personal workspaces when `allowPersonalWorkspaces` is on.
+ */
+export type OrganizationComputeReach = {
+  homeWorkspaceId: string;
+  allowedWorkspaceIds: string[] | null;
+  allowPersonalWorkspaces: boolean;
+};
+
+/** PUT .../machines/:enrollmentId/reach and PUT .../rigs/:rigId/reach body:
+ * an organization owner changes where an organization machine or rig
+ * works. The ids are the organization's shared workspaces. */
+export type UpdateOrganizationComputeReachRequest = {
+  allowedWorkspaceIds: string[] | null;
+  allowPersonalWorkspaces: boolean;
+};
+
+export type OrganizationComputeReachResponse = {
+  reach: OrganizationComputeReach;
 };
 
 export type RigChangeKind = "setup_append" | "definition_edit";
@@ -10844,6 +10870,8 @@ export type MachineView = {
    * session boxes; null limits on a real machine mean unrestricted. */
   operationPolicy: MachineOperationPolicy | null;
   metrics: MetricSample | null;
+  /** Where an organization machine works; null for every other machine. */
+  reach?: OrganizationComputeReach | null;
 };
 
 /** GET /v1/workspaces/:ws/machines — the dashboard list + the active-sandbox

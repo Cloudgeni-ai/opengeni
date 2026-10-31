@@ -891,6 +891,7 @@ import type {
   WorkspaceControlEvent,
   WorkspaceMemoryPromptMode,
   Channel,
+  OrganizationComputeReach,
   Rig,
   RigProviderImage,
   RigProviderImages,
@@ -22201,6 +22202,22 @@ function unknownRigHealth(activeVersion: RigVersion | null): RigVerificationHeal
   return activeVersion ? { checkHealth: "unknown", lastVerifiedAt: null } : null;
 }
 
+/** Where an organization machine or rig works (migration 1190); null for
+ * workspace and personal ones, whose reach is their owner's. */
+function organizationComputeReach(row: {
+  authorityScope: string;
+  workspaceId: string;
+  allowedWorkspaceIds: string[] | null;
+  allowPersonalWorkspaces: boolean;
+}): OrganizationComputeReach | null {
+  if (row.authorityScope !== "organization") return null;
+  return {
+    homeWorkspaceId: row.workspaceId,
+    allowedWorkspaceIds: row.allowedWorkspaceIds ?? null,
+    allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+  };
+}
+
 function mapRig(
   row: typeof schema.rigs.$inferSelect,
   activeVersion: RigVersion | null,
@@ -22222,6 +22239,7 @@ function mapRig(
     versionCount,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    reach: organizationComputeReach(row),
   };
 }
 
@@ -22777,6 +22795,119 @@ export async function revokeScopedRig(
       'revoke', null, false, null, false, ${options.allowOrganization === true}
     )`);
   });
+}
+
+/** Input for changing where an organization machine or rig works. The caller
+ * has checked that the subject is an organization owner. */
+export type OrganizationComputeReachInput = {
+  accountId: string;
+  /** The workspace the machine was connected from or the rig was made in. */
+  homeWorkspaceId: string;
+  allowedWorkspaceIds: string[] | null;
+  allowPersonalWorkspaces: boolean;
+  subjectId: string;
+};
+
+export type OrganizationComputeReachUpdate =
+  | { status: "updated"; reach: OrganizationComputeReach }
+  | { status: "not_found" }
+  | { status: "unknown_workspaces"; workspaceIds: string[] };
+
+/** The listed ids, without duplicates or the home workspace (which always has
+ * it), checked against the organization's shared workspaces. */
+async function normalizeOrganizationComputeReach(
+  db: Database,
+  input: OrganizationComputeReachInput,
+): Promise<
+  { ok: true; allowedWorkspaceIds: string[] | null } | { ok: false; workspaceIds: string[] }
+> {
+  if (input.allowedWorkspaceIds === null) return { ok: true, allowedWorkspaceIds: null };
+  const listed = [...new Set(input.allowedWorkspaceIds)].filter(
+    (workspaceId) => workspaceId !== input.homeWorkspaceId,
+  );
+  if (listed.length === 0) return { ok: true, allowedWorkspaceIds: [] };
+  const shared = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: null },
+    async (scopedDb) =>
+      await rawRows<{ workspace_id: string }>(
+        scopedDb,
+        sql`select workspace_id from list_organization_workspace_ids(${input.accountId}::uuid)`,
+      ),
+  );
+  const sharedIds = new Set(shared.map((row) => row.workspace_id));
+  const unknown = listed.filter((workspaceId) => !sharedIds.has(workspaceId));
+  if (unknown.length > 0) return { ok: false, workspaceIds: unknown };
+  return { ok: true, allowedWorkspaceIds: listed.sort() };
+}
+
+/** Change where an organization rig works. Its home workspace always has it;
+ * chats and schedules in a workspace it no longer works in fail at their next
+ * attempt instead of using it. */
+export async function updateOrganizationRigReach(
+  db: Database,
+  rigId: string,
+  input: OrganizationComputeReachInput,
+): Promise<OrganizationComputeReachUpdate> {
+  const normalized = await normalizeOrganizationComputeReach(db, input);
+  if (!normalized.ok)
+    return { status: "unknown_workspaces", workspaceIds: normalized.workspaceIds };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.homeWorkspaceId },
+    async (scopedDb) => {
+      const where = and(
+        eq(schema.rigs.accountId, input.accountId),
+        eq(schema.rigs.workspaceId, input.homeWorkspaceId),
+        eq(schema.rigs.id, rigId),
+        eq(schema.rigs.authorityScope, "organization"),
+        eq(schema.rigs.status, "active"),
+      );
+      const [before] = await scopedDb
+        .select({
+          allowedWorkspaceIds: schema.rigs.allowedWorkspaceIds,
+          allowPersonalWorkspaces: schema.rigs.allowPersonalWorkspaces,
+        })
+        .from(schema.rigs)
+        .where(where)
+        .for("update")
+        .limit(1);
+      if (!before) return { status: "not_found" };
+      const [row] = await scopedDb
+        .update(schema.rigs)
+        .set({
+          allowedWorkspaceIds: normalized.allowedWorkspaceIds,
+          allowPersonalWorkspaces: input.allowPersonalWorkspaces,
+          updatedAt: new Date(),
+        })
+        .where(where)
+        .returning();
+      if (!row) return { status: "not_found" };
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.homeWorkspaceId,
+        subjectId: input.subjectId,
+        action: "rig.reach.changed",
+        targetType: "rig",
+        targetId: rigId,
+        metadata: {
+          from: before,
+          to: {
+            allowedWorkspaceIds: row.allowedWorkspaceIds,
+            allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+          },
+        },
+      });
+      return {
+        status: "updated",
+        reach: {
+          homeWorkspaceId: row.workspaceId,
+          allowedWorkspaceIds: row.allowedWorkspaceIds ?? null,
+          allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+        },
+      };
+    },
+  );
 }
 
 // --- Channels ---------------------------------------------------------------
@@ -65103,6 +65234,9 @@ export type EnrollmentRecord = {
   createdAt: string;
   revokedAt: string | null;
   updatedAt: string;
+  /** Where an organization machine works (migration 1190); null for workspace
+   * and personal machines. */
+  reach?: OrganizationComputeReach | null;
 };
 
 function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentRecord {
@@ -65176,6 +65310,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     createdAt: row.createdAt.toISOString(),
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     updatedAt: row.updatedAt.toISOString(),
+    reach: organizationComputeReach(row),
   };
 }
 
@@ -65526,6 +65661,76 @@ export async function updateEnrollmentOperationPolicy(
         },
       });
       return mapEnrollment(row);
+    },
+  );
+}
+
+/** Change where an organization machine works. The workspace it was connected
+ * from always has it; chats and schedules in a workspace it no longer works
+ * in fail at their next attach or attempt instead of using it. */
+export async function updateOrganizationMachineReach(
+  db: Database,
+  enrollmentId: string,
+  input: OrganizationComputeReachInput,
+): Promise<OrganizationComputeReachUpdate> {
+  const normalized = await normalizeOrganizationComputeReach(db, input);
+  if (!normalized.ok)
+    return { status: "unknown_workspaces", workspaceIds: normalized.workspaceIds };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.homeWorkspaceId },
+    async (scopedDb) => {
+      const where = and(
+        eq(schema.enrollments.accountId, input.accountId),
+        eq(schema.enrollments.workspaceId, input.homeWorkspaceId),
+        eq(schema.enrollments.id, enrollmentId),
+        eq(schema.enrollments.kind, "machine"),
+        eq(schema.enrollments.authorityScope, "organization"),
+        eq(schema.enrollments.status, "active"),
+      );
+      const [before] = await scopedDb
+        .select({
+          allowedWorkspaceIds: schema.enrollments.allowedWorkspaceIds,
+          allowPersonalWorkspaces: schema.enrollments.allowPersonalWorkspaces,
+        })
+        .from(schema.enrollments)
+        .where(where)
+        .for("update")
+        .limit(1);
+      if (!before) return { status: "not_found" };
+      const [row] = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          allowedWorkspaceIds: normalized.allowedWorkspaceIds,
+          allowPersonalWorkspaces: input.allowPersonalWorkspaces,
+          updatedAt: new Date(),
+        })
+        .where(where)
+        .returning();
+      if (!row) return { status: "not_found" };
+      await scopedDb.insert(schema.auditEvents).values({
+        accountId: input.accountId,
+        workspaceId: input.homeWorkspaceId,
+        subjectId: input.subjectId,
+        action: "connected_machine.reach.changed",
+        targetType: "enrollment",
+        targetId: enrollmentId,
+        metadata: {
+          from: before,
+          to: {
+            allowedWorkspaceIds: row.allowedWorkspaceIds,
+            allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+          },
+        },
+      });
+      return {
+        status: "updated",
+        reach: {
+          homeWorkspaceId: row.workspaceId,
+          allowedWorkspaceIds: row.allowedWorkspaceIds ?? null,
+          allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+        },
+      };
     },
   );
 }

@@ -6,7 +6,7 @@ import {
   type UseMachinesOptions,
 } from "../../machines";
 import { useAppContext } from "../app-context";
-import { hasWorkspacePermission, isSignedInPerson } from "./permissions";
+import { hasAccountPermission, hasWorkspacePermission, isSignedInPerson } from "./permissions";
 
 export { isSignedInPerson };
 
@@ -19,10 +19,11 @@ const emptySeries = async (): Promise<MetricSample[]> => [];
 // Stock-console reads follow the current workspace grant. The public React
 // hook remains usable by embedding hosts with their own authorization model.
 // Anyone who can see machines connects and changes their own Only me
-// machines; workspace machines need enrollments:manage (`canManage`).
+// machines; workspace machines need enrollments:manage (`canManage`), and
+// organization machines also an organization owner, as the API asks.
 export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
   const { workspaceId } = useOpenGeni();
-  const { accessContext } = useAppContext();
+  const { accessContext, workspaces } = useAppContext();
   const targetWorkspaceId = options.workspaceId ?? workspaceId;
   const canRead =
     (!options.sessionId ||
@@ -34,11 +35,22 @@ export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
   const canConnect = canManage || (canRead && isSignedInPerson(accessContext, targetWorkspaceId));
   const canControl =
     canRead && hasWorkspacePermission(accessContext, targetWorkspaceId, "sessions:control");
+  const organizationId = workspaces.find(
+    (workspace) => workspace.id === targetWorkspaceId,
+  )?.accountId;
+  const organizationAdmin = organizationId
+    ? hasAccountPermission(accessContext, organizationId, "account:admin")
+    : false;
   const fleet = useMachines({ ...options, enabled: canRead && options.enabled !== false });
   const machines = canRead ? fleet.machines : EMPTY_MACHINES;
-  /** Change this machine: your own Only me machine, or any with canManage. */
+  /** Change this machine: your own Only me machine, a workspace machine with
+   * canManage, an organization machine with canManage as an organization owner. */
   const canManageMachine = (machine: Pick<MachineView, "scope">) =>
-    machine.scope === "user" ? canConnect : canManage;
+    machine.scope === "user"
+      ? canConnect
+      : machine.scope === "organization"
+        ? canManage && organizationAdmin
+        : canManage;
   const mayChange = (enrollmentId: string) => {
     const machine = machines.find((candidate) => candidate.enrollmentId === enrollmentId);
     return machine ? canManageMachine(machine) : canManage;
