@@ -1841,6 +1841,7 @@ const READ_ONLY_TAB_METHODS = new Set([
   "DOM.getDocument",
   "DOM.querySelectorAll",
   "DOM.resolveNode",
+  "DOMSnapshot.captureSnapshot",
   "Emulation.setFocusEmulationEnabled",
   "Inspector.enable",
   "Log.enable",
