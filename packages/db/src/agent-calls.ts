@@ -84,7 +84,7 @@ export type PlaceAgentCallResult =
 
 /**
  * The phones a product embedding Opengeni rings for agent calls itself, as
- * the person stated through it (1143). Null when they stated none.
+ * the person stated through it (`1143_agent_call_host_phones`). Null when they stated none.
  */
 export type AgentCallHostPhones = { phones: number; teammates: boolean; updatedAt: string };
 
