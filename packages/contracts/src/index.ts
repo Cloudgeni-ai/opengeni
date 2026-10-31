@@ -17226,6 +17226,42 @@ export const AgentCallActionRequest = /* @__PURE__ */ defineSchema(() =>
 export type AgentCallActionRequest = z.infer<typeof AgentCallActionRequest>;
 
 /**
+ * Phones a product embedding Opengeni rings for agent calls itself, from the
+ * `session.agentCall.ringing` webhook with its own push credentials. The
+ * person states them through the product (its backend acting as them), and
+ * agents count them alongside the person's Opengeni app phones.
+ */
+export const AgentCallHostPhones = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** How many of the person's phones the product rings for agents. */
+      phones: z.number().int().min(1).max(20),
+      /** Whether agents working for other members of a shared workspace may ring them too. */
+      teammates: z.boolean(),
+      updatedAt: primitives.dateTime,
+    })
+    .strict(),
+);
+export type AgentCallHostPhones = z.infer<typeof AgentCallHostPhones>;
+
+/** State the phones the product rings for agent calls; `phones: 0` removes them. */
+export const SetAgentCallHostPhonesRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      phones: z.number().int().min(0).max(20),
+      teammates: z.boolean().optional(),
+    })
+    .strict(),
+);
+export type SetAgentCallHostPhonesRequest = z.infer<typeof SetAgentCallHostPhonesRequest>;
+
+/** The phones the product rings for this person; null when none. */
+export const AgentCallHostPhonesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ hostPhones: AgentCallHostPhones.nullable() }).strict(),
+);
+export type AgentCallHostPhonesResponse = z.infer<typeof AgentCallHostPhonesResponse>;
+
+/**
  * `session.agentCall.ringing`: the agent is ringing a person. Products that
  * deliver their own pushes ring their app from this event.
  */

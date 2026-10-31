@@ -55,7 +55,7 @@ const LATE_ANSWER_MS = AGENT_CALL_ANSWER_GRACE_SECONDS * 1000;
 
 const REFUSALS: Record<AgentCallRefusal, (who: string) => string> = {
   no_phone: (who) =>
-    `${who} has no phone that takes calls from agents (they turn it on in the Opengeni app's settings). Notify them instead (notify_user).`,
+    `${who} has no phone that takes calls from agents (they turn it on in their phone app's settings). Notify them instead (notify_user).`,
   busy: (who) =>
     `Another call is ringing ${who} right now. Notify them instead (notify_user), or try again in a minute if it truly cannot wait.`,
   rate_limited: (who) =>
@@ -196,7 +196,7 @@ export function registerAgentCallTools(input: RegisterAgentCallToolsInput): void
               callerLabel,
               reason: placed.call.reason,
               ringUntil: placed.call.ringUntil,
-              devices: placed.call.devices,
+              devices: placed.nativeDevices,
             }),
           },
         ] as Parameters<typeof appendAndPublishTurnEventsFenced>[7],

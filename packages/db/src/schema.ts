@@ -14771,6 +14771,24 @@ export const agentCalls = pgTable(
   }),
 );
 
+/**
+ * Phones a product embedding Opengeni rings for agent calls itself (1143_agent_call_host_phones):
+ * how many of the person's phones, and whether teammates' agents may ring them.
+ */
+export const agentCallHostPhones = pgTable(
+  "agent_call_host_phones",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id").notNull(),
+    phones: integer("phones").notNull(),
+    teammates: boolean("teammates").notNull().default(false),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({ identity: primaryKey({ columns: [table.accountId, table.subjectId] }) }),
+);
+
 /** Promotion eligibility is separate from account access and paid funding. */
 export const promotionDecisions = pgTable("promotion_decisions", {
   accountId: uuid("account_id").primaryKey(),
