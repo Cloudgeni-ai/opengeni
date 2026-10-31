@@ -1,12 +1,17 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
+import {
+  BrowserAccountsApiError,
+  type ManagedAuthSessionSetProjection,
+} from "@opengeni/sdk/accounts";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import { storeOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
 
-import { AccountAuthRoute } from "./account-auth";
+import { SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE } from "@/lib/signups-paused";
+
+import { AccountAuthRoute, accountAuthFailureMessage } from "./account-auth";
 
 const TRANSACTION_ID = "00000000-0000-4000-8000-000000000001";
 const SLOT_ID = "00000000-0000-4000-8000-000000000002";
@@ -153,5 +158,87 @@ describe("isolated browser account authentication", () => {
       container.remove();
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("says an address isn't allowed instead of asking to check the credentials", async () => {
+    const originalFetch = globalThis.fetch;
+    const refusals = [
+      { status: 403, code: "sign_in_email_not_allowed" },
+      { status: 401, code: "invalid_credentials" },
+    ];
+    let attempt = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url =
+        input instanceof Request ? input.url : input instanceof URL ? input.toString() : input;
+      if (new URL(url, "https://opengeni.test").pathname === "/v1/config/client") {
+        return Response.json({
+          auth: { mode: "managedSession", session: "cookie", socialProviders: [] },
+        });
+      }
+      if ((init?.method ?? "GET") === "GET") return Response.json(projection("1"));
+      const refusal = refusals[attempt++]!;
+      return Response.json(
+        {
+          error: {
+            status: refusal.status,
+            code: refusal.status === 401 ? "unauthenticated" : "forbidden",
+            message: refusal.code,
+            retryable: false,
+            details: { managedAuthCode: refusal.code },
+          },
+        },
+        { status: refusal.status },
+      );
+    }) as typeof fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<AccountAuthRoute transactionId={TRANSACTION_ID} />));
+      const email = container.querySelector<HTMLInputElement>("#account-auth-email")!;
+      const password = container.querySelector<HTMLInputElement>("#account-auth-password")!;
+      const submit = async () => {
+        await enter(email, "removed@example.test");
+        await enter(password, "correct horse battery staple");
+        await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+        await flush();
+        return container.querySelector('[role="alert"]')?.textContent;
+      };
+
+      expect(await submit()).toBe("This email can't sign in here. Ask your admin for access.");
+      expect(await submit()).toBe(
+        "Authentication did not complete. Check the credentials and try again.",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("add-account failure messages", () => {
+  const generic = "Authentication did not complete. Check the credentials and try again.";
+
+  test("each refusal the server names gets its own message", () => {
+    const message = (status: number, code: string) =>
+      accountAuthFailureMessage(new BrowserAccountsApiError(status, code));
+    expect(message(403, "sign_in_email_not_allowed")).toBe(SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE);
+    expect(message(403, "email_not_verified")).toBe("Verify your email before signing in.");
+    expect(message(403, "sign_in_refused")).toBe("This account can't sign in right now.");
+    expect(message(429, "login_transaction_rate_limited")).toBe(
+      "Too many attempts. Wait a while, then try again.",
+    );
+  });
+
+  test("wrong credentials and unexpected failures keep the generic message", () => {
+    expect(accountAuthFailureMessage(new BrowserAccountsApiError(401, "invalid_credentials"))).toBe(
+      generic,
+    );
+    expect(accountAuthFailureMessage(new BrowserAccountsApiError(500, "internal_error"))).toBe(
+      generic,
+    );
+    expect(accountAuthFailureMessage(new Error("network down"))).toBe(generic);
   });
 });
