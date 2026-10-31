@@ -70,6 +70,20 @@ export async function regenerateMerge(options: RegenerateMergeOptions): Promise<
   };
   if (git(["rev-parse", "HEAD"]).text.trim() !== head)
     throw new Error(`The working directory is not checked out at ${head}`);
+  // In a partial clone, git merge's checkout can ask the remote for blobs the
+  // merge has just written itself, which the remote never had and refuses.
+  // Which merges hit it depends on Git's object lookups, so refuse them all.
+  const promisor = git(
+    ["config", "--get-regexp", String.raw`^(extensions\.partialclone|remote\..*\.promisor)$`],
+    [0, 1],
+  );
+  const partialClone = promisor.text
+    .split("\n")
+    .some((line) => line.startsWith("extensions.partialclone ") || / (true|yes|on|1)$/i.test(line));
+  if (partialClone)
+    throw new Error(
+      "The checkout is a partial clone: regenerating needs every file's contents, so check out the PR head without a filter",
+    );
   git(["cat-file", "-e", `${main}^{commit}`]);
   const base = { version: 1 as const, pull, head, main };
 

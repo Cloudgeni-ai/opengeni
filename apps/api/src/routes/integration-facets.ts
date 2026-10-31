@@ -10,9 +10,9 @@ import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organizatio
 import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import {
   authorizationHoldsOrganizationAdministration,
-  hasPermission,
+  hasIntegrationSetupPermission,
   requireAccessGrant,
-  requireAccessGrantAuthorization,
+  requireIntegrationSetupAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -68,12 +68,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/source",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const authorization = await requireAccessGrantAuthorization(
-        c,
-        deps,
-        workspaceId,
-        "capabilities:manage",
-      );
+      const authorization = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
       const { grant } = authorization;
       try {
         return c.json(
@@ -88,10 +83,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
               payload: await c.req.json(),
               canManageOrganizationDestination:
                 authorizationHoldsOrganizationAdministration(authorization),
-              canManageWorkspaceDestination: hasPermission(
-                grant.permissions,
-                "capabilities:manage",
-              ),
+              canManageWorkspaceDestination: hasIntegrationSetupPermission(grant),
               canManagePersonalDestination:
                 authorization.contextIntegrity &&
                 authorization.authenticatedSubjectId === grant.subjectId,
@@ -131,7 +123,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+      const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
       const payload = await parseRequestJson(c, UpsertIntegrationFacetRequest);
       const capabilityId = decoded(c.req.param("capabilityId"));
       const instanceKey = decoded(c.req.param("instanceKey"));
@@ -223,7 +215,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
       `/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/${action}`,
       async (c) => {
         const workspaceId = c.req.param("workspaceId");
-        const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+        const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
         const payload = await parseRequestJson(c, MutateIntegrationFacetRequest);
         try {
           return c.json(
@@ -262,7 +254,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+      const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
       const payload = await parseRequestJson(c, MutateIntegrationFacetRequest);
       try {
         return c.json(

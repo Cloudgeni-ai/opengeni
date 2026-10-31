@@ -7,13 +7,46 @@ export type AccountOriginWorkspace = { id: string; name: string; kind: "personal
 export type ConnectionAccountRow = {
   /** Who the account is: its identity, or "<name> account" when the provider gave none. */
   label: string;
-  /** "This workspace", "Only me", "Only me · From Personal workspace", or
-   * "From <workspace>" for a shared account added in another workspace. */
+  /** "Shared", "Yours", "Yours · From Personal workspace", or "Shared · From
+   * <workspace>" for a shared account added in another workspace. */
   scope: string;
   /** The workspace it was added in, when that is not the one being viewed.
    * Removing or reconnecting it acts there. */
   origin: string | null;
 };
+
+/** Why another account of a service can't be added yet. */
+export type AddAccountLimit = "single" | "reconnect";
+
+export const ADD_ACCOUNT_LIMIT_COPY: Readonly<Record<AddAccountLimit, string>> = {
+  single:
+    "This service doesn't tell us which account you signed in with, so you can connect one account. Disconnect it to use a different one.",
+  reconnect: "Reconnect your existing account once, then add another.",
+};
+
+/**
+ * Mirrors the server's account rule for adding one more account in the given
+ * ownership. A service that can't identify accounts allows each person one
+ * connection: none beside one in the same place, no personal one beside a
+ * shared one, and no shared one beside the person's own. A service that can
+ * identify accounts first needs any older account in the same place signed in
+ * again. Only the viewer's own and shared accounts count. The API decides.
+ */
+export function addAccountLimit(
+  accounts: readonly Pick<ConnectionMetadata, "subjectId" | "status" | "accountIdentity">[],
+  input: { viewerSubjectId: string | null; ownership: "personal" | "workspace" },
+): AddAccountLimit | null {
+  const live = accounts.filter(
+    (account) =>
+      account.status !== "revoked" &&
+      (account.subjectId === null || account.subjectId === input.viewerSubjectId),
+  );
+  if (live.some((account) => account.accountIdentity === "single")) return "single";
+  const sameBucket = live.filter((account) =>
+    input.ownership === "workspace" ? account.subjectId === null : account.subjectId !== null,
+  );
+  return sameBucket.some((account) => account.accountIdentity === "reconnect") ? "reconnect" : null;
+}
 
 function originName(workspaceId: string, workspaces: readonly AccountOriginWorkspace[]): string {
   const origin = workspaces.find((workspace) => workspace.id === workspaceId);
@@ -56,11 +89,11 @@ export function connectionAccountRows(
     const scope =
       account.subjectId === null
         ? origin
-          ? `From ${origin}`
-          : "This workspace"
+          ? `Shared · From ${origin}`
+          : "Shared"
         : origin
-          ? `Only me · From ${origin}`
-          : "Only me";
+          ? `Yours · From ${origin}`
+          : "Yours";
     return {
       account,
       label: input.labelOf?.(account) ?? connectionAccountIdentityLabel(account.metadata, fallback),

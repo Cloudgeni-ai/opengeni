@@ -14,7 +14,11 @@ Add the `queue-ready` label or turn on auto-merge (`gh pr merge --auto --squash`
 A queued PR is batched once its **PR CI** check has passed on its exact current
 head. Add `queue-priority` as well for an urgent fix: priority PRs are tested
 next, as soon as the batch that is already running finishes. A running batch is
-never cancelled for one.
+never cancelled for one. The oldest ready PRs fill the rest of a priority
+batch, after the priority PRs and without waiting for the batching window, so
+priority PRs that arrive one at a time do not each take a round alone. A
+priority CI or batcher change still runs alone, and while a failed batch is
+being split, priority PRs go without the fill.
 
 ## Releasing: a Version PR holds main
 
@@ -141,11 +145,14 @@ and members of the running batch are never regenerated.
    that the new `main` tree is exactly the tree CI tested at that point, and
    stops with a comment on the PR if not.
 5. **Failures.** A failed batch is split in half and each half is tested in
-   turn until the failing PR is found and removed from the queue. Priority PRs
-   in those halves keep their place in them, so a failed batch of priority PRs
-   is split too; a priority PR queued since goes first. A half of several PRs
-   that fails only in jobs (by name, ignoring jobs cancelled after a failure)
-   that the bisection already saw fail also after a retry is split at once,
+   turn until the failing PR is found and removed from the queue. A failed
+   batch with both priority and other PRs is split into its priority PRs, tested
+   first, and the rest, so a broken fill delays them one round. Priority PRs in
+   those halves keep their place in them, so a failed batch of only priority PRs
+   is split in half too; a priority PR queued since goes first. A half of
+   several PRs that fails only in jobs (by name, ignoring jobs cancelled
+   after a failure) that the bisection already saw fail also after a retry is
+   split at once,
    without its own retry, which would almost surely fail again. The manifest's
    `blame` lists those jobs; a priority or Version PR built in between drops
    it. A single PR always gets its retry before it is ejected, so a flaky job

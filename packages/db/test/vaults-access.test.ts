@@ -639,6 +639,44 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         "orgAvailable",
         "orgNoPersonal",
       ]);
+
+      // Selected workspaces and Personal workspaces: the list names shared
+      // workspaces, and Personal workspaces follow the switch alone.
+      const selected = await getVault(world.db, asOwner, {
+        vaultId: world.vaults.orgElsewhere.id,
+      });
+      await updateVault(world.db, asOwner, {
+        vaultId: selected.id,
+        expectedGeneration: selected.generation,
+        availability: { allowedWorkspaceIds: [world.workspaceId], allowPersonalWorkspaces: true },
+        allowOrganization: true,
+      });
+      expect(org((await reach(world, memberHere)).labels)).toEqual([
+        "orgAvailable",
+        "orgElsewhere",
+        "orgNoPersonal",
+      ]);
+      expect(org((await reach(world, ownerPersonal)).labels)).toEqual([
+        "orgAvailable",
+        "orgElsewhere",
+        "orgNoPersonal",
+      ]);
+      const selectedOnly = await getVault(world.db, asOwner, { vaultId: selected.id });
+      await updateVault(world.db, asOwner, {
+        vaultId: selectedOnly.id,
+        expectedGeneration: selectedOnly.generation,
+        availability: { allowedWorkspaceIds: [world.workspaceId], allowPersonalWorkspaces: false },
+        allowOrganization: true,
+      });
+      expect(org((await reach(world, memberHere)).labels)).toEqual([
+        "orgAvailable",
+        "orgElsewhere",
+        "orgNoPersonal",
+      ]);
+      expect(org((await reach(world, ownerPersonal)).labels)).toEqual([
+        "orgAvailable",
+        "orgNoPersonal",
+      ]);
       // Restore for later tests.
       const restored = await getVault(world.db, asOwner, { vaultId: world.vaults.orgElsewhere.id });
       await updateVault(world.db, asOwner, {

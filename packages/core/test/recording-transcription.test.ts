@@ -12,6 +12,7 @@ import {
   recordingDiarizationKind,
   RecordingTranscriptionError,
   transcriptLanguages,
+  transcriptionProviderOutOfCredit,
   withoutMicrophoneEchoes,
   withRecorderVoice,
   type RecordingTranscribedWord,
@@ -506,6 +507,55 @@ describe("ElevenLabs provider", () => {
     expect((await attempt(400)).message).toContain("nope");
   });
 
+  test("an account out of credit is told apart from a wrong key, though both are 401", async () => {
+    const attempt = async (status: number, body: unknown) => {
+      const provider = createElevenLabsRecordingTranscriptionProvider({
+        fetch: (async () => Response.json(body, { status })) as unknown as typeof fetch,
+      });
+      try {
+        await provider.transcribe({ audio, model: "scribe_v2", diarize: false }, { apiKey: "k" });
+      } catch (error) {
+        return error as RecordingTranscriptionError;
+      }
+      throw new Error("expected failure");
+    };
+    // What ElevenLabs answers when the month's credits are spent.
+    const spent = await attempt(401, {
+      detail: {
+        status: "quota_exceeded",
+        message:
+          "This request exceeds your quota of 10000. You have 0 credits remaining, while 12 credits are required for this request.",
+      },
+    });
+    expect([spent.code, spent.retryable]).toEqual(["quota_exceeded", false]);
+    expect(spent.message).toContain("exceeds your quota");
+    expect(
+      await attempt(401, {
+        detail: { type: "payment_required", code: "insufficient_credits", message: "No credits" },
+      }),
+    ).toMatchObject({ code: "quota_exceeded" });
+    const wrongKey = await attempt(401, {
+      detail: { status: "invalid_api_key", message: "Invalid API key" },
+    });
+    expect([wrongKey.code, wrongKey.message]).toEqual([
+      "unauthorized",
+      "ElevenLabs could not transcribe this audio (HTTP 401: Invalid API key)",
+    ]);
+  });
+
+  test("a live transcript on a spent account fails as out of credit", async () => {
+    const provider = createElevenLabsRecordingTranscriptionProvider({
+      fetch: (async () =>
+        Response.json(
+          { detail: { status: "quota_exceeded", message: "This request exceeds your quota." } },
+          { status: 401 },
+        )) as unknown as typeof fetch,
+    });
+    await expect(
+      provider.createLiveSession!({ model: "scribe_v2_realtime" }, { apiKey: "k" }),
+    ).rejects.toMatchObject({ code: "quota_exceeded", retryable: false });
+  });
+
   test("network failures are retryable", async () => {
     const provider = createElevenLabsRecordingTranscriptionProvider({
       fetch: (async () => {
@@ -556,6 +606,38 @@ describe("ElevenLabs provider", () => {
     await expect(
       provider.createLiveSession!({ model: "scribe_v2_realtime" }, { apiKey: "k" }),
     ).rejects.toMatchObject({ code: "unauthorized" });
+  });
+});
+
+describe("transcriptionProviderOutOfCredit", () => {
+  test("reads the providers' own ways of saying an account is spent", () => {
+    expect(transcriptionProviderOutOfCredit({ detail: { status: "quota_exceeded" } })).toBe(true);
+    expect(transcriptionProviderOutOfCredit({ error: { code: "insufficient_quota" } })).toBe(true);
+    expect(
+      transcriptionProviderOutOfCredit({ error: { message: "Out of call volume quota for F0." } }),
+    ).toBe(true);
+    expect(transcriptionProviderOutOfCredit("Insufficient credits")).toBe(true);
+  });
+
+  test("a busy provider, a wrong key or no body is not out of credit", () => {
+    // Azure OpenAI's rate limit links to its quota page; that is still a rate limit.
+    expect(
+      transcriptionProviderOutOfCredit({
+        error: {
+          code: "429",
+          message:
+            "Requests have exceeded token rate limit of your current pricing tier. Please retry after 4 seconds. Please go here: https://aka.ms/oai/quotaincrease if you would like to further increase the default rate limit.",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      transcriptionProviderOutOfCredit({
+        error: { code: "rate_limit_exceeded", message: "Rate limit reached for requests." },
+      }),
+    ).toBe(false);
+    expect(transcriptionProviderOutOfCredit({ detail: { status: "invalid_api_key" } })).toBe(false);
+    expect(transcriptionProviderOutOfCredit(null)).toBe(false);
+    expect(transcriptionProviderOutOfCredit({})).toBe(false);
   });
 });
 

@@ -1250,6 +1250,7 @@ function PeopleConfirm({
             ? `Their access to ${joinNames(names)} is removed. Restoring doesn't bring it back.`
             : "They have no shared workspaces right now.",
           "Their unfinished work is stopped. Their Personal workspace is kept.",
+          "Schedules they own stop running and pause themselves. Each one says why on its Automations page.",
         ]}
         confirmLabel="Suspend"
         pendingLabel="Suspending…"
@@ -1280,6 +1281,7 @@ function PeopleConfirm({
             ? `${first} loses access to ${organizationName} and ${count} shared ${count === 1 ? "workspace" : "workspaces"} right away.`
             : `${first} loses access to ${organizationName} right away.`,
           "Their unfinished work is stopped. Their personal data is kept for as long as your retention policy says.",
+          "Schedules they own stop running for good. Each one says why on its Automations page, where people there can set it up again as theirs.",
           `${first} can never be invited to ${organizationName} again.`,
         ]}
         confirmLabel="Remove from organization"

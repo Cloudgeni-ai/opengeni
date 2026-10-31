@@ -90,6 +90,8 @@ class DetachmentBridge implements AttachedBrowserBridgeTransport {
             cssContentSize: { x: 0, y: 0, width: 800, height: 600 },
           };
         if (payload.method === "Accessibility.getFullAXTree") result = { nodes: [] };
+        if (payload.method === "DOMSnapshot.captureSnapshot")
+          result = { strings: [], documents: [] };
         if (payload.method === "Runtime.evaluate")
           result = {
             result: {

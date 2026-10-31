@@ -245,9 +245,35 @@ document.getElementById("row").addEventListener("mouseenter",()=>setTimeout(()=>
 </script>`;
 
 e2e(
-  "a control the page turns on a moment after the hover is not refused as if the page had not reacted",
+  "a control the page turns on a moment after the hover is hovered and clicked",
   async () => {
     await withPage(HOVER_ENABLED_LATER, async ({ act, evaluate }) => {
+      const clicked = await act({
+        type: "click",
+        locator: { kind: "role", role: "button", name: "Go", exact: true },
+      });
+      expect(clicked.error ?? null).toBeNull();
+      expect(clicked.state).toBe("completed");
+      expect(((await evaluate("log")) as string[]).filter((entry) => entry !== "move")).toEqual([
+        "click Go",
+      ]);
+      expect(await evaluate('document.querySelector(".go").className')).toBe("go on");
+    });
+  },
+  90_000,
+);
+
+/** A row that notes the pointer a moment after it enters, while its action
+ * stays off. */
+const HOVER_NOTICED_LATER = HOVER_ENABLED_LATER.replace(
+  'document.querySelector(".go").classList.add("on")',
+  'document.getElementById("row").dataset.hovered="yes"',
+);
+
+e2e(
+  "a control the page leaves off after reacting to the hover a moment later is not refused as if the page had not reacted",
+  async () => {
+    await withPage(HOVER_NOTICED_LATER, async ({ act, evaluate }) => {
       const clicked = await act({
         type: "click",
         locator: { kind: "role", role: "button", name: "Go", exact: true },
@@ -255,7 +281,7 @@ e2e(
       expect(clicked.state).toBe("outcome_unknown");
       expect(clicked.error?.code).toBe("outcome_unknown");
       expect(((await evaluate("log")) as string[]).filter((entry) => entry !== "move")).toEqual([]);
-      expect(await evaluate('document.querySelector(".go").className')).toBe("go on");
+      expect(await evaluate('document.getElementById("row").dataset.hovered')).toBe("yes");
     });
   },
   90_000,

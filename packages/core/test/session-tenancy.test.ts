@@ -449,6 +449,37 @@ describe("managed-human session tenancy application service", () => {
     await expect(open(personalWorkspaceId)).resolves.toBeUndefined();
   }, 180_000);
 
+  test("the Personal workspace limit takes the usage-allowance switch to set, never to remove", async () => {
+    if (!shared || !client) return;
+    const userId = `core-personal-limit-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Personal limit",
+    });
+    const accountId = access.defaultAccountId!;
+    const change = (usageAllowancesEnabled: boolean, credits: number | null) =>
+      updateOrganizationPrivacySettings(
+        { db: client!.db, settings: { ...testSettings(), usageAllowancesEnabled } },
+        {
+          organizationId: accountId,
+          actorSubjectId: subjectId,
+          request: { personalWorkspaceMonthlyCredits: credits },
+        },
+      );
+
+    expect(
+      await getOrganizationPrivacySettings({ db: client.db, settings: testSettings() }, accountId),
+    ).toMatchObject({ personalWorkspaceMonthlyCredits: null });
+    await expect(change(false, 50_000_000)).rejects.toBeInstanceOf(OrganizationPrivacyLockedError);
+    expect(await change(true, 50_000_000)).toMatchObject({
+      personalWorkspaceMonthlyCredits: 50_000_000,
+      personalWorkspaces: true,
+    });
+    expect(await change(false, null)).toMatchObject({ personalWorkspaceMonthlyCredits: null });
+  }, 180_000);
+
   test("serves personal-resource discovery for a receipt-less organization; unknown authorities deny", async () => {
     if (!shared || !client) return;
     const userId = `core-personal-discovery-inactive-${crypto.randomUUID()}`;

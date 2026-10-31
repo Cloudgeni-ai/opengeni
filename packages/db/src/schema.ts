@@ -4108,6 +4108,8 @@ export const organizationCredentialProviders = pgTable(
     enabled: boolean("enabled").notNull().default(true),
     timeoutMs: integer("timeout_ms").notNull().default(10000),
     workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
+    /** Personal workspaces; the workspace filter applies to shared ones only. */
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(false),
     createdBySubjectId: text("created_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4621,6 +4623,11 @@ export const organizationPrivacyPreferences = pgTable("organization_privacy_pref
     .default("workspace_shared"),
   adminsSeePrivateSchedules: boolean("admins_see_private_schedules").notNull().default(true),
   personalWorkspacesEnabled: boolean("personal_workspaces_enabled").notNull().default(true),
+  // The most each person spends from the organization's credits in their own
+  // Personal workspace per calendar month, in USD micros (1147). Null: no limit.
+  personalWorkspaceMonthlyCredits: bigint("personal_workspace_monthly_credits", {
+    mode: "number",
+  }),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4736,6 +4743,14 @@ export const channels = pgTable(
     pinned: boolean("pinned").notNull().default(false),
     // Explicit user order within the pinned and unpinned project groups.
     sortOrder: integer("sort_order").notNull().default(0),
+    // Who sees it (1161): the workspace, or only its owner ("Only me"), like
+    // a chat. An Only me project holds only its owner's Only me chats and
+    // Sites; the migration owns the rule and the per-audience name indexes.
+    visibility: text("visibility")
+      .$type<"workspace_shared" | "user_private">()
+      .notNull()
+      .default("workspace_shared"),
+    ownerSubjectId: text("owner_subject_id"),
     // Attribution string: 'user:<subject>' | 'session:<id>' | 'system'.
     createdBy: text("created_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -5050,6 +5065,9 @@ export const sessions = pgTable(
     // Frozen agent configuration (migration 0559); NULL means a legacy
     // session. Mid-session updates share the tool_policy_version CAS.
     agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
+    // Migration 1124: hosted web-search records reach the model as runtime
+    // input instead of assistant messages. Set once by a worker, never reset.
+    searchRecordsAsInput: boolean("search_records_as_input").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Top-level xid, assigned by a BEFORE trigger in the original row write.
@@ -14769,6 +14787,24 @@ export const agentCalls = pgTable(
       sql`${table.state} in ('ringing', 'answered', 'declined', 'missed', 'cancelled')`,
     ),
   }),
+);
+
+/**
+ * Phones a product embedding Opengeni rings for agent calls itself (1143_agent_call_host_phones):
+ * how many of the person's phones, and whether teammates' agents may ring them.
+ */
+export const agentCallHostPhones = pgTable(
+  "agent_call_host_phones",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id").notNull(),
+    phones: integer("phones").notNull(),
+    teammates: boolean("teammates").notNull().default(false),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({ identity: primaryKey({ columns: [table.accountId, table.subjectId] }) }),
 );
 
 /** Promotion eligibility is separate from account access and paid funding. */

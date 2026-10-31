@@ -25,6 +25,7 @@ export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
+export * from "./session-search-records";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
 export * from "./workspace-model-catalog-inputs";
@@ -1041,6 +1042,10 @@ import {
 import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import { canonicalSecretPermissions } from "./canonical-secret-permissions";
+import {
+  accountPermissionsForOrganizationRole,
+  allAccountPermissions,
+} from "./organization-role-permissions";
 import {
   canonicalizePersistedHistoryItem,
   CodexAppsCredentialUnavailable,
@@ -2356,23 +2361,7 @@ export async function turnWorkspaceSettingsAccess(
   return allowed ? authority.kind : null;
 }
 
-export const allAccountPermissions: Permission[] = [
-  "account:read",
-  "account:admin",
-  "members:manage",
-  "workspace:create",
-  "billing:read",
-  "billing:manage",
-  "api_keys:manage",
-];
-
-function accountPermissionsForOrganizationRole(role: "owner" | "admin" | "member"): Permission[] {
-  if (role === "owner") return allAccountPermissions;
-  if (role === "admin") {
-    return ["account:read", "members:manage", "workspace:create", "billing:read"];
-  }
-  return ["account:read"];
-}
+export { allAccountPermissions } from "./organization-role-permissions";
 
 export type BootstrapWorkspaceInput = {
   accountExternalSource: string;
@@ -7754,6 +7743,11 @@ export type CreateCapabilityCatalogItemInput = {
   installUrl?: string | null;
   authModel?: string | null;
   metadata?: Record<string, unknown>;
+  /**
+   * Insert only: an existing workspace row with this id is returned unchanged
+   * instead of being rewritten (a member adding a server never edits one).
+   */
+  createOnly?: boolean;
 };
 
 export type ImportBatch = {
@@ -10429,14 +10423,24 @@ export async function upsertCapabilityCatalogItem(
         metadata: values.metadata,
         updatedAt: values.updatedAt,
       };
-      const [row] = await scopedDb
-        .insert(schema.capabilityCatalogItems)
-        .values(values)
-        .onConflictDoUpdate({
-          target: [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id],
-          set: updateValues,
-        })
-        .returning();
+      const insert = scopedDb.insert(schema.capabilityCatalogItems).values(values);
+      const target = [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id];
+      const [row] = input.createOnly
+        ? await insert.onConflictDoNothing({ target }).returning()
+        : await insert.onConflictDoUpdate({ target, set: updateValues }).returning();
+      if (!row && input.createOnly) {
+        const [existing] = await scopedDb
+          .select()
+          .from(schema.capabilityCatalogItems)
+          .where(
+            and(
+              eq(schema.capabilityCatalogItems.workspaceId, input.workspaceId),
+              eq(schema.capabilityCatalogItems.id, input.id),
+            ),
+          )
+          .limit(1);
+        if (existing) return mapCapabilityCatalogItem(existing);
+      }
       if (!row) {
         throw new Error("Failed to upsert capability catalog item");
       }
@@ -19683,6 +19687,34 @@ export async function getVisibleSessionTenancyVisibility(
   });
 }
 
+/**
+ * A chat's audience and, for an Only me chat, its owner; null when the
+ * caller cannot see the chat.
+ */
+export async function getVisibleSessionAudience(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{
+  visibility: "user_private" | "workspace_shared";
+  ownerSubjectId: string | null;
+} | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        visibility: schema.sessions.visibility,
+        ownerSubjectId: schema.sessions.ownerSubjectId,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    return row.visibility === "user_private"
+      ? { visibility: "user_private", ownerSubjectId: row.ownerSubjectId ?? null }
+      : { visibility: "workspace_shared", ownerSubjectId: null };
+  });
+}
+
 export async function updateScheduledTask(
   db: Database,
   workspaceId: string,
@@ -22808,10 +22840,35 @@ export class ChannelNotFoundError extends Error {
   }
 }
 
+/**
+ * An Only me project holds only its owner's own Only me chats and Sites
+ * (1161), so nothing in it is ever visible to anyone else.
+ */
+export class ChannelAudienceMismatchError extends Error {
+  constructor(kind: "chat" | "Site") {
+    super(`An Only me project holds only your own Only me ${kind}s.`);
+    this.name = "ChannelAudienceMismatchError";
+  }
+}
+
 function isChannelNameUniqueViolation(error: unknown): boolean {
+  const constraint = safeDatabaseErrorFacts(error).constraint;
   return (
     nestedPostgresSqlState(error) === "23505" &&
-    safeDatabaseErrorFacts(error).constraint === "channels_workspace_name_idx"
+    (constraint === "channels_workspace_name_idx" || constraint === "channels_owner_name_idx")
+  );
+}
+
+/** Whether an item fits a project: anything fits a shared one. */
+function fitsProject(
+  project: { visibility: string; ownerSubjectId: string | null },
+  item: { visibility: string; ownerSubjectId: string | null },
+): boolean {
+  return (
+    project.visibility !== "user_private" ||
+    (item.visibility === "user_private" &&
+      item.ownerSubjectId !== null &&
+      item.ownerSubjectId === project.ownerSubjectId)
   );
 }
 
@@ -22844,6 +22901,7 @@ function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
     avatar: storedSessionAvatar(row.avatar),
     pinned: row.pinned,
     sortOrder: row.sortOrder,
+    visibility: row.visibility === "user_private" ? "private" : "workspace",
     createdBy: row.createdBy ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -22859,8 +22917,17 @@ export async function createChannel(
     description?: string | null;
     avatar?: SessionAvatar | null;
     createdBy?: string | null;
+    /**
+     * Who sees it; Only me needs its owner. Omitted, shared with the
+     * workspace, as every project was before audiences.
+     */
+    audience?: { visibility: "user_private" | "workspace_shared"; ownerSubjectId: string | null };
   },
 ): Promise<Channel> {
+  const visibility = input.audience?.visibility ?? "workspace_shared";
+  const ownerSubjectId = input.audience?.ownerSubjectId ?? null;
+  if (visibility === "user_private" && !ownerSubjectId)
+    throw new TypeError("An Only me project needs an owner");
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -22884,6 +22951,8 @@ export async function createChannel(
             description: input.description ?? null,
             avatar: input.avatar ?? null,
             sortOrder: nextSortOrder,
+            visibility,
+            ownerSubjectId,
             createdBy: input.createdBy ?? null,
           })
           .returning();
@@ -22940,9 +23009,28 @@ export async function updateChannel(
     description?: string | null | undefined;
     avatar?: SessionAvatar | null | undefined;
     pinned?: boolean | undefined;
+    /** Shares an Only me project with the workspace; never narrows. */
+    visibility?: "workspace_shared" | undefined;
   },
 ): Promise<Channel | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    // Sharing keeps the name, which then has to be free among shared projects.
+    const conflictName =
+      input.name ??
+      (input.visibility === undefined
+        ? ""
+        : ((
+            await scopedDb
+              .select({ name: schema.channels.name })
+              .from(schema.channels)
+              .where(
+                and(
+                  eq(schema.channels.workspaceId, workspaceId),
+                  eq(schema.channels.id, channelId),
+                ),
+              )
+              .limit(1)
+          )[0]?.name ?? ""));
     try {
       const [row] = await scopedDb
         .update(schema.channels)
@@ -22951,6 +23039,7 @@ export async function updateChannel(
           ...(input.description !== undefined ? { description: input.description } : {}),
           ...(input.avatar !== undefined ? { avatar: input.avatar } : {}),
           ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+          ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
@@ -22958,7 +23047,7 @@ export async function updateChannel(
       return row ? mapChannel(row) : null;
     } catch (error) {
       if (isChannelNameUniqueViolation(error)) {
-        throw new ChannelNameConflictError(input.name ?? "");
+        throw new ChannelNameConflictError(conflictName);
       }
       throw error;
     }
@@ -23054,7 +23143,11 @@ export async function setSessionChannel(
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
     if (input.channelId !== null) {
       const [channel] = await scopedDb
-        .select({ id: schema.channels.id })
+        .select({
+          id: schema.channels.id,
+          visibility: schema.channels.visibility,
+          ownerSubjectId: schema.channels.ownerSubjectId,
+        })
         .from(schema.channels)
         .where(
           and(
@@ -23065,6 +23158,29 @@ export async function setSessionChannel(
         .limit(1);
       if (!channel) {
         throw new ChannelNotFoundError(input.channelId);
+      }
+      if (channel.visibility === "user_private") {
+        const [session] = await scopedDb
+          .select({
+            visibility: schema.sessions.visibility,
+            ownerSubjectId: schema.sessions.ownerSubjectId,
+          })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        if (!session) return false;
+        if (
+          !fitsProject(channel, {
+            visibility: session.visibility,
+            ownerSubjectId: session.ownerSubjectId ?? null,
+          })
+        )
+          throw new ChannelAudienceMismatchError("chat");
       }
     }
     try {
@@ -23163,6 +23279,8 @@ export async function moveSiteToProject(
         accountId: string;
         homeChannelId: string | null;
         inAudience: boolean;
+        visibility: string;
+        ownerSubjectId: string | null;
       }>(
         scoped,
         sql`
@@ -23170,7 +23288,9 @@ export async function moveSiteToProject(
             (case when placement.site_id is not null then placement.channel_id
               else creator.channel_id end)::text as "homeChannelId",
             (artifact.visibility = 'workspace_shared'
-              or artifact.owner_subject_id = ${input.subjectId}) as "inAudience"
+              or artifact.owner_subject_id = ${input.subjectId}) as "inAudience",
+            artifact.visibility as "visibility",
+            artifact.owner_subject_id as "ownerSubjectId"
           from ${schema.workspaceArtifacts} artifact
           left join ${schema.siteProjectPlacements} placement
             on placement.workspace_id = artifact.workspace_id and placement.site_id = artifact.id
@@ -23191,7 +23311,11 @@ export async function moveSiteToProject(
       if (input.fromChannelId === input.channelId) return { siteMoved: false, movedSessionIds: [] };
       if (input.channelId !== null) {
         const [channel] = await scoped
-          .select({ id: schema.channels.id })
+          .select({
+            id: schema.channels.id,
+            visibility: schema.channels.visibility,
+            ownerSubjectId: schema.channels.ownerSubjectId,
+          })
           .from(schema.channels)
           .where(
             and(
@@ -23201,6 +23325,30 @@ export async function moveSiteToProject(
           )
           .limit(1);
         if (!channel) throw new ChannelNotFoundError(input.channelId);
+        // An Only me project takes only its owner's Only me Site, and the
+        // conversations that move with a row must fit it too.
+        if (channel.visibility === "user_private") {
+          if (!fitsProject(channel, site)) throw new ChannelAudienceMismatchError("Site");
+          const misfits =
+            input.sessionIds.length === 0
+              ? []
+              : await scoped
+                  .select({ id: schema.sessions.id })
+                  .from(schema.sessions)
+                  .where(
+                    and(
+                      eq(schema.sessions.workspaceId, input.workspaceId),
+                      inArray(schema.sessions.id, [...input.sessionIds]),
+                      or(
+                        ne(schema.sessions.visibility, "user_private"),
+                        isNull(schema.sessions.ownerSubjectId),
+                        ne(schema.sessions.ownerSubjectId, channel.ownerSubjectId ?? ""),
+                      ),
+                    ),
+                  )
+                  .limit(1);
+          if (misfits.length > 0) throw new ChannelAudienceMismatchError("chat");
+        }
       }
       const siteMoved = site.inAudience && site.homeChannelId === input.fromChannelId;
       try {
@@ -29680,6 +29828,105 @@ export async function listConnectorActionPolicies(
         );
     },
   );
+}
+
+const connectorActionPolicySnapshotColumns = {
+  id: schema.connectorActionPolicies.id,
+  connectionId: schema.connectorActionPolicies.connectionId,
+  serverId: schema.connectorActionPolicies.serverId,
+  toolName: schema.connectorActionPolicies.toolName,
+  actionName: schema.connectorActionPolicies.actionName,
+  policy: schema.connectorActionPolicies.policy,
+  version: schema.connectorActionPolicies.version,
+};
+
+/**
+ * The tool choices a turn starts with. A workspace login's choices are that
+ * workspace's. A personal login's choices belong to the login: they are stored
+ * once, in the workspace it was connected from, and follow it to every
+ * workspace where its owner's turn uses it. A copy left in this workspace is
+ * ignored. A login whose choices don't fit the snapshot bound is left out
+ * whole, so its recommendations apply; never part of its rules. The
+ * workspace's own rows keep database order and followed logins come after
+ * them, so exact-attempt re-entry compares equal snapshots.
+ */
+export async function connectorActionPolicySnapshotForTurn(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    bindings: readonly McpConnectionAccountBinding[] | null;
+  },
+): Promise<ConnectorActionPolicySnapshotEntry[]> {
+  const followed = new Map<string, Set<string>>();
+  for (const binding of input.bindings ?? []) {
+    if (binding.subjectScope !== "subject" || binding.originWorkspaceId === input.workspaceId)
+      continue;
+    const ids = followed.get(binding.originWorkspaceId) ?? new Set<string>();
+    ids.add(binding.connectionId);
+    followed.set(binding.originWorkspaceId, ids);
+  }
+  const followedIds = new Set([...followed.values()].flatMap((ids) => [...ids]));
+  const stored = await db
+    .select(connectorActionPolicySnapshotColumns)
+    .from(schema.connectorActionPolicies)
+    .where(
+      and(
+        eq(schema.connectorActionPolicies.accountId, input.accountId),
+        eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+      ),
+    )
+    .orderBy(
+      asc(schema.connectorActionPolicies.connectionId),
+      asc(schema.connectorActionPolicies.serverId),
+      asc(schema.connectorActionPolicies.toolName),
+      asc(schema.connectorActionPolicies.actionName),
+      asc(schema.connectorActionPolicies.id),
+    )
+    .limit(CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX + 1);
+  if (stored.length > CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX) {
+    throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
+  }
+  const snapshot: ConnectorActionPolicySnapshotEntry[] = stored.filter(
+    (row) => !followedIds.has(row.connectionId),
+  );
+  for (const [originWorkspaceId, ids] of [...followed].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  )) {
+    // Read the login's home under that workspace's tenant scope, without the
+    // session-tenancy fence: this is a read inside the claim transaction.
+    const rows = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: originWorkspaceId },
+      async (scoped) =>
+        await scoped
+          .select(connectorActionPolicySnapshotColumns)
+          .from(schema.connectorActionPolicies)
+          .where(
+            and(
+              eq(schema.connectorActionPolicies.accountId, input.accountId),
+              eq(schema.connectorActionPolicies.workspaceId, originWorkspaceId),
+              inArray(schema.connectorActionPolicies.connectionId, [...ids].sort()),
+            ),
+          )
+          .orderBy(
+            asc(schema.connectorActionPolicies.connectionId),
+            asc(schema.connectorActionPolicies.serverId),
+            asc(schema.connectorActionPolicies.toolName),
+            asc(schema.connectorActionPolicies.actionName),
+            asc(schema.connectorActionPolicies.id),
+          )
+          .limit(CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX + 1),
+      undefined,
+      "none",
+    );
+    for (const connectionId of [...ids].sort()) {
+      const group = rows.filter((row) => row.connectionId === connectionId);
+      if (snapshot.length + group.length <= CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX)
+        snapshot.push(...group);
+    }
+  }
+  return snapshot;
 }
 
 /**
@@ -77218,29 +77465,14 @@ export async function claimSessionWorkForAttempt(
               }
             }
           }
-          const connectorPolicyRows = await tx
-            .select({
-              id: schema.connectorActionPolicies.id,
-              connectionId: schema.connectorActionPolicies.connectionId,
-              serverId: schema.connectorActionPolicies.serverId,
-              toolName: schema.connectorActionPolicies.toolName,
-              actionName: schema.connectorActionPolicies.actionName,
-              policy: schema.connectorActionPolicies.policy,
-              version: schema.connectorActionPolicies.version,
-            })
-            .from(schema.connectorActionPolicies)
-            .where(eq(schema.connectorActionPolicies.workspaceId, workspaceId))
-            .orderBy(
-              asc(schema.connectorActionPolicies.connectionId),
-              asc(schema.connectorActionPolicies.serverId),
-              asc(schema.connectorActionPolicies.toolName),
-              asc(schema.connectorActionPolicies.actionName),
-              asc(schema.connectorActionPolicies.id),
-            )
-            .limit(2049);
-          if (connectorPolicyRows.length > 2048) {
-            throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
-          }
+          const connectorPolicyRows = await connectorActionPolicySnapshotForTurn(
+            tx as unknown as Database,
+            {
+              accountId: session.accountId,
+              workspaceId,
+              bindings: turn.mcpAccountBindings,
+            },
+          );
           // New queued, compaction, and internal-update executions are born
           // while the locked session still has no active-turn pointer. Publish
           // that ownership edge before freezing governance so the database

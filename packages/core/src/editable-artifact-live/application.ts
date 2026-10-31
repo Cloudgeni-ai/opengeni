@@ -11,6 +11,7 @@ import {
   type EditableArtifactId,
   type EditableArtifactModality,
   type EditableArtifactOriginalImport,
+  type EditableArtifactAudience,
   type EditableArtifactScope,
   type ImportEditableArtifactRequest,
 } from "../domain/editable-artifacts/types";
@@ -56,6 +57,8 @@ export type CreateEditableArtifactApplicationInput = Readonly<{
   idempotencyKey: EditableArtifactClientTransactionId;
   modality: EditableArtifactModality;
   title: string;
+  /** Who can open it; absent means the whole workspace with no owner. */
+  audience?: EditableArtifactAudience;
   signal?: AbortSignal;
 }>;
 
@@ -67,6 +70,8 @@ export type ImportEditableArtifactApplicationInput = Readonly<{
   title: string;
   originalImport: EditableArtifactOriginalImport;
   snapshot: ImportEditableArtifactRequest["snapshot"];
+  /** Who can open it; absent means the whole workspace with no owner. */
+  audience?: EditableArtifactAudience;
   signal?: AbortSignal;
 }>;
 
@@ -129,6 +134,7 @@ export class EditableArtifactApplication implements EditableArtifactApplicationP
         idempotencyKey: editableArtifactClientTransactionId(input.idempotencyKey),
         modality: input.modality,
         title: input.title,
+        ...(input.audience ? { audience: input.audience } : {}),
       },
       ...(input.signal ? { signal: input.signal } : {}),
     });
@@ -147,6 +153,7 @@ export class EditableArtifactApplication implements EditableArtifactApplicationP
         title: input.title,
         originalImport: input.originalImport,
         snapshot: input.snapshot,
+        ...(input.audience ? { audience: input.audience } : {}),
       },
       ...(input.signal ? { signal: input.signal } : {}),
     });

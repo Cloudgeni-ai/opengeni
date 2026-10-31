@@ -54,6 +54,8 @@ export type IntegrationProvider = {
   createdAt: string;
   updatedAt: string;
   workspaceFilter?: IntegrationWorkspaceFilter | null;
+  /** Organization only: members' Personal workspaces use it too. */
+  allowPersonalWorkspaces?: boolean;
 };
 
 export type ProviderTest = {
@@ -73,6 +75,7 @@ export type ProviderInput = {
   enabled: boolean;
   timeoutMs: number;
   workspaceFilter?: IntegrationWorkspaceFilter | null;
+  allowPersonalWorkspaces?: boolean;
 };
 
 export interface DeveloperIntegrationsApi {
@@ -180,12 +183,14 @@ export function organizationIntegrationsApi(
       (await rotateOrganizationWebhookSecret(client, organizationId, id)).secret,
     getProvider: async () =>
       (await getOrganizationCredentialProvider(client, organizationId)).provider,
-    putProvider: async ({ url, enabled, timeoutMs, workspaceFilter }) =>
+    // PUT replaces the configuration, so every write restates both reach choices.
+    putProvider: async ({ url, enabled, timeoutMs, workspaceFilter, allowPersonalWorkspaces }) =>
       await putOrganizationCredentialProvider(client, organizationId, {
         url,
         enabled,
         timeoutMs,
         workspaceFilter: workspaceFilter ?? null,
+        allowPersonalWorkspaces: allowPersonalWorkspaces ?? false,
       }),
     deleteProvider: async () => await deleteOrganizationCredentialProvider(client, organizationId),
     rotateProviderSecret: async () =>

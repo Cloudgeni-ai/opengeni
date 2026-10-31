@@ -137,9 +137,17 @@ samples once a second.
   the descent drops only cache, and its growth past its high only waits
   until its guest is shrunk. A later bound tries it again for one step,
   and a lifted bound, a pause or a resume opens it. Memory that does not
-  compress costs a VM at most a step's work each time it is bounded. A
-  new bound starts from where the one before settled, never from the
-  thirty-second below that a descent it overtook left.
+  compress costs a VM at most a step's work each time it is bounded. Once
+  a step showed that the VM's memory compresses, one refusing step is not
+  enough: reclaim walks pages coldest first, a run of them may not
+  compress among many that do, and the counters lag the step a little.
+  The swap of such a VM closes after two refusing steps in a row, or one
+  that also brought it no lower, so memory that does not compress costs
+  it at most one step more, and a VM whose memory compresses is not left
+  with nothing the kernel may take (closed after one such step, the
+  borrower's program was ended instead of compressed in three of five
+  gate runs). A new bound starts from where the one before settled, never
+  from the thirty-second below that a descent it overtook left.
 - **The guest is asked to shrink.** When the host is short even with
   every running VM at its request and what is on its way back counted,
   for 10 s (by then pressure has put to sleep every idle sandbox it

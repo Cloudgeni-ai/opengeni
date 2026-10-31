@@ -391,9 +391,13 @@ test("a refund of a pre-plan or prior-period video debit cannot inflate the new 
 test("ended plan credit is unavailable before maintenance and ledger writers expire it before settlement", async () => {
   if (!client || !shared) return;
   const { accountId } = await account();
-  const period = await grantPlanCreditPeriod(client.db, await activate(accountId, "pro", 100));
+  const period = await grantPlanCreditPeriod(client.db, await activate(accountId));
   await topup(accountId, 100 * M);
-  await Bun.sleep(120);
+  // The period ends now, after the top-up was bought inside it. A short real
+  // period would make this depend on setup speed: if it ended before the
+  // top-up, the top-up's own settlement would already have expired it.
+  await shared.admin`update plan_credit_periods set period_end=clock_timestamp() where id=${period.id}`;
+  await shared.admin`update organization_plans set current_period_end=(select period_end from plan_credit_periods where id=${period.id}) where account_id=${accountId}`;
   expect(await getBillingBalance(client.db, accountId)).toMatchObject({
     balanceMicros: 100 * M,
     generalBalanceMicros: 100 * M,

@@ -22,6 +22,7 @@ import {
   type Workspace,
 } from "@opengeni/contracts";
 import {
+  INTEGRATION_SETUP_PERMISSION,
   PERSONAL_INTEGRATION_SETUP_PERMISSION,
   permissionSetCovers,
 } from "@opengeni/contracts/personal-integration-setup";
@@ -1199,6 +1200,45 @@ export async function requireWorkspaceSettingsAuthorization(
   throw new MissingPermissionRefusal("workspace:admin", {
     message: WORKSPACE_SETTINGS_REFUSAL,
   });
+}
+
+/**
+ * Whether this grant may add integrations to its workspace (Members'
+ * `connections:write`, or an integration admin's `capabilities:manage`). See
+ * `INTEGRATION_SETUP_PERMISSION` for what that covers and what stays admin.
+ */
+export function hasIntegrationSetupPermission(
+  grant: Pick<AccessGrant, "permissions" | "permissionMode">,
+): boolean {
+  return (
+    hasPermission(grant.permissions, INTEGRATION_SETUP_PERMISSION, grant.permissionMode) ||
+    hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode)
+  );
+}
+
+/** Whether this grant holds integration admin rights (`capabilities:manage`). */
+export function hasIntegrationAdminPermission(
+  grant: Pick<AccessGrant, "permissions" | "permissionMode">,
+): boolean {
+  return hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode);
+}
+
+/**
+ * The access check of every route that adds or removes an integration
+ * (plugins, API integrations, custom MCP servers, integration sources):
+ * `connections:write` or `capabilities:manage`. The route still keeps what
+ * stays admin work (auto-approval, changing what is already on) behind
+ * {@link hasIntegrationAdminPermission}.
+ */
+export async function requireIntegrationSetupAuthorization(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<AccessGrantAuthorization> {
+  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  requireResolvedAccessGrantAuthorization(authorization, workspaceId);
+  if (hasIntegrationSetupPermission(authorization.grant)) return authorization;
+  throw new MissingPermissionRefusal(INTEGRATION_SETUP_PERMISSION);
 }
 
 /**

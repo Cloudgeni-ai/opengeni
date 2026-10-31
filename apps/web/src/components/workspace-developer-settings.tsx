@@ -211,7 +211,7 @@ export function WorkspaceDeveloperSettings({
   );
 }
 
-/** Organization settings > Developer: registrations for every matching shared workspace. */
+/** Organization settings > Developer: registrations for the workspaces each one picks. */
 export function OrganizationDeveloperIntegrations({
   client,
   organizationId,
