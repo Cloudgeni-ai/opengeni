@@ -7134,6 +7134,19 @@ export type AgentCall = {
   answeredHere: boolean | null;
 };
 
+/**
+ * Phones a product embedding Opengeni rings for agent calls itself, from the
+ * `session.agentCall.ringing` webhook with its own push credentials. Agents
+ * count them alongside the person's Opengeni app phones.
+ */
+export type AgentCallHostPhones = {
+  /** How many of the person's phones the product rings for agents, 1..20. */
+  phones: number;
+  /** Whether agents working for other members of a shared workspace may ring them too. */
+  teammates: boolean;
+  updatedAt: string;
+};
+
 // --- Organization-wide session list (org API key or organization owner) -----------------------
 
 export type ListOrganizationSessionsOptions = {

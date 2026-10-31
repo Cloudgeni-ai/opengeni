@@ -10,7 +10,22 @@ import postgres from "postgres";
 import { bootstrapWorkspace, createDb, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
+import {
+  assertRuntimeDatabasePosture,
+  evaluateRuntimeDatabasePosture,
+  inspectRuntimeDatabasePosture,
+} from "../src/runtime-posture";
+
+const postureOptions = { rlsStrategy: "force", targetSchema: "public" } as const;
+// The database stops before 1120, so tables later migrations add are absent
+// from it by design. Compare the posture around the refused migration rather
+// than against the current contract, which grows with every later table.
+async function postureViolations(): Promise<string[]> {
+  return evaluateRuntimeDatabasePosture(
+    await inspectRuntimeDatabasePosture(client!.db, postureOptions),
+    postureOptions,
+  );
+}
 
 const migration = "1120_retire_subscription_sql_cutover_gates.sql";
 const names = [
@@ -88,6 +103,7 @@ describe.skipIf(!realDatabase)("retire subscription SQL cutover switches", () =>
     await owned!.admin`
       update subscription_provider_cutovers set enabled = false
       where account_id = ${accountId} and provider = 'codex'`;
+    const violationsBefore = await postureViolations();
     try {
       const [role] = await owner!<{ superuser: boolean; bypass: boolean }[]>`
         select rolsuper as superuser, rolbypassrls as bypass
@@ -105,10 +121,7 @@ describe.skipIf(!realDatabase)("retire subscription SQL cutover switches", () =>
           exists(select 1 from schema_migrations where name = ${migration}) as applied
         from pg_class c where c.oid = 'public.subscription_provider_cutovers'::regclass`;
       expect(state).toEqual({ forced: true, applied: false });
-      await assertRuntimeDatabasePosture(client!.db, {
-        rlsStrategy: "force",
-        targetSchema: "public",
-      });
+      expect(await postureViolations()).toEqual(violationsBefore);
     } finally {
       await owned!.admin`
         update subscription_provider_cutovers set enabled = true
