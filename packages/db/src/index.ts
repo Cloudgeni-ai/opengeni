@@ -22706,7 +22706,7 @@ export async function revokeScopedRig(
 }
 
 /** Input for changing where an organization machine or rig works. The caller
- * has checked that the subject is an organization owner or admin. */
+ * has checked that the subject is an organization owner. */
 export type OrganizationComputeReachInput = {
   accountId: string;
   /** The workspace the machine was connected from or the rig was made in. */

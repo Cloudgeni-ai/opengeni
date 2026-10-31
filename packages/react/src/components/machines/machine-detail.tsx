@@ -61,7 +61,7 @@ export type MachineDetailProps = {
    * as its "Available in" row. Organization machines only. */
   reachSummary?: string | undefined;
   /** Open "Available in" for an organization machine. Omit when the viewer
-   * isn't an organization owner or admin; the row is then read-only. */
+   * isn't an organization owner; the row is then read-only. */
   onChangeReach?: ((machine: MachineView) => void) | undefined;
   /** Start, retry or resend the signed agent update. Omit when the viewer can't. */
   onUpdateAgent?: ((machine: MachineView) => void) | undefined;

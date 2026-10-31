@@ -1791,7 +1791,7 @@ connection, so its chats, schedules and the installed agent are not registered
 again, and the agent keeps running (with its running commands) without a
 restart or an upgrade. On the Machines page, open the machine and choose
 **Who can use it?**. Organization machines belong to the organization and
-cannot be changed here. An organization admin chooses which workspaces they
+cannot be changed here. An organization owner chooses which workspaces they
 work in instead (see
 [Choose where an organization machine works](#choose-where-an-organization-machine-works)).
 

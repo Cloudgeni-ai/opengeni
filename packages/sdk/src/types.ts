@@ -8332,7 +8332,7 @@ export type OrganizationComputeReach = {
 };
 
 /** PUT .../machines/:enrollmentId/reach and PUT .../rigs/:rigId/reach body:
- * an organization owner or admin changes where an organization machine or rig
+ * an organization owner changes where an organization machine or rig
  * works. The ids are the organization's shared workspaces. */
 export type UpdateOrganizationComputeReachRequest = {
   allowedWorkspaceIds: string[] | null;

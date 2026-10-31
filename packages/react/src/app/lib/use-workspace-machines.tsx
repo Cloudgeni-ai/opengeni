@@ -20,7 +20,7 @@ const emptySeries = async (): Promise<MetricSample[]> => [];
 // hook remains usable by embedding hosts with their own authorization model.
 // Anyone who can see machines connects and changes their own Only me
 // machines; workspace machines need enrollments:manage (`canManage`), and
-// organization machines also an organization owner or admin, as the API asks.
+// organization machines also an organization owner, as the API asks.
 export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
   const { workspaceId } = useOpenGeni();
   const { accessContext, workspaces } = useAppContext();
@@ -44,7 +44,7 @@ export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
   const fleet = useMachines({ ...options, enabled: canRead && options.enabled !== false });
   const machines = canRead ? fleet.machines : EMPTY_MACHINES;
   /** Change this machine: your own Only me machine, a workspace machine with
-   * canManage, an organization machine with canManage as an organization admin. */
+   * canManage, an organization machine with canManage as an organization owner. */
   const canManageMachine = (machine: Pick<MachineView, "scope">) =>
     machine.scope === "user"
       ? canConnect

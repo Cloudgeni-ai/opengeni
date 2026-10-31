@@ -107,12 +107,12 @@ export function RigDetailRoute({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [reachOpen, setReachOpen] = useState(false);
   // An organization rig works in the workspaces its organization picks;
-  // organization owners and admins change that.
+  // organization owners change that.
   const organizationId = rig.rig?.scope === "organization" ? rig.rig.accountId : "";
   const organizationAdmin = organizationId
     ? hasAccountPermission(context.accessContext, organizationId, "account:admin")
     : false;
-  // Changing an organization rig also needs an organization owner or admin, as
+  // Changing an organization rig also needs an organization owner, as
   // the API asks; without that its edit actions would only be refused.
   const canManage = canManageRigs && (rig.rig?.scope !== "organization" || organizationAdmin);
   const organizationName =

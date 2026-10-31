@@ -2831,7 +2831,7 @@ export class OpenGeniClient {
   /** Change where an organization Connected Machine works: every shared
    * workspace (`allowedWorkspaceIds: null`) or chosen ones, plus members'
    * Personal workspaces when switched on. The workspace it was connected from
-   * always has it. Organization owners and admins only. */
+   * always has it. Organization owners only. */
   async updateMachineReach(
     workspaceId: string,
     enrollmentId: string,
@@ -7988,7 +7988,7 @@ export class OpenGeniClient {
 
   /** Change where an organization Sandbox Environment works: every shared
    * workspace (`allowedWorkspaceIds: null`) or chosen ones, plus members'
-   * Personal workspaces when switched on. Organization owners and admins only. */
+   * Personal workspaces when switched on. Organization owners only. */
   async updateRigReach(
     workspaceId: string,
     rigId: string,
