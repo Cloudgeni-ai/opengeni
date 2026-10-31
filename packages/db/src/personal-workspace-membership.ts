@@ -3,7 +3,7 @@ import * as schema from "./schema";
 
 /**
  * The identity every Personal workspace carries: `external_source` is this
- * value and `external_id` is `<organization id>:<owner subject>`. Migration 1153
+ * value and `external_id` is `<organization id>:<owner subject>`. Migration 1159
  * keeps it immutable and refuses any `workspace_memberships` row in such a
  * workspace other than its owner's.
  */
@@ -12,7 +12,7 @@ export const PERSONAL_WORKSPACE_EXTERNAL_SOURCE = "opengeni:organization-members
 /**
  * Excludes a Personal workspace's own row from a `workspace_memberships` read.
  *
- * Migration 1153 makes a Personal workspace hold at most one row, its owner's.
+ * Migration 1159 makes a Personal workspace hold at most one row, its owner's.
  * That row is not membership evidence here. A membership row admits whoever
  * names its subject: a delegated bearer, a host token, a seam that never
  * checks who is asking. The owner reaches their Personal workspace only
