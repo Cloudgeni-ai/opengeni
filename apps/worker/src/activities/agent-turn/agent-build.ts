@@ -159,6 +159,8 @@ export type BuildTurnAgentDeps = {
   buildCompanyBrainContributionReceiptFor: GovernanceModelOk["buildCompanyBrainContributionReceiptFor"];
   promptCacheKey: CompactionPrepOk["promptCacheKey"];
   runtimeResources: ReturnType<typeof runtimeResourcesForTurn>;
+  /** Repositories removed from the chat whose sandbox folders are removed before this turn. */
+  repositoryRemoval?: BuildAgentOptions["repositoryRemoval"] | null;
   sandboxEnvironment: Record<string, string>;
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
   sandboxGitToken: string | undefined;
@@ -227,6 +229,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     buildCompanyBrainContributionReceiptFor,
     promptCacheKey,
     runtimeResources,
+    repositoryRemoval,
     sandboxEnvironment,
     sandboxArtifactRuntime,
     sandboxGitToken,
@@ -896,6 +899,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               codemodeTokenSessionId: input.sessionId,
               ...(codemodeClientDownload ? { codemodeClientDownload } : {}),
             }
+          : {}),
+        ...(activeSandboxBackend !== "selfhosted" && repositoryRemoval
+          ? { repositoryRemoval }
           : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         ...(activeSandboxBackend === "selfhosted" && sandboxState.machinePrimarySession

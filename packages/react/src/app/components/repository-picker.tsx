@@ -183,6 +183,11 @@ export type RepositoryContextPickerProps = {
   lockedManualRepoIds?: ReadonlySet<number> | undefined;
   /** Mounted personal sources may outlive their currently authorized catalog entry. */
   unavailableMountedRepositories?: ReadonlyArray<{ uri: string; ref: string }> | undefined;
+  /**
+   * Switching a mounted repository off asks to remove it from the chat. Without
+   * it, mounted repositories stay locked.
+   */
+  onRemoveMountedRepository?: ((target: MountedRepositoryTarget) => void) | undefined;
   /** Inline validation for pending manual repository additions. */
   validationError?: string | null | undefined;
   /** New-chat route used to explain immutable mounted follow-up resources. */
@@ -192,6 +197,12 @@ export type RepositoryContextPickerProps = {
   /** Extra classes on the bar trigger (e.g. `max-sm:hidden` when opened from +). */
   triggerClassName?: string | undefined;
 };
+
+/** A mounted repository row the person switched off. */
+export type MountedRepositoryTarget =
+  | { kind: "app"; repository: GitHubRepository }
+  | { kind: "personal"; repository: PersonalGitHubRepositoryCatalogItem }
+  | { kind: "uri"; uri: string };
 
 /** Shared picker body — desktop dropdown and mobile “+” drill-in. */
 export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
@@ -574,14 +585,19 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                 </div>
               </div>
               <MetaChip dot="idle" rounded="full">
-                <LockIcon className="size-3" aria-hidden="true" />
+                {props.onRemoveMountedRepository ? null : (
+                  <LockIcon className="size-3" aria-hidden="true" />
+                )}
                 Mounted
               </MetaChip>
               <ComposerMenuSwitch
                 checked
-                locked
+                locked={!props.onRemoveMountedRepository}
+                disabled={props.pending}
                 label={`${repo.uri} mounted`}
-                onCheckedChange={() => {}}
+                onCheckedChange={() =>
+                  props.onRemoveMountedRepository?.({ kind: "uri", uri: repo.uri })
+                }
               />
             </div>
           ))}
@@ -596,14 +612,19 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                   <div className="truncate text-xs text-fg-subtle">{repo.ref}</div>
                 </div>
                 <MetaChip dot="idle" rounded="full">
-                  <LockIcon className="size-3" aria-hidden="true" />
+                  {props.onRemoveMountedRepository ? null : (
+                    <LockIcon className="size-3" aria-hidden="true" />
+                  )}
                   Mounted
                 </MetaChip>
                 <ComposerMenuSwitch
                   checked
-                  locked
+                  locked={!props.onRemoveMountedRepository}
+                  disabled={props.pending}
                   label={`${repo.url} mounted`}
-                  onCheckedChange={() => {}}
+                  onCheckedChange={() =>
+                    props.onRemoveMountedRepository?.({ kind: "uri", uri: repo.url })
+                  }
                 />
               </div>
             ))}
@@ -714,7 +735,9 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             (props.lockedManualRepoIds?.size ?? 0) >
             0 ? (
             <p className="px-2.5 text-xs leading-4.5 text-fg-muted">
-              Mounted repositories cannot be removed or retargeted.{" "}
+              {props.onRemoveMountedRepository
+                ? "Mounted repositories cannot be retargeted."
+                : "Mounted repositories cannot be removed or retargeted."}{" "}
               <a href={props.newChatUrl} className="og-link">
                 Start a new chat
               </a>{" "}
@@ -866,7 +889,14 @@ function RepositoryPickerRowView(props: {
     else if (app) picker.onToggleRepo(app);
   }
   function toggle() {
-    if (locked) return;
+    if (locked) {
+      if (personalLocked && personal) {
+        picker.onRemoveMountedRepository?.({ kind: "personal", repository: personal });
+      } else if (app) {
+        picker.onRemoveMountedRepository?.({ kind: "app", repository: app });
+      }
+      return;
+    }
     if (personalSelected && personal) picker.onTogglePersonalGitHubRepo?.(personal);
     else if (appSelected && app) picker.onToggleRepo(app);
     else select(actingAs);
@@ -896,7 +926,9 @@ function RepositoryPickerRowView(props: {
         </span>
         {locked ? (
           <MetaChip dot="idle" rounded="full">
-            <LockIcon className="size-3" aria-hidden="true" />
+            {picker.onRemoveMountedRepository ? null : (
+              <LockIcon className="size-3" aria-hidden="true" />
+            )}
             Mounted
           </MetaChip>
         ) : !app && personal ? (
@@ -904,10 +936,12 @@ function RepositoryPickerRowView(props: {
         ) : null}
         <ComposerMenuSwitch
           checked={checked}
-          locked={locked}
+          locked={locked && !picker.onRemoveMountedRepository}
           disabled={
             picker.pending ||
-            (actingAs === "personal" && (personalBusy || !picker.onTogglePersonalGitHubRepo))
+            (!locked &&
+              actingAs === "personal" &&
+              (personalBusy || !picker.onTogglePersonalGitHubRepo))
           }
           onCheckedChange={toggle}
           label={

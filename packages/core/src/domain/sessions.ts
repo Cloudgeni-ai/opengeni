@@ -224,6 +224,7 @@ import {
   type FrozenTurnInitiator,
   type UpdateSessionMcpServerCredentialsInput,
   QueueCommandConflictError,
+  SessionRepositoryRemovedError,
   AgentCommandAuthorityError,
   runIdempotentPersistenceTransaction,
   SessionSpawnDeniedDbError,
@@ -1401,6 +1402,8 @@ export async function createAndStartSessionWithOutcome(input: {
           allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
           subjectId: input.subjectId ?? null,
           ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
+        }).catch((error: unknown) => {
+          throw repositoryRemovedHttpError(error);
         }),
     );
     if (keyedResult.denied) {
@@ -1520,7 +1523,7 @@ export async function createAndStartSessionWithOutcome(input: {
     if (error instanceof SessionSpawnDeniedDbError) {
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(error.denial));
     }
-    throw error;
+    throw repositoryRemovedHttpError(error);
   }
   const finished = await finishNewlyCreatedSession(
     targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
@@ -2265,6 +2268,7 @@ export async function postUserMessageTurn(
         { message: error.message, cause: error },
       );
     }
+    if (error instanceof SessionRepositoryRemovedError) throw repositoryRemovedHttpError(error);
     if (
       error instanceof QueueCommandConflictError ||
       error instanceof SessionControlConflictError
@@ -2280,6 +2284,16 @@ export async function postUserMessageTurn(
     throw error;
   }
   return finalizePostUserMessageTurn(input, result);
+}
+
+/**
+ * A person removed the repository from the chat; an agent cannot attach it
+ * again (to the chat or to a child it creates). Other errors pass through.
+ */
+function repositoryRemovedHttpError(error: unknown): unknown {
+  return error instanceof SessionRepositoryRemovedError
+    ? new HTTPException(403, { message: error.message, cause: error })
+    : error;
 }
 
 /**
