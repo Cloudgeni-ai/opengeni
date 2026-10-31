@@ -1681,6 +1681,7 @@ async fn serve_bridge_connection(
     }
 }
 
+#[allow(clippy::too_many_lines)] // One extension connection's protocol loop, read top to bottom.
 async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     mut reader: R,
     mut writer: W,
