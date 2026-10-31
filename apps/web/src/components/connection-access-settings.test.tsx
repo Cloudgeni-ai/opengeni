@@ -265,7 +265,7 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter", "opper
       expect(editor()?.textContent).toContain("Models it can serve");
       expect(editor()?.textContent).toContain("All models");
       await open();
-      expect(container.textContent).not.toContain("Which workspaces can use it");
+      expect(container.textContent).not.toContain("Available in");
       await choose("Only the models I choose");
       const label = [...container.querySelectorAll("label")].find(
         (candidate) => candidate.textContent === "Model B",
@@ -463,9 +463,9 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter", "opper
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
       expect(container.textContent).not.toContain("Engineering");
       // A response without the people fields keeps the workspace-only form.
-      expect(container.textContent).toContain("Which workspaces can use it");
+      expect(container.textContent).toContain("Available in");
       expect(container.textContent).not.toContain("Only selected people");
-      await choose("Only selected workspaces");
+      await choose("Selected workspaces");
       expect(container.textContent).toContain("Finance");
       await choose("Finance");
       const modelsOnly = [...container.querySelectorAll<HTMLElement>('[role="radio"]')].filter(
@@ -785,9 +785,9 @@ test("a workspace's own copy no workspace manages is an organization account: it
       [...container.querySelectorAll<HTMLButtonElement>("button")].find(
         (candidate) => candidate.textContent === "Save",
       )!.disabled;
-    await choose("All shared workspaces, including new ones");
+    await choose("All workspaces in your organization");
     expect(saveDisabled()).toBe(false);
-    await choose("Only selected workspaces");
+    await choose("Selected workspaces");
     expect(saveDisabled()).toBe(true);
 
     // Chosen people replace workspaces; Personal is not a separate choice then.
@@ -812,7 +812,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
     expect(group.getAttribute("aria-describedby")).toBe(note.id);
     // With the People list shown, it describes the list; no status region.
     expect(note.getAttribute("role")).toBeNull();
-    await choose("Only selected workspaces");
+    await choose("Selected workspaces");
     expect(container.textContent).not.toContain(keptNote);
     await choose("Only selected people");
     await choose("Alex Morgan");
@@ -836,12 +836,12 @@ test("a workspace's own copy no workspace manages is an organization account: it
       [...container.querySelectorAll<HTMLButtonElement>("button")].find(
         (candidate) => candidate.textContent === "Save",
       )!;
-    await choose("All shared workspaces, including new ones");
+    await choose("All workspaces in your organization");
     expect(saveButton().disabled).toBe(false);
     await choose("Only selected people");
     expect(saveButton().disabled).toBe(true);
     // From saved people, chosen workspaces start empty, never from all of them.
-    await choose("Only selected workspaces");
+    await choose("Selected workspaces");
     await save();
     expect(writes.at(-1)).toEqual({
       allowedModels: null,
@@ -855,7 +855,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
     root = createRoot(container);
     await act(async () => root.render(<Page />));
     await flush();
-    await choose("All shared workspaces, including new ones");
+    await choose("All workspaces in your organization");
     await save();
     expect(writes.at(-1)).toEqual({
       allowedModels: null,
@@ -871,7 +871,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await flush();
     await choose("Only selected people");
     expect(saveButton().disabled).toBe(false);
-    await choose("All shared workspaces, including new ones");
+    await choose("All workspaces in your organization");
     expect(saveButton().disabled).toBe(true);
 
     // From all, chosen workspaces start from every shared one, its own
@@ -880,7 +880,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
     root = createRoot(container);
     await act(async () => root.render(<Page />));
     await flush();
-    await choose("Only selected workspaces");
+    await choose("Selected workspaces");
     await choose("Legal");
     await choose("Personal workspaces");
     await save();
@@ -898,7 +898,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await flush();
     await choose("Only selected people");
     expect(saveButton().disabled).toBe(false);
-    await choose("Only selected workspaces");
+    await choose("Selected workspaces");
     expect(saveButton().disabled).toBe(true);
     // Choosing people clears the saved Personal choice: people replace it.
     await choose("Only selected people");
@@ -931,7 +931,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
     const status = () => container.querySelector<HTMLElement>('p[role="status"]');
     expect(status()?.textContent).toBe("In Engineering too, only these people can use it.");
     const region = status()!;
-    await choose("Only selected workspaces");
+    await choose("Selected workspaces");
     expect(status()).toBe(region);
     expect(region.textContent).toBe("");
     await choose("Only selected people");
@@ -940,7 +940,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
     expect(container.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain(
       "Only selected people",
     );
-    await choose("Only selected workspaces");
+    await choose("Selected workspaces");
     await choose("Only selected people");
     expect(saveButton().disabled).toBe(true);
     // An empty saved choice says "No one" once, without a "0 people" count.
@@ -986,14 +986,14 @@ test("a workspace's own copy no workspace manages is an organization account: it
     await act(async () => root.render(<Page />));
     await flush();
     expect(container.textContent).not.toContain("Only selected people");
-    expect(container.textContent).toContain("Which workspaces can use it");
+    expect(container.textContent).toContain("Available in");
     // No people offered, so no status region for them, even without a member list.
     peopleReadable = false;
     await act(async () => root.unmount());
     root = createRoot(container);
     await act(async () => root.render(<Page />));
     await flush();
-    expect(container.textContent).toContain("Which workspaces can use it");
+    expect(container.textContent).toContain("Available in");
     expect(
       [...container.querySelectorAll('p[role="status"]')].filter(
         (paragraph) => !paragraph.textContent,

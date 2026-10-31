@@ -94,6 +94,7 @@ export const SECTION_KEYS = [
   "switch",
   "segmented-control",
   "choice-cards",
+  "workspace-reach",
   "select",
   "disclosure",
   // Status
@@ -483,6 +484,16 @@ export const SECTIONS: readonly SectionMeta[] = [
       },
     ],
     load: () => import("./choice-cards"),
+  },
+  {
+    key: "workspace-reach",
+    group: "Selection",
+    title: "Available in",
+    purpose:
+      "Where a thing an organization, a workspace or a person shares can be used, with its owner and who manages it, in the same words for every kind.",
+    usedOn:
+      "Model account Available in, Connect provider, vault Available in, Slack bot, organization keys and connected agents (workspace list)",
+    load: () => import("./workspace-reach"),
   },
   {
     key: "select",
