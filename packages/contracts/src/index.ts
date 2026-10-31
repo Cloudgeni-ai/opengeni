@@ -13,6 +13,12 @@ export * from "./session-target";
 export * from "./turn-serving-policy";
 import { AzureOpenAIEndpoint } from "./direct-model-provider";
 import { modelLogoUrl } from "./model-display";
+import {
+  isClaudeSubscriptionProviderId,
+  LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  modelIdListIncludes,
+} from "./claude-subscription-model-ids";
 import { CustomMcpSetupRequest } from "./prepared-mcp-setup";
 import {
   ClaudeProviderAccountAuthoritySnapshotV1,
@@ -22837,15 +22843,39 @@ export function evaluateWorkspaceModelPolicy(
   if (policy.allowCreditModels === false && candidate.chargesCredits) {
     return { allowed: false, reason: "credits" };
   }
-  if (policy.allowedProviders !== null && !policy.allowedProviders.includes(candidate.providerId)) {
+  if (
+    policy.allowedProviders !== null &&
+    !policyAllowsProvider(policy.allowedProviders, candidate)
+  ) {
     return { allowed: false, reason: "provider" };
   }
-  if (policy.allowedModels !== null && !policy.allowedModels.includes(candidate.modelId)) {
+  if (
+    policy.allowedModels !== null &&
+    !modelIdListIncludes(policy.allowedModels, candidate.modelId)
+  ) {
     return { allowed: false, reason: "model" };
   }
   return { allowed: true };
 }
 
+/**
+ * One provider rule for Claude subscription models, whichever id form the
+ * model or the stored policy uses: the canonical provider, or the
+ * organization provider every older form already required, admits them all.
+ */
+function policyAllowsProvider(
+  allowedProviders: readonly string[],
+  candidate: { providerId: string },
+): boolean {
+  if (!isClaudeSubscriptionProviderId(candidate.providerId))
+    return allowedProviders.includes(candidate.providerId);
+  return (
+    allowedProviders.includes(CLAUDE_SUBSCRIPTION_PROVIDER_ID) ||
+    allowedProviders.includes(LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID)
+  );
+}
+
+export * from "./claude-subscription-model-ids";
 export * from "./codex-fleet-policy";
 export * from "./xai-provider-account-authority";
 export * from "./claude-provider-account-authority";
