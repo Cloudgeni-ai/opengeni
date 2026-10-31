@@ -5,15 +5,20 @@ import type {
   SessionAuthorizationSurface,
   UserResourceKind,
 } from "@opengeni/contracts";
+import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import {
   isSubjectOwnPersonalWorkspace,
   issueSelfUserResourceGrant,
+  listEnrollments,
+  listOwnSubscriptionCoreConnections,
   listSelfUserResourceAuthorities,
+  nestedPostgresSqlState,
   revokeSelfUserResourceGrant,
   type UserResourceAuthoritySummary,
 } from "@opengeni/db";
 import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
 import type { AppDependencies } from "../dependencies";
+import { listOwnConnectionMetadata } from "../domain/personal-connection-delegations";
 import { requireSessionAuthorization } from "../session-authorization";
 import {
   requireVerifiedOwningUser,
@@ -165,12 +170,20 @@ const USE_ACTION = {
 
 type OwnResourceInput = { resourceKind: OwnResourceReachKind; resourceId: string };
 
-async function findOwnAuthority(
+const OWN_RESOURCE_KINDS = [
+  "connection",
+  "subscription_connection",
+  "connected_machine",
+] as const satisfies readonly OwnResourceReachKind[];
+
+/** Your active authorities of one kind, as this workspace may show them. */
+async function listOwnAuthorities(
   deps: Pick<UserResourceGrantDependencies, "db">,
   authorization: AccessGrantAuthorization,
   workspaceId: string,
-  input: OwnResourceInput,
-): Promise<UserResourceAuthoritySummary | null> {
+  resourceKind: OwnResourceReachKind,
+): Promise<UserResourceAuthoritySummary[]> {
+  const authorities: UserResourceAuthoritySummary[] = [];
   let cursor: string | undefined;
   // Bounded: a person has few logins, plans and machines; a broken cursor must not loop.
   for (let page = 0; page < 50; page += 1) {
@@ -178,18 +191,30 @@ async function findOwnAuthority(
       accountId: authorization.grant.accountId,
       workspaceId,
       subjectId: authorization.grant.subjectId,
-      resourceKind: input.resourceKind,
+      resourceKind,
       limit: 100,
       ...(cursor ? { cursor } : {}),
     });
-    const found = listed.authorities.find(
-      (authority) => authority.resourceId === input.resourceId && authority.status === "active",
-    );
-    if (found) return found;
-    if (!listed.nextCursor) return null;
+    authorities.push(...listed.authorities.filter((authority) => authority.status === "active"));
+    if (!listed.nextCursor) break;
     cursor = listed.nextCursor;
   }
-  return null;
+  return authorities;
+}
+
+async function findOwnAuthority(
+  deps: Pick<UserResourceGrantDependencies, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+  input: OwnResourceInput,
+): Promise<UserResourceAuthoritySummary | null> {
+  const authorities = await listOwnAuthorities(
+    deps,
+    authorization,
+    workspaceId,
+    input.resourceKind,
+  );
+  return authorities.find((authority) => authority.resourceId === input.resourceId) ?? null;
 }
 
 /** Standing (`always`, not bound to one chat) grants for this workspace. */
@@ -248,6 +273,24 @@ function mayTurnOn(authorization: AccessGrantAuthorization, kind: OwnResourceRea
   );
 }
 
+function ownResourceHere(
+  authorization: AccessGrantAuthorization,
+  authority: UserResourceAuthoritySummary,
+  workspaceId: string,
+  kind: OwnResourceReachKind,
+  personal: boolean,
+  now: number,
+): OwnResourceHere {
+  const on = onHere(authority, workspaceId, kind, personal, now);
+  const alwaysOn = personal && kind !== "connected_machine";
+  return {
+    personal,
+    on,
+    alwaysOn,
+    canChange: !alwaysOn && (on || mayTurnOn(authorization, kind)),
+  };
+}
+
 /**
  * Whether your own login, plan or machine works in this workspace for your
  * own messages. Null when it isn't yours or you can't see it here.
@@ -275,14 +318,173 @@ async function readOwnResourceHere(
     workspaceId,
     subjectId: authorization.grant.subjectId,
   });
-  const on = onHere(authority, workspaceId, input.resourceKind, personal, Date.now());
-  const alwaysOn = personal && input.resourceKind !== "connected_machine";
-  return {
+  return ownResourceHere(
+    authorization,
+    authority,
+    workspaceId,
+    input.resourceKind,
     personal,
-    on,
-    alwaysOn,
-    canChange: !alwaysOn && (on || mayTurnOn(authorization, input.resourceKind)),
+    Date.now(),
+  );
+}
+
+/** One of your own things as one workspace sees it. */
+export type OwnResourceInWorkspace = OwnResourceInput &
+  OwnResourceHere & {
+    /** Where it was added or connected from. */
+    originWorkspaceId: string | null;
   };
+
+/**
+ * Every one of your own logins, plans and machines you can see in this
+ * workspace, with whether each works here for your own messages. A kind you
+ * may not list here is left out.
+ */
+export async function listOwnResourcesHere(
+  deps: Pick<UserResourceGrantDependencies, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): Promise<OwnResourceInWorkspace[]> {
+  requireOwnerAuthority(authorization, workspaceId, []);
+  const kinds = OWN_RESOURCE_KINDS.filter((kind) =>
+    LIST_PERMISSIONS[kind].every((permission) =>
+      hasPermission(authorization.grant.permissions, permission),
+    ),
+  );
+  if (kinds.length === 0) return [];
+  const personal = await isSubjectOwnPersonalWorkspace(deps.db, {
+    accountId: authorization.grant.accountId,
+    workspaceId,
+    subjectId: authorization.grant.subjectId,
+  });
+  const now = Date.now();
+  const resources: OwnResourceInWorkspace[] = [];
+  for (const resourceKind of kinds) {
+    for (const authority of await listOwnAuthorities(
+      deps,
+      authorization,
+      workspaceId,
+      resourceKind,
+    )) {
+      resources.push({
+        resourceKind,
+        resourceId: authority.resourceId,
+        originWorkspaceId: authority.originWorkspaceId,
+        ...ownResourceHere(authorization, authority, workspaceId, resourceKind, personal, now),
+      });
+    }
+  }
+  return resources;
+}
+
+/** What one of your own things is called. */
+export type OwnResourceName = {
+  /** A login's or plan's account (its email when known), or a machine's name. */
+  name: string;
+  /** A login's provider domain or a plan's provider id; null for a machine. */
+  provider: string | null;
+  /** A plan's reported plan, when known. */
+  plan: string | null;
+};
+
+export function ownResourceKey(resource: OwnResourceInput): string {
+  return `${resource.resourceKind}:${resource.resourceId}`;
+}
+
+/**
+ * What your own logins, plans and machines are called, keyed by
+ * {@link ownResourceKey}, read from this workspace. A machine this workspace
+ * doesn't list is read from the workspace it was connected from. A thing
+ * that can't be read is left out.
+ */
+export async function nameOwnResources(
+  deps: Pick<UserResourceGrantDependencies, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+  resources: readonly (OwnResourceInput & { originWorkspaceId: string | null })[],
+): Promise<Map<string, OwnResourceName>> {
+  requireOwnerAuthority(authorization, workspaceId, []);
+  const owner = {
+    accountId: authorization.grant.accountId,
+    workspaceId,
+    subjectId: authorization.grant.subjectId,
+  };
+  const wanted = (kind: OwnResourceReachKind) =>
+    new Set(
+      resources
+        .filter((resource) => resource.resourceKind === kind)
+        .map((resource) => resource.resourceId),
+    );
+  const names = new Map<string, OwnResourceName>();
+
+  const logins = wanted("connection");
+  if (logins.size > 0) {
+    const connections = await listOwnConnectionMetadata(deps.db, {
+      ...owner,
+      reach: "anywhere",
+      includeInactive: true,
+      connectionIds: logins,
+    });
+    for (const connection of connections) {
+      names.set(ownResourceKey({ resourceKind: "connection", resourceId: connection.id }), {
+        name: connectionAccountIdentityLabel(connection.metadata, connection.providerDomain),
+        provider: connection.providerDomain,
+        plan: null,
+      });
+    }
+  }
+
+  const plans = wanted("subscription_connection");
+  if (plans.size > 0) {
+    for (const plan of await listOwnSubscriptionCoreConnections(deps.db, owner)) {
+      if (!plans.has(plan.connectionId)) continue;
+      names.set(
+        ownResourceKey({ resourceKind: "subscription_connection", resourceId: plan.connectionId }),
+        {
+          name: plan.accountEmail ?? plan.label ?? plan.provider,
+          provider: plan.provider,
+          plan: plan.planType,
+        },
+      );
+    }
+  }
+
+  const machines = wanted("connected_machine");
+  if (machines.size > 0) {
+    const nameMachines = async (from: string) => {
+      for (const enrollment of await listEnrollments(deps.db, { ...owner, workspaceId: from })) {
+        if (!machines.has(enrollment.id)) continue;
+        names.set(
+          ownResourceKey({ resourceKind: "connected_machine", resourceId: enrollment.id }),
+          {
+            name: enrollment.sandboxName ?? `${enrollment.os} machine`,
+            provider: null,
+            plan: null,
+          },
+        );
+      }
+    };
+    await nameMachines(workspaceId);
+    const origins = new Set(
+      resources.flatMap((resource) =>
+        resource.resourceKind === "connected_machine" &&
+        resource.originWorkspaceId &&
+        resource.originWorkspaceId !== workspaceId &&
+        !names.has(ownResourceKey(resource))
+          ? [resource.originWorkspaceId]
+          : [],
+      ),
+    );
+    for (const origin of origins) {
+      try {
+        await nameMachines(origin);
+      } catch (error) {
+        // A workspace you have left can't be read; its machine is left out.
+        if (nestedPostgresSqlState(error) !== "42501") throw error;
+      }
+    }
+  }
+  return names;
 }
 
 /** Your own login, plan or machine isn't yours, or isn't visible here. */

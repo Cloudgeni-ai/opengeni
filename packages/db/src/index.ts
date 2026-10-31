@@ -545,7 +545,9 @@ export {
 // A person's own personal connections outside placement: stored status for
 // status reads and the live re-read of a stored exhaustion (design 5.3).
 export {
+  listOwnSubscriptionCoreConnections,
   subscriptionCorePersonalConnections,
+  type OwnSubscriptionCoreConnection,
   type SubscriptionCorePersonalConnection,
 } from "./subscription-core/personal-connections";
 import {
