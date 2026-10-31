@@ -484,6 +484,7 @@ import type {
   UpdateInboxItemInput,
   NativePushDevice,
   RegisterNativePushDeviceInput,
+  AgentCall,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
   InstallLibrarySkillRequest,
@@ -2933,7 +2934,9 @@ export class OpenGeniClient {
    * non-interactive enroll path. The returned `token` is SECRET — surface it once
    * with a copy-now warning; it cannot be re-read. `allowScreenControl` bakes the
    * screen-control consent into the token. `scope: "user"` connects the signed-in
-   * person's own machine; `"workspace"` (or omitted) shares it with the workspace.
+   * person's own machine; `"workspace"` shares it with the workspace. Omitted, a
+   * signed-in teammate without `enrollments:manage` gets `"user"` and everyone
+   * else `"workspace"`.
    * Check the response's `scope` before showing a command: an older server ignores
    * the request and mints a workspace-shared token.
    */
@@ -6173,7 +6176,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Remove the workspace's own allowlist so it follows its organization's default. */
+  /** Remove the workspace's own allowlist so it uses its organization's list as is. */
   async deleteWorkspaceModelAccessPolicy(workspaceId: string): Promise<WorkspaceModelAccessPolicy> {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
       "DELETE",
@@ -11073,6 +11076,43 @@ export class OpenGeniClient {
   /** Stop pushes to this device for this app credential. */
   async unregisterNativePushDevice(): Promise<void> {
     await this.requestJson<unknown>("DELETE", "/v1/native-app/push-device");
+  }
+
+  /** An agent's call to the signed-in person, while it rings and after. */
+  async getAgentCall(workspaceId: string, callId: string): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}`,
+    );
+    return call;
+  }
+
+  /**
+   * Take an agent's call. The first phone to answer wins; the call comes back
+   * `answered` with `answeredHere: true`, then start the chat's voice call.
+   * A call already taken, declined or rung out comes back in that state.
+   */
+  async answerAgentCall(
+    workspaceId: string,
+    callId: string,
+    options: { device?: string } = {},
+  ): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}/answer`,
+      options,
+    );
+    return call;
+  }
+
+  /** Decline an agent's call: it stops ringing everywhere and the agent is told. */
+  async declineAgentCall(workspaceId: string, callId: string): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}/decline`,
+      {},
+    );
+    return call;
   }
 
   // --- Organization-wide sessions ----------------------------------------------------------------

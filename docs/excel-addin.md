@@ -30,7 +30,11 @@ Excel on the web, Windows and Mac.
 - **Pane.** `apps/web/office/` (built by `vite.office.config.ts` into
   `dist/office/`). Sign-in, a workspace picker and the packaged chat UI from
   `@opengeni/react`, wired up with the add-in kit in `@opengeni/sdk/office`.
-  The workbook joins the workspace picked in the pane. Messages sent from the
+  The pane opens in the workspace picked in it before, else the person's own
+  default workspace (the one the web app lands in), and the workbook joins
+  that workspace. The new-chat page suggests spreadsheet tasks (explain the
+  sheet, check for mistakes, write a formula) instead of Opengeni's general
+  ones, and its recent chats lead with the ones opened in the pane. Messages sent from the
   pane carry `modelContext` naming the workbook, so the agent knows which
   workbook "here" is, and the current selection (`selectionContextItem`): the active sheet, the selected range and a
   sample of its displayed values and formulas (at most 20 rows by 8 columns of
@@ -41,8 +45,11 @@ Excel on the web, Windows and Mac.
   `/office/auth-callback.html` on the same origin, which hands the code to the
   pane with `Office.context.ui.messageParent`; the pane redeems it for its own
   revocable credential. The API accepts that redirect only for the
-  deployment's own web origins (`nativeAppRedirectAllowed`). Sign out revokes
-  the credential.
+  deployment's own web origins (`nativeAppRedirectAllowed`). An add-in
+  installed from another address (an older or internal one) still loads its
+  pane there, so its sign-in is refused with a message that says the add-in
+  is out of date and links the current install page. Sign out revokes the
+  credential.
 - **Relay.** `apps/api/src/office-workbooks.ts`. The pane holds one WebSocket
   (`/v1/office/workbooks/live`, subprotocol `opengeni-office-v1`) authenticated
   by a two-minute ticket from

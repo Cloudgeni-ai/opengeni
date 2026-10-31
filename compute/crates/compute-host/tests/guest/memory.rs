@@ -148,12 +148,18 @@ EOF";
 
 /// Takes `mib` MiB and touches all of it for 30 s.
 fn neighbour_script(mib: u64) -> String {
+    neighbour_script_until(mib, 30, "")
+}
+
+/// Takes `mib` MiB and touches all of it for `secs` seconds, or until a
+/// file `stop` exists when it is not empty.
+fn neighbour_script_until(mib: u64, secs: u64, stop: &str) -> String {
     format!(
         r"python3 - <<'EOF'
-import time
+import os, time
 b = bytearray(b'n') * ({mib} << 20)
-end, passes = time.time() + 30, 0
-while time.time() < end:
+end, passes = time.time() + {secs}, 0
+while time.time() < end and not ('{stop}' and os.path.exists('{stop}')):
     for i in range(0, len(b), 4096):
         b[i] ^= 1
     passes += 1
@@ -249,7 +255,9 @@ echo "exit $?""#;
 /// grows within its request: its guest ends the program that took the
 /// memory, and the sandbox, its other programs and envd run on. Neither
 /// is paused or ended, the kernel ends no VM, and the neighbour is never
-/// compressed.
+/// compressed. The neighbour needs its memory until then: the host knows
+/// the memory does not compress only once the kernel has tried it, which
+/// on a host short of processor time can take it most of a minute.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_borrower_whose_memory_does_not_compress_loses_only_the_program_that_took_it() {
     let Some((lab, guest)) = setup() else {
@@ -270,7 +278,13 @@ async fn a_borrower_whose_memory_does_not_compress_loses_only_the_program_that_t
     let started = Instant::now();
     let work = async {
         let ran = tokio::join!(
-            async { (borrower_shell.run(INCOMPRESSIBLE).await, started.elapsed()) },
+            async {
+                let ran = borrower_shell.run(INCOMPRESSIBLE).await;
+                let ended = started.elapsed();
+                // Given back: the neighbour may stop.
+                let _ = neighbour_shell.run("touch /tmp/given-back").await;
+                (ran, ended)
+            },
             async {
                 while !borrower_shell
                     .run("test -e /tmp/filled && echo yes")
@@ -280,7 +294,8 @@ async fn a_borrower_whose_memory_does_not_compress_loses_only_the_program_that_t
                     sleep(Duration::from_millis(500)).await;
                 }
                 let filled = started.elapsed();
-                (neighbour_shell.run(&neighbour_script(1024)).await, filled)
+                let script = neighbour_script_until(1024, 110, "/tmp/given-back");
+                (neighbour_shell.run(&script).await, filled)
             }
         );
         done.store(true, Ordering::Relaxed);

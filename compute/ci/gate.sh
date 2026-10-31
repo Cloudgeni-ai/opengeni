@@ -27,7 +27,9 @@
 # `bare-metal`; the agent's own choice when unset), STORE (a directory or
 # gs:// URL for save_wake, LAB/gate-store), SANDBOXES (12, for `lab`),
 # SHARED_EXTENTS (a directory on XFS or btrfs, LAB/at), GUEST (where
-# guest/build.sh puts its output, LAB/gate-guest), CARGO_TARGET_DIR.
+# guest/build.sh puts its output, LAB/gate-guest), RESULTS (where the lab
+# and guest tests keep their results and a failed test's agent log, and a
+# failed step its whole output, LAB/gate-results), CARGO_TARGET_DIR.
 #
 # Every step's status counts: the gate ends with GATE_PASSED, or with
 # GATE_FAILED and the failed steps and exits 1. KVM steps set
@@ -42,6 +44,7 @@ STORE=${STORE:-$LAB/gate-store}
 SANDBOXES=${SANDBOXES:-12}
 SHARED_EXTENTS=${SHARED_EXTENTS:-$LAB/at}
 GUEST=${GUEST:-$LAB/gate-guest}
+RESULTS=${RESULTS:-$LAB/gate-results}
 ALL="fmt clippy arch workspace python lab-setup pager networking engine save_wake lab guest smoke conformance"
 STEPS=${STEPS:-$ALL}
 export PATH=$HOME/.cargo/bin:$PATH
@@ -67,6 +70,7 @@ check() {
     FAILED+=("$name")
     echo "!! $name exited $status; its last lines:"
     tail -60 "$log"
+    sudo mkdir -p "$RESULTS" && sudo cp "$log" "$RESULTS/$name.log"
   fi
   rm -f "$log"
   return "$status"
@@ -149,7 +153,7 @@ if wants lab; then
   step "lab ($SANDBOXES sandboxes)"
   # shellcheck disable=SC2046
   check lab "$TESTS" root env COMPUTE_TEST_LAB="$LAB" COMPUTE_TEST_REQUIRE=lab \
-    $(profile) COMPUTE_TEST_SANDBOXES="$SANDBOXES" \
+    $(profile) COMPUTE_TEST_SANDBOXES="$SANDBOXES" COMPUTE_TEST_RESULTS="$RESULTS" \
     cargo test --locked --release -p compute-host --test lab -- --test-threads 1
 fi
 guest_built=true
@@ -168,7 +172,7 @@ elif wants guest; then
   step guest
   # shellcheck disable=SC2046
   check guest "$TESTS" root env COMPUTE_TEST_LAB="$LAB" COMPUTE_TEST_REQUIRE=lab,guest \
-    $(profile) COMPUTE_TEST_GUEST="$GUEST" \
+    $(profile) COMPUTE_TEST_GUEST="$GUEST" COMPUTE_TEST_RESULTS="$RESULTS" \
     cargo test --locked --release -p compute-host --test guest -- --test-threads 1
 fi
 if wants smoke; then

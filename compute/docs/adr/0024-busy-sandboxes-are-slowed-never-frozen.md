@@ -92,7 +92,14 @@ samples once a second.
   lower than on the reading before, counts as one the kernel cannot hold;
   one coming down, however slowly, is left to come down. After 10 s of
   that it is treated as costing the others, as a short host is: its guest
-  is asked to free what it holds above its high.
+  is asked to free what it holds above its high. The 10 s count only once
+  the host has brought the VM down as far as the kernel takes: before the
+  kernel compresses any of a VM that has just written gigabytes it ages
+  its pages, and on a one-CPU or busy host that took 6 to over 12 s at
+  about 1 MiB/s before compression ran at about 240 MiB/s. A VM the host
+  is still bringing down gets 60 s without coming down instead. Its
+  neighbour does not pay meanwhile: the VM's high holds it where it is,
+  the neighbour's low keeps its request, and the wall below stands.
 - **A high is never set below what a VM holds while its memory may not
   compress.** Past its
   `memory.high` every page a VM takes waits, about 64 s times the square
@@ -187,8 +194,8 @@ samples once a second.
   requested, borrowed, compressed and out of RAM by running sandboxes;
   running sandboxes by memory stall (under 1 %, to 10 %, to 40 %, above);
   the borrowed level for idle and busy sandboxes, how many it holds back,
-  how many the kernel cannot hold to their bound, the memory on its way
-  back, and the shortfall;
+  how many the kernel cannot hold to their bound and how many it is still
+  bringing down to it, the memory on its way back, and the shortfall;
   shrinks by answer, memory they freed and programs they ended; the two
   alarms. Each shrink is an event naming its sandbox
   and the programs it ended, and each running sandbox's periodic summary

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use compute_core::{HostPolicy, SandboxId};
 use compute_engine::{
-    CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, MemoryProfile,
+    CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, LastWords, MemoryProfile,
     MemorySource, MemoryStats, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec, Writes,
 };
 use compute_host::client::Client;
@@ -1131,6 +1131,16 @@ impl Engine for Fake {
     ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
         let work = Arc::clone(&vm.work);
         async move { Ok(work.lock().unwrap().said_halted) }
+    }
+
+    /// What a real VM's logs would say, naming the VM, read once it is
+    /// lost.
+    fn last_words(&self, vm: &FakeVm) -> impl Future<Output = LastWords> + Send + 'static {
+        std::future::ready(LastWords {
+            guest: format!("{}: Kernel panic - not syncing", vm.name),
+            vmm: "Vmm is stopping.".into(),
+            pager: String::new(),
+        })
     }
 
     fn io_bytes(&self, vm: &FakeVm) -> Result<u64, EngineError> {

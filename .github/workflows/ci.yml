@@ -1761,9 +1761,9 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browserd_real_e2e == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
     runs-on: ubuntu-latest
-    # 17m browser installation + 2m recovery + 6m headless + 5m headed,
+    # 17m browser installation + 2m recovery + 9m headless + 5m headed,
     # with 3m for checkout, dependencies and cleanup.
-    timeout-minutes: 33
+    timeout-minutes: 36
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@v6
@@ -1803,7 +1803,9 @@ jobs:
             --test-name-pattern '^a (graceful|killed) controller leaves the same live browser'
 
       - name: Run headless browserd end-to-end suite
-        timeout-minutes: 6
+        # The suite runs about 5.5 minutes on main; 9 keeps a stalled run
+        # bounded without failing batches that add a few e2e files.
+        timeout-minutes: 9
         run: |
           set -euo pipefail
           # Use the shipped desktop software compositor on this GPU-less CI host.

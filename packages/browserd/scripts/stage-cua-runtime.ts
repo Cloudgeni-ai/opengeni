@@ -7,8 +7,7 @@ import { buildCuaWorker, cuaSourceRevision } from "./build-cua-worker";
 const packageRoot = resolve(import.meta.dir, "..");
 
 /** A closed list of pinned package files, not a runtime installer or archive.
- * macOS and Linux carry the source-built private worker; Windows runs the
- * published SDK's native runtime in process (see src/cua/sdk.ts). */
+ * Every platform carries the same source-pinned private worker. */
 export async function stageCuaRuntime(architecture: string): Promise<string> {
   if (
     !["darwin", "linux", "win32"].includes(process.platform) ||
@@ -52,15 +51,16 @@ export async function stageCuaRuntime(architecture: string): Promise<string> {
   const nativeDirectory = join(output, "node_modules", nativeName);
   await mkdir(nativeDirectory, { recursive: true });
   const assets = ["cua-sdk/index.js"];
-  if (!windows) {
-    const worker = join(output, "cua-driver");
+  {
+    const workerName = windows ? "cua-driver.exe" : "cua-driver";
+    const worker = join(output, workerName);
     await copyFile(await buildCuaWorker(architecture), worker);
     await signMacAsset(worker);
     await Bun.write(
       join(output, "cua-source.json"),
       JSON.stringify({ revision: cuaSourceRevision }),
     );
-    assets.push("cua-driver", "cua-source.json");
+    assets.push(workerName, "cua-source.json");
   }
   for (const file of ["LICENSE.md", "THIRD-PARTY-NOTICES.md"]) {
     await copyFile(join(packageRoot, "src", "cua", file), join(sdkDirectory, file));

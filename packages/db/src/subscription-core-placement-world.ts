@@ -116,11 +116,17 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
                 session.visibility,
                 ${provider.sessionCompactionLock ?? sql`false`} as compaction_locked,
                 get_workspace_kind(workspace.account_id, workspace.id) as workspace_kind,
-                -- The workspace's own policy, else its organization's default.
-                case when policy.workspace_id is not null then policy.allowed_providers
-                  else organization_defaults.allowed_providers end as allowed_providers,
-                case when policy.workspace_id is not null then policy.allowed_models
-                  else organization_defaults.allowed_models end as allowed_models
+                -- The workspace's own lists narrowed within its organization's.
+                case when policy.allowed_providers is null then organization_defaults.allowed_providers
+                  when organization_defaults.allowed_providers is null then policy.allowed_providers
+                  else array(select allowed from unnest(policy.allowed_providers) allowed
+                    where allowed = any(organization_defaults.allowed_providers)) end
+                  as allowed_providers,
+                case when policy.allowed_models is null then organization_defaults.allowed_models
+                  when organization_defaults.allowed_models is null then policy.allowed_models
+                  else array(select allowed from unnest(policy.allowed_models) allowed
+                    where allowed = any(organization_defaults.allowed_models)) end
+                  as allowed_models
               from sessions session
               join session_turns turn on turn.account_id = session.account_id
                 and turn.workspace_id = session.workspace_id and turn.session_id = session.id
