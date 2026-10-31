@@ -53,6 +53,7 @@ beforeEach(() => {
     membersConnectOwnMachines: true,
     defaultVisibility: "workspace",
     personalWorkspaces: true,
+    personalWorkspaceMonthlyCredits: null,
     adminsSeePrivateSchedules: true,
     limits: {
       onlyMeAllowed: true,
