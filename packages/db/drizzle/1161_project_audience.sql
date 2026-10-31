@@ -1,4 +1,6 @@
 -- deployment-mode: rolling
+-- online-safety-exception: constraint-validation: channels holds each workspace's projects, a few dozen rows per workspace at most, so validating the new check in this file is instant.
+-- online-safety-exception: nonconcurrent-index: channels holds each workspace's projects, a few dozen rows per workspace at most, so both partial name indexes build instantly.
 -- Projects get the audiences chats have: the whole workspace, or only their
 -- owner ("Only me"). An Only me project is visible to its owner alone, exactly
 -- like an Only me chat: the owner, or an agent turn acting for them. Others,
