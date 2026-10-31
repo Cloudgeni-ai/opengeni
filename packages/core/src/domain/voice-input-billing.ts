@@ -1,3 +1,4 @@
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import {
   calculateVoiceInputCost,
   configuredStaticUsageLimits,
@@ -8,6 +9,7 @@ import {
   type VoiceInputUsage,
 } from "@opengeni/config";
 import {
+  chargeBillingOrigin,
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
   creditDebitAttributionMetadata,
@@ -151,11 +153,23 @@ export function createVoiceInputBilling(deps: {
           },
         );
       }
-      const balance = await getSpendableCreditBalance(deps.db, accountId, VOICE_CREDIT_USAGE);
+      // API callers spend credits only, as their debit will.
+      const origin = chargeBillingOrigin(attribution.billingOrigin);
+      const balance = await getSpendableCreditBalance(
+        deps.db,
+        accountId,
+        VOICE_CREDIT_USAGE,
+        undefined,
+        undefined,
+        origin,
+      );
       if (balance.balanceMicros <= 0) {
         throw new TranscriptionBillingRefusedError({
           code: "insufficient_credits",
-          message: voiceInsufficientCreditsMessage("Voice input", voiceCreditStanding(balance)),
+          message:
+            origin === "api"
+              ? API_CREDITS_REQUIRED_MESSAGE
+              : voiceInsufficientCreditsMessage("Voice input", voiceCreditStanding(balance)),
         });
       }
       const refusal = await checkWorkspaceAllowance(deps.db, {

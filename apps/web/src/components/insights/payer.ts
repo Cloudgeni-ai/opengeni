@@ -3,6 +3,7 @@ import type { UsagePayerId } from "./usage-contract";
 /** Providers whose calls run on a connected ChatGPT, Claude or SuperGrok plan. */
 const SUBSCRIPTION_PROVIDERS = new Set([
   "codex-subscription",
+  "claude-subscription",
   "workspace-claude-subscription",
   "organization-claude-subscription",
   "supergrok-subscription",

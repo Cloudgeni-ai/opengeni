@@ -22,7 +22,7 @@ type UserResourceGrantDependencies = Pick<AppDependencies, "db" | "sessionAuthor
 const LIST_PERMISSIONS = {
   connection: ["connections:read"],
   document: ["documents:search"],
-  variable_set: ["variable-sets:list"],
+  variable_set: ["secrets:list"],
   rig: ["rigs:use"],
   connected_machine: ["enrollments:read"],
 } as const satisfies Record<UserResourceKind, readonly Permission[]>;
@@ -30,7 +30,7 @@ const LIST_PERMISSIONS = {
 const ISSUE_PERMISSIONS = {
   connection: ["connections:read"],
   document: ["documents:search"],
-  variable_set: ["variable-sets:list", "variable-sets:attach", "variable-sets:use"],
+  variable_set: ["secrets:list", "secrets:use"],
   rig: ["rigs:use"],
   connected_machine: ["enrollments:read"],
 } as const satisfies Record<UserResourceKind, readonly Permission[]>;

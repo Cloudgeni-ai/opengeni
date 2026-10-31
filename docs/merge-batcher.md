@@ -16,6 +16,38 @@ head. Add `queue-priority` as well for an urgent fix: priority PRs are tested
 next, as soon as the batch that is already running finishes. A running batch is
 never cancelled for one.
 
+## Releasing: a Version PR holds main
+
+A queued Version PR (the `changeset-release/main` branch that the Open Version
+PR workflow opens) holds the queue so it lands on a stable `main`:
+
+1. Run the **Open Version PR** workflow, then add `queue-ready` to the PR.
+2. The batch already running, if any, still finishes and may land. After
+   that, nothing else builds, including priority and CI-change PRs, so `main`
+   moves at most once after you queue it. The Version PR gets one comment per
+   head saying it holds `main`.
+3. Once the Version PR's PR CI passes on its head, it is built alone on that
+   `main` and lands as a true merge. Normal batching then resumes, priority
+   PRs first.
+
+If the batch that was running lands a file the Version PR also changes, or
+its merge conflicts with `main`, the Version PR cannot land as reviewed. It is
+never ejected for that: it keeps holding the queue and gets one comment per
+head asking for it to be regenerated. Run the Open Version PR workflow again;
+do not merge `main` into it. That updates the same PR from the now-stable
+`main`, it keeps its label, and it lands next.
+
+A Version PR leaves the queue with a comment, so a broken release never blocks
+other work, when its PR CI fails or times out on its current head, or when no
+PR CI run has passed or is running on that head an hour after it was queued
+or pushed (a cancelled run counts as none: rerun it). A bisection in progress
+may be dropped during a hold; its PRs are simply batched again afterwards.
+
+While a Version PR holds the queue, nothing else lands, including a lone
+control-plane fix. To land a fix first, remove `queue-ready` from the Version
+PR, let the fix land, then queue the Version PR again; to give up on a
+release, just remove the label.
+
 The release-plan guard recognizes singleton Version batches by their manifest
 and exact parent topology, independently recomputes their complete merge tree,
 then reproduces the original Version head from its own base. Consumed changesets
@@ -32,22 +64,62 @@ never stops batching. Don't push to an `in-batch` PR, remove its `queue-ready`
 label or close it: any change to one member cancels the whole batch, so every
 other member's CI starts again. The batcher wakes as soon as an `in-batch` PR
 changes, rebuilds the batch without it, and comments on that PR with the
-members it restarted. Pushing to a queued PR that is not `in-batch` is fine.
+members it restarted. The one exception is a new head that tests exactly the
+same: merging the same `main` into the branch again, or rebasing it, leaves the
+batch running, and it lands the new head. Pushing to a queued PR that is not
+`in-batch` is fine.
 
 Database migrations need unique numbers, and two PRs can add the same number
-without a Git conflict. A queued PR that adds a migration whose number `main`
-already uses for another migration leaves the queue right away, with the
-`scripts/renumber-migration.ts` command that fixes it, instead of failing a
-whole batch. Two queued PRs that add the same number never share a batch.
-The numbered directories are listed in `NUMBERED_FILES`
+without a Git conflict. When `main` already uses the number of a migration a
+queued PR adds, the batcher fixes it on the PR's branch instead of failing a
+whole batch: it merges `main` into the branch and moves the migration to the
+next free number above `main` and every number other queued PRs add (or were
+moved to earlier in the same pass), renaming its companion tests and rewriting
+references in the PR's changed files, as `scripts/renumber-migration.ts
+--next` does. The PR's later migrations move with it, so they keep their
+order. It does this through GitHub's API with the planner from `main`, so it
+never runs PR code, and it only fast-forwards the branch. The PR stays queued,
+a comment says what moved, and it is batched once PR CI passes on the new head.
+If the move needs judgment (a Git conflict, a changed file that names the
+number without naming the migration, a changed text file it cannot read, a
+branch GitHub will not update, or any other failure), the PR leaves the queue
+with the `scripts/renumber-migration.ts` command instead. GitHub being down or
+throttling (5xx, 429, a rate-limit 403) or the network failing only postpones
+the move to the next pass, and once the branch is updated nothing after it
+takes the PR out of the queue. Migrations on the `production` and
+release branches are never moved. Two queued PRs that add the same number
+never share a batch. The numbered directories are listed in `NUMBERED_FILES`
 (`scripts/batcher/model.ts`).
+
+Two PRs that both regenerated one generated file, such as
+`packages/sdk/src/site-browser-runtime.gen.ts` or
+`scripts/public-api/surface.gen.json`, conflict in Git once the first lands,
+although neither did anything wrong. A queued PR that conflicts with `main`
+therefore is not ejected at once. The batcher dispatches the `Regenerate
+generated files` workflow for its head, which merges `main` into it and, if
+every conflicted file is listed in `REGENERATED_ON_CONFLICT`
+(`scripts/ci/check-generated-artifacts.ts`), takes `main`'s version of those
+files and runs only their regenerate commands. That run executes the PR's own
+generators with a read-only token and pushes nothing. The batcher trusts
+nothing in its result: it writes it to the branch through GitHub's API as
+three commits (`main`'s version of the conflicted files, the merge of `main`,
+whose tree must be exactly the one the run regenerated on, and the regenerated
+files), only if the run merged `main` or a commit behind it and changed only
+registered generated files, and it only fast-forwards the branch. The PR stays
+queued, a comment names the commands, and it is batched once PR CI passes on
+the new head, whose freshness checks fail a wrong regeneration as they would
+any stale artifact. A conflict in any other file ejects the PR with every
+conflicting file named; a failed run ejects it with a link to the run, and
+GitHub failing only postpones it. PRs on the `production` branch, Version PRs
+and members of the running batch are never regenerated.
 
 ## How a batch lands
 
 1. **Collect.** Once the oldest ready PR has waited the batching window
    (3 minutes, `MERGE_BATCHER_WINDOW_SECONDS`), the batcher takes up to 12 ready
    PRs (`MERGE_BATCHER_MAX_BATCH`) in queue order. PRs that change `.github/`,
-   `scripts/ci/` or `scripts/batcher/`, and Version PRs, are batched alone.
+   `scripts/ci/` or `scripts/batcher/`, and Version PRs, are batched alone
+   (a Version PR first; see above).
 2. **Build.** It merges the PRs one by one onto the current `main` with
    GitHub's merge API on a scratch branch, and pushes the result with a
    manifest commit as `batch/<id>`. A PR that conflicts with an earlier one in
@@ -71,11 +143,22 @@ The numbered directories are listed in `NUMBERED_FILES`
 5. **Failures.** A failed batch is split in half and each half is tested in
    turn until the failing PR is found and removed from the queue. Priority PRs
    in those halves keep their place in them, so a failed batch of priority PRs
-   is split too; a priority PR queued since goes first.
+   is split too; a priority PR queued since goes first. A half of several PRs
+   that fails only in jobs (by name, ignoring jobs cancelled after a failure)
+   that the bisection already saw fail also after a retry is split at once,
+   without its own retry, which would almost surely fail again. The manifest's
+   `blame` lists those jobs; a priority or Version PR built in between drops
+   it. A single PR always gets its retry before it is ejected, so a flaky job
+   in a half costs at most one more split, never an innocent PR's place.
 
-A batch is rebuilt from scratch whenever `main` moves under it, a member gets a
-new head or leaves the queue. The rebuild happens in the same pass, without the
-changed PR (its new head waits for PR CI), and keeps any bisection in progress.
+A batch is rebuilt from scratch whenever `main` moves under it, a member leaves
+the queue, or a member gets a new head that changes what the batch tests. The
+rebuild happens in the same pass, without the changed PR (its new head waits
+for PR CI), and keeps any bisection in progress. For a member's new head, the
+batcher first merges it on a scratch branch at the member's place in the
+candidate; when that gives exactly the tree CI is testing there, the batch
+carries on and lands the new head (the landed-tree check still applies).
+Version PRs always restart.
 
 ## Main CI records the batch result
 
@@ -153,6 +236,9 @@ staging deploys use the newest fully green `main` SHA as before.
 - **Run a pass now:** `gh workflow run merge-batcher.yml`.
 - **Stop landing:** set `MERGE_BATCHER` to anything else. Nothing is lost: the
   queue is the labels, and a leftover `batch/<id>` branch is rebuilt later.
+- **Hold main for a release:** queue the Version PR (see
+  [Releasing](#releasing-a-version-pr-holds-main)); do not change the window,
+  the batch size or other PRs' labels.
 - **Every pass is idempotent.** It reads GitHub, does the next step and exits,
   so a cancelled or failed pass is repaired by the next one (every 5 minutes,
   and whenever PR CI or batch CI finishes or a PR is queued).

@@ -11,13 +11,19 @@ import {
   type VideoGenerationFundingSource,
   type VideoGenerationPolicy as VideoGenerationPolicyValue,
 } from "@opengeni/contracts";
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
 import { checkWorkspaceAllowance } from "./usage-allowances";
 import { creditDebitAttributionForTurn } from "./credit-debit-attribution";
-import { getSpendableCreditBalance } from "./credit-balances";
+import {
+  chargeBillingOrigin,
+  getBillingBalance,
+  getSpendableCreditBalance,
+  planPostUseCreditAllocations,
+} from "./credit-balances";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 
 export const ACTIVE_VIDEO_GENERATION_STATUSES = [
@@ -1356,16 +1362,30 @@ async function debitVideoGenerationCredits(
     subjectId: attribution.kind === "turn" ? attribution.initiatingHumanSubjectId : null,
   });
   if (refusal) throw Object.assign(new VideoGenerationCreditError(refusal.message), refusal);
+  // Billed like the chat it runs in: API work spends credits only.
+  const usageOrigin = attribution.kind === "turn" ? attribution.billingOrigin : undefined;
   const { balanceMicros } = await getSpendableCreditBalance(
     tx,
     operation.accountId,
     undefined,
     undefined,
     settledAt,
+    usageOrigin,
   );
   if (!Number.isSafeInteger(balanceMicros) || balanceMicros < operation.pricedCostMicros) {
-    throw new VideoGenerationCreditError();
+    throw new VideoGenerationCreditError(
+      chargeBillingOrigin(usageOrigin) === "api" ? API_CREDITS_REQUIRED_MESSAGE : undefined,
+    );
   }
+  // App use: plan credit (the Free plan's scoped credit too) pays first.
+  const allocations =
+    chargeBillingOrigin(usageOrigin) === "app"
+      ? planPostUseCreditAllocations(
+          await getBillingBalance(tx, operation.accountId, undefined, settledAt, true),
+          operation.pricedCostMicros,
+          undefined,
+        )
+      : [];
   const now = new Date();
   const inserted = await tx
     .insert(schema.creditLedgerEntries)
@@ -1376,6 +1396,7 @@ async function debitVideoGenerationCredits(
       amountMicros: -operation.pricedCostMicros,
       sourceType: "video_generation_operation",
       sourceId: operation.id,
+      usageOrigin: chargeBillingOrigin(usageOrigin),
       idempotencyKey: `credit:video_generation_debit:${operation.id}`,
       metadata: {
         turnId: operation.turnId,
@@ -1390,6 +1411,15 @@ async function debitVideoGenerationCredits(
     .returning({ id: schema.creditLedgerEntries.id });
   if (inserted.length !== 1) {
     throw new VideoGenerationConflictError("Video generation credit debit already exists");
+  }
+  if (allocations.length) {
+    await tx.insert(schema.creditDebitAllocations).values(
+      allocations.map((allocation) => ({
+        ...allocation,
+        accountId: operation.accountId,
+        debitEntryId: inserted[0]!.id,
+      })),
+    );
   }
   await tx
     .insert(schema.usageEvents)
@@ -1421,13 +1451,27 @@ async function refundVideoGenerationCredits(
   }
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${operation.accountId}))`);
   const settledAt = await beginPlanCreditSettlement(tx, operation.accountId);
+  // Scoped plan credit (the Free plan's) has no refund path back into its
+  // grant: return only what other credit paid, so it never becomes credits.
+  const [scoped] = await rawRows<{ micros: string }>(
+    tx,
+    sql`select coalesce(sum(a.amount_micros), 0)::text as micros
+      from ${schema.creditDebitAllocations} a
+      join ${schema.creditLedgerEntries} debit on debit.id = a.debit_entry_id
+      join ${schema.creditLedgerEntries} grant_row on grant_row.id = a.grant_entry_id
+      where a.account_id = ${operation.accountId}
+        and debit.idempotency_key = ${`credit:video_generation_debit:${operation.id}`}
+        and grant_row.type = 'plan_credit_grant' and grant_row.eligible_model_ids is not null`,
+  );
+  const refundMicros = operation.pricedCostMicros - Number(scoped?.micros ?? 0);
+  if (refundMicros <= 0) return "refunded";
   const inserted = await tx
     .insert(schema.creditLedgerEntries)
     .values({
       accountId: operation.accountId,
       workspaceId: operation.workspaceId,
       type: "video_generation_refund",
-      amountMicros: operation.pricedCostMicros,
+      amountMicros: refundMicros,
       sourceType: "video_generation_operation",
       sourceId: operation.id,
       idempotencyKey: `credit:video_generation_refund:${operation.id}`,

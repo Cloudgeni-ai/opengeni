@@ -902,6 +902,107 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("removed-feature tables may be absent, without making live tables optional", () => {
+    const posture = safePosture();
+    const retiring = Object.values(runtimePosture.RETIRING_FEATURE_TABLES).flat();
+    const missing = evaluateRuntimeDatabasePosture(posture, {
+      ...options,
+      protectedTables: [...options.protectedTables!, ...retiring, "still_used"],
+      tablePrivileges: {
+        ...options.tablePrivileges,
+        ...Object.fromEntries(retiring.map((name) => [name, ["SELECT"] as const])),
+        still_used: ["SELECT"],
+      },
+      protectedNoDirectDmlTables: [],
+    });
+    expect(missing.filter((violation) => violation.includes("tables are missing"))).toEqual([
+      "runtime privilege tables are missing: still_used",
+      "protected tables are missing: still_used",
+    ]);
+  });
+
+  test("retiring tables retain their exact privileges, ownership and RLS while present", () => {
+    for (const name of Object.values(runtimePosture.RETIRING_FEATURE_TABLES).flat()) {
+      const posture = safePosture();
+      posture.tables = posture.tables.filter((table) => table.name !== name);
+      const table = {
+        ...posture.tables[0]!,
+        name,
+        select: true,
+        insert: false,
+        update: false,
+        delete: false,
+      };
+      posture.tables.push(table);
+      const retiringOptions = {
+        ...options,
+        protectedTables: [...options.protectedTables!, name],
+        tablePrivileges: { ...options.tablePrivileges, [name]: ["SELECT"] as const },
+      };
+      expect(
+        evaluateRuntimeDatabasePosture(posture, retiringOptions).filter((v) => v.includes(name)),
+      ).toEqual([]);
+      Object.assign(table, { owner: "opengeni_app", rlsForced: false, update: true });
+      const violations = evaluateRuntimeDatabasePosture(posture, retiringOptions);
+      expect(violations).toContain(`runtime role owns table ${name}`);
+      expect(violations).toContain(`table ${name} does not FORCE RLS`);
+      expect(violations).toContain(`table ${name} grants excess runtime privileges: UPDATE`);
+    }
+  });
+
+  test("retired receipts may disappear only after all of their feature tables", () => {
+    const posture = safePosture();
+    posture.retiringFeatureTablesPresent = { subscription: false, variableSets: false };
+    const retiring = new Set<string>(Object.values(runtimePosture.RETIRING_FEATURE_TABLES).flat());
+    posture.tables = posture.tables.filter((table) => !retiring.has(table.name));
+    posture.subscriptionCodexCutoverActivationPresent = false;
+    posture.subscriptionProviderCutoverReceipts = [];
+    posture.sessionVariableSetAttachmentsCutoverPresent = false;
+    const receipts = () =>
+      evaluateRuntimeDatabasePosture(posture, options).filter(
+        (v) =>
+          v.includes("cutover receipt") || v.includes("Variable Set attachment runtime receipt"),
+      );
+    expect(receipts()).toEqual([]);
+    // Inconsistent metadata cannot hide even one remaining legacy table.
+    posture.tables.push({ ...posture.tables[0]!, name: "xai_subscription_credentials" });
+    expect(receipts()).toContain(
+      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+    );
+    posture.tables.push({ ...posture.tables[0]!, name: "workspace_variable_sets" });
+    expect(receipts()).toContain(
+      "database is missing the 0352 session Variable Set attachment runtime receipt",
+    );
+    // Inspectors without the new catalog witness still fail closed.
+    delete posture.retiringFeatureTablesPresent;
+    expect(receipts()).toContain(
+      "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
+    );
+  });
+
+  test("old Codex source entry points may disappear only after every subscription table", () => {
+    const posture = safePosture();
+    const signatures = [
+      "resolve_workspace_codex_subscription_source(uuid, uuid)",
+      "capture_legacy_codex_turn_sources(uuid, uuid)",
+    ];
+    posture.targetRoutines = posture.targetRoutines.filter(
+      (routine) => !signatures.includes(routine.name),
+    );
+    const missing = () =>
+      evaluateRuntimeDatabasePosture(posture, {
+        ...options,
+        targetSchemaCapabilityRoutines: signatures,
+      }).filter((violation) => signatures.some((signature) => violation.includes(signature)));
+    expect(missing()).toHaveLength(2);
+    const retired = new Set<string>(runtimePosture.RETIRING_FEATURE_TABLES.subscription);
+    posture.tables = posture.tables.filter((table) => !retired.has(table.name));
+    posture.retiringFeatureTablesPresent = { subscription: false, variableSets: true };
+    expect(missing()).toEqual([]);
+    posture.tables.push({ ...posture.tables[0]!, name: "codex_turn_source_bindings" });
+    expect(missing()).toHaveLength(2);
+  });
+
   test("a provider's legacy tables are read-only once its receipt exists", () => {
     const posture = safePosture();
     const existing = posture.tables.find((table) => table.name === "xai_subscription_credentials");
@@ -1944,6 +2045,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1143_agent_call_host_phones: full DML, FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 1175 organization connectors: one full-DML FORCE-RLS table.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -2018,6 +2125,7 @@ describe("runtime database posture evaluator", () => {
         1 + // 1090 personal default machines: full-DML, FORCE-RLS.
         1 + // 1105 workspace activity facts: read and insert, FORCE-RLS.
         1 + // 1107 agent calls: read, insert and update, FORCE-RLS.
+        1 + // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
         1; // 1175 organization connectors: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
