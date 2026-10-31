@@ -2058,9 +2058,11 @@ export function ProviderConnectPage({
 /** What "Models it can serve" edits for this provider. */
 export function ProviderAccessPage({
   state,
+  organizationName,
   onClose,
 }: {
   state: ProviderConnection;
+  organizationName?: string | undefined;
   onClose: () => void;
 }) {
   const access = useConnectionAccess(state.accessTarget);
@@ -2068,6 +2070,7 @@ export function ProviderAccessPage({
     <ConnectionAccessFormPage
       access={access}
       organization={state.organization}
+      organizationName={organizationName}
       canManage={state.canManageCustomModels}
       name={state.config.title}
       onClose={onClose}

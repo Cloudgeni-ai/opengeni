@@ -185,6 +185,12 @@ mock.module("@opengeni/react/ui/dropdown-menu", () => ({
       {children}
     </button>
   ),
+  // The rest of the module, which the toolbar's search and filters import.
+  DropdownMenuCheckboxItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuLabel: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuMeta: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+  DropdownMenuSeparator: () => null,
 }));
 mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({

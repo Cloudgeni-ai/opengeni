@@ -78,7 +78,7 @@ export function NewVaultPage({
       ? "Only you can see it, and only work you start can use it."
       : owner === "workspace"
         ? "Everyone in this workspace can use it. Members can add items."
-        : `Shared with ${organizationName}. Organization admins manage it.`;
+        : `Belongs to ${organizationName}. Organization owners manage it.`;
 
   return (
     <FlushFormPage
@@ -151,6 +151,7 @@ export function NewVaultPage({
             workspaces={workspaces}
             organizationName={organizationName}
             error={availabilityError}
+            showOwner={false}
           />
         ) : null}
         {owner === "user" ? (
@@ -160,6 +161,7 @@ export function NewVaultPage({
             onChange={setPersonalAvailability}
             workspaces={workspaces}
             organizationName={organizationName}
+            showOwner={false}
           />
         ) : null}
         <Field label="Description" optional>

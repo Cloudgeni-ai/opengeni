@@ -1779,6 +1779,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         canManageSocial={canManageSocial}
         socialSetupAvailable={selectedSocialSetupAvailable}
         canManageSkills={canManageSkills}
+        canManageConnectors={canManageApiIntegrationInstances}
         onAction={(action) => void handleAction(action)}
         onConnectAccount={() => setAccountConnectOpen(true)}
         onRetryAuthInspection={

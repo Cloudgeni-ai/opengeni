@@ -93,6 +93,7 @@ export const SECTION_KEYS = [
   "switch",
   "segmented-control",
   "choice-cards",
+  "workspace-reach",
   "select",
   "disclosure",
   // Status
@@ -137,6 +138,7 @@ export const SECTION_KEYS = [
   "page-dictation",
   "page-knowledge",
   "page-org-people",
+  "page-org-connectors",
   "page-eu-only",
 ] as const;
 
@@ -471,6 +473,16 @@ export const SECTIONS: readonly SectionMeta[] = [
       },
     ],
     load: () => import("./choice-cards"),
+  },
+  {
+    key: "workspace-reach",
+    group: "Selection",
+    title: "Available in",
+    purpose:
+      "Where a thing an organization, a workspace or a person shares can be used, with its owner and who manages it, in the same words for every kind.",
+    usedOn:
+      "Model account Available in, Connect provider, vault Available in, Slack bot, organization keys and connected agents (workspace list)",
+    load: () => import("./workspace-reach"),
   },
   {
     key: "select",
@@ -1010,6 +1022,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Everyone in Acme Robotics, with the person page.",
     usedOn: "Organization settings",
     load: () => import("./page-org-people"),
+  },
+  {
+    key: "page-org-connectors",
+    group: "Pages",
+    title: "Organization connectors",
+    purpose:
+      "Connectors an organization adds once for the workspaces it chooses: how people sign in, where each works, turning it off and replacing its key.",
+    usedOn: "Organization settings > Integrations",
+    load: () => import("./page-org-connectors"),
   },
   {
     key: "page-eu-only",
