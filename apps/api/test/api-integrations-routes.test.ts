@@ -685,6 +685,123 @@ describe("API Integration routes", () => {
     });
   }, 60_000);
 
+  test("an organization's API integration is listed as the organization's, and a workspace turns it off here or back on", async () => {
+    if (!available || !shared) return;
+    const slug = `org-ledger-${crypto.randomUUID().slice(0, 8)}`;
+    const capabilityId = `api:openapi:${slug}`;
+    const definition = {
+      kind: "api",
+      name: "Ledger API",
+      description: null,
+      definitionId: slug,
+      definitionProvenance: "workspace",
+      protocol: "openapi",
+      pluginKey: `integration/openapi/${slug}`,
+      serverId: `api_openapi_${slug.replaceAll("-", "_")}`,
+      provider: null,
+      providerDomain: "127.0.0.1",
+      baseUrl: "https://127.0.0.1/v1/",
+      sourceUrl: "https://127.0.0.1/ledger.json",
+      source: { kind: "openapi", url: "https://127.0.0.1/ledger.json" },
+      requiredScopes: [],
+      auth: { kind: "none" },
+      authScheme: { kind: "none" },
+      revision: {
+        id: `openapi:${"5".repeat(24)}`,
+        protocol: "openapi",
+        definitionId: slug,
+        contentSha256: "5".repeat(64),
+        source: { url: "https://127.0.0.1/ledger.json" },
+        title: "Ledger API",
+        tools: [
+          {
+            id: "list_entries",
+            operationKey: "listEntries",
+            name: "List entries",
+            description: "List entries.",
+            inputSchema: { type: "object", properties: {} },
+            safety: "read",
+            approvalMode: "never",
+            deprecated: false,
+          },
+        ],
+        bindings: {
+          list_entries: {
+            method: "get",
+            pathTemplate: "/entries",
+            serverUrl: "https://127.0.0.1/v1/",
+            parameters: [],
+          },
+        },
+      },
+    };
+    const [row] = await shared.admin<{ id: string }[]>`
+      insert into organization_connectors
+        (account_id, kind, capability_id, custom_definition, created_by_subject_id, updated_by_subject_id)
+      values (${accountId}, 'api', ${capabilityId}, ${shared.admin.json(definition)},
+        ${subjectId}, ${subjectId})
+      returning id`;
+    try {
+      const listed = async () =>
+        (
+          (await (await request("/integrations")).json()).integrations as {
+            capabilityId: string;
+            instanceKey: string;
+            organizationConnector?: { connectorId: string; login: string; enabledHere: boolean };
+          }[]
+        ).filter((integration) => integration.capabilityId === capabilityId);
+      expect(await listed()).toEqual([
+        expect.objectContaining({
+          instanceKey: "organization",
+          name: "Ledger API",
+          requiresConnection: false,
+          organizationConnector: {
+            connectorId: row!.id,
+            login: "none",
+            auth: { kind: "none" },
+            enabledHere: true,
+          },
+        }),
+      ]);
+      const here = (enabledHere: boolean, id = capabilityId) =>
+        request(`/integrations/${encodeURIComponent(id)}/organization`, {
+          method: "PUT",
+          body: JSON.stringify({ enabledHere }),
+        });
+      const off = await here(false);
+      expect(off.status).toBe(200);
+      expect(await off.json()).toEqual({ capabilityId, enabledHere: false });
+      expect(await listed()).toEqual([
+        expect.objectContaining({
+          organizationConnector: {
+            connectorId: row!.id,
+            login: "none",
+            auth: { kind: "none" },
+            enabledHere: false,
+          },
+        }),
+      ]);
+      expect((await here(true)).status).toBe(200);
+      expect((await listed())[0]!.organizationConnector!.enabledHere).toBe(true);
+      expect((await here(false, `api:openapi:not-shared-${slug}`)).status).toBe(404);
+      // It is managed in the organization's settings, never removed or replaced here.
+      const instance = `/integrations/${encodeURIComponent(capabilityId)}/instances/organization`;
+      expect((await request(`${instance}/uninstall-preview`)).status).toBe(409);
+      expect(
+        (
+          await request(instance, {
+            method: "DELETE",
+            body: JSON.stringify({ expectedInstallationVersion: 1, expectedInstanceVersion: 1 }),
+          })
+        ).status,
+      ).toBe(409);
+    } finally {
+      await shared.admin`delete from capability_installations
+        where workspace_id = ${workspaceId} and capability_id = ${capabilityId}`;
+      await shared.admin`delete from organization_connectors where id = ${row!.id}`;
+    }
+  });
+
   test("previews and installs an inline OpenAPI document by stable source key", async () => {
     if (!available || !client) return;
     const fetchesBefore = sourceFetches;

@@ -135,6 +135,7 @@ import {
 } from "@opengeni/react/app/lib/workspace-navigation-preference";
 import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-context";
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
+import { recordFeedbackNavigation } from "@opengeni/react/app/lib/feedback-trail";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
@@ -1119,6 +1120,8 @@ const router = createRouter({
   ...routerErrorOptions(() => appRoutePattern()),
 });
 installDesktopShell((path) => router.history.push(path));
+// The screens the person moved through go with their next feedback report.
+router.history.subscribe(({ location }) => recordFeedbackNavigation(location.pathname));
 warmDesktopPages([
   LazySessionRoute,
   LazySessionsIndexRoute,

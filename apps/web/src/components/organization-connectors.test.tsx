@@ -12,6 +12,7 @@ const { createRoot } = await import("react-dom/client");
 const connectors = await import("./organization-connectors");
 const route = await import("@/lib/organization-route");
 type OrganizationConnector = import("@opengeni/contracts").OrganizationConnector;
+type ApiIntegrationPreview = import("@opengeni/contracts").ApiIntegrationPreview;
 type CapabilityCatalogItem = import("@opengeni/react/app/types").CapabilityCatalogItem;
 type ConnectorLocation = import("@/lib/organization-route").ConnectorLocation;
 type Client = import("@opengeni/sdk/browser").OpenGeniBrowserClient;
@@ -25,6 +26,7 @@ function connector(overrides: Partial<OrganizationConnector> = {}): Organization
   return {
     id: LINEAR_ID,
     organizationId: ORG,
+    kind: "mcp",
     capabilityId: "registry:linear",
     name: "Linear",
     description: null,
@@ -36,6 +38,7 @@ function connector(overrides: Partial<OrganizationConnector> = {}): Organization
     availability: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
     status: "active",
     available: true,
+    apiIntegration: null,
     generation: 3,
     createdAt: "2026-10-30T00:00:00Z",
     updatedAt: "2026-10-30T00:00:00Z",
@@ -61,6 +64,48 @@ function catalogItem(overrides: Partial<CapabilityCatalogItem> = {}): Capability
   } as unknown as CapabilityCatalogItem;
 }
 
+function apiPreview(overrides: Partial<ApiIntegrationPreview> = {}): ApiIntegrationPreview {
+  return {
+    source: { kind: "auto", url: "https://api.example.com/openapi.json" },
+    definitionId: "api.example.com",
+    definitionProvenance: "workspace",
+    protocol: "openapi",
+    capabilityId: "api:openapi:inventory",
+    pluginKey: "integration/openapi/inventory",
+    serverId: "api_openapi_inventory",
+    name: "Inventory API",
+    description: null,
+    provider: null,
+    providerDomain: "api.example.com",
+    baseUrl: "https://api.example.com/v2/",
+    sourceUrl: "https://api.example.com/openapi.json",
+    revisionId: "openapi:abc123",
+    contentSha256: "c".repeat(64),
+    auth: { kind: "http", providerDomain: "api.example.com", scheme: "bearer" },
+    connectionId: null,
+    connectionOwnership: null,
+    tools: [
+      tool("list_items", "List items"),
+      tool("get_item", "Get an item"),
+      { ...tool("old_items", "Old items"), deprecated: true },
+    ],
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function tool(id: string, name: string): ApiIntegrationPreview["tools"][number] {
+  return {
+    id,
+    operationKey: id,
+    name,
+    description: "",
+    safety: "read",
+    approvalMode: "never",
+    deprecated: false,
+  };
+}
+
 function fakeClient(initial: OrganizationConnector[]) {
   const calls: Array<{ method: string; args: unknown[] }> = [];
   let rows = [...initial];
@@ -68,6 +113,10 @@ function fakeClient(initial: OrganizationConnector[]) {
     listOrganizationConnectors: async (...args: unknown[]) => {
       calls.push({ method: "list", args });
       return rows;
+    },
+    previewOrganizationApiIntegration: async (...args: unknown[]) => {
+      calls.push({ method: "preview", args });
+      return apiPreview();
     },
     createOrganizationConnector: async (...args: unknown[]) => {
       calls.push({ method: "create", args });
@@ -228,6 +277,53 @@ describe("organization connector helpers", () => {
     expect(connectors.catalogLoginChoices({ name: "?", authKind: null }).initial).toBeNull();
   });
 
+  test("an API's sign-in choices follow how it authenticates, and its page counts its tools", () => {
+    const none = connectors.apiLoginChoices({ name: "Status", auth: { kind: "none" } });
+    expect(none.initial).toBe("none");
+    expect(none.allowed.organization_key).toBe("Status needs no key.");
+    const oauth = connectors.apiLoginChoices({
+      name: "Docs",
+      auth: { kind: "oauth2", providerDomain: "docs.example.com", scopes: [] },
+    });
+    expect(oauth.initial).toBe("each_person");
+    expect(oauth.allowed.organization_key).toContain("each person connects their own account");
+    const keyed = connectors.apiLoginChoices({
+      name: "Billing",
+      auth: { kind: "api_key", providerDomain: "billing.example.com", carrier: "query", name: "k" },
+    });
+    expect(keyed).toEqual({
+      allowed: { each_person: null, organization_key: null, none: "Billing needs a key." },
+      initial: "organization_key",
+    });
+    expect(connectors.apiPreviewSummary(apiPreview())).toBe("OpenAPI · 2 tools · api.example.com");
+    const api = {
+      kind: "api" as const,
+      definitionId: "billing",
+      protocol: "openapi" as const,
+      providerDomain: "billing.example.com",
+      auth: { kind: "none" as const },
+      revisionId: "r",
+      contentSha256: "c".repeat(64),
+      tools: [{ id: "a", name: "A", safety: "read" as const }],
+    };
+    const { kind: _kind, ...apiIntegration } = api;
+    expect(connectors.connectorToolsSummary({ allowedTools: null, apiIntegration })).toBe(
+      "Its one tool, A.",
+    );
+    expect(
+      connectors.connectorToolsSummary({
+        allowedTools: null,
+        apiIntegration: {
+          ...apiIntegration,
+          tools: [...apiIntegration.tools, ...apiIntegration.tools],
+        },
+      }),
+    ).toBe("All 2 tools.");
+    expect(connectors.connectorToolsSummary({ allowedTools: ["a"], apiIntegration })).toBe(
+      "Only a.",
+    );
+  });
+
   test("only shared remote MCP servers can be added for the organization", () => {
     const items = connectors.addableCatalogItems([
       catalogItem({ name: "Zeta" }),
@@ -368,6 +464,104 @@ describe("organization connectors in settings", () => {
         headers: { Authorization: "Bearer secret" },
         availability: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
       });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a custom API is checked before anything else, then its key goes where the API expects it", async () => {
+    const { client, calls } = fakeClient([]);
+    const view = await mount(client, { kind: "new" });
+    try {
+      await click(radio(view.container, "Custom API"));
+      // How people sign in waits for the API to be read.
+      expect(() => radio(view.container, "Organization key")).toThrow();
+      await submit(view.container);
+      expect(view.container.textContent).toContain("Check the API first.");
+      expect(calls.some((call) => call.method === "create")).toBe(false);
+
+      const address = [...view.container.querySelectorAll<HTMLInputElement>("input")].find(
+        (input) => input.placeholder === "https://api.example.com/openapi.json",
+      )!;
+      await type(address, "api.example.com/openapi.json");
+      await click(button(view.container, "Check API"));
+      expect(calls.find((call) => call.method === "preview")!.args).toEqual([
+        ORG,
+        { source: { kind: "auto", url: "https://api.example.com/openapi.json" } },
+      ]);
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Inventory API");
+      expect(text).toContain("OpenAPI · 2 tools · api.example.com");
+      expect(radio(view.container, "Organization key").getAttribute("aria-checked")).toBe("true");
+      expect(radio(view.container, "No sign-in").getAttribute("data-disabled")).not.toBeNull();
+
+      await submit(view.container);
+      expect(view.container.textContent).toContain("Paste the token.");
+      expect(calls.some((call) => call.method === "create")).toBe(false);
+      await type(
+        view.container.querySelector<HTMLInputElement>('input[type="password"]')!,
+        "tok-1",
+      );
+      await submit(view.container);
+      expect(calls.find((call) => call.method === "create")!.args[1]).toEqual({
+        apiIntegration: {
+          source: { kind: "auto", url: "https://api.example.com/openapi.json" },
+          expectedRevisionId: "openapi:abc123",
+          expectedContentSha256: "c".repeat(64),
+        },
+        login: "organization_key",
+        apiKey: [{ carrier: "header", name: "Authorization", value: "tok-1", prefix: "Bearer " }],
+        availability: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an API's page says where its key goes, and a new key goes to the same place", async () => {
+    const api = connector({
+      kind: "api",
+      capabilityId: "api:openapi:billing",
+      name: "Billing API",
+      endpointUrl: "https://billing.example.com/v1/",
+      source: "custom",
+      login: "organization_key",
+      headerNames: ["api_key"],
+      apiIntegration: {
+        definitionId: "billing",
+        protocol: "openapi",
+        providerDomain: "billing.example.com",
+        auth: {
+          kind: "api_key",
+          providerDomain: "billing.example.com",
+          carrier: "query",
+          name: "api_key",
+        },
+        revisionId: "openapi:r1",
+        contentSha256: "d".repeat(64),
+        tools: [
+          { id: "list_invoices", name: "List invoices", safety: "read" },
+          { id: "refund", name: "Refund", safety: "destructive" },
+        ],
+      },
+    });
+    const { client, calls } = fakeClient([api]);
+    const view = await mount(client, { kind: "connector", connectorId: LINEAR_ID, view: "page" });
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Custom API");
+      expect(text).toContain("OpenAPI");
+      expect(text).toContain("Sent as the api_key query parameter.");
+      expect(text).toContain("All 2 tools.");
+      expect(text).toContain("Custom APIs");
+      await click(button(view.container, "Replace key"));
+      await type(view.container.querySelector<HTMLInputElement>('input[type="password"]')!, "k2");
+      await submit(view.container);
+      expect(calls.find((call) => call.method === "update")!.args).toEqual([
+        ORG,
+        LINEAR_ID,
+        { apiKey: [{ carrier: "query", name: "api_key", value: "k2" }], expectedGeneration: 3 },
+      ]);
     } finally {
       await view.unmount();
     }
