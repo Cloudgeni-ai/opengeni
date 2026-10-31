@@ -48,6 +48,8 @@ export type ExtensionDevice = {
     diagnostics: true;
     rawCdp: false;
     linkedComputer: true;
+    /** Read-only DOMSnapshot privacy discovery, including closed roots. */
+    paymentFieldPrivacy: true;
   };
 };
 
@@ -163,7 +165,12 @@ const DEBUGGER_DOMAINS = new Set([
 // raising Chrome; without it Chrome holds every mouse event sent to a hidden
 // tab for about five seconds. Chrome clears it when the debugger detaches.
 // Inspector.enable only reports a crashed tab, so the agent stops waiting on it.
-const DEBUGGER_METHODS = new Set(["Emulation.setFocusEmulationEnabled", "Inspector.enable"]);
+// DOMSnapshot is read-only privacy discovery, including closed shadow roots.
+const DEBUGGER_METHODS = new Set([
+  "Emulation.setFocusEmulationEnabled",
+  "Inspector.enable",
+  "DOMSnapshot.captureSnapshot",
+]);
 
 export function isAllowedDebuggerMethod(method: string): boolean {
   return DEBUGGER_METHODS.has(method) || DEBUGGER_DOMAINS.has(method.slice(0, method.indexOf(".")));

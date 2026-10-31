@@ -2503,6 +2503,16 @@ function SessionChatPane(props: {
     runsOn.fleet.sessionMachineAccess,
     props.session.activeSandboxId,
   );
+  // The chat is shared with other people in the workspace, so the owner of
+  // the personal machine it runs on gets a heads-up that they see the work on
+  // it. A Personal workspace has nobody else in it.
+  const sharedChat =
+    props.session.tenancy?.visibility === "workspace" &&
+    !isPersonalWorkspace(
+      context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null,
+      context.managedSelfContext,
+    );
+  const showMachineAccess = machineAccess !== null && (!machineAccess.isOwner || sharedChat);
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -4354,7 +4364,7 @@ function SessionChatPane(props: {
                   modelSwitchHeadsUp ||
                   usageLimitNotice ||
                   creditRefusalNotice ||
-                  (machineAccess && !machineAccess.isOwner) ? (
+                  showMachineAccess ? (
                     <>
                       {!sessionAdmissionNeedsDifferentMachine(
                         sessionAdmissionReason(props.session),
@@ -4362,12 +4372,15 @@ function SessionChatPane(props: {
                       ) ? (
                         <SessionMachineAccessNotice
                           access={machineAccess}
+                          shared={sharedChat}
+                          className="px-3.5 pt-2.5 md:px-4"
                           action={
                             <SessionMachinePickerAction
                               runsOn={runsOn}
                               workspaceId={props.session.workspaceId}
                               rigId={props.session.rigId}
                               move={moveRunsOn}
+                              compact={machineAccess?.isOwner === true}
                             />
                           }
                         />

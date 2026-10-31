@@ -27,6 +27,8 @@ function RecordButton({ workspaceId }: { workspaceId: string }) {
 
 Each track is saved on the device every few seconds before it is uploaded straight to storage, so a reload, a crash or a lost connection loses nothing; the next `useRecorder` finishes uploading what was left. Pass `systemAudio: true` to also record a tab's or the computer's audio as its own track, and `liveTranscript: true` for a read-along preview while recording.
 
+Pass `title` only when the person gave one: a title you pass is theirs, and nothing replaces it. Without one, Opengeni names the meeting after the event on the person's connected calendar at the time, or else from what was said once its notes are written. A title your app guessed, such as the call app's name, goes with `titleSource: "app"` so a better name replaces it. Each recording says where its title came from in `titleSource`.
+
 `useRecordings`, `useRecording` and `useTranscript` list recordings, follow processing, and read and edit a transcript: name speakers, move a segment to another speaker, correct text, re-run with another model, or switch the shown version. `useRecordingPeople` reads the people directory speakers are named from.
 
 ## On phones and other hosts

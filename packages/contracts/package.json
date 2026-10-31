@@ -70,6 +70,10 @@
       "types": "./src/values.ts",
       "default": "./src/values.ts"
     },
+    "./claude-cite-tags": {
+      "types": "./src/claude-cite-tags.ts",
+      "default": "./src/claude-cite-tags.ts"
+    },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"

@@ -476,7 +476,52 @@ describe("allowance authorization matrix", () => {
     for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
   });
 
-  test("member can read only its own usage, never roster or config; machine own reads fail", async () => {
+  test("a person who can start chats reads the workspace budget, never the roster or a write", async () => {
+    const spies = storage();
+    const api = app();
+    const auth = await bearer(["workspace:read", "sessions:create"]);
+    const read = await request(api, `${path}/allowance`, auth);
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual(config);
+    const state = await request(api, `${path}/allowance/state`, auth);
+    expect(state.status).toBe(200);
+    expect(await state.json()).toEqual({ version: 1, config });
+    expect(spies.state.mock.calls[0]![1]).toMatchObject({ accountId, workspaceId });
+    expect((await request(api, `${path}/usage/me`, auth)).status).toBe(200);
+
+    // Not the roster's usage, and no budget or member-limit change.
+    for (const [route, method, body] of [
+      [`${path}/usage`, "GET", undefined],
+      [`${path}/allowance`, "PUT", { ...config, version: undefined, expectedVersion: 1 }],
+      [`${path}/allowance`, "DELETE", { expectedVersion: 1 }],
+      [`${path}/allowance/grants`, "POST", { operationId: "member-grant", credits: 1 }],
+      [`${path}/members/user:other/allowance`, "PUT", { rule: { share: 1 }, expectedVersion: 0 }],
+    ] as const)
+      expect((await request(api, route, auth, method, body)).status, `${method} ${route}`).toBe(
+        403,
+      );
+    expect(spies.usage).toHaveBeenCalledTimes(1);
+    for (const spy of [spies.set, spies.clear, spies.grant, spies.member])
+      expect(spy).not.toHaveBeenCalled();
+
+    // An agent or service carrying the same permission is not that person, and
+    // a grant for another workspace reaches nothing here.
+    track(spyOn(db, "getWorkspaceGrant").mockResolvedValue(null));
+    for (const other of [
+      await bearer(["workspace:read", "sessions:create"], "agent_attempt"),
+      await bearer(["workspace:read", "sessions:create"], "service"),
+      await bearer(
+        ["workspace:read", "sessions:create"],
+        "human_session",
+        subjectId,
+        "44444444-4444-4444-8444-444444444444",
+      ),
+    ])
+      expect((await request(api, `${path}/allowance/state`, other)).status).toBe(403);
+    expect(spies.state).toHaveBeenCalledTimes(1);
+  });
+
+  test("a viewer reads only its own usage, never roster or config; machine own reads fail", async () => {
     const spies = storage();
     const api = app();
     const auth = await bearer(["workspace:read"]);
@@ -590,6 +635,72 @@ describe("allowance authorization matrix", () => {
     expect(
       (await api.request("/v1/workspaces/external/host/customer/usage/me", { headers })).status,
     ).toBe(200);
+  });
+
+  test("asUser can't read the budget, even as a member who can start chats", async () => {
+    storage();
+    const api = app();
+    const externalSubject = "external_user:55555555-5555-4555-8555-555555555555";
+    track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+    track(spyOn(db, "readExternalWorkspaceRevocationWatermark").mockResolvedValue("0"));
+    track(
+      spyOn(db, "ensureExternalIdentity").mockResolvedValue({
+        id: "55555555-5555-4555-8555-555555555555",
+        accountId,
+        subjectId: externalSubject,
+        source: "product",
+        externalId: "Person",
+        personalWorkspaceId: "66666666-6666-4666-8666-666666666666",
+        organizationMembershipId: "77777777-7777-4777-8777-777777777777",
+        authorizationRevision: 1,
+      } as never),
+    );
+    track(
+      spyOn(db, "withWorkspaceSubjectRls").mockImplementation(
+        async (_db, _workspace, _subject, callback) => callback({} as never),
+      ),
+    );
+    track(
+      spyOn(db, "withAccountRls").mockImplementation(async (_db, _account, callback) =>
+        callback({} as never),
+      ),
+    );
+    track(
+      spyOn(db, "findWorkspaceByExternalIdentity").mockResolvedValue({ id: workspaceId } as never),
+    );
+    for (const keyPermissions of [
+      ["sessions:create", "members:manage"],
+      ["account:read", "workspace:admin"],
+    ] satisfies Permission[][]) {
+      const auth = organizationKey(keyPermissions);
+      track(
+        spyOn(db, "getWorkspaceGrant").mockResolvedValue({
+          accountId,
+          workspaceId,
+          subjectId: externalSubject,
+          principalKind: "human_session",
+          permissions: ["workspace:read", "sessions:create"],
+        }),
+      );
+      const headers = {
+        authorization: auth,
+        "x-opengeni-external-actor": encodeURIComponent(
+          JSON.stringify({
+            mode: "external",
+            identity: { source: "product", externalId: "Person" },
+          }),
+        ),
+      };
+      for (const route of [
+        `${path}/allowance`,
+        `${path}/allowance/state`,
+        "/v1/workspaces/external/host/customer/allowance",
+        "/v1/workspaces/external/host/customer/allowance/state",
+      ])
+        expect((await api.request(route, { headers })).status, `${keyPermissions} ${route}`).toBe(
+          403,
+        );
+    }
   });
 
   test("workspace keys and account-admin-only callers cannot administer members", async () => {

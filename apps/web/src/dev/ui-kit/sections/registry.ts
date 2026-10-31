@@ -111,6 +111,7 @@ export const SECTION_KEYS = [
   "access-list",
   // Chat
   "chat-approvals",
+  "chat-app-actions",
   "chat-questions",
   "chat-connect",
   "chat-answers",
@@ -712,6 +713,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Ask the person to allow or decline one action the agent wants to take.",
     usedOn: "Chat, embedded chat, inbox and phone",
     load: () => import("./chat-approvals"),
+  },
+  {
+    key: "chat-app-actions",
+    group: "Chat",
+    title: "App action approvals",
+    purpose: "Ask the person to allow a change in Opengeni itself, naming exactly what it changes.",
+    usedOn: "Chat, embedded chat, inbox, phone and Slack",
+    load: () => import("./chat-app-actions"),
   },
   {
     key: "chat-questions",

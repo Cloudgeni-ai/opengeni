@@ -4941,6 +4941,11 @@ export type OrganizationModelAccountSettings = {
   locked: ModelAccountSettingKey[];
   version: number;
   updatedAt: string | null;
+  /**
+   * False when this deployment doesn't switch models when subscriptions run
+   * out, so `crossProviderFailover` has no effect here. Absent from older servers.
+   */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
@@ -4974,6 +4979,8 @@ export type WorkspaceModelAccountSettings = ModelAccountSettingsView & {
   version: number;
   updatedAt: string | null;
   canEdit: boolean;
+  /** As on the organization's settings: false when switching models is off here. */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
@@ -5189,6 +5196,12 @@ export type OrganizationPrivacySettings = {
   defaultVisibility: "private" | "workspace";
   /** Whether people have their own Personal workspace to see and work in. */
   personalWorkspaces: boolean;
+  /**
+   * The most each person can spend from the organization's credits in their
+   * own Personal workspace each calendar month (UTC), in USD micros; null for
+   * no limit. Work paid by their own model plans or keys doesn't count.
+   */
+  personalWorkspaceMonthlyCredits: number | null;
   /** Whether admins see that other people's Only me schedules exist, and can pause them. */
   adminsSeePrivateSchedules: boolean;
   limits: {
@@ -5207,6 +5220,8 @@ export type UpdateOrganizationPrivacySettingsRequest = {
   adminsSeePrivateSchedules?: boolean;
   /** Off: people no longer see or start new work in their Personal workspace. */
   personalWorkspaces?: boolean;
+  /** USD micros a month per person; null removes the limit. */
+  personalWorkspaceMonthlyCredits?: number | null;
 };
 
 /**
@@ -7154,6 +7169,19 @@ export type AgentCall = {
   endedAt: string | null;
   /** Whether this phone (app credential) took the call; null when unknown. */
   answeredHere: boolean | null;
+};
+
+/**
+ * Phones a product embedding Opengeni rings for agent calls itself, from the
+ * `session.agentCall.ringing` webhook with its own push credentials. Agents
+ * count them alongside the person's Opengeni app phones.
+ */
+export type AgentCallHostPhones = {
+  /** How many of the person's phones the product rings for agents, 1..20. */
+  phones: number;
+  /** Whether agents working for other members of a shared workspace may ring them too. */
+  teammates: boolean;
+  updatedAt: string;
 };
 
 // --- Organization-wide session list (org API key or organization owner) -----------------------

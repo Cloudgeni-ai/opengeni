@@ -128,6 +128,10 @@ async function jsonBody(c: Context): Promise<unknown> {
  */
 export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps): void {
   const organizationPath = "/v1/organizations/:organizationId/model-account-settings";
+  // Whether this deployment switches models at all; the setting does nothing without it.
+  const availability = {
+    crossProviderFailoverAvailable: deps.settings.subscriptionCrossProviderFailoverEnabled,
+  };
 
   app.get(organizationPath, async (c) => {
     c.header("cache-control", "private, no-store");
@@ -135,12 +139,13 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
     const human = await requireOrganizationSubscriptionAdministrator(c, deps, organizationId);
     try {
       return c.json(
-        OrganizationModelAccountSettings.parse(
-          await readOrganizationSubscriptionSettings(deps.db, {
+        OrganizationModelAccountSettings.parse({
+          ...(await readOrganizationSubscriptionSettings(deps.db, {
             organizationId,
             actorSubjectId: human.subjectId,
-          }),
-        ),
+          })),
+          ...availability,
+        }),
       );
     } catch (error) {
       refused(error, "account:admin");
@@ -167,7 +172,9 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
         ...(expectedVersion === undefined ? {} : { expectedVersion }),
       });
       await wake(deps, result.wake);
-      return c.json(OrganizationModelAccountSettings.parse(result.settings));
+      return c.json(
+        OrganizationModelAccountSettings.parse({ ...result.settings, ...availability }),
+      );
     } catch (error) {
       refused(error, "account:admin");
     }
@@ -187,15 +194,17 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
       throw new HTTPException(422, { message: "limit must be between 1 and 500" });
     }
     try {
+      const overview = await readSubscriptionSettingsOverview(deps.db, {
+        organizationId,
+        actorSubjectId: human.subjectId,
+        after: after ?? null,
+        ...(limit === undefined ? {} : { limit }),
+      });
       return c.json(
-        ModelAccountSettingsOverview.parse(
-          await readSubscriptionSettingsOverview(deps.db, {
-            organizationId,
-            actorSubjectId: human.subjectId,
-            after: after ?? null,
-            ...(limit === undefined ? {} : { limit }),
-          }),
-        ),
+        ModelAccountSettingsOverview.parse({
+          ...overview,
+          organization: { ...overview.organization, ...availability },
+        }),
       );
     } catch (error) {
       refused(error, "account:admin");
@@ -210,13 +219,14 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     try {
       return c.json(
-        WorkspaceModelAccountSettings.parse(
-          await readWorkspaceSubscriptionSettings(deps.db, {
+        WorkspaceModelAccountSettings.parse({
+          ...(await readWorkspaceSubscriptionSettings(deps.db, {
             accountId: grant.accountId,
             workspaceId,
             subjectId: grant.subjectId,
-          }),
-        ),
+          })),
+          ...availability,
+        }),
       );
     } catch (error) {
       refused(error, "workspace:admin");
@@ -245,7 +255,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
         ...(expectedVersion === undefined ? {} : { expectedVersion }),
       });
       await wake(deps, result.wake);
-      return c.json(WorkspaceModelAccountSettings.parse(result.settings));
+      return c.json(WorkspaceModelAccountSettings.parse({ ...result.settings, ...availability }));
     } catch (error) {
       refused(error, "workspace:admin");
     }

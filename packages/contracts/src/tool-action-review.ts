@@ -51,6 +51,22 @@ export const ToolReviewContext = /* @__PURE__ */ defineSchema(() =>
         .optional(),
       samples: z.array(ToolReviewSelectionLabel).max(3).optional(),
       /**
+       * What an app action changes, as facts the server read from its own
+       * records when the approval was prepared ("Connection: Gmail",
+       * "Account: anna@example.com"); never text from the call's arguments.
+       */
+      targetFacts: z
+        .array(
+          z
+            .object({
+              label: z.string().max(64),
+              value: z.string().max(256),
+            })
+            .strict(),
+        )
+        .max(12)
+        .optional(),
+      /**
        * Provider metadata for the whole selection, read when the review was
        * prepared. Only the details page reads it; entries may be missing.
        */

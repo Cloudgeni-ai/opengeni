@@ -803,6 +803,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelHistoryProjector,
             generatedImageHistoryProjector,
             compactionModelHistoryProjector,
+            searchRecords,
           } = governance.ok;
 
           // A codex-subscription turn resolves the bearer for THIS turn's effective
@@ -2226,6 +2227,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               compactionModelHistoryProjector,
               generatedImageHistoryProjector,
               modelHistoryProjector,
+              searchRecords,
               compactionModeOptions,
               initialRunCredentialMaterial,
               initialGitCredentials,

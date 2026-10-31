@@ -152,6 +152,10 @@ const nativeAppMethods = [
   "unregisterNativePushDevice",
 ];
 
+// A product embedding Opengeni states, from its backend as the person, which
+// of their phones it rings for agent calls; no Opengeni browser surface uses it.
+const embeddingProductMethods = ["getAgentCallHostPhones", "setAgentCallHostPhones"];
+
 // #3470 retired the preference editor and learning/onboarding hooks, not their
 // public SDK contracts. Preserve these existing browser methods for old bundles
 // and SDK consumers; their browser transport is exercised in the corresponding
@@ -261,6 +265,7 @@ describe("browser client runtime surface", () => {
         ...agentInteractionMethods,
         ...integrationMethods,
         ...nativeAppMethods,
+        ...embeddingProductMethods,
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,

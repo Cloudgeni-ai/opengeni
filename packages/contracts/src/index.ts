@@ -5,6 +5,7 @@ import {
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
 export * from "./secret-value";
+export * from "./claude-cite-tags";
 export * from "./integration-capability-id";
 import { defineSchema } from "./define-schema";
 import { SessionAvatar, SessionDescription } from "./bots";
@@ -17257,6 +17258,42 @@ export const AgentCallActionRequest = /* @__PURE__ */ defineSchema(() =>
 export type AgentCallActionRequest = z.infer<typeof AgentCallActionRequest>;
 
 /**
+ * Phones a product embedding Opengeni rings for agent calls itself, from the
+ * `session.agentCall.ringing` webhook with its own push credentials. The
+ * person states them through the product (its backend acting as them), and
+ * agents count them alongside the person's Opengeni app phones.
+ */
+export const AgentCallHostPhones = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** How many of the person's phones the product rings for agents. */
+      phones: z.number().int().min(1).max(20),
+      /** Whether agents working for other members of a shared workspace may ring them too. */
+      teammates: z.boolean(),
+      updatedAt: primitives.dateTime,
+    })
+    .strict(),
+);
+export type AgentCallHostPhones = z.infer<typeof AgentCallHostPhones>;
+
+/** State the phones the product rings for agent calls; `phones: 0` removes them. */
+export const SetAgentCallHostPhonesRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      phones: z.number().int().min(0).max(20),
+      teammates: z.boolean().optional(),
+    })
+    .strict(),
+);
+export type SetAgentCallHostPhonesRequest = z.infer<typeof SetAgentCallHostPhonesRequest>;
+
+/** The phones the product rings for this person; null when none. */
+export const AgentCallHostPhonesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ hostPhones: AgentCallHostPhones.nullable() }).strict(),
+);
+export type AgentCallHostPhonesResponse = z.infer<typeof AgentCallHostPhonesResponse>;
+
+/**
  * `session.agentCall.ringing`: the agent is ringing a person. Products that
  * deliver their own pushes ring their app from this event.
  */
@@ -20864,6 +20901,15 @@ export const MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE = "NEW_SIGNUPS_PAUSED" as cons
  * OAuth sign-up refusals redirect with `error=signup_email_not_allowed` instead.
  */
 export const MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE = "SIGNUP_EMAIL_NOT_ALLOWED" as const;
+
+/**
+ * Error code returned (HTTP 403, `{ code, message }`) when a deployment that
+ * restricts accounts to listed email addresses (`allowedUserEmails`) refuses to
+ * sign in an address that isn't on the list. Email sign-in decides it before
+ * the password is checked, so the refusal says nothing about the password.
+ * OAuth sign-in refusals redirect with `error=sign_in_email_not_allowed` instead.
+ */
+export const MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE = "SIGN_IN_EMAIL_NOT_ALLOWED" as const;
 
 // The negotiated capability handshake document (sandbox contract C.3). ONE shape;
 // collapses the parallel per-module definitions. A capability cell is always

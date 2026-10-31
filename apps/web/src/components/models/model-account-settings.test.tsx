@@ -381,6 +381,39 @@ test("dependent rules show only while their rule is on", async () => {
   }
 });
 
+test("switching models shows only where the deployment switches models", async () => {
+  client.getModelAccountSettingsOverview.mockImplementationOnce(async () => ({
+    organization: {
+      organizationId: "acme",
+      values: { ...VALUES, crossProviderFailover: true },
+      locked: [],
+      version: 7,
+      updatedAt: null,
+      crossProviderFailoverAvailable: false,
+    },
+    workspaces: [],
+    nextCursor: null,
+  }));
+  const view = await render(<Organization />);
+  try {
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Personal subscriptions");
+    expect(text).not.toContain("Switch models when subscriptions run out");
+    expect(text).not.toContain("Fallback order");
+  } finally {
+    await view.cleanup();
+  }
+  // A workspace's own switching rules aren't changes that do anything there.
+  expect(
+    accountRuleChanges({
+      values: { ...VALUES, crossProviderFailover: false },
+      sources: { ...SOURCES, crossProviderFailover: "workspace", fallbackOrder: "workspace" },
+      entrySources: { rotation: {}, providers: {}, fallbackOrder: { "claude/opus": "workspace" } },
+      crossProviderFailoverAvailable: false,
+    }),
+  ).toEqual(["Personal subscriptions: On"]);
+});
+
 test("the organization keeps a rule the same everywhere with the version it read", async () => {
   closeLocks.mockClear();
   const view = await render(<Locks />);

@@ -114,6 +114,7 @@ function providerProjection(
     ...integrationProviderFields(row),
     organizationId: row.accountId,
     workspaceFilter: row.workspaceFilter,
+    allowPersonalWorkspaces: row.allowPersonalWorkspaces,
   });
 }
 function webhookProjection(row: OrganizationWebhookRow): OrganizationWebhook {
@@ -185,6 +186,7 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
         enabled: request.enabled ?? true,
         timeoutMs: request.timeoutMs ?? 10_000,
         workspaceFilter: request.workspaceFilter,
+        allowPersonalWorkspaces: request.allowPersonalWorkspaces ?? false,
         createdBySubjectId: target.subjectId,
         ...(secret ? { secretEncrypted: encrypted(secret) } : {}),
       });

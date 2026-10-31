@@ -150,6 +150,7 @@ class UnansweredTabBridge implements AttachedBrowserBridgeTransport {
         cssContentSize: { x: 0, y: 0, width: 800, height: 600 },
       };
     if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+    if (method === "DOMSnapshot.captureSnapshot") return { strings: [], documents: [] };
     if (method === "Runtime.evaluate") return { result: { value: 1 } };
     return {};
   }
