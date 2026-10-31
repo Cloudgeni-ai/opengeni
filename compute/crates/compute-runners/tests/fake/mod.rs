@@ -57,6 +57,8 @@ pub struct World {
     pub refreshes: u32,
     /// The queue: a message stays until deleted.
     pub messages: VecDeque<Value>,
+    /// The jobs the last poll said the pool takes at most.
+    pub capacity: Option<u32>,
     pub deleted_messages: Vec<u64>,
     /// Acquisitions failing before one succeeds.
     pub acquire_failures: u32,
@@ -399,6 +401,9 @@ async fn poll(
     if headers["authorization"] != token.as_str() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    fake.world().capacity = headers
+        .get("x-scalesetmaxcapacity")
+        .and_then(|capacity| capacity.to_str().ok()?.parse().ok());
     let last = query
         .get("lastMessageId")
         .map_or(0, |last| last.parse().unwrap());

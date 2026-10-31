@@ -10,10 +10,18 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use compute_runners::compute::Compute;
 use compute_runners::github::{Credentials, Github, Scope};
+use compute_runners::room::Room;
 use compute_runners::warm::{self, BUILDER_KEY};
 use fake::Fake;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+
+/// The places of a pool that holds no runner.
+fn free_room() -> Room {
+    let room = Room::new(4);
+    room.hold(0, 0, |_| 0);
+    room
+}
 
 fn settings() -> warm::Settings {
     warm::Settings {
@@ -63,6 +71,7 @@ async fn a_template_follows_the_branch_and_older_ones_go() {
         settings(),
         github,
         compute,
+        free_room(),
         current_tx,
         leading,
         stop.clone(),
@@ -144,6 +153,7 @@ async fn a_replica_taking_over_starts_runners_from_the_newest_template() {
         settings(),
         github,
         compute,
+        free_room(),
         current_tx,
         leading,
         stop.clone(),
@@ -237,6 +247,7 @@ async fn a_takeover_that_cannot_list_templates_lists_them_again() {
         },
         github,
         compute,
+        free_room(),
         current_tx,
         leading,
         stop.clone(),
@@ -275,6 +286,69 @@ async fn a_takeover_that_cannot_list_templates_lists_them_again() {
         1,
         "B is at the head: no builder was asked for"
     );
+
+    stop.cancel();
+    keeping.await.unwrap();
+}
+
+/// A refresh waits for a place among the pool's: none is free while the
+/// pool's one place runs a job, nor taken while this replica stands by.
+#[tokio::test]
+async fn a_refresh_waits_for_a_place_in_the_pool() {
+    let fake = Fake::start().await;
+    fake.world().head = "b".repeat(40);
+    let github = Arc::new(Github::new(
+        reqwest::Client::new(),
+        &fake.base,
+        &fake.base,
+        Scope::parse("acme/web").unwrap(),
+        Credentials::Token("the-token".into()),
+    ));
+    let compute = Compute::new(reqwest::Client::new(), &fake.base, "key");
+    let room = Room::new(1);
+    room.hold(1, 1, |places| usize::try_from(places.min(1)).unwrap());
+    let (current_tx, mut current) = watch::channel("runner-base".to_owned());
+    let (leading_tx, leading) = watch::channel(true);
+    let stop = CancellationToken::new();
+    let keeping = tokio::spawn(warm::keep(
+        settings(),
+        github,
+        compute,
+        room.clone(),
+        current_tx,
+        leading,
+        stop.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        fake.world().sandboxes.is_empty(),
+        "no builder while the pool's place runs a job"
+    );
+
+    // Standing by when the job ends, it builds nothing; leading again, it
+    // builds.
+    leading_tx.send_replace(false);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    room.forget();
+    room.hold(0, 0, |_| 0);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        fake.world().sandboxes.is_empty(),
+        "a standby builds nothing"
+    );
+    assert!(!room.building(), "nor holds a place");
+    leading_tx.send_replace(true);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        current.wait_for(|name| name.ends_with("-bbbbbbbbbbbb")),
+    )
+    .await
+    .expect("no fresh template")
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), room.moved(true))
+        .await
+        .expect("the place is given back after the refresh");
+    assert_eq!(fake.world().killed.len(), 1, "one builder, gone");
 
     stop.cancel();
     keeping.await.unwrap();

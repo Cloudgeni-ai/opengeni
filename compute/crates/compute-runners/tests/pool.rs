@@ -503,3 +503,78 @@ async fn a_runner_is_busy_only_when_github_says_its_job_runs() {
     assert_eq!(github.remove_runner(60).await.unwrap(), Removed::Busy);
     assert_eq!(fake.world().connections, connections + 1);
 }
+
+/// A warm template's builder takes one of the pool's places: an idle
+/// runner makes way for it, the pool keeps one runner fewer and tells
+/// GitHub it takes one job fewer while it builds, and gets the place back
+/// after.
+#[tokio::test]
+async fn a_builder_takes_one_of_the_pools_places() {
+    let fake = Fake::start().await;
+    let pool = pool(&fake, 4).await;
+    let room = pool.room();
+    let ours = key(&fake);
+    {
+        // Four idle runners, settled long ago: the pool's every place.
+        let mut world = fake.world();
+        for id in 1..=4u64 {
+            let name = format!("ci-00000000000{id}");
+            world.runners.insert(id, (name.clone(), false));
+            world.sandboxes.insert(
+                format!("sbx-{id}"),
+                Sandbox {
+                    template: "runner-base".into(),
+                    metadata: BTreeMap::from([
+                        (POOL_KEY.into(), ours.clone()),
+                        (NAME_KEY.into(), name),
+                        (ID_KEY.into(), id.to_string()),
+                        (BORN_KEY.into(), "1000".into()),
+                    ]),
+                    env: BTreeMap::new(),
+                },
+            );
+        }
+    }
+    let (leading_tx, mut leading) = watch::channel(false);
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let done = tokio::spawn(async move {
+        pool::listen(pool, "replica-a", &leading_tx, &stopping)
+            .await
+            .unwrap();
+    });
+    until_leading(&mut leading, true).await;
+    fake.until("four places offered", |world| world.capacity == Some(4))
+        .await;
+
+    let place = tokio::time::timeout(Duration::from_secs(10), room.take())
+        .await
+        .expect("an idle runner makes way");
+    assert_eq!(fake.world().sandboxes.len(), 3);
+    fake.until("three places offered", |world| world.capacity == Some(3))
+        .await;
+
+    // Four jobs: three run, the fourth waits for the builder.
+    fake.send(
+        &json!([
+            {"messageType": "JobAvailable", "runnerRequestId": 21},
+            {"messageType": "JobAvailable", "runnerRequestId": 22},
+            {"messageType": "JobAvailable", "runnerRequestId": 23},
+            {"messageType": "JobAvailable", "runnerRequestId": 24},
+        ]),
+        4,
+    );
+    fake.until("the message handled", |world| world.messages.is_empty())
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fake.world().sandboxes.len(), 3, "the builder's place stays");
+
+    drop(place);
+    fake.until("the place back with the pool", |world| {
+        world.sandboxes.len() == 4 && world.capacity == Some(4)
+    })
+    .await;
+
+    stop.cancel();
+    done.await.unwrap();
+}

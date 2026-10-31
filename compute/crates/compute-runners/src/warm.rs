@@ -10,7 +10,9 @@
 //! (their images stay while sandboxes use them). A failed refresh leaves
 //! the last good template in use. The clone's token is given to that one
 //! command in its environment, never written to the disk the template
-//! keeps.
+//! keeps. The builder takes one of the pool's places ([`crate::room`]),
+//! so the pool and its builder never hold more sandboxes than its
+//! maximum.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -24,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::compute::{Compute, Created, NewSandbox, Snapshot};
 use crate::github::Github;
+use crate::room::Room;
 
 /// The metadata key a template builder's sandbox carries, naming its
 /// pool's key.
@@ -133,13 +136,15 @@ fn clone_script(web: &str, repo: &str, commit: &str, dir: &str) -> String {
 /// taking over it adopts the newest template, which the replica that led
 /// before may have made, and refreshes nothing until it has: what it had
 /// as a standby may be gone, and a refresh failing then would keep it for
-/// as long as refreshes wait.
+/// as long as refreshes wait. A refresh waits for a place in `room`, and
+/// is put off when this replica stops leading first.
 pub async fn keep(
     settings: Settings,
     github: Arc<Github>,
     compute: Compute,
+    room: Room,
     current: watch::Sender<String>,
-    leading: watch::Receiver<bool>,
+    mut leading: watch::Receiver<bool>,
     stop: CancellationToken,
 ) {
     let mut have: Option<Ours> = None;
@@ -158,6 +163,14 @@ pub async fn keep(
             if due {
                 match look(&settings, &github, &mut branch, have.as_ref()).await {
                     Ok(Some(commit)) => {
+                        let place = tokio::select! {
+                            place = room.take() => Some(place),
+                            _ = leading.wait_for(|leads| !*leads) => None,
+                            () = stop.cancelled() => return,
+                        };
+                        let Some(place) = place else {
+                            continue;
+                        };
                         tried = Some(now_s());
                         tokio::select! {
                             refreshed = refresh(&settings, &github, &compute, &commit) => match refreshed {
@@ -174,6 +187,7 @@ pub async fn keep(
                             },
                             () = stop.cancelled() => return,
                         }
+                        drop(place);
                     }
                     Ok(None) => {}
                     Err(error) => tracing::warn!(
