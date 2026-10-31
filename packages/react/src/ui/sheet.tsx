@@ -3,7 +3,7 @@ import { XIcon } from "lucide-react";
 import { Dialog as SheetPrimitive } from "radix-ui";
 
 import { SectionFrameReset } from "./section-variant";
-import { WindowBarTitleBoundary } from "./page-header";
+import { WindowBarTitleBoundary } from "./window-bar-title";
 import { cn } from "../lib/cn";
 import { containedPortal } from "./portal-container";
 

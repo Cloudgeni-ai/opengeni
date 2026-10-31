@@ -2,7 +2,7 @@ import { CircleAlertIcon, KeyRoundIcon } from "lucide-react";
 import { useRef, useState, type ReactNode, type Ref } from "react";
 import { Button } from "@opengeni/react/ui/button";
 import { cn } from "@opengeni/react/app/lib/utils";
-import { useWindowBarTitle } from "@opengeni/react/ui/page-header";
+import { useWindowBarTitle } from "@opengeni/react/ui/window-bar-title";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
 import { Notice } from "@opengeni/react/ui/notice";

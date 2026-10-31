@@ -1,7 +1,7 @@
 import { Children, isValidElement, type ReactNode } from "react";
 
 import { LogoTileSizeProvider } from "./logo-tile";
-import { useWindowBarTitle } from "./page-header";
+import { useWindowBarTitle } from "./window-bar-title";
 import { cn } from "../lib/cn";
 
 export { BackLink, DetailPage, type DetailBackLink } from "./detail-sheet";

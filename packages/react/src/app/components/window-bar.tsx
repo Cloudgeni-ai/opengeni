@@ -8,7 +8,7 @@ import { useMemo, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
 import { Button } from "../../ui/button";
-import { PageHeaderWindowBarContext } from "../../ui/page-header";
+import { PageHeaderWindowBarContext } from "../../ui/window-bar-title";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
 import { useActionShortcut } from "../lib/actions/actions-provider";
 import { desktopPlatform } from "../lib/desktop";

@@ -24,7 +24,7 @@ import type { AnalyticsAction } from "./analytics-actions";
 import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "./api-error";
 import { cn } from "../lib/cn";
 import { containedPortal } from "./portal-container";
-import { useWindowBarTitle, WindowBarTitleBoundary } from "./page-header";
+import { useWindowBarTitle, WindowBarTitleBoundary } from "./window-bar-title";
 
 const DialogContainedPortal = containedPortal(DialogPrimitive.Portal);
 

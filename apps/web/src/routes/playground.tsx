@@ -26,7 +26,7 @@ import { captureAnalyticsEvent } from "@opengeni/react/app/lib/analytics-observe
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { readyNewChat } from "@opengeni/react/app/lib/ready-new-chat";
 import { cn } from "@opengeni/react/app/lib/utils";
-import { useWindowBarTitle } from "@opengeni/react/ui/page-header";
+import { useWindowBarTitle } from "@opengeni/react/ui/window-bar-title";
 
 /** The callouts, in order. Each moves on only when the person acts. */
 export type Tip = "chat" | "color" | "code" | "tool" | "ship";

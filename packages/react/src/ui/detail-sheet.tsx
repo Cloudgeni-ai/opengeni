@@ -19,7 +19,7 @@ import { Sheet, SheetClose, SheetDescription, SheetTitle, SheetTrigger } from ".
 import { Skeleton } from "./skeleton";
 import { cn } from "../lib/cn";
 import { containedPortal } from "./portal-container";
-import { WindowBarTitleBoundary } from "./page-header";
+import { WindowBarTitleBoundary } from "./window-bar-title";
 
 const DialogContainedPortal = containedPortal(DialogPrimitive.Portal);
 
