@@ -306,7 +306,12 @@ describe("computeControl", () => {
         postgres: { enabled: false },
         computeControl: {
           ...enabled.computeControl,
-          database: { existingSecret: "compute-db", provision: false, host: "db.example.com", sslmode },
+          database: {
+            existingSecret: "compute-db",
+            provision: false,
+            host: "db.example.com",
+            sslmode,
+          },
         },
       });
       expect(refused.exitCode).not.toBe(0);
