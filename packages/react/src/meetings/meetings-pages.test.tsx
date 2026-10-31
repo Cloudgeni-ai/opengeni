@@ -1290,6 +1290,52 @@ describe("Meeting page", () => {
     }
   });
 
+  test("while a meeting is processed, the player waits until every recorded track can play", async () => {
+    const fixture = createMeetingsFixture();
+    const listed = await fixture.client.listRecordings(fixture.workspaceId);
+    const processing = listed.recordings.find((entry) => entry.state === "processing")!;
+    // The microphone is ready to play; the computer audio isn't yet.
+    let playable = new Set([0]);
+    let reads = 0;
+    const recordings = {
+      ...fixture.client,
+      getRecording: async (workspaceId: string, id: string) => {
+        const found = await fixture.client.getRecording(workspaceId, id);
+        if (id !== processing.id) return found;
+        reads += 1;
+        return {
+          ...found,
+          tracks: found.tracks.map((track) => ({
+            ...track,
+            playable: playable.has(track.trackNumber),
+          })),
+        };
+      },
+    };
+    const player = (container: HTMLElement) =>
+      container.querySelector('[aria-label="Position"]') !== null;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={processing.id}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={recordings}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitFor(() => reads > 0);
+      await settle(600);
+      // The microphone alone would sound as if the call was never recorded.
+      expect(player(view.container)).toBe(false);
+      playable = new Set([0, 1]);
+      // The page reads the meeting again while it's processed.
+      await waitFor(() => player(view.container), 6_000);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a transcript that failed before the audio was prepared can be made again", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
