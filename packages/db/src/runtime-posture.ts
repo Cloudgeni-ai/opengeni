@@ -461,7 +461,7 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "keep_subscription_cutover_identity()",
   // Migration 0907: the invoker-rights trigger function that kept a
   // workspace's own subscription connection serving only that workspace. Its
-  // triggers were dropped in migration 1150; the function stays until a later
+  // triggers were dropped in migration 1166; the function stays until a later
   // release removes it.
   "guard_subscription_workspace_owner_reach()",
   // Migration 0909: the invoker-rights trigger that mirrors a message event's

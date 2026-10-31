@@ -9,7 +9,7 @@ import { migrate } from "../src/migrate";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const migration = readFileSync(
-  new URL("../drizzle/1152_own_login_turned_on_per_workspace.sql", import.meta.url),
+  new URL("../drizzle/1168_own_login_turned_on_per_workspace.sql", import.meta.url),
   "utf8",
 );
 // The one-time backfill, from relaxing FORCE ROW LEVEL SECURITY to restoring it.
@@ -55,7 +55,7 @@ async function turnedOnIn(authorityId: string) {
   return rows.map((row) => row.workspaceId);
 }
 
-describe("1152 turns existing own logins on where their owners work (real PostgreSQL)", () => {
+describe("1168 turns existing own logins on where their owners work (real PostgreSQL)", () => {
   test("every shared workspace the owner belongs to, never Personal, once", async () => {
     if (!owned || !ownerSql) return;
     const [account] = await owned.admin<{ id: string }[]>`
