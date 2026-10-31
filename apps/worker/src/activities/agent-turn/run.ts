@@ -124,6 +124,7 @@ import { observeCodexResponseCompletion } from "./codex-core-settlement";
 import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
 import { createSandboxTurnRuntime } from "./sandbox-runtime";
+import { prepareFileTurnStartup } from "./file-startup";
 import {
   resolveSandboxRoute,
   establishTurnSandbox,
@@ -1623,170 +1624,183 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             attachRunCredentialRenewal,
           } = runCredentials;
 
-          await establishTurnSandbox({
-            ...sandboxRoute,
-            input,
-            settings,
-            db,
-            bus,
-            wakeSessionWorkflow,
-            objectStorage,
-            observability,
-            cancellationSignal,
-            runtimeCancellationSignal,
-            sandboxResumeSignal,
-            activityContext,
-            opJournal,
-            sandboxState,
-            eventing,
-            attempt,
-            turn,
-            session,
-            fileAuthoritySubjectId,
-            capabilitySettings,
-            turnExecutionPolicy,
-            runSettings,
-            logicalSandboxSettings,
-            verifiedRigProviderImageId,
-            runtimePreparationStartedAt,
+          const { fileResourceDownloads, vaultAccess, toolRuntime } = await prepareFileTurnStartup({
             establishPolicy,
-            sandboxEnvironment,
-            startRunGitCredentialsMint,
-            machineOpObserver,
-            sandboxOperationObserver,
-            sandboxRuntime,
-            transientCodemodeEnvironment,
-            rigVersion,
-            turnResources,
-          });
-
-          const ordinaryFileResourceDownloads = await (async () => {
-            const fileResolutionStartedAt = performance.now();
-            let fileResolutionOutcome: "completed" | "failed" = "completed";
-            try {
-              return await waitForTurnOperation(
-                sandboxFileDownloadsForRun(
-                  runSettings,
-                  db,
-                  objectStorage,
-                  input.accountId,
-                  input.workspaceId,
-                  fileAuthoritySubjectId,
-                  turn.resources,
-                  activeSandboxBackend ?? groupBoxBackend,
-                ),
+            machinePrimary,
+            backend: groupBoxBackend,
+            hasFileResources: turn.resources.some((resource) => resource.kind === "file"),
+            establish: () =>
+              establishTurnSandbox({
+                ...sandboxRoute,
+                input,
+                settings,
+                db,
+                bus,
+                wakeSessionWorkflow,
+                objectStorage,
+                observability,
                 cancellationSignal,
-                undefined,
-              );
-            } catch (error) {
-              fileResolutionOutcome = "failed";
-              throw error;
-            } finally {
-              recordTurnStartupPhase(observability, {
-                phase: "file_resolution",
-                provider: turnExecutionPolicy.providerId,
-                backend: activeSandboxBackend ?? groupBoxBackend,
-                outcome: fileResolutionOutcome,
-                durationSeconds: (performance.now() - fileResolutionStartedAt) / 1_000,
-                count: turn.resources.length,
+                runtimeCancellationSignal,
+                sandboxResumeSignal,
+                activityContext,
+                opJournal,
+                sandboxState,
+                eventing,
+                attempt,
+                turn,
+                session,
+                fileAuthoritySubjectId,
+                capabilitySettings,
+                turnExecutionPolicy,
+                runSettings,
+                logicalSandboxSettings,
+                verifiedRigProviderImageId,
+                runtimePreparationStartedAt,
+                establishPolicy,
+                sandboxEnvironment,
+                startRunGitCredentialsMint,
+                machineOpObserver,
+                sandboxOperationObserver,
+                sandboxRuntime,
+                transientCodemodeEnvironment,
+                rigVersion,
+                turnResources,
+              }),
+            prepare: async () => {
+              const ordinaryFileResourceDownloads = await (async () => {
+                const fileResolutionStartedAt = performance.now();
+                let fileResolutionOutcome: "completed" | "failed" = "completed";
+                try {
+                  return await waitForTurnOperation(
+                    sandboxFileDownloadsForRun(
+                      runSettings,
+                      db,
+                      objectStorage,
+                      input.accountId,
+                      input.workspaceId,
+                      fileAuthoritySubjectId,
+                      turn.resources,
+                      activeSandboxBackend ?? groupBoxBackend,
+                    ),
+                    cancellationSignal,
+                    undefined,
+                  );
+                } catch (error) {
+                  fileResolutionOutcome = "failed";
+                  throw error;
+                } finally {
+                  recordTurnStartupPhase(observability, {
+                    phase: "file_resolution",
+                    provider: turnExecutionPolicy.providerId,
+                    backend: activeSandboxBackend ?? groupBoxBackend,
+                    outcome: fileResolutionOutcome,
+                    durationSeconds: (performance.now() - fileResolutionStartedAt) / 1_000,
+                    count: turn.resources.length,
+                  });
+                }
+              })();
+              if (requiredGeneratedVideoFiles.length > 0 && !objectStorage) {
+                throw new Error("Generated video materialization requires object storage");
+              }
+              const generatedVideoDownloads: SandboxFileDownload[] = [];
+              if (objectStorage && requiredGeneratedVideoFiles.length > 0) {
+                const downloadStorage = objectStorageForSandboxDownloads(
+                  eventing.modelRunSettings,
+                  objectStorage,
+                  media.sandboxFileDownloadBackend,
+                );
+                for (const file of requiredGeneratedVideoFiles) {
+                  const signed = await downloadStorage.createGetUrl({
+                    key: file.objectKey,
+                  });
+                  generatedVideoDownloads.push({
+                    fileId: file.fileId,
+                    mountPath: "generated-videos",
+                    filename: file.filename,
+                    url: signed.url,
+                    expiresAt: signed.expiresAt,
+                    sizeBytes: file.sizeBytes,
+                    sha256: file.sha256,
+                  });
+                }
+              }
+              const preparedFileDownloads = [
+                ...new Map(
+                  [...ordinaryFileResourceDownloads, ...generatedVideoDownloads].map((download) => [
+                    download.fileId,
+                    download,
+                  ]),
+                ).values(),
+              ];
+              // Connected vaults (1Password, host) resolve under the acting human;
+              // one provider read budget covers every resolver of this attempt.
+              const preparedVaultAccess = createAttemptVaultAccess({
+                db,
+                settings,
+                workspaceId: input.workspaceId,
+                subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? null,
+                hostVaultProvider: connectionCredentials?.vaultProvider,
+                onePasswordVaultProvider: resolvedServices.onePasswordVaultProvider,
+                externalVaultProviders: resolvedServices.externalVaultProviders ?? null,
+                executionContext: {
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  attemptId: input.attemptId,
+                },
               });
-            }
-          })();
-          if (requiredGeneratedVideoFiles.length > 0 && !objectStorage) {
-            throw new Error("Generated video materialization requires object storage");
-          }
-          const generatedVideoDownloads: SandboxFileDownload[] = [];
-          if (objectStorage && requiredGeneratedVideoFiles.length > 0) {
-            const downloadStorage = objectStorageForSandboxDownloads(
-              eventing.modelRunSettings,
-              objectStorage,
-              media.sandboxFileDownloadBackend,
-            );
-            for (const file of requiredGeneratedVideoFiles) {
-              const signed = await downloadStorage.createGetUrl({
-                key: file.objectKey,
+              const preparedToolRuntime = await prepareTurnToolRuntime({
+                independentSessionTitles: !!startSessionTitleWorkflow,
+                vaultAccess: preparedVaultAccess,
+                fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
+                runCredentialRenewals: runCredentialResolver ? renewals : undefined,
+                runMcpCredentials,
+                input,
+                catalogSourceSettings,
+                db,
+                bus,
+                runtime,
+                objectStorage,
+                observability,
+                cancellationSignal,
+                eventing,
+                attempt,
+                sandboxState,
+                media,
+                toolResultSpill,
+                turn,
+                session,
+                fileAuthoritySubjectId,
+                capabilitySettings,
+                installedApiIntegrations,
+                ...(capabilityServerCategories ? { capabilityServerCategories } : {}),
+                codexAppsCoreConnectionId,
+                turnExecutionPolicy,
+                trigger,
+                runSettings,
+                resolvedModel,
+                lazyToolTransport,
+                workspaceCreditModelsAllowed,
+                turnTools,
+                connectionScope,
+                sandboxArtifactRuntime,
+                activeSandboxBackend,
+                groupBoxBackend,
+                routingOn,
+                runtimeCancellationSignal,
+                credentialSubjectId,
+                interactionInterventionResume,
+                runWorkspaceMutationForSandbox,
+                codeSearchEnabled,
+                retainsOptionalRepository,
+                throwIfWorkerShuttingDown,
+                throwIfTurnCancelled,
               });
-              generatedVideoDownloads.push({
-                fileId: file.fileId,
-                mountPath: "generated-videos",
-                filename: file.filename,
-                url: signed.url,
-                expiresAt: signed.expiresAt,
-                sizeBytes: file.sizeBytes,
-                sha256: file.sha256,
-              });
-            }
-          }
-          const fileResourceDownloads = [
-            ...new Map(
-              [...ordinaryFileResourceDownloads, ...generatedVideoDownloads].map((download) => [
-                download.fileId,
-                download,
-              ]),
-            ).values(),
-          ];
-          // Connected vaults (1Password, host) resolve under the acting human;
-          // one provider read budget covers every resolver of this attempt.
-          const vaultAccess = createAttemptVaultAccess({
-            db,
-            settings,
-            workspaceId: input.workspaceId,
-            subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? null,
-            hostVaultProvider: connectionCredentials?.vaultProvider,
-            onePasswordVaultProvider: resolvedServices.onePasswordVaultProvider,
-            externalVaultProviders: resolvedServices.externalVaultProviders ?? null,
-            executionContext: {
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              attemptId: input.attemptId,
+              return {
+                fileResourceDownloads: preparedFileDownloads,
+                vaultAccess: preparedVaultAccess,
+                toolRuntime: preparedToolRuntime,
+              };
             },
-          });
-          const toolRuntime = await prepareTurnToolRuntime({
-            independentSessionTitles: !!startSessionTitleWorkflow,
-            vaultAccess,
-            fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
-            runCredentialRenewals: runCredentialResolver ? renewals : undefined,
-            runMcpCredentials,
-            input,
-            catalogSourceSettings,
-            db,
-            bus,
-            runtime,
-            objectStorage,
-            observability,
-            cancellationSignal,
-            eventing,
-            attempt,
-            sandboxState,
-            media,
-            toolResultSpill,
-            turn,
-            session,
-            fileAuthoritySubjectId,
-            capabilitySettings,
-            installedApiIntegrations,
-            ...(capabilityServerCategories ? { capabilityServerCategories } : {}),
-            codexAppsCoreConnectionId,
-            turnExecutionPolicy,
-            trigger,
-            runSettings,
-            resolvedModel,
-            lazyToolTransport,
-            workspaceCreditModelsAllowed,
-            turnTools,
-            connectionScope,
-            sandboxArtifactRuntime,
-            activeSandboxBackend,
-            groupBoxBackend,
-            routingOn,
-            runtimeCancellationSignal,
-            credentialSubjectId,
-            interactionInterventionResume,
-            runWorkspaceMutationForSandbox,
-            codeSearchEnabled,
-            retainsOptionalRepository,
-            throwIfWorkerShuttingDown,
-            throwIfTurnCancelled,
           });
           const {
             attemptConnectorActionBindings,

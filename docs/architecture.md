@@ -37,6 +37,12 @@ Turn post-provision timing uses the existing startup events/metrics through
 mint/join, client publication and credential materialization settle concurrently
 before owned setup; see [run lifecycle](run-lifecycle.md#agent-loop-request-lifecycle-observability).
 
+Managed eager file turns overlap box establishment with independent file metadata
+and tool preparation through `apps/worker/src/activities/agent-turn/file-startup.ts`.
+Both branches settle before agent build, including on failure; verified file
+delivery and platform setup still finish before model dispatch. Machine, sandboxless
+and non-file turns retain their existing preparation order.
+
 Worker pre-dispatch timing, nested phase boundaries and the real-PostgreSQL
 comparison harness: [startup round trips](design/turn-predispatch-round-trips.md).
 HTTP/Temporal first-request measurements, independent metadata overlap and
