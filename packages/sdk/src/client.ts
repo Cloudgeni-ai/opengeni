@@ -203,6 +203,7 @@ import {
   type ReadRetryPolicy,
 } from "./read-retry";
 import type {
+  OrganizationSkillReach,
   SkillRecord,
   SkillSummary,
   SkillWriteReceipt,
@@ -10208,6 +10209,21 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/reject`,
       request,
+    );
+  }
+
+  /** Choose where an organization Skill works: every shared workspace (`null`)
+   * or the listed ones, plus members' Personal workspaces when switched on.
+   * Whoever may change the organization's Skills only. */
+  async updateSkillReach(
+    workspaceId: string,
+    skillId: string,
+    reach: OrganizationSkillReach,
+  ): Promise<{ reach: OrganizationSkillReach }> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/reach`,
+      reach,
     );
   }
 
