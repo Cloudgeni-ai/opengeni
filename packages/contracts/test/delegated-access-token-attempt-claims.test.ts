@@ -65,4 +65,33 @@ describe("delegated access token attempt claims", () => {
       }).success,
     ).toBe(false);
   });
+
+  test("only an agent attempt's token can name the machine its process runs on", () => {
+    const executionSandboxId = "55555555-5555-4555-8555-555555555555";
+    expect(
+      DelegatedAccessTokenPayload.safeParse({
+        ...base,
+        subjectId: "sandbox:66666666-6666-4666-8666-666666666666",
+        principalKind: "agent_attempt",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "66666666-6666-4666-8666-666666666666",
+        executionGeneration: 1,
+        executionSandboxId,
+      }).success,
+    ).toBe(true);
+    for (const principalKind of ["human_session", "service"] as const) {
+      expect(
+        DelegatedAccessTokenPayload.safeParse({ ...base, principalKind, executionSandboxId })
+          .success,
+      ).toBe(false);
+    }
+    expect(
+      DelegatedAccessTokenPayload.safeParse({
+        ...base,
+        principalKind: "agent_attempt",
+        executionSandboxId: "not-a-machine",
+      }).success,
+    ).toBe(false);
+  });
 });

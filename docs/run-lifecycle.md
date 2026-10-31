@@ -5031,7 +5031,10 @@ hides its search evidence behind the stored `ws_` ID even when results are inlin
 When native search is attached, the Azure request policy requests sources and,
 with enabled reasoning, result snippets. `hosted-search-evidence.ts` exposes only
 actually returned URLs/titles/snippets as one bounded, explicitly untrusted
-assistant historical-fact message before model and portable-compaction accounting.
+search record before model and portable-compaction accounting: a user-role
+runtime record for sessions in the `runtime` form, the original assistant-role
+message for older sessions until that changes no sent text (see
+[search record forms](web-search.md#hosted-evidence-across-tool-calls)).
 Canonical hosted records remain unchanged. Missing legacy includes cannot be
 reconstructed; sources alone cannot supply page facts, and native citations are
 not guaranteed. See [hosted evidence across tool calls](web-search.md#hosted-evidence-across-tool-calls).

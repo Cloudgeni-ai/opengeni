@@ -1,6 +1,11 @@
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
-import type { EntitlementsPort } from "@opengeni/contracts";
 import {
+  API_CREDITS_REQUIRED_MESSAGE,
+  type BillingOrigin,
+  type EntitlementsPort,
+} from "@opengeni/contracts";
+import {
+  chargeBillingOrigin,
   checkWorkspaceAllowance,
   getSpendableCreditBalance,
   sumUsageQuantity,
@@ -15,7 +20,13 @@ export type ModelCallAdmissionDenial =
 
 export type ModelCallAdmission =
   | { allowed: true; creditPolicyRevision: number | undefined }
-  | { allowed: false; denial: ModelCallAdmissionDenial; message: string };
+  | {
+      allowed: false;
+      denial: ModelCallAdmissionDenial;
+      message: string;
+      /** API work found no credits: plan credit never pays for it. */
+      apiCreditsRequired?: true;
+    };
 
 /**
  * Admission for one stateless model call, with the same funding rules as an
@@ -36,6 +47,8 @@ export async function admitModelCall(
     chargesOpenGeniCredits: boolean;
     countsTowardTokenCap: boolean;
     subjectId: string | null;
+    /** Who pays: API work needs credits; plan credit never pays for it. */
+    billingOrigin?: BillingOrigin | null;
   },
 ): Promise<ModelCallAdmission> {
   const { settings, db } = services;
@@ -57,13 +70,23 @@ export async function admitModelCall(
         };
       }
     } else {
-      const balance = await getSpendableCreditBalance(db, input.accountId, input.model);
+      const origin = chargeBillingOrigin(input.billingOrigin);
+      const balance = await getSpendableCreditBalance(
+        db,
+        input.accountId,
+        input.model,
+        undefined,
+        undefined,
+        origin,
+      );
       creditPolicyRevision = balance.creditPolicyRevision;
       if (balance.balanceMicros <= 0) {
         return {
           allowed: false,
           denial: "insufficient_credits",
-          message: "Insufficient workspace credits.",
+          ...(origin === "api"
+            ? { message: API_CREDITS_REQUIRED_MESSAGE, apiCreditsRequired: true as const }
+            : { message: "Insufficient workspace credits." }),
         };
       }
     }

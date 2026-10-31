@@ -84,6 +84,7 @@ import {
   type TurnTaskQueueIdentity,
 } from "./observability-metrics";
 import {
+  configureBillingLegacyAccounts,
   resolveCatalogSettings,
   TURN_ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL_MS,
 } from "@opengeni/core";
@@ -221,6 +222,8 @@ export async function createDefaultWorkerActivities(
   if (dependencies.objectStorage == null) {
     prepareObjectStorageProvider(dependencies.settings ?? getSettings());
   }
+  // Accounts on the billing terms from before the app/API split (CloudGeni).
+  configureBillingLegacyAccounts((dependencies.settings ?? getSettings()).billingLegacyAccountIds);
   return role === "control"
     ? (await import("./activities-control")).createControlActivities(dependencies)
     : (await import("./activities-turn")).createTurnActivities(dependencies);

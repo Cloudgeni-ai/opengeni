@@ -89,6 +89,8 @@ function frozen(
 
 async function manuallyTrigger(callingGrant: AccessGrant, suppliedRestriction = false) {
   track(spyOn(db, "scheduledTaskMutationOwnerMatches").mockResolvedValue(true));
+  track(spyOn(db, "markScheduledTaskApiBilled").mockResolvedValue());
+  track(spyOn(db, "readTurnBillingOrigin").mockResolvedValue("app"));
   const database = { transaction: async (run: (tx: never) => Promise<void>) => run({} as never) };
   let accepted: Parameters<SessionWorkflowClient["triggerScheduledTask"]>[0] | undefined;
   await triggerScheduledTaskForGrant(
@@ -413,6 +415,7 @@ describe("scheduled task frozen setup restriction", () => {
 
   test("a paused schedule is refused visibly instead of being triggered into a silent no-op", async () => {
     track(spyOn(db, "scheduledTaskMutationOwnerMatches").mockResolvedValue(true));
+    track(spyOn(db, "markScheduledTaskApiBilled").mockResolvedValue());
     const database = { transaction: async (run: (tx: never) => Promise<void>) => run({} as never) };
     let started = 0;
     const workflowClient = {

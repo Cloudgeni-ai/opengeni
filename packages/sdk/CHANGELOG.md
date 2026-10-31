@@ -1,5 +1,20 @@
 # @opengeni/sdk
 
+## 6.2.1
+
+### Minor Changes
+
+- cbfd911: Insights can show the last hour, the last 3 hours and the last 24 hours, and a custom range now takes a start and end time to the minute. Usage requests accept `range` values `1h`, `3h` and `24h`, and custom `from`/`to` as UTC instants (`YYYY-MM-DDTHH:MMZ`, end exclusive) as well as UTC days (end inclusive). Buckets follow the window length: 5 minutes up to 3 hours, hourly up to 2 days, then daily, so `bucket` can now be `five_minutes`. The prior window is always the same length immediately before. Usage responses list `availableRanges`, the ranges that server serves.
+- 7c94b6e: Find in a chat (Cmd/Ctrl+F) now covers the whole chat and starts at the newest match. It counts matches in the background, so the bar reads "3 / 120" instead of "1 / 50+"; in a chat with thousands of matches it shows how many it has found so far. Previous from the first match goes to the newest, Next from the newest goes straight to the first, and Enter, Shift+Enter, the arrows and Cmd/Ctrl+G all step through matches. Closing and reopening the bar starts again at the newest match. Session message search accepts `order: "newest"` to walk messages newest first; the default stays `oldest`, and `groupBy: "session"` only supports `oldest`.
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+  - @opengeni/connect@6.2.0
+
 ## 6.1.1
 
 ### Minor Changes

@@ -368,6 +368,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 swapped,
                 stall: stall_thousandths(stats.pressure_full_avg10),
                 high: stats.high,
+                bringing_down: self.engine.bringing_down(&live.vm),
             });
         }
         readings

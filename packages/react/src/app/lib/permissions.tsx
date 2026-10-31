@@ -414,6 +414,51 @@ export function canManageWorkspaceSettings(
 }
 
 /**
+ * Shared content of a workspace that everyone who works there may change for
+ * everyone, like a shared Skill: its instructions and the review of the
+ * agent's proposed changes to them. Whoever manages the workspace's settings
+ * may; otherwise a person of the organization who can start chats here
+ * (`sessions:create`), signed in as themselves (see {@link isSignedInPerson}).
+ * Mirrors the API's `requireWorkspaceContributorGrant`. UI affordance only.
+ */
+export function canContributeWorkspaceContent(
+  context: AccessContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  selfContext: ManagedSelfContext | null,
+): boolean {
+  if (!context || !workspace) return false;
+  if (canManageWorkspaceSettings(context, workspace, selfContext)) return true;
+  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspace.id);
+  return Boolean(
+    grant &&
+    grant.accountId === workspace.accountId &&
+    isSignedInPerson(context, workspace.id) &&
+    hasWorkspacePermission(context, workspace.id, "sessions:create"),
+  );
+}
+
+/**
+ * The signed-in person themself, not a key, a delegated credential or an
+ * agent: an Opengeni account (`user:`) or the local install's person (`dev`).
+ * Mirrors the API's rule for Only me machines and shared workspace content;
+ * the API still decides.
+ */
+export function isSignedInPerson(context: AccessContext | null, workspaceId: string): boolean {
+  if (!context || context.credential) return false;
+  const person =
+    context.mode === "local" ? context.subjectId === "dev" : context.subjectId.startsWith("user:");
+  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  return Boolean(
+    person &&
+    grant &&
+    grant.subjectId === context.subjectId &&
+    grant.principalKind === "human_session" &&
+    grant.metadata?.delegated !== true &&
+    !grant.serviceInitiator,
+  );
+}
+
+/**
  * A shared workspace's Members surface: the viewer's own members:manage grant,
  * or (in a managed browser session) an active organization owner or admin of
  * the workspace's organization, with or without a grant here. The API applies

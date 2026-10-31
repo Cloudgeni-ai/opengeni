@@ -1,7 +1,6 @@
 import type { Recording } from "@opengeni/contracts";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import {
-  defaultMeetingTitle,
   formatClock,
   formatDuration,
   groupLiveTurns,
@@ -410,8 +409,9 @@ function RecorderCard({
   const liveOn = liveTranscript ? (liveChoice ?? liveTranscript.defaultOn) : false;
 
   const start = () => {
+    // Unnamed: Opengeni names it after the calendar event at the time, or
+    // from the conversation once its notes are written.
     void recorder.start({
-      title: defaultMeetingTitle(new Date(), msg),
       ...(externalRef ? { externalRef } : {}),
       ...(liveOn ? { liveTranscript: true } : {}),
     });

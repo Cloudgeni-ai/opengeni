@@ -46,6 +46,8 @@ function harness(
     "withAccessGrantSessionRlsContext",
     async (_d: unknown, _g: unknown, fn: () => unknown) => fn(),
   );
+  // The chat's frozen funding origin (read from its turn) is not under test.
+  spy(rls, "billingOriginForAccessGrant", async () => "app");
   spy(core, "resolveWorkspaceCatalogSettings", async () => ({ settings }));
   spy(core, "resolveCallerWorkspaceModelSelections", async () => [selection]);
   spy(core, "admissibleWorkspaceModel", () => selection);

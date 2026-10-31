@@ -529,3 +529,57 @@ test("an address that is not approved for the service gets who to ask, not a ret
     host.remove();
   }
 });
+
+test("an address the deployment doesn't allow is told it can't sign in, for a password or a passkey", async () =>
+  withPasskeyBrowser(async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const refusal = () =>
+      new AuthApiError(403, "SIGN_IN_EMAIL_NOT_ALLOWED", null, "sign in email not allowed");
+    const setField = async (selector: string, value: string) => {
+      const input = host.querySelector<HTMLInputElement>(selector)!;
+      const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+      await act(async () => {
+        (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[
+          propsKey
+        ]!.onChange({ target: { value } });
+      });
+    };
+    const message = "This email can't sign in here. Ask your admin for access.";
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            passkeySignIn
+            onPasskeySubmit={async () => {
+              throw refusal();
+            }}
+            onSubmit={async () => {
+              throw refusal();
+            }}
+          />,
+        ),
+      );
+      await setField("#managed-auth-email", "person@example.test");
+      await setField('input[type="password"]', "any-password");
+      await act(async () =>
+        host
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      expect(host.textContent).toContain("Couldn't sign in");
+      expect(host.textContent).toContain(message);
+      expect(host.textContent).not.toContain("Please try again");
+
+      const passkey = Array.from(host.querySelectorAll("button")).find(
+        (b) => b.textContent?.trim() === "Sign in with a passkey",
+      )!;
+      await act(async () => passkey.click());
+      expect(host.textContent).toContain(message);
+      expect(host.textContent).not.toContain("Couldn't sign in with your passkey");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  }));

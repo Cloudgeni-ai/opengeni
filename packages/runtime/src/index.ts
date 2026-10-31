@@ -1,4 +1,5 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+import type { SearchRecordForm } from "./hosted-search-evidence";
 export {
   activeAttemptSecretValues,
   installToolResultSecretMasking,
@@ -833,6 +834,12 @@ export {
   serializeInteractionInterventionRequests,
 } from "./run-events";
 export { toolCallIdFromSdkItem } from "./tool-call-identity";
+export {
+  HostedSearchEvidenceEchoGuard,
+  isHostedSearchEvidenceEchoText,
+  searchRecordFormMatters,
+  type SearchRecordForm,
+} from "./hosted-search-evidence";
 export {
   compactMcpResultCustomDataRunState,
   OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
@@ -2149,6 +2156,21 @@ export type GitCredentialBindingSeed = {
   expiresAt?: string;
   /** Total active bindings for this provider, used to suppress unsafe aliases. */
   providerBindingCount?: number;
+  /**
+   * Commit identity for this binding's repositories. The repository clone hook
+   * writes it into each repository's local Git config (marked
+   * `opengeni.managedIdentity`), so one session can mix repositories that
+   * commit as different identities. `committer` is set only when it differs
+   * from the author (a deployment with separate OPENGENI_GIT_COMMITTER_*).
+   * Never a secret.
+   */
+  identity?: GitRepositoryIdentity;
+};
+/** A repository's commit identity: author, plus a committer when it differs. */
+export type GitRepositoryIdentity = {
+  name: string;
+  email: string;
+  committer?: { name: string; email: string } | undefined;
 };
 export type GitCredentialTokenWriterSession = SandboxSessionLike;
 export type CodemodeTokenWriterSession = SandboxSessionLike;
@@ -10277,6 +10299,12 @@ export type RunAgentStreamOptions = {
   // reconcile dual-write never sees it.
   callModelInputFilter?: CallModelInputFilter;
   /**
+   * How the session's hosted web searches reach the model (see
+   * `SearchRecordForm`). The worker settles it before the run; it stays the
+   * same for every model call of the run.
+   */
+  searchRecordForm?: SearchRecordForm;
+  /**
    * Masks known secret values in the instructions and input of every model
    * call, after every filter that can add input (docs/secrets.md, Masking).
    */
@@ -10654,7 +10682,12 @@ async function runAgentStreamInternal(
     const ownedFilter = composeCallModelInputFilters(
       [
         inputWaitYield?.modelInputFilter,
-        measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
+        measuredModelInputFilter(
+          "input_filter_base",
+          baseModelInputFilterForSettings(settings, {
+            searchRecordForm: overrides.searchRecordForm,
+          }),
+        ),
         measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
         measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
         // A caller filter may synthesize model input. Re-apply the idempotent
@@ -10829,7 +10862,12 @@ async function runAgentStreamInternal(
   const callModelInputFilter = composeCallModelInputFilters(
     [
       inputWaitYield?.modelInputFilter,
-      measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
+      measuredModelInputFilter(
+        "input_filter_base",
+        baseModelInputFilterForSettings(settings, {
+          searchRecordForm: overrides.searchRecordForm,
+        }),
+      ),
       measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
       measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
       measuredModelInputFilter(
@@ -13346,6 +13384,284 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
   ];
 }
 
+/**
+ * Per-turn `git` wrapper in the provider-CLI wrapper dir (which precedes the
+ * real git on the manifest PATH of provisioned boxes).
+ *
+ * Boxes created before per-repository identity carry a box-wide
+ * GIT_AUTHOR_* / GIT_COMMITTER_* identity in their manifest env, and a live box
+ * keeps that env for its whole life. Git lets the environment override a
+ * repository's `user.name`/`user.email`, so the wrapper runs the real git with
+ * those variables unset when (1) they still hold exactly the values the box
+ * was created with, recorded by the clone hook in `baked-git-identity`, and
+ * (2) the repository the command targets has an Opengeni-managed local
+ * identity. Anything else - no env identity, a value the command set itself,
+ * an unmanaged repository - passes straight through.
+ *
+ * The wrapper resolves the real git by walking PATH with shell builtins only
+ * (a stripped PATH may lack readlink or cat). It skips itself and every git it
+ * already chose on this exec chain (`test -ef`, so symlinks count): before
+ * exec it records itself and its choice in OPENGENI_GIT_WRAPPERS_SEEN, keyed
+ * to its process id. Another git shim on PATH that execs back into the
+ * wrapper (same process) therefore moves on to the next git on PATH. A new
+ * process - a hook or alias that runs git - starts a fresh chain, so it still
+ * finds the real git. A shim that forks back into the wrapper instead of
+ * exec'ing stops after OPENGENI_GIT_WRAPPER_HOPS hops with an error, rather
+ * than spinning. Only repository selecting global options (`-C`,
+ * `--git-dir`, `--work-tree`) are replayed for the identity lookup.
+ */
+export const GIT_COMMAND_WRAPPER_SCRIPT = [
+  "#!/bin/sh",
+  "# Opengeni git wrapper: per-repository commit identity.",
+  '[ "${OPENGENI_GIT_WRAPPER_PID:-}" = "$$" ] || OPENGENI_GIT_WRAPPERS_SEEN=',
+  "OPENGENI_GIT_WRAPPER_HOPS=$((${OPENGENI_GIT_WRAPPER_HOPS:-0} + 1))",
+  'if [ "$OPENGENI_GIT_WRAPPER_HOPS" -gt 32 ]; then',
+  "  printf '%s\\n' 'git: Opengeni git wrapper loop on PATH' >&2",
+  "  exit 125",
+  "fi",
+  'OPENGENI_GIT_WRAPPERS_SEEN="${OPENGENI_GIT_WRAPPERS_SEEN:+$OPENGENI_GIT_WRAPPERS_SEEN:}$0"',
+  "export OPENGENI_GIT_WRAPPER_HOPS",
+  "is_seen_git_wrapper() {",
+  "  for seen_wrapper in $OPENGENI_GIT_WRAPPERS_SEEN; do",
+  '    [ -n "$seen_wrapper" ] && [ "$1" -ef "$seen_wrapper" ] && return 0',
+  "  done",
+  "  return 1",
+  "}",
+  "real_git=",
+  'old_ifs="$IFS"',
+  "IFS=:",
+  "for dir in $PATH; do",
+  '  [ -n "$dir" ] || dir=.',
+  '  candidate="$dir/git"',
+  '  [ -f "$candidate" ] && [ -x "$candidate" ] || continue',
+  '  is_seen_git_wrapper "$candidate" && continue',
+  '  real_git="$candidate"',
+  "  break",
+  "done",
+  'IFS="$old_ifs"',
+  'if [ -z "$real_git" ]; then',
+  "  printf '%s\\n' 'git: real command not found on PATH' >&2",
+  "  exit 127",
+  "fi",
+  'if [ -n "${GIT_AUTHOR_NAME:-}${GIT_AUTHOR_EMAIL:-}${GIT_COMMITTER_NAME:-}${GIT_COMMITTER_EMAIL:-}" ]; then',
+  '  baked_identity_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/baked-git-identity"',
+  '  current_identity="$(printf \'%s\\n%s\\n%s\\n%s\' "${GIT_AUTHOR_NAME:-}" "${GIT_AUTHOR_EMAIL:-}" "${GIT_COMMITTER_NAME:-}" "${GIT_COMMITTER_EMAIL:-}")"',
+  '  if [ -r "$baked_identity_file" ] && [ "$current_identity" = "$(cat "$baked_identity_file" 2>/dev/null)" ]; then',
+  "    shell_word() { printf \"'%s'\" \"$(printf '%s' \"$1\" | sed \"s/'/'\\\\\\\\''/g\")\"; }",
+  "    git_context=",
+  "    expect=",
+  '    for arg in "$@"; do',
+  '      if [ -n "$expect" ]; then',
+  '        [ "$expect" = keep ] && git_context="$git_context $(shell_word "$arg")"',
+  "        expect=",
+  "        continue",
+  "      fi",
+  '      case "$arg" in',
+  '        -C|--git-dir|--work-tree) git_context="$git_context $arg"; expect=keep ;;',
+  '        --git-dir=*|--work-tree=*) git_context="$git_context $(shell_word "$arg")" ;;',
+  "        -c|--namespace|--config-env) expect=skip ;;",
+  "        -*) ;;",
+  "        *) break ;;",
+  "      esac",
+  "    done",
+  '    managed_identity="$(eval "\\"\\$real_git\\" $git_context config --local --get opengeni.managedidentity" 2>/dev/null || true)"',
+  '    if [ "$managed_identity" = true ]; then',
+  "      unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL",
+  "    fi",
+  "  fi",
+  "fi",
+  'OPENGENI_GIT_WRAPPERS_SEEN="$OPENGENI_GIT_WRAPPERS_SEEN:$real_git"',
+  "OPENGENI_GIT_WRAPPER_PID=$$",
+  "export OPENGENI_GIT_WRAPPERS_SEEN OPENGENI_GIT_WRAPPER_PID",
+  'exec "$real_git" "$@"',
+].join("\n");
+
+function gitCommandWrapperCommandLines(): string[] {
+  return [
+    // Record the box's creation-time env identity (if any) so the wrapper can
+    // tell it apart from an identity a command sets on purpose.
+    'baked_git_identity_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/baked-git-identity"',
+    'mkdir -p "$(dirname "$baked_git_identity_file")"',
+    'if [ -n "${GIT_AUTHOR_NAME:-}${GIT_AUTHOR_EMAIL:-}${GIT_COMMITTER_NAME:-}${GIT_COMMITTER_EMAIL:-}" ]; then',
+    '  printf \'%s\\n%s\\n%s\\n%s\\n\' "${GIT_AUTHOR_NAME:-}" "${GIT_AUTHOR_EMAIL:-}" "${GIT_COMMITTER_NAME:-}" "${GIT_COMMITTER_EMAIL:-}" > "$baked_git_identity_file.tmp.$$"',
+    '  mv -f "$baked_git_identity_file.tmp.$$" "$baked_git_identity_file"',
+    "else",
+    '  rm -f "$baked_git_identity_file"',
+    "fi",
+    'git_wrapper="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}/git"',
+    'mkdir -p "$(dirname "$git_wrapper")"',
+    "cat > \"$git_wrapper.tmp.$$\" <<'GIT_WRAPPER_EOF'",
+    GIT_COMMAND_WRAPPER_SCRIPT,
+    "GIT_WRAPPER_EOF",
+    'chmod 0755 "$git_wrapper.tmp.$$"',
+    'mv -f "$git_wrapper.tmp.$$" "$git_wrapper"',
+  ];
+}
+
+/**
+ * Writes each cloned repository's commit identity into its local Git config
+ * from its own credential binding, and a box-wide default into the global
+ * config for repositories the agent creates itself. A repository whose
+ * identity was set by someone else (no `opengeni.managedIdentity` marker) is
+ * left alone; a managed identity whose binding no longer carries one is
+ * cleared so the box-wide default applies again.
+ */
+export function repositoryIdentityCommandLines(
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  bindings: GitCredentialBindingSeed[],
+): string[] {
+  const identityByBinding = new Map<string, GitRepositoryIdentity>();
+  for (const binding of bindings) {
+    if (binding.identity?.name && binding.identity.email) {
+      identityByBinding.set(
+        gitCredentialBindingKey(binding.provider, binding.credentialBindingId),
+        binding.identity,
+      );
+    }
+  }
+  const calls: string[] = [];
+  let defaultIdentity: GitRepositoryIdentity | undefined;
+  // A repository always gets an explicit committer (the author unless one is
+  // configured); the global default only a differing one. See
+  // apply_managed_identity.
+  const identityArguments = (identity: GitRepositoryIdentity, scope: "repository" | "default") => {
+    const committer =
+      identity.committer?.name && identity.committer.email
+        ? identity.committer
+        : scope === "repository"
+          ? identity
+          : null;
+    return [identity.name, identity.email, ...(committer ? [committer.name, committer.email] : [])]
+      .map(shellQuote)
+      .join(" ");
+  };
+  let defaultIsPersonal = true;
+  for (const resource of resources) {
+    if (resource.subpath) continue;
+    const provider = gitCredentialProviderForRepository(resource);
+    const bindingId = provider ? gitCredentialBindingIdForRepository(resource, provider) : null;
+    const identity =
+      provider && bindingId
+        ? identityByBinding.get(gitCredentialBindingKey(provider, bindingId))
+        : undefined;
+    const target = shellQuote(posixPath.join("/workspace", resourceMountPath(resource)));
+    if (identity) {
+      calls.push(
+        `configure_repository_identity ${target} ${identityArguments(identity, "repository")} || true`,
+      );
+      // Repositories the agent creates itself default to the App identity
+      // when one is attached (the established behavior), else the person's.
+      const personal = resource.connectionType === "github_personal";
+      if (!defaultIdentity || (defaultIsPersonal && !personal)) {
+        defaultIdentity = identity;
+        defaultIsPersonal = personal;
+      }
+    } else {
+      calls.push(`clear_repository_identity ${target} || true`);
+    }
+  }
+  if (calls.length === 0) return [];
+  return [
+    "repository_identity_root() {",
+    '  [ -d "$1" ] || return 1',
+    '  identity_top="$(command git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1',
+    '  [ "$identity_top" = "$(cd "$1" && pwd -P)" ]',
+    "}",
+    // Managed means Opengeni wrote the current values and recorded them.
+    // A value someone changed since (the person or the agent, on purpose) is
+    // theirs: the marker is dropped and the repository is left alone.
+    // identity_config <repository dir, or empty for global> <config args...>
+    "identity_config() {",
+    '  identity_dir="$1"',
+    "  shift",
+    '  if [ -n "$identity_dir" ]; then',
+    '    command git -C "$identity_dir" config --local "$@"',
+    "  else",
+    '    command git config --global "$@"',
+    "  fi",
+    "}",
+    "identity_value() {",
+    '  identity_config "$1" --get "$2" 2>/dev/null || true',
+    "}",
+    "managed_identity_current() {",
+    '  [ "$(identity_value "$1" opengeni.managedidentity)" = true ] &&',
+    '    [ "$(identity_value "$1" user.name)" = "$(identity_value "$1" opengeni.managedname)" ] &&',
+    '    [ "$(identity_value "$1" user.email)" = "$(identity_value "$1" opengeni.managedemail)" ] &&',
+    '    [ "$(identity_value "$1" committer.name)" = "$(identity_value "$1" opengeni.managedcommittername)" ] &&',
+    '    [ "$(identity_value "$1" committer.email)" = "$(identity_value "$1" opengeni.managedcommitteremail)" ]',
+    "}",
+    // Removes a committer Opengeni wrote (still unchanged), so user.* covers
+    // the committer again.
+    "release_managed_committer() {",
+    '  if [ -n "$(identity_value "$1" opengeni.managedcommitteremail)" ] &&',
+    '    [ "$(identity_value "$1" committer.name)" = "$(identity_value "$1" opengeni.managedcommittername)" ] &&',
+    '    [ "$(identity_value "$1" committer.email)" = "$(identity_value "$1" opengeni.managedcommitteremail)" ]; then',
+    '    identity_config "$1" --unset-all committer.name >/dev/null 2>&1 || true',
+    '    identity_config "$1" --unset-all committer.email >/dev/null 2>&1 || true',
+    "  fi",
+    "  for managed_key in opengeni.managedcommittername opengeni.managedcommitteremail; do",
+    '    identity_config "$1" --unset-all "$managed_key" >/dev/null 2>&1 || true',
+    "  done",
+    "}",
+    "forget_managed_identity() {",
+    '  release_managed_committer "$1"',
+    "  for managed_key in opengeni.managedidentity opengeni.managedname opengeni.managedemail opengeni.managedcommittername opengeni.managedcommitteremail; do",
+    '    identity_config "$1" --unset-all "$managed_key" >/dev/null 2>&1 || true',
+    "  done",
+    "}",
+    // apply_managed_identity <repository dir, or empty for global> <name> <email>
+    //   [<committer name> <committer email>]; the committer defaults to the author.
+    "apply_managed_identity() {",
+    '  if [ "$(identity_value "$1" opengeni.managedidentity)" = true ]; then',
+    '    if ! managed_identity_current "$1"; then',
+    '      forget_managed_identity "$1"',
+    "      return 0",
+    "    fi",
+    '  elif [ -n "$(identity_value "$1" user.email)" ]; then',
+    "    return 0",
+    "  fi",
+    '  identity_config "$1" user.name "$2"',
+    '  identity_config "$1" user.email "$3"',
+    '  identity_config "$1" opengeni.managedName "$2"',
+    '  identity_config "$1" opengeni.managedEmail "$3"',
+    // committer.* wins over user.* at every config level, so it is written
+    // only when asked: always for a repository (a global default committer
+    // must never leak into it), and for the global default only when the
+    // committer differs from the author.
+    '  if [ -n "${4:-}" ] && [ -n "${5:-}" ]; then',
+    '    identity_config "$1" committer.name "$4"',
+    '    identity_config "$1" committer.email "$5"',
+    '    identity_config "$1" opengeni.managedCommitterName "$4"',
+    '    identity_config "$1" opengeni.managedCommitterEmail "$5"',
+    "  else",
+    '    release_managed_committer "$1"',
+    "  fi",
+    '  identity_config "$1" opengeni.managedIdentity true',
+    "}",
+    "remove_managed_identity() {",
+    '  [ "$(identity_value "$1" opengeni.managedidentity)" = true ] || return 0',
+    '  if managed_identity_current "$1"; then',
+    "    for managed_key in user.name user.email committer.name committer.email; do",
+    '      identity_config "$1" --unset-all "$managed_key" >/dev/null 2>&1 || true',
+    "    done",
+    "  fi",
+    '  forget_managed_identity "$1"',
+    "}",
+    "configure_repository_identity() {",
+    '  repository_identity_root "$1" || return 0',
+    '  apply_managed_identity "$@"',
+    "}",
+    "clear_repository_identity() {",
+    '  repository_identity_root "$1" || return 0',
+    '  remove_managed_identity "$1"',
+    "}",
+    ...calls,
+    defaultIdentity
+      ? `apply_managed_identity '' ${identityArguments(defaultIdentity, "default")} || true`
+      : "remove_managed_identity '' || true",
+  ];
+}
+
 function gitCredentialHelperCommandLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
   bindings: GitCredentialBindingSeed[] = [],
@@ -13665,6 +13981,7 @@ function gitCredentialHelperCommandLines(
     '  chmod 0755 "$wrapper.tmp.$$"',
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
+    ...gitCommandWrapperCommandLines(),
     "if [ -d /etc/profile.d ] && [ -w /etc/profile.d ]; then",
     '  printf \'%s\\n\' \'case ":$PATH:" in *":${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:"*) ;; *) export PATH="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:$PATH" ;; esac\' > /etc/profile.d/opengeni-git-cli.sh',
     "fi",
@@ -14023,9 +14340,17 @@ export function repositoryCloneCommand(
     'export HOME="${HOME:-/workspace}"',
     'export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"',
     "ensure_git() {",
-    "  if command -v git >/dev/null 2>&1; then",
-    "    return 0",
-    "  fi",
+    // The per-turn `git` wrapper lives on PATH too; only a real git counts.
+    '  ensure_git_wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
+    '  ensure_git_ifs="$IFS"',
+    "  IFS=:",
+    "  for ensure_git_dir in $PATH; do",
+    '    if [ -n "$ensure_git_dir" ] && [ -f "$ensure_git_dir/git" ] && [ -x "$ensure_git_dir/git" ] && ! [ "$ensure_git_dir/git" -ef "$ensure_git_wrapper_dir/git" ]; then',
+    '      IFS="$ensure_git_ifs"',
+    "      return 0",
+    "    fi",
+    "  done",
+    '  IFS="$ensure_git_ifs"',
     "  if command -v apt-get >/dev/null 2>&1; then",
     "    export DEBIAN_FRONTEND=noninteractive",
     "    apt-get update >/dev/null",
@@ -14100,6 +14425,9 @@ export function repositoryCloneCommand(
       commands.push("wait_repository_clone_batch");
     }
   }
+  // Present repositories are skipped above, so this runs every turn and also
+  // converges repositories cloned before per-repository identity existed.
+  commands.push(...repositoryIdentityCommandLines(resources, bindings));
   return commands.join("\n");
 }
 
