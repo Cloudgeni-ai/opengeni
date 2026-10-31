@@ -1,5 +1,23 @@
 # @opengeni/sdk
 
+## Import guidance
+
+The `@opengeni/contracts` root is a large compatibility barrel. Server-side
+consumers should use `import type` for types from that root, and import runtime
+constants or schemas from the smallest dedicated subpath available. For
+example:
+
+```ts
+import type { SessionEvent } from "@opengeni/contracts";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+} from "@opengeni/contracts/api-contract";
+import { DEFAULT_FIRST_PARTY_MCP_TOOLS } from "@opengeni/contracts/first-party-mcp-tools";
+```
+
+This keeps a small server import from evaluating the complete contracts barrel.
+
 Framework-agnostic TypeScript SDK for the Opengeni public API: a typed client,
 session lifecycle, and the streaming core — SSE event streaming with automatic
 reconnect, resume-by-sequence, gap backfill, and duplicate suppression — plus
