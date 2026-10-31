@@ -1,4 +1,6 @@
 import { createCuaRuntime } from "../../../src/cua/sdk";
+import { CuaNativeTools } from "../../../src/cua/native-tools";
+import { cuaDesktopToolsFor, type ComputerNativeCallRequest } from "@opengeni/contracts";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +10,12 @@ const directory = process.platform === "linux" ? await mkdtemp(join(tmpdir(), "c
 const sdk = await createCuaRuntime(directory ? { ...process.env, HOME: directory, XDG_RUNTIME_DIR: directory } : process.env);
 let workerPid: number | undefined;
 try {
+  const platform = windows ? "windows" : process.platform === "darwin" ? "macos" : "linux";
+  const inventory = new CuaNativeTools(sdk, "packaging-probe", platform);
+  for (const tool of cuaDesktopToolsFor(platform)) {
+    // Inventory validation only: no tool call, input, capture or app discovery.
+    await inventory.validate({ tool: tool.name, arguments: {} } as ComputerNativeCallRequest);
+  }
   const result = await sdk.callTool(
     "check_permissions",
     JSON.stringify(process.platform === "darwin" ? { prompt: false, probe_direct_capture: false } : {}),
@@ -20,8 +28,7 @@ try {
       ? typeof status.uia !== "boolean" || typeof status.post_message !== "boolean"
       : typeof status.accessibility !== "boolean" || typeof status.screen_recording !== "boolean")
     throw new Error("Packaged CUA permission result is malformed");
-  // Windows runs the native runtime in process; macOS and Linux use a worker.
-  if (!windows) {
+  {
     workerPid = (await sdk.metadata()).pid;
     if (!Number.isInteger(workerPid) || workerPid === process.pid)
       throw new Error("Packaged CUA did not start a separate worker");
@@ -35,8 +42,6 @@ try {
   if (directory) await rm(directory, { recursive: true, force: true });
 }
 let stopped = false;
-if (windows) stopped = true;
-else
   try {
     process.kill(workerPid!, 0);
   } catch (error) {

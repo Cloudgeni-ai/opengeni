@@ -172,6 +172,7 @@ export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
+export * from "./billing-origin";
 export * from "./desktop-app";
 export * from "./event-triggers";
 export * from "./automation-templates";
@@ -1011,6 +1012,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "notify_user",
   "notification_withdraw",
   "inbox_tidy",
+  "call_user",
   "goal_set",
   "goal_update",
   "goal_progress",
@@ -4020,6 +4022,11 @@ export const DelegatedAccessTokenPayload = /* @__PURE__ */ defineSchema(() =>
       // attempt still owns the signed turn.
       attemptId: primitives.optionalUuid,
       executionGeneration: z.number().int().positive().optional(),
+      // The machine whose process holds this token, when it is not the
+      // session's active sandbox: a `run_on` exec on another enrolled machine.
+      // Tools that take a path in "this" workspace resolve it there. Older
+      // verifiers ignore it and fall back to the active sandbox.
+      executionSandboxId: primitives.optionalUuid,
       exp: primitives.positiveInteger,
     })
     .superRefine((payload, ctx) => {
@@ -4048,6 +4055,13 @@ export const DelegatedAccessTokenPayload = /* @__PURE__ */ defineSchema(() =>
           code: z.ZodIssueCode.custom,
           path: ["principalKind"],
           message: "nested-agent depth claims require an agent_attempt principal",
+        });
+      }
+      if (payload.executionSandboxId !== undefined && payload.principalKind !== "agent_attempt") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["executionSandboxId"],
+          message: "executionSandboxId requires an agent_attempt principal",
         });
       }
       if (
@@ -6575,6 +6589,18 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
     updatedAt: primitives.string,
     /** General credits, including unrestricted legacy grants. May be negative after use. */
     generalBalanceMicros: z.number().int().optional(),
+    /**
+     * Credits: general credit outside the monthly plan allowance (top-ups,
+     * operator and unrestricted legacy grants). API usage spends only this.
+     * May be negative after use.
+     */
+    creditsMicros: z.number().int().optional(),
+    /**
+     * Credit debt that API work ran up (negative credits, up to the account's
+     * API spending). Plan credit never repays it, so app use still sees the
+     * whole plan credit. Absent means none.
+     */
+    apiDebtMicros: primitives.nonnegativeInteger.optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
     heldCreditMicros: primitives.nonnegativeInteger.optional(),
     heldGeneralCreditMicros: primitives.nonnegativeInteger.optional(),
@@ -16523,6 +16549,9 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     // and its withdrawal. They drive that person's inbox and phone notifications.
     "session.notification.posted",
     "session.notification.withdrawn",
+    // An agent ringing the person's phones (call_user), and how the ring ended.
+    "session.agentCall.ringing",
+    "session.agentCall.settled",
     "session.context.compaction.requested",
     "session.context.compaction.started",
     "session.context.compacted",
@@ -17130,6 +17159,88 @@ export const SessionNotificationWithdrawnPayload = /* @__PURE__ */ defineSchema(
 export type SessionNotificationWithdrawnPayload = z.infer<
   typeof SessionNotificationWithdrawnPayload
 >;
+
+/** Bound on why an agent calls, shown on the ring screen and in the chat. */
+export const AGENT_CALL_REASON_MAX_CHARS = 120;
+
+/** Where an agent's call to a person stands. */
+export const AgentCallState = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    /** The person's phones are ringing. */
+    "ringing",
+    /** They picked up: the chat's voice call opens with the reason. */
+    "answered",
+    /** They declined it. */
+    "declined",
+    /** Nobody answered before it stopped ringing. */
+    "missed",
+    /** The agent's turn ended while it rang. */
+    "cancelled",
+  ]),
+);
+export type AgentCallState = z.infer<typeof AgentCallState>;
+
+/**
+ * An agent ringing a person's phones (docs/design/agent-calls.md). Only the
+ * person called can read, answer or decline it.
+ */
+export const AgentCall = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: primitives.uuid,
+      workspaceId: primitives.uuid,
+      sessionId: primitives.uuid,
+      /** Who the ring screen shows as calling (the chat, or the member it works for). */
+      callerLabel: z.string().max(200).nullable(),
+      reason: z.string().min(1).max(200),
+      state: AgentCallState,
+      ringUntil: primitives.dateTime,
+      createdAt: primitives.dateTime,
+      endedAt: z.string().datetime().nullable(),
+      /** Whether this phone (app session) took the call; null when unknown. */
+      answeredHere: z.boolean().nullable(),
+    })
+    .strict(),
+);
+export type AgentCall = z.infer<typeof AgentCall>;
+
+/** Answering or declining from a phone; `device` tells the other phones it was taken elsewhere. */
+export const AgentCallActionRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ device: z.string().trim().min(1).max(300).optional() }).strict(),
+);
+export type AgentCallActionRequest = z.infer<typeof AgentCallActionRequest>;
+
+/**
+ * `session.agentCall.ringing`: the agent is ringing a person. Products that
+ * deliver their own pushes ring their app from this event.
+ */
+export const SessionAgentCallRingingPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      callId: primitives.uuid,
+      calleeSubjectId: z.string().min(1).max(300),
+      callerLabel: z.string().max(200).nullable(),
+      reason: z.string().min(1).max(200),
+      ringUntil: primitives.dateTime,
+      /** How many of the person's phones Opengeni rang itself. */
+      devices: z.number().int().min(0),
+    })
+    .strict(),
+);
+export type SessionAgentCallRingingPayload = z.infer<typeof SessionAgentCallRingingPayload>;
+
+/** `session.agentCall.settled`: how the call ended its ring. */
+export const SessionAgentCallSettledPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      callId: primitives.uuid,
+      calleeSubjectId: z.string().min(1).max(300),
+      reason: z.string().min(1).max(200),
+      outcome: AgentCallState.exclude(["ringing"]),
+    })
+    .strict(),
+);
+export type SessionAgentCallSettledPayload = z.infer<typeof SessionAgentCallSettledPayload>;
 
 /** Why an item waits on the person. */
 export const InboxItemKind = /* @__PURE__ */ defineSchema(() =>

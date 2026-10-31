@@ -24,7 +24,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
-import type { VaultPolicy } from "@opengeni/contracts";
+import type { BillingOrigin, VaultPolicy } from "@opengeni/contracts";
 import {
   ATLASSIAN_NATIVE_RETIRED_MESSAGE,
   isRetiredNativeAtlassianSource,
@@ -89,6 +89,8 @@ import {
   updateScheduledTask,
   ScheduledTaskHeadChangedError,
   withWorkspaceSubjectRls,
+  manualScheduledTaskRunBillingOrigin,
+  markScheduledTaskApiBilled,
   type Database,
   type ScheduledTaskCreatorPolicy,
   type SessionCommandActor,
@@ -122,6 +124,7 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
 } from "../session-authorization";
+import { fundedBillingOrigin, resolveTurnBillingOrigin } from "../billing-origin";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import {
@@ -661,10 +664,17 @@ export async function createValidatedScheduledTask(input: {
     personalKnowledge: agentConfig.knowledgeSource?.destination.kind === "personal",
     ownerSubjectId,
   });
+  // Every run is billed as whoever set the task up: in the app, plan credit
+  // first; over the API, credits only.
+  const billingOrigin = await resolveTurnBillingOrigin(input.db, {
+    grant: input.grant,
+    authorization: input.authorization,
+  });
   return await withScheduledTaskAuthorityWriteErrors(() =>
     input.db.transaction(async (transaction) => {
       const task = await createScheduledTask(transaction, {
         id,
+        billingOrigin,
         accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
         name: trimmedScheduledTaskName(input.payload.name),
@@ -876,10 +886,20 @@ export async function updateScheduledTaskForApi(
 ): Promise<ScheduledTask> {
   const workspaceId = grant.workspaceId;
   const beforeUpdateCommit = update.beforeUpdateCommit;
+  // An API caller's edit makes every later run API use (credits only).
+  // Pausing spends nothing, so it leaves the origin alone.
+  const pauseOnly = Object.keys(update).length === 1 && update.status === "paused";
+  const callerOrigin = pauseOnly ? null : await resolveTurnBillingOrigin(db, { grant });
   update = {
     ...update,
     beforeUpdateCommit: async (tx) => {
       await assertScheduledTaskMutationOwner(tx, grant, taskId);
+      if (callerOrigin === "api")
+        await markScheduledTaskApiBilled(tx, {
+          accountId: grant.accountId,
+          workspaceId,
+          taskId,
+        });
       await beforeUpdateCommit?.(tx);
     },
   };
@@ -1009,14 +1029,33 @@ export async function pauseScheduledTaskAsAdmin(
 export const SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE =
   "This schedule is paused, so it cannot run now. Resume it first, then trigger it.";
 
+/**
+ * Who pays for a run `grant` starts by hand: API when the caller or the task
+ * is API, else the task's app origin. The edge checks credits with it.
+ */
+export async function manualScheduledTaskTriggerBillingOrigin(
+  db: Database,
+  grant: AccessGrant,
+  taskId: string,
+): Promise<BillingOrigin> {
+  return fundedBillingOrigin(
+    grant.accountId,
+    await manualScheduledTaskRunBillingOrigin(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      taskId,
+      callerOrigin: await resolveTurnBillingOrigin(db, { grant }),
+    }),
+  );
+}
+
 export async function triggerScheduledTaskForGrant(
   db: Database,
   grant: AccessGrant,
   workflowClient: SessionWorkflowClient,
   input: Parameters<SessionWorkflowClient["triggerScheduledTask"]>[0],
 ): Promise<void> {
-  await db.transaction(async (tx) => {
-    await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+  const refuseUnrunnable = () => {
     if (isRetiredNativeGoogleDriveTask(input.task))
       throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
     if (isRetiredNativeAtlassianTask(input.task))
@@ -1025,6 +1064,23 @@ export async function triggerScheduledTaskForGrant(
     // told, instead of accepting a trigger that would silently do nothing.
     if (input.task.status === "paused")
       throw new HTTPException(409, { message: SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE });
+  };
+  // An API caller's run, and every later run, is API use (credits only).
+  // Committed before the run starts, so the run's turn reads it.
+  if ((await resolveTurnBillingOrigin(db, { grant })) === "api") {
+    await db.transaction(async (tx) => {
+      await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+      refuseUnrunnable();
+      await markScheduledTaskApiBilled(tx, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        taskId: input.task.id,
+      });
+    });
+  }
+  await db.transaction(async (tx) => {
+    await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+    refuseUnrunnable();
     const actor = creationInitiatorForGrant(grant).actor ?? null;
     const restriction = await scheduledTaskCredentialRestrictionForGrant(tx, grant, actor);
     // A caller cannot supply or clear the trusted ceiling. Ownerless and

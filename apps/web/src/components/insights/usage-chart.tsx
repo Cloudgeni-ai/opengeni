@@ -19,11 +19,37 @@ export type ChartSeries = {
 export type ChartBucket = {
   key: string;
   label: string;
+  /**
+   * The bucket's day, for buckets shorter than a day. The first axis label on a new
+   * day shows it in place of the time, so an axis that crosses midnight stays readable.
+   */
+  day?: string;
   /** Long label for the tooltip. */
   title: string;
   /** Value per series id; missing means zero. */
   values: Record<string, number>;
 };
+
+/**
+ * The axis labels: every `stride`th bucket and the last one (dropped when it would
+ * crowd the one before). The first label on a new day shows that day instead of a time.
+ */
+export function axisLabels(
+  buckets: readonly ChartBucket[],
+  stride: number,
+): Array<{ index: number; text: string }> {
+  const last = buckets.length - 1;
+  const labels: Array<{ index: number; text: string }> = [];
+  let previousDay: string | undefined;
+  buckets.forEach((bucket, index) => {
+    if (index % stride !== 0 && index !== last) return;
+    if (index !== last && last - index < stride / 2) return;
+    const newDay = labels.length > 0 && bucket.day !== undefined && bucket.day !== previousDay;
+    labels.push({ index, text: newDay ? bucket.day! : bucket.label });
+    previousDay = bucket.day;
+  });
+  return labels;
+}
 
 function useWidth(initial = 720) {
   const ref = useRef<HTMLDivElement>(null);
@@ -252,23 +278,18 @@ export function StackedBarChart(props: {
               </g>
             );
           })}
-          {props.buckets.map((bucket, index) =>
-            index % labelStride === 0 || index === props.buckets.length - 1 ? (
-              index !== props.buckets.length - 1 &&
-              props.buckets.length - 1 - index < labelStride / 2 ? null : (
-                <text
-                  key={`label-${bucket.key}`}
-                  x={padLeft + band * (index + 0.5)}
-                  y={height - 6}
-                  textAnchor="middle"
-                  className={active === index ? "fill-fg" : "fill-fg-subtle"}
-                  style={{ fontSize: 10 }}
-                >
-                  {bucket.label}
-                </text>
-              )
-            ) : null,
-          )}
+          {axisLabels(props.buckets, labelStride).map(({ index, text }) => (
+            <text
+              key={`label-${props.buckets[index]!.key}`}
+              x={padLeft + band * (index + 0.5)}
+              y={height - 6}
+              textAnchor="middle"
+              className={active === index ? "fill-fg" : "fill-fg-subtle"}
+              style={{ fontSize: 10 }}
+            >
+              {text}
+            </text>
+          ))}
         </svg>
         <span className="sr-only" aria-live="polite">
           {active !== null ? describe(active) : ""}

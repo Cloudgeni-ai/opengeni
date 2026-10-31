@@ -297,7 +297,9 @@ pick a VM.
   at what it holds. A new one starts only in room above the buffer and the
   high watermark that no wake wants: none while a wake is queued for
   memory or refused and held, or before the first memory reading after a
-  start; and it is booked before it starts. Ready
+  start; and it is booked before it starts. A fill keeps room in the
+  budget above the buffer for claims of every ready clone kept, itself
+  included, too. Ready
   clones are the first relief for a wake, the buffer and memory pressure,
   oldest first, ahead of step 1 of the relief above; one still filling is
   left to finish. A ready clone is offered for relief only once it waits

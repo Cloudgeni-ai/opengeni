@@ -290,6 +290,7 @@ describe("write-through", () => {
       agentConfigFirstPartyMcpTools(none, DEFAULT_FIRST_PARTY_MCP_TOOLS).sort() as string[],
     ).toEqual(
       [
+        "call_user",
         "command_read",
         "command_wait",
         "inbox_tidy",

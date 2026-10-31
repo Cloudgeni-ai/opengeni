@@ -48,6 +48,7 @@ export * from "./knowledge-entries-schema";
 export * from "./subscription-core-schema";
 import type { ResolvedAgentConfig, SessionAvatar, SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
+import type { SessionEventPayloadTruncation } from "@opengeni/contracts";
 import {
   bigint,
   boolean,
@@ -108,6 +109,16 @@ const opengeniPrivateSchema = pgSchema("opengeni_private");
 
 /** Who asked for a pending context compaction (`sessions.compact_request_trigger`). */
 export type CompactRequestTrigger = "operator" | "proactive";
+
+/**
+ * A pending tool call's output as its agent.toolCall.output event carries it,
+ * bounded on write like the event itself; `truncation` is present only when
+ * the bound omitted part of the value.
+ */
+export type PendingToolCallEventOutput = {
+  value: unknown;
+  truncation?: SessionEventPayloadTruncation;
+};
 
 export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
 
@@ -7786,6 +7797,11 @@ export const sessionTurns = pgTable(
     // (`SessionTurnSurface`). Analytics only, never an authorization input.
     // Null is reserved for rolling/legacy writers (migration 0533).
     surface: text("surface"),
+    // Immutable funding origin (`BillingOrigin`: app or api), frozen when the
+    // turn is accepted and inherited by agent and machine work. Unlike
+    // `surface` it decides which credit pays; it never grants access. Null is
+    // legacy and billed as app (migration 1128).
+    billingOrigin: text("billing_origin"),
     // Immutable user-facing admission intent. Physical execution still uses
     // status=queued until a worker claims the row; this field keeps that
     // implementation queue distinct from prompts genuinely waiting behind
@@ -8753,6 +8769,9 @@ export const sessionAttemptCodemodeCalls = pgTable(
     toolName: text("tool_name").notNull(),
     arguments: jsonb("arguments").$type<Record<string, unknown>>().notNull(),
     callerSubjectId: text("caller_subject_id").notNull(),
+    /** 1108: the machine the calling code ran on, when it was not the session's
+     *  active sandbox (a `run_on` exec). Paths in the call resolve there. */
+    callerExecutionSandboxId: uuid("caller_execution_sandbox_id"),
     state: text("state", {
       enum: [
         "queued",
@@ -10458,7 +10477,7 @@ export const sessionPendingToolCalls = pgTable(
     modelToolOutputTruncationTokens: integer("model_tool_output_truncation_tokens"),
     resultItem: losslessOrderedJson("result_item_ordered").$type<Record<string, unknown>>(),
     resultItemCodecVersion: losslessCodecVersion("result_item_codec_version"),
-    eventOutput: losslessJsonb("event_output").$type<{ value: unknown }>(),
+    eventOutput: losslessJsonb("event_output").$type<PendingToolCallEventOutput>(),
     eventOutputCodecVersion: losslessCodecVersion("event_output_codec_version"),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
     /** Private state of an MCP server question that paused this call; never in events. */
@@ -12643,6 +12662,9 @@ export const scheduledTasks = pgTable(
       .$type<Record<string, unknown>>()
       .notNull()
       .default({ backfill: true }),
+    // Funding origin of whoever set the task up (`BillingOrigin`), frozen at
+    // creation and inherited by every run. Null is legacy and billed as app.
+    billingOrigin: text("billing_origin"),
     personalConnectionDelegations: jsonb("personal_connection_delegations")
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
@@ -13624,6 +13646,10 @@ export const creditLedgerEntries = pgTable(
     sourceId: text("source_id"),
     // Immutable execution-origin attribution, not an allocated platform charge.
     siteId: uuid("site_id"),
+    // Funding origin of a usage debit (`BillingOrigin`). API debits never
+    // count against the monthly plan allowance (plan_period_usage). Null is
+    // legacy or non-usage and treated as app.
+    usageOrigin: text("usage_origin"),
     idempotencyKey: text("idempotency_key").notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
@@ -15305,6 +15331,8 @@ export const feedbackSubmissions = pgTable(
     context: jsonb("context").$type<Record<string, unknown>>(),
     /** Screenshot metadata in send order (FeedbackScreenshot); bytes are in object storage. */
     screenshots: jsonb("screenshots").$type<unknown[]>().notNull().default([]),
+    /** What the server knew when the report arrived (FeedbackDiagnostics); never sent to clients. */
+    diagnostics: jsonb("diagnostics").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -15336,6 +15364,50 @@ export const feedbackSubmissions = pgTable(
       table.sessionId,
       table.createdAt,
       table.id,
+    ),
+  }),
+);
+
+/**
+ * An agent ringing a person's phones (1107): one row per call, from ringing
+ * to its outcome. Answering opens the chat's voice call.
+ */
+export const agentCalls = pgTable(
+  "agent_calls",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    calleeSubjectId: text("callee_subject_id").notNull(),
+    callerSubjectId: text("caller_subject_id"),
+    callerLabel: text("caller_label"),
+    reason: text("reason").notNull(),
+    state: text("state").notNull().default("ringing"),
+    devices: integer("devices").notNull().default(0),
+    ringUntil: timestamp("ring_until", { withTimezone: true }).notNull(),
+    answeredBy: text("answered_by"),
+    realtimeId: uuid("realtime_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (table) => ({
+    session: index("agent_calls_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt.desc(),
+    ),
+    ringingCallee: index("agent_calls_ringing_callee_idx")
+      .on(table.calleeSubjectId)
+      .where(sql`${table.state} = 'ringing'`),
+    ringingDeadline: index("agent_calls_ringing_deadline_idx")
+      .on(table.ringUntil)
+      .where(sql`${table.state} = 'ringing'`),
+    stateCheck: check(
+      "agent_calls_state_chk",
+      sql`${table.state} in ('ringing', 'answered', 'declined', 'missed', 'cancelled')`,
     ),
   }),
 );

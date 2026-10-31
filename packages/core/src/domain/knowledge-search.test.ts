@@ -57,6 +57,8 @@ mock.module("@opengeni/db", () => ({
     fn: (db: unknown) => Promise<unknown>,
   ) => fn(_db),
   isCodexBilledTurn: async () => false,
+  // Knowledge queries run in the app unless an outer scope says otherwise.
+  chargeBillingOrigin: (origin?: "app" | "api" | null) => origin ?? "app",
   SUBSCRIPTION_CORE_XAI_PROVIDER: "xai",
   // Knowledge queries and document indexing carry no inference model, so the
   // imported billing helper must never consult subscription-route funding.

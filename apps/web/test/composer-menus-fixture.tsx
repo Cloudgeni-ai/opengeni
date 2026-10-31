@@ -132,7 +132,6 @@ function Fixture() {
     groups: [{ installationId: 123, label: "example", detail: "Organization", repositories }],
     selectedRepoIds: selected,
     selectedRepoRefs: refs,
-    selectedInstallationId: 123,
     lockedRepoIds: isNew ? new Set() : new Set([1]),
     manualRepos: [],
     manualOpen,
