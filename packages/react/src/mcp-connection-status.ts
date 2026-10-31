@@ -23,6 +23,23 @@ function matchingMcpConnections(item: CapabilityCatalogItem, connections: Connec
   );
 }
 
+/**
+ * Personal accounts a reconnect may reauthorize for one MCP endpoint. A removed
+ * (revoked) connection is history, so it never counts toward an ambiguous match.
+ */
+export function reconnectablePersonalMcpConnections(
+  connections: ConnectionMetadata[],
+  mcpUrl: string,
+) {
+  return connections.filter(
+    (entry) =>
+      entry.status !== "revoked" &&
+      entry.subjectId !== null &&
+      entry.kind === "oauth2" &&
+      entry.metadata.mcpUrl === mcpUrl,
+  );
+}
+
 /** Installation availability is not account readiness. Revoked history is not actionable. */
 export function mcpConnectionDiscoveryState(
   t: OpenGeniText,
