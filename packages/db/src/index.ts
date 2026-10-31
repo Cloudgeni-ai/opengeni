@@ -29682,6 +29682,105 @@ export async function listConnectorActionPolicies(
   );
 }
 
+const connectorActionPolicySnapshotColumns = {
+  id: schema.connectorActionPolicies.id,
+  connectionId: schema.connectorActionPolicies.connectionId,
+  serverId: schema.connectorActionPolicies.serverId,
+  toolName: schema.connectorActionPolicies.toolName,
+  actionName: schema.connectorActionPolicies.actionName,
+  policy: schema.connectorActionPolicies.policy,
+  version: schema.connectorActionPolicies.version,
+};
+
+/**
+ * The tool choices a turn starts with. A workspace login's choices are that
+ * workspace's. A personal login's choices belong to the login: they are stored
+ * once, in the workspace it was connected from, and follow it to every
+ * workspace where its owner's turn uses it. A copy left in this workspace is
+ * ignored. A login whose choices don't fit the snapshot bound is left out
+ * whole, so its recommendations apply; never part of its rules. The
+ * workspace's own rows keep database order and followed logins come after
+ * them, so exact-attempt re-entry compares equal snapshots.
+ */
+export async function connectorActionPolicySnapshotForTurn(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    bindings: readonly McpConnectionAccountBinding[] | null;
+  },
+): Promise<ConnectorActionPolicySnapshotEntry[]> {
+  const followed = new Map<string, Set<string>>();
+  for (const binding of input.bindings ?? []) {
+    if (binding.subjectScope !== "subject" || binding.originWorkspaceId === input.workspaceId)
+      continue;
+    const ids = followed.get(binding.originWorkspaceId) ?? new Set<string>();
+    ids.add(binding.connectionId);
+    followed.set(binding.originWorkspaceId, ids);
+  }
+  const followedIds = new Set([...followed.values()].flatMap((ids) => [...ids]));
+  const stored = await db
+    .select(connectorActionPolicySnapshotColumns)
+    .from(schema.connectorActionPolicies)
+    .where(
+      and(
+        eq(schema.connectorActionPolicies.accountId, input.accountId),
+        eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+      ),
+    )
+    .orderBy(
+      asc(schema.connectorActionPolicies.connectionId),
+      asc(schema.connectorActionPolicies.serverId),
+      asc(schema.connectorActionPolicies.toolName),
+      asc(schema.connectorActionPolicies.actionName),
+      asc(schema.connectorActionPolicies.id),
+    )
+    .limit(CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX + 1);
+  if (stored.length > CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX) {
+    throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
+  }
+  const snapshot: ConnectorActionPolicySnapshotEntry[] = stored.filter(
+    (row) => !followedIds.has(row.connectionId),
+  );
+  for (const [originWorkspaceId, ids] of [...followed].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  )) {
+    // Read the login's home under that workspace's tenant scope, without the
+    // session-tenancy fence: this is a read inside the claim transaction.
+    const rows = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: originWorkspaceId },
+      async (scoped) =>
+        await scoped
+          .select(connectorActionPolicySnapshotColumns)
+          .from(schema.connectorActionPolicies)
+          .where(
+            and(
+              eq(schema.connectorActionPolicies.accountId, input.accountId),
+              eq(schema.connectorActionPolicies.workspaceId, originWorkspaceId),
+              inArray(schema.connectorActionPolicies.connectionId, [...ids].sort()),
+            ),
+          )
+          .orderBy(
+            asc(schema.connectorActionPolicies.connectionId),
+            asc(schema.connectorActionPolicies.serverId),
+            asc(schema.connectorActionPolicies.toolName),
+            asc(schema.connectorActionPolicies.actionName),
+            asc(schema.connectorActionPolicies.id),
+          )
+          .limit(CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX + 1),
+      undefined,
+      "none",
+    );
+    for (const connectionId of [...ids].sort()) {
+      const group = rows.filter((row) => row.connectionId === connectionId);
+      if (snapshot.length + group.length <= CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX)
+        snapshot.push(...group);
+    }
+  }
+  return snapshot;
+}
+
 /**
  * Install a risk-appropriate connector default without overwriting an explicit
  * user choice that already exists for the same immutable connector action.
@@ -77218,29 +77317,14 @@ export async function claimSessionWorkForAttempt(
               }
             }
           }
-          const connectorPolicyRows = await tx
-            .select({
-              id: schema.connectorActionPolicies.id,
-              connectionId: schema.connectorActionPolicies.connectionId,
-              serverId: schema.connectorActionPolicies.serverId,
-              toolName: schema.connectorActionPolicies.toolName,
-              actionName: schema.connectorActionPolicies.actionName,
-              policy: schema.connectorActionPolicies.policy,
-              version: schema.connectorActionPolicies.version,
-            })
-            .from(schema.connectorActionPolicies)
-            .where(eq(schema.connectorActionPolicies.workspaceId, workspaceId))
-            .orderBy(
-              asc(schema.connectorActionPolicies.connectionId),
-              asc(schema.connectorActionPolicies.serverId),
-              asc(schema.connectorActionPolicies.toolName),
-              asc(schema.connectorActionPolicies.actionName),
-              asc(schema.connectorActionPolicies.id),
-            )
-            .limit(2049);
-          if (connectorPolicyRows.length > 2048) {
-            throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
-          }
+          const connectorPolicyRows = await connectorActionPolicySnapshotForTurn(
+            tx as unknown as Database,
+            {
+              accountId: session.accountId,
+              workspaceId,
+              bindings: turn.mcpAccountBindings,
+            },
+          );
           // New queued, compaction, and internal-update executions are born
           // while the locked session still has no active-turn pointer. Publish
           // that ownership edge before freezing governance so the database
