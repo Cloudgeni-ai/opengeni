@@ -675,6 +675,10 @@ describe("provider-neutral subscription runtime persistence", () => {
           ${state.accountId}::uuid, ${state.workspaceId}::uuid,
           ARRAY['codex-subscription']::text[], ARRAY['codex/b']::text[]
         )`;
+      // A wider organization list leaves the workspace's narrower one in force.
+      await shared!.admin`
+        insert into organization_model_defaults (account_id, allowed_models)
+        values (${state.accountId}::uuid, ARRAY['codex/a', 'codex/b']::text[])`;
       await shared!.admin`
         insert into subscription_connection_assignment_policies (
           account_id, connection_id, workspace_id, inference_pool

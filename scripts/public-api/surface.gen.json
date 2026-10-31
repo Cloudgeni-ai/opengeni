@@ -32549,6 +32549,7 @@
         "$.id": "string!",
         "$.label": "string!",
         "$.logoUrl": "string?",
+        "$.organizationAllowed": "boolean?",
         "$.policyAllowed": "boolean?",
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",

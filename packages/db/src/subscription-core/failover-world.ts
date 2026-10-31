@@ -200,10 +200,14 @@ export async function withSubscriptionCoreFailoverPlacementWorld<T>(
       tx,
       sql`select turn.metadata, session.visibility,
       get_workspace_kind(workspace.account_id, workspace.id) as workspace_kind,
-      case when policy.workspace_id is not null then policy.allowed_providers
-        else defaults.allowed_providers end as allowed_providers,
-      case when policy.workspace_id is not null then policy.allowed_models
-        else defaults.allowed_models end as allowed_models
+      case when policy.allowed_providers is null then defaults.allowed_providers
+        when defaults.allowed_providers is null then policy.allowed_providers
+        else array(select allowed from unnest(policy.allowed_providers) allowed
+          where allowed = any(defaults.allowed_providers)) end as allowed_providers,
+      case when policy.allowed_models is null then defaults.allowed_models
+        when defaults.allowed_models is null then policy.allowed_models
+        else array(select allowed from unnest(policy.allowed_models) allowed
+          where allowed = any(defaults.allowed_models)) end as allowed_models
       from sessions session join session_turns turn on turn.account_id = session.account_id
         and turn.workspace_id = session.workspace_id and turn.session_id = session.id
       join workspaces workspace on workspace.account_id = session.account_id and workspace.id = session.workspace_id

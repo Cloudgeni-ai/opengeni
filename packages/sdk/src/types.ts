@@ -4595,8 +4595,18 @@ export type WorkspaceModelCatalogModel = ClientModel & {
     | undefined;
   credentialReadiness: ModelCredentialReadinessV1;
   creditFunding?: "promotional" | "general" | "unavailable" | undefined;
-  /** Exact workspace-policy verdict without exposing provider identity. */
+  /**
+   * Exact verdict of the policy the workspace runs with (its own lists within
+   * its organization's, and its credit switch), without exposing provider
+   * identity.
+   */
   policyAllowed?: boolean | undefined;
+  /**
+   * False when the organization's allowlist, a ceiling the workspace's own
+   * list can't widen, excludes the model. Absent when the organization allows
+   * every model, and from older servers. Ignores the credit switch.
+   */
+  organizationAllowed?: boolean | undefined;
   availability: ModelAvailabilityV1;
 };
 
@@ -4789,7 +4799,8 @@ export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewa
 
 /**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for
- * that dimension; an empty array is an explicit total block.
+ * that dimension; an empty array is an explicit total block. A model runs only
+ * when both this list and `organization` allow it.
  */
 export type WorkspaceModelAccessPolicy = {
   allowedProviders: string[] | null;
@@ -4799,7 +4810,10 @@ export type WorkspaceModelAccessPolicy = {
    * default it follows, or no restriction. Absent from older servers.
    */
   source?: "workspace" | "organization" | "none" | undefined;
-  /** The organization default the workspace follows without its own policy. */
+  /**
+   * The organization's list: what the workspace uses without its own policy,
+   * and a ceiling its own policy can only narrow.
+   */
   organization?: {
     allowedProviders: string[] | null;
     allowedModels: string[] | null;
@@ -4815,6 +4829,8 @@ export type WorkspaceModelAccessPolicy = {
 /**
  * Model defaults every workspace in an organization follows until it sets its
  * own (`GET/PATCH /v1/organizations/:id/model-defaults`, owners and admins).
+ * The allowlists are the exception: a ceiling every workspace stays within,
+ * which a workspace's own allowlist can only narrow.
  */
 export type OrganizationModelDefaults = {
   sessionDefaults: { model: string; reasoningEffort: ReasoningEffort } | null;
