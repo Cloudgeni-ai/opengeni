@@ -400,7 +400,7 @@ fn a_save_booked_ahead_starts_on_an_overdrawn_disk() {
     rig.add(2, State::RUNNING);
     // Both book a save of 1 GiB, beyond the 1 GiB the disk has.
     rig.disk(2 * GIB, 10_000);
-    assert!(rig.host.disk().unwrap().free().bytes == 0);
+    assert_eq!(rig.host.disk().unwrap().free().bytes, 0);
     assert_eq!(rig.host.save_room(SandboxId(1)), CreateRoom::Fits);
     let actions = rig.send(Input::Sleep {
         sandbox: SandboxId(1),
