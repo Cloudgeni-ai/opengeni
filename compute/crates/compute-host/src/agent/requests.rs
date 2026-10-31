@@ -710,6 +710,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut record = Record::new(id, ordinal, allocation, config);
         record.owner_epoch = owner.0;
         record.first_wake_by_ms = Some(by_ms);
+        // Made here from nothing the store holds of it.
+        record.only_copy = true;
         self.prepare(record, template, reply);
     }
 
