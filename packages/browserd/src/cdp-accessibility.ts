@@ -4,12 +4,15 @@ import {
   type InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { isRecord } from "@opengeni/contracts/values";
+import type { ProtectedReason } from "./page-protection";
 
 type CdpAxValue = {
   value?: unknown;
 };
 
 export type CdpAxNode = {
+  /** Driver-discovered DOM protection, never supplied by the page. */
+  protectedReason?: ProtectedReason;
   nodeId?: unknown;
   ignored?: unknown;
   ignoredReasons?: unknown;
@@ -270,8 +273,16 @@ export function normalizeCdpAccessibilityTree(options: {
   for (const [nodeId, node] of rawById) {
     if (node.ignored === true || roleValue(node) === "InlineTextBox") continue;
     const role = normalizedRole(roleValue(node));
-    const name = accessibleStringValue(node.name) || null;
-    const states = propertyStates(node.properties, node.value?.value);
+    const name =
+      node.protectedReason &&
+      !["textbox", "searchbox", "combobox", "spinbutton", "checkbox", "radio", "switch"].includes(
+        role,
+      )
+        ? null
+        : accessibleStringValue(node.name) || null;
+    const states = propertyStates(node.properties, node.value?.value).filter(
+      (state) => !node.protectedReason || !/^(?:checked|selected|valuetext|valuenow)/u.test(state),
+    );
     const backendDOMNodeId = finitePositiveInteger(node.backendDOMNodeId);
     const ref = semanticRef(
       {
@@ -328,6 +339,10 @@ export function normalizeCdpAccessibilityTree(options: {
     if (raw) for (const childId of childIds(raw)) suppressSubtree(childId);
   };
   for (const [nodeId, entry] of entriesByNodeId) {
+    if (rawById.get(nodeId)?.protectedReason) {
+      for (const childId of childIds(rawById.get(nodeId)!)) suppressSubtree(childId);
+      continue;
+    }
     if (!isEditableControlRole(entry.role)) continue;
     const raw = rawById.get(nodeId);
     if (!raw) continue;
@@ -360,7 +375,7 @@ export function normalizeCdpAccessibilityTree(options: {
     // Children are visited first. Chromium marks the document AND its focused
     // control focused; a later ancestor must not replace that exact control.
     if (entry.states.includes("focused") && focusedRef === null) focusedRef = entry.ref;
-    const description = accessibleStringValue(raw.description);
+    const description = raw.protectedReason ? "" : accessibleStringValue(raw.description);
     // Pages can compute accessible names from arbitrarily long text (a whole
     // table cell or <pre> block). Clip to the semantic-node contract so one
     // long node cannot make the entire observation invalid.
@@ -443,7 +458,8 @@ const EDITABLE_VALUE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinb
 function safeValue(
   node: CdpAxNode,
   role: string,
-): { value?: string | { redacted: true; reason: "password" } } {
+): { value?: string | { redacted: true; reason: ProtectedReason } } {
+  if (node.protectedReason) return { value: { redacted: true, reason: node.protectedReason } };
   // Sliders, progress bars and meters report a number.
   const raw = node.value?.value;
   const value =

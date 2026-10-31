@@ -8,6 +8,10 @@ import {
   sessionUnattendedNow,
 } from "./unattended";
 import {
+  resolveAppActionTargets,
+  savedAppActionApprovalCard,
+} from "@opengeni/db/app-action-targets";
+import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
   beginConnectorActionExecution,
@@ -581,15 +585,43 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       sessionId: input.sessionId,
       settings: runSettings,
       // Live per change, the same check the API makes before running it.
-      authority: async () =>
-        (
-          await resolveSessionAppActionAuthority(db, {
+      authority: async () => {
+        const authority = await resolveSessionAppActionAuthority(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+        });
+        return {
+          kind: authority.kind,
+          ...("subjectId" in authority ? { subjectId: authority.subjectId } : {}),
+        };
+      },
+      // Names what a confirmed change touches, read as the person it asks.
+      targets: async (args, reader) =>
+        await resolveAppActionTargets(
+          db,
+          {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-          })
-        ).kind,
+            subjectId: reader.subjectId,
+            onLookupError: (error, parameter) =>
+              console.warn("app action target lookup failed", {
+                parameter,
+                error: error instanceof Error ? error.message : String(error),
+              }),
+          },
+          args,
+        ),
+      saved: async (approvalId) =>
+        await savedAppActionApprovalCard(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          approvalId,
+        }),
+      cards: eventing.appActionApprovalCards,
     },
   );
   const bundledSkills =
