@@ -21,6 +21,7 @@ export function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
   if (model.cost === "free") return "Free in this deployment";
   if (model.cost === "credits") return "Opengeni credits";
   if (
+    model.provider === "claude-subscription" ||
     model.provider === "organization-claude-subscription" ||
     model.provider === "workspace-claude-subscription"
   ) {

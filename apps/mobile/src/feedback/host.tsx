@@ -11,7 +11,7 @@ import { useAccount } from "@/account";
 import { feedbackDraftStore, startFeedback } from "./draft";
 import { bindFeedbackSender, feedbackOutbox, useFeedbackPending } from "./outbox";
 import { useShakeToSendFeedback } from "./preference";
-import { recordUncaughtErrors, setFeedbackScreen } from "./recent-errors";
+import { recordBreadcrumb, recordUncaughtErrors, setFeedbackScreen } from "./recent-errors";
 import { createShakeDetector } from "./shake";
 
 const SHAKE_SAMPLE_MS = 100;
@@ -19,6 +19,11 @@ const SHAKE_SAMPLE_MS = 100;
 const PENDING_RETRY_MS = 60_000;
 
 recordUncaughtErrors();
+// Going to the background and coming back are steps a report shows.
+AppState.addEventListener("change", (state) => {
+  if (state === "active") recordBreadcrumb("lifecycle", "App opened");
+  else if (state === "background") recordBreadcrumb("lifecycle", "App in background");
+});
 
 export function FeedbackHost() {
   const { account, client, workspaceId } = useAccount();

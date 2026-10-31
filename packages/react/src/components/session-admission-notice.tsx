@@ -1,4 +1,5 @@
 import type { MachineView, Session, SessionMachineAccess } from "@opengeni/sdk";
+import { InfoIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useSessionStart, type UseSessionStartOptions } from "../hooks/use-session-start";
 import { useOpenGeniText } from "../messages/runtime";
@@ -188,19 +189,43 @@ export function SessionWaitingMessagesNotice({ access }: { access: SessionMachin
 }
 
 /**
- * Before sending: the chat runs on somebody else's personal machine, so a new
- * message from this person could not start there. Renders nothing for the
- * machine's owner or when the chat is not on a personal machine.
+ * The personal machine a chat runs on, before sending. On somebody else's
+ * machine a new message from this person could not start there, so it says
+ * why and offers the ways forward. Its owner, in a chat shared with the
+ * workspace, gets a one-line heads-up that people here see what the agent
+ * does on it, with `action` as the way to move elsewhere. Renders nothing in
+ * the owner's private chats or when the chat is not on a personal machine.
  */
 export function SessionMachineAccessNotice({
   access,
   action,
+  shared = false,
+  className,
 }: {
   access: SessionMachineAccess | null | undefined;
   action?: ReactNode | undefined;
+  /** The chat is shared with the workspace rather than Only me. */
+  shared?: boolean | undefined;
+  /** Spacing for the owner's one-line heads-up where it sits. */
+  className?: string | undefined;
 }) {
   const t = useOpenGeniText();
-  if (!access || access.isOwner) return null;
+  if (!access) return null;
+  if (access.isOwner) {
+    if (!shared) return null;
+    return (
+      <div
+        data-testid="own-machine-shared-heads-up"
+        className={`flex min-w-0 items-start gap-1.5 text-xs text-fg-muted ${className ?? ""}`}
+      >
+        <InfoIcon aria-hidden className="mt-0.5 size-3 shrink-0" />
+        <span className="min-w-0">
+          {t("sessionAdmission.ownMachineSharedHeadsUp", { machine: access.machineName })}
+          {action ? <> {action}</> : null}
+        </span>
+      </div>
+    );
+  }
   return (
     <Notice tone="waiting" title={t("sessionAdmission.preSendTitle")} live="polite">
       <PersonalMachineExplanation access={access} action={action} />

@@ -550,13 +550,11 @@ describe("Recorder provider", () => {
       await act(async () => controls!.requestStart());
       await waitFor(() => starts.length === 2);
       expect(store.pendingStart()).toBeNull();
-      const { title: buttonTitle, ...buttonOptions } = starts[0]!;
-      const { title: actionTitle, ...actionOptions } = starts[1]!;
-      expect(actionOptions).toEqual(buttonOptions);
-      // Both are named after when they start.
-      expect(typeof buttonTitle).toBe("string");
-      expect(typeof actionTitle).toBe("string");
-      expect((actionTitle as string).length).toBeGreaterThan(0);
+      expect(starts[1]).toEqual(starts[0]!);
+      // Neither makes up a name: Opengeni names the meeting, from the
+      // calendar or the conversation, so a made-up one never hides it.
+      expect(starts[0]!.title).toBeUndefined();
+      expect(starts[0]!.titleSource).toBeUndefined();
 
       // While one records, the action asks for no second start.
       state = "recording";
@@ -751,13 +749,26 @@ describe("Recorder provider", () => {
     try {
       await waitForText(view.container, "Start recording");
       const field = view.container.querySelector<HTMLInputElement>(
-        'input[placeholder="Name this meeting (optional)"]',
+        'input[placeholder="Name this meeting, or it\'s named for you"]',
       );
       expect(field).not.toBeNull();
+      // A call app's name, with nothing typed, is sent as the app's guess.
+      await act(async () => store.requestStart({ title: "Zoom meeting", titleSource: "app" }));
+      await waitFor(() => starts.length === 1);
+      expect(starts[0]).toMatchObject({ title: "Zoom meeting", titleSource: "app" });
+      expect(field!.value).toBe("");
+      starts.length = 0;
       await typeInto(field!, "Design review");
       await act(async () => store.requestStart({ title: "" }));
       await waitFor(() => starts.length === 1);
       expect(starts[0]!.title).toBe("Design review");
+      expect(starts[0]!.titleSource).toBeUndefined();
+      // A call app's guess never replaces a name someone typed.
+      starts.length = 0;
+      await act(async () => store.requestStart({ title: "Zoom meeting", titleSource: "app" }));
+      await waitFor(() => starts.length === 1);
+      expect(starts[0]).toMatchObject({ title: "Design review" });
+      expect(starts[0]!.titleSource).toBeUndefined();
     } finally {
       await act(async () => view.root.unmount());
       view.container.remove();
@@ -1285,6 +1296,52 @@ describe("Meeting page", () => {
       expect(text).toContain("Scribe v2 needs ElevenLabs, which isn't connected.");
       expect(text).toContain("Try another model");
       expect(text).not.toContain("No transcription provider is connected");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("while a meeting is processed, the player waits until every recorded track can play", async () => {
+    const fixture = createMeetingsFixture();
+    const listed = await fixture.client.listRecordings(fixture.workspaceId);
+    const processing = listed.recordings.find((entry) => entry.state === "processing")!;
+    // The microphone is ready to play; the computer audio isn't yet.
+    let playable = new Set([0]);
+    let reads = 0;
+    const recordings = {
+      ...fixture.client,
+      getRecording: async (workspaceId: string, id: string) => {
+        const found = await fixture.client.getRecording(workspaceId, id);
+        if (id !== processing.id) return found;
+        reads += 1;
+        return {
+          ...found,
+          tracks: found.tracks.map((track) => ({
+            ...track,
+            playable: playable.has(track.trackNumber),
+          })),
+        };
+      },
+    };
+    const player = (container: HTMLElement) =>
+      container.querySelector('[aria-label="Position"]') !== null;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={processing.id}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={recordings}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitFor(() => reads > 0);
+      await settle(600);
+      // The microphone alone would sound as if the call was never recorded.
+      expect(player(view.container)).toBe(false);
+      playable = new Set([0, 1]);
+      // The page reads the meeting again while it's processed.
+      await waitFor(() => player(view.container), 6_000);
     } finally {
       await view.unmount();
     }
@@ -1846,7 +1903,7 @@ describe("Live transcript", () => {
     } as unknown as Parameters<typeof RecorderPanel>[0]["recorder"];
     const view = await render(<RecorderPanel recorder={recorder} />);
     try {
-      expect(view.container.textContent).toContain("No name yet");
+      expect(view.container.textContent).toContain("Named for you");
       const nameIt = [...view.container.querySelectorAll("button")].find(
         (button) => button.textContent?.trim() === "Name it",
       )!;

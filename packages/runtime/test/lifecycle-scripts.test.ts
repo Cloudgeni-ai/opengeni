@@ -2023,4 +2023,324 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  describe("per-repository commit identity", () => {
+    const appRemote = "https://github.com/acme/app-repo.git";
+    const personalRemote = "https://github.com/octocat/personal-repo";
+    const botIdentity = {
+      name: "opengeni[bot]",
+      email: "42+opengeni[bot]@users.noreply.github.com",
+    };
+    const personalIdentity = { name: "octocat", email: "1+octocat@users.noreply.github.com" };
+    const resources = [
+      {
+        kind: "repository" as const,
+        uri: appRemote,
+        ref: "main",
+        mountPath: "repos/acme/app-repo",
+        githubInstallationId: 42,
+        githubRepositoryId: 43,
+      },
+      {
+        kind: "repository" as const,
+        uri: personalRemote,
+        ref: "main",
+        mountPath: "repos/octocat/personal-repo",
+        provider: "github" as const,
+        connectionType: "github_personal" as const,
+        credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        repositoryId: "77",
+        access: "write" as const,
+      },
+    ];
+    const bindings = [
+      {
+        credentialBindingId: "github-installation:42",
+        provider: "github" as const,
+        token: "app-token",
+        identity: botIdentity,
+      },
+      {
+        credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        provider: "github" as const,
+        token: "personal-token",
+        identity: personalIdentity,
+      },
+    ];
+
+    /** A sandbox-shaped session whose PATH puts the per-turn wrapper dir first,
+     *  exactly like the provisioned manifest PATH. */
+    function identitySession(
+      root: string,
+      home: string,
+      bakedIdentity: Record<string, string> = {},
+    ) {
+      const origin = existsSync(join(root, "origin")) ? join(root, "origin") : makeOrigin(root);
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const session = hostShellSession(home, {
+        cwd: workspace,
+        env: {
+          PATH: `${join(home, ".opengeni", "bin")}:${process.env.PATH}`,
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_CONFIG_COUNT: "2",
+          GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_0: appRemote,
+          GIT_CONFIG_KEY_1: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_1: personalRemote,
+          ...bakedIdentity,
+        },
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+      });
+      const run = async (cmd: string) => {
+        const result = await session.exec({ cmd });
+        if (result.exitCode !== 0) {
+          throw new Error(`command failed (${result.exitCode}): ${cmd}\n${result.output}`);
+        }
+        return result.stdout.trim();
+      };
+      const commitAs = async (relativeRepo: string, extra = "") =>
+        await run(
+          `${extra} git -C '${join(workspace, relativeRepo)}' commit --allow-empty -q -m change && git -C '${join(workspace, relativeRepo)}' log -1 --format='%an <%ae>|%cn <%ce>'`,
+        );
+      return { session, workspace, run, commitAs };
+    }
+
+    const formatted = (identity: { name: string; email: string }) =>
+      `${identity.name} <${identity.email}>|${identity.name} <${identity.email}>`;
+
+    test("mixed App and personal repositories in one box each commit as their own identity", async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-identity-new-box-"));
+      try {
+        const home = join(root, "home");
+        const { session, workspace, run, commitAs } = identitySession(root, home);
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        expect(await commitAs("repos/acme/app-repo")).toBe(formatted(botIdentity));
+        expect(await commitAs("repos/octocat/personal-repo")).toBe(formatted(personalIdentity));
+        // A repository the agent creates itself uses the box-wide default: the
+        // App identity when an App repository is attached.
+        await run(`git init -q '${join(workspace, "scratch")}'`);
+        expect(await commitAs("scratch")).toBe(formatted(botIdentity));
+        // The marker is local, never global.
+        expect(
+          await run(
+            `git -C '${join(workspace, "repos/octocat/personal-repo")}' config --local --get opengeni.managedidentity`,
+          ),
+        ).toBe("true");
+
+        // An identity someone set on purpose is never overwritten by later turns.
+        await run(
+          `git -C '${join(workspace, "repos/acme/app-repo")}' config --local --unset opengeni.managedidentity && git -C '${join(workspace, "repos/acme/app-repo")}' config --local user.email custom@example.com`,
+        );
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        expect(
+          await run(
+            `git -C '${join(workspace, "repos/acme/app-repo")}' config --local --get user.email`,
+          ),
+        ).toBe("custom@example.com");
+
+        // A managed identity whose binding no longer carries one is cleared.
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings.map(({ identity: _identity, ...binding }) => binding),
+        });
+        expect(
+          (
+            await session.exec({
+              cmd: `git -C '${join(workspace, "repos/octocat/personal-repo")}' config --local --get user.email`,
+            })
+          ).exitCode,
+        ).toBe(1);
+        // So is the box-wide default once no binding carries an identity.
+        expect((await session.exec({ cmd: "git config --global --get user.email" })).exitCode).toBe(
+          1,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("an identity changed inside a managed repository is kept on later turns", async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-identity-user-edit-"));
+      try {
+        const home = join(root, "home");
+        const { session, workspace, run, commitAs } = identitySession(root, home);
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        const personalRepo = join(workspace, "repos/octocat/personal-repo");
+        // The agent changes the identity on the person's request, marker untouched.
+        await run(`git -C '${personalRepo}' config user.email mine@corp.example`);
+        await run("git config --global user.name 'Someone Else'");
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        expect(await commitAs("repos/octocat/personal-repo")).toBe(
+          `${personalIdentity.name} <mine@corp.example>|${personalIdentity.name} <mine@corp.example>`,
+        );
+        // No global committer overrides an identity set in the repository.
+        expect(
+          (await session.exec({ cmd: "git config --global --get committer.email" })).exitCode,
+        ).toBe(1);
+        expect(await run("git config --global --get user.name")).toBe("Someone Else");
+        // The repository is no longer managed, so a dropped binding identity
+        // does not clear it either.
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings.map(({ identity: _identity, ...binding }) => binding),
+        });
+        expect(await run(`git -C '${personalRepo}' config --get user.email`)).toBe(
+          "mine@corp.example",
+        );
+        expect(await run("git config --global --get user.name")).toBe("Someone Else");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a box whose env carries a deployment identity commits personal repositories as the person", async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-identity-deployment-box-"));
+      try {
+        const home = join(root, "home");
+        const deployment = { name: "Deploy Bot", email: "deploy@example.com" };
+        const releaseBot = { name: "Release Bot", email: "release@example.com" };
+        const { session, commitAs } = identitySession(root, home, {
+          GIT_AUTHOR_NAME: deployment.name,
+          GIT_AUTHOR_EMAIL: deployment.email,
+          GIT_COMMITTER_NAME: releaseBot.name,
+          GIT_COMMITTER_EMAIL: releaseBot.email,
+        });
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings.map((binding) =>
+            binding.credentialBindingId === "github-installation:42"
+              ? { ...binding, identity: { ...deployment, committer: releaseBot } }
+              : binding,
+          ),
+        });
+        // A separately configured committer survives on App repositories.
+        expect(await commitAs("repos/acme/app-repo")).toBe(
+          `${deployment.name} <${deployment.email}>|${releaseBot.name} <${releaseBot.email}>`,
+        );
+        expect(await commitAs("repos/octocat/personal-repo")).toBe(formatted(personalIdentity));
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a box created with a baked GIT_AUTHOR env identity still commits as each repository's identity", async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-identity-baked-box-"));
+      try {
+        const home = join(root, "home");
+        const baked = {
+          GIT_AUTHOR_NAME: botIdentity.name,
+          GIT_AUTHOR_EMAIL: botIdentity.email,
+          GIT_COMMITTER_NAME: botIdentity.name,
+          GIT_COMMITTER_EMAIL: botIdentity.email,
+        };
+        const { session, workspace, run, commitAs } = identitySession(root, home, baked);
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        expect(await run("command -v git")).toBe(join(home, ".opengeni", "bin", "git"));
+        expect(await commitAs("repos/octocat/personal-repo")).toBe(formatted(personalIdentity));
+        expect(await commitAs("repos/acme/app-repo")).toBe(formatted(botIdentity));
+        // From inside the repository (no -C) too.
+        expect(
+          await run(
+            `cd '${join(workspace, "repos/octocat/personal-repo")}' && git commit --allow-empty -q -m inside && git log -1 --format='%ae|%ce'`,
+          ),
+        ).toBe(`${personalIdentity.email}|${personalIdentity.email}`);
+        // An identity the command sets itself is respected.
+        expect(
+          await commitAs(
+            "repos/octocat/personal-repo",
+            "GIT_AUTHOR_NAME=Custom GIT_AUTHOR_EMAIL=custom@example.com",
+          ),
+        ).toBe(`Custom <custom@example.com>|${botIdentity.name} <${botIdentity.email}>`);
+        // An unmanaged repository keeps the box's env identity.
+        await run(`git init -q '${join(workspace, "scratch")}'`);
+        expect(await commitAs("scratch")).toBe(formatted(botIdentity));
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("the git wrapper never runs itself and fails clearly without a real git", async () => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-identity-wrapper-loop-"));
+      try {
+        const home = join(root, "home");
+        const { session, run } = identitySession(root, home);
+        await runRepositoryCloneHook(session as never, resources, {
+          environment: {},
+          gitCredentialBindings: bindings,
+        });
+        const wrapperDir = join(home, ".opengeni", "bin");
+        const linkDir = join(root, "link-bin");
+        mkdirSync(linkDir, { recursive: true });
+        childProcess.execFileSync("ln", ["-s", join(wrapperDir, "git"), join(linkDir, "git")]);
+        expect(
+          await run(`PATH='${wrapperDir}:${linkDir}:${wrapperDir}':"$PATH" git --version`),
+        ).toContain("git version");
+        const missing = await session.exec({
+          cmd: `PATH='${wrapperDir}:${linkDir}' '${join(wrapperDir, "git")}' --version`,
+        });
+        expect(missing.exitCode).toBe(127);
+        expect(missing.stderr).toContain("git: real command not found on PATH");
+
+        // Another git shim that walks PATH skipping itself and execs the next
+        // git reaches the real git in either PATH order.
+        const shimDir = join(root, "shim-bin");
+        mkdirSync(shimDir, { recursive: true });
+        const shim = (mode: "exec" | "fork") =>
+          [
+            "#!/bin/sh",
+            "IFS=:",
+            "for dir in $PATH; do",
+            '  [ -x "$dir/git" ] && ! [ "$dir/git" -ef "$0" ] && { unset IFS; ' +
+              (mode === "exec" ? 'exec "$dir/git" "$@"; }' : '"$dir/git" "$@"; exit $?; }'),
+            "done",
+            "exit 127",
+          ].join("\n");
+        writeFileSync(join(shimDir, "git"), shim("exec"), { mode: 0o755 });
+        for (const order of [`${wrapperDir}:${shimDir}`, `${shimDir}:${wrapperDir}`]) {
+          const result = await session.exec({
+            cmd: `PATH='${order}':"$PATH" timeout 10 git --version`,
+          });
+          expect(result.exitCode).toBe(0);
+          expect(result.stdout).toContain("git version");
+        }
+        // A hook that runs git starts a new chain and still finds the real git.
+        const hooked = join(root, "hooked");
+        await run(`git init -q '${hooked}'`);
+        writeFileSync(
+          join(hooked, ".git", "hooks", "pre-commit"),
+          "#!/bin/sh\nexec git rev-parse --git-dir >/dev/null\n",
+          { mode: 0o755 },
+        );
+        const committed = await session.exec({
+          cmd: `PATH='${wrapperDir}:${shimDir}':"$PATH" timeout 10 git -C '${hooked}' -c user.name=t -c user.email=t@example.com commit --allow-empty -q -m hooked`,
+        });
+        expect(committed.exitCode).toBe(0);
+        // A shim that forks back into the wrapper stops instead of spinning.
+        writeFileSync(join(shimDir, "git"), shim("fork"), { mode: 0o755 });
+        const forked = await session.exec({
+          cmd: `timeout 20 env PATH='${wrapperDir}:${shimDir}' '${join(wrapperDir, "git")}' --version`,
+        });
+        expect(forked.exitCode).toBe(125);
+        expect(forked.stderr).toContain("git wrapper loop");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  });
 });

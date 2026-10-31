@@ -1,6 +1,5 @@
 // Regression: the viewer-attach cold-create path must declare the SAME stable
-// git-auth pointer env a repo turn does (GIT_ASKPASS / GIT_TERMINAL_PROMPT / bot
-// identity) — an attach-warmed box missing those keys kills the next repo turn on
+// git-auth pointer env a repo turn does (GIT_ASKPASS / GIT_TERMINAL_PROMPT) — an attach-warmed box missing those keys kills the next repo turn on
 // the SDK's "Live sandbox sessions cannot change manifest environment variables"
 // guard. Live instance: session 0566bad3 (2026-07-02) — the open session page's
 // viewer attach won the cold-create race against the first turn.
@@ -9,7 +8,6 @@
 
 import { describe, expect, test } from "bun:test";
 import { applyGitAuthPointerEnvironment, stableSandboxEnvironmentForRun } from "@opengeni/config";
-import { githubAppBotIdentity } from "@opengeni/github";
 import type { Session } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
 import { sessionAttachEnvironment } from "../src/sandbox/viewer";
@@ -50,7 +48,6 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
     );
     const expected = applyGitAuthPointerEnvironment(
       stableSandboxEnvironmentForRun(settings, { workspaceId: "ws" }),
-      githubAppBotIdentity(settings),
     );
     expect(attachEnv).toEqual(expected);
     expect(attachEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
@@ -80,12 +77,53 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
     );
     const expected = applyGitAuthPointerEnvironment(
       stableSandboxEnvironmentForRun(settings, { workspaceId: "ws" }),
-      null,
     );
     expect(attachEnv).toEqual(expected);
     expect(attachEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
     expect(attachEnv.GIT_AUTHOR_NAME).toBe("Opengeni Bot");
     expect(attachEnv.GIT_AUTHOR_EMAIL).toBe("bot@opengeni.dev");
+  });
+
+  test("a personal-GitHub session's attach env never carries the App bot identity", async () => {
+    // Regression: the viewer used to cold-create any GitHub-repo session's box
+    // with the bot identity, so a personal-only session whose viewer won the
+    // cold-create race committed as the bot for the box's whole life.
+    const noDeploymentIdentity = testSettings({
+      sandboxBackend: "modal",
+      gitAuthorName: undefined,
+      gitAuthorEmail: undefined,
+      githubAppId: "12345",
+      githubAppSlug: "opengeni-test",
+    });
+    const attachEnv = await sessionAttachEnvironment(
+      { db: null as never, settings: noDeploymentIdentity, bus: null as never } as never,
+      "ws",
+      sessionWith([
+        {
+          kind: "repository",
+          uri: "https://github.com/octocat/private-repository",
+          ref: "main",
+          provider: "github",
+          connectionType: "github_personal",
+          credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          repositoryId: "9007199254740993123",
+          access: "write",
+        },
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/repo.git",
+          ref: "main",
+          githubInstallationId: 123,
+          githubRepositoryId: 456,
+        },
+      ]),
+      null,
+    );
+    expect(attachEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
+    expect(attachEnv.GIT_AUTHOR_NAME).toBeUndefined();
+    expect(attachEnv.GIT_AUTHOR_EMAIL).toBeUndefined();
+    expect(attachEnv.GIT_COMMITTER_NAME).toBeUndefined();
+    expect(attachEnv.GIT_COMMITTER_EMAIL).toBeUndefined();
   });
 
   test("the attach env is keyed off the SESSION's backend, not the deployment default (HOME + pointers move with it)", async () => {
@@ -112,7 +150,6 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
     );
     const expected = applyGitAuthPointerEnvironment(
       stableSandboxEnvironmentForRun({ ...settings, sandboxBackend: "e2b" }, { workspaceId: "ws" }),
-      githubAppBotIdentity(settings),
     );
     expect(attachEnv).toEqual(expected);
     expect(attachEnv.HOME).toBe("/home/user");

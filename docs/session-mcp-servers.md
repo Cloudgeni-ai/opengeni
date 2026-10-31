@@ -375,6 +375,13 @@ or `block`. Attempt claim copies a bounded, ordered policy snapshot into
 new attempt only, except that an already-created Ask request keeps its original
 decision across the approval-resume attempt.
 
+The snapshot holds the session workspace's rows, then the rows of each
+personal login the turn routes to from another workspace, read from that
+login's own workspace (`connectorActionPolicySnapshotForTurn`). A personal
+login's choices are kept there once and follow it; a row for it in the session
+workspace is ignored. A login whose rows don't fit the 2048-row bound is left
+out whole, so its recommendations apply.
+
 Resolution is most-specific-first. Two matching policies with equal specificity
 fail closed as Block. No matching row preserves the historical unmanaged
 behavior. `requireApproval` and a tool's `opengeni/recommendedPermission` `_meta`

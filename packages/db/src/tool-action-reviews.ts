@@ -11,6 +11,7 @@ import {
   type ToolReviewStatus,
   decodeReviewArguments,
 } from "@opengeni/contracts";
+import { findAppAction } from "@opengeni/contracts/app-actions";
 import { type Database, withRlsContext } from "./database";
 import * as schema from "./schema";
 import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
@@ -278,6 +279,10 @@ export async function getToolReviewDetailsPage(
       record.request.reviewContext ?? undefined,
       input.path,
       input.offset,
+      25,
+      record.request.toolName,
+      // Only Opengeni's own app actions are named from its catalog.
+      record.request.serverId === "opengeni" ? (id) => findAppAction(id) !== undefined : undefined,
     );
   } catch {
     return null;

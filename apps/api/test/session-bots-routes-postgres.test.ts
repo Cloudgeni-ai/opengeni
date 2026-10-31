@@ -249,7 +249,7 @@ describe("bots through the API (real PostgreSQL)", () => {
     });
   }, 180_000);
 
-  test("templates: everyone uses them, whoever saved one manages it", async () => {
+  test("templates: shared ones are everyone's to change, Only me ones stay with whoever saved them", async () => {
     if (!shared) return;
     const workspace = await freshWorkspace("bots templates");
     const person = ["workspace:read", "sessions:create", "sessions:read"] as Permission[];
@@ -272,6 +272,7 @@ describe("bots through the API (real PostgreSQL)", () => {
       name: "SRE bot",
       createdBySubjectId: "user:alice",
       viewerAccess: "manage",
+      viewerCanMakePrivate: true,
       sourceSessionId: null,
     });
     expect((await call(reader, "POST", base, { name: "x", setupInstructions: "y" })).status).toBe(
@@ -280,12 +281,42 @@ describe("bots through the API (real PostgreSQL)", () => {
 
     const seenByBob = await call(bob, "GET", base);
     expect(seenByBob.json.templates).toHaveLength(1);
-    expect(seenByBob.json.templates[0]).toMatchObject({ id: template.id, viewerAccess: "use" });
+    // A shared template is shared work: any member who starts chats changes it.
+    // ...but only whoever saved it (or an admin) may make it Only me, and the
+    // template says so, so the edit dialog offers only what the server allows.
+    expect(seenByBob.json.templates[0]).toMatchObject({
+      id: template.id,
+      viewerAccess: "manage",
+      viewerCanMakePrivate: false,
+    });
+    expect((await call(reader, "GET", base)).json.templates[0]).toMatchObject({
+      id: template.id,
+      viewerAccess: "use",
+      viewerCanMakePrivate: false,
+    });
+    expect((await call(admin, "GET", `${base}/${template.id}`)).json.template).toMatchObject({
+      viewerAccess: "manage",
+      viewerCanMakePrivate: true,
+    });
     expect((await call(reader, "GET", `${base}/${template.id}`)).json.template.name).toBe(
       "SRE bot",
     );
-    expect((await call(bob, "PATCH", `${base}/${template.id}`, { name: "Mine" })).status).toBe(403);
-    expect((await call(bob, "DELETE", `${base}/${template.id}`)).status).toBe(403);
+    expect((await call(reader, "PATCH", `${base}/${template.id}`, { name: "No" })).status).toBe(
+      403,
+    );
+    expect((await call(reader, "DELETE", `${base}/${template.id}`)).status).toBe(403);
+    const renamedByBob = await call(bob, "PATCH", `${base}/${template.id}`, { name: "SRE bot" });
+    expect(renamedByBob.status).toBe(200);
+    expect(renamedByBob.json.template).toMatchObject({
+      createdBySubjectId: "user:alice",
+      viewerAccess: "manage",
+    });
+    // Only whoever saved it (or an admin) can take it away from everyone.
+    const hiddenByBob = await call(bob, "PATCH", `${base}/${template.id}`, {
+      visibility: "private",
+    });
+    expect(hiddenByBob.status).toBe(403);
+    expect(hiddenByBob.json.error.message).toContain("can make it Only me");
 
     const changed = await call(alice, "PATCH", `${base}/${template.id}`, {
       setupInstructions: "Install the on-call Skill and create the morning check.",
@@ -357,6 +388,9 @@ describe("bots through the API (real PostgreSQL)", () => {
     expect((await call(bob, "GET", base)).json.templates.map((row: any) => row.id)).toEqual([
       mineId,
     ]);
+    // Once shared, any member who starts chats may also delete it.
+    expect((await call(bob, "DELETE", `${base}/${mineId}`)).status).toBe(200);
+    expect((await call(alice, "GET", base)).json.templates).toEqual([]);
   }, 180_000);
 
   test("the agent edits its own profile and saves itself as a template", async () => {
