@@ -6862,6 +6862,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove",
+    "request": [
+      "RemoveSessionResourcesRequest"
+    ],
+    "response": [],
+    "permission": "sessions:control"
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/revoke",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/revoke",

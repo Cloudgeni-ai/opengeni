@@ -386,14 +386,20 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
     if (toolName === "repositories_list") {
       const repositories = [];
       for (const repository of this.repositoriesByName.values()) {
-        const authority = await this.options.resolveAuthority({
-          serverId: this.options.serverId,
-          toolName,
-          destinationUrl: `${GITHUB_REST_API_ORIGIN}/repos/${repository.fullName}`,
-          repository,
-          write: false,
-          forceRefresh: false,
-        });
+        let authority: GitHubRestResolvedAuthority;
+        try {
+          authority = await this.options.resolveAuthority({
+            serverId: this.options.serverId,
+            toolName,
+            destinationUrl: `${GITHUB_REST_API_ORIGIN}/repos/${repository.fullName}`,
+            repository,
+            write: false,
+            forceRefresh: false,
+          });
+        } catch (error) {
+          if (error instanceof GitHubRestRepositoryDetachedError) continue;
+          throw error;
+        }
         assertResolvedAuthority(repository, authority);
         if (authority.authorizeProviderRequest && !(await authority.authorizeProviderRequest())) {
           throw new GitHubRestAuthorityError("GitHub repository authority is no longer current");
@@ -831,6 +837,11 @@ type GitHubProviderResult = {
 
 export class GitHubRestInputError extends Error {}
 export class GitHubRestAuthorityError extends Error {}
+/**
+ * The repository was removed from the chat. Its tools refuse it and
+ * `repositories_list` leaves it out instead of failing the whole listing.
+ */
+export class GitHubRestRepositoryDetachedError extends GitHubRestAuthorityError {}
 export class GitHubRestProviderError extends Error {}
 export class GitHubRestMutationNotExecutedError extends Error {
   readonly connectorActionOutcome = "not_executed" as const;

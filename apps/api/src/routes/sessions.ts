@@ -159,6 +159,7 @@ import {
   UpdateSessionToolPolicyRequest,
   UpdateSessionAgentRequest,
   UpdateSessionSkillsRequest,
+  RemoveSessionResourcesRequest,
   AgentConfigError,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
@@ -403,6 +404,7 @@ import {
   updateSessionToolPolicy,
   updateSessionAgent,
   updateSessionSkills,
+  removeSessionResources,
   updateSessionProfile,
   setSessionRetention,
   setSessionUnattended,
@@ -3282,6 +3284,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
+  // Remove attached repositories from the session and its child sessions.
+  // Access ends on the next Git or GitHub call; the next turn removes the
+  // repository folders from the sandbox.
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = parseRequestBody(
+      RemoveSessionResourcesRequest,
+      await c.req.json().catch(() => null),
+    );
+    const session = await removeSessionResources(deps, grant, sessionId, payload);
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
@@ -5990,6 +6007,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/capability-continuations" && verb === "POST") return "session.append";
   if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/skills" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/resources/remove" && verb === "POST") return "session.resources.write";
   if (suffix === "/admin-access") {
     if (verb === "GET") return "session.read";
     if (verb === "PUT" || verb === "DELETE") return "session.tool_policy.write";

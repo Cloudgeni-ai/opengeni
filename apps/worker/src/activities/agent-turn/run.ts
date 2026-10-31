@@ -10,6 +10,7 @@ import {
   markSessionTurnModelTransportHttpOnly,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
+import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
 import { createAttemptVaultAccess } from "./secret-resolver";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
@@ -1439,6 +1440,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const {
             turnResources: claimedTurnResources,
             runtimeResources: claimedRuntimeResources,
+            repositoryRemoval,
             mcpAvailabilityNote,
             turnTools,
             connectionScope,
@@ -1843,6 +1845,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             buildCompanyBrainContributionReceiptFor,
             promptCacheKey,
             runtimeResources,
+            // Revoke a removed repository's dedicated token only when
+            // Opengeni's own GitHub App minted it, never a token a host
+            // credential callback supplied.
+            repositoryRemoval: repositoryRemoval
+              ? {
+                  ...repositoryRemoval,
+                  revokeDedicatedGitHubAppTokens: gitTokensMintedByOpengeni(connectionCredentials),
+                }
+              : null,
             sandboxEnvironment,
             sandboxArtifactRuntime,
             sandboxGitToken,

@@ -2816,6 +2816,7 @@ export const SESSION_EVENT_TYPES = [
   "session.tool_policy.updated",
   "session.agent.updated",
   "session.skills.updated",
+  "session.resources.removed",
   "session.model_settings.updated",
   // An authorized person or host changed the task root's usage limit.
   "session.usage_limit.updated",
@@ -11273,6 +11274,16 @@ export type UpdateSessionSkillsRequest = {
   skills: SessionSkillInput[];
   /** The session's current `toolPolicyVersion` (shared CAS). */
   expectedVersion: number;
+};
+
+/**
+ * `POST .../sessions/:id/resources/remove`. Removes attached repositories from
+ * the session and its child sessions. Access ends on the next Git or GitHub
+ * call; the next turn removes the repository folders. Repositories that are
+ * not attached are ignored.
+ */
+export type RemoveSessionResourcesRequest = {
+  resources: Array<{ kind: "repository"; uri: string }>;
 };
 
 /** `PUT .../sessions/:id/agent`. Omitted agent fields keep their current values. */

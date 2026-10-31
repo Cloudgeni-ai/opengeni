@@ -121,6 +121,12 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
     why: "the source creator's credential bindings are stripped",
     expected: ({ source }) => source.resources,
   },
+  // The fork routines start from the source row (migration 1140): a
+  // repository a person removed from the source stays removed in the fork.
+  removed_repositories: {
+    why: "the source's repository removals",
+    expected: ({ source }) => source.removed_repositories,
+  },
   create_idempotency_key: { why: "the source's create request", expected: fresh(null) },
   agent_creation_attempt_id: { why: "the source's create request", expected: fresh(null) },
   imported_archive_import_id: { why: "the source's import", expected: fresh(null) },

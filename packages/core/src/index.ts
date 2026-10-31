@@ -159,6 +159,7 @@ export * from "./domain/bot-templates";
 export * from "./domain/site-audience";
 export * from "./domain/file-audience";
 export * from "./domain/sessions";
+export * from "./domain/session-resource-removal";
 export * from "./domain/insights";
 export * from "./domain/insights-usage";
 export * from "./domain/memory-slack-publication";
