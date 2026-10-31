@@ -35,8 +35,10 @@ import type { OrganizationModelDefaultsState } from "@/components/models/use-org
 /* ----------------------------------------------------------------------------
    Allowed models: the one limit on which models new work may use, on top of
    every connected account. The organization sets it once for every
-   workspace; a workspace follows that until its admins give it its own list.
-   A summary row on the Models page opens a form page to change it.
+   workspace, as a ceiling: a workspace uses the organization's list until its
+   admins narrow it with a list of their own, and its own list can never allow
+   a model the organization doesn't. A summary row on the Models page opens a
+   form page to change it.
 
    Use Opengeni credits: a separate workspace switch (the `allowCreditModels`
    workspace setting). Off blocks every model paid with Opengeni credits,
@@ -168,8 +170,52 @@ function policyDraftKey(draft: ModelAccessPolicyDraft): string {
   return JSON.stringify({ follow: draft.follow, policy: modelAccessPolicyRequest(draft) });
 }
 
+/**
+ * The organization's list a workspace's own list can only narrow, when it
+ * restricts anything. Null on the organization's own page.
+ */
+function organizationCeiling(draft: ModelAccessPolicyDraft) {
+  const organization = draft.originalPolicy.organization;
+  return organization &&
+    (organization.allowedProviders !== null || organization.allowedModels !== null)
+    ? organization
+    : null;
+}
+
+/** Whether the organization's list rules this model out of a workspace's draft. */
+function outsideOrganization(
+  draft: ModelAccessPolicyDraft,
+  model: WorkspaceModelCatalogModel | undefined,
+  modelId: string,
+): boolean {
+  const ceiling = organizationCeiling(draft);
+  if (!ceiling) return false;
+  // The server's verdict covers provider limits, which the catalog can't show.
+  if (model) return model.organizationAllowed === false;
+  return ceiling.allowedModels !== null && !ceiling.allowedModels.includes(modelId);
+}
+
+/** How many models an exact list lets run: within the organization's list, credits as given. */
+function selectedRunnableCount(
+  draft: ModelAccessPolicyDraft,
+  models: readonly WorkspaceModelCatalogModel[],
+  allowCreditModels: boolean,
+): number {
+  const byId = new Map(models.map((model) => [model.id, model]));
+  return [...draft.selectedModelIds].filter((modelId) => {
+    const model = byId.get(modelId);
+    if (outsideOrganization(draft, model, modelId)) return false;
+    return allowCreditModels || !modelUsesCredits(model);
+  }).length;
+}
+
+function selectedAllowedLabel(count: number): string {
+  return `${count} ${count === 1 ? "model" : "models"} allowed`;
+}
+
 /** Whether the draft's allowlist lets this catalog model through (credits aside). */
 function allowedByDraft(model: WorkspaceModelCatalogModel, draft: ModelAccessPolicyDraft) {
+  if (outsideOrganization(draft, model, model.id)) return false;
   if (draft.mode === "unrestricted") return true;
   // Opaque provider rules: the server's verdict is the only truth.
   if (draft.mode === "provider") return model.policyAllowed === true;
@@ -377,6 +423,14 @@ export function allowedModelsSummary(
   const draft = state.saved;
   if (!draft) return "";
   if (draft.mode === "unrestricted") {
+    // Every model the organization allows: count them.
+    if (organizationCeiling(draft)) {
+      const allowed = state.models.filter(
+        (model) =>
+          allowedByDraft(model, draft) && (draft.allowCreditModels || !modelUsesCredits(model)),
+      ).length;
+      return `${allowed} of ${state.models.length} models`;
+    }
     return draft.allowCreditModels ? "All models" : "All except credits";
   }
   if (draft.mode === "provider") {
@@ -385,11 +439,9 @@ export function allowedModelsSummary(
     const allowed = state.models.filter((model) => model.policyAllowed).length;
     return `${allowed} of ${state.models.length} models`;
   }
-  // With credits off, a listed credit model can't run: count only the rest.
-  const byId = new Map(state.models.map((model) => [model.id, model]));
-  const count = draft.allowCreditModels
-    ? draft.selectedModelIds.size
-    : [...draft.selectedModelIds].filter((id) => !modelUsesCredits(byId.get(id))).length;
+  // A listed model the organization doesn't allow, or a credit model with
+  // credits off, can't run: count only the rest.
+  const count = selectedRunnableCount(draft, state.models, draft.allowCreditModels);
   return count === 0 ? "No models" : count === 1 ? "1 model" : `${count} models`;
 }
 
@@ -430,7 +482,8 @@ export function AllowedModelsRow({
     );
   }
   const saved = state.saved;
-  const blocked = saved?.mode === "selected" && saved.selectedModelIds.size === 0;
+  const blocked =
+    saved?.mode === "selected" && selectedRunnableCount(saved, state.models, true) === 0;
   const creditsLeaveNothing =
     saved !== null &&
     !saved.allowCreditModels &&
@@ -442,7 +495,7 @@ export function AllowedModelsRow({
       description={
         blocked
           ? state.scope === "organization"
-            ? "No model is allowed, so workspaces that follow this can't start new work."
+            ? "No model is allowed, so no workspace can start new work."
             : "No model is allowed, so new work can't start."
           : creditsLeaveNothing
             ? "Opengeni credits are off and no other model can run, so new work can't start."
@@ -591,7 +644,11 @@ export function AllowedModelsFormPage({
             : current.mode === "unrestricted"
               ? new Set(
                   models
-                    .filter((model) => model.credentialReadiness.status === "ready")
+                    .filter(
+                      (model) =>
+                        model.credentialReadiness.status === "ready" &&
+                        !outsideOrganization(current, model, model.id),
+                    )
                     .map((model) => model.id),
                 )
               : current.selectedModelIds,
@@ -629,6 +686,9 @@ export function AllowedModelsFormPage({
   const visiblePolicyAllowedCount = models.filter((model) => model.policyAllowed).length;
   const following = canFollow && draft?.follow === true;
   const disabled = !canManage || following;
+  // The organization's list this workspace's own list stays within.
+  const ceiling = !organizationScope && draft ? organizationCeiling(draft) : null;
+  const narrowing = ceiling !== null && !following;
 
   function setFollow(follow: boolean) {
     setDraft((current) => {
@@ -646,8 +706,8 @@ export function AllowedModelsFormPage({
         label={`Use ${organizationLabel}’s allowed models`}
         description={
           following
-            ? `Changes ${organizationLabel} makes apply here too. Turn this off to choose this workspace’s own models.`
-            : "This workspace has its own list."
+            ? `Changes ${organizationLabel} makes apply here too. Turn this off to allow fewer models here.`
+            : `This workspace has its own list, within ${organizationLabel}’s.`
         }
         control={
           <Switch
@@ -798,7 +858,11 @@ export function AllowedModelsFormPage({
         <SettingRowGroup className="-mt-3">
           <SettingRow
             label="Allow every model"
-            description="Includes models from accounts you connect later."
+            description={
+              narrowing
+                ? `Every model ${organizationLabel} allows, including models from accounts you connect later.`
+                : "Includes models from accounts you connect later."
+            }
             control={
               <Switch
                 checked={draft.mode === "unrestricted"}
@@ -822,8 +886,8 @@ export function AllowedModelsFormPage({
             {creditsOff
               ? "New chats and automations won't start until you allow a model paid by a subscription or API key, connect one, or turn Opengeni credits back on."
               : organizationScope
-                ? "Workspaces that follow this list can't start new chats or automations until it allows at least one model."
-                : "New chats and automations won't start until you allow at least one model."}
+                ? "None of the models this list allows can run with the accounts connected now, so new chats and automations won't start. Allow one that can."
+                : "None of the allowed models can run now, so new chats and automations won't start. Allow one that can."}
           </Notice>
         ) : null}
         {draft.mode === "selected" ? (
@@ -833,6 +897,7 @@ export function AllowedModelsFormPage({
             selected={draft.selectedModelIds}
             canManage={canManage && !following}
             creditsOff={creditsOff}
+            isOutsideOrganization={(model) => outsideOrganization(draft, model, model.id)}
             onToggle={setModelSelected}
             onToggleMany={setModelsSelected}
             onAdd={(modelId) => setModelSelected(modelId, true)}
@@ -848,8 +913,10 @@ export function AllowedModelsFormPage({
         title="Allowed models"
         description={
           organizationScope
-            ? `Choose which models people can pick in every workspace. A workspace can choose its own instead.`
-            : "Choose which models people can pick for new chats and automations."
+            ? "Choose which models people can pick in every workspace. A workspace can allow fewer, never more."
+            : ceiling
+              ? `Choose which models people can pick for new chats and automations, within what ${organizationLabel} allows.`
+              : "Choose which models people can pick for new chats and automations."
         }
         onClose={onClose}
         loading={state.loading && !saved}
@@ -865,8 +932,10 @@ export function AllowedModelsFormPage({
             ? `Follows ${organizationLabel}`
             : draft && draft.mode !== "provider"
               ? draft.mode === "unrestricted"
-                ? "Every model allowed"
-                : `${draft.selectedModelIds.size} ${draft.selectedModelIds.size === 1 ? "model" : "models"} allowed`
+                ? narrowing
+                  ? `Every model ${organizationLabel} allows`
+                  : "Every model allowed"
+                : selectedAllowedLabel(selectedRunnableCount(draft, models, true))
               : null
         }
         onSubmit={async () => {
@@ -885,7 +954,9 @@ export function AllowedModelsFormPage({
         title="Replace the provider limit?"
         description={
           pendingReplacementMode === "unrestricted"
-            ? "After you save, every current and future model from connected accounts is allowed."
+            ? narrowing
+              ? `After you save, this workspace allows every current and future model that ${organizationLabel} allows.`
+              : "After you save, every current and future model from connected accounts is allowed."
             : "After you save, only the exact models allowed today stay allowed; future models from the same providers don't. You can check the list before saving."
         }
         confirmLabel="Replace limit"
@@ -903,7 +974,8 @@ export function AllowedModelsFormPage({
  * Models grouped by provider, one row each, with a checkbox on the right. Each
  * group heading names who pays and has its own checkbox to pick the whole
  * group at once. With Opengeni credits off, credit models are muted and can't
- * be changed (their saved choice is kept for when credits come back).
+ * be changed (their saved choice is kept for when credits come back). Models
+ * the organization's list rules out are muted and locked the same way.
  */
 function ModelChecklist({
   groups,
@@ -911,6 +983,7 @@ function ModelChecklist({
   selected,
   canManage,
   creditsOff,
+  isOutsideOrganization,
   onToggle,
   onToggleMany,
   onAdd,
@@ -920,6 +993,7 @@ function ModelChecklist({
   selected: Set<string>;
   canManage: boolean;
   creditsOff: boolean;
+  isOutsideOrganization: (model: WorkspaceModelCatalogModel) => boolean;
   onToggle: (modelId: string, selected: boolean) => void;
   onToggleMany: (modelIds: readonly string[], selected: boolean) => void;
   onAdd: (modelId: string) => void;
@@ -963,7 +1037,9 @@ function ModelChecklist({
         shown.map(([providerLabel, providerModels]) => {
           const lockedByCredits = (model: WorkspaceModelCatalogModel) =>
             creditsOff && modelUsesCredits(model);
-          const changeable = providerModels.filter((model) => !lockedByCredits(model));
+          const locked = (model: WorkspaceModelCatalogModel) =>
+            isOutsideOrganization(model) || lockedByCredits(model);
+          const changeable = providerModels.filter((model) => !locked(model));
           const changeableSelected = changeable.filter((model) => selected.has(model.id)).length;
           const payers = [
             ...new Set(providerModels.map((model) => payerSummaryForModel(t, model))),
@@ -991,8 +1067,9 @@ function ModelChecklist({
               }
             >
               {providerModels.map((model) => {
-                const locked = lockedByCredits(model);
-                const interactive = canManage && !locked;
+                const ruledOut = isOutsideOrganization(model);
+                const muted = locked(model);
+                const interactive = canManage && !muted;
                 return (
                   <li key={model.id} className="min-w-0">
                     <label
@@ -1007,13 +1084,15 @@ function ModelChecklist({
                       <span
                         className={cn(
                           "min-w-0 flex-1 truncate text-sm",
-                          locked ? "text-fg-muted" : "text-fg",
+                          muted ? "text-fg-muted" : "text-fg",
                         )}
                       >
                         {model.label}
                       </span>
-                      {locked ? (
-                        <span className="shrink-0 text-xs text-fg-muted">Credits off</span>
+                      {muted ? (
+                        <span className="shrink-0 text-xs text-fg-muted">
+                          {ruledOut ? "Not allowed by organization" : "Credits off"}
+                        </span>
                       ) : null}
                       <Checkbox
                         aria-label={model.label}

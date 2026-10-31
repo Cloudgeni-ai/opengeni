@@ -1,3 +1,6 @@
+// The models section renders the shared models page, which navigates through
+// the page's navigation host; the router mock below backs it.
+import "@/navigation-host";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -121,6 +124,24 @@ const listOrganizationMcpConnections = mock(async (_accountId: string) => ({
   connections: [],
   canManageAll: true,
 }));
+// Billing shows the per-person Personal-workspace limit from the
+// organization's privacy settings.
+const getOrganizationPrivacySettings = mock(async (_organizationId: string) => ({
+  organizationId: accountId,
+  defaultVisibility: "workspace" as const,
+  personalWorkspaces: true,
+  personalWorkspaceMonthlyCredits: null,
+  adminsSeePrivateSchedules: false,
+  limits: {
+    onlyMeAllowed: true,
+    defaultVisibilityLocked: false,
+    adminsSeePrivateSchedulesLocked: false,
+  },
+  updatedAt: null,
+}));
+const updateOrganizationPrivacySettings = mock(async () => {
+  throw new Error("not used");
+});
 const useBillingUsage = mock((_options: unknown) => ({
   loading: false,
   error: null,
@@ -145,6 +166,8 @@ const context = {
     getWorkspaceModelCatalog,
     getOrganizationAdministrationOverview,
     listOrganizationMcpConnections,
+    getOrganizationPrivacySettings,
+    updateOrganizationPrivacySettings,
   } as unknown as OpenGeniBrowserClient,
   clientConfig: { auth: { mode: "managedSession" } },
   authSession: { user: { email: "owner@example.test" } },
@@ -387,6 +410,8 @@ describe("organization billing StrictMode ownership", () => {
 
     expect(getBilling.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(getOrganizationPrivacySettings.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain("Monthly limit per person");
     const creditSection = container.querySelector('section[aria-label="Credits and payments"]');
     expect(creditSection).not.toBeNull();
     expect(creditSection?.textContent).toContain("$25.00");

@@ -23,6 +23,7 @@ import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
+  evaluateWorkspaceModelPolicy,
   machineCanBeWorkspaceDefault,
   MemberDefaultExecutionTarget,
   resolveRealtimeVoiceSettings,
@@ -874,6 +875,30 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       },
     );
+    // The organization's allowlist is a ceiling the workspace's own list can
+    // only narrow; say per model where it rules one out (Allowed models).
+    if (
+      organizationDefaults.allowedProviders !== null ||
+      organizationDefaults.allowedModels !== null
+    ) {
+      const providerByModel = new Map(
+        selections.map((selection) => [selection.model.id, selection.model.providerId]),
+      );
+      for (const model of catalog.models) {
+        model.organizationAllowed = evaluateWorkspaceModelPolicy(
+          {
+            allowedProviders: organizationDefaults.allowedProviders,
+            allowedModels: organizationDefaults.allowedModels,
+            allowCreditModels: true,
+          },
+          {
+            providerId: providerByModel.get(model.id) ?? model.provider,
+            modelId: model.id,
+            chargesCredits: false,
+          },
+        ).allowed;
+      }
+    }
     for (const model of catalog.models) {
       model.compactionPolicy = workspaceModelCompactionPolicy(
         workspaceCatalogSettings,
@@ -1834,6 +1859,8 @@ async function workspaceModelPolicyResponse(
   workspaceId: string,
 ): Promise<WorkspaceModelPolicyResponse> {
   const layers = await getWorkspaceModelPolicyLayers(deps.db, workspaceId);
+  // The workspace's own list as saved (the form edits it); a model runs only
+  // when both it and `organization` allow it.
   const effective = layers.workspace ?? layers.organization;
   return WorkspaceModelPolicyResponse.parse({
     allowedProviders: effective?.allowedProviders ?? null,

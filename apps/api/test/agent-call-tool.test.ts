@@ -10,6 +10,7 @@ import {
   initializeSessionStartAtomically,
   listSessionEvents,
   registerNativePushDevice,
+  setAgentCallHostPhones,
   synchronizeCanonicalHumanLoginBindings,
   type DbClient,
 } from "@opengeni/db";
@@ -232,6 +233,36 @@ describe("call_user", () => {
       "session.agentCall.settled",
       "session.notification.posted",
     ]);
+  });
+
+  test("rings a person through the phones their product rings, without an app phone", async () => {
+    if (!shared) return;
+    const { db, deps, scope, subjectId, session, callUser, ringingCall } = await setup();
+    expect(await callUser({ reason: "Production is down" })).toMatchObject({
+      placed: false,
+      refusal: "no_phone",
+    });
+    await setAgentCallHostPhones(db, {
+      accountId: scope.accountId,
+      subjectId,
+      phones: 1,
+      teammates: false,
+    });
+    const pending = callUser({ reason: "Production is down" });
+    const callId = await ringingCall();
+    await finishAgentCall(deps as never, {
+      ...scope,
+      callId,
+      outcome: "answered",
+      calleeSubjectId: subjectId,
+      answeredBy: "product-phone",
+    });
+    expect(await pending).toMatchObject({ placed: true, callId, outcome: "answered", phones: 1 });
+    const ringing = (await listSessionEvents(db, scope.workspaceId, session.id)).find(
+      (event) => event.type === "session.agentCall.ringing",
+    );
+    // The product rings its own phones; Opengeni rang none itself.
+    expect(ringing?.payload).toMatchObject({ callId, devices: 0 });
   });
 
   test("stopping the turn while it rings cancels the call", async () => {

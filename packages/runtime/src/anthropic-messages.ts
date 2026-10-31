@@ -17,6 +17,11 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
+import {
+  hasClaudeCiteTag,
+  rewriteClaudeCiteTags,
+  type ClaudeCiteSource,
+} from "@opengeni/contracts/claude-cite-tags";
 import { withClaudeModelRequest } from "./claude-subscription-usage";
 import { createModelImageSizer } from "./model-image-sizing";
 import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
@@ -351,7 +356,15 @@ export function anthropicMessages(
 ): Message[] {
   const messages: Message[] = [];
   let foreignSearch = false;
+  // A runtime-form search record waits for the next user message: inside a
+  // reply it would split it (thinking from its tool call), and it is never
+  // Claude's speech. An assistant-form record keeps its original place.
+  let pendingRecords: Json[] = [];
   const append = (role: Message["role"], content: Json[]) => {
+    if (role === "user" && pendingRecords.length) {
+      content = [...pendingRecords, ...content];
+      pendingRecords = [];
+    }
     if (!content.length) return;
     const previous = messages.at(-1);
     if (previous?.role === role) previous.content.push(...content);
@@ -415,7 +428,9 @@ export function anthropicMessages(
           if (options.webSearch && sameAccount) append("assistant", anthropicWebSearchBlocks(item));
           else {
             if (!sameAccount) foreignSearch = true;
-            append("assistant", contentBlocks(object(projectHostedSearchEvidence(item)).content));
+            const projected = object(projectHostedSearchEvidence(item));
+            if (projected.role === "user") pendingRecords.push(...contentBlocks(projected.content));
+            else append("assistant", contentBlocks(projected.content));
           }
           break;
         }
@@ -436,6 +451,11 @@ export function anthropicMessages(
         ]);
     }
   }
+  // A request that ends in Claude's own reply continues it (a paused search).
+  // A record placed after that reply would end it, and would move once the
+  // reply grows, so records still waiting then reach Claude with the next
+  // user message, in a later request.
+  if (messages.at(-1)?.role !== "assistant") append("user", []);
   withoutUncontinuableSearches(messages);
   // Validate adjacency and pairing before network I/O. Reorder only results within their user message.
   let pending = new Set<string>();
@@ -616,7 +636,8 @@ export function buildAnthropicRequest(
     provider.kind === "anthropic-workspace" ||
     provider.kind === "anthropic-organization" ||
     provider.kind === "claude-subscription-workspace" ||
-    provider.kind === "claude-subscription-organization";
+    provider.kind === "claude-subscription-organization" ||
+    provider.kind === "claude-subscription";
   const outputLimit = profile?.maxOutputTokens ?? (managed ? 32_000 : undefined);
   const names = toolNames(request);
   const forcedName = (name: string): string => {
@@ -839,6 +860,58 @@ function requestUsage(raw: Json): Usage {
   });
 }
 
+/**
+ * Claude's web-search results in the order it numbers them for citations:
+ * each `web_search_result` of each result block, counted from 1.
+ */
+export function anthropicSearchResultSources(blocks: Iterable<unknown>): ClaudeCiteSource[] {
+  const sources: ClaudeCiteSource[] = [];
+  for (const block of blocks) {
+    const result = block as Json | null;
+    if (result?.type !== "web_search_tool_result" || !Array.isArray(result.content)) continue;
+    for (const entry of result.content as Json[])
+      if (entry?.type === "web_search_result")
+        sources.push({
+          url: typeof entry.url === "string" ? entry.url : "",
+          title: typeof entry.title === "string" ? entry.title : null,
+        });
+  }
+  return sources;
+}
+
+/** The search results a built request sends, in order. */
+function requestSearchResultSources(body: Json): ClaudeCiteSource[] {
+  const messages = Array.isArray(body.messages) ? (body.messages as Json[]) : [];
+  return messages.flatMap((message) =>
+    Array.isArray(message.content) ? anthropicSearchResultSources(message.content) : [],
+  );
+}
+
+/**
+ * With native web search, Anthropic tells Claude to mark quotes with citation
+ * tags (a `cite` tag whose `index="N-M"` names search result N, sentence M),
+ * and turns them into structured citations only in ordinary answer text. A
+ * `wait_for_input` call's `reply` is shown verbatim as the turn's answer, so
+ * its tags would reach the person as raw markup. They become the quoted text,
+ * linked to the search result the index names among the results this request
+ * and response hold, or plain text when it names none. Only that reply is
+ * changed: other tool arguments, such as file edits, keep their exact text.
+ */
+function withLinkedReplyCitations(
+  toolName: string,
+  input: Json,
+  searchResults: () => readonly ClaudeCiteSource[],
+): Json {
+  if (!/(?:^|__)wait_for_input$/u.test(toolName)) return input;
+  const reply = input.reply;
+  if (typeof reply !== "string" || !hasClaudeCiteTag(reply)) return input;
+  const sources = searchResults();
+  return {
+    ...input,
+    reply: rewriteClaudeCiteTags(reply, (result) => sources[result - 1] ?? null),
+  };
+}
+
 export function anthropicResponse(
   message: Json,
   requestId?: string,
@@ -846,7 +919,11 @@ export function anthropicResponse(
   searchQueries: ReadonlyMap<string, string> = new Map(),
   requestUsages: Json[] = [],
   accountScope: string | null = null,
-  options: { progressUpdates?: boolean } = {},
+  options: {
+    progressUpdates?: boolean;
+    /** The search results the request sent, in order, read only when needed. */
+    requestSearchResults?: () => readonly ClaudeCiteSource[];
+  } = {},
 ): ModelResponse {
   // A refused response can be HTTP 200 with no content blocks. It must not
   // become an empty successful response or admit a tool call from partial output.
@@ -932,7 +1009,16 @@ export function anthropicResponse(
           ...(names.get(block.name)?.namespace
             ? { namespace: names.get(block.name)!.namespace }
             : {}),
-          arguments: JSON.stringify(object(block.input)),
+          arguments: JSON.stringify(
+            withLinkedReplyCitations(
+              names.get(block.name)?.name ?? block.name,
+              object(block.input),
+              () => [
+                ...(options.requestSearchResults?.() ?? []),
+                ...anthropicSearchResultSources(content.slice(0, index)),
+              ],
+            ),
+          ),
           status: "completed",
         });
         break;
@@ -1049,6 +1135,17 @@ export class AnthropicMessagesModel implements Model {
       } else result.push(block);
     }
     return result;
+  }
+
+  /**
+   * The search results a request sends, in order, as Claude numbers them for
+   * citations. A paused turn's continuation adds its earlier content after
+   * these, and the response numbers those blocks itself.
+   */
+  private requestSearchResults(request: ModelRequest): ClaudeCiteSource[] {
+    return requestSearchResultSources(
+      buildAnthropicRequest(request, this.model, this.provider, false),
+    );
   }
 
   private async prepare(request: ModelRequest, stream: boolean) {
@@ -1253,7 +1350,10 @@ export class AnthropicMessagesModel implements Model {
       searchQueries,
       merged!.requestUsages,
       accountScope,
-      { progressUpdates: anthropicWritesProgressUpdates(this.model) },
+      {
+        progressUpdates: anthropicWritesProgressUpdates(this.model),
+        requestSearchResults: () => this.requestSearchResults(request),
+      },
     );
   }
 
@@ -1321,7 +1421,10 @@ export class AnthropicMessagesModel implements Model {
       searchQueries,
       merged!.requestUsages,
       accountScope,
-      { progressUpdates: anthropicWritesProgressUpdates(this.model) },
+      {
+        progressUpdates: anthropicWritesProgressUpdates(this.model),
+        requestSearchResults: () => this.requestSearchResults(request),
+      },
     );
     yield protocol.StreamEventResponseCompleted.parse({
       type: "response_done",
