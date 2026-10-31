@@ -137,8 +137,13 @@ can be built and tested.
   out. That gives up the bound for it: an only copy on a host that stays
   cut off runs until the host is back in touch or someone stops it. No
   limit is set on that time, since reaching one would end the only copy.
-  The fleet's default rules take a sandbox's first checkpoint within a
-  minute and then one every ten, so in practice this covers sandboxes
+  Nor does the agent adjust memory meanwhile: it decides nothing while
+  its lease is out, so the memory rules of
+  [24](0024-busy-sandboxes-are-slowed-never-frozen.md) stop
+  moving, and an only copy that runs on is held by the limits its group
+  already has and the sandboxes' wall. The fleet's default rules take a
+  sandbox's first checkpoint within a minute (`FIRST_CHECKPOINT`) and
+  then one every ten, so in practice this covers sandboxes
   that are never checkpointed (runner sandboxes, and sandboxes whose
   rules ask for no checkpoint), and a default sandbox is its only copy
   for its first minute at most.
