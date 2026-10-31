@@ -2517,10 +2517,10 @@ function workspaceRepositoryPickerProps(
     selectedPersonalGitHubRepoIds: context.selectedPersonalGitHubRepoIds,
     selectedPersonalGitHubRepoRefs: context.selectedPersonalGitHubRepoRefs,
     personalGitHubBusy: context.personalGitHubBusy,
+    personalGitHubManageUrl: `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=integration:github`,
     groups: context.repositoryGroups,
     selectedRepoIds: context.selectedRepoIds,
     selectedRepoRefs: context.selectedRepoRefs,
-    selectedInstallationId: context.selectedInstallationId,
     manualRepos: context.manualRepos,
     manualOpen: context.manualReposOpen,
     githubAppOpen: context.githubAppOpen,
@@ -2605,11 +2605,7 @@ function workspaceRepositoryPickerProps(
         selectWorkspaceRepository: (matched, ref) => {
           assertCurrent();
           context.setSelectedRepoIds((current) => {
-            const next =
-              context.selectedInstallationId !== null &&
-              context.selectedInstallationId !== matched.installationId
-                ? new Set<number>()
-                : new Set(current);
+            const next = new Set(current);
             next.add(matched.id);
             return next;
           });

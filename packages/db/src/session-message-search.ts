@@ -180,6 +180,8 @@ export async function scanSessionMessages(
         request.sessionId ?? null,
         request.archiveStatus ?? "active",
         ...(request.groupBy ? [{ groupBy: request.groupBy }] : []),
+        // Older cursors carry no order; only the newest-first traversal binds one.
+        ...(request.order === "newest" ? [{ order: "newest" }] : []),
       ]),
     )
     .digest("hex");
@@ -209,6 +211,11 @@ export async function scanSessionMessages(
     }
   }
   const pattern = new RegExp(sessionMessageLiteralPattern(request.query), "giu");
+  // Newest-first walks the same key backwards: messages arrive newest first,
+  // while the occurrences inside one message keep their text order.
+  const newest = request.order === "newest";
+  const direction = newest ? sql.raw("desc") : sql.raw("asc");
+  const reverse = newest ? sql.raw("asc") : sql.raw("desc");
   const matches: SessionMessageSearchMatch[] = [];
   let exhausted = false;
   const e = schema.sessionEvents;
@@ -239,7 +246,9 @@ export async function scanSessionMessages(
     const boundary = position
       ? position.skipSession
         ? sql`${c.sessionId} > ${position.sessionId}::uuid`
-        : sql`(${c.sessionId}, ${c.sequence}) ${position.done ? sql`>` : sql`>=`} (${position.sessionId}::uuid, ${position.sequence}::int)`
+        : sql`(${c.sessionId}, ${c.sequence}) ${sql.raw(
+            (newest ? "<" : ">") + (position.done ? "" : "="),
+          )} (${position.sessionId}::uuid, ${position.sequence}::int)`
       : sql`true`;
     // One statement checks the next window's text in PostgreSQL and returns
     // only the first candidates that contain the literal. The cheap
@@ -276,14 +285,14 @@ export async function scanSessionMessages(
           sql`${e.duplicateOfEventId} is null`,
           sql`jsonb_typeof(${e.payload}->'text') = 'string'`,
         )}
-        order by ${c.sessionId}, ${c.sequence}
+        order by ${c.sessionId} ${direction}, ${c.sequence} ${direction}
         limit ${sql.raw(String(SESSION_MESSAGE_SEARCH_WINDOW))}
       ), visited as (
         select count(*)::int as visited from eligible
       ), last_visited as (
         select eligible.session_id as "lastSessionId", eligible.sequence as "lastSequence"
         from eligible
-        order by eligible.session_id desc, eligible.sequence desc
+        order by eligible.session_id ${reverse}, eligible.sequence ${reverse}
         limit 1
       )
       select visited.visited, last_visited.*, candidate.*
@@ -307,9 +316,9 @@ export async function scanSessionMessages(
           case when octet_length(${e.payload}->>'text') <= 8192 then ${e.payload}->'text' else null end as "smallText"
         from (
           select eligible.id, eligible.session_id, eligible.sequence, eligible.matched, eligible.encoded,
-            (row_number() over (order by eligible.session_id, eligible.sequence))::int as rank
+            (row_number() over (order by eligible.session_id ${direction}, eligible.sequence ${direction}))::int as rank
           from eligible
-          order by eligible.session_id, eligible.sequence
+          order by eligible.session_id ${direction}, eligible.sequence ${direction}
           offset 0
         ) ranked
         inner join ${e} on ${e.workspaceId} = ${workspaceId} and ${e.id} = ranked.id
@@ -334,14 +343,14 @@ export async function scanSessionMessages(
               and other_message.payload->'text' = ${e.payload}->'text'
               and (other_message.payload_codec_version is not distinct from ${e.payloadCodecVersion}
                 or left(${e.payload}->>'text', ${LOSSLESS_JSON_STRING_PREFIX.length}) <> ${LOSSLESS_JSON_STRING_PREFIX})))))
-        order by ranked.session_id, ranked.sequence
+        order by ranked.session_id ${direction}, ranked.sequence ${direction}
         offset 0
           ) valid
         ) grouped
         -- Grouping needs only each session's first certain hit. Encoded text
         -- stays a candidate because only the decoding reader can confirm it.
         where ${request.groupBy === "session" ? sql`grouped.earlier = 0` : sql`true`}
-        order by grouped."sessionId", grouped.sequence
+        order by grouped."sessionId" ${direction}, grouped.sequence ${direction}
         limit 33
       ) candidate on true
       order by candidate.rank

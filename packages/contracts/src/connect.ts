@@ -8,6 +8,28 @@ import { PreparedMcpSetup } from "./prepared-mcp-setup";
 export { PreparedMcpSetup, preparedMcpHeaders } from "./prepared-mcp-setup";
 
 const opaqueId = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(512));
+/**
+ * More provider access asked for when reconnecting an existing account, for
+ * example the Gmail permission a later tool call needs. The server bounds it by
+ * the reviewed connector's own permission list; it can never widen past it.
+ */
+const ConnectRequestedScopes = /* @__PURE__ */ defineSchema(() =>
+  z.array(z.string().min(1).max(512)).min(1).max(16),
+);
+const PROVIDERS_ACCEPTING_REQUESTED_SCOPES = new Set([
+  "mcp-oauth",
+  "slack-personal",
+  "gmail",
+  "google-drive",
+  "google-calendar",
+]);
+/**
+ * Whether a reconnect of this Connect provider may carry `requestedScopes`.
+ * Other providers keep their fixed permission set and reject the field.
+ */
+export function connectProviderAcceptsRequestedScopes(providerId: string): boolean {
+  return PROVIDERS_ACCEPTING_REQUESTED_SCOPES.has(providerId);
+}
 export const ConnectOwnership = /* @__PURE__ */ defineSchema(() =>
   z.enum(["personal", "workspace"]),
 );
@@ -149,6 +171,8 @@ export const ConnectAttempt = /* @__PURE__ */ defineSchema(() =>
       mcpSetup: PreparedMcpSetup.optional(),
       /** Exact installed catalog identity after a verified prepared MCP setup. */
       mcpCapabilityId: opaqueId.optional(),
+      /** Additional access this reconnect asks the provider for. */
+      requestedScopes: ConnectRequestedScopes.optional(),
       error: z
         .object({ code: opaqueId, message: z.string().max(2048), retryable: primitives.boolean })
         .strict()
@@ -237,6 +261,8 @@ export const BeginConnectRequest = /* @__PURE__ */ defineSchema(() =>
       reconnectAccountId: opaqueId.optional(),
       installationTarget: ConnectInstallationTarget.optional(),
       mcpSetup: PreparedMcpSetup.optional(),
+      /** Additional access to ask for; only meaningful with `reconnectAccountId`. */
+      requestedScopes: ConnectRequestedScopes.optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -245,6 +271,12 @@ export const BeginConnectRequest = /* @__PURE__ */ defineSchema(() =>
           code: "custom",
           path: ["mcpSetup"],
           message: "Prepared header setup requires the MCP headers provider",
+        });
+      if (value.requestedScopes && !value.reconnectAccountId)
+        context.addIssue({
+          code: "custom",
+          path: ["requestedScopes"],
+          message: "Additional access can only be requested when reconnecting an account",
         });
     }),
 );

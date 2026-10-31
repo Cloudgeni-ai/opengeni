@@ -1011,6 +1011,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "notify_user",
   "notification_withdraw",
   "inbox_tidy",
+  "call_user",
   "goal_set",
   "goal_update",
   "goal_progress",
@@ -4020,6 +4021,11 @@ export const DelegatedAccessTokenPayload = /* @__PURE__ */ defineSchema(() =>
       // attempt still owns the signed turn.
       attemptId: primitives.optionalUuid,
       executionGeneration: z.number().int().positive().optional(),
+      // The machine whose process holds this token, when it is not the
+      // session's active sandbox: a `run_on` exec on another enrolled machine.
+      // Tools that take a path in "this" workspace resolve it there. Older
+      // verifiers ignore it and fall back to the active sandbox.
+      executionSandboxId: primitives.optionalUuid,
       exp: primitives.positiveInteger,
     })
     .superRefine((payload, ctx) => {
@@ -4048,6 +4054,13 @@ export const DelegatedAccessTokenPayload = /* @__PURE__ */ defineSchema(() =>
           code: z.ZodIssueCode.custom,
           path: ["principalKind"],
           message: "nested-agent depth claims require an agent_attempt principal",
+        });
+      }
+      if (payload.executionSandboxId !== undefined && payload.principalKind !== "agent_attempt") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["executionSandboxId"],
+          message: "executionSandboxId requires an agent_attempt principal",
         });
       }
       if (
@@ -8690,13 +8703,25 @@ export type UpdateSessionToolPolicyRequest = z.infer<typeof UpdateSessionToolPol
  * server finds the latest card for this capability, checks the capability is
  * now usable in the chat and that the person has not written since, and then
  * wakes the agent once so it continues the request that needed it.
+ *
+ * `connectionId` instead names a connected account's own card (expired access,
+ * or more access a tool needs) that the person just reconnected or allowed:
+ * the server finds the latest card for that account and checks the account is
+ * active with the access the card asked for.
  */
 export const ContinueAfterCapabilitySetupRequest = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      capabilityId: z.string().trim().min(1).max(512),
-    })
-    .strict(),
+  z.union([
+    z
+      .object({
+        capabilityId: z.string().trim().min(1).max(512),
+      })
+      .strict(),
+    z
+      .object({
+        connectionId: z.string().trim().min(1).max(512),
+      })
+      .strict(),
+  ]),
 );
 export type ContinueAfterCapabilitySetupRequest = z.infer<
   typeof ContinueAfterCapabilitySetupRequest
@@ -12540,6 +12565,11 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
       .min(SCHEDULED_TASK_APPROVAL_TIMEOUT_MIN_SECONDS)
       .max(SCHEDULED_TASK_APPROVAL_TIMEOUT_MAX_SECONDS)
       .optional(),
+    // Whether the chats this task starts run unattended (no person answers
+    // during the run). Omitted: unattended by default, unless
+    // approvalTimeoutSeconds is set (see scheduledTaskRunUnattendedSetting).
+    // Runs posted into an existing chat follow that chat.
+    unattended: primitives.optionalBoolean,
     // Agent configuration for every generated session; resolved at dispatch
     // (the whole-row execution digest covers it). Omitted keeps legacy.
     agent: AgentConfigRequest.optional(),
@@ -16162,6 +16192,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * older servers; treat absence as a live session without an exemption.
      */
     retention: z.lazy(() => SessionRetention).optional(),
+    /**
+     * Whether the session's next turns run unattended: no person will see or
+     * answer a question until the task ends. Absent on older servers; treat
+     * absence as attended. See `SessionUnattendedSetting` for where it comes from.
+     */
+    unattended: primitives.optionalBoolean,
     /** Optimistic archive-state revision; zero represents an absent personal relation. */
     archiveVersion: primitives.nonnegativeInteger.default(0),
     /**
@@ -16500,6 +16536,9 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     // and its withdrawal. They drive that person's inbox and phone notifications.
     "session.notification.posted",
     "session.notification.withdrawn",
+    // An agent ringing the person's phones (call_user), and how the ring ended.
+    "session.agentCall.ringing",
+    "session.agentCall.settled",
     "session.context.compaction.requested",
     "session.context.compaction.started",
     "session.context.compacted",
@@ -17107,6 +17146,88 @@ export const SessionNotificationWithdrawnPayload = /* @__PURE__ */ defineSchema(
 export type SessionNotificationWithdrawnPayload = z.infer<
   typeof SessionNotificationWithdrawnPayload
 >;
+
+/** Bound on why an agent calls, shown on the ring screen and in the chat. */
+export const AGENT_CALL_REASON_MAX_CHARS = 120;
+
+/** Where an agent's call to a person stands. */
+export const AgentCallState = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    /** The person's phones are ringing. */
+    "ringing",
+    /** They picked up: the chat's voice call opens with the reason. */
+    "answered",
+    /** They declined it. */
+    "declined",
+    /** Nobody answered before it stopped ringing. */
+    "missed",
+    /** The agent's turn ended while it rang. */
+    "cancelled",
+  ]),
+);
+export type AgentCallState = z.infer<typeof AgentCallState>;
+
+/**
+ * An agent ringing a person's phones (docs/design/agent-calls.md). Only the
+ * person called can read, answer or decline it.
+ */
+export const AgentCall = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: primitives.uuid,
+      workspaceId: primitives.uuid,
+      sessionId: primitives.uuid,
+      /** Who the ring screen shows as calling (the chat, or the member it works for). */
+      callerLabel: z.string().max(200).nullable(),
+      reason: z.string().min(1).max(200),
+      state: AgentCallState,
+      ringUntil: primitives.dateTime,
+      createdAt: primitives.dateTime,
+      endedAt: z.string().datetime().nullable(),
+      /** Whether this phone (app session) took the call; null when unknown. */
+      answeredHere: z.boolean().nullable(),
+    })
+    .strict(),
+);
+export type AgentCall = z.infer<typeof AgentCall>;
+
+/** Answering or declining from a phone; `device` tells the other phones it was taken elsewhere. */
+export const AgentCallActionRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ device: z.string().trim().min(1).max(300).optional() }).strict(),
+);
+export type AgentCallActionRequest = z.infer<typeof AgentCallActionRequest>;
+
+/**
+ * `session.agentCall.ringing`: the agent is ringing a person. Products that
+ * deliver their own pushes ring their app from this event.
+ */
+export const SessionAgentCallRingingPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      callId: primitives.uuid,
+      calleeSubjectId: z.string().min(1).max(300),
+      callerLabel: z.string().max(200).nullable(),
+      reason: z.string().min(1).max(200),
+      ringUntil: primitives.dateTime,
+      /** How many of the person's phones Opengeni rang itself. */
+      devices: z.number().int().min(0),
+    })
+    .strict(),
+);
+export type SessionAgentCallRingingPayload = z.infer<typeof SessionAgentCallRingingPayload>;
+
+/** `session.agentCall.settled`: how the call ended its ring. */
+export const SessionAgentCallSettledPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      callId: primitives.uuid,
+      calleeSubjectId: z.string().min(1).max(300),
+      reason: z.string().min(1).max(200),
+      outcome: AgentCallState.exclude(["ringing"]),
+    })
+    .strict(),
+);
+export type SessionAgentCallSettledPayload = z.infer<typeof SessionAgentCallSettledPayload>;
 
 /** Why an item waits on the person. */
 export const InboxItemKind = /* @__PURE__ */ defineSchema(() =>
@@ -19459,6 +19580,124 @@ export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
 export const SESSION_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
 
+/**
+ * Reserved session-metadata key recording that the session is unattended: no
+ * person will see or answer a question until its task ends. Session metadata
+ * is immutable after creation, so this is frozen with the create. Create
+ * admission sets it only from `CreateSessionRequest.unattended` and drops any
+ * caller-supplied value.
+ */
+export const SESSION_UNATTENDED_METADATA_KEY = "_opengeniUnattended";
+
+/** True only when session metadata records an unattended create. */
+export function sessionMetadataUnattended(metadata: unknown): boolean {
+  return (
+    typeof metadata === "object" &&
+    metadata !== null &&
+    !Array.isArray(metadata) &&
+    (metadata as Record<string, unknown>)[SESSION_UNATTENDED_METADATA_KEY] === true
+  );
+}
+
+/** `metadata` with the reserved unattended key set from `unattended` alone. */
+export function withSessionUnattendedMetadata(
+  metadata: Record<string, unknown>,
+  unattended: boolean,
+): Record<string, unknown> {
+  const { [SESSION_UNATTENDED_METADATA_KEY]: _ignored, ...rest } = metadata;
+  return unattended ? { ...rest, [SESSION_UNATTENDED_METADATA_KEY]: true } : rest;
+}
+
+/**
+ * A chat's changeable unattended setting, stored apart from its frozen
+ * metadata:
+ * - `unattended` / `attended`: an explicit choice (the chat's "Work without
+ *   me" switch, `PUT …/sessions/:id/unattended`, or a scheduled task that says
+ *   `unattended`). A person's message never changes it.
+ * - `unattended_by_default`: an automation (scheduled task or event trigger)
+ *   started the chat and nobody chose. It becomes `attended` when a person
+ *   writes in the chat.
+ * With no setting, the create option (`CreateSessionRequest.unattended`) decides.
+ */
+export const SessionUnattendedSetting = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["unattended", "attended", "unattended_by_default"]),
+);
+export type SessionUnattendedSetting = z.infer<typeof SessionUnattendedSetting>;
+
+/**
+ * Whether a session's turns run unattended. A fork is made by a person to
+ * continue the work: it keeps an explicit choice (copied with the row) but not
+ * the create option or an automation default.
+ */
+export function resolveSessionUnattended(input: {
+  setting: SessionUnattendedSetting | null;
+  createdUnattended: boolean;
+  forked: boolean;
+}): boolean {
+  if (input.setting === "unattended") return true;
+  if (input.setting === "attended") return false;
+  if (input.forked) return false;
+  return input.setting === "unattended_by_default" || input.createdUnattended;
+}
+
+/** Turn this chat's unattended mode on or off from its next turn. */
+export const UpdateSessionUnattendedRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      unattended: primitives.boolean,
+    })
+    .strict(),
+);
+export type UpdateSessionUnattendedRequest = z.infer<typeof UpdateSessionUnattendedRequest>;
+
+/**
+ * Model-facing result of a call refused in an unattended session because it
+ * needs a person's approval. Nothing ran and nothing was approved.
+ */
+export const UNATTENDED_APPROVAL_REFUSAL_TEXT =
+  "Not run: this call needs a person's approval, and this chat is set to work without a person, so no one can give it. Nothing was changed. Continue without it, and list it among the steps left for a person.";
+
+/**
+ * Model-facing result of a question or hand-off to a person refused because
+ * the chat was switched to work without a person after it started (its tools
+ * stay as they were, so the call is refused rather than withheld).
+ */
+export const UNATTENDED_PERSON_REFUSAL_TEXT =
+  "Not sent: this chat is now set to work without a person, so no one will answer until the task ends. Settle open choices with the most conventional option and continue. Do not take anything destructive, outside the workspace or needing authority you were not given; list it, with any step only a person can take, among the steps left for a person.";
+
+/** Surfaces through which a person, not a program, sends a message. */
+export const PERSON_MESSAGE_SURFACES: readonly SessionTurnSurface[] = ["web", "slack", "voice"];
+
+/**
+ * Whether a person (not an API key, service or agent) sent an accepted
+ * message, through the web app, Slack or a voice call. Such a message ends an
+ * automation's unattended default (`unattended_by_default`).
+ */
+export function messageSentByPerson(input: {
+  source: "user" | "api";
+  surface: SessionTurnSurface | null;
+}): boolean {
+  return (
+    input.source === "user" &&
+    input.surface !== null &&
+    PERSON_MESSAGE_SURFACES.includes(input.surface)
+  );
+}
+
+/**
+ * The unattended setting of a chat a scheduled task or event trigger starts:
+ * the task's explicit `unattended` choice, else unattended by default unless
+ * the task sets `approvalTimeoutSeconds` (its owner chose to answer its
+ * approvals).
+ */
+export function scheduledTaskRunUnattendedSetting(config: {
+  unattended?: boolean | undefined;
+  approvalTimeoutSeconds?: number | undefined;
+}): SessionUnattendedSetting | null {
+  if (config.unattended !== undefined) return config.unattended ? "unattended" : "attended";
+  return config.approvalTimeoutSeconds === undefined ? "unattended_by_default" : null;
+}
+
 export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(() =>
   rejectingRemovedFields(
     ["turnInstructions", "selectedHostMcpDelegations"],
@@ -19504,6 +19743,15 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         initialMessage: z.string().min(1).optional(),
         /** Exempt the new session from the idle-session archive (for persistent agents). */
         keepLive: primitives.optionalBoolean,
+        /**
+         * No person will see or answer questions until this session's task ends
+         * (an API automation or other headless run). The agent is told so, and
+         * resolves open choices itself instead of asking; tools that wait for a
+         * person are not offered. Frozen at create for every later turn;
+         * omitted or false keeps the ordinary interactive behavior. Not
+         * inherited by child sessions; a fork reads as attended.
+         */
+        unattended: primitives.optionalBoolean,
         /** The new chat's name, description and avatar, as if a person set them
          * (a bot started from a template, for example). Display metadata only;
          * never sent to the model. */

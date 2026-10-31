@@ -38,6 +38,7 @@ pub mod keys;
 pub mod leader;
 pub mod link;
 pub mod metrics;
+pub mod pointers;
 pub mod service;
 pub mod store;
 pub mod tls;
@@ -70,6 +71,11 @@ pub const REQUESTS_KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How long a host given up on stays listed (`GET /v1/hosts`, state
 /// `lost`) before the service forgets it, counted from the give-up.
 pub const LOST_HOSTS_KEPT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How often a replica tries to move the fleet's pointers into the store
+/// while hosts of an earlier release still keep theirs in the object
+/// store (ADR 25).
+pub const IMPORT_EVERY: Duration = Duration::from_secs(5);
 
 /// How a replica runs.
 #[derive(Debug)]
@@ -138,12 +144,26 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         .validate()
         .map_err(|error| anyhow::anyhow!("lease terms: {error}"))?;
     let give_up_after = config.settings.give_up_after;
-    let view = Arc::new(View::new(config.seed, terms.term));
+    let view = Arc::new(View::new(config.seed, terms.silent_after()));
+    // The fleet's pointers are kept in the store once they are moved in
+    // from the archive, whose own pointers the import reads.
+    let pointers = config
+        .archive
+        .as_ref()
+        .map(|_| Arc::new(pointers::Pointers::new(Arc::clone(&store))));
+    let import = config
+        .archive
+        .as_ref()
+        .map(|archive| (archive.object_pointers(), archive.describe()));
+    let archive = config.archive.map(|archive| match &pointers {
+        Some(pointers) => archive.with_pointers(Arc::clone(pointers) as _),
+        None => archive,
+    });
     let service = Arc::new(Service::new(
         Arc::clone(&store),
         Arc::clone(&view),
         Hosts::new(config.tls.client.clone()),
-        config.archive,
+        archive,
         config.settings,
     ));
     let host_listener = TcpListener::bind(config.hosts)
@@ -172,6 +192,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         service.settings().links.clone(),
         certificates,
         host_metrics,
+        pointers.clone(),
     );
     let api_router = api::router(Arc::clone(&service), config.operator, Arc::clone(&metrics));
     let mut tasks = vec![
@@ -196,23 +217,18 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         tokio::spawn(collect_images(Arc::clone(&service))),
         tokio::spawn(images::follow(Arc::clone(&service), config.image_sources)),
     ];
+    if let (Some(pointers), Some((from, url))) = (pointers, import) {
+        tasks.push(tokio::spawn(pointers::import(
+            pointers,
+            from,
+            url,
+            IMPORT_EVERY,
+            Arc::clone(&metrics),
+        )));
+    }
     let metrics = serve_metrics(config.metrics, metrics, &view, &mut tasks).await?;
     let e2b = match config.e2b {
-        Some(e2b::listen::Listen {
-            address,
-            tls,
-            settings,
-        }) => {
-            let listener = TcpListener::bind(address)
-                .await
-                .with_context(|| format!("listening for E2B callers on {address}"))?;
-            let bound = listener.local_addr()?;
-            let front = e2b::Front::new(Arc::clone(&service), settings);
-            let router = e2b::router(Arc::clone(&front));
-            tasks.push(tokio::spawn(e2b::ops::sweep(front)));
-            tasks.push(tokio::spawn(e2b::listen::serve(listener, router, tls)));
-            Some(bound)
-        }
+        Some(listen) => Some(serve_e2b(listen, &service, &mut tasks).await?),
         None => None,
     };
     Ok(Running {
@@ -223,6 +239,28 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         service,
         tasks,
     })
+}
+
+/// Serves the E2B-compatible API `listen` describes over `service` among
+/// `tasks`; returns the address bound.
+async fn serve_e2b<S: Store>(
+    e2b::listen::Listen {
+        address,
+        tls,
+        settings,
+    }: e2b::listen::Listen,
+    service: &Arc<Service<S>>,
+    tasks: &mut Vec<JoinHandle<()>>,
+) -> anyhow::Result<SocketAddr> {
+    let listener = TcpListener::bind(address)
+        .await
+        .with_context(|| format!("listening for E2B callers on {address}"))?;
+    let bound = listener.local_addr()?;
+    let front = e2b::Front::new(Arc::clone(service), settings);
+    let router = e2b::router(Arc::clone(&front));
+    tasks.push(tokio::spawn(e2b::ops::sweep(front)));
+    tasks.push(tokio::spawn(e2b::listen::serve(listener, router, tls)));
+    Ok(bound)
 }
 
 /// Serves Prometheus metrics on `address`, if one is set, among `tasks`;

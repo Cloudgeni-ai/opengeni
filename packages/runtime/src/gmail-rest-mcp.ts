@@ -24,6 +24,8 @@ import {
   GMAIL_COMPOSE_PROPERTIES,
   GMAIL_ATTACHMENT_SOURCE_PROPERTIES,
   gmailToolAvailableOnDeployment,
+  gmailToolRequiredScope,
+  gmailToolSupportsScopes,
 } from "./gmail-rest-tools";
 export { gmailToolAvailableOnDeployment, gmailToolSupportsScopes } from "./gmail-rest-tools";
 
@@ -53,12 +55,20 @@ const MUTATION_TOOLS = new Set([
   "unlabel_message",
   "unlabel_thread",
 ]);
+/**
+ * The account was connected with less access than this tool needs. The person
+ * is asked in the chat to allow more, through the same connect card.
+ */
+const GMAIL_MORE_ACCESS_NEEDED =
+  "Gmail has not been given access for this action yet. The person is asked in the chat to allow it; try again after they do.";
 
 type ResolveCredentialResult =
   | {
       status: "ok";
       headers: Record<string, string>;
       connectionId: string;
+      /** The provider's actual grants, when the connection broker knows them. */
+      grantedScopes?: string[];
       authoritySource?: "host";
       authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
@@ -507,6 +517,8 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     toolName: string,
     args: Record<string, unknown>,
   ): Promise<Partial<import("@opengeni/contracts").ToolReviewContext>> {
+    // Ask for missing access before the person is asked to approve the action.
+    await this.resolveForTool(toolName, `${GMAIL_REST_API_BASE}/profile`, false);
     if (["send_draft", "send_message", "create_draft", "update_draft"].includes(toolName)) {
       const raw =
         toolName === "send_draft"
@@ -1702,6 +1714,54 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     });
   }
 
+  /** Resolve the pinned account's credential for one tool and check its grant. */
+  private async resolveForTool(
+    toolName: string,
+    destinationUrl: string,
+    forceRefresh: boolean,
+  ): Promise<Extract<ResolveCredentialResult, { status: "ok" }>> {
+    const result = await this.options.resolveCredential({
+      workspaceId: this.options.workspaceId,
+      serverId: this.options.serverId,
+      connectionRef: this.options.connectionRef,
+      destinationUrl,
+      toolName,
+      forceRefresh,
+      ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
+    });
+    if (result.status === "auth_needed") {
+      await this.reportAuthNeeded(result, toolName);
+      throw new GmailRestAuthError("Authentication required for Gmail");
+    }
+    this.options.onResolvedConnectionId?.(result.connectionId);
+    if (this.pinnedConnectionId && this.pinnedConnectionId !== result.connectionId) {
+      throw new GmailRestAuthError("Gmail account changed during this tool session");
+    }
+    this.pinnedConnectionId = result.connectionId;
+    // A host-supplied credential may not report grants; Google then decides.
+    if (result.grantedScopes && !gmailToolSupportsScopes(toolName, result.grantedScopes)) {
+      await this.reportAuthNeeded(
+        {
+          status: "auth_needed",
+          reason: "insufficient_scope",
+          providerDomain: this.options.connectionRef.providerDomain,
+          ...(this.options.connectionRef.provider
+            ? { provider: this.options.connectionRef.provider }
+            : {}),
+          connectionId: result.connectionId,
+          ...(result.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
+          scopes: [gmailToolRequiredScope(toolName)],
+          ...(this.options.connectionRef.resource
+            ? { resource: this.options.connectionRef.resource }
+            : {}),
+        },
+        toolName,
+      );
+      throw new GmailRestAuthError(GMAIL_MORE_ACCESS_NEEDED);
+    }
+    return result;
+  }
+
   private async request<T>(
     toolName: string,
     urlInput: string | URL,
@@ -1717,27 +1777,8 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     ) {
       throw new Error("Gmail REST destination binding mismatch");
     }
-    const resolve = async (forceRefresh: boolean) => {
-      const result = await this.options.resolveCredential({
-        workspaceId: this.options.workspaceId,
-        serverId: this.options.serverId,
-        connectionRef: this.options.connectionRef,
-        destinationUrl: url.toString(),
-        toolName,
-        forceRefresh,
-        ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
-      });
-      if (result.status === "auth_needed") {
-        await this.reportAuthNeeded(result, toolName);
-        throw new GmailRestAuthError("Authentication required for Gmail");
-      }
-      this.options.onResolvedConnectionId?.(result.connectionId);
-      if (this.pinnedConnectionId && this.pinnedConnectionId !== result.connectionId) {
-        throw new GmailRestAuthError("Gmail account changed during this tool session");
-      }
-      this.pinnedConnectionId = result.connectionId;
-      return result;
-    };
+    const resolve = async (forceRefresh: boolean) =>
+      await this.resolveForTool(toolName, url.toString(), forceRefresh);
     const send = async (headers: Record<string, string>) => {
       const context = this.requestContext.getStore();
       const request: RequestInit = {

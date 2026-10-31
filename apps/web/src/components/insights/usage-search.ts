@@ -31,7 +31,11 @@ export type UsageSearch = {
   root?: string;
   sched?: string;
   src?: string;
-  /** Custom range: YYYY-MM-DD, UTC (`from` is taken by the back link). */
+  /**
+   * Custom range (`from` is taken by the back link): UTC instants such as
+   * 2026-10-30T09:15Z with `end` exclusive, or, in older links, UTC days
+   * (YYYY-MM-DD) with `end` inclusive. Both use the same form.
+   */
   start?: string;
   end?: string;
 };
@@ -48,7 +52,18 @@ const FILTER_KEYS: Record<UsageFilterField, keyof UsageSearch> = {
   source: "src",
 };
 
-const RANGES: readonly UsageRange[] = ["today", "week", "month", "30d", "90d", "ytd", "custom"];
+const RANGES: readonly UsageRange[] = [
+  "1h",
+  "3h",
+  "24h",
+  "today",
+  "week",
+  "month",
+  "30d",
+  "90d",
+  "ytd",
+  "custom",
+];
 const GROUPS: readonly UsageGroupBy[] = [
   "model",
   "provider",
@@ -83,16 +98,51 @@ function values(raw: unknown, field: UsageFilterField): string[] {
 }
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z$/;
+const DAY_MS = 86_400_000;
+/** The server answers custom windows up to 370 days. */
+export const CUSTOM_MAX_MS = 370 * DAY_MS;
 
 function day(value: unknown): string | undefined {
   if (typeof value !== "string" || !DAY.test(value)) return undefined;
   return Number.isNaN(Date.parse(`${value}T00:00:00Z`)) ? undefined : value;
 }
 
+function instant(value: unknown): string | undefined {
+  if (typeof value !== "string" || !INSTANT.test(value)) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) &&
+    new Date(parsed).toISOString().slice(0, 16) === value.slice(0, 16)
+    ? value
+    : undefined;
+}
+
+/** A UTC instant at minute precision, the form custom ranges use in links and requests. */
+export function minuteInstant(ms: number): string {
+  return `${new Date(ms).toISOString().slice(0, 16)}Z`;
+}
+
+/** A custom bound as milliseconds; day-form `end` is inclusive, so it ends a day later. */
+export function customBoundMs(value: string, edge: "start" | "end"): number {
+  if (DAY.test(value)) return Date.parse(`${value}T00:00:00Z`) + (edge === "end" ? DAY_MS : 0);
+  return Date.parse(value);
+}
+
+function customPair(start: unknown, end: unknown): { start: string; end: string } | undefined {
+  const firstDay = day(start);
+  const lastDay = day(end);
+  if (firstDay && lastDay)
+    return firstDay <= lastDay ? { start: firstDay, end: lastDay } : undefined;
+  const from = instant(start);
+  const to = instant(end);
+  if (!from || !to) return undefined;
+  const span = Date.parse(to) - Date.parse(from);
+  return span > 0 && span <= CUSTOM_MAX_MS ? { start: from, end: to } : undefined;
+}
+
 export function parseUsageSearch(search: Record<string, unknown>): UsageSearch {
-  const from = day(search.start);
-  const to = day(search.end);
-  const custom = search.range === "custom" && from && to && from <= to;
+  const pair = search.range === "custom" ? customPair(search.start, search.end) : undefined;
+  const custom = pair !== undefined;
   const range = custom
     ? ("custom" as const)
     : RANGES.find((id) => id === search.range && id !== "custom");
@@ -100,7 +150,7 @@ export function parseUsageSearch(search: Record<string, unknown>): UsageSearch {
   const metric = (["tokens", "calls"] as const).find((id) => id === search.metric);
   const out: UsageSearch = {
     ...(range && range !== DEFAULT_RANGE ? { range } : {}),
-    ...(custom ? { start: from, end: to } : {}),
+    ...(pair ? { start: pair.start, end: pair.end } : {}),
     ...(group && group !== DEFAULT_GROUP ? { group } : {}),
     ...(metric ? { metric } : {}),
     ...(search.split === "group" ? { split: "group" as const } : {}),

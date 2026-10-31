@@ -6,6 +6,7 @@ import { defineConfig } from "vite";
 const demoApiTarget = process.env.OPENGENI_REACT_DEMO_API_TARGET ?? "http://127.0.0.1:8000";
 const timelineScrollTestBuild = process.env.OPENGENI_TIMELINE_SCROLL_TEST_BUILD === "1";
 const demoInputs = {
+  agentSettings: resolve(__dirname, "agent-settings.html"),
   agentRows: resolve(__dirname, "agent-rows.html"),
   approvalReview: resolve(__dirname, "approval-review.html"),
   siteToolConsent: resolve(__dirname, "site-tool-consent.html"),

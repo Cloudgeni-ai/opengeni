@@ -69,6 +69,7 @@ import {
   resolveAgentToolFamilies,
   type VideoGenerationPolicy,
 } from "@opengeni/contracts";
+import { sessionStartedUnattended, sessionUnattendedNow } from "./unattended";
 
 import {
   structuredToolTransportForTurn,
@@ -693,7 +694,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     governance: workspaceGovernance ?? null,
   });
-  eventing.modelVisibleSkillIds = skillCatalogEntryIds(modelVisibleSkillCatalogText);
+  eventing.modelVisibleSkillIds = skillCatalogEntryIds(
+    modelVisibleSkillCatalogText,
+    deps.skillCatalog,
+  );
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
       buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText),
@@ -758,6 +762,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             provider: turnExecutionPolicy.providerId,
             backend: activeSandboxBackend ?? groupBoxBackend,
             publish: eventing.publish,
+            publishInBackground: eventing.publishInBackground,
           },
           (measure) =>
             measure("client_publication", () =>
@@ -821,6 +826,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(textVerbosity ? { textVerbosity } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
+        // Frozen at create: what the model is told and which tools it has.
+        ...(sessionStartedUnattended(session) ? { unattended: true } : {}),
+        // The current setting: approvals and questions are refused, not awaited.
+        ...(sessionUnattendedNow(session) ? { unattendedNow: true } : {}),
         secrets: {
           referencesEnabled: secretsCapabilityEnabled(session.agent),
           // Same rule as the vault context (0739) and session authorization:

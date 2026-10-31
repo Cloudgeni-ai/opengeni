@@ -34,6 +34,7 @@ import {
   sharedAzureEntraAccessTokenSource,
   type AzureEntraAccessTokenSource,
 } from "@opengeni/network/azure-entra";
+import { pinnedFetch } from "@opengeni/network";
 import {
   XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
   xaiSubscriptionFetch,
@@ -258,6 +259,21 @@ function openAIResponsesFetch(settings: Settings): typeof globalThis.fetch {
     endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
   });
   return openaiWebSocketTransport as unknown as typeof globalThis.fetch;
+}
+
+/**
+ * The transport for a workspace's own OpenAI-compatible endpoint. Its URL is
+ * customer-chosen, so each request resolves the host once, refuses private
+ * and special-use addresses (unless the operator allows private integration
+ * targets), pins the connection to the vetted addresses and never follows a
+ * redirect.
+ */
+export function compatibleModelEndpointFetch(settings: Settings): typeof globalThis.fetch {
+  return ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+    pinnedFetch(input as string | URL | Request, init, settings, {
+      label: "Model endpoint",
+      requireHttpsOutsideLocalTest: true,
+    })) as typeof globalThis.fetch;
 }
 
 /**
@@ -528,10 +544,12 @@ function azureEntraRefusedResponse(): Response {
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
   const residency = inferenceResidencyRequirement(settings);
   if (
-    (provider.kind === "direct-openai-workspace" || provider.kind === "direct-azure-workspace") &&
+    (provider.kind === "direct-openai-workspace" ||
+      provider.kind === "direct-azure-workspace" ||
+      provider.kind === "direct-compatible-workspace") &&
     !provider.apiKey?.trim()
   ) {
-    throw new Error("OpenAI or Azure OpenAI workspace key is unavailable");
+    throw new Error("This workspace's model connection key is unavailable");
   }
   // A missing or revoked organization connection fails closed; it never
   // falls back to the deployment's own Azure or OpenAI credentials.
@@ -562,6 +580,9 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     provider.kind === "opper-managed" ||
     provider.kind === "opper-workspace" ||
     provider.kind === "opper-organization";
+  // A workspace's own OpenAI-compatible server is an arbitrary URL: every
+  // request is DNS-pinned to public addresses and refuses redirects.
+  const compatibleEndpoint = provider.kind === "direct-compatible-workspace";
   // Opper reuses the exact-upstream lookup so an unknown slug fails before
   // network I/O; its entries carry no Gateway route policy.
   const gatewayPolicies =
@@ -615,7 +636,9 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   // transports has a provider idempotency key tied to our durable call,
   // so never let the SDK replay them blindly.
   const registryMaxRetries =
-    gatewayProvider || openRouterProvider || opperProvider ? 0 : settings.openaiMaxRetries;
+    gatewayProvider || openRouterProvider || opperProvider || compatibleEndpoint
+      ? 0
+      : settings.openaiMaxRetries;
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
     : provider.kind === "codex-subscription"
@@ -740,12 +763,19 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                             settings.openaiResponsesWebSocketEnabled,
                             residency,
                           )
-                        : instrumentedModelFetch(
-                            provider.id,
-                            openAIResponsesFetch(settings),
-                            settings.openaiResponsesWebSocketEnabled,
-                            residency,
-                          ),
+                        : compatibleEndpoint
+                          ? instrumentedModelFetch(
+                              provider.id,
+                              compatibleModelEndpointFetch(settings),
+                              false,
+                              residency,
+                            )
+                          : instrumentedModelFetch(
+                              provider.id,
+                              openAIResponsesFetch(settings),
+                              settings.openaiResponsesWebSocketEnabled,
+                              residency,
+                            ),
                 ),
               ),
             },

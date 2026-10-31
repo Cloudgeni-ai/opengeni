@@ -12,16 +12,37 @@ const UtcDateTime = /* @__PURE__ */ defineSchema(() => primitives.dateTime);
 const Identifier = /* @__PURE__ */ defineSchema(() => primitives.uuid);
 const OpaqueKey = /* @__PURE__ */ defineSchema(() => primitives.nonEmptyString);
 
+/**
+ * Calendar ranges start at a UTC day, month or year boundary. `1h`, `3h` and
+ * `24h` are rolling: the current 5-minute (or hour, for `24h`) bucket plus the
+ * ones before it. `custom` pairs with `from`/`to`.
+ */
 export const InsightsUsageRange = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["today", "week", "month", "30d", "90d", "ytd", "custom"]),
+  z.enum(["today", "week", "month", "30d", "90d", "ytd", "custom", "1h", "3h", "24h"]),
 );
 export type InsightsUsageRange = z.infer<typeof InsightsUsageRange>;
 
+/** Chart granularity, chosen by the server from the range; never requested. */
+export const InsightsUsageBucket = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["hour", "day", "five_minutes"]),
+);
+export type InsightsUsageBucket = z.infer<typeof InsightsUsageBucket>;
+
+const SITE_USAGE_RANGES = [
+  "today",
+  "week",
+  "month",
+  "30d",
+  "90d",
+  "ytd",
+  "1h",
+  "3h",
+  "24h",
+] as const;
+
 /** Aggregate Site accounting only: no viewer, session, turn or prompt identities. */
 export const InsightsSiteUsageQuery = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({ range: z.enum(["today", "week", "month", "30d", "90d", "ytd"]).default("month") })
-    .strict(),
+  z.object({ range: z.enum(SITE_USAGE_RANGES).default("month") }).strict(),
 );
 export type InsightsSiteUsageQuery = z.infer<typeof InsightsSiteUsageQuery>;
 export const InsightsSiteUsageRow = /* @__PURE__ */ defineSchema(() =>
@@ -95,12 +116,61 @@ const CustomUtcDateTime = /* @__PURE__ */ defineSchema(() =>
   ),
 );
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
+const FIVE_MINUTES_MS = 300_000;
 const CUSTOM_MAX_DAYS = 370;
 
+/** A custom boundary at minute or finer precision, always in UTC (`Z`). */
+const UtcInstant = /* @__PURE__ */ defineSchema(() =>
+  primitives.string
+    .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?Z$/)
+    .refine((value) => {
+      const instant = Date.parse(value);
+      if (!Number.isFinite(instant)) return false;
+      // Reject normalized impossible values such as 24:00 or February 30.
+      const canonical = new Date(instant).toISOString();
+      return canonical.slice(0, 16) === value.slice(0, 16);
+    }, "Expected a real UTC instant (YYYY-MM-DDTHH:MM[:SS[.sss]]Z)"),
+);
+
+/**
+ * The chart bucket for a range: 5 minutes up to three hours, hours up to two
+ * days, and days beyond that. `today` is hourly however far it has run.
+ */
+export function insightsUsageBucket(
+  range: InsightsUsageRange,
+  spanMs: number,
+): InsightsUsageBucket {
+  switch (range) {
+    case "1h":
+    case "3h":
+      return "five_minutes";
+    case "today":
+    case "24h":
+      return "hour";
+    case "custom":
+      return spanMs <= 3 * HOUR_MS ? "five_minutes" : spanMs <= 2 * DAY_MS ? "hour" : "day";
+    default:
+      return "day";
+  }
+}
+
+function customBounds(from: string, to: string): { start: number; end: number } | undefined {
+  if (UtcDay.safeParse(from).success && UtcDay.safeParse(to).success) {
+    // Whole UTC days, `to` inclusive.
+    return { start: Date.parse(`${from}T00:00:00Z`), end: Date.parse(`${to}T00:00:00Z`) + DAY_MS };
+  }
+  if (UtcInstant.safeParse(from).success && UtcInstant.safeParse(to).success) {
+    // Exact instants, `to` exclusive.
+    return { start: Date.parse(from), end: Date.parse(to) };
+  }
+  return undefined;
+}
+
 function customWindow(from: string, to: string) {
-  if (!UtcDay.safeParse(from).success || !UtcDay.safeParse(to).success) return undefined;
-  const start = Date.parse(`${from}T00:00:00Z`);
-  const end = Date.parse(`${to}T00:00:00Z`) + DAY_MS;
+  const bounds = customBounds(from, to);
+  if (bounds === undefined) return undefined;
+  const { start, end } = bounds;
   if (start >= end || end - start > CUSTOM_MAX_DAYS * DAY_MS) return undefined;
   const priorStart = start - (end - start);
   const windows = {
@@ -113,23 +183,83 @@ function customWindow(from: string, to: string) {
   // PostgreSQL has no year zero even though ISO/Zod datetime permits it.
   if (!Object.values(windows).every((value) => CustomUtcDateTime.safeParse(value).success))
     return undefined;
-  return { ...windows, bucket: end - start <= 2 * DAY_MS ? ("hour" as const) : ("day" as const) };
+  return { ...windows, bucket: insightsUsageBucket("custom", end - start) };
 }
 
 const CustomDates = /* @__PURE__ */ defineSchema(() =>
   z
-    .object({ from: UtcDay, to: UtcDay })
+    .object({ from: z.union([UtcDay, UtcInstant]), to: z.union([UtcDay, UtcInstant]) })
     .strict()
     .refine(
       (value) => customWindow(value.from, value.to) !== undefined,
-      "Custom days must be ordered, span at most 370 days and have representable current/prior windows",
+      "Custom bounds must both be UTC days or both UTC instants, be ordered, span at most 370 days and have representable current/prior windows",
     ),
 );
 
-/** At most 370 inclusive UTC days; exclusive end and equally long immediate prior. */
+/**
+ * Both bounds are UTC days (`to` inclusive) or both are UTC instants (`to`
+ * exclusive). At most 370 days, with an equally long immediate prior.
+ */
 export function resolveInsightsUsageCustomWindow(dates: { from: string; to: string }) {
   const parsed = CustomDates.parse(dates);
   return customWindow(parsed.from, parsed.to)!;
+}
+
+function floorTo(instant: number, step: number): number {
+  return Math.floor(instant / step) * step;
+}
+
+/**
+ * The current and prior windows for a selection. Rolling and calendar ranges
+ * end at `now`; the prior window is equally long and ends where this one starts.
+ */
+export function resolveInsightsUsageWindow(
+  selection: { range: InsightsUsageRange; from?: string | undefined; to?: string | undefined },
+  now: Date,
+): { since: Date; until: Date; priorSince: Date; priorUntil: Date; bucket: InsightsUsageBucket } {
+  if (!Number.isFinite(now.getTime())) throw new Error("Invalid Insights clock");
+  if (selection.range === "custom") {
+    if (selection.from === undefined || selection.to === undefined)
+      throw new Error("Custom Insights range requires from and to");
+    const window = resolveInsightsUsageCustomWindow({ from: selection.from, to: selection.to });
+    return {
+      since: new Date(window.windowStart),
+      until: new Date(window.windowEnd),
+      priorSince: new Date(window.priorWindowStart),
+      priorUntil: new Date(window.priorWindowEnd),
+      bucket: window.bucket,
+    };
+  }
+  const instant = now.getTime();
+  let since: Date;
+  switch (selection.range) {
+    case "1h":
+      since = new Date(floorTo(instant, FIVE_MINUTES_MS) - 11 * FIVE_MINUTES_MS);
+      break;
+    case "3h":
+      since = new Date(floorTo(instant, FIVE_MINUTES_MS) - 35 * FIVE_MINUTES_MS);
+      break;
+    case "24h":
+      since = new Date(floorTo(instant, HOUR_MS) - 23 * HOUR_MS);
+      break;
+    default: {
+      since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+      if (selection.range === "week") since.setUTCDate(since.getUTCDate() - 6);
+      if (selection.range === "30d") since.setUTCDate(since.getUTCDate() - 29);
+      if (selection.range === "90d") since.setUTCDate(since.getUTCDate() - 89);
+      if (selection.range === "month") since.setUTCDate(1);
+      if (selection.range === "ytd") since.setUTCMonth(0, 1);
+    }
+  }
+  const until = new Date(instant);
+  const duration = until.getTime() - since.getTime();
+  return {
+    since,
+    until,
+    priorSince: new Date(since.getTime() - duration),
+    priorUntil: new Date(since),
+    bucket: insightsUsageBucket(selection.range, duration),
+  };
 }
 
 function validateWindowQuery(
@@ -148,7 +278,7 @@ function validateWindowQuery(
         code: "custom",
         path: ["to"],
         message:
-          "Custom days must be ordered, span at most 370 days and have representable current/prior windows",
+          "Custom bounds must both be UTC days or both UTC instants, be ordered, span at most 370 days and have representable current/prior windows",
       });
     }
   } else if (value.from !== undefined || value.to !== undefined) {
@@ -209,8 +339,10 @@ const QueryBoolean = /* @__PURE__ */ defineSchema(() =>
 // field. Empty segments are rejected, never silently widened to all records.
 const Filters = {
   range: InsightsUsageRange.default("week"),
-  from: UtcDay.optional(),
-  to: UtcDay.optional(),
+  /** With range=custom: a UTC day (YYYY-MM-DD, inclusive) or a UTC instant. */
+  from: z.union([UtcDay, UtcInstant]).optional(),
+  /** With range=custom: a UTC day (inclusive) or a UTC instant (exclusive), same form as from. */
+  to: z.union([UtcDay, UtcInstant]).optional(),
   /** At workspace scope this intersects the path workspace; it never expands scope. */
   workspaceId: repeated(Identifier),
   provider: repeated(OpaqueKey),
@@ -538,7 +670,7 @@ export const InsightsUsageResponse = /* @__PURE__ */ defineSchema(() =>
       windowEnd: UtcDateTime,
       priorWindowStart: UtcDateTime,
       priorWindowEnd: UtcDateTime,
-      bucket: z.enum(["hour", "day"]),
+      bucket: InsightsUsageBucket,
       generatedAt: UtcDateTime,
       dataThrough: UtcDateTime.nullable(),
       totals: InsightsUsageMeasures,
@@ -550,6 +682,11 @@ export const InsightsUsageResponse = /* @__PURE__ */ defineSchema(() =>
       groupsTruncated: primitives.boolean,
       series: z.array(InsightsUsageSeriesPoint),
       facets: InsightsUsageFacets,
+      /**
+       * The ranges this server answers. Servers older than the rolling hour
+       * ranges omit it; they answer only the six calendar presets.
+       */
+      availableRanges: z.array(InsightsUsageRange).optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -608,15 +745,7 @@ export const InsightsUsageResponse = /* @__PURE__ */ defineSchema(() =>
           message: "Zero-length prior windows must have null measures",
         });
       }
-      const expectedBucket =
-        value.range === "custom"
-          ? windowEnd - windowStart <= 2 * DAY_MS
-            ? "hour"
-            : "day"
-          : value.range === "today"
-            ? "hour"
-            : "day";
-      if (value.bucket !== expectedBucket) {
+      if (value.bucket !== insightsUsageBucket(value.range, windowEnd - windowStart)) {
         context.addIssue({
           code: "custom",
           path: ["bucket"],
@@ -654,8 +783,6 @@ export const InsightsUsageResponse = /* @__PURE__ */ defineSchema(() =>
         if (
           windowStart === windowEnd ||
           windowEnd - windowStart > CUSTOM_MAX_DAYS * DAY_MS ||
-          windowStart % DAY_MS !== 0 ||
-          windowEnd % DAY_MS !== 0 ||
           priorWindowStart !== windowStart - (windowEnd - windowStart) ||
           priorWindowEnd !== windowStart
         ) {
@@ -663,7 +790,7 @@ export const InsightsUsageResponse = /* @__PURE__ */ defineSchema(() =>
             code: "custom",
             path: ["windowEnd"],
             message:
-              "Custom windows must span at most 370 complete UTC days with an immediate equal-duration prior",
+              "Custom windows must span at most 370 days with an immediate equal-duration prior",
           });
         }
       }

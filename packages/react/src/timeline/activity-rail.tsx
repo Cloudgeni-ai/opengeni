@@ -40,6 +40,7 @@ import {
   ToolOutputPreviewProvider,
 } from "./shared";
 import { invokedToolCall } from "./invoked-tool";
+import { redactToolCall } from "./credential-redaction";
 import { toolDisplayName } from "./tool-display-name";
 import { ToolKindIcon } from "./tool-icon";
 import { genericToolIconKind } from "./tool-presentation";
@@ -326,7 +327,8 @@ export function renderActivity(
       );
     case "tool-call": {
       // A deferred tool run through tool_invoke reads as the tool it ran.
-      const shown = invokedToolCall(item);
+      // Renderers only ever see the call with its credentials hidden.
+      const shown = invokedToolCall(redactToolCall(item));
       const Renderer = toolRegistry.resolve(shown);
       const outputPreview = item.outputPreview ?? null;
       // A row that cannot read its preview waits for its exact output; one

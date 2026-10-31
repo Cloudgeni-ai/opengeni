@@ -33,6 +33,7 @@ fn policy() -> HostPolicy {
             balloon_grace: Duration::from_millis(200),
             outgrowth: Some(Outgrowth {
                 hold: Duration::from_millis(100),
+                descent: Duration::from_millis(500),
                 answer: Duration::from_secs(2),
                 settle: Duration::from_millis(100),
                 least: MIB,

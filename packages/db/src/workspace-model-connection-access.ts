@@ -45,7 +45,7 @@ async function listDirectModelConnections(db: Database, workspaceId: string, sub
           isNull(connections.subjectId),
           eq(connections.kind, "api_key"),
           eq(connections.status, "active"),
-          sql`${connections.metadata}->>'credentialRole' IN ('direct_openai', 'direct_azure_openai')`,
+          sql`${connections.metadata}->>'credentialRole' IN ('direct_openai', 'direct_azure_openai', 'direct_openai_compatible')`,
         ),
       ),
   );
@@ -171,7 +171,7 @@ export async function assertModelConnectionAllowsTurn(
     );
     if (!connection)
       throw new Error(
-        "This OpenAI or Azure OpenAI connection is no longer available; reconnect and select its model",
+        "This model connection is no longer available; reconnect and select its model",
       );
     return;
   }

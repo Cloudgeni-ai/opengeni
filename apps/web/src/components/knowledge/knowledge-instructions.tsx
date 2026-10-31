@@ -322,7 +322,7 @@ export function InstructionsPage({
           ) : null,
           // In a Personal workspace only its owner reads this page, so a
           // refusal note would only ever address the owner themself.
-          !canEdit && !personal ? "Only workspace admins can change these" : null,
+          !canEdit && !personal ? "Only people who can start chats here can change these" : null,
         ]}
         actions={
           canEdit ? (
@@ -391,7 +391,7 @@ export function InstructionsPage({
                 ? "No instructions yet. Write how agents should work here, like review rules or the tone for pull requests."
                 : personal
                   ? "No personal instructions yet."
-                  : "No workspace instructions yet. A workspace admin can add them."}
+                  : "No workspace instructions yet."}
             </p>
           )}
         </DetailSection>
@@ -743,7 +743,7 @@ export function instructionRevisions(
             ? "Opengeni"
             : revision.provenance.source === "onboarding"
               ? "Workspace setup"
-              : "A workspace admin";
+              : "A teammate";
       const summary =
         event.type === "rollback"
           ? "Restored an earlier version"
@@ -841,7 +841,7 @@ export function InstructionsHistoryPage({
             label="Workspace instructions history"
             restoreDisabledReason={
               !canEdit
-                ? "Only workspace admins can restore a version."
+                ? "Only people who can start chats here can restore a version."
                 : !head
                   ? "The instructions are turned off right now. Write new ones to start again."
                   : undefined

@@ -130,13 +130,8 @@ export function requireApiKeyDelegationContext(
   const authority = accountScopedApiKeyWorkspaceAuthority(context);
   const external = externalActorContexts.get(context);
   const ceiling = authority ?? external;
-  if (
-    ceiling?.permissionMode === "explicit" &&
-    permissions.some((permission) => !ceilingCovers(ceiling.permissions, permission))
-  ) {
-    throw new HTTPException(403, {
-      message: "cannot delegate a permission outside the organization key policy",
-    });
+  if (ceiling?.permissionMode === "explicit") {
+    requirePermissionsWithinCeiling(ceiling.permissions, permissions);
   }
   if (
     ceiling?.permissionMode === "explicit" &&
@@ -187,13 +182,8 @@ export function requireExplicitPermissionDelegation(
   grant: Pick<AccessGrant, "permissions" | "permissionMode">,
   requested: Permission[],
 ): void {
-  if (
-    grant.permissionMode === "explicit" &&
-    requested.some((permission) => !ceilingCovers(grant.permissions, permission))
-  ) {
-    throw new HTTPException(403, {
-      message: "cannot delegate a permission outside the organization key policy",
-    });
+  if (grant.permissionMode === "explicit") {
+    requirePermissionsWithinCeiling(grant.permissions, requested);
   }
   if (
     grant.permissionMode === "explicit" &&
@@ -1063,9 +1053,22 @@ export async function requireWorkspaceSettingsGrant(
   deps: AccessDeps,
   workspaceId: string,
 ): Promise<AccessGrant> {
+  const authorization = await requireWorkspaceSettingsAuthorization(c, deps, workspaceId);
+  return authorization.grant;
+}
+
+/**
+ * {@link requireWorkspaceSettingsGrant}, returning the whole authorization for
+ * a route that checks more about the request (who sent it, and how) after it.
+ */
+export async function requireWorkspaceSettingsAuthorization(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<AccessGrantAuthorization> {
   const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
-  const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
-  if (await workspaceSettingsAuthorized(deps, authorization, workspaceId)) return grant;
+  requireResolvedAccessGrantAuthorization(authorization, workspaceId);
+  if (await workspaceSettingsAuthorized(deps, authorization, workspaceId)) return authorization;
   throw new MissingPermissionRefusal("workspace:admin", {
     message: WORKSPACE_SETTINGS_REFUSAL,
   });
@@ -1100,6 +1103,62 @@ export async function workspaceSettingsAuthorized(
       subjectId: authorization.authenticatedSubjectId,
     })) !== null
   );
+}
+
+/** The refusal of {@link requireWorkspaceContributorGrant}, a plain sentence. */
+export const WORKSPACE_CONTRIBUTOR_REFUSAL =
+  "Only people who can start chats here, acting as themselves, can change this.";
+
+/**
+ * Ordinary shared content of a workspace that anyone who works there may
+ * change for everyone, like a shared Skill or Knowledge entry: its
+ * instructions and the review of the agent's proposed changes to them.
+ * Whoever may change the workspace's settings may (see
+ * {@link workspaceSettingsAuthorized});
+ * otherwise a person of the organization who can start chats here
+ * (`sessions:create`), acting as themselves: signed in, or their own chat or
+ * connected agent or personal API key acting for them within what they
+ * allowed. Agents' own tokens, organization and workspace API keys, services
+ * and people from another product keep their own ways in (agent learning for
+ * instructions), so `sessions:create` alone never lets them change these.
+ */
+export async function workspaceContributionAuthorized(
+  deps: Pick<AccessDeps, "db">,
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): Promise<boolean> {
+  if (await workspaceSettingsAuthorized(deps, authorization, workspaceId)) return true;
+  if (!isResolvedAccessGrantAuthorization(authorization, workspaceId)) return false;
+  const { grant } = authorization;
+  const metadata = grant.metadata ?? {};
+  const person =
+    authorization.canonicalLocalHumanSession ||
+    (grant.subjectId.startsWith("user:") &&
+      (authorization.canonicalManagedHumanSession ||
+        isVerifiedDelegatedHumanAuthorization(authorization)));
+  return (
+    person &&
+    grant.principalKind === "human_session" &&
+    !grant.serviceInitiator &&
+    !grant.serviceInitiatorContext &&
+    metadata.turnId === undefined &&
+    metadata.attemptId === undefined &&
+    hasPermission(grant.permissions, "sessions:create", grant.permissionMode)
+  );
+}
+
+/** Require {@link workspaceContributionAuthorized}. */
+export async function requireWorkspaceContributorGrant(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<AccessGrant> {
+  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
+  if (await workspaceContributionAuthorized(deps, authorization, workspaceId)) return grant;
+  throw new MissingPermissionRefusal("sessions:create", {
+    message: WORKSPACE_CONTRIBUTOR_REFUSAL,
+  });
 }
 
 /**
@@ -1707,6 +1766,33 @@ const ceilingCovers = (ceiling: readonly Permission[], permission: Permission): 
   permissionSetCovers(ceiling, permission);
 
 /**
+ * Refuse a delegation that states a permission the ceiling does not hold. A
+ * deprecated name keeps its exact meaning here, as it does for every legacy
+ * requirement (Q-16), so it is refused even when the ceiling holds its
+ * canonical equivalent; the refusal then names that equivalent so the caller
+ * can state it instead.
+ */
+function requirePermissionsWithinCeiling(
+  ceiling: readonly Permission[],
+  requested: readonly Permission[],
+): void {
+  const outside = requested.filter((permission) => !ceilingCovers(ceiling, permission));
+  if (outside.length === 0) return;
+  const deprecated = outside.find((permission) => {
+    const canonical = normalizePermission(permission) as Permission;
+    return canonical !== permission && ceilingCovers(ceiling, canonical);
+  });
+  if (deprecated) {
+    throw new HTTPException(403, {
+      message: `${deprecated} is a deprecated permission name; state ${normalizePermission(deprecated)} instead`,
+    });
+  }
+  throw new HTTPException(403, {
+    message: "cannot delegate a permission outside the organization key policy",
+  });
+}
+
+/**
  * Stored roles and API keys keep their legacy variable-set names (Q-16): a
  * canonical `secrets:*` requirement is met by any granted name that aliases to
  * it. Legacy requirements (the variable-set routes, until they are removed)
@@ -2311,6 +2397,9 @@ async function delegatedAccessContext(
           ...(payload.executionGeneration
             ? { executionGeneration: payload.executionGeneration }
             : {}),
+          // The machine running the token holder's process (a `run_on` exec),
+          // when it is not the session's active sandbox.
+          ...(payload.executionSandboxId ? { executionSandboxId: payload.executionSandboxId } : {}),
         },
         ...(payload.serviceInitiator ? { serviceInitiator: payload.serviceInitiator } : {}),
         ...(payload.serviceInitiatorContext

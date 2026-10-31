@@ -37,6 +37,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             ready: Vec::new(),
             awake: 2,
             sandboxes: 5,
+            pointers_in_service: true,
         },
     }
 }
@@ -95,12 +96,41 @@ fn only_the_leader_reports_the_fleet() {
         Some(1.5)
     );
 
+    // The count moves after standing still 12 s: one gap of 12 s, and
+    // the next note starts the next gap.
+    metrics.still([(HostId(1), Duration::from_secs(12))]);
+    metrics.still([(HostId(1), Duration::from_millis(200))]);
+    metrics.still([(HostId(1), Duration::from_millis(450))]);
+    let text = metrics.render(&hosts);
+    let bucket = |le: &str| {
+        value(
+            &text,
+            &format!(
+                "compute_fleet_host_renewal_gap_seconds_bucket{{host_name=\"hosts-a\",le=\"{le}\"}}"
+            ),
+        )
+    };
+    assert_eq!(bucket("10"), Some(0.0), "{text}");
+    assert_eq!(bucket("15"), Some(1.0), "{text}");
+    assert_eq!(bucket("+Inf"), Some(1.0), "{text}");
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_renewal_gap_seconds_sum{host_name=\"hosts-a\"}"
+        ),
+        Some(12.0)
+    );
+
     // A replica that stops leading forgets what it knew as the leader.
     metrics.leads(false);
     metrics.leads(true);
     let text = metrics.render(&hosts);
     assert!(
         !text.contains("compute_fleet_host_renewal_age_seconds{"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("compute_fleet_host_renewal_gap_seconds_count{"),
         "{text}"
     );
 }

@@ -13,6 +13,7 @@ import { attachManualRepository } from "@opengeni/react/app/lib/manual-repositor
 import {
   buildResources,
   groupRepositories,
+  reconcileManualRepositoriesWithCatalog,
   rehydrateRepositoryResources,
   repositorySelectionFromResources,
   type RepoDraft,
@@ -163,8 +164,6 @@ function ComposerRepositories(props: HarnessProps) {
     groups: groupRepositories(props.repositories),
     selectedRepoIds,
     selectedRepoRefs,
-    selectedInstallationId:
-      props.repositories.find((repo) => selectedRepoIds.has(repo.id))?.installationId ?? null,
     manualRepos,
     manualOpen: true,
     githubAppOpen: false,
@@ -707,5 +706,32 @@ describe("repository picker catalog reconciliation", () => {
       },
     ]);
     await rendered.unmount();
+  });
+});
+
+describe("repository catalog reconciliation across GitHub accounts", () => {
+  test("a bare row from another installation joins the existing selection", () => {
+    const otherAccount: GitHubRepository = {
+      ...opengeni,
+      id: 77,
+      installationId: 999,
+      fullName: "globex/core",
+      name: "core",
+      htmlUrl: "https://github.com/globex/core",
+      cloneUrl: "https://github.com/globex/core.git",
+      accountLogin: "globex",
+    };
+    const next = reconcileManualRepositoriesWithCatalog(
+      {
+        manualRepos: [{ id: -1, url: otherAccount.cloneUrl, ref: "main", attached: true }],
+        selectedRepoIds: new Set([opengeni.id]),
+        selectedRepoRefs: { [opengeni.id]: "main" },
+      },
+      [opengeni, otherAccount],
+      true,
+    );
+    expect(next?.manualRepos).toEqual([]);
+    expect([...(next?.selectedRepoIds ?? [])].sort()).toEqual([77, opengeni.id].sort());
+    expect(next?.selectedRepoRefs[77]).toBe("main");
   });
 });

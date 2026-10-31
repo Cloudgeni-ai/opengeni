@@ -4,6 +4,7 @@ import {
   OPEN_SUFFIX_RUN_STATE_BLOB,
   SecretReferenceError,
   buildMissingSecretAskCard,
+  UNATTENDED_APPROVAL_REFUSAL_TEXT,
 } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
@@ -1589,6 +1590,76 @@ test("a durable-capable call arriving mid model request still executes an allowe
     expect(operation).toMatchObject({ state: "completed" });
     expect(effects).toBe(1);
     // Prepared like a non-waiting client: no durable wait could be accepted.
+    expect(seenMeta).toEqual([null]);
+    expect(gate.requested).toBe(false);
+  } finally {
+    await dispatcher.close();
+  }
+}, 60_000);
+
+test("an unattended session refuses a call that needs approval instead of waiting", async () => {
+  if (!available) throw new Error("PostgreSQL required");
+  let effects = 0;
+  const seenMeta: unknown[] = [];
+  const { scope, environment } = await fixture(
+    async () => {
+      effects++;
+      return "unreachable";
+    },
+    { type: "object" },
+    {
+      prepare: async ({ context }) => {
+        seenMeta.push(context.transportMeta?.durableApproval ?? null);
+        throw new AttemptToolApprovalRequiredError();
+      },
+    },
+  );
+  const bus = new MemoryEventBus(),
+    gate = new InputWaitYield();
+  const dispatcher = new CodemodeAttemptDispatcher(
+    client.db,
+    bus,
+    environment,
+    scope,
+    undefined,
+    1,
+    {},
+    undefined,
+    undefined,
+    gate,
+    true,
+  );
+  dispatcher.start();
+  const operationId = crypto.randomUUID();
+  try {
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      durableApproval: true,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: `sandbox:${scope.attemptId}` },
+      },
+    });
+    await bus.request(
+      codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+      encodeCodemodeDispatchRequest({
+        version: 1,
+        operationId,
+        catalogDigest: environment.catalog.digest,
+      }),
+      { timeoutMs: 5000 },
+    );
+    expect(await waitForTerminal(scope, operationId)).toMatchObject({
+      state: "failed",
+      errorCode: "approval_required",
+      errorMessage: UNATTENDED_APPROVAL_REFUSAL_TEXT,
+      executionStartedAt: null,
+    });
+    expect(effects).toBe(0);
+    // Prepared like a non-waiting client, and no durable wait was opened.
     expect(seenMeta).toEqual([null]);
     expect(gate.requested).toBe(false);
   } finally {
