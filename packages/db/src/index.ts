@@ -1382,6 +1382,11 @@ import {
   subjectHasLiveWorkspaceAuthorityInScope,
 } from "./workspace-authority";
 import { managedPersonalWorkspacePermissions } from "./personal-workspace-permissions";
+import {
+  joinedWorkspaceIsNotPersonal,
+  membershipOutsidePersonalWorkspace,
+} from "./personal-workspace-membership";
+export { PERSONAL_WORKSPACE_EXTERNAL_SOURCE } from "./personal-workspace-membership";
 export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -2563,7 +2568,12 @@ export async function bootstrapWorkspace(
         schema.workspaces,
         eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
       )
-      .where(eq(schema.workspaceMemberships.subjectId, input.subjectId))
+      .where(
+        and(
+          eq(schema.workspaceMemberships.subjectId, input.subjectId),
+          joinedWorkspaceIsNotPersonal(),
+        ),
+      )
       .orderBy(desc(schema.workspaces.createdAt));
     return {
       mode: input.accountExternalSource === "opengeni:local" ? "local" : "configured",
@@ -2688,6 +2698,8 @@ async function projectManagedOrganizationAccess(
       and(
         eq(schema.workspaceMemberships.accountId, schema.managedAccounts.id),
         eq(schema.workspaceMemberships.subjectId, input.subjectId),
+        // The Personal grant below comes from the pointer, never a row there.
+        membershipOutsidePersonalWorkspace(),
       ),
     )
     .leftJoin(
@@ -3053,6 +3065,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           eq(schema.workspaceMemberships.subjectId, subjectId),
           eq(schema.workspaceMemberships.accountId, account.id),
           eq(schema.workspaces.accountId, account.id),
+          joinedWorkspaceIsNotPersonal(),
         ),
       )
       .orderBy(desc(schema.workspaces.createdAt));
@@ -3115,6 +3128,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
             eq(schema.workspaceMemberships.subjectId, subjectId),
             eq(schema.workspaceMemberships.accountId, organizationMembership.organizationId),
             eq(schema.workspaces.accountId, organizationMembership.organizationId),
+            joinedWorkspaceIsNotPersonal(),
           ),
         )
         .orderBy(desc(schema.workspaces.createdAt));
@@ -3252,7 +3266,9 @@ export async function listWorkspacesForSubject(
     .select({ workspace: schema.workspaces })
     .from(schema.workspaceMemberships)
     .innerJoin(schema.workspaces, eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id))
-    .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+    .where(
+      and(eq(schema.workspaceMemberships.subjectId, subjectId), joinedWorkspaceIsNotPersonal()),
+    )
     .orderBy(desc(schema.workspaces.createdAt))
     .limit(limit);
   return await mapWorkspaceProjections(db, rows, async (row) =>
@@ -4033,6 +4049,9 @@ export async function getWorkspaceGrant(
   workspaceId: string,
   provenance?: { principalKind?: AccessPrincipalKind },
 ): Promise<AccessGrant | null> {
+  // A bare membership grant, never a Personal workspace's own row: whoever
+  // names the owner's subject would otherwise reach it. See
+  // membershipOutsidePersonalWorkspace.
   const [row] = await db
     .select({
       membership: schema.workspaceMemberships,
@@ -4044,6 +4063,7 @@ export async function getWorkspaceGrant(
       and(
         eq(schema.workspaceMemberships.subjectId, subjectId),
         eq(schema.workspaceMemberships.workspaceId, workspaceId),
+        joinedWorkspaceIsNotPersonal(),
       ),
     )
     .limit(1);
@@ -12714,6 +12734,7 @@ export async function persistProviderOAuthConnection(
               and(
                 eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
                 eq(schema.workspaceMemberships.subjectId, input.subjectId),
+                membershipOutsidePersonalWorkspace(),
               ),
             )
             .for("update")
@@ -33666,6 +33687,7 @@ async function requireSessionPersonalStateWriteAuthority(
       and(
         eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
         eq(schema.workspaceMemberships.subjectId, input.subjectId),
+        membershipOutsidePersonalWorkspace(),
       ),
     )
     .limit(1);
@@ -35558,6 +35580,7 @@ export async function searchSessionMessagesForSubject(
           and(
             eq(schema.workspaceMemberships.workspaceId, workspaceId),
             eq(schema.workspaceMemberships.subjectId, authority.subjectId),
+            membershipOutsidePersonalWorkspace(),
           ),
         )
         .limit(1);
@@ -35606,6 +35629,7 @@ export async function listWorkspaceBackgroundCommandsForSubject(
         and(
           eq(schema.workspaceMemberships.workspaceId, workspaceId),
           eq(schema.workspaceMemberships.subjectId, authority.subjectId),
+          membershipOutsidePersonalWorkspace(),
         ),
       )
       .limit(1);
@@ -35681,6 +35705,7 @@ async function requireSessionListReadAuthorityInScope(
       and(
         eq(schema.workspaceMemberships.workspaceId, workspaceId),
         eq(schema.workspaceMemberships.subjectId, options.subjectId),
+        membershipOutsidePersonalWorkspace(),
       ),
     )
     .limit(1);

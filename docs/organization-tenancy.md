@@ -269,6 +269,44 @@ The personal workspace still receives no `workspace_memberships` row, so
 membership CRUD and subject-membership fallback cannot discover or widen the
 owner-only projection.
 
+### One member, enforced by the database (migration 1159)
+
+Migration `1159_personal_workspace_single_member.sql` turns "a Personal
+workspace has exactly one member, its owner" from a runtime property into a
+database rule. It comes ahead of giving the owner a real membership row in a later
+release. A workspace is Personal when it carries the Personal identity:
+`external_source = 'opengeni:organization-membership'` and
+`external_id = '<organization id>:<owner subject>'`
+(`PERSONAL_WORKSPACE_EXTERNAL_SOURCE`). Triggers refuse, for every writer:
+
+- any `workspace_memberships` row there except its owner's, including an
+  organization owner's or admin's;
+- an owner row with an `owner` or `admin` role, or with `workspace:admin`,
+  `members:manage`, `api_keys:manage` or `usage_allowances:manage`, so the row
+  can never let anyone else in;
+- moving a row into, out of, or within a Personal workspace to another person,
+  workspace or organization;
+- pointing an organization membership at someone else's Personal workspace,
+  or moving it to another person while it points at one (the existing
+  `(personal_workspace_id, account_id)` foreign key already keeps it in the
+  same organization);
+- changing a Personal workspace's identity, or giving an existing workspace one.
+
+`POST /v1/workspaces` and `PUT /v1/workspaces/external` refuse that external
+source (422), so nobody can create someone's Personal workspace before they
+join.
+
+A row in a Personal workspace is never membership to the runtime. Every
+TypeScript membership reader (`getWorkspaceGrant`, workspace lists, member
+lists, the session-list, pin, draft and search fences, Slack, recordings,
+Sites, MCP OAuth and `subjectHasLiveWorkspaceAuthorityInScope`) excludes it
+through `membershipOutsidePersonalWorkspace`
+(`packages/db/src/personal-workspace-membership.ts`). A membership row admits
+whoever names its subject, so the owner keeps reaching Personal only through
+the pointer with verified owning-user proof. The previous release reads rows
+without that exclusion. The owner's row can therefore be created and backfilled
+only in a release after this one is in production.
+
 ### Session ownership at the mint (migration 0302)
 
 Because that workspace has no membership row, migration 0225's session write
