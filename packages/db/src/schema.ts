@@ -4108,6 +4108,8 @@ export const organizationCredentialProviders = pgTable(
     enabled: boolean("enabled").notNull().default(true),
     timeoutMs: integer("timeout_ms").notNull().default(10000),
     workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
+    /** Personal workspaces; the workspace filter applies to shared ones only. */
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(false),
     createdBySubjectId: text("created_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
