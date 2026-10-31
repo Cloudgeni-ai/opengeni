@@ -11210,32 +11210,36 @@ export function hasGitCredentialRepositorySelection(
 /**
  * TOKEN-BROKER (B1) parity: the STABLE git-auth POINTER environment a
  * repo-attached run declares — GIT_ASKPASS (a fixed path under HOME; the script
- * itself is provisioned at box setup), GIT_TERMINAL_PROMPT, and the GitHub-App
- * bot identity fallbacks. NO rotating value rides here (the token lives in the
- * file behind the askpass), so the layer is attach-reproducible and MUST be
- * applied identically by the worker turn (sandboxEnvironmentForRun) AND every
- * API-direct attach surface that can cold-create the box (viewer attach,
- * channel-A ops). A box cold-created WITHOUT this layer kills the next repo
- * turn: the turn's manifest declares these keys, the box's env lacks them, and
- * the SDK's provided-session guard throws "Live sandbox sessions cannot change
- * manifest environment variables" (observed live: an open session page's viewer
- * attach won the cold-create race and the first turn died).
+ * itself is provisioned at box setup) and GIT_TERMINAL_PROMPT. NO rotating value
+ * rides here (the token lives in the file behind the askpass), so the layer is
+ * attach-reproducible and MUST be applied identically by the worker turn
+ * (sandboxEnvironmentForRun) AND every API-direct attach surface that can
+ * cold-create the box (viewer attach, channel-A ops). A box cold-created
+ * WITHOUT this layer kills the next repo turn: the turn's manifest declares
+ * these keys, the box's env lacks them, and the SDK's provided-session guard
+ * throws "Live sandbox sessions cannot change manifest environment variables"
+ * (observed live: an open session page's viewer attach won the cold-create race
+ * and the first turn died).
  *
- * Mutates and returns `environment`. Identity fallbacks preserve values already
- * present (the deployment git-identity allowlist wins over the bot identity).
+ * Commit identity is deliberately NOT part of this layer. One session can mix
+ * repositories that commit as different identities (the GitHub App bot and the
+ * person's own GitHub account), and a live box keeps its creation-time manifest
+ * env for its whole life, so a box-wide GIT_AUTHOR_* value would be both wrong
+ * for mixed sessions and frozen to whichever surface cold-created the box. The
+ * repository-clone hook writes each repository's identity into that
+ * repository's local Git config instead. Only a deployment-configured identity
+ * (`collectGitIdentityEnvironment`, part of the stable base) remains box-wide,
+ * as the default for repositories without their own identity.
+ *
+ * Mutates and returns `environment`.
  */
 export function applyGitAuthPointerEnvironment(
   environment: Record<string, string>,
-  identity: { name: string; email: string } | null,
+  /** @deprecated Ignored: commit identity is per repository, written by the clone hook. */
+  _identity?: { name: string; email: string } | null,
 ): Record<string, string> {
   environment.GIT_ASKPASS = `${environment.HOME ?? "/workspace"}/.opengeni/askpass`;
   environment.GIT_TERMINAL_PROMPT = "0";
-  if (identity) {
-    environment.GIT_AUTHOR_NAME = environment.GIT_AUTHOR_NAME || identity.name;
-    environment.GIT_AUTHOR_EMAIL = environment.GIT_AUTHOR_EMAIL || identity.email;
-    environment.GIT_COMMITTER_NAME = environment.GIT_COMMITTER_NAME || identity.name;
-    environment.GIT_COMMITTER_EMAIL = environment.GIT_COMMITTER_EMAIL || identity.email;
-  }
   return environment;
 }
 

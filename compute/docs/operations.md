@@ -79,8 +79,8 @@ enabling it changes no session's backend.
    `keepalives_idle` of exactly 7200 (the library's default, which reads
    as unset), get the bound. `keepalives=0` still turns keepalives off,
    and `keepalives_retries=0` is kept as given. A
-   replica that has read no hosts from the database for a lease term
-   cannot tell which hosts renew: it answers creates and wakes 503
+   replica that has read no hosts from the database for three renewal
+   intervals (10 s) cannot tell which hosts renew: it answers creates and wakes 503
    `unavailable` ("has not read its hosts from the store"), not
    `no_capacity`.
 2. **Its keys.** API keys are `team key` lines in a Secret
@@ -970,16 +970,32 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     on its own: the guest rebooted, which its kernel does on a panic, or
     the VMM failed or was killed), `memory_lost` (its memory could no
     longer be served), `guest_stopped` (it took no connection: halted,
-    powered off or hung) or `ended_for_memory`. `compute.vm.guest_said`,
+    powered off or hung), `ended_for_memory` or `fenced` (the host's
+    guard killed it because the host's lease ran out before it froze;
+    that also raises the `fenced` alarm). `compute.vm.guest_said`,
     `.vmm_said` and `.pager_said` hold the last lines of the guest's
     console, the VMM's own messages and its pager's log, which usually
     say why.
+  - any `fenced` alarm, and the host log's warning `renewals to the
+    control service go unanswered`: a host whose renewals went
+    unanswered for most of its lease term (30 s) freezes its VMs three
+    seconds before the term runs out, and kills those that do not freeze
+    in time. The service's histogram
+    `compute_fleet_host_renewal_gap_seconds`, by host, records how long
+    each host went unheard; gaps of more than 15 s say the link or the
+    host is close to that.
   - `compute.canary.count` with outcome `failed` or `timed_out`, and a
     `compute.canary.last_run` older than one rotation plus a period for
     any path, which also catches an agent that died or hangs. A rotation
     is four periods (three on a host without a store), since each run
     takes the next path, so with `--canary-every 5m` that is 25 minutes.
-  - `compute.sample.age` above a minute: the agent's loop is stuck.
+  - `compute.sample.age` above a minute: the agent's loop is stuck. In a
+    fleet the agent's process then stops itself for systemd to start it
+    again (log line `the agent has not said what the host can take on
+    for a minute`), keeping the VMs and the lease; repeated restarts mean
+    a host that needs a person. A stop that hangs a minute more ends the
+    process at once (log line `the stuck agent's process has not stopped
+    in a minute`).
   - `compute.step.oldest_age` above the step's usual time, for example
     ten minutes for an archive.
   - `compute.sandbox.unhealthy` above zero: sandboxes broken, blocked or
@@ -1078,6 +1094,16 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   A release that lets hosts leave out something they used to send, which
   an older service would refuse, says so, and then the service goes
   first.
+  A release that changes the lease terms (as the one that raised T from
+  10 s to 30 s did) also goes service first, and every host follows
+  promptly: a host's VMs must stop before the service gives up on it, so
+  a host must never hold a longer term than the service it renews with.
+  Until it is upgraded, a host renews the lease it holds but cannot
+  register again, since hosts only register under terms equal to their
+  own: one whose lease runs out meanwhile (cut off, or an agent restart
+  longer than its term) keeps its VMs frozen until it is upgraded. Never
+  roll the service back below such a release while hosts run it: roll
+  the hosts back first.
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)), and a host in a fleet
   keeps its lease however many sandboxes it has: the old agent renews

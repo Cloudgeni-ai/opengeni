@@ -15320,6 +15320,8 @@ export const feedbackSubmissions = pgTable(
     context: jsonb("context").$type<Record<string, unknown>>(),
     /** Screenshot metadata in send order (FeedbackScreenshot); bytes are in object storage. */
     screenshots: jsonb("screenshots").$type<unknown[]>().notNull().default([]),
+    /** What the server knew when the report arrived (FeedbackDiagnostics); never sent to clients. */
+    diagnostics: jsonb("diagnostics").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

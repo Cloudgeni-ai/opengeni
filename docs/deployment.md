@@ -4030,10 +4030,12 @@ Service endpoints:
 API and worker health responses include the non-fatal warning
 `github_app_bot_identity_unavailable` when that process has partial workspace
 GitHub App configuration, cannot derive the App bot identity, and has no
-complete `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` fallback. Compare
-the warning across API and worker processes: a difference means attach and turn
-startup would declare different stable Git identity environment keys. The
-warning never includes provider credentials and does not change liveness.
+complete `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` fallback. On the
+worker it means App repositories commit without the bot identity. Commit
+identity is per repository (each mounted repository's local git config), not
+sandbox environment, so the warning no longer affects attach and turn
+environment parity. The warning never includes provider credentials and does
+not change liveness.
 
 Useful settings:
 

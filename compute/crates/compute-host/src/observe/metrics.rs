@@ -89,11 +89,15 @@ pub enum Alarm {
     /// The kernel's out-of-memory killer ended a VM process: the memory
     /// rule (ADR 24) did not keep the VMs below their wall.
     OomKilled,
+    /// The host's guard ended a VM: the host's lease with the control
+    /// service ran out before the VM froze (ADR 18), as when the host
+    /// could not reach the service for most of a lease term.
+    Fenced,
 }
 
 impl Alarm {
     /// Every alarm.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::OnlyCopyKept,
         Self::VerificationFailed,
         Self::Quarantined,
@@ -102,6 +106,7 @@ impl Alarm {
         Self::ProgramsLost,
         Self::EndedForMemory,
         Self::OomKilled,
+        Self::Fenced,
     ];
 
     /// Its name on events and metrics.
@@ -116,6 +121,7 @@ impl Alarm {
             Self::ProgramsLost => "programs_lost",
             Self::EndedForMemory => "ended_for_memory",
             Self::OomKilled => "oom_killed",
+            Self::Fenced => "fenced",
         }
     }
 }

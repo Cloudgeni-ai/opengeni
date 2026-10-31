@@ -108,7 +108,7 @@ describe("principal transition contract", () => {
   });
 
   test("access bootstrap is synchronously fenced by principal generation", () => {
-    const accessLoad = sourceBetween("void Promise.all([", "const selectedInstalledRepositories");
+    const accessLoad = sourceBetween("void Promise.all([", "const repositoryGroups = useMemo(");
     expect(accessLoad).toContain(
       "ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)",
     );
