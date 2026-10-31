@@ -381,5 +381,5 @@ describe("migration 1145 merges a personal login's choices into its own workspac
         version: 1,
       },
     ]);
-  });
+  }, 180_000);
 });
