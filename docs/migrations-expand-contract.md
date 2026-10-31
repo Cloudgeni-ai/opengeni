@@ -250,7 +250,7 @@ withheld the same way, with the same caller check, and 1101 granted it and
 removed that check. 1002 created the
 held-browser inventory withheld, with the same caller check, and 1093 granted
 it and removed the check. 1060 created the EU-only
-inference change function withheld the same way, and 1158 granted it. 1091
+inference change function withheld the same way, and 1210 granted it. 1091
 created the secret history scrub's reader and cell
 writer withheld; the scrub checks the grant once per run and reports the
 cells only they reach as pending until then. 1103 created the subscription

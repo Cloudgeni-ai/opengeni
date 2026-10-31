@@ -98,7 +98,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * it. 0988 withholds the queued-turn
  * hold summary; until it is granted, the control worker does not publish it.
  * 1002 withheld the held-browser inventory and 1093 granted it.
- * 1060 withheld the EU-only change function and 1158 granted it. 1091
+ * 1060 withheld the EU-only change function and 1210 granted it. 1091
  * withholds the secret history scrub's
  * reader and cell writer; until they are granted, a scrub reports the cells
  * only they reach as pending. 1103 withheld the subscription

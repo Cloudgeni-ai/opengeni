@@ -845,7 +845,7 @@ other actor. Changes carry the current `version` (stale: `409`) and an
 `operationId`: an exact replay returns the stored result, and the same id with
 a different request is `409`. A request that changes nothing keeps the
 version, so repeating "on" never makes someone else's change stale. 1060
-withheld the runtime's EXECUTE on that function for one release and 1158
+withheld the runtime's EXECUTE on that function for one release and 1210
 granted it (see [migrations-expand-contract.md](migrations-expand-contract.md));
 readiness requires the grant.
 

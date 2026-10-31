@@ -406,9 +406,9 @@ test("migrations grant the runtime the change function, never PUBLIC", async () 
   expect(changed).toMatchObject({ euOnly: true, version: 1, changed: true });
 });
 
-test("1158 grants every configured application role", async () => {
+test("1210 grants every configured application role", async () => {
   const migration = await Bun.file(
-    new URL("../drizzle/1158_organization_inference_residency_runtime_grant.sql", import.meta.url),
+    new URL("../drizzle/1210_organization_inference_residency_runtime_grant.sql", import.meta.url),
   ).text();
   const role = `eu_only_app_${crypto.randomUUID().replaceAll("-", "")}`;
   class RolledBack extends Error {}
