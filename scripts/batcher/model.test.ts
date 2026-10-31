@@ -32,6 +32,7 @@ function pull(number: number, extra: Partial<QueuedPull> = {}): QueuedPull {
     greenAt: NOW - 20 * MINUTE,
     conflict: null,
     renumber: [],
+    regenerate: false,
     slots: [],
     priority: false,
     version: false,
@@ -249,6 +250,12 @@ describe("decide", () => {
     const moving = ["packages/db/drizzle/1071_usage_residency.sql"];
     const actions = decide(observe([pull(1, { renumber: moving }), pull(2)]));
     expect(actions[0]).toEqual({ kind: "renumber", number: 1, paths: moving });
+    expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([2]);
+  });
+
+  test("regenerates a conflicting PR before it can be batched, even a priority one", () => {
+    const actions = decide(observe([pull(1, { regenerate: true, priority: true }), pull(2)]));
+    expect(actions[0]).toEqual({ kind: "regenerate", number: 1 });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([2]);
   });
 

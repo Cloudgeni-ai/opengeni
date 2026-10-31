@@ -2,6 +2,7 @@
 // queued PRs, the batch/* branch with its manifest commit, and its CI runs.
 
 import type { RepoFile, TreeEntry } from "./renumber";
+import { REGENERATE_WORKFLOW, regenerationTitle, unzipText } from "./regenerate";
 
 export class GitHubError extends Error {
   constructor(
@@ -93,6 +94,14 @@ export interface GitHub {
   branchHead(name: string): Promise<string | null>;
   commit(sha: string): Promise<CommitSummary>;
   runs(branch: string, sha: string): Promise<RunSummary[]>;
+  /** Runs of the regeneration workflow for exactly this PR head, newest first. */
+  regenerations(pull: number, head: string): Promise<RunSummary[]>;
+  /** Start the regeneration workflow from main: merge `main` into the PR head and regenerate. */
+  dispatchRegeneration(pull: number, head: string, main: string): Promise<void>;
+  /** The text of one file in a run's artifact, or null when the run has no such file. */
+  artifactText(runId: number, artifact: string, file: string): Promise<string | null>;
+  /** Store file content given in base64; returns the blob SHA. */
+  createBlob(content: string): Promise<string>;
   createBranch(name: string, sha: string): Promise<void>;
   deleteBranch(name: string): Promise<void>;
   mergeInto(branch: string, head: string, message: string): Promise<MergeResult>;
@@ -487,6 +496,88 @@ export class RestGitHub implements GitHub {
         attempt: r.run_attempt,
         url: r.html_url,
       }));
+  }
+
+  async regenerations(pull: number, head: string) {
+    const workflow = REGENERATE_WORKFLOW.slice(REGENERATE_WORKFLOW.lastIndexOf("/") + 1);
+    const data = await this.get<{
+      workflow_runs: {
+        id: number;
+        path: string;
+        event: string;
+        head_branch: string;
+        display_title: string;
+        status: string;
+        conclusion: string | null;
+        run_attempt: number;
+        html_url: string;
+      }[];
+    }>(`actions/workflows/${workflow}/runs?event=workflow_dispatch&branch=main&per_page=100`);
+    const title = regenerationTitle(pull, head);
+    // Only main's copy of the workflow, run for exactly this head, counts.
+    return data.workflow_runs
+      .filter(
+        (r) =>
+          r.path === REGENERATE_WORKFLOW &&
+          r.event === "workflow_dispatch" &&
+          r.head_branch === "main" &&
+          r.display_title === title,
+      )
+      .sort((a, b) => b.id - a.id)
+      .map((r) => ({
+        id: r.id,
+        workflow: r.path,
+        status: r.status,
+        conclusion: r.conclusion,
+        attempt: r.run_attempt,
+        url: r.html_url,
+      }));
+  }
+
+  async dispatchRegeneration(pull: number, head: string, main: string) {
+    const workflow = REGENERATE_WORKFLOW.slice(REGENERATE_WORKFLOW.lastIndexOf("/") + 1);
+    await this.request("POST", `actions/workflows/${workflow}/dispatches`, {
+      ref: "main",
+      inputs: { pull: String(pull), head, main },
+    });
+  }
+
+  async artifactText(runId: number, artifact: string, file: string) {
+    const data = await this.get<{
+      artifacts: { name: string; expired: boolean; archive_download_url: string }[];
+    }>(`actions/runs/${runId}/artifacts?name=${encodeURIComponent(artifact)}&per_page=10`);
+    const found = data.artifacts.find((a) => a.name === artifact && !a.expired);
+    if (!found) return null;
+    const url = found.archive_download_url;
+    const fetchOnce = async (target: string, authorized: boolean) => {
+      try {
+        return await this.fetchImpl(target, {
+          headers: authorized
+            ? {
+                authorization: `Bearer ${this.token}`,
+                accept: "application/vnd.github+json",
+                "x-github-api-version": "2022-11-28",
+              }
+            : {},
+          redirect: "manual",
+          signal: AbortSignal.timeout(60_000),
+        });
+      } catch (error) {
+        throw new GitHubNetworkError(target, error);
+      }
+    };
+    // GitHub answers with a redirect to short-lived storage, which takes no token.
+    let response = await fetchOnce(url, true);
+    const location = response.headers.get("location");
+    if (response.status >= 300 && response.status < 400 && location)
+      response = await fetchOnce(location, false);
+    if (!response.ok) throw new GitHubError(response.status, url, await response.text());
+    return unzipText(new Uint8Array(await response.arrayBuffer()), file);
+  }
+
+  async createBlob(content: string) {
+    const { data } = await this.request("POST", "git/blobs", { content, encoding: "base64" });
+    return (data as { sha: string }).sha;
   }
 
   async createBranch(name: string, sha: string) {

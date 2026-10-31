@@ -127,6 +127,12 @@ export interface QueuedPull {
    * free numbers on the PR's branch before testing it; empty when none.
    */
   renumber: string[];
+  /**
+   * It conflicts with main. The batcher merges main into its branch and
+   * regenerates the generated files that conflict, or ejects it when other
+   * files conflict too; it is not tested meanwhile.
+   */
+  regenerate: boolean;
   /** Numbered slots its added files use; two members of one batch never share one. */
   slots: string[];
   priority: boolean;
@@ -200,6 +206,7 @@ export type Action =
   | { kind: "land"; batch: Batch }
   | { kind: "eject"; number: number; reason: string }
   | { kind: "renumber"; number: number; paths: string[] }
+  | { kind: "regenerate"; number: number }
   | { kind: "build"; members: QueuedPull[]; pending: number[][] }
   /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
   | { kind: "hold"; number: number; headSha: string; headAt: number; behind: boolean }
@@ -271,7 +278,7 @@ export function nextBatch(
         };
 
   const ready = pulls
-    .filter((p) => p.greenAt !== null && p.conflict === null && !p.renumber.length)
+    .filter((p) => p.greenAt !== null && p.conflict === null && !p.renumber.length && !p.regenerate)
     .sort(fifo);
   if (!ready.length) return null;
   const alone = (p: QueuedPull) => p.controlPlane;
@@ -372,6 +379,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
   for (const pull of pulls)
     if (pull.conflict !== null)
       actions.push({ kind: "eject", number: pull.number, reason: pull.conflict });
+    else if (pull.regenerate) actions.push({ kind: "regenerate", number: pull.number });
     else if (pull.renumber.length)
       actions.push({ kind: "renumber", number: pull.number, paths: pull.renumber });
 
