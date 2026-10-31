@@ -242,8 +242,8 @@ jobs:
           OPENGENI_AGENT_REQUIRE_NATS: ${{ runner.os == 'Linux' && '1' || '' }}
         run: cargo test --workspace --all-features
 
-      - name: Verify publication receipts across blocked writes and reconnects
-        run: cargo test --manifest-path vendor/async-nats/Cargo.toml --locked --lib --no-default-features --features ring,websockets flush_custody
+      - name: Verify publication receipts and websocket dialing across reconnects
+        run: cargo test --manifest-path vendor/async-nats/Cargo.toml --locked --lib --no-default-features --features ring,websockets -- flush_custody connector::tests
 
       - name: Prove embedded helper selection with synthetic payloads
         if: runner.os == 'Linux'
