@@ -2461,6 +2461,8 @@ export const englishMessages = {
     "The audio, transcript and speaker names are deleted. This can't be undone.",
   "meetings.detailPage.aboutEstimateForThisDuration":
     "About ${estimate} for this {duration} meeting.",
+  "meetings.detailPage.aboutEstimateForTracks":
+    "About ${estimate} for this {duration} meeting. Each of its {count} audio tracks is transcribed and billed separately.",
   "meetings.detailPage.aboutLessThan001": "Less than $0.01 for this {duration} meeting.",
   "meetings.detailPage.aboutThisTranscript": "About this transcript",
   "meetings.detailPage.addCredits": "Add credits",
