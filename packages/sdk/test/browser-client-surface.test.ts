@@ -181,6 +181,16 @@ const retiredGoogleDriveNativeMethods = [
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
+// Organization connectors land before their organization settings page, which
+// follows in its own change. Remove these entries when that page lands (the
+// equality below enforces it).
+const pendingOrganizationConnectorMethods = [
+  "createOrganizationConnector",
+  "deleteOrganizationConnector",
+  "listOrganizationConnectors",
+  "updateOrganizationConnector",
+];
+
 // Chat share links: the public share page reads a link without the SDK (no
 // credentials, no SDK bundle for someone without an account), and listing a
 // person's links is offered to the agent and SDK callers, not a web screen yet.
@@ -262,6 +272,7 @@ describe("browser client runtime surface", () => {
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
+        ...pendingOrganizationConnectorMethods,
         ...chatShareLinkMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),
