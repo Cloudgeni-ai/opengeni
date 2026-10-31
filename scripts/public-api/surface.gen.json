@@ -39714,6 +39714,11 @@
       "usageValueText": "value",
       "UsageWindowReading": "type"
     },
+    "@opengeni/react/ui/window-bar-title": {
+      "PageHeaderWindowBarContext": "value",
+      "useWindowBarTitle": "value",
+      "WindowBarTitleBoundary": "value"
+    },
     "@opengeni/react/usage": {
       "allowanceLabels": "value",
       "AllowanceLabels": "type",
