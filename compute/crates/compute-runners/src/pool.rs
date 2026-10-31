@@ -87,6 +87,8 @@ pub struct Pool {
     template: watch::Receiver<String>,
     /// The pool's places, which its warm template's builder shares.
     room: Room,
+    /// Whether a builder held a place when the pool last scaled.
+    scaled_for_builder: bool,
     runners: BTreeMap<String, Runner>,
     /// The jobs GitHub has assigned the scale set, as it last said.
     assigned: u32,
@@ -148,6 +150,7 @@ impl Pool {
             room: Room::new(settings.max),
             settings,
             template,
+            scaled_for_builder: false,
             runners: BTreeMap::new(),
             assigned: 0,
         }
@@ -161,8 +164,9 @@ impl Pool {
 
     /// Says what the pool holds, and returns how many runners it wants:
     /// the jobs assigned and the idle runners asked for, within the places
-    /// a builder leaves. The runners it lacks count as held from now on.
-    fn want(&self) -> usize {
+    /// a builder leaves, and whether a builder held one. The runners it
+    /// lacks count as held from now on.
+    fn want(&self) -> (usize, bool) {
         let wanted = self.assigned.saturating_add(self.settings.min_idle);
         self.room.hold(self.runners.len(), self.assigned, |places| {
             usize::try_from(wanted.min(places)).unwrap_or(usize::MAX)
@@ -198,9 +202,12 @@ impl Pool {
     }
 
     /// Starts or removes runners until the pool has as many as it wants;
-    /// the runners missing start at once, side by side.
+    /// the runners missing start at once, side by side. A builder taking a
+    /// place or giving it back meanwhile is seen in [`Pool::hold`], which
+    /// scales again.
     pub async fn scale(&mut self) {
-        let target = self.want();
+        let (target, building) = self.want();
+        self.scaled_for_builder = building;
         let missing = target.saturating_sub(self.runners.len());
         if missing > 0 {
             let started = futures::future::join_all((0..missing).map(|_| self.start())).await;
@@ -494,9 +501,10 @@ impl Pool {
                 }
                 reconciled = Some(Instant::now());
             }
-            let building = room.building();
+            let building = self.scaled_for_builder;
+            let capacity = self.settings.max.saturating_sub(u32::from(building));
             let polled = tokio::select! {
-                polled = github.poll(session, last, room.for_runners()) => polled,
+                polled = github.poll(session, last, capacity) => polled,
                 () = room.moved(building) => {
                     self.scale().await;
                     continue;

@@ -578,3 +578,65 @@ async fn a_builder_takes_one_of_the_pools_places() {
     stop.cancel();
     done.await.unwrap();
 }
+
+/// A builder taking its place while the pool is still starting a runner
+/// is seen as soon as that start ends, not at the next check.
+#[tokio::test]
+async fn a_builder_taking_its_place_during_a_scale_is_seen() {
+    let fake = Fake::start().await;
+    let pool = pool(&fake, 4).await;
+    let room = pool.room();
+    let ours = key(&fake);
+    {
+        // Three idle runners settled long ago; the fourth starts slowly.
+        let mut world = fake.world();
+        for id in 1..=3u64 {
+            let name = format!("ci-00000000000{id}");
+            world.runners.insert(id, (name.clone(), false));
+            world.sandboxes.insert(
+                format!("sbx-{id}"),
+                Sandbox {
+                    template: "runner-base".into(),
+                    metadata: BTreeMap::from([
+                        (POOL_KEY.into(), ours.clone()),
+                        (NAME_KEY.into(), name),
+                        (ID_KEY.into(), id.to_string()),
+                        (BORN_KEY.into(), "1000".into()),
+                    ]),
+                    env: BTreeMap::new(),
+                },
+            );
+        }
+        world.create_delay = Duration::from_millis(500);
+    }
+    let (leading_tx, mut leading) = watch::channel(false);
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let done = tokio::spawn(async move {
+        pool::listen(pool, "replica-a", &leading_tx, &stopping)
+            .await
+            .unwrap();
+    });
+    until_leading(&mut leading, true).await;
+
+    // The pool has counted the fourth runner before it starts.
+    let place = tokio::time::timeout(Duration::from_secs(10), room.take())
+        .await
+        .expect("an idle runner makes way within a scale, not at the next check");
+    {
+        let world = fake.world();
+        assert_eq!(world.sandboxes.len(), 3, "{:#?}", world.sandboxes);
+        assert!(
+            world
+                .sandboxes
+                .values()
+                .any(|sandbox| sandbox.metadata[BORN_KEY] != "1000"),
+            "the runner started stays; a settled idle one went"
+        );
+    }
+    fake.until("three places offered", |world| world.capacity == Some(3))
+        .await;
+    drop(place);
+    stop.cancel();
+    done.await.unwrap();
+}

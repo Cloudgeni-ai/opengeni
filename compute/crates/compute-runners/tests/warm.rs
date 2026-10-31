@@ -354,6 +354,62 @@ async fn a_refresh_waits_for_a_place_in_the_pool() {
     keeping.await.unwrap();
 }
 
+/// A replica that stops leading while it builds ends the refresh and its
+/// builder, saves nothing, and gives its place back: the replica leading
+/// next counts no builder of ours.
+#[tokio::test]
+async fn a_refresh_ends_with_its_builder_when_leading_ends() {
+    let fake = Fake::start().await;
+    {
+        let mut world = fake.world();
+        world.head = "b".repeat(40);
+        world.process_delay = Duration::from_secs(30);
+    }
+    let github = Arc::new(Github::new(
+        reqwest::Client::new(),
+        &fake.base,
+        &fake.base,
+        Scope::parse("acme/web").unwrap(),
+        Credentials::Token("the-token".into()),
+    ));
+    let compute = Compute::new(reqwest::Client::new(), &fake.base, "key");
+    let room = free_room();
+    let (current_tx, current) = watch::channel("runner-base".to_owned());
+    let (leading_tx, leading) = watch::channel(true);
+    let stop = CancellationToken::new();
+    let keeping = tokio::spawn(warm::keep(
+        settings(),
+        github,
+        compute,
+        room.clone(),
+        current_tx,
+        leading,
+        stop.clone(),
+    ));
+    fake.until("the clone running in a builder", |world| {
+        world.processes.len() == 1
+    })
+    .await;
+    assert!(room.building());
+    let builder = fake.world().processes[0].sandbox.clone();
+
+    leading_tx.send_replace(false);
+    fake.until("the builder gone", |world| world.killed.contains(&builder))
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), room.moved(true))
+        .await
+        .expect("the place given back");
+    {
+        let world = fake.world();
+        assert!(world.templates.is_empty(), "nothing saved");
+        assert_eq!(world.processes.len(), 1, "nothing more run");
+    }
+    assert_eq!(*current.borrow(), "runner-base");
+
+    stop.cancel();
+    keeping.await.unwrap();
+}
+
 /// One refresh: cloned with the token in its environment alone, prepared,
 /// written out, saved, and its builder gone.
 fn the_refresh_ran_as_it_should(world: &fake::World) {

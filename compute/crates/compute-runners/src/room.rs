@@ -59,21 +59,23 @@ impl Room {
         self.held.borrow().building
     }
 
-    /// The places runners may have now: all but a builder's.
-    #[must_use]
-    pub fn for_runners(&self) -> u32 {
-        self.places.saturating_sub(u32::from(self.building()))
-    }
-
     /// The pool says it holds `runners` and GitHub has assigned it
     /// `assigned` jobs, and asks how many runners it may have: `wanted`
-    /// given the places runners may have. Those it lacks are counted as
-    /// held from now on, before they start, so a builder never takes a
-    /// place a runner is starting in.
-    pub fn hold(&self, runners: usize, assigned: u32, wanted: impl FnOnce(u32) -> usize) -> usize {
-        let mut target = 0;
+    /// given the places runners may have, all but a builder's. Those it
+    /// lacks are counted as held from now on, before they start, so a
+    /// builder never takes a place a runner is starting in. Returns that,
+    /// and whether a builder held a place: what the pool scales for, until
+    /// [`Room::moved`] says otherwise.
+    pub fn hold(
+        &self,
+        runners: usize,
+        assigned: u32,
+        wanted: impl FnOnce(u32) -> usize,
+    ) -> (usize, bool) {
+        let mut answer = (0, false);
         self.held.send_if_modified(|held| {
-            target = wanted(self.places.saturating_sub(u32::from(held.building)));
+            let target = wanted(self.places.saturating_sub(u32::from(held.building)));
+            answer = (target, held.building);
             let said = Held {
                 known: true,
                 runners: runners.max(target),
@@ -84,7 +86,7 @@ impl Room {
             *held = said;
             changed
         });
-        target
+        answer
     }
 
     /// The pool no longer leads, and what it holds is no longer known.
@@ -123,8 +125,8 @@ impl Room {
         place
     }
 
-    /// Waits until a builder takes a place, when `building` is false, or
-    /// gives it back, when true.
+    /// Waits until a builder holds a place, when `building` is false, or
+    /// holds none, when true: at once if it already does.
     pub async fn moved(&self, building: bool) {
         let mut seen = self.held.subscribe();
         let _ = seen.wait_for(|held| held.building != building).await;
@@ -153,23 +155,22 @@ mod tests {
     async fn a_builder_waits_until_the_pool_has_said_and_its_jobs_leave_a_place() {
         let room = Room::new(2);
         assert!(soon(room.take()).await.is_none(), "the pool has not said");
-        assert_eq!(room.hold(2, 2, wanting(2)), 2);
+        assert_eq!(room.hold(2, 2, wanting(2)), (2, false));
         assert!(
             soon(room.take()).await.is_none(),
             "two jobs fill both places"
         );
-        assert_eq!(room.hold(2, 1, wanting(1)), 1);
+        assert_eq!(room.hold(2, 1, wanting(1)), (1, false));
         let taking = tokio::spawn({
             let room = room.clone();
             async move { room.take().await }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(room.building(), "the place is taken at once");
-        assert_eq!(room.for_runners(), 1);
         assert!(!taking.is_finished(), "while the runner idle stays");
         assert_eq!(
             room.hold(2, 1, wanting(2)),
-            1,
+            (1, true),
             "runners get the places the builder leaves"
         );
         // The idle runner goes.
@@ -178,7 +179,7 @@ mod tests {
         assert!(soon(room.take()).await.is_none(), "one builder at a time");
         drop(place);
         assert!(!room.building());
-        assert_eq!(room.for_runners(), 2);
+        assert_eq!(room.hold(1, 1, wanting(2)), (2, false));
     }
 
     #[tokio::test]
