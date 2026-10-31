@@ -154,6 +154,7 @@ export type BuildTurnAgentDeps = {
   workspaceGovernance: GovernanceModelOk["workspaceGovernance"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
   workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
+  hostedToolsBillCredits: GovernanceModelOk["hostedToolsBillCredits"];
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
   rigVersion: GovernanceModelOk["rigVersion"];
   rigName: GovernanceModelOk["rigName"];
@@ -275,11 +276,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   // tested gate) and is reused here — resolving once is correct because the
   // clone hook runs at beforeAgentStart, so a mid-turn swap can't affect it.
   // Fallback mode (the default) keeps hosted search exactly as resolved; the
-  // operator's `replace` mode withholds it in favour of provider tools.
+  // operator's `replace` mode withholds it in favour of provider tools, and
+  // so does a turn whose hosted search would run on Opengeni's bill.
   const hostedWebSearch = turnWebSearchPlan(
     resolvedModel,
     runSettings,
     deps.workspaceCreditModelsAllowed,
+    deps.hostedToolsBillCredits,
   ).hostedWebSearch;
   const resolveImageReferences = async (
     references: Parameters<typeof resolveImageGenerationReferencesForTool>[0]["references"],

@@ -113,6 +113,7 @@ export {
   getBillingBalance,
   getSpendableCreditBalance,
   spendableCreditMicros,
+  toolCreditUsage,
   VOICE_CREDIT_USAGE,
   type CreditUsage,
 } from "./credit-balances";
