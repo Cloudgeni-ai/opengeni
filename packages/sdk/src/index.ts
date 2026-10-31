@@ -402,6 +402,7 @@ export type {
   PinEditableArtifactVersionRequest,
   ReadEditableArtifactMaterializationOptions,
   ReadEditableArtifactResourceOptions,
+  UpdateEditableArtifactVisibilityRequest,
 } from "./editable-artifact-resources";
 export {
   OpenGeniApiContractMismatchError,
