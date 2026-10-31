@@ -513,6 +513,7 @@ export function SessionMachineCapabilityCard({
           machinesError={fleet.error}
           personalWorkspace={personalWorkspace}
           canShareWithWorkspace={fleet.canManage}
+          canConnectOwnMachine={fleet.canConnectOwnMachine}
           defaultScope={setupScope}
           defaultAllowScreenControl={setupScreenControl}
           onConnected={(machine) => {

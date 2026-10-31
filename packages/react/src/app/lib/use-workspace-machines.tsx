@@ -48,6 +48,12 @@ export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
     canRead,
     canManage,
     canConnect,
+    /**
+     * Connect a new machine of one's own (Only me, or any machine in a
+     * Personal workspace). Off when the organization keeps that to its
+     * owners and admins; machines already connected stay changeable.
+     */
+    canConnectOwnMachine: canConnect && fleet.canConnectOwnMachine,
     canManageMachine,
     canControl,
     canRemove: canConnect && fleet.canRemove,
