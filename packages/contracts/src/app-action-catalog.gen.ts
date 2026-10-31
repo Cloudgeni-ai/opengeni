@@ -9391,6 +9391,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "enrollments:read"
   },
   {
+    "id": "updateMachineReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/reach",
+    "request": [
+      "UpdateOrganizationComputeReachRequest"
+    ],
+    "response": [
+      "OrganizationComputeReachResponse"
+    ],
+    "permission": "enrollments:read"
+  },
+  {
     "id": "updateMemberNotifications",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/inbox/member-notifications",
@@ -9629,6 +9641,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Rig"
+    ]
+  },
+  {
+    "id": "updateRigReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/rigs/:rigId/reach",
+    "request": [
+      "UpdateOrganizationComputeReachRequest"
+    ],
+    "response": [
+      "OrganizationComputeReachResponse"
     ]
   },
   {

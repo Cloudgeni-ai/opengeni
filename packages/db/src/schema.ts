@@ -12097,6 +12097,12 @@ export const enrollments = pgTable(
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     originWorkspaceId: uuid("origin_workspace_id"),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    // Where an organization machine works besides the workspace it was
+    // connected from (migration 1190): every shared workspace (null) or the
+    // listed ones, and members' Personal workspaces when the switch is on.
+    // Unused for workspace and personal machines.
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
     // 'machine' is a Connected Machine. 'sandbox' is the agent inside one
     // Opengeni compute sandbox (migration 0858): bound to its sandbox group,
     // reached through the agent gateway, with no key or bearer, and never
@@ -14805,6 +14811,10 @@ export const rigs = pgTable(
     originWorkspaceId: uuid("origin_workspace_id"),
     generation: bigint("generation", { mode: "number" }).notNull().default(1),
     status: text("status").notNull().default("active"),
+    // Where an organization rig works besides the workspace it was made in
+    // (migration 1190), as for organization machines. Unused otherwise.
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

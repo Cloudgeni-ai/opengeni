@@ -447,6 +447,7 @@ export async function listMachines(
         runtime: runtimeFor(services.settings, enrollment),
         operationPolicy: enrollment.operationPolicy,
         metrics: metricsRow ? metricRowToSample(metricsRow) : null,
+        reach: enrollment.reach ?? null,
       });
     }),
   );

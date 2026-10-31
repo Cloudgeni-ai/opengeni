@@ -50,12 +50,18 @@ import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { resourceScopeLabel } from "@/components/resource-scope-picker";
+import {
+  OrganizationComputeReachDialog,
+  organizationComputeReachSummary,
+} from "@/components/organization-compute-reach-dialog";
+import { useOrganizationName } from "@/lib/use-organization-name";
 import { userFacingError } from "@opengeni/react/ui/api-error";
 import { LoadFailure } from "@opengeni/react/ui/load-failure";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { apiErrorDetails, userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
 import {
   canManageWorkspaceSettings,
+  hasAccountPermission,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
 import { rigActorLabel } from "@/lib/rig-status";
@@ -99,6 +105,15 @@ export function RigDetailRoute({
 
   const [tab, setTab] = useState<Tab>("overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [reachOpen, setReachOpen] = useState(false);
+  // An organization rig works in the workspaces its organization picks;
+  // organization owners and admins change that.
+  const organizationId = rig.rig?.scope === "organization" ? rig.rig.accountId : "";
+  const organizationAdmin = organizationId
+    ? hasAccountPermission(context.accessContext, organizationId, "account:admin")
+    : false;
+  const organizationName =
+    useOrganizationName(organizationId, organizationAdmin) ?? "your organization";
 
   const versionLabel = useMemo(() => {
     const byId = new Map(versions.versions.map((version) => [version.id, `v${version.version}`]));
@@ -257,6 +272,22 @@ export function RigDetailRoute({
       <DetailAsideItem label="Available to" icon={SCOPE_ICON[current.scope]}>
         {current.scope === "workspace" ? "This workspace" : resourceScopeLabel(current.scope)}
       </DetailAsideItem>
+      {current.scope === "organization" && current.reach ? (
+        <DetailAsideItem label="Available in">
+          {organizationComputeReachSummary(current.reach)}
+          {canManage && organizationAdmin ? (
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              className="block h-auto p-0"
+              onClick={() => setReachOpen(true)}
+            >
+              Change where it works
+            </Button>
+          ) : null}
+        </DetailAsideItem>
+      ) : null}
       <DetailAsideItem label="Workspace default">
         {isDefaultRig ? "Yes. New sessions use it." : "No"}
       </DetailAsideItem>
@@ -482,6 +513,35 @@ export function RigDetailRoute({
           openList();
         }}
       />
+      {current.scope === "organization" && current.reach && canManage && organizationAdmin ? (
+        <OrganizationComputeReachDialog
+          open={reachOpen}
+          onOpenChange={setReachOpen}
+          client={context.client}
+          kind="rig"
+          name={current.name}
+          reach={current.reach}
+          organizationId={organizationId}
+          organizationName={organizationName}
+          hereId={workspaceId}
+          save={async (next) =>
+            (await context.client.updateRigReach(workspaceId, current.id, next)).reach
+          }
+          onSaved={(reach) => {
+            setReachOpen(false);
+            const personal = workspace?.kind === "personal";
+            const stillHere =
+              reach.homeWorkspaceId === workspaceId ||
+              (personal
+                ? reach.allowPersonalWorkspaces
+                : reach.allowedWorkspaceIds === null ||
+                  reach.allowedWorkspaceIds.includes(workspaceId));
+            // Taken out of this workspace: it is no longer found here.
+            if (stillHere) void rig.refresh();
+            else openList();
+          }}
+        />
+      ) : null}
     </DetailPage>,
   );
 }

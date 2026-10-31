@@ -3,11 +3,13 @@ import {
   ProposeRigChangeRequest,
   RigDefinitionEditPayload,
   UpdateRigRequest,
+  UpdateOrganizationComputeReachRequest,
 } from "@opengeni/contracts";
 import {
   beginRigChangeVerificationAttempt,
   listRigs,
   RigChangeTransitionError,
+  updateOrganizationRigReach,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import type { Context } from "hono";
@@ -35,6 +37,12 @@ import {
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
+import { parseRequestJson } from "../http/request-body";
+import {
+  organizationComputeReachResponse,
+  requireComputeReachCaller,
+  requireOrganizationCompute,
+} from "../http/organization-compute-reach";
 import { errorMessage } from "@opengeni/contracts/values";
 
 async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string): Promise<T> {
@@ -247,6 +255,27 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     await deleteRigForApi({ db }, grant, rig, { allowOrganization });
     return c.json({ ok: true });
+  });
+
+  // Where an organization rig works: every shared workspace or chosen ones,
+  // and members' Personal workspaces when switched on. The workspace it was
+  // made in always has it. Organization admins decide this; chats and
+  // schedules in a workspace it no longer works in stop using it at their next
+  // attempt.
+  app.put("/v1/workspaces/:workspaceId/rigs/:rigId/reach", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
+    requireOrganizationCompute(rig.scope, "sandbox environment");
+    requireComputeReachCaller(c, grant, "sandbox environment");
+    const body = await parseRequestJson(c, UpdateOrganizationComputeReachRequest);
+    const result = await updateOrganizationRigReach(db, rig.id, {
+      accountId: grant.accountId,
+      homeWorkspaceId: rig.workspaceId,
+      allowedWorkspaceIds: body.allowedWorkspaceIds,
+      allowPersonalWorkspaces: body.allowPersonalWorkspaces,
+      subjectId: grant.subjectId,
+    });
+    return c.json(organizationComputeReachResponse(result, "sandbox environment"));
   });
 
   app.get("/v1/workspaces/:workspaceId/rigs/:rigId/versions", async (c) => {
