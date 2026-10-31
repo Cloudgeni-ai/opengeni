@@ -1,5 +1,22 @@
 # @opengeni/browserd
 
+## 0.4.15
+
+### Patch Changes
+
+- 263ced5: A click on a control that takes the pointer only while it is hovered now waits for the hover to take effect. After the pointer moves onto the control, the hit test is repeated on the next drawn frames, for as long as the page is watched for a reaction. This fixes intermittent refusals in cross-origin frames, where the frame's process applies the hover after the move has returned, and controls that turn on a moment after the pointer rests on them are now clicked instead of refused. Controls that never take the pointer are still refused.
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [923c161]
+- Updated dependencies [40b79c9]
+- Updated dependencies [d872b12]
+- Updated dependencies [008d073]
+- Updated dependencies [af8fb16]
+- Updated dependencies [1afdda0]
+  - @opengeni/contracts@6.3.0
+  - @opengeni/interaction@6.3.0
+
 ## 0.4.14
 
 ### Patch Changes

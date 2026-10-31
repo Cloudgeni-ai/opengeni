@@ -1,5 +1,69 @@
 # @opengeni/api-router
 
+## 6.3.1
+
+### Minor Changes
+
+- d91058a: Agents can call a person. The new `call_user` tool rings the person's phones with the system's incoming-call screen (CallKit on iOS, through a PushKit VoIP push) when something cannot wait, waits up to 40 seconds while it rings, and returns `answered`, `declined`, `missed` or `cancelled`. Answering opens the chat's voice call, which starts by saying why the agent called. Nothing rings until the person turns on "Let agents call this iPhone" on that phone (native push rule `call`); "Teammates' agents too" (`call_members`) lets agents of other workspace members call them. One call rings a person at a time, a chat calls at most three times an hour, and after a decline it cannot call again for 15 minutes. A missed call leaves a "Missed call" notification. New: `session.agentCall.ringing` and `session.agentCall.settled` events (also subscribable by workspace webhooks, so a product can ring its own app with its own push credentials), `GET /v1/workspaces/:workspaceId/agent-calls/:callId` with `/answer` and `/decline`, the SDK's `getAgentCall`, `answerAgentCall` and `declineAgentCall`, the native push device's `voipToken`, and in `@opengeni/react-native` `useIncomingAgentCalls` and `useNativeVoipToken`.
+- 1afdda0: An organization's Allowed models list is now a ceiling for every workspace in it. A workspace's own list only narrows it: a model runs only when both lists allow its provider and both allow the model, so a workspace that allows every model allows exactly what its organization allows, and listing a model the organization doesn't allow never lets it run. Before, a workspace's own list replaced the organization's. The combined policy applies at the API edges, the omitted-model default, goal admission, subscription placement and failover, and the worker's model gate. The workspace model catalog adds `organizationAllowed` (false when the organization's list rules a model out, omitted when it allows every model), and the Allowed models form shows those models locked. `GET /v1/workspaces/:workspaceId/model-policy` still returns the workspace's own lists as saved, next to the `organization` lists.
+
+### Patch Changes
+
+- c0b945b: A signed-in teammate without `enrollments:manage` who mints a Connected Machine connect command without a `scope` now gets an Only me (`user`) command instead of a refusal. Machine managers, keys and services keep the original workspace default.
+- 008d073: Members of a shared workspace can now edit its instructions and review the agent's proposed changes to them, like shared Skills and Knowledge. Anyone who can start chats there (`sessions:create`), acting as themselves, may create drafts, import the earlier persona, propose onboarding instructions, activate and roll back, and approve or reject instruction proposals; the Knowledge page shows these controls to them. Viewers still can't, and tokens that only carry `sessions:create` (an agent's own, a worker's, an organization or workspace API key's, or another product's person) are refused, so agents still change instructions only through agent learning. A member's personal API key, or a chat they gave full access, acts as that member, like their connected agent, within what they allowed. The workspace's learning settings stay with admins and the Personal owner. New `requireWorkspaceContributorGrant` / `workspaceContributionAuthorized` in `@opengeni/core` and `canContributeWorkspaceContent` in `@opengeni/react`.
+- 99159e9: A session can now mix GitHub repositories from several GitHub App installations and from your personal GitHub. Each mounted repository commits as its own identity: the Opengeni app's bot for App repositories, your `users.noreply.github.com` address for repositories used through your GitHub. The worker writes `user.name`/`user.email` into each repository's local git config (marked `opengeni.managedIdentity`; an identity you set yourself is kept) instead of one sandbox-wide `GIT_AUTHOR_*`/`GIT_COMMITTER_*` identity, so a sandbox with both no longer fails setup with "repository resources require different Git commit identities". New sandboxes no longer carry a bot identity in their environment, so the sandbox viewer and terminal create the same environment as the worker and a session with only personal repositories never commits as the bot. Sandboxes created before this change keep their pinned environment; a `git` wrapper written to the per-turn CLI wrapper directory (`$HOME/.opengeni/bin`, ahead of the real git on PATH) runs git without the baked identity when the repository has a managed identity, and passes through otherwise. A deployment-configured `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` stays the default identity for App and host repositories. `applyGitAuthPointerEnvironment` from `@opengeni/config` ignores its deprecated identity argument; `GitCredentialBindingSeed` in `@opengeni/runtime` gains an optional `identity`.
+
+  The repository picker shows one row per repository. A repository reachable both through the Opengeni app and your GitHub has an "Acts as" choice when selected (you by default when your GitHub can write to it), and repositories from any number of App installations can be selected together with your own. The picker footer is now "GitHub access", with "Your GitHub" (connect, or choose which repositories Opengeni may use) and "Opengeni app" (installations and "Install on another account"). Automations can also select repositories from several installations. `RepositoryContextPickerProps` drops `selectedInstallationId` and gains `personalGitHubManageUrl`; the app context drops `selectedInstallationId`.
+
+- 1987adf: The phone and desktop apps can give a session full access. `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/admin-access` required a same-origin browser request from every caller, so the apps, which sign in with their own bearer credential and send no browser origin, always got 403 and showed "Couldn't give full access". A bearer caller now skips the browser-origin check, as other bearer-friendly routes already do; a cookie session still has to be same-origin, and only the person themselves can give it.
+- 5c1177a: The owner of a Personal workspace can now change its credential profile, remove secrets from its chats' stored history, configure Memory-to-Slack publishing and set its Slack task policy, like a workspace admin does in a shared workspace. These routes now use the workspace settings check (a workspace admin, or the verified owner of the Personal workspace); delegated owner lookalikes and non-admin members of shared workspaces are still refused.
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [c2e0db6]
+- Updated dependencies [923c161]
+- Updated dependencies [e104fbb]
+- Updated dependencies [40b79c9]
+- Updated dependencies [4260008]
+- Updated dependencies [d872b12]
+- Updated dependencies [64beb77]
+- Updated dependencies [98542ad]
+- Updated dependencies [6bbd24f]
+- Updated dependencies [008d073]
+- Updated dependencies [99159e9]
+- Updated dependencies [278ad58]
+- Updated dependencies [59d708c]
+- Updated dependencies [79605f2]
+- Updated dependencies [af8fb16]
+- Updated dependencies [94ba6a2]
+- Updated dependencies [3a47d0b]
+- Updated dependencies [2c3a01c]
+- Updated dependencies [1afdda0]
+  - @opengeni/contracts@6.3.0
+  - @opengeni/db@6.3.0
+  - @opengeni/core@6.3.0
+  - @opengeni/config@6.3.0
+  - @opengeni/runtime@6.3.0
+  - @opengeni/codemode@6.3.0
+  - @opengeni/artifact-tool@6.3.0
+  - @opengeni/capabilities@6.3.0
+  - @opengeni/codex@6.3.0
+  - @opengeni/documents@6.3.0
+  - @opengeni/events@6.3.0
+  - @opengeni/github@6.3.0
+  - @opengeni/interaction@6.3.0
+  - @opengeni/observability@6.3.0
+  - @opengeni/storage@6.3.0
+  - @opengeni/tool-gateway@6.3.0
+  - @opengeni/vaults@6.3.0
+  - @opengeni/vaults-bitwarden@6.3.0
+  - @opengeni/vaults-keeper@6.3.0
+  - @opengeni/vaults-onepassword@6.3.0
+  - @opengeni/vaults-protonpass@6.3.0
+  - @opengeni/agent-proto@6.3.0
+  - @opengeni/network@6.3.0
+  - @opengeni/xai-subscription@6.3.0
+
 ## 6.2.1
 
 ### Patch Changes
