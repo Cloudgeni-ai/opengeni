@@ -2436,7 +2436,7 @@ export const NON_RLS_RUNTIME_TABLES = [
  * table must not silently grant it broader DML than its migration intended.
  */
 export const RUNTIME_FULL_DML_TABLES = [
-  // 1128: the phones a product embedding Opengeni rings for agent calls.
+  // 1142: the phones a product embedding Opengeni rings for agent calls.
   "agent_call_host_phones",
   "agent_run_states",
   "api_keys",
