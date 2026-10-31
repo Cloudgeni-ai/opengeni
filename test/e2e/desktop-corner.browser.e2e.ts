@@ -173,10 +173,13 @@ describe("the desktop window bar", () => {
     for (const [key, box] of title) {
       if (!key.startsWith("browser-")) continue;
       expect({ key, ...title.get(key.replace("browser", "windows"))! }).toEqual({ key, ...box });
-      const web = description.get(key)!;
+      const browserDescription = description.get(key)!;
       const mac = description.get(key.replace("browser", "macos"))!;
       expect({ key, near: Math.abs(mac.x - box.x) <= 3 }).toEqual({ key, near: true });
-      expect({ key, near: Math.abs(mac.x - web.x) <= 3 }).toEqual({ key, near: true });
+      expect({ key, near: Math.abs(mac.x - browserDescription.x) <= 3 }).toEqual({
+        key,
+        near: true,
+      });
     }
     // And the web app is unchanged: 24px past the rail below 1024px, then the
     // centred column with its 32px inset.
