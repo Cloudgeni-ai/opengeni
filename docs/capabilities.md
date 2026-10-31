@@ -141,6 +141,84 @@ workspace.
 
 MCP event sources are not carried yet.
 
+### Organization connectors
+
+An organization owner or admin can add an MCP connector once for the whole
+organization and choose where it works, instead of each workspace setting it
+up. Each organization connector is either a reviewed catalog connector or a
+custom remote MCP server (name and streamable HTTP endpoint), and stores how
+turns sign in to it:
+
+- `each_person`: everyone connects their own account to the server's OAuth,
+  as with a workspace connector enabled for personal accounts. Google's MCP
+  servers only allow this.
+- `organization_key`: request headers held by the organization, probed and
+  then stored encrypted exactly like
+  [credential headers](#credential-headers). The API returns header names only.
+- `none`: a server that needs no credentials, probed when added.
+
+The sign-in mode is fixed once added; remove the connector and add it again to
+change it. Availability uses the same reach as organization model keys:
+`allowedWorkspaceIds: null` means every shared workspace, a list means only
+those shared workspaces, and `allowPersonalWorkspaces` separately decides
+whether members' Personal workspaces get it. A list may only name this
+organization's shared workspaces (`422` otherwise).
+
+In a workspace it reaches, an organization connector behaves like an enabled
+connector of the workspace's own. It appears once in the catalog with
+`lifecycle.managedBy: "organization"`, the detail **From your organization**
+and `metadata.organizationConnector` (`id`, `generation`, `login`, `source`).
+Agents get it in name order among the workspace's own connectors, with the
+same server ID a workspace setup of the same connector would have, so tool
+names don't change when a connector moves between the two. A catalog connector
+keeps its catalog approval floor; a custom one has none, as for a workspace's
+own custom server. When a person shares their own login made through it, that
+login carries into their Personal workspace like any other
+([Personal workspace extension](#personal-workspace-extension)).
+
+The workspace's own installation of the same capability, on or off, always
+wins:
+
+- A workspace manager (`capabilities:manage`) can turn it off for that
+  workspace with the ordinary disable action. That stores a turned-off
+  installation marked as the override; the catalog then shows the connector as
+  available, **Turned off in this workspace**. An enable request with an empty
+  body turns it back on by removing the override.
+- An admin's enable request that brings its own setup (connection reference,
+  headers, config or metadata) for a catalog connector creates the workspace's
+  own installation, which then replaces the organization's in that workspace.
+  A custom organization server has no definition outside the organization's,
+  so that is refused with `409`.
+- A member's personal setup (`connections:personal`) never adds a workspace
+  installation over the organization's and never turns back on one an admin
+  turned off here.
+
+Administration is organization-level and needs no workspace:
+
+| Route | SDK method |
+| --- | --- |
+| `GET /v1/organizations/:organizationId/connectors` | `listOrganizationConnectors` |
+| `POST /v1/organizations/:organizationId/connectors` | `createOrganizationConnector` |
+| `PATCH /v1/organizations/:organizationId/connectors/:connectorId` | `updateOrganizationConnector` |
+| `DELETE /v1/organizations/:organizationId/connectors/:connectorId` | `deleteOrganizationConnector` |
+
+A create request names `capabilityId` (catalog) or `custom`, plus `login`,
+`headers` (only with `organization_key`), optional `allowedTools` and
+`availability`. A change sends `expectedGeneration` with any of
+`availability`, `allowedTools`, `status` (`active` or `disabled`) and `headers`
+(organization key only, probed again); a stale generation returns `409`.
+Removing a connector stops it in every workspace at once.
+
+Only signed-in organization owners and admins, and agents acting for one,
+manage organization connectors; the database checks the person's live
+organization role in every change. Organization API keys are refused (`403`).
+Adding one, or saving one that stays on, is an acquisition under the
+[organization integration policy](organization-integration-policy.md) with
+the `custom:mcp` key, as for a workspace's own MCP setup; an organization key's
+headers also follow the EU-only content-flow rules. Storage is
+`organization_connectors` (migration `1175_organization_connectors.sql`), with
+row security serving each workspace exactly the connectors that reach it.
+
 ### Credential headers
 
 MCP servers that require request headers (for example an `Authorization` bearer token) are enabled by passing the headers in the enable request:
