@@ -1202,6 +1202,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "OrganizationConnector"
     ],
     "secretFields": [
+      "request.apiKey",
       "request.headers"
     ]
   },
@@ -7300,6 +7301,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "previewOrganizationApiIntegration",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/connectors/api-integrations/preview",
+    "request": [
+      "PreviewOrganizationApiIntegrationRequest"
+    ],
+    "response": [
+      "ApiIntegrationPreview"
+    ],
+    "secretFields": [
+      "request.apiKey"
+    ]
+  },
+  {
     "id": "previewPlugin",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/plugins/preview",
@@ -8670,6 +8685,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:write"
   },
   {
+    "id": "setOrganizationApiIntegrationHere",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/integrations/:capabilityId/organization",
+    "request": [
+      "SetOrganizationApiIntegrationHereRequest"
+    ],
+    "response": [
+      "OrganizationApiIntegrationHere"
+    ],
+    "permission": "capabilities:manage"
+  },
+  {
     "id": "setOrganizationClaudeSubscriptionAccountAllocator",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/claude/accounts/:accountId/allocator",
@@ -9577,6 +9604,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "OrganizationConnector"
     ],
     "secretFields": [
+      "request.apiKey",
       "request.headers"
     ]
   },

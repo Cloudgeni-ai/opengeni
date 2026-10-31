@@ -1,5 +1,6 @@
 import { subscriptionConnections } from "./subscription-core-schema";
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
+import type { StoredApiIntegrationRevision } from "./capability-integrations";
 import {
   commentaryExclusiveMeaningfulSessionEventSql,
   commentaryInclusiveMeaningfulSessionEventSql,
@@ -46,7 +47,12 @@ import {
 import { sql } from "drizzle-orm";
 export * from "./knowledge-entries-schema";
 export * from "./subscription-core-schema";
-import type { ResolvedAgentConfig, SessionAvatar, SessionToolPolicy } from "@opengeni/contracts";
+import type {
+  ApiIntegrationAuthPreview,
+  ResolvedAgentConfig,
+  SessionAvatar,
+  SessionToolPolicy,
+} from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import type { SessionEventPayloadTruncation } from "@opengeni/contracts";
 import {
@@ -13639,14 +13645,49 @@ export const capabilityInstallations = pgTable(
 );
 
 /**
- * An organization's MCP connector, added once by an organization owner or
- * admin and served to the workspaces its reach selects: every shared workspace
+ * An organization's connector, added once by an organization owner or admin
+ * and served to the workspaces its reach selects: every shared workspace
  * (`allowedWorkspaceIds` null) or the listed ones, plus members' Personal
- * workspaces when `allowPersonalWorkspaces` is on. `config` has the shape of a
- * workspace installation's config; `customDefinition` holds a custom server's
- * name and endpoint and is null for a catalog connector. A workspace's own
- * installation of the same capability, on or off, wins (resolved by readers).
+ * workspaces when `allowPersonalWorkspaces` is on. A workspace's own setup of
+ * the same capability, on or off, wins (resolved by readers).
+ *
+ * `kind` "mcp": a remote MCP server. `config` has the shape of a workspace
+ * installation's config; `customDefinition` holds a custom server's name and
+ * endpoint and is null for a catalog connector.
+ * `kind` "api": an API integration. `customDefinition` is the reviewed,
+ * compiled definition every reached workspace runs; `config` holds how turns
+ * sign in and the tools that are on.
  */
+export type OrganizationMcpServerDefinition = {
+  name: string;
+  description?: string | null;
+  endpointUrl: string;
+};
+
+/** What an organization admin reviewed when adding an API integration. */
+export type OrganizationApiIntegrationDefinition = {
+  kind: "api";
+  name: string;
+  description: string | null;
+  definitionId: string;
+  definitionProvenance: "curated" | "workspace";
+  protocol: "openapi" | "graphql";
+  pluginKey: string;
+  /** The base server id a workspace installation of it would use. */
+  serverId: string;
+  provider: string | null;
+  providerDomain: string;
+  baseUrl: string;
+  sourceUrl: string | null;
+  /** The source it was compiled from, as a preview echoes it (never an inline document's text). */
+  source: Record<string, unknown>;
+  requiredScopes: string[];
+  /** How the API authenticates, as the preview showed it: what each person or the key provides. */
+  auth: ApiIntegrationAuthPreview;
+  authScheme: Record<string, unknown>;
+  revision: StoredApiIntegrationRevision;
+};
+
 export const organizationConnectors = pgTable(
   "organization_connectors",
   {
@@ -13655,11 +13696,10 @@ export const organizationConnectors = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     capabilityId: text("capability_id").notNull(),
-    customDefinition: jsonb("custom_definition").$type<{
-      name: string;
-      description?: string | null;
-      endpointUrl: string;
-    }>(),
+    kind: text("kind").$type<"mcp" | "api">().notNull().default("mcp"),
+    customDefinition: jsonb("custom_definition").$type<
+      OrganizationMcpServerDefinition | OrganizationApiIntegrationDefinition
+    >(),
     config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     status: text("status").$type<"active" | "disabled">().notNull().default("active"),
@@ -13679,6 +13719,10 @@ export const organizationConnectors = pgTable(
     statusCheck: check(
       "organization_connectors_status_chk",
       sql`${table.status} in ('active', 'disabled')`,
+    ),
+    kindCheck: check(
+      "organization_connectors_kind_chk",
+      sql`${table.kind} in ('mcp', 'api') and (${table.kind} = 'mcp' or ${table.customDefinition} is not null)`,
     ),
   }),
 );
