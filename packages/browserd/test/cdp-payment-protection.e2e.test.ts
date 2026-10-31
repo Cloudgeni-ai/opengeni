@@ -11,12 +11,14 @@ const PAN = "4000000000000002";
 const GROUPED = "4000 0000 0000 0002";
 const CVC = "731";
 
-function paymentContentJson(value: unknown, fixtureOrigin: string): string {
+function paymentContentJson(value: unknown, ...fixtureOrigins: string[]): string {
   return JSON.stringify(value, (key, item: unknown) => {
     // Generated refs and the fixture's random port are not page content.
     // Keep every other string, including URL paths and queries, under test.
     if (key === "ref") return "<element-ref>";
-    return typeof item === "string" ? item.replaceAll(fixtureOrigin, "<fixture-origin>") : item;
+    return typeof item === "string"
+      ? fixtureOrigins.reduce((text, origin) => text.replaceAll(origin, "<fixture-origin>"), item)
+      : item;
   });
 }
 
@@ -26,13 +28,13 @@ test("payment privacy comparisons ignore only generated refs and the fixture ori
       {
         ref: "ef2e7319d",
         name: "Checkout fixture",
-        states: ["url=http://127.0.0.1:57317/"],
+        states: ["url=http://127.0.0.1:57317/", "url=http://localhost:57317/frame"],
         children: [{ ref: "ee2712731", value: { redacted: true, reason: "payment" } }],
       },
     ],
   };
   expect(JSON.stringify(semantic)).toContain(CVC);
-  const text = paymentContentJson(semantic, "http://127.0.0.1:57317");
+  const text = paymentContentJson(semantic, "http://127.0.0.1:57317", "http://localhost:57317");
   expect(text).not.toContain(CVC);
   expect(text).toContain("Checkout fixture");
   expect(text).toContain('"reason":"payment"');
@@ -44,11 +46,15 @@ test("payment privacy comparisons still detect secrets in all page-content strin
       { value: secret },
       { name: `Card ${secret}` },
       { description: secret },
+      { identifier: secret },
       { states: [`url=http://127.0.0.1:57317/${secret}?card=${secret}`] },
+      { states: [`url=http://localhost:57317/${secret}?card=${secret}`] },
       { children: [{ name: `Reference-like page text e${secret}d` }] },
       { states: [`url=https://example.test/${secret}`] },
     ]) {
-      expect(paymentContentJson(content, "http://127.0.0.1:57317")).toContain(secret);
+      expect(
+        paymentContentJson(content, "http://127.0.0.1:57317", "http://localhost:57317"),
+      ).toContain(secret);
     }
   }
 });
@@ -254,7 +260,11 @@ for (const crossOrigin of [false, true]) {
       });
       try {
         const observation = await driver.start(String(server.url));
-        const text = paymentContentJson(observation.semantic, server.url.origin);
+        const text = paymentContentJson(
+          observation.semantic,
+          server.url.origin,
+          `http://localhost:${server.port}`,
+        );
         for (const secret of [PAN, GROUPED, CVC]) expect(text).not.toContain(secret);
         expect(text).toContain("Embedded card");
         expect(text).toContain("Embedded security code");
