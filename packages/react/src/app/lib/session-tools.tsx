@@ -645,6 +645,35 @@ function selectedPersonalCounterpartRef(
 }
 
 /**
+ * The ref of an attached personal GitHub selection for the repository a bare
+ * manual row names (an exact https://github.com URL), or null when there is
+ * none. Used for repositories outside the workspace catalog, whose row cannot
+ * be matched through it.
+ */
+function attachedPersonalRefForManualRow(
+  repo: RepoDraft,
+  personal: PersonalRepositorySelection | undefined,
+): string | null {
+  if (!personal || repo.github) return null;
+  let fullName: string;
+  try {
+    fullName = parseCanonicalGitHubRepositoryUrl(repo.url.trim()).fullName.toLowerCase();
+  } catch {
+    return null;
+  }
+  const attached = personal.repositories.find(
+    (candidate) =>
+      personal.selectedRepoIds.has(candidate.repositoryId) &&
+      candidate.selectedAccess !== null &&
+      candidate.fullName.toLowerCase() === fullName,
+  );
+  if (!attached) return null;
+  return (
+    (personal.selectedRepoRefs[attached.repositoryId] ?? attached.defaultBranch).trim() || null
+  );
+}
+
+/**
  * Fold attached manual rows that stand for a workspace catalog repository into
  * the catalog selection, so one repository is attached once and the picker
  * shows it checked. Returns null when nothing changes.
@@ -657,6 +686,7 @@ function selectedPersonalCounterpartRef(
  *   workspace App copy is never selected for it. A row at the ref of an
  *   attached personal selection is an exact duplicate and is dropped; any
  *   other row stays, including while the personal selection cannot attach yet.
+ *   This holds for repositories outside the workspace catalog too.
  * - A row open in the editor is left alone until the edit ends.
  * - A retained identity that a ready catalog no longer contains is dropped,
  *   exactly like draft hydration drops it when the catalog is already loaded.
@@ -689,6 +719,8 @@ export function reconcileManualRepositoriesWithCatalog(
     const match = manualRepositoryCatalogMatch(repo, repositories);
     if (!match) {
       if (repo.github) {
+        changed = true;
+      } else if (attachedPersonalRefForManualRow(repo, personal) === ref) {
         changed = true;
       } else {
         kept.add(repo);
