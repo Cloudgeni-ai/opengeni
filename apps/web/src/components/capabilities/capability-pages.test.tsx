@@ -182,7 +182,7 @@ describe("CatalogItemPage", () => {
     socialConnections: [],
     canManageSocial: true,
     canManageSkills: true,
-    canTurnOff: true,
+    canTurnOnOrOff: true,
     onBack: () => {},
   };
 

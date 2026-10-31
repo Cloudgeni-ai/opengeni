@@ -238,6 +238,14 @@ headers also follow the EU-only content-flow rules. Storage is
 `organization_connectors` (migration `1175_organization_connectors.sql`), with
 row security serving each workspace exactly the connectors that reach it.
 
+In the app, owners and admins manage them under **Organization settings >
+Integrations > Connectors**: add one from the catalog or by server address,
+choose how people sign in and where it works, turn it off everywhere, change
+where it works, replace its organization key or remove it. In a workspace, the
+connector's page shows **Turn on for this workspace** when a workspace manager
+turned it off there; members without `capabilities:manage` are told to ask a
+workspace admin.
+
 ### Credential headers
 
 MCP servers that require request headers (for example an `Authorization` bearer token) are enabled by passing the headers in the enable request:

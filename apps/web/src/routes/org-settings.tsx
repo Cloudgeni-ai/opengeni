@@ -23,6 +23,9 @@ import { OrganizationPeoplePage } from "@/components/organization/people-page";
 import { OrganizationSecurityPage } from "@/components/organization/security-page";
 import { OrganizationWorkspacesPage } from "@/components/organization/workspaces-page";
 import { OrganizationIntegrationsSection } from "@/components/organization-integrations-section";
+import { OrganizationConnectors } from "@/components/organization-connectors";
+import type { ConnectorLocation } from "@/lib/organization-route";
+import { SectionStack } from "@opengeni/react/ui/section";
 import {
   organizationSettingsDescription,
   organizationSettingsLabel,
@@ -115,6 +118,7 @@ export function OrgSettingsRoute({
   workspace,
   developer,
   connectedAgent,
+  connectors,
   insights,
 }: {
   workspaceId: string;
@@ -129,6 +133,8 @@ export function OrgSettingsRoute({
   developer?: DeveloperLocation | undefined;
   /** Connected agents: the agent whose page is open. */
   connectedAgent?: string | undefined;
+  /** Integrations: Add connector, or an organization connector's page or form. */
+  connectors?: ConnectorLocation | undefined;
   checkout?: "success" | "cancelled";
   /** Stripe's session id on a same-tab return; its credits are celebrated once they land. */
   checkoutSession?: string | undefined;
@@ -346,6 +352,27 @@ export function OrgSettingsRoute({
       params: { workspaceId },
       search: { section: "agents", ...(next.agent ? { agent: next.agent } : {}) },
     });
+  const navigateConnectors = (next: ConnectorLocation) =>
+    void navigate({
+      to: "/workspaces/$workspaceId/organization",
+      params: { workspaceId },
+      search: {
+        section: "integrations",
+        ...(next.kind === "new"
+          ? { view: "new-connector" as const }
+          : next.kind === "connector"
+            ? { connector: next.connectorId, ...(next.view === "page" ? {} : { view: next.view }) }
+            : {}),
+      },
+    });
+  // Organization connectors are administered by organization owners and admins,
+  // like the integration policy beside them.
+  const integrationsAdministrator =
+    organizationAdministratorSession &&
+    Boolean(accountId) &&
+    (actorRole === "owner" || actorRole === "admin");
+  const connectorPage =
+    integrationsAdministrator && connectors !== undefined && connectors.kind !== "list";
   // Models is for owners and admins, account administrators (a key or service
   // with account:admin) and signed-in members; anyone else gets a plain refusal.
   const modelsRefused = requestedSection === "models" && !visibleSections.has("models");
@@ -357,6 +384,7 @@ export function OrgSettingsRoute({
     (section === "workspaces" && Boolean(workspace || organizationView)) ||
     (section === "developer" && (organizationView === "new-key" || developerSubPage)) ||
     (section === "agents" && Boolean(connectedAgent)) ||
+    (section === "integrations" && connectorPage) ||
     // Opened from another scope (a workspace's Models): Billing brings its own back link.
     // A workspace's budget page brings its own back link and title too.
     (section === "billing" && Boolean(returnTo || workspace));
@@ -469,13 +497,30 @@ export function OrgSettingsRoute({
           ) : null}
 
           {!modelsRefused && section === "integrations" ? (
-            <OrganizationIntegrationsSection
-              key={`${identityKey}:integrations`}
-              client={client}
-              identity={adminIdentity}
-              actorRole={actorRole}
-              managedSession={organizationAdministratorSession}
-            />
+            // One position for the connectors, so moving between the list and a
+            // connector's page keeps what was loaded.
+            <SectionStack>
+              {integrationsAdministrator ? (
+                <OrganizationConnectors
+                  key={`${identityKey}:connectors`}
+                  client={client}
+                  organizationId={accountId}
+                  organizationName={fallbackLabel}
+                  workspaceId={workspaceId}
+                  location={connectorPage && connectors ? connectors : { kind: "list" }}
+                  onNavigate={navigateConnectors}
+                />
+              ) : null}
+              {connectorPage ? null : (
+                <OrganizationIntegrationsSection
+                  key={`${identityKey}:integrations`}
+                  client={client}
+                  identity={adminIdentity}
+                  actorRole={actorRole}
+                  managedSession={organizationAdministratorSession}
+                />
+              )}
+            </SectionStack>
           ) : null}
 
           {!modelsRefused && section === "agents" ? (
