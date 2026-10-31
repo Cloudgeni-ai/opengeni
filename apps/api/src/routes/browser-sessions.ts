@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
+import { computerCursorIdentity } from "./computer-cursor-identity";
 import {
   assertEphemeralBrowserCreateEnabled,
   ephemeralBrowserPartition,
@@ -5711,6 +5712,14 @@ async function ensureLinkedComputerController(
   } catch (error) {
     if (!isMissingLinkedComputerControllerSession(error)) throw error;
     await client.createComputerSession({
+      cursorIdentity: await computerCursorIdentity(
+        deps,
+        grant,
+        await getSession(deps.db, browser.workspaceId, record.sourceSessionId).then((session) => {
+          if (!session) throw new BrowserSessionStateError("Associated session not found");
+          return session;
+        }),
+      ),
       ...reference,
       tokenGeneration: record.tokenGeneration,
       ...tokens,

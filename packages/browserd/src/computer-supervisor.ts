@@ -33,6 +33,7 @@ import type {
 } from "./computer-media";
 import { ComputerNativeClient } from "./computer-native-client";
 import { UnsettledCleanupError } from "./cleanup-error";
+import { ComputerCursorIdentity } from "@opengeni/contracts";
 
 const DEFAULT_MAX_SESSIONS = 64;
 
@@ -42,6 +43,7 @@ export type ComputerSessionReference = {
 };
 
 export type ComputerSupervisorSessionOptions = ComputerSessionReference & {
+  cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity;
   authority?: ComputerInteractionAuthority;
 };
 
@@ -69,6 +71,7 @@ export type ComputerSupervisorDriver = ComputerInteractionDriver & {
 };
 
 export type ComputerSupervisorDriverContext = ComputerSessionReference & {
+  cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity;
   sessionDirectory: string;
   seatId: string;
   displayId: string;
@@ -504,6 +507,7 @@ export class ComputerSupervisor {
         seatId,
         displayId,
         environment,
+        ...(options.cursorIdentity ? { cursorIdentity: options.cursorIdentity } : {}),
       });
       const capabilities = await pinActionBatches(sessionDirectory, driver.capabilities, resumed);
       let runtime: Runtime | undefined;
@@ -706,6 +710,9 @@ function validateSessionOptions(
     computerSessionId: options.computerSessionId,
     controllerGeneration: options.controllerGeneration,
     ...(options.authority ? { authority: options.authority } : {}),
+    ...(options.cursorIdentity
+      ? { cursorIdentity: ComputerCursorIdentity.parse(options.cursorIdentity) }
+      : {}),
   };
 }
 

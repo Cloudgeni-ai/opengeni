@@ -18,6 +18,7 @@ import {
 import {
   openGeniSlackBotMetadata,
   requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   sanitizeSlackPublicationText,
   validateOpenGeniSlackBotConnectionSelection,
   type ApiRouteDeps,
@@ -45,7 +46,7 @@ export function registerMemorySlackPublicationRoutes(app: Hono, deps: ApiRouteDe
 
   app.put(`${base}/configuration`, async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = await parseRequestJson(c, UpdateMemorySlackPublicationConfigurationRequest);
     let slackTeamId: string | null = null;
     let channelName = payload.slackChannelName;
@@ -129,7 +130,7 @@ export function registerMemorySlackPublicationRoutes(app: Hono, deps: ApiRouteDe
 
   app.get(`${base}/channels`, async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const connectionId = c.req.query("connectionId");
     if (!connectionId) throw new HTTPException(400, { message: "connectionId is required" });
     await validateOpenGeniSlackBotConnectionSelection(deps.db, grant, workspaceId, connectionId);
@@ -179,7 +180,7 @@ export function registerMemorySlackPublicationRoutes(app: Hono, deps: ApiRouteDe
 
   app.post(`${base}/:publicationId/action`, async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = await parseRequestJson(c, MemorySlackPublicationActionRequest);
     const publication = await actOnMemorySlackPublication(deps.db, {
       workspaceId,

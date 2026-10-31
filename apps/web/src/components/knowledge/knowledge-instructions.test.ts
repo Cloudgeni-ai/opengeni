@@ -59,7 +59,7 @@ test("history lists every activated version, newest first, in plain words", () =
   } as unknown as WorkspaceInstructionPolicyListResponse;
   const history = instructionRevisions(response, "user:me");
   expect(history.map((each) => [each.summary, each.author, each.revisionId])).toEqual([
-    ["Restored an earlier version", "A workspace admin", "r1"],
+    ["Restored an earlier version", "A teammate", "r1"],
     ["Approved an agent's change", "Opengeni", "r2"],
     ["Created the instructions", "You", "r1"],
   ]);

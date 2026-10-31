@@ -35,9 +35,9 @@
 //!    established, failure to create, configure, pre-open, migrate, or verify an
 //!    operation leaf aborts that operation; user code never runs ambient after a
 //!    partial admission. Optional per-op limits contain work in that leaf.
-//!    Without a limit, the child score bias below makes global kernel OOM prefer
-//!    host work when a higher score is representable; a supervisor already at the
-//!    ABI ceiling remains equal to its children.
+//!    Without a limit, the child score bias below makes kernel OOM prefer host
+//!    work over the supervisor; a supervisor already at the ABI ceiling remains
+//!    equal to its children.
 //! 3. **Teardown** ([`OpCgroupHandle`]). The op leaf is `rmdir`'d after the op's
 //!    complete cgroup-owned process tree is killed and reaped. This includes a
 //!    descendant that changed its process group after admission, but excludes an
@@ -1660,30 +1660,46 @@ fn disable_subtree_controller(service_dir: &Path, controller: &str) -> std::io::
 
 // --- oom_score_adj: bias the kernel OOM killer toward host work ----------------
 
-/// Derives the minimal child OOM bias above the supervisor when the kernel ABI can
-/// represent one. A manager-protected negative supervisor needs only neutral
-/// children. If the manager clamps the supervisor to neutral or positive, one
-/// point is the smallest legal preference. At the ABI ceiling (1000) no stronger
-/// relative preference is representable, so the child remains equal.
+/// The kernel ABI's largest `oom_score_adj`: a process at this value is chosen
+/// before every process with a lower value, whatever their sizes.
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn minimal_exec_oom_score_adj(supervisor: i32) -> u16 {
+const OOM_SCORE_ADJ_MAX: u16 = 1000;
+
+/// Derives the OOM bias of a command the supervisor starts.
+///
+/// The kernel ranks OOM victims by memory footprint plus `oom_score_adj`
+/// thousandths of the memory being exhausted (the cgroup limit for a cgroup OOM,
+/// RAM and swap otherwise). A small difference in `oom_score_adj` is therefore no
+/// preference at all: one point in an 8 GiB container is worth 8 MiB, while the
+/// supervisor's resident binary alone is far larger than many of the processes a
+/// build or test run leaves behind once the biggest one is killed.
+///
+/// * A manager-protected (negative) supervisor keeps neutral children, which
+///   compete with the host's other processes as usual.
+/// * A supervisor no manager could protect (zero or positive, for example in an
+///   unprivileged container, which may raise but never lower its own value)
+///   gives its commands the ABI maximum. Raising needs no privilege, and it is
+///   the only value that ranks every command, however small, ahead of the
+///   supervisor, whatever the size of the supervisor or of the memory. A
+///   supervisor already at the maximum stays equal to its commands.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn exec_oom_score_adj_for_supervisor(supervisor: i32) -> u16 {
     if supervisor < 0 {
         0
     } else {
-        u16::try_from(supervisor.saturating_add(1).min(1000))
-            .expect("a parsed nonnegative OOM adjustment fits u16")
+        OOM_SCORE_ADJ_MAX
     }
 }
 
 /// Reads the current supervisor's authoritative kernel value and derives the
-/// minimal child bias. `None` leaves the host policy untouched when `/proc` cannot
-/// be read or contains an invalid ABI value.
+/// child bias. `None` leaves the host policy untouched when `/proc` cannot be
+/// read or contains an invalid ABI value.
 #[cfg(target_os = "linux")]
-fn exec_oom_score_adj() -> Option<u16> {
+pub(crate) fn exec_oom_score_adj() -> Option<u16> {
     std::fs::read_to_string("/proc/self/oom_score_adj")
         .ok()
         .and_then(|value| parse_oom_score_adj(&value))
-        .map(minimal_exec_oom_score_adj)
+        .map(exec_oom_score_adj_for_supervisor)
 }
 
 /// Reports the effective supervisor victim bias. Service managers are allowed to
@@ -1697,18 +1713,18 @@ fn report_supervisor_oom_score_adj() {
     {
         Some(score) if score < 0 => tracing::info!(
             oom_score_adj = score,
-            "control supervisor has negative kernel OOM victim bias"
+            child_oom_score_adj = exec_oom_score_adj_for_supervisor(score),
+            "control supervisor has negative kernel OOM victim bias; commands stay neutral"
         ),
-        Some(0) => tracing::info!(
-            oom_score_adj = 0,
-            child_oom_score_adj = minimal_exec_oom_score_adj(0),
-            "control supervisor has neutral kernel OOM victim bias; children receive the smallest available relative preference"
+        Some(score) if score < i32::from(OOM_SCORE_ADJ_MAX) => tracing::info!(
+            oom_score_adj = score,
+            child_oom_score_adj = exec_oom_score_adj_for_supervisor(score),
+            "control supervisor could not be protected from the kernel OOM killer; commands are made its preferred victims so a command that exhausts memory is killed before the supervisor"
         ),
         Some(score) => tracing::warn!(
             oom_score_adj = score,
-            child_oom_score_adj = minimal_exec_oom_score_adj(score),
-            relative_preference_representable = score < 1000,
-            "control supervisor has nonnegative kernel OOM victim bias; children receive the smallest higher bias when representable, otherwise the equal ABI ceiling, and delegated cgroups do not protect against host-wide kernel OOM"
+            child_oom_score_adj = exec_oom_score_adj_for_supervisor(score),
+            "control supervisor already has the largest kernel OOM victim bias, so its commands cannot be preferred over it"
         ),
         None => tracing::warn!(
             "could not read the control supervisor's effective kernel OOM victim bias"
@@ -1840,12 +1856,47 @@ mod tests {
     }
 
     #[test]
-    fn child_oom_bias_is_the_minimal_representable_target() {
-        assert_eq!(minimal_exec_oom_score_adj(-100), 0);
-        assert_eq!(minimal_exec_oom_score_adj(-1), 0);
-        assert_eq!(minimal_exec_oom_score_adj(0), 1);
-        assert_eq!(minimal_exec_oom_score_adj(999), 1000);
-        assert_eq!(minimal_exec_oom_score_adj(1000), 1000);
+    fn unprotected_supervisors_give_commands_the_largest_oom_bias() {
+        assert_eq!(exec_oom_score_adj_for_supervisor(-1000), 0);
+        assert_eq!(exec_oom_score_adj_for_supervisor(-100), 0);
+        assert_eq!(exec_oom_score_adj_for_supervisor(-1), 0);
+        assert_eq!(exec_oom_score_adj_for_supervisor(0), 1000);
+        assert_eq!(exec_oom_score_adj_for_supervisor(1), 1000);
+        assert_eq!(exec_oom_score_adj_for_supervisor(200), 1000);
+        assert_eq!(exec_oom_score_adj_for_supervisor(1000), 1000);
+    }
+
+    /// The kernel's victim ranking (`oom_badness`): resident pages plus
+    /// `oom_score_adj` thousandths of the pages being exhausted.
+    fn kernel_badness(resident_pages: i64, oom_score_adj: i64, total_pages: i64) -> i64 {
+        resident_pages + oom_score_adj * (total_pages / 1000)
+    }
+
+    /// An unprotected supervisor with a few hundred MiB of resident binary must
+    /// never outrank even the smallest command it runs, in a small container or
+    /// a large host. One point of preference (the earlier `supervisor + 1`) lost
+    /// to the supervisor's footprint in exactly this case.
+    #[test]
+    fn every_command_outranks_an_unprotected_supervisor_as_an_oom_victim() {
+        const MIB: i64 = 256; // 4 KiB pages
+        let supervisor_resident = 240 * MIB;
+        let command_resident = MIB;
+        for total in [512 * MIB, 8 * 1024 * MIB, 256 * 1024 * MIB] {
+            for supervisor in [0, 100, 500] {
+                let command = i64::from(exec_oom_score_adj_for_supervisor(supervisor));
+                assert!(
+                    kernel_badness(command_resident, command, total)
+                        > kernel_badness(supervisor_resident, i64::from(supervisor), total),
+                    "supervisor {supervisor} in {total} pages"
+                );
+            }
+        }
+        // The one-point preference does not survive the supervisor's footprint.
+        let eight_gib = 8 * 1024 * MIB;
+        assert!(
+            kernel_badness(command_resident, 1, eight_gib)
+                < kernel_badness(supervisor_resident, 0, eight_gib)
+        );
     }
 
     #[test]

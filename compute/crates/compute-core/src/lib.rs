@@ -42,8 +42,8 @@ mod sandbox;
 mod time;
 
 pub use host::{
-    Action, Capacity, CpuCapacity, CreateRoom, DiskCapacity, DiskSpace, Failure, Host, Input,
-    MemoryLevels, Notice, Outcome, Resource, SandboxView, Size,
+    Action, Capacity, Claims, CpuCapacity, CreateRoom, DiskCapacity, DiskSpace, Failure, Host,
+    Input, MemoryLevels, Notice, Outcome, Resource, SandboxView, Size,
 };
 pub use ids::{BalloonRequest, HoldId, LoanId, OpId, SandboxId, ShrinkRequest};
 pub use level::{Durability, Level, Priority, State, Step};

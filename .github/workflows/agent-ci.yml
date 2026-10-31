@@ -3,6 +3,7 @@ name: Agent CI
 # Cross-platform Rust agent checks run after pushes to main and production.
 
 on:
+  workflow_dispatch:
   # Pull-request checks are disabled; retained triggers run below.
   push:
     branches:
@@ -88,15 +89,22 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install
         run: bun install --frozen-lockfile
+      - name: Stage the source-pinned Windows worker and transport
+        run: bun packages/browserd/scripts/stage-cua-runtime.ts x64
+      - name: Verify the source worker keeps the admitted Windows catalog unchanged
+        run: |
+          bun packages/browserd/scripts/generate-cua-desktop-tools.ts
+          git diff --exit-code -- packages/contracts/src/cua-desktop-tools.windows.gen.json
       - name: Drive a real window and verify compiled packaging
         env:
           OPENGENI_CUA_E2E: "1"
           OPENGENI_CUA_PACKAGING_E2E: "1"
         run: |
-          bun test --timeout 120000 packages/browserd/test/cua-windows.e2e.test.ts
           bun test --timeout 120000 packages/browserd/test/cua-runtime-packaging.e2e.test.ts
+          bun test --timeout 120000 packages/browserd/test/cua-windows.e2e.test.ts
 
   native-command-supervisor:
     # Skip the main -> production promotion PR: its head already ran as a main push.

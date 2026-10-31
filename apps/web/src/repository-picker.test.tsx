@@ -5,8 +5,12 @@ import { FollowUpRepositoryMenuBody } from "@opengeni/react/app/components/follo
 import {
   RepositoryContextPicker,
   RepositoryContextMenuBody,
+  defaultRepositoryIdentity,
   repositoryBindingPresentation,
+  repositoryPickerRowGroups,
+  type RepositoryContextPickerProps,
 } from "@opengeni/react/app/components/repository-picker";
+import { groupRepositories } from "@opengeni/react/app/lib/session-tools";
 import { actRun, registerDom, renderComponent } from "../../../packages/react/test/render-hook";
 import type {
   GitHubInstallationBinding,
@@ -59,7 +63,7 @@ describe("repository picker GitHub binding status", () => {
       "https://api.opengeni.test/github/connect",
     );
     expect(presentation).toMatchObject({
-      connectLabel: "Connect another account",
+      connectLabel: "Install on another account",
       healthy: true,
       canRefresh: true,
     });
@@ -108,7 +112,6 @@ describe("repository picker GitHub App links", () => {
         groups: [],
         selectedRepoIds: new Set<number>(),
         selectedRepoRefs: {},
-        selectedInstallationId: null,
         manualRepos: [],
         manualOpen: false,
         githubAppOpen: false,
@@ -174,7 +177,6 @@ describe("repository picker GitHub load failure", () => {
       groups: [],
       selectedRepoIds: new Set<number>(),
       selectedRepoRefs: {},
-      selectedInstallationId: null,
       manualRepos: [],
       manualOpen: false,
       githubAppOpen: false,
@@ -271,7 +273,6 @@ describe("additive repository picker", () => {
         groups: [],
         selectedRepoIds: new Set([repository.id]),
         selectedRepoRefs: { [repository.id]: "main" },
-        selectedInstallationId: repository.installationId,
         manualRepos: [],
         manualOpen: false,
         githubAppOpen: false,
@@ -335,7 +336,6 @@ describe("additive repository picker", () => {
         ],
         selectedRepoIds: new Set([repository.id]),
         selectedRepoRefs: { [repository.id]: "main" },
-        selectedInstallationId: repository.installationId,
         manualRepos: [],
         manualOpen: false,
         githubAppOpen: false,
@@ -387,7 +387,6 @@ describe("additive repository picker", () => {
       selectedPersonalGitHubRepoRefs: { [personalRepository.repositoryId]: "main" },
       selectedRepoIds: new Set<number>(),
       selectedRepoRefs: {},
-      selectedInstallationId: null,
       manualRepos: [],
       manualOpen: false,
       githubAppOpen: false,
@@ -430,7 +429,7 @@ describe("additive repository picker", () => {
       'button[aria-label="octocat/private-repository mounted as you"]',
     );
     expect(row?.getAttribute("aria-disabled")).toBe("true");
-    expect(mounted.container.textContent).toContain("@octocat");
+    expect(mounted.container.textContent).toContain("GitHub access");
     expect(mounted.container.textContent).toContain("Mounted");
     await mounted.unmount();
 
@@ -544,5 +543,311 @@ describe("additive repository picker", () => {
     ).toBe("true");
     expect(manual.container.querySelector('input[aria-label="Repository URL"]')).toBeNull();
     await manual.unmount();
+  });
+});
+
+describe("repositories from several GitHub accounts and your GitHub", () => {
+  function appRepository(id: number, installationId: number, fullName: string): GitHubRepository {
+    const [owner = "", name = ""] = fullName.split("/");
+    return {
+      id,
+      installationId,
+      fullName,
+      name,
+      private: true,
+      htmlUrl: `https://github.com/${fullName}`,
+      cloneUrl: `https://github.com/${fullName}.git`,
+      defaultBranch: "main",
+      accountLogin: owner,
+      accountType: "Organization",
+    };
+  }
+  function personalRepository(
+    repositoryId: string,
+    fullName: string,
+    selectedAccess: "read" | "write" | null = "write",
+  ): PersonalGitHubRepositoryCatalogItem {
+    return {
+      repositoryId,
+      fullName,
+      canonicalUrl: `https://github.com/${fullName}`,
+      defaultBranch: "main",
+      visibility: "private",
+      private: true,
+      archived: false,
+      disabled: false,
+      permissions: {
+        pull: true,
+        push: selectedAccess === "write",
+        admin: false,
+        maintain: false,
+        triage: false,
+      },
+      selectedAccess,
+    };
+  }
+  const personalStatus = {
+    enabled: true,
+    connection: { status: "active", metadata: { githubLogin: "octocat" } },
+    reviewUrl: null,
+  } as unknown as PersonalGitHubConnectionStatusResponse;
+  const acmeApi = appRepository(1, 100, "acme/api");
+  const acmeWeb = appRepository(2, 100, "acme/web");
+  const globexCore = appRepository(3, 200, "globex/core");
+  const globexDocs = appRepository(4, 200, "globex/docs");
+  const sharedViaApp = appRepository(5, 200, "globex/shared");
+  const repositories = [acmeApi, acmeWeb, globexCore, globexDocs, sharedViaApp];
+  const personalOnly = personalRepository("900", "octocat/dotfiles");
+  const sharedViaYou = personalRepository("901", "Globex/Shared");
+
+  function props(overrides: Partial<RepositoryContextPickerProps> = {}) {
+    const calls: string[] = [];
+    const base: RepositoryContextPickerProps = {
+      setupMode: "platform",
+      configured: true,
+      status: "bound",
+      installUrl: "https://api.opengeni.test/github/connect",
+      linkUrl: null,
+      installations: [],
+      repositories,
+      groups: groupRepositories(repositories),
+      personalGitHubStatus: personalStatus,
+      personalGitHubRepositories: [personalOnly, sharedViaYou],
+      selectedPersonalGitHubRepoIds: new Set<string>(),
+      selectedPersonalGitHubRepoRefs: {},
+      selectedRepoIds: new Set<number>(),
+      selectedRepoRefs: {},
+      manualRepos: [],
+      manualOpen: false,
+      githubAppOpen: false,
+      org: "",
+      pending: false,
+      repoBusy: false,
+      githubAppBusy: false,
+      personalGitHubManageUrl: "/workspaces/w/plugins?open=integration:github",
+      onRefresh: async () => {},
+      onTogglePersonalGitHubRepo: (repo) => calls.push(`personal:${repo.fullName}`),
+      onPersonalGitHubRefChange: (id, ref) => calls.push(`personal-ref:${id}:${ref}`),
+      onConnectPersonalGitHub: () => calls.push("connect-personal"),
+      onToggleRepo: (repo) => calls.push(`app:${repo.fullName}`),
+      onRefChange: (id, ref) => calls.push(`app-ref:${id}:${ref}`),
+      onManualOpenChange: () => {},
+      onManualAdd: () => {},
+      onManualUpdate: () => {},
+      onManualRemove: () => {},
+      onGitHubAppOpenChange: () => {},
+      onOrgChange: () => {},
+      onStartGitHubApp: () => {},
+      onConnectWorkspaceApp: () => calls.push("install-app"),
+      onConfigureInstallation: async () => {},
+      onDisconnectInstallation: async () => {},
+      ...overrides,
+    };
+    return { props: base, calls };
+  }
+  const switchFor = (container: HTMLElement, name: string) =>
+    container.querySelector<HTMLButtonElement>(`button[role="switch"][aria-label="${name}"]`);
+
+  test("merges both catalogs into one row per repository, grouped by owner", () => {
+    const groups = repositoryPickerRowGroups(groupRepositories(repositories), [
+      personalOnly,
+      sharedViaYou,
+      personalRepository("902", "octocat/not-allowed", null),
+    ]);
+    expect(groups.map((group) => group.label)).toEqual(["acme", "globex", "octocat"]);
+    const rows = groups.flatMap((group) => group.rows);
+    expect(rows.map((row) => row.fullName)).toEqual([
+      "acme/api",
+      "acme/web",
+      "globex/core",
+      "globex/docs",
+      "globex/shared",
+      "octocat/dotfiles",
+    ]);
+    const shared = rows.find((row) => row.fullName === "globex/shared")!;
+    expect(shared.app?.id).toBe(sharedViaApp.id);
+    expect(shared.personal?.repositoryId).toBe(sharedViaYou.repositoryId);
+    expect(defaultRepositoryIdentity(shared)).toBe("personal");
+    expect(
+      defaultRepositoryIdentity({
+        ...shared,
+        personal: { ...sharedViaYou, selectedAccess: "read" },
+      }),
+    ).toBe("app");
+    expect(defaultRepositoryIdentity(rows.find((row) => row.app === null)!)).toBe("personal");
+  });
+
+  test("selects repositories from two installations and your GitHub together", async () => {
+    const { props: picker, calls } = props({
+      selectedRepoIds: new Set([acmeApi.id, globexCore.id]),
+      selectedRepoRefs: { [acmeApi.id]: "main", [globexCore.id]: "release" },
+      selectedPersonalGitHubRepoIds: new Set([personalOnly.repositoryId]),
+    });
+    const rendered = await renderComponent(createElement(RepositoryContextMenuBody, picker));
+    const text = rendered.container.textContent ?? "";
+    expect(text).not.toContain("Other app");
+    for (const name of ["acme/api", "globex/core", "octocat/dotfiles"]) {
+      expect(switchFor(rendered.container, `Select ${name}`)?.getAttribute("aria-checked")).toBe(
+        "true",
+      );
+    }
+    // Another installation's repository stays selectable next to both.
+    const docs = switchFor(rendered.container, "Select globex/docs");
+    expect(docs?.getAttribute("aria-checked")).toBe("false");
+    expect(docs?.disabled).toBe(false);
+    await actRun(() => docs!.click());
+    expect(calls).toEqual(["app:globex/docs"]);
+    // Personal-only rows say how they act, without an identity choice.
+    expect(text).toContain("As you");
+    expect(rendered.container.querySelector('[aria-label="octocat/dotfiles acts as"]')).toBeNull();
+    await rendered.unmount();
+  });
+
+  test("a repository reachable both ways is one row that acts as you by default", async () => {
+    const { props: picker, calls } = props();
+    const rendered = await renderComponent(createElement(RepositoryContextMenuBody, picker));
+    const rows = [...rendered.container.querySelectorAll('button[role="switch"]')].filter(
+      (button) => button.getAttribute("aria-label")?.toLowerCase().includes("globex/shared"),
+    );
+    expect(rows).toHaveLength(1);
+    await actRun(() => switchFor(rendered.container, "Select globex/shared")!.click());
+    expect(calls).toEqual(["personal:Globex/Shared"]);
+    await rendered.unmount();
+
+    const readOnly = props({
+      personalGitHubRepositories: [personalRepository("901", "globex/shared", "read")],
+    });
+    const second = await renderComponent(createElement(RepositoryContextMenuBody, readOnly.props));
+    await actRun(() => switchFor(second.container, "Select globex/shared")!.click());
+    expect(readOnly.calls).toEqual(["app:globex/shared"]);
+    await second.unmount();
+  });
+
+  test("switching who a selected repository acts as keeps its branch", async () => {
+    const { props: picker, calls } = props({
+      selectedRepoIds: new Set([sharedViaApp.id]),
+      selectedRepoRefs: { [sharedViaApp.id]: "release" },
+    });
+    const rendered = await renderComponent(createElement(RepositoryContextMenuBody, picker));
+    const choice = rendered.container.querySelector('[aria-label="globex/shared acts as"]');
+    expect(choice).toBeTruthy();
+    const option = (label: string) =>
+      [...choice!.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === label,
+      );
+    expect(option("Opengeni app")?.getAttribute("aria-checked")).toBe("true");
+    await actRun(() => option("You (@octocat)")!.click());
+    expect(calls).toEqual(["personal-ref:901:release", "personal:Globex/Shared"]);
+    await rendered.unmount();
+
+    const asYou = props({
+      selectedPersonalGitHubRepoIds: new Set([sharedViaYou.repositoryId]),
+      selectedPersonalGitHubRepoRefs: { [sharedViaYou.repositoryId]: "feature" },
+    });
+    const second = await renderComponent(createElement(RepositoryContextMenuBody, asYou.props));
+    const appOption = [
+      ...second.container.querySelectorAll<HTMLButtonElement>(
+        '[aria-label="globex/shared acts as"] button',
+      ),
+    ].find((button) => button.textContent === "Opengeni app");
+    await actRun(() => appOption!.click());
+    expect(asYou.calls).toEqual([`app-ref:${sharedViaApp.id}:feature`, "app:globex/shared"]);
+    await second.unmount();
+  });
+
+  test("a search with no match keeps the list's own empty state and footer", async () => {
+    const { props: picker } = props({
+      status: "unbound",
+      repositories: [],
+      groups: [],
+      personalGitHubRepositories: [personalOnly],
+      onTogglePersonalGitHubRepo: undefined,
+    });
+    const rendered = await renderComponent(
+      createElement(RepositoryContextMenuBody, {
+        ...picker,
+        // More than five rows show the search box.
+        personalGitHubRepositories: Array.from({ length: 6 }, (_, index) =>
+          personalRepository(String(800 + index), `octocat/repo-${index}`),
+        ),
+      }),
+    );
+    // Without a personal toggle, personal rows cannot be switched on.
+    expect(switchFor(rendered.container, "Select octocat/repo-0")?.disabled).toBe(true);
+    const search = rendered.container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search repositories"]',
+    )!;
+    await actRun(() => search.focus());
+    await actRun(() => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(search) as HTMLInputElement,
+        "value",
+      )!.set!;
+      setValue.call(search, "nothing-matches");
+      // React may have loaded before the DOM was registered, so it can be
+      // watching key events instead of input events for value changes.
+      for (const type of ["input", "keyup"])
+        search.dispatchEvent(new Event(type, { bubbles: true }));
+    });
+    const text = rendered.container.textContent ?? "";
+    expect(text).toContain("No repositories match your search.");
+    expect(text).not.toContain("No repositories connected");
+    // The access entries stay behind the footer instead of jumping inline.
+    expect(text).toContain("GitHub access");
+    expect(text).not.toContain("Your GitHub");
+    await rendered.unmount();
+  });
+
+  test("GitHub access lists your GitHub and the Opengeni app", async () => {
+    const { props: picker, calls } = props({
+      githubAppOpen: true,
+      installations: [
+        {
+          installationId: 100,
+          accountLogin: "acme",
+          lifecycle: "active",
+          repositoryScope: "selected",
+          repositoryCount: 2,
+          configureUrl: null,
+        } as unknown as GitHubInstallationBinding,
+      ],
+    });
+    const rendered = await renderComponent(createElement(RepositoryContextMenuBody, picker));
+    const text = rendered.container.textContent ?? "";
+    expect(text).toContain("GitHub access");
+    expect(text).not.toContain("Connected GitHub accounts");
+    expect(text).toContain("Your GitHub");
+    expect(text).toContain("@octocat · 2 repos");
+    expect(
+      rendered.container.querySelector<HTMLAnchorElement>(
+        "a[href='/workspaces/w/plugins?open=integration:github']",
+      )?.textContent,
+    ).toBe("Choose repos");
+    expect(text).toContain("Opengeni app");
+    expect(text).toContain("acme");
+    const install = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Install on another account",
+    );
+    await actRun(() => install!.click());
+    expect(calls).toEqual(["install-app"]);
+    await rendered.unmount();
+
+    const disconnected = props({
+      githubAppOpen: true,
+      personalGitHubStatus: { enabled: true, connection: null, reviewUrl: null } as never,
+      personalGitHubRepositories: [],
+    });
+    const second = await renderComponent(
+      createElement(RepositoryContextMenuBody, disconnected.props),
+    );
+    expect(second.container.textContent).toContain(
+      "Connect your GitHub – work appears under your name",
+    );
+    const connect = [...second.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Connect",
+    );
+    await actRun(() => connect!.click());
+    expect(disconnected.calls).toEqual(["connect-personal"]);
+    await second.unmount();
   });
 });

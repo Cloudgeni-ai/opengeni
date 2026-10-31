@@ -24,8 +24,9 @@ import { requireUsableSessionAvatar } from "./session-avatar";
 /**
  * Bot templates a workspace keeps: where a new bot chat starts. Reading needs
  * what reading chats needs; saving, changing and deleting need what starting a
- * chat needs, and changing or deleting someone else's needs an admin. An Only
- * me template is visible only to whoever saved it.
+ * chat needs, for any template shared with the workspace. An Only me template
+ * is visible only to whoever saved it, and only they or an admin can make a
+ * shared template Only me.
  */
 export function registerBotTemplateRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db } = deps;

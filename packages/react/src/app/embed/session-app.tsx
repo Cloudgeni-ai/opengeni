@@ -31,6 +31,7 @@ import { RailProvider } from "../components/rail/rail-context";
 import { ActionsProvider } from "../lib/actions/actions-provider";
 import { SessionShell, type SessionShellSlots } from "../components/rail/session-shell";
 import { CreditRequiredGate } from "../components/credit-required-gate";
+import type { SessionStarter } from "../components/new-session-starters";
 import { Toaster } from "../components/toaster";
 import { WorkspaceTenantBoundary } from "../components/workspace-tenant-boundary";
 import { apiErrorFromResponseBody, type AppApiHost } from "../lib/app-api";
@@ -128,6 +129,13 @@ export type SessionAppProps = Readonly<{
    * and shows nothing. Context for the model, never instructions.
    */
   messageContext?: MessageContextInput;
+  /**
+   * Suggestions under the new-chat composer in place of Opengeni's own, such
+   * as tasks that fit the app the chat sits in. Each puts its prompt in the
+   * composer for the person to edit and send. An empty list shows none; the
+   * `starters` feature still turns them off.
+   */
+  starters?: readonly SessionStarter[] | undefined;
   /**
    * Opens Opengeni object links in agent messages (files, Sites, editable
    * artifacts) the host's way, such as its own page for an artifact. Return
@@ -520,6 +528,7 @@ function SessionAppForWorkspace(props: SessionAppProps) {
   useEffect(() => messageContext.set(props.messageContext), [messageContext, props.messageContext]);
   const pdfPreview = props.surfaces?.pdfPreview;
   const editableArtifact = props.surfaces?.editableArtifact;
+  const starters = props.starters;
   const host = useMemo<AppHost>(
     () => ({
       navigation,
@@ -529,9 +538,10 @@ function SessionAppForWorkspace(props: SessionAppProps) {
         ...(editableArtifact ? { editableArtifact } : {}),
       },
       messageContext,
+      ...(starters ? { starters } : {}),
       onSessionState: (state) => latest.current.onSessionState?.(state),
     }),
-    [api, editableArtifact, messageContext, navigation, pdfPreview],
+    [api, editableArtifact, messageContext, navigation, pdfPreview, starters],
   );
   return (
     <AppearanceProvider hostTheme={props.theme} scope="local">

@@ -977,10 +977,36 @@ the monitored ancestor and candidate cgroup have the same owner, so host policy
 must preserve that ownership relationship. Cgroup placement alone does not change
 host-wide kernel OOM victim selection: the generated service requests a negative
 supervisor `OOMScoreAdjust`, startup reports the effective `/proc` value because an
-unprivileged user manager may clamp it. A pre-exec hook gives commands the smallest
-valid higher OOM-score bias over the live supervisor: neutral `0` when the
-supervisor is negative, otherwise supervisor + 1. If the supervisor is already at
+unprivileged user manager may clamp it. A pre-exec hook gives commands a higher
+OOM-score bias than the live supervisor: neutral `0` when the supervisor is
+negative, otherwise the kernel maximum `1000`. Raising a score needs no
+privilege, while lowering one needs `CAP_SYS_RESOURCE`, which containers lack by
+default; the supervisor then stays at `0`, and only the maximum bias (the whole
+memory limit added to every command process's score) keeps a small command
+process ahead of the supervisor's mostly file-backed resident memory. A bias of
+`+1` was worth about a thousandth of the limit, less than the supervisor itself.
+A human terminal's shell gets the same bias. If the supervisor is already at
 the kernel maximum, no relative preference is representable and both remain 1000.
+On a machine where a user service manager clamps the supervisor to `0`, this
+also makes the agent's commands the first victims of a machine-wide OOM, ahead
+of the person's other processes; that is deliberate, since a killed command
+fails visibly while a killed supervisor takes the machine offline.
+
+A foreground `opengeni-agent run` on Linux (a container, a CI job, a terminal)
+has no service manager to start it again, so it runs as a small keeper process
+whose child is the real agent. When the agent is killed (`SIGKILL`, as from the
+out-of-memory killer) or crashes, the keeper starts it again after a back-off of
+1 s doubling to 30 s, reset after a minute of healthy running; the new agent
+reconnects with a new connection instance, and the commands of the agent that
+died ended with it. Stop signals (`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`) are
+passed on and stop it for good, `SIGUSR1` and `SIGUSR2` are passed on, an agent
+that exits by itself is not started again and the keeper exits with its status,
+and a killed keeper takes the agent with it. A signal ignored at start (`nohup`)
+stays ignored. The agent that starts again logs why in `agent.log`. The generated
+services, the desktop app and compute sandboxes already start the agent again and
+run it without a keeper; an in-place update keeps the agent's process, and so its
+keeper. A process started with `SIGCHLD` ignored, or without a readable `/proc`,
+runs the agent itself without a keeper, as before.
 Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
 of the command: the daemon chooses that workload's cgroup and OOM score. Operators
@@ -1912,8 +1938,12 @@ fleet. Tokens minted before 0696 carry no `jti` and stay multi-use until they
 expire an hour later. Expired redemptions are pruned per workspace during later
 exchanges.
 
-`scope` chooses who can use the machine: `"workspace"` (the default, shared with
-the workspace) or `"user"` (only the person who minted the token). A personal
+`scope` chooses who can use the machine: `"workspace"` (shared with the
+workspace) or `"user"` (only the person who minted the token). Omitted, it is
+`"workspace"` for callers that may connect workspace machines
+(`enrollments:manage`), keys and services, and `"user"` for a signed-in
+teammate without `enrollments:manage`, who can only connect their own machine.
+A personal
 token can be minted only for a verified person: a signed-in human session, or a
 credential acting as that person (a personal API key, or an organization key or
 organization MCP client acting as them), the same canonical-actor rule as
@@ -1942,7 +1972,7 @@ is **secret**: anyone holding it can connect one machine until it expires.
 const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
   workspaceId,
   {
-    scope: "user", // only me; "workspace" (the default) shares it
+    scope: "user", // only me; "workspace" shares it with the workspace
     allowScreenControl: false, // bake screen-control consent into the token
   },
 );

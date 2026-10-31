@@ -146,6 +146,10 @@ describe("withRecorderVoice", () => {
           word("hva", 400, 700, "A"),
           word("trenger", 3_000, 3_600, "B"),
           word("dere?", 3_700, 4_500, "B"),
+          word("Vi", 4_600, 4_800, "B"),
+          word("trenger", 4_900, 5_300, "B"),
+          word("en", 5_400, 5_500, "B"),
+          word("pris.", 5_600, 6_000, "B"),
           word("Et", 7_000, 7_200, "A"),
           word("tilbud.", 7_300, 7_800, "A"),
           word(" ", 7_900, 9_900, "C"),
@@ -154,6 +158,32 @@ describe("withRecorderVoice", () => {
       null,
     );
     expect(speakerOf(track)).toBe("B");
+  });
+
+  test("a few words placed over minutes don't make a voice the one that spoke the most", () => {
+    // Text-only models give words no times, and the aligner can stretch a
+    // word over a long silence. What a voice said is counted, not how long.
+    const track = withRecorderVoice(
+      {
+        trackNumber: 0,
+        recorder,
+        words: [
+          word("But", 0, 336_960, "X"),
+          word("I", 534_680, 534_800, "A"),
+          word("agree.", 534_900, 535_400, "A"),
+          word("I", 535_500, 535_600, "A"),
+          word("think", 535_700, 536_000, "A"),
+          word("we", 536_100, 536_200, "A"),
+          word("should", 536_300, 536_600, "A"),
+          word("That", 868_120, 1_051_800, "A"),
+          word("Yeah,", 1_196_160, 1_197_000, "X"),
+          word("it", 1_197_100, 1_197_400, "X"),
+          word("is.", 1_197_500, 1_198_020, "X"),
+        ],
+      },
+      null,
+    );
+    expect(speakerOf(track)).toBe("A");
   });
 
   test("the remembered voice picks the person recording over who spoke the most", () => {
