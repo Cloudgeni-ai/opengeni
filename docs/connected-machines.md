@@ -1869,17 +1869,17 @@ with less than the person's full access, is refused.
 ### Choose where an organization machine works
 
 An organization machine works in the organization's workspaces that an
-organization admin picks, like the organization's model keys and connectors:
+organization owner picks, like the organization's model keys and connectors:
 every shared workspace, or chosen ones, plus a separate switch for members'
 Personal workspaces. The workspace it was connected from always has it,
 because its rows live there. A machine connected before this keeps working
 everywhere it did: every shared workspace and every Personal workspace.
 
 On the Machines page, an organization machine shows **Available in** with a
-short summary. Organization owners and admins who can manage machines see
-**Change** next to it, which opens the shared **Available in** picker. Taking
-workspaces away warns that chats and schedules there stop using the machine
-from their next turn. Nothing is moved or rebuilt: the machine list, the fleet
+short summary. Organization owners see **Change** next to it, which opens the
+shared **Available in** picker. Taking workspaces away warns that chats and
+schedules there stop using the machine from their next turn. Nothing is moved
+or rebuilt: the machine list, the fleet
 tools, attempt resolution and direct attaches all check where the machine works
 on every call, so a workspace it no longer works in simply stops seeing it.
 

@@ -21,7 +21,7 @@ import { useOrganizationWorkspaces } from "@/components/models/connect-audience"
    shared workspace of the organization or the ones picked, and members'
    Personal workspaces when switched on. The workspace it was connected from
    or made in always has it, because that is where it lives. Organization
-   owners and admins decide this. Chats and schedules in a workspace taken off
+   owners decide this. Chats and schedules in a workspace taken off
    the list stop using it at their next turn, so the dialog says so before
    saving.
    -------------------------------------------------------------------------- */
@@ -136,7 +136,7 @@ export function OrganizationComputeReachDialog({
         <WorkspaceReachFields
           owner={{ kind: "organization", name: organizationName }}
           organizationName={organizationName}
-          managedBy="Organization owners and admins manage it."
+          managedBy="Organization owners manage it."
           value={draft}
           onChange={setDraft}
           workspaces={organization.workspaces}

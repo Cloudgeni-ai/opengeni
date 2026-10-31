@@ -141,7 +141,7 @@ function MachineAudienceRow({
   );
 }
 
-/** Where an organization machine works. A navigational row for organization admins. */
+/** Where an organization machine works. A navigational row for organization owners. */
 function MachineReachRow({
   machine,
   summary,
@@ -160,7 +160,7 @@ function MachineReachRow({
           {t("machines.machineDetail.availableIn")}
         </span>
         <span className="text-og-xs text-og-fg-muted">
-          {t("machines.machineDetail.organizationAdminsChooseWhere")}
+          {t("machines.machineDetail.organizationOwnersChooseWhere")}
         </span>
       </span>
       <span className="shrink-0 text-og-sm text-og-fg-muted">{summary}</span>

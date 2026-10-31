@@ -326,7 +326,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── Where an organization machine works ──────────────────────────────────────
   // PUT .../reach: every shared workspace of the organization or chosen ones,
   // and members' Personal workspaces when switched on. The workspace it was
-  // connected from always has it. Organization admins decide this; chats and
+  // connected from always has it. Organization owners decide this; chats and
   // schedules in a workspace it no longer works in stop using it at their next
   // attach or attempt.
   app.put("/v1/workspaces/:workspaceId/machines/:enrollmentId/reach", async (c) => {

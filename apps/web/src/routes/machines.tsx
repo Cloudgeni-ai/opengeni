@@ -112,7 +112,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       ? { ...selectedMachine, enrollmentId: selectedMachine.enrollmentId }
       : null;
   // Organization machines work in the workspaces their organization picks;
-  // organization owners and admins change that.
+  // organization owners change that.
   const organizationId = workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
   const organizationAdmin = organizationId
     ? hasAccountPermission(accessContext, organizationId, "account:admin")

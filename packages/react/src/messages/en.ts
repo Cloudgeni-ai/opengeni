@@ -2256,8 +2256,8 @@ export const englishMessages = {
   "machines.machineDetail.availableInNameLabel": "Where {name} is available: {summary}",
   "machines.machineDetail.membersCanUseItWhere":
     "Members can use it in the workspaces it's available in.",
-  "machines.machineDetail.organizationAdminsChooseWhere":
-    "Organization owners and admins choose the workspaces it works in.",
+  "machines.machineDetail.organizationOwnersChooseWhere":
+    "Organization owners choose the workspaces it works in.",
   "machines.machineDetail.justNow": "just now",
   "machines.machineDetail.keptOutExtraCopiesOf_one": "Kept out {count} extra copy of the agent",
   "machines.machineDetail.keptOutExtraCopiesOf_other": "Kept out {count} extra copies of the agent",

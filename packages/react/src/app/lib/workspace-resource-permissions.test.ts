@@ -159,7 +159,7 @@ test("a signed-in Member connects and changes only their own Only me machines", 
   fleetMachines = [machine];
 });
 
-test("an organization machine changes only for organization owners and admins", () => {
+test("an organization machine changes only for organization owners", () => {
   const organization = { sandboxId: "org", enrollmentId: "org", scope: "organization" };
   const shared = { sandboxId: "shared", enrollmentId: "shared", scope: "workspace" };
   fleetMachines = [organization, shared];
