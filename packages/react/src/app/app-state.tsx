@@ -92,6 +92,7 @@ import {
   type PendingCreateAttempt,
 } from "./lib/session-create";
 import { isPaymentRequiredError } from "./lib/model-access";
+import { applySessionArchiveProjection } from "./lib/session-pagination";
 import {
   applySessionPinProjection,
   notifySessionPinChanged,
@@ -1390,8 +1391,17 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       const updated = update.value;
       // The mutation can race a newer page poll/other-device write, and its
       // full Session projection can lag lifecycle/SSE fields. Merge only the
-      // monotonic personal pin fields rather than replacing the open session.
-      setSession((current) => applySessionPinProjection(current, updated));
+      // monotonic personal pin fields rather than replacing the open session,
+      // plus the archive fields when pinning restored an archived chat.
+      setSession((current) => {
+        const next = applySessionPinProjection(current, updated);
+        return next &&
+          next.id === updated.id &&
+          next.workspaceId === updated.workspaceId &&
+          (updated.archiveVersion ?? 0) > (next.archiveVersion ?? 0)
+          ? applySessionArchiveProjection(next, updated)
+          : next;
+      });
       notifySessionPinChanged(workspaceId, sessionId);
       return updated;
     } catch (error) {
