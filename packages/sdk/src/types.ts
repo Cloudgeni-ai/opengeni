@@ -8299,8 +8299,9 @@ export type RigVerificationHealth = {
 };
 
 /**
- * Workspace-shared channel organizing root sessions ("workstreams") by work
- * type in the rail. Pure organizational metadata.
+ * A project ("channel") organizing root sessions ("workstreams") by work type
+ * in the rail. Pure organizational metadata, shared with the workspace or
+ * Only me, like a chat.
  */
 export type Channel = {
   id: string;
@@ -8315,6 +8316,13 @@ export type Channel = {
   avatar?: SessionAvatar | null | undefined;
   pinned: boolean;
   sortOrder: number;
+  /**
+   * Who sees it: the workspace, or only its owner ("private", Only me). An
+   * Only me project holds only its owner's own Only me chats and Sites.
+   * Absent from servers that predate project audiences, where every project
+   * is shared.
+   */
+  visibility?: "private" | "workspace" | undefined;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -8324,6 +8332,11 @@ export type CreateChannelRequest = {
   name: string;
   description?: string;
   avatar?: SessionAvatar | null;
+  /**
+   * Omitted, a person's project is shared with the workspace and an agent's
+   * follows its chat: Only me when made in an Only me chat.
+   */
+  visibility?: "private" | "workspace";
 };
 
 export type UpdateChannelRequest = {
@@ -8332,6 +8345,12 @@ export type UpdateChannelRequest = {
   /** null clears it; omitted keeps it. */
   avatar?: SessionAvatar | null;
   pinned?: boolean;
+  /**
+   * "workspace" shares the owner's Only me project with the workspace. A
+   * shared project cannot be made Only me; only its owner, signed in,
+   * changes it.
+   */
+  visibility?: "workspace";
 };
 
 /** Complete workspace project order. It is replaced atomically after a drag. */

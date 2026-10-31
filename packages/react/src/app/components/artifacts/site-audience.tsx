@@ -1,8 +1,9 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { WorkspaceArtifact } from "@opengeni/sdk";
 import { ChevronDownIcon, Loader2Icon, LockKeyholeIcon, UsersIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { toast } from "../../lib/toast";
+import { useCanLimitToMe } from "../../lib/use-can-limit-to-me";
 
 import { Button } from "../../../ui/button";
 import { ConfirmDialog } from "../../../ui/confirm-dialog";
@@ -17,30 +18,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../
 import { userErrorText } from "../../../ui/api-error";
 
 export type Audience = "private" | "workspace";
-
-/**
- * Whether this person may make something Only me here, from the same answer
- * the chat composer uses. Unknown fails closed: Limit to me is never offered
- * on a guess, because the server refuses it when Only me is off.
- */
-function useCanLimitToMe(client: OpenGeniBrowserClient, workspaceId: string, enabled: boolean) {
-  const [canLimit, setCanLimit] = useState(false);
-  useEffect(() => {
-    setCanLimit(false);
-    if (!enabled) return;
-    let current = true;
-    void client
-      .getSessionTenancyCreateCapabilities(workspaceId)
-      .then((capabilities) => {
-        if (current) setCanLimit(capabilities.canCreatePrivate === true);
-      })
-      .catch(() => undefined);
-    return () => {
-      current = false;
-    };
-  }, [client, enabled, workspaceId]);
-  return canLimit;
-}
 
 /** The words an audience control uses for one kind of thing. */
 type AudienceCopy = {

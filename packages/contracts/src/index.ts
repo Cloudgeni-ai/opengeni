@@ -12007,6 +12007,12 @@ export const Channel = /* @__PURE__ */ defineSchema(() =>
     avatar: SessionAvatar.nullable().default(null),
     pinned: primitives.boolean,
     sortOrder: primitives.nonnegativeInteger,
+    /**
+     * Who sees it, like a chat: the workspace, or only its owner ("private",
+     * Only me). Only its owner sees an Only me project, which holds only their
+     * own Only me chats and Sites. Absent from servers that predate it.
+     */
+    visibility: z.enum(["private", "workspace"]).default("workspace"),
     createdBy: primitives.nullableString,
     createdAt: primitives.string,
     updatedAt: primitives.string,
@@ -12019,6 +12025,11 @@ export const CreateChannelRequest = /* @__PURE__ */ defineSchema(() =>
     name: primitives.string.trim().min(1).max(80),
     description: z.string().max(2000).optional(),
     avatar: SessionAvatar.nullable().optional(),
+    /**
+     * Omitted, a person's project is shared with the workspace and an agent's
+     * follows its chat: Only me when made in an Only me chat.
+     */
+    visibility: z.enum(["private", "workspace"]).optional(),
   }),
 );
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
@@ -12030,6 +12041,12 @@ export const UpdateChannelRequest = /* @__PURE__ */ defineSchema(() =>
     /** null clears it; omitted keeps it. */
     avatar: SessionAvatar.nullable().optional(),
     pinned: primitives.optionalBoolean,
+    /**
+     * "workspace" shares the owner's Only me project with the workspace. A
+     * shared project cannot be made Only me; only its owner, signed in,
+     * changes it.
+     */
+    visibility: z.literal("workspace").optional(),
   }),
 );
 export type UpdateChannelRequest = z.infer<typeof UpdateChannelRequest>;

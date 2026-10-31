@@ -13105,6 +13105,7 @@
         "$.pinned": "boolean!",
         "$.sortOrder": "integer!",
         "$.updatedAt": "string!",
+        "$.visibility": "enum!=[\"\\\"private\\\"\",\"\\\"workspace\\\"\"]",
         "$.workspaceId": "string!"
       }
     },
@@ -14951,7 +14952,8 @@
         "$": "object",
         "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string?",
-        "$.name": "string!"
+        "$.name": "string!",
+        "$.visibility": "ref(SessionVisibility)?"
       }
     },
     "CreateCheckoutRequest": {
@@ -29754,7 +29756,8 @@
         "$.avatar": "ref(SessionAvatar)? null",
         "$.description": "string? null",
         "$.name": "string?",
-        "$.pinned": "boolean?"
+        "$.pinned": "boolean?",
+        "$.visibility": "const?=[\"\\\"workspace\\\"\"]"
       }
     },
     "UpdateCompanyProfileAgentPolicyRequest": {
