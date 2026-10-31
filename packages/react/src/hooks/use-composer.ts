@@ -1509,71 +1509,82 @@ export function useComposer(
     [targetKey],
   );
 
-  const persistPayload = useCallback(
+  /**
+   * Take the session's one draft slot. The server accepts a durable send only
+   * with exactly the content saved at the revision it names, so a send holds
+   * the slot from its save through its submit: no autosave and no other send
+   * can write the draft in between. Everything that writes the draft waits
+   * its turn here, in order. Call the returned function to let the next one
+   * in; it is safe to call more than once.
+   */
+  const acquireDraftSlot = useCallback(async (): Promise<() => void> => {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const previous = saveChain.current;
+    saveChain.current = previous.then(
+      () => released,
+      () => released,
+    );
+    await previous.catch(() => undefined);
+    return release;
+  }, []);
+
+  /** Save the draft now. The caller holds the draft slot. */
+  const saveDraftInSlot = useCallback(
     async (
       payload: SaveComposerDraftRequest,
+      owner: { targetKey: string; generation: number },
       // Receives this call's own failure (never a later autosave's), so a send
       // blocked by it keeps its real cause.
       onFailure?: (problem: Error) => void,
     ): Promise<boolean> => {
-      const ownedTargetKey = targetKey;
-      const ownedGeneration = targetGeneration.current;
-      if (!sessionId || !durableDrafts || targetKeyRef.current !== ownedTargetKey) {
+      const owned = () =>
+        targetKeyRef.current === owner.targetKey && targetGeneration.current === owner.generation;
+      if (!sessionId || !durableDrafts || !owned()) return false;
+      const current = draftRef.current;
+      if (!current) return false;
+      const request = { ...payload, expectedRevision: current.revision };
+      if (draftSignature(request) === lastSavedSignature.current) return true;
+      setDraftSaving(true);
+      try {
+        const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
+        if (!owned()) return false;
+        adoptDraftBase(saved);
+        return true;
+      } catch (cause) {
+        if (owned()) {
+          const problem = asError(cause);
+          if (isDraftConflictError(problem)) setDraftConflict(problem);
+          setError(problem);
+          onFailure?.(problem);
+        }
+        return false;
+      } finally {
+        if (owned()) setDraftSaving(false);
+      }
+    },
+    [adoptDraftBase, client, durableDrafts, sessionId, workspaceId],
+  );
+
+  const persistPayload = useCallback(
+    async (
+      payload: SaveComposerDraftRequest,
+      onFailure?: (problem: Error) => void,
+    ): Promise<boolean> => {
+      const owner = { targetKey, generation: targetGeneration.current };
+      if (!sessionId || !durableDrafts || targetKeyRef.current !== owner.targetKey) {
         return false;
       }
-      let success = false;
-      let failure: Error | null = null;
-      const run = async () => {
-        if (
-          targetKeyRef.current !== ownedTargetKey ||
-          targetGeneration.current !== ownedGeneration
-        ) {
-          return;
-        }
-        const current = draftRef.current;
-        if (!current) return;
-        const request = { ...payload, expectedRevision: current.revision };
-        const signature = draftSignature(request);
-        if (signature === lastSavedSignature.current) {
-          success = true;
-          return;
-        }
-        setDraftSaving(true);
-        try {
-          const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
-          if (
-            targetKeyRef.current !== ownedTargetKey ||
-            targetGeneration.current !== ownedGeneration
-          ) {
-            return;
-          }
-          adoptDraftBase(saved);
-          success = true;
-        } catch (cause) {
-          if (
-            targetKeyRef.current === ownedTargetKey &&
-            targetGeneration.current === ownedGeneration
-          ) {
-            const problem = asError(cause);
-            failure = problem;
-            if (isDraftConflictError(problem)) setDraftConflict(problem);
-            setError(problem);
-          }
-        } finally {
-          if (
-            targetKeyRef.current === ownedTargetKey &&
-            targetGeneration.current === ownedGeneration
-          ) {
-            setDraftSaving(false);
-          }
-        }
-      };
-      saveChain.current = saveChain.current.then(run, run);
-      await saveChain.current;
-      if (!success && failure) onFailure?.(failure);
-      return success;
+      const release = await acquireDraftSlot();
+      try {
+        return await saveDraftInSlot(payload, owner, onFailure);
+      } finally {
+        release();
+      }
     },
-    [adoptDraftBase, client, durableDrafts, sessionId, targetKey, workspaceId],
+    [acquireDraftSlot, durableDrafts, saveDraftInSlot, sessionId, targetKey],
   );
 
   const flushDraft = useCallback(async (): Promise<void> => {
@@ -1682,6 +1693,8 @@ export function useComposer(
       // The draft save failed before anything was submitted.
       let notSubmitted = false;
       let holding = false;
+      // Held from this send's draft save through its submit.
+      let releaseDraftSlot: (() => void) | null = null;
       /**
        * Keep a send that failed only because Opengeni is updating: it stays
        * "sending" with the same client event ID and is retried with backoff.
@@ -1815,11 +1828,16 @@ export function useComposer(
         }
         let expectedDraftRevision: number | undefined;
         if (durableDrafts && operation.draftPayload) {
+          releaseDraftSlot = await acquireDraftSlot();
           let persistFailure = null as Error | null;
           if (
-            !(await persistPayload(operation.draftPayload, (problem) => {
-              persistFailure = problem;
-            }))
+            !(await saveDraftInSlot(
+              operation.draftPayload,
+              { targetKey: ownedTargetKey, generation: ownedGeneration },
+              (problem) => {
+                persistFailure = problem;
+              },
+            ))
           ) {
             // An update that blocks the draft save holds the send like any
             // other transient failure; nothing was submitted yet.
@@ -1884,6 +1902,7 @@ export function useComposer(
             });
           acceptedResult = result;
           adoptDraftBase(result.draft);
+          releaseDraftSlot?.();
         } else {
           acceptedEvent = await client
             .sendMessage(workspaceId, sessionId, wireInput)
@@ -1954,6 +1973,7 @@ export function useComposer(
           notifyComposerObserver(onDeliveryErrorRef.current, problem, operation.input, "send");
         }
       } finally {
+        releaseDraftSlot?.();
         optimisticProcessorBusyRef.current = false;
         if (
           targetKeyRef.current === ownedTargetKey &&
@@ -1977,6 +1997,7 @@ export function useComposer(
       }
     })();
   }, [
+    acquireDraftSlot,
     adoptDraftBase,
     client,
     durableDrafts,
@@ -1985,8 +2006,8 @@ export function useComposer(
     loadDraft,
     onSent,
     options.events,
-    persistPayload,
     replaceOptimisticSends,
+    saveDraftInSlot,
     sessionId,
     targetKey,
     workspaceId,
@@ -2172,6 +2193,8 @@ export function useComposer(
       };
 
       let keepSteering = pending?.delivery === "steer";
+      // Held from this send's draft save (or its retry) through its submit.
+      let releaseDraftSlot: (() => void) | null = null;
 
       const settleAccepted = (operation: PendingComposerOperation): void => {
         clearPending();
@@ -2311,6 +2334,7 @@ export function useComposer(
             return false;
           }
           try {
+            if (durableDrafts) releaseDraftSlot = await acquireDraftSlot();
             const result = await deliver(pending);
             if (pending.delivery === "steer" && result) {
               keepSteering = true;
@@ -2373,7 +2397,17 @@ export function useComposer(
         const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT(t);
         const currentPayload = currentDraftPayload();
         const payload = currentPayload ? { ...currentPayload, text: sendText } : null;
-        if (payload && !(await persistPayload(payload))) return false;
+        if (payload) {
+          releaseDraftSlot = await acquireDraftSlot();
+          if (
+            !(await saveDraftInSlot(payload, {
+              targetKey: ownedTargetKey,
+              generation: ownedGeneration,
+            }))
+          ) {
+            return false;
+          }
+        }
         if (
           targetKeyRef.current !== ownedTargetKey ||
           targetGeneration.current !== ownedGeneration
@@ -2472,6 +2506,7 @@ export function useComposer(
         settleAccepted(operation);
         return true;
       } finally {
+        releaseDraftSlot?.();
         if (
           targetKeyRef.current === ownedTargetKey &&
           targetGeneration.current === ownedGeneration
@@ -2482,14 +2517,15 @@ export function useComposer(
       }
     },
     [
+      acquireDraftSlot,
       client,
       currentDraftPayload,
       durableDrafts,
       onSent,
-      persistPayload,
       restoredResources,
       annotations,
       adoptDraftBase,
+      saveDraftInSlot,
       sending,
       sessionId,
       targetKey,
