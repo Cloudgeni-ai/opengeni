@@ -189,6 +189,10 @@ wins:
   own installation, which then replaces the organization's in that workspace.
   A custom organization server has no definition outside the organization's,
   so that is refused with `409`.
+- Anyone connecting their own account to an `each_person` connector (a
+  subject-scoped OAuth reference to the same provider, with no pinned account
+  or resources) uses the organization's setup; an admin doing so creates no
+  workspace installation either.
 - A member's personal setup (`connections:personal`) never adds a workspace
   installation over the organization's and never turns back on one an admin
   turned off here.

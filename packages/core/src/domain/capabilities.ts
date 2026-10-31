@@ -795,7 +795,9 @@ export function mcpEndpointRequiresPersonalConnection(
  * Enabling a connector the organization serves here (OR-11). An enable that
  * brings no setup of its own (no login, key, config or metadata) means "use
  * the organization's": it removes this workspace's turned-off override, or
- * changes nothing. Personal setup never adds a workspace setup over the
+ * changes nothing. So does a person connecting their own account to an
+ * "each person signs in" connector, which is how they use the organization's
+ * setup, not a new one. Personal setup never adds a workspace setup over the
  * organization's (that would replace it for everyone here) and never turns
  * back on what an admin turned off. An admin's enable with a setup of its own
  * becomes this workspace's own installation, which wins; a custom
@@ -817,7 +819,8 @@ async function organizationConnectorEnableShortcut(
   );
   if (existing && !isOrganizationConnectorOverride(existing)) return null;
   const ownSetup =
-    !!input.payload.connectionRef ||
+    (!!input.payload.connectionRef &&
+      !isOwnSignInToOrganizationConnector(input.payload.connectionRef, connector)) ||
     Object.keys(input.payload.headers ?? {}).length > 0 ||
     Object.keys(input.payload.config ?? {}).length > 0 ||
     Object.keys(input.payload.metadata ?? {}).length > 0;
@@ -844,6 +847,29 @@ async function organizationConnectorEnableShortcut(
       return organizationConnectorAsInstallation(connector, input.workspaceId);
     },
   };
+}
+
+/**
+ * A person's own sign-in to an "each person signs in" organization connector:
+ * a subject-scoped OAuth reference to the same provider, with no pinned
+ * account, resources or host authority (what connecting your own account
+ * sends). A shared workspace account is a setup of the workspace's own.
+ */
+function isOwnSignInToOrganizationConnector(
+  ref: NonNullable<EnableCapabilityRequest["connectionRef"]>,
+  connector: OrganizationConnectorRow,
+): boolean {
+  if (organizationConnectorLogin(connector.config) !== "each_person") return false;
+  const organizationRef = installationConnectionRef(connector.config);
+  return (
+    !!organizationRef &&
+    ref.subjectScope === "subject" &&
+    ref.kind === "oauth2" &&
+    !ref.connectionId &&
+    ref.authoritySource !== "host" &&
+    !ref.selectedResources &&
+    canonicalDomain(ref.providerDomain) === canonicalDomain(organizationRef.providerDomain)
+  );
 }
 
 /**

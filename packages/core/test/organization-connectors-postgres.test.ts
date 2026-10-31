@@ -248,6 +248,38 @@ test("a member's own sign-in never becomes a workspace setup over the organizati
   expect((await catalogItem(f.team, f.catalogId))[0]?.lifecycle.managedBy).toBe("organization");
 }, 60_000);
 
+test("an admin connecting their own account uses the organization's setup too", async () => {
+  if (!shared) return;
+  const tracker = f.catalogId.replace("registry:org-catalog-", "tracker-") + ".example.test";
+  for (const [capabilityId, providerDomain] of [
+    [f.catalogId, tracker],
+    [f.docs.id, f.docs.domain],
+  ] as const) {
+    const installation = await enableCapability({
+      db: client.db,
+      grant: grant(f.team, f.admin, true),
+      accountId: f.accountId,
+      workspaceId: f.team,
+      settings,
+      capabilityId,
+      payload: {
+        config: {},
+        metadata: {},
+        headers: {},
+        connectionRef: {
+          providerDomain,
+          kind: "oauth2",
+          subjectScope: "subject",
+          accountSelection: "all_eligible",
+        },
+      },
+    });
+    expect(installation.status).toBe("active");
+    expect(await getCapabilityInstallation(client.db, f.team, capabilityId)).toBeNull();
+    expect((await catalogItem(f.team, capabilityId))[0]?.lifecycle.managedBy).toBe("organization");
+  }
+}, 60_000);
+
 test("a custom organization server is used only as the organization set it up", async () => {
   if (!shared) return;
   await expect(
