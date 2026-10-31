@@ -416,7 +416,8 @@ export function canManageWorkspaceSettings(
 /**
  * Shared content of a workspace that everyone who works there may change for
  * everyone, like a shared Skill: its instructions and the review of the
- * agent's proposed changes to them. Whoever manages the workspace's settings
+ * agent's proposed changes to them, a shared workspace's name and its custom
+ * model entries. Whoever manages the workspace's settings
  * may; otherwise a person of the organization who can start chats here
  * (`sessions:create`), signed in as themselves (see {@link isSignedInPerson}).
  * Mirrors the API's `requireWorkspaceContributorGrant`. UI affordance only.
