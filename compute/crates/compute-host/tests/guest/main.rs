@@ -320,6 +320,25 @@ impl Host {
         found.pop().unwrap()
     }
 
+    /// The directory of sandbox `sandbox`'s VM, whatever name it was made
+    /// under: one claimed from the ready pool keeps the ready sandbox's.
+    fn dir_of(&self, sandbox: Id) -> PathBuf {
+        let dir = self.root.join("state/vm/firecracker");
+        let mut found: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                std::fs::read(path.join("sandbox.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .is_some_and(|record| record["id"].as_str() == Some(&sandbox.to_string()))
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        found.pop().unwrap()
+    }
+
     /// Removes every sandbox, ends the agent and deletes its files.
     async fn finish(mut self) {
         for sandbox in self.status().await.sandboxes {
@@ -702,11 +721,7 @@ async fn a_sandbox_that_asks_for_a_longer_disk_has_all_of_it() {
             size >= ASKED_MIB * 9 / 10,
             "sandbox {n} asked for {ASKED_MIB} MiB, its first command saw {size} MiB"
         );
-        let disk = host
-            .root
-            .join("state/vm/firecracker")
-            .join(sandbox.to_string())
-            .join("root/disk.ext4");
+        let disk = host.dir_of(sandbox).join("root/disk.ext4");
         assert_eq!(
             std::fs::metadata(&disk).unwrap().len(),
             u64::from(ASKED_MIB) << 20
