@@ -8,6 +8,7 @@ import {
   initializeSessionStartAtomically,
   type DbClient,
 } from "../src/index";
+import { attachLegacyVariableSets, createLegacyVariableSet } from "./helpers/legacy-variable-sets";
 
 // Deleting a workspace removes its rows through cascading foreign keys.
 // PostgreSQL runs that cascade level by level and orders a row's foreign key
@@ -272,6 +273,44 @@ async function grantCount(workspaceId: string) {
 }
 
 describe("deleting a workspace", () => {
+  test("still detaches stored Variable Sets before the legacy-schema cascade", async () => {
+    const { accountId, workspaceId, subjectId } = await seedAccount("legacy attachment");
+    const variableSet = await createLegacyVariableSet(adminClient.db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      name: "Retired empty set",
+    });
+    const session = await createSession(adminClient.db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      initialMessage: "historical attachment",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await attachLegacyVariableSets(adminClient.db, {
+      workspaceId,
+      sessionId: session.id,
+      variableSetIds: [variableSet.id],
+    });
+    const [before] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from session_variable_set_attachments
+      where workspace_id = ${workspaceId}`;
+    expect(before!.count).toBe(1);
+    const result = await deleteWorkspaceIfQuiescent(appClient.db, { accountId, workspaceId });
+    expect(result.status).toBe("deleted");
+    expect(await workspaceRowCount(workspaceId)).toBe(0);
+    const [after] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from workspace_variable_sets where id = ${variableSet.id}`;
+    expect(after!.count).toBe(0);
+  }, 120_000);
+
   test("removes a chat whose turn used a personal machine grant", async () => {
     const { accountId, workspaceId } = await workspaceWithMachineGrantTurn();
     const result = await deleteWorkspaceIfQuiescent(appClient.db, {

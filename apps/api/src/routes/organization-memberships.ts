@@ -902,6 +902,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     );
     const { subjectId } = await requirePrivateSessionAdministrator(context, deps, organizationId);
     const request = await parseBody(context, UpdateOrganizationPrivacySettingsRequest);
+    // The Personal workspace limit is a usage allowance: like workspace
+    // budgets, people and organization keys set it, never agents.
+    if (request.personalWorkspaceMonthlyCredits !== undefined && isAgentActingAsPerson(context)) {
+      throw new HTTPException(403, { message: "Agents cannot change usage allowances" });
+    }
     try {
       return context.json(
         OrganizationPrivacySettings.parse(

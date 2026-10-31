@@ -1876,6 +1876,7 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  */
 export const FORCE_RLS_TABLES = [
   "additional_organization_creation_receipts",
+  "agent_call_host_phones",
   "agent_calls",
   "agent_instruction_operations",
   "agent_learning_revisions",
@@ -2434,6 +2435,8 @@ export const NON_RLS_RUNTIME_TABLES = [
  * table must not silently grant it broader DML than its migration intended.
  */
 export const RUNTIME_FULL_DML_TABLES = [
+  // 1143_agent_call_host_phones: the phones a product embedding Opengeni rings for agent calls.
+  "agent_call_host_phones",
   "agent_run_states",
   "api_keys",
   "audit_events",

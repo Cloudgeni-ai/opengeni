@@ -25,6 +25,7 @@ export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
+export * from "./session-search-records";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
 export * from "./workspace-model-catalog-inputs";
@@ -97,6 +98,7 @@ export * from "./subscription-plans";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 export * from "./subscription-plan-maintenance";
 import {
+  chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
   planCreditDebit,
@@ -104,6 +106,8 @@ import {
   type CreditUsage,
 } from "./credit-balances";
 export {
+  apiSpendableCreditMicros,
+  chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
   spendableCreditMicros,
@@ -161,6 +165,7 @@ import {
   withSessionUnattendedMetadata,
   type SessionUnattendedSetting,
 } from "@opengeni/contracts";
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import {
@@ -301,6 +306,7 @@ export {
 } from "./accepted-subscription-authority";
 
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
+import { storedBillingOrigin, type BillingOrigin } from "@opengeni/contracts";
 import {
   normalizeOrganizationAccessPolicy,
   type OrganizationAccessPolicy,
@@ -343,6 +349,7 @@ import {
   currentSessionRlsActorInitiatingHumanSubjectId,
 } from "./database";
 import {
+  ambientBillingOrigin,
   CreditDebitAttribution,
   creditDebitAttributionMetadata,
   currentCreditDebitAttribution,
@@ -1034,6 +1041,11 @@ import {
 } from "@opengeni/config";
 import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
+import { canonicalSecretPermissions } from "./canonical-secret-permissions";
+import {
+  accountPermissionsForOrganizationRole,
+  allAccountPermissions,
+} from "./organization-role-permissions";
 import {
   canonicalizePersistedHistoryItem,
   CodexAppsCredentialUnavailable,
@@ -2264,15 +2276,10 @@ export const allWorkspacePermissions: Permission[] = [
   "connections:write",
   "connections:personal",
   "capabilities:manage",
-  "variable-sets:list",
-  "variable-sets:read",
-  "variable-sets:write",
-  "variable-sets:manage",
-  "variable-sets:attach",
-  "variable-sets:use",
   "secrets:list",
   "secrets:read",
   "secrets:write",
+  "secrets:use",
   "mcp_servers:attach",
   "goals:manage",
   "enrollments:read",
@@ -2354,23 +2361,7 @@ export async function turnWorkspaceSettingsAccess(
   return allowed ? authority.kind : null;
 }
 
-export const allAccountPermissions: Permission[] = [
-  "account:read",
-  "account:admin",
-  "members:manage",
-  "workspace:create",
-  "billing:read",
-  "billing:manage",
-  "api_keys:manage",
-];
-
-function accountPermissionsForOrganizationRole(role: "owner" | "admin" | "member"): Permission[] {
-  if (role === "owner") return allAccountPermissions;
-  if (role === "admin") {
-    return ["account:read", "members:manage", "workspace:create", "billing:read"];
-  }
-  return ["account:read"];
-}
+export { allAccountPermissions } from "./organization-role-permissions";
 
 export type BootstrapWorkspaceInput = {
   accountExternalSource: string;
@@ -4773,25 +4764,29 @@ export async function deleteWorkspaceIfQuiescent(
           // deleting the parent. Finalize the gate inside this transaction: the
           // workspace activity counter disappears with the parent cascade.
           const variableSetDetachStartedAt = performance.now();
-          await withRestoredSessionActivityRlsContext(
+          // Release-N compatibility only: ordinary ORM reads no longer name
+          // retired columns. The contract release removes this table and its
+          // attachment guards atomically, after which detachment is unnecessary.
+          const [retiredVariableSetSchema] = await rawRows<{ present: boolean }>(
             tx,
-            { accountId: input.accountId, workspaceId: input.workspaceId },
-            async (activityDb) => {
-              await activityDb
-                .update(schema.sessions)
-                .set({
-                  variableSetIds: [],
-                  variableSetId: null,
-                  updatedAt: new Date(),
-                })
-                .where(
-                  and(
-                    eq(schema.sessions.workspaceId, input.workspaceId),
-                    isNotNull(schema.sessions.variableSetId),
-                  ),
-                );
-            },
+            sql`select pg_catalog.to_regclass('workspace_variable_sets') is not null as present`,
           );
+          if (retiredVariableSetSchema?.present) {
+            await withRestoredSessionActivityRlsContext(
+              tx,
+              { accountId: input.accountId, workspaceId: input.workspaceId },
+              async (activityDb) => {
+                await activityDb.execute(sql`
+                  update sessions
+                  set variable_set_ids = '[]'::jsonb, variable_set_id = null,
+                    updated_at = ${new Date().toISOString()}::timestamptz
+                  where workspace_id = ${input.workspaceId}::uuid
+                    and account_id = ${input.accountId}::uuid
+                    and variable_set_id is not null
+                `);
+              },
+            );
+          }
           observeWorkspaceDeletePhase(input.observer, {
             phase: "variable_set_detach",
             outcome: "ok",
@@ -6693,6 +6688,83 @@ export async function applyCreditLedgerEntryOnce(
   );
 }
 
+const USAGE_ORIGIN_TURN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The funding origin a usage debit is charged under, frozen on its ledger row
+ * (`usage_origin`): the caller's explicit origin; else the origin carried in
+ * its attribution metadata; else the turn it names; else the origin a
+ * trusted outer scope fixed; else app (today's behaviour, and legacy null).
+ * API debits never count against the monthly plan allowance.
+ */
+/**
+ * The origin a frozen billing record is charged under, resolved like the
+ * debit itself (see resolveUsageOrigin), so admission and charge agree.
+ */
+async function attributionBillingOrigin(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attribution?: CreditDebitAttribution | null | undefined;
+  },
+): Promise<BillingOrigin> {
+  const attribution = input.attribution;
+  if (!attribution || attribution.kind === "unknown") return ambientBillingOrigin() ?? "app";
+  return await resolveUsageOrigin(scopedDb, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    metadata: creditDebitAttributionMetadata(attribution),
+  });
+}
+
+/** {@link attributionBillingOrigin} for a caller outside an account scope. */
+export async function billingOriginForAttribution(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attribution?: CreditDebitAttribution | null | undefined;
+  },
+): Promise<BillingOrigin> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await attributionBillingOrigin(scopedDb, input),
+  );
+}
+
+async function resolveUsageOrigin(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    usageOrigin?: BillingOrigin | undefined;
+    metadata?: Record<string, unknown> | undefined;
+  },
+): Promise<BillingOrigin> {
+  if (input.usageOrigin) return input.usageOrigin;
+  const metadataOrigin = input.metadata?.billingOrigin;
+  if (metadataOrigin === "app" || metadataOrigin === "api") return metadataOrigin;
+  const attribution = currentCreditDebitAttribution();
+  const turnId =
+    typeof input.metadata?.turnId === "string"
+      ? input.metadata.turnId
+      : attribution.kind === "turn" && !attribution.billingOrigin
+        ? attribution.turnId
+        : null;
+  if (turnId && input.workspaceId && USAGE_ORIGIN_TURN_ID.test(turnId)) {
+    const [turn] = await rawRows<{ billingOrigin: string | null }>(
+      scopedDb,
+      sql`SELECT billing_origin AS "billingOrigin" FROM session_turns
+        WHERE account_id=${input.accountId}::uuid AND workspace_id=${input.workspaceId}::uuid
+          AND id=${turnId}::uuid`,
+    );
+    if (turn) return storedBillingOrigin(turn.billingOrigin);
+  }
+  return ambientBillingOrigin() ?? "app";
+}
+
 export async function applyCreditDebitUpToBalance(
   db: Database,
   input: {
@@ -6708,6 +6780,8 @@ export async function applyCreditDebitUpToBalance(
     idempotencyKey: string;
     metadata?: Record<string, unknown>;
     occurredAt?: Date;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
   },
 ): Promise<{
   balance: BillingBalance;
@@ -6739,7 +6813,8 @@ export async function applyCreditDebitUpToBalance(
         settledAt,
         true,
       );
-      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
+      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId, usageOrigin);
       const candidateDebitMicros = plan.debitedMicros;
       // Keep a zero-cost receipt too: retrying after a top-up must not charge
       // a response that was already settled while the eligible balance was empty.
@@ -6752,6 +6827,7 @@ export async function applyCreditDebitUpToBalance(
           amountMicros: -candidateDebitMicros,
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
+          usageOrigin,
           idempotencyKey: input.idempotencyKey,
           metadata: {
             ...input.metadata,
@@ -6811,6 +6887,8 @@ export async function applyCreditDebitAfterUse(
      * Omitted: general credit only.
      */
     usage?: CreditUsage;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
   },
 ): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
@@ -6824,8 +6902,11 @@ export async function applyCreditDebitAfterUse(
       // that cannot allocate promotional grants.
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
-      if (input.usage) {
+      // App use: plan credit (the Free plan's scoped credit too) pays for
+      // tools as well as models.
+      if (usageOrigin === "app") {
         allocations = planPostUseCreditAllocations(
           await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
           input.amountMicros,
@@ -6841,6 +6922,7 @@ export async function applyCreditDebitAfterUse(
           amountMicros: -input.amountMicros,
           sourceType: input.sourceType,
           sourceId: input.sourceId,
+          usageOrigin,
           idempotencyKey: input.idempotencyKey,
           metadata: input.metadata ?? {},
           occurredAt: input.occurredAt ?? new Date(),
@@ -7118,6 +7200,8 @@ export type ScheduledTaskCreatorPolicy = {
 export type CreateScheduledTaskInput = {
   id?: string;
   accountId: string;
+  /** Funding origin of whoever set the task up, inherited by every run. */
+  billingOrigin?: BillingOrigin | null;
   /** Vault narrowing for every run (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   workspaceId: string;
@@ -7941,6 +8025,8 @@ export type EnqueueSessionTurnInput = {
   source: SessionTurnSource;
   /** Content-free product surface the request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the turn; null inherits the session's latest. */
+  billingOrigin?: BillingOrigin | null;
   prompt: string;
   modelContext?: string | null;
   resources: ResourceRef[];
@@ -7970,6 +8056,8 @@ export type SessionTurnForExecution = SessionTurn & {
   /** Worker-only causal authority; never inferred from the current worker. */
   initiatingHumanSubjectId: string | null;
   scheduledTaskRunId: string | null;
+  /** Funding origin frozen at acceptance; legacy null is app. */
+  billingOrigin: BillingOrigin;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
   goalSnapshot: SessionGoalSnapshot;
@@ -19295,6 +19383,7 @@ export async function createScheduledTask(
           id: input.id,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
+          billingOrigin: input.billingOrigin ?? null,
           name: input.name,
           ownerSubjectId:
             (input.action?.kind ?? "agent_turn") === "agent_turn"
@@ -19318,7 +19407,9 @@ export async function createScheduledTask(
             input.claudeProviderAccountAuthoritySnapshot ?? sharedTaskPool!.claude,
           subscriptionAuthority: taskSubscriptionAuthority,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
-          creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
+          creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions
+            ? canonicalSecretPermissions(input.creatorPolicy.firstPartyMcpPermissions)
+            : null,
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
           reusableSessionId: input.targetSessionId ?? null,
           // The column default is { mode: "all" }; omit it so rows written
@@ -19654,9 +19745,9 @@ export async function updateScheduledTask(
         ...(input.creatorFirstPartyPolicy
           ? {
               creatorFirstPartyMcpTools: [...input.creatorFirstPartyPolicy.firstPartyMcpTools],
-              creatorFirstPartyMcpPermissions: [
-                ...input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
-              ],
+              creatorFirstPartyMcpPermissions: canonicalSecretPermissions(
+                input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
+              ),
             }
           : {}),
         ...(input.refreshPersonalResourceAuthority ||
@@ -27747,9 +27838,10 @@ export async function readSubscriptionCoreCodexResetAuthority(
  * post-resolution gate (a blocked provider never reaches a model call and
  * never silently remaps).
  *
- * A workspace row is the workspace's own choice. Without one, the workspace
- * follows its organization's default allowlist (organization_model_defaults);
- * with neither, every model is allowed.
+ * The organization's allowlist (organization_model_defaults) is a ceiling for
+ * every workspace in it. A workspace row only narrows it: a model must pass
+ * both. Without a row the workspace uses the organization's list as is; with
+ * neither, every model is allowed.
  */
 export type WorkspaceModelPolicy = {
   allowedProviders: string[] | null;
@@ -27771,10 +27863,33 @@ function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boo
   return Boolean(policy && (policy.allowedProviders !== null || policy.allowedModels !== null));
 }
 
+/** One allowlist narrowed by another; null allows everything. */
+function narrowAllowlist(ceiling: string[] | null, own: string[] | null): string[] | null {
+  if (ceiling === null) return own;
+  if (own === null) return ceiling;
+  const allowed = new Set(ceiling);
+  return own.filter((id) => allowed.has(id));
+}
+
 /**
- * The workspace's own policy row and the organization default it would
- * follow without one. `organization` is null when the organization allows
- * every model.
+ * What a workspace may use: its own allowlists within the organization's. A
+ * model passes only when both allow its provider and both allow the model.
+ */
+function narrowWorkspaceModelPolicy(
+  organization: WorkspaceModelPolicy | null,
+  workspace: WorkspaceModelPolicy | null,
+): WorkspaceModelPolicy | null {
+  if (!organization) return workspace;
+  if (!workspace) return organization;
+  return {
+    allowedProviders: narrowAllowlist(organization.allowedProviders, workspace.allowedProviders),
+    allowedModels: narrowAllowlist(organization.allowedModels, workspace.allowedModels),
+  };
+}
+
+/**
+ * The workspace's own policy row and the organization's ceiling above it.
+ * `organization` is null when the organization allows every model.
  */
 export async function getWorkspaceModelPolicyLayers(
   db: Database,
@@ -27825,17 +27940,23 @@ export async function getWorkspaceModelPolicyLayers(
 }
 
 /**
- * The policy this workspace runs with: the allowlists of its own row, else of
- * its organization's default, plus its credit switch. Null only when nothing
- * is restricted (every model allowed and credits on).
+ * The policy this workspace runs with: its own allowlists narrowed within its
+ * organization's, plus its credit switch. Null only when nothing is
+ * restricted (every model allowed and credits on).
  */
 export async function getWorkspaceModelPolicy(
   db: Database,
   workspaceId: string,
 ): Promise<EffectiveWorkspaceModelPolicy | null> {
-  const layers = await getWorkspaceModelPolicyLayers(db, workspaceId);
-  const allowlists = layers.workspace ?? layers.organization;
-  if (!allowlists && layers.allowCreditModels) return null;
+  return effectiveWorkspaceModelPolicy(await getWorkspaceModelPolicyLayers(db, workspaceId));
+}
+
+/** The policy a workspace runs with, from its already-read layers. */
+function effectiveWorkspaceModelPolicy(
+  layers: Awaited<ReturnType<typeof getWorkspaceModelPolicyLayers>>,
+): EffectiveWorkspaceModelPolicy | null {
+  const allowlists = narrowWorkspaceModelPolicy(layers.organization, layers.workspace);
+  if (!restrictsAnything(allowlists) && layers.allowCreditModels) return null;
   return {
     allowedProviders: allowlists?.allowedProviders ?? null,
     allowedModels: allowlists?.allowedModels ?? null,
@@ -27843,7 +27964,7 @@ export async function getWorkspaceModelPolicy(
   };
 }
 
-/** Remove the workspace's own policy so it follows its organization's default. */
+/** Remove the workspace's own policy so it uses its organization's list as is. */
 export async function deleteWorkspaceModelPolicy(
   db: Database,
   input: { accountId: string; workspaceId: string },
@@ -27861,8 +27982,8 @@ export async function deleteWorkspaceModelPolicy(
 
 /**
  * Create or replace the workspace's own model policy. Passing null for a field
- * clears that restriction; a policy of {null, null} is kept as the workspace's
- * explicit choice to allow every model even when its organization restricts.
+ * clears that restriction. It only ever narrows the organization's list, so
+ * {null, null} allows exactly what the organization allows.
  */
 export async function upsertWorkspaceModelPolicy(
   db: Database,
@@ -29548,6 +29669,105 @@ export async function listConnectorActionPolicies(
         );
     },
   );
+}
+
+const connectorActionPolicySnapshotColumns = {
+  id: schema.connectorActionPolicies.id,
+  connectionId: schema.connectorActionPolicies.connectionId,
+  serverId: schema.connectorActionPolicies.serverId,
+  toolName: schema.connectorActionPolicies.toolName,
+  actionName: schema.connectorActionPolicies.actionName,
+  policy: schema.connectorActionPolicies.policy,
+  version: schema.connectorActionPolicies.version,
+};
+
+/**
+ * The tool choices a turn starts with. A workspace login's choices are that
+ * workspace's. A personal login's choices belong to the login: they are stored
+ * once, in the workspace it was connected from, and follow it to every
+ * workspace where its owner's turn uses it. A copy left in this workspace is
+ * ignored. A login whose choices don't fit the snapshot bound is left out
+ * whole, so its recommendations apply; never part of its rules. The
+ * workspace's own rows keep database order and followed logins come after
+ * them, so exact-attempt re-entry compares equal snapshots.
+ */
+export async function connectorActionPolicySnapshotForTurn(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    bindings: readonly McpConnectionAccountBinding[] | null;
+  },
+): Promise<ConnectorActionPolicySnapshotEntry[]> {
+  const followed = new Map<string, Set<string>>();
+  for (const binding of input.bindings ?? []) {
+    if (binding.subjectScope !== "subject" || binding.originWorkspaceId === input.workspaceId)
+      continue;
+    const ids = followed.get(binding.originWorkspaceId) ?? new Set<string>();
+    ids.add(binding.connectionId);
+    followed.set(binding.originWorkspaceId, ids);
+  }
+  const followedIds = new Set([...followed.values()].flatMap((ids) => [...ids]));
+  const stored = await db
+    .select(connectorActionPolicySnapshotColumns)
+    .from(schema.connectorActionPolicies)
+    .where(
+      and(
+        eq(schema.connectorActionPolicies.accountId, input.accountId),
+        eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+      ),
+    )
+    .orderBy(
+      asc(schema.connectorActionPolicies.connectionId),
+      asc(schema.connectorActionPolicies.serverId),
+      asc(schema.connectorActionPolicies.toolName),
+      asc(schema.connectorActionPolicies.actionName),
+      asc(schema.connectorActionPolicies.id),
+    )
+    .limit(CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX + 1);
+  if (stored.length > CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX) {
+    throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
+  }
+  const snapshot: ConnectorActionPolicySnapshotEntry[] = stored.filter(
+    (row) => !followedIds.has(row.connectionId),
+  );
+  for (const [originWorkspaceId, ids] of [...followed].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  )) {
+    // Read the login's home under that workspace's tenant scope, without the
+    // session-tenancy fence: this is a read inside the claim transaction.
+    const rows = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: originWorkspaceId },
+      async (scoped) =>
+        await scoped
+          .select(connectorActionPolicySnapshotColumns)
+          .from(schema.connectorActionPolicies)
+          .where(
+            and(
+              eq(schema.connectorActionPolicies.accountId, input.accountId),
+              eq(schema.connectorActionPolicies.workspaceId, originWorkspaceId),
+              inArray(schema.connectorActionPolicies.connectionId, [...ids].sort()),
+            ),
+          )
+          .orderBy(
+            asc(schema.connectorActionPolicies.connectionId),
+            asc(schema.connectorActionPolicies.serverId),
+            asc(schema.connectorActionPolicies.toolName),
+            asc(schema.connectorActionPolicies.actionName),
+            asc(schema.connectorActionPolicies.id),
+          )
+          .limit(CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX + 1),
+      undefined,
+      "none",
+    );
+    for (const connectionId of [...ids].sort()) {
+      const group = rows.filter((row) => row.connectionId === connectionId);
+      if (snapshot.length + group.length <= CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX)
+        snapshot.push(...group);
+    }
+  }
+  return snapshot;
 }
 
 /**
@@ -31423,7 +31643,9 @@ async function createSessionInTransaction(
         rigId: input.rigId ?? null,
         rigVersionId: input.rigVersionId ?? null,
         channelId,
-        firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+        firstPartyMcpPermissions: input.firstPartyMcpPermissions
+          ? canonicalSecretPermissions(input.firstPartyMcpPermissions)
+          : null,
         firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
         initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
         initialMcpAccountBindings: acceptedMcpAccountBindings,
@@ -46405,8 +46627,9 @@ export class SandboxPaidComputeAdmissionError extends Error {
   constructor(
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
+    message = "Insufficient workspace credits to admit paid sandbox compute",
   ) {
-    super("Insufficient workspace credits to admit paid sandbox compute");
+    super(message);
   }
 }
 
@@ -47729,9 +47952,28 @@ async function acquireLeaseOnce(
                 refusal,
               );
             }
-            const balance = await getSpendableCreditBalance(tx, accountId);
+            // The box is funded like the work it runs: an API chat's box spends credits.
+            const leaseOrigin = await attributionBillingOrigin(tx, {
+              accountId,
+              workspaceId,
+              attribution,
+            });
+            const balance = await getSpendableCreditBalance(
+              tx,
+              accountId,
+              undefined,
+              undefined,
+              undefined,
+              leaseOrigin,
+            );
             if (balance.balanceMicros <= 0) {
-              throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
+              throw new SandboxPaidComputeAdmissionError(
+                workspaceId,
+                sandboxGroupId,
+                chargeBillingOrigin(leaseOrigin) === "api"
+                  ? `${API_CREDITS_REQUIRED_MESSAGE} Add credits to start this computer.`
+                  : undefined,
+              );
             }
           }
         }
@@ -54868,7 +55110,20 @@ export async function heartbeatLeaseHolderStatus(
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&
           snapshot.rateMicrosPerSecond > 0 &&
-          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
+          (
+            await getSpendableCreditBalance(
+              tx,
+              input.accountId,
+              undefined,
+              undefined,
+              undefined,
+              await attributionBillingOrigin(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                attribution: snapshot.attribution,
+              }),
+            )
+          ).balanceMicros <= 0
         ) {
           // Touching the holder above is essential: the running writer remains
           // protected while it winds down. The provider/lease TTL is not renewed.
@@ -57079,7 +57334,20 @@ export async function reArmDrainingLease(
             ? snapshot.mode === "credits" && snapshot.rateMicrosPerSecond > 0
             : input.warmBilling?.rateMicrosPerSecond !== undefined &&
               input.warmBilling.rateMicrosPerSecond > 0) &&
-          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
+          (
+            await getSpendableCreditBalance(
+              tx,
+              input.accountId,
+              undefined,
+              undefined,
+              undefined,
+              await attributionBillingOrigin(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                attribution: snapshot?.attribution ?? null,
+              }),
+            )
+          ).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
         }
@@ -73362,6 +73630,8 @@ export type InitializeSessionStartInput = {
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the initial turn; null inherits the parent's. */
+  billingOrigin?: BillingOrigin | null;
   /**
    * Normalized IANA zone of the person sending the initial message, frozen in
    * the initial turn's metadata.
@@ -73987,6 +74257,7 @@ export async function initializeSessionStartAtomically(
                   status: "queued",
                   source: "user",
                   surface: input.surface ?? null,
+                  billingOrigin: input.billingOrigin ?? null,
                   promptRouting: runnable ? "accepted_for_execution" : "queued_for_execution",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
@@ -74333,6 +74604,7 @@ export async function enqueueSessionTurn(
                 status: "queued",
                 source: input.source,
                 surface: input.surface ?? null,
+                billingOrigin: input.billingOrigin ?? null,
                 promptRouting: "queued_for_execution",
                 position,
                 prompt: input.prompt,
@@ -77034,29 +77306,14 @@ export async function claimSessionWorkForAttempt(
               }
             }
           }
-          const connectorPolicyRows = await tx
-            .select({
-              id: schema.connectorActionPolicies.id,
-              connectionId: schema.connectorActionPolicies.connectionId,
-              serverId: schema.connectorActionPolicies.serverId,
-              toolName: schema.connectorActionPolicies.toolName,
-              actionName: schema.connectorActionPolicies.actionName,
-              policy: schema.connectorActionPolicies.policy,
-              version: schema.connectorActionPolicies.version,
-            })
-            .from(schema.connectorActionPolicies)
-            .where(eq(schema.connectorActionPolicies.workspaceId, workspaceId))
-            .orderBy(
-              asc(schema.connectorActionPolicies.connectionId),
-              asc(schema.connectorActionPolicies.serverId),
-              asc(schema.connectorActionPolicies.toolName),
-              asc(schema.connectorActionPolicies.actionName),
-              asc(schema.connectorActionPolicies.id),
-            )
-            .limit(2049);
-          if (connectorPolicyRows.length > 2048) {
-            throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
-          }
+          const connectorPolicyRows = await connectorActionPolicySnapshotForTurn(
+            tx as unknown as Database,
+            {
+              accountId: session.accountId,
+              workspaceId,
+              bindings: turn.mcpAccountBindings,
+            },
+          );
           // New queued, compaction, and internal-update executions are born
           // while the locked session still has no active-turn pointer. Publish
           // that ownership edge before freezing governance so the database
@@ -92238,7 +92495,11 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               ? { firstPartyMcpTools: update.firstPartyMcpTools }
               : {}),
             ...(update.firstPartyMcpPermissions !== undefined
-              ? { firstPartyMcpPermissions: update.firstPartyMcpPermissions }
+              ? {
+                  firstPartyMcpPermissions: canonicalSecretPermissions(
+                    update.firstPartyMcpPermissions,
+                  ),
+                }
               : {}),
             ...(update.sandboxBackend !== undefined
               ? { sandboxBackend: update.sandboxBackend }
@@ -92519,8 +92780,10 @@ function mapSession(
     effectiveControl,
     inputWait: effectiveControl.state === "active" ? (row.currentInputWait ?? null) : null,
     lastSequence: row.lastSequence,
-    codexPinnedCredentialId: row.codexPinnedCredentialId ?? null,
-    codexLastCredentialId: row.codexLastCredentialId ?? null,
+    // Public adapters project these from subscription-core bindings and leases,
+    // never the frozen columns of the retired allocator.
+    codexPinnedCredentialId: null,
+    codexLastCredentialId: null,
     codexCompactionMode:
       row.codexCompactionMode === "remote_v2" || row.codexCompactionMode === "portable"
         ? row.codexCompactionMode
@@ -92635,6 +92898,7 @@ function mapSessionTurnForExecution(
     mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcpAccountBindings),
     initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
     scheduledTaskRunId: row.scheduledTaskRunId ?? null,
+    billingOrigin: storedBillingOrigin(row.billingOrigin),
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personalConnectionDelegations,
       `session_turns:${row.workspaceId}:${row.sessionId}:${row.id}`,

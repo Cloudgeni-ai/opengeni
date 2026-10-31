@@ -140,7 +140,7 @@ export function CredentialProviderSection({
           }
           description={
             organization
-              ? workspaceFilterLabel(provider.workspaceFilter)
+              ? workspaceFilterLabel(provider.workspaceFilter, provider.allowPersonalWorkspaces)
               : inherited
                 ? "Runs here use it instead of your organization's provider."
                 : "Runs in this workspace ask it for credentials."
@@ -405,7 +405,12 @@ export function CredentialProviderPage({
         url: own.url,
         enabled,
         timeoutMs: own.timeoutMs,
-        ...(organization ? { workspaceFilter: own.workspaceFilter ?? null } : {}),
+        ...(organization
+          ? {
+              workspaceFilter: own.workspaceFilter ?? null,
+              allowPersonalWorkspaces: own.allowPersonalWorkspaces ?? false,
+            }
+          : {}),
       });
       setState({ own: response.provider, inherited });
       toast(enabled ? "Credential provider resumed" : "Credential provider paused", {
@@ -509,7 +514,9 @@ export function CredentialProviderPage({
           </span>,
           fromOrganization ? <span key="by">set by your organization</span> : null,
           organization ? (
-            <span key="filter">{workspaceFilterLabel(provider.workspaceFilter)}</span>
+            <span key="filter">
+              {workspaceFilterLabel(provider.workspaceFilter, provider.allowPersonalWorkspaces)}
+            </span>
           ) : null,
         ]}
         actions={actions}
@@ -525,7 +532,7 @@ export function CredentialProviderPage({
             </DetailAsideItem>
             {organization ? (
               <DetailAsideItem label="Workspaces">
-                {workspaceFilterLabel(provider.workspaceFilter)}
+                {workspaceFilterLabel(provider.workspaceFilter, provider.allowPersonalWorkspaces)}
               </DetailAsideItem>
             ) : null}
             {!fromOrganization ? (
@@ -585,7 +592,7 @@ export function CredentialProviderPage({
           <DetailSection>
             <InlineHelp icon>
               {organization
-                ? "Paused. Shared workspaces without their own provider get no credentials from your product until you resume it."
+                ? "Paused. Workspaces without their own provider get no credentials from your product until you resume it."
                 : "Paused. Runs in this workspace get no credentials from any provider, including your organization's, until you resume it."}
             </InlineHelp>
           </DetailSection>
@@ -711,6 +718,9 @@ function ProviderForm({
   const [filter, setFilter] = useState<IntegrationWorkspaceFilter | null>(
     own?.workspaceFilter ?? null,
   );
+  const [personalWorkspaces, setPersonalWorkspaces] = useState(
+    own?.allowPersonalWorkspaces ?? false,
+  );
   const [errors, setErrors] = useState<{ url?: string; filter?: string }>({});
   const [secret, setSecret] = useState<string | null>(null);
 
@@ -752,6 +762,7 @@ function ProviderForm({
         ...(organization
           ? {
               workspaceFilter: filter ? { externalSource: filter.externalSource.trim() } : null,
+              allowPersonalWorkspaces: personalWorkspaces,
             }
           : {}),
       });
@@ -777,7 +788,7 @@ function ProviderForm({
       title={own ? "Edit credential provider" : "Connect a credential provider"}
       description={
         organization
-          ? "Opengeni calls your endpoint before each run in the shared workspaces you choose, and gives the agent what it returns."
+          ? "Opengeni calls your endpoint before each run in the workspaces you choose, and gives the agent what it returns."
           : "Opengeni calls your endpoint before each run in this workspace, and gives the agent what it returns."
       }
       submitLabel={own ? "Save" : "Connect"}
@@ -817,6 +828,7 @@ function ProviderForm({
               setFilter(next);
               setErrors((value) => ({ ...value, filter: undefined }));
             }}
+            personalWorkspaces={{ checked: personalWorkspaces, onChange: setPersonalWorkspaces }}
           />
         ) : null}
         {!own ? (

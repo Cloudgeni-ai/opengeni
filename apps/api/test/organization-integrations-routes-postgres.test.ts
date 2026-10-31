@@ -151,6 +151,7 @@ describe("organization integration routes (PostgreSQL)", () => {
     const created = await call("PUT", "/credential-provider", {
       url: "https://product.example/credentials",
       workspaceFilter: { externalSource: "product" },
+      allowPersonalWorkspaces: true,
       enabled: false,
       timeoutMs: 2000,
     });
@@ -160,6 +161,7 @@ describe("organization integration routes (PostgreSQL)", () => {
     expect(first.provider).toMatchObject({
       organizationId: accountId,
       workspaceFilter: { externalSource: "product" },
+      allowPersonalWorkspaces: true,
     });
     const updated = await call("PUT", "/credential-provider", {
       url: "https://product.example/new",
@@ -169,6 +171,8 @@ describe("organization integration routes (PostgreSQL)", () => {
     expect(second.secret).toBeUndefined();
     expect(second.provider).toMatchObject({
       workspaceFilter: null,
+      // PUT replaces the configuration: an omitted switch is off again.
+      allowPersonalWorkspaces: false,
       enabled: true,
       timeoutMs: 10_000,
     });

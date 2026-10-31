@@ -27,7 +27,9 @@ import {
 } from "@/lib/managed-auth-url";
 import {
   MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
+  MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE,
   MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE,
+  SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE,
   SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE,
   SIGNUPS_PAUSED_MESSAGE,
 } from "@/lib/signups-paused";
@@ -59,6 +61,9 @@ export function passkeyFailure(
       message: "This passkey already belongs to an account here. Sign in with it instead.",
       switchTo: "signin",
     };
+  }
+  if (error instanceof AuthApiError && error.code === MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE) {
+    return { message: SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE, switchTo: null };
   }
   if (error instanceof AuthApiError && error.code?.startsWith("PASSKEY_")) {
     return { message: error.message, switchTo: null };

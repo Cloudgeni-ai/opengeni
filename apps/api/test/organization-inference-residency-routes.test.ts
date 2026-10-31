@@ -38,7 +38,10 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-function buildApp(productAccessMode: "managed" | "local" | "configured" = "managed"): Hono {
+function buildApp(
+  productAccessMode: "managed" | "local" | "configured" = "managed",
+  usageAllowancesEnabled = false,
+): Hono {
   const app = new Hono();
   app.onError((error, c) => {
     if (error instanceof HTTPException)
@@ -54,6 +57,7 @@ function buildApp(productAccessMode: "managed" | "local" | "configured" = "manag
       databaseUrl: shared.appUrl,
       productAccessMode,
       publicBaseUrl: ORIGIN,
+      usageAllowancesEnabled,
     }),
     bus: new MemoryEventBus(),
     // A signed-in browser session, keyed by its cookie.
@@ -329,4 +333,43 @@ test("without Opengeni sign-in nobody could turn it off, so it can't be turned o
     );
     expect(response.status).toBe(409);
   }
+});
+
+test("people set the Personal workspace limit; agents never do, even as an owner", async () => {
+  const owner = await person("limit-owner");
+  const org = owner.organizationId;
+  const privacy = `http://x/v1/organizations/${org}/privacy-settings`;
+  const limit = (app: Hono, credits: number | null) =>
+    app.request(privacy, {
+      method: "PATCH",
+      headers: browser(owner.cookie),
+      body: JSON.stringify({ personalWorkspaceMonthlyCredits: credits }),
+    });
+
+  // Like a workspace budget, a limit takes the usage-allowance switch.
+  expect((await limit(buildApp(), 25_000_000)).status).toBe(409);
+  const app = buildApp("managed", true);
+  const set = await limit(app, 25_000_000);
+  expect(set.status).toBe(200);
+  expect(await set.json()).toMatchObject({ personalWorkspaceMonthlyCredits: 25_000_000 });
+
+  const request = new Request(privacy, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ personalWorkspaceMonthlyCredits: null }),
+  });
+  stampDelegatedHumanAuthorization(request, {
+    organizationId: org,
+    subjectId: owner.subjectId,
+    permissions: ["account:read", "account:admin"],
+    workspaceScope: { kind: "all" },
+  });
+  expect((await app.fetch(request)).status).toBe(403);
+
+  const read = await app.request(privacy, { headers: { cookie: owner.cookie } });
+  expect(await read.json()).toMatchObject({ personalWorkspaceMonthlyCredits: 25_000_000 });
+  // Removing a limit never takes the switch.
+  expect(await (await limit(buildApp(), null)).json()).toMatchObject({
+    personalWorkspaceMonthlyCredits: null,
+  });
 });

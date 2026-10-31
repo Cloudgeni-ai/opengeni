@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "6.2.1",
+  "version": "6.3.1",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -50,6 +50,10 @@
       "types": "./src/modal-native-proof-v2.ts",
       "default": "./src/modal-native-proof-v2.ts"
     },
+    "./billing-origin": {
+      "types": "./src/billing-origin.ts",
+      "default": "./src/billing-origin.ts"
+    },
     "./allowance-refusal": {
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
@@ -65,6 +69,10 @@
     "./values": {
       "types": "./src/values.ts",
       "default": "./src/values.ts"
+    },
+    "./claude-cite-tags": {
+      "types": "./src/claude-cite-tags.ts",
+      "default": "./src/claude-cite-tags.ts"
     },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
@@ -241,6 +249,10 @@
     "./model-display": {
       "types": "./src/model-display.ts",
       "default": "./src/model-display.ts"
+    },
+    "./claude-subscription-model-ids": {
+      "types": "./src/claude-subscription-model-ids.ts",
+      "default": "./src/claude-subscription-model-ids.ts"
     },
     "./secret-use-approval-question": {
       "types": "./src/secret-use-approval-question.ts",
