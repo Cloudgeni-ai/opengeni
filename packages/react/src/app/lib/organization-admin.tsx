@@ -11,6 +11,7 @@ export const ORGANIZATION_ADMIN_SECTIONS = [
   "people",
   "workspaces",
   "identity",
+  "shared",
   "models",
   "integrations",
   "agents",

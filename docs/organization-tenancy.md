@@ -254,6 +254,24 @@ only the owner for personal things) and opens the thing's own page. Model plans
 and keys stay on Organization settings › Models, which already shows each
 one's owner; the page links there for people who may open it.
 
+### Shared
+
+Organization settings › Shared, for organization owners and admins, shows
+everything the organization shares with its workspaces and where each works.
+Model plans and keys link to Organization settings › Models. The
+organization's machines, rigs, Skills and Knowledge work in every workspace,
+Personal workspaces included, so the page reads them from the lists of the
+workspace it is opened from, kept to what the organization owns. Organization
+vaults work only where their "Available in" says, so the page reads
+`GET /v1/workspaces/:workspaceId/organization-vaults`, which lists every
+organization vault wherever it works (account administrators only), and says
+for each one where it works and where it opens: in this workspace when it works
+here, else in the first workspace by name that it works in and the viewer can
+open, else nowhere. An admin who isn't an owner, or a server that has not
+granted the list yet, gets the organization vaults that work in the current
+workspace, and the page says so. The page links to Developer (webhooks and the
+credential provider) for people who manage the organization's API keys.
+
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
 Migration `0219_organization_tenancy_managed_human_provisioning.sql` adds the

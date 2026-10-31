@@ -6288,6 +6288,31 @@
       "response": []
     },
     {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/organization-vaults",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
+        "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemApproval",
+        "VaultItemSummary",
+        "VaultProviderConnectionSummary",
+        "VaultSummary"
+      ]
+    },
+    {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/pause-timer",
       "sdk": [
