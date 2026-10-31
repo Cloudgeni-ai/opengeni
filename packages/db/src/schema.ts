@@ -4623,6 +4623,11 @@ export const organizationPrivacyPreferences = pgTable("organization_privacy_pref
     .default("workspace_shared"),
   adminsSeePrivateSchedules: boolean("admins_see_private_schedules").notNull().default(true),
   personalWorkspacesEnabled: boolean("personal_workspaces_enabled").notNull().default(true),
+  // The most each person spends from the organization's credits in their own
+  // Personal workspace per calendar month, in USD micros (1147). Null: no limit.
+  personalWorkspaceMonthlyCredits: bigint("personal_workspace_monthly_credits", {
+    mode: "number",
+  }),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

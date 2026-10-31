@@ -146,6 +146,38 @@ Omitted workspace/member threshold lists default to `[0.8, 1]`; configured
 thresholds must be greater than zero and at most one, with at most 16 values
 per list.
 
+### A limit per person for Personal workspaces
+
+A Personal workspace belongs to one person, so the organization limits it
+per person rather than per workspace: one organization setting caps what each
+person spends from the organization's credits in their own Personal workspace
+each calendar month (UTC). Null, the default, means no limit.
+
+```ts
+await og.updateOrganizationPrivacySettings(organizationId, {
+  personalWorkspaceMonthlyCredits: 50_000_000, // $50 a person a month; null removes it
+});
+```
+
+It sits with the organization's other Personal workspace choices, so the same
+owners, admins and administration-capable organization keys change it; agents
+never do, even with full access.
+Setting a limit takes `OPENGENI_USAGE_ALLOWANCES_ENABLED`, like a workspace
+budget; removing one never does.
+
+- It applies to a Personal workspace with no budget of its own, and acts as
+  that workspace's monthly budget: reads (`/usage`, `/usage/me`) report it as
+  the workspace limit with `resetsAt` at the next month, and admission refuses
+  with the usual `allowance_exhausted` (`scope: "workspace"`) once it is spent.
+- It meters the calendar-month counters every workspace keeps, so turning it
+  on mid-month counts what the month has already spent.
+- Work paid by the person's own model plans or keys spends no credits, so
+  it never counts and never stops.
+- It applies to the running month only. A past month reads without a limit:
+  the organization keeps no history of the setting.
+- There are no threshold notifications for it; the person sees it on their
+  Usage page and in the composer's near/at-limit notice.
+
 ### Counting usage that spends no credits
 
 `unbilledUsage` decides how model calls that debit no Opengeni credits count:
@@ -559,7 +591,9 @@ they draw on: owners set a shared workspace's monthly budget under
 Organization settings → Billing (a budgets list and one page per
 workspace), workspace admins set member limits under Workspace settings →
 Usage, everyone sees their own limit there and in the account menu, and the
-composer shows the near/at-limit notice. Personal workspaces have no budget.
+composer shows the near/at-limit notice. Personal workspaces have no budget of
+their own; owners and admins can set a monthly limit per person for them on
+the same Billing page.
 
 ## Attribution and background work
 
