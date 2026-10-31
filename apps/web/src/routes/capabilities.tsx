@@ -164,6 +164,7 @@ import {
   oauthCallbackReasonMessage,
 } from "@opengeni/react/app/lib/oauth-callback-messages";
 import {
+  markPersonalGitHubRepositoryChooser,
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
 } from "@/lib/personal-github-oauth";
@@ -1284,14 +1285,16 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     );
     setOpenIntegration("github", true);
     if (result.outcome === "success") {
+      // The GitHub page opens its repository chooser once the connection loads.
+      markPersonalGitHubRepositoryChooser(workspaceId);
       void context
         .refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true })
         .then(() => {
-          toast.success("Your GitHub identity is connected");
+          toast.success("Your GitHub is connected");
         });
       return;
     }
-    toast.error("Couldn't connect your GitHub identity", {
+    toast.error("Couldn't connect your GitHub", {
       description: personalGitHubOAuthFailureMessage(result.reason),
     });
   }, [context, workspaceId, setOpenIntegration]);
