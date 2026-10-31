@@ -362,7 +362,7 @@ realTest(
 );
 
 realTest(
-  "this binary requires the definer and table grants 0947, 0950, 1093, 1101 and 1110 make",
+  "this binary requires the definer and table grants 0947, 0950, 1093, 1101, 1110 and 1149 make",
   async () => {
     const admin = database!.admin;
     const current = async () =>
@@ -402,6 +402,10 @@ realTest(
       expect(await current()).toContain(
         "runtime role lacks target-schema capability mutate_managed_passkey(text, text, jsonb)",
       );
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.grant_subscription_account_administrator(jsonb) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine grant_subscription_account_administrator(jsonb)",
+      );
     } finally {
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text) TO opengeni_app`;
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) TO opengeni_app`;
@@ -410,6 +414,7 @@ realTest(
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint) TO opengeni_app`;
       await admin`GRANT DELETE ON TABLE auth_passkeys TO opengeni_app`;
       await admin`GRANT EXECUTE ON FUNCTION mutate_managed_passkey(text, text, jsonb) TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.grant_subscription_account_administrator(jsonb) TO opengeni_app`;
     }
     expect(await current()).toEqual([]);
   },

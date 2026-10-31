@@ -5,6 +5,7 @@ import {
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
 export * from "./secret-value";
+export * from "./claude-cite-tags";
 export * from "./integration-capability-id";
 import { defineSchema } from "./define-schema";
 import { SessionAvatar, SessionDescription } from "./bots";
@@ -13,6 +14,12 @@ export * from "./session-target";
 export * from "./turn-serving-policy";
 import { AzureOpenAIEndpoint } from "./direct-model-provider";
 import { modelLogoUrl } from "./model-display";
+import {
+  isClaudeSubscriptionProviderId,
+  LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  modelIdListIncludes,
+} from "./claude-subscription-model-ids";
 import { CustomMcpSetupRequest } from "./prepared-mcp-setup";
 import {
   ClaudeProviderAccountAuthoritySnapshotV1,
@@ -3062,7 +3069,8 @@ export type WorkspaceRealtimeVoicePatch = z.infer<typeof WorkspaceRealtimeVoiceP
 /**
  * Model defaults an organization owner or admin sets once for every workspace
  * in the organization. Each workspace follows them until it sets its own
- * value; a workspace value always wins, field by field and model by model.
+ * value; a workspace value always wins, field by field and model by model,
+ * except the allowlists: those are a ceiling a workspace can only narrow.
  * Subscriptions and keys are not defaults: they stay organization resources
  * that are shared with workspaces.
  */
@@ -3070,9 +3078,15 @@ export const OrganizationModelDefaults = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /** Model and reasoning for new chats and schedules; null leaves it automatic. */
     sessionDefaults: WorkspaceSessionDefaults.nullable(),
-    /** Provider allowlist for workspaces without their own policy; null allows every provider. */
+    /**
+     * Provider allowlist for every workspace; a workspace's own policy can
+     * only narrow it. Null allows every provider.
+     */
     allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable(),
-    /** Exact model allowlist for workspaces without their own policy; null allows every model. */
+    /**
+     * Exact model allowlist for every workspace; a workspace's own policy can
+     * only narrow it. Null allows every model.
+     */
     allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable(),
     /** Automatic compaction trigger by exact model id. */
     modelCompactionThresholds: z.record(z.string().min(1).max(512), ModelCompactionTokenThreshold),
@@ -3534,10 +3548,12 @@ export const UpdateWorkspaceModelPolicyRequest = /* @__PURE__ */ defineSchema(()
 export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceModelPolicyRequest>;
 
 /**
- * The model policy a workspace runs with (`allowedProviders`/`allowedModels`)
- * and where it comes from: its own saved policy, the organization's default it
- * follows, or no restriction at all. `organization` is what the workspace would
- * follow after removing its own policy.
+ * A workspace's model allowlists (`allowedProviders`/`allowedModels`) and
+ * where they come from: its own saved policy, the organization's list it uses
+ * as is, or no restriction at all. `organization` is the organization's list,
+ * a ceiling for every workspace: a workspace's own policy only narrows it, so
+ * a model runs only when both allow it. The workspace's catalog reports the
+ * combined verdict per model (`policyAllowed`, `organizationAllowed`).
  */
 export const WorkspaceModelPolicyResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -11991,6 +12007,12 @@ export const Channel = /* @__PURE__ */ defineSchema(() =>
     avatar: SessionAvatar.nullable().default(null),
     pinned: primitives.boolean,
     sortOrder: primitives.nonnegativeInteger,
+    /**
+     * Who sees it, like a chat: the workspace, or only its owner ("private",
+     * Only me). Only its owner sees an Only me project, which holds only their
+     * own Only me chats and Sites. Absent from servers that predate it.
+     */
+    visibility: z.enum(["private", "workspace"]).default("workspace"),
     createdBy: primitives.nullableString,
     createdAt: primitives.string,
     updatedAt: primitives.string,
@@ -12003,6 +12025,11 @@ export const CreateChannelRequest = /* @__PURE__ */ defineSchema(() =>
     name: primitives.string.trim().min(1).max(80),
     description: z.string().max(2000).optional(),
     avatar: SessionAvatar.nullable().optional(),
+    /**
+     * Omitted, a person's project is shared with the workspace and an agent's
+     * follows its chat: Only me when made in an Only me chat.
+     */
+    visibility: z.enum(["private", "workspace"]).optional(),
   }),
 );
 export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
@@ -12014,6 +12041,12 @@ export const UpdateChannelRequest = /* @__PURE__ */ defineSchema(() =>
     /** null clears it; omitted keeps it. */
     avatar: SessionAvatar.nullable().optional(),
     pinned: primitives.optionalBoolean,
+    /**
+     * "workspace" shares the owner's Only me project with the workspace. A
+     * shared project cannot be made Only me; only its owner, signed in,
+     * changes it.
+     */
+    visibility: z.literal("workspace").optional(),
   }),
 );
 export type UpdateChannelRequest = z.infer<typeof UpdateChannelRequest>;
@@ -12380,6 +12413,8 @@ export type IncidentTelemetryPreflight = z.infer<typeof IncidentTelemetryPreflig
  * They bound create/update requests and freshly accepted occurrence snapshots;
  * already-stored tasks are read back through the unbounded storage shape so a
  * legacy row can never become unreadable or undispatchable by a later cap.
+ * Inline `agentConfig.skills` are outside these byte caps: they are bounded by
+ * the Skill limits, exactly as on session create (see ScheduledTaskSkill).
  */
 export const SCHEDULED_TASK_NAME_MAX_BYTES = 512;
 export const SCHEDULED_TASK_PROMPT_MAX_BYTES = 64 * 1024;
@@ -12416,6 +12451,19 @@ function scheduledTaskJsonUtf8Bytes(value: unknown): number {
   } catch {
     return Number.POSITIVE_INFINITY;
   }
+}
+
+/**
+ * An agent config without its inline Skills, for the byte caps. A chat the
+ * task starts takes the same Skills a session create does, so they are bounded
+ * by the Skill limits rather than by the size of the rest of the config.
+ */
+function scheduledTaskAgentConfigWithoutSkills(agentConfig: unknown): unknown {
+  if (!agentConfig || typeof agentConfig !== "object" || Array.isArray(agentConfig)) {
+    return agentConfig;
+  }
+  const { skills: _skills, ...rest } = agentConfig as Record<string, unknown>;
+  return rest;
 }
 
 /**
@@ -12756,7 +12804,10 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ /* @__PURE__ */ def
           "Omit sandboxBackend and select machineTarget for a separate agent; existing-chat schedules inherit the chat's machine",
       });
     }
-    if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
+    if (
+      scheduledTaskJsonUtf8Bytes(scheduledTaskAgentConfigWithoutSkills(value)) >
+      SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES
+    ) {
       context.addIssue({
         code: "custom",
         message: `scheduled task agent config exceeds ${SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES} UTF-8 bytes`,
@@ -13239,7 +13290,16 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
     })
     .strict()
     .superRefine((value, context) => {
-      if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES) {
+      // The task's inline Skills are bounded by the Skill limits it was saved
+      // under, so a task that passed ingress can always be accepted.
+      const measured = {
+        ...value,
+        task: {
+          ...value.task,
+          agentConfig: scheduledTaskAgentConfigWithoutSkills(value.task.agentConfig),
+        },
+      };
+      if (scheduledTaskJsonUtf8Bytes(measured) > SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES) {
         context.addIssue({
           code: "custom",
           message: `scheduled accepted execution exceeds ${SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES} UTF-8 bytes`,
@@ -14245,6 +14305,15 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
     verifiedInstallAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     verifiedInstallVersion: z.number().int().positive().nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()),
+    /**
+     * Whether this OAuth MCP account can be told apart from another account of
+     * the same service: `verified` (its account is known), `reconnect` (the
+     * service identifies accounts but this one predates that or its check
+     * failed; sign in again once before adding another), or `single` (the
+     * service doesn't say which account it is, so each person can connect
+     * one). Absent for other connections and from older servers.
+     */
+    accountIdentity: z.enum(["verified", "reconnect", "single"]).optional(),
     createdBySubjectId: primitives.nullableString,
     updatedBySubjectId: primitives.nullableString,
     createdAt: primitives.string,
@@ -14768,6 +14837,11 @@ export const CapabilityCatalogResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     items: z.array(CapabilityCatalogItem),
     installations: z.array(CapabilityInstallation),
+    /**
+     * Who the organization lets turn integrations on: members (the default)
+     * or only integration admins. Older servers omit it; treat that as members.
+     */
+    memberIntegrationSetup: z.enum(["members", "admins"]).optional(),
   }),
 );
 export type CapabilityCatalogResponse = z.infer<typeof CapabilityCatalogResponse>;
@@ -15390,11 +15464,12 @@ export const InstallApiIntegrationRequest = /* @__PURE__ */ defineSchema(() =>
       allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
       // Selected write/destructive tools (preview approvalMode "ask") that run
       // without per-call human approval, for unattended/scheduled work. Custom and
-      // curated Integrations alike; requires capabilities:manage and re-passes
-      // organization acquisition policy. A curated definition may forbid it per
-      // operation (IntegrationDefinition.autoApproval). Declarative: omission restores
-      // approval for every "ask" tool. Session approval policy, connector Block,
-      // and action policies still apply.
+      // curated Integrations alike; requires capabilities:manage (members install
+      // without it) and re-passes organization acquisition policy. A curated
+      // definition may forbid it per operation (IntegrationDefinition.autoApproval).
+      // Omission keeps an earlier choice only for the same account and unchanged
+      // operations; otherwise every "ask" tool needs approval. Session approval
+      // policy, connector Block, and action policies still apply.
       autoApprovedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
     })
     .strict(),
@@ -17209,6 +17284,42 @@ export const AgentCallActionRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({ device: z.string().trim().min(1).max(300).optional() }).strict(),
 );
 export type AgentCallActionRequest = z.infer<typeof AgentCallActionRequest>;
+
+/**
+ * Phones a product embedding Opengeni rings for agent calls itself, from the
+ * `session.agentCall.ringing` webhook with its own push credentials. The
+ * person states them through the product (its backend acting as them), and
+ * agents count them alongside the person's Opengeni app phones.
+ */
+export const AgentCallHostPhones = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** How many of the person's phones the product rings for agents. */
+      phones: z.number().int().min(1).max(20),
+      /** Whether agents working for other members of a shared workspace may ring them too. */
+      teammates: z.boolean(),
+      updatedAt: primitives.dateTime,
+    })
+    .strict(),
+);
+export type AgentCallHostPhones = z.infer<typeof AgentCallHostPhones>;
+
+/** State the phones the product rings for agent calls; `phones: 0` removes them. */
+export const SetAgentCallHostPhonesRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      phones: z.number().int().min(0).max(20),
+      teammates: z.boolean().optional(),
+    })
+    .strict(),
+);
+export type SetAgentCallHostPhonesRequest = z.infer<typeof SetAgentCallHostPhonesRequest>;
+
+/** The phones the product rings for this person; null when none. */
+export const AgentCallHostPhonesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ hostPhones: AgentCallHostPhones.nullable() }).strict(),
+);
+export type AgentCallHostPhonesResponse = z.infer<typeof AgentCallHostPhonesResponse>;
 
 /**
  * `session.agentCall.ringing`: the agent is ringing a person. Products that
@@ -20819,6 +20930,15 @@ export const MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE = "NEW_SIGNUPS_PAUSED" as cons
  */
 export const MANAGED_AUTH_SIGNUP_EMAIL_NOT_ALLOWED_CODE = "SIGNUP_EMAIL_NOT_ALLOWED" as const;
 
+/**
+ * Error code returned (HTTP 403, `{ code, message }`) when a deployment that
+ * restricts accounts to listed email addresses (`allowedUserEmails`) refuses to
+ * sign in an address that isn't on the list. Email sign-in decides it before
+ * the password is checked, so the refusal says nothing about the password.
+ * OAuth sign-in refusals redirect with `error=sign_in_email_not_allowed` instead.
+ */
+export const MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE = "SIGN_IN_EMAIL_NOT_ALLOWED" as const;
+
 // The negotiated capability handshake document (sandbox contract C.3). ONE shape;
 // collapses the parallel per-module definitions. A capability cell is always
 // present with `available`/`transport` + a `reason` when unavailable — never
@@ -21336,7 +21456,8 @@ export type DeviceEnrollmentDenyResponse = z.infer<typeof DeviceEnrollmentDenyRe
 // person: someone signed in, or a credential acting as them (a personal API
 // key, or an organization key or organization MCP client acting as that
 // person). A key, service or agent acting as itself gets 422. Omitted keeps the
-// original workspace-shared token for existing integrations.
+// original workspace-shared token for existing integrations, except that a
+// signed-in teammate without enrollments:manage gets their own (`user`) token.
 export const MintEnrollTokenRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     allowScreenControl: primitives.boolean.default(false),
@@ -22493,8 +22614,18 @@ export const WorkspaceModelCatalogModel =
       credentialReadiness: ModelCredentialReadinessV1,
       /** Current funding status, without exposing the organization's balance. */
       creditFunding: z.enum(["promotional", "general", "unavailable"]).optional(),
-      /** Exact workspace-policy verdict without exposing provider identity. */
+      /**
+       * Exact verdict of the policy the workspace runs with (its own lists
+       * within its organization's, and its credit switch), without exposing
+       * provider identity.
+       */
       policyAllowed: primitives.optionalBoolean,
+      /**
+       * False when the organization's allowlist, the ceiling a workspace's own
+       * list can't widen, excludes the model. Omitted when the organization
+       * allows every model. Ignores the workspace's credit switch.
+       */
+      organizationAllowed: primitives.optionalBoolean,
       /** Workspace preference, separate from immutable model execution limits. */
       compactionPolicy: ModelCompactionPolicy.optional(),
       availability: ModelAvailabilityV1,
@@ -22837,15 +22968,39 @@ export function evaluateWorkspaceModelPolicy(
   if (policy.allowCreditModels === false && candidate.chargesCredits) {
     return { allowed: false, reason: "credits" };
   }
-  if (policy.allowedProviders !== null && !policy.allowedProviders.includes(candidate.providerId)) {
+  if (
+    policy.allowedProviders !== null &&
+    !policyAllowsProvider(policy.allowedProviders, candidate)
+  ) {
     return { allowed: false, reason: "provider" };
   }
-  if (policy.allowedModels !== null && !policy.allowedModels.includes(candidate.modelId)) {
+  if (
+    policy.allowedModels !== null &&
+    !modelIdListIncludes(policy.allowedModels, candidate.modelId)
+  ) {
     return { allowed: false, reason: "model" };
   }
   return { allowed: true };
 }
 
+/**
+ * One provider rule for Claude subscription models, whichever id form the
+ * model or the stored policy uses: the canonical provider, or the
+ * organization provider every older form already required, admits them all.
+ */
+function policyAllowsProvider(
+  allowedProviders: readonly string[],
+  candidate: { providerId: string },
+): boolean {
+  if (!isClaudeSubscriptionProviderId(candidate.providerId))
+    return allowedProviders.includes(candidate.providerId);
+  return (
+    allowedProviders.includes(CLAUDE_SUBSCRIPTION_PROVIDER_ID) ||
+    allowedProviders.includes(LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID)
+  );
+}
+
+export * from "./claude-subscription-model-ids";
 export * from "./codex-fleet-policy";
 export * from "./xai-provider-account-authority";
 export * from "./claude-provider-account-authority";

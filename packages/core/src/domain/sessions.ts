@@ -9,6 +9,11 @@ import {
   ModelUnavailableError,
   normalizeMessageTimeZone,
 } from "@opengeni/contracts";
+import {
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  isClaudeSubscriptionModelId,
+  isClaudeSubscriptionProviderId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
 import { requireExplicitPermissionDelegation } from "../access";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
@@ -365,6 +370,7 @@ function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
     modelId?.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(ORGANIZATION_OPPER_MODEL_ID_PREFIX) === true ||
     organizationDirectModelProviderOf(modelId) !== null ||
+    (modelId != null && isClaudeSubscriptionModelId(modelId)) ||
     CLAUDE_CONNECTION_KINDS.some((kind) =>
       ["workspace", "organization"].some((scope) =>
         modelId?.startsWith(claudeProviderId(kind, scope as "workspace" | "organization") + "/"),
@@ -1254,16 +1260,23 @@ export async function createAndStartSessionWithOutcome(input: {
                     upstreamModelId: input.turnExecutionPolicy.upstreamModelId,
                   }
                 : {
-                    scope: input.turnExecutionPolicy.providerId.startsWith("organization-")
-                      ? ("organization" as const)
-                      : ("workspace" as const),
+                    // The canonical Claude subscription provider admits like
+                    // the organization list (its admission reads every
+                    // connection serving the workspace).
+                    scope:
+                      input.turnExecutionPolicy.providerId.startsWith("organization-") ||
+                      input.turnExecutionPolicy.providerId === CLAUDE_SUBSCRIPTION_PROVIDER_ID
+                        ? ("organization" as const)
+                        : ("workspace" as const),
                     providerKind:
-                      CLAUDE_CONNECTION_KINDS.find(
-                        (kind) =>
-                          claudeProviderId(kind) === input.turnExecutionPolicy.providerId ||
-                          claudeProviderId(kind, "workspace") ===
-                            input.turnExecutionPolicy.providerId,
-                      ) ??
+                      (isClaudeSubscriptionProviderId(input.turnExecutionPolicy.providerId)
+                        ? ("claude_subscription" as const)
+                        : CLAUDE_CONNECTION_KINDS.find(
+                            (kind) =>
+                              claudeProviderId(kind) === input.turnExecutionPolicy.providerId ||
+                              claudeProviderId(kind, "workspace") ===
+                                input.turnExecutionPolicy.providerId,
+                          )) ??
                       (input.turnExecutionPolicy.providerId.includes("openrouter")
                         ? ("openrouter" as const)
                         : input.turnExecutionPolicy.providerId.endsWith("-opper")
@@ -3493,6 +3506,13 @@ async function createSessionForRequestInFileScope(
     if (!channel) {
       throw new HTTPException(422, {
         message: `unknown channelId: ${payload.channelId}`,
+      });
+    }
+    // Only its owner sees an Only me project, and it holds only their own
+    // Only me chats; the database leaves any other chat out of it.
+    if (channel.visibility === "private" && effectiveVisibility !== "user_private") {
+      throw new HTTPException(422, {
+        message: "An Only me project holds only your own Only me chats.",
       });
     }
     channelId = channel.id;

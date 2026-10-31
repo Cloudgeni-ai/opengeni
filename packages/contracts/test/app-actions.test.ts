@@ -475,7 +475,16 @@ test("the card's second line shows the key values; raw arguments stay in Details
     kind: "generic",
     title: "Invite anna@example.com to your organization as an admin?",
   });
-  expect(review.consequence).toBe("Email: anna@example.com · Role: admin");
+  // The agent's values are labelled as sent, never read as the server's facts.
+  expect(review.consequence).toBe("Sent by the agent: Email: anna@example.com · Role: admin");
+  // Beside the server's facts about its target they're left to Details.
+  expect(
+    toolReviewAction("admin_action_call", invite, {
+      kind: "generic",
+      title: "Remove the Gmail connection?",
+      targetFacts: [{ label: "Added", value: "14 Oct 2026, 07:41 UTC" }],
+    }).consequence,
+  ).toBeUndefined();
   expect(toolReviewFields(invite, undefined, "admin_action_call")).toEqual({
     fields: [],
     moreFields: 0,

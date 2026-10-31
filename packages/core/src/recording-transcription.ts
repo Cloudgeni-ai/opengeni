@@ -482,41 +482,44 @@ export type RecordingTrackWords = {
   echoSpeakers?: readonly string[];
 };
 
+const LETTER = /[\p{L}\p{N}]/gu;
+
 /**
  * Find the person recording among the voices on their own microphone. One
  * voice (or none told apart) makes the whole track theirs. With several, it
  * is the voice that matched their remembered voice, else the one that spoke
- * the most, since the microphone is closest to them; the others are people
- * in the room with them. A voice that was almost all the call heard from the
- * speakers is not a person: it is never picked over a real voice, and what
- * the echo left of it is dropped.
+ * the most (by letters said, which a misplaced word's timing can't inflate),
+ * since the microphone is closest to them; the others are people in the room
+ * with them. A voice that was almost all the call heard from the speakers is
+ * not a person: it is never picked over a real voice, and what the echo left
+ * of it is dropped.
  */
 export function withRecorderVoice(
   track: RecordingTrackWords,
   matchedSpeaker: string | null,
 ): RecordingTrackWords {
   if (!track.recorder) return track;
-  const speech = new Map<string, number>();
+  const said = new Map<string, number>();
   for (const word of track.words) {
     if (!word.text.trim() || word.speaker === null) continue;
-    const length = Math.max(0, word.endMilliseconds - word.startMilliseconds);
-    speech.set(word.speaker, (speech.get(word.speaker) ?? 0) + length);
+    const letters = word.text.match(LETTER)?.length ?? 0;
+    said.set(word.speaker, (said.get(word.speaker) ?? 0) + letters);
   }
   const echoes = new Set(track.echoSpeakers ?? []);
   // When every voice is an echo, the person recording may still be one of
   // them (told apart badly, or silent), so they are all candidates then.
-  const people = [...speech.keys()].filter((candidate) => !echoes.has(candidate));
-  const candidates = people.length > 0 ? people : [...speech.keys()];
+  const people = [...said.keys()].filter((candidate) => !echoes.has(candidate));
+  const candidates = people.length > 0 ? people : [...said.keys()];
   let speaker: string | null = null;
-  if (speech.size > 1) {
-    if (matchedSpeaker !== null && speech.has(matchedSpeaker)) {
+  if (said.size > 1) {
+    if (matchedSpeaker !== null && said.has(matchedSpeaker)) {
       speaker = matchedSpeaker;
     } else {
       let most = -1;
       for (const candidate of candidates) {
-        const length = speech.get(candidate)!;
-        if (length > most) {
-          most = length;
+        const letters = said.get(candidate)!;
+        if (letters > most) {
+          most = letters;
           speaker = candidate;
         }
       }
@@ -947,10 +950,15 @@ export function parseElevenLabsTranscript(body: unknown): RecordingTranscription
 
 function elevenLabsError(
   status: number,
-  detail: string,
+  failure: { detail: string; outOfCredit: boolean },
   action = "transcribe this audio",
 ): RecordingTranscriptionError {
+  const { detail } = failure;
   const message = `ElevenLabs could not ${action} (HTTP ${status}${detail ? `: ${detail}` : ""})`;
+  // An empty balance comes back as 401, like a wrong key; only its body tells them apart.
+  if (status === 402 || failure.outOfCredit) {
+    return new RecordingTranscriptionError(message, "quota_exceeded", false);
+  }
   if (status === 401 || status === 403) {
     return new RecordingTranscriptionError(message, "unauthorized", false);
   }
@@ -958,7 +966,6 @@ function elevenLabsError(
   if (status === 400 || status === 415 || status === 422) {
     return new RecordingTranscriptionError(message, "invalid_audio", false);
   }
-  if (status === 402) return new RecordingTranscriptionError(message, "quota_exceeded", false);
   if (status === 429) return new RecordingTranscriptionError(message, "rate_limited", true);
   if (status >= 500) return new RecordingTranscriptionError(message, "unavailable", true);
   return new RecordingTranscriptionError(message, "provider", false);
@@ -970,14 +977,54 @@ function elevenLabsApiKey(credentials: RecordingTranscriptionCredentials | null)
   throw new RecordingTranscriptionError("ElevenLabs needs an API key", "unauthorized", false);
 }
 
-async function errorDetail(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as { detail?: { message?: unknown; status?: unknown } };
-    const message = body.detail?.message ?? body.detail?.status;
-    return typeof message === "string" ? message.slice(0, 300) : "";
-  } catch {
-    return "";
+async function elevenLabsFailure(
+  response: Response,
+): Promise<{ detail: string; outOfCredit: boolean }> {
+  const body: unknown = await response.json().catch(() => null);
+  const detail =
+    body && typeof body === "object" ? (body as { detail?: unknown }).detail : undefined;
+  const fields =
+    detail && typeof detail === "object" ? (detail as { message?: unknown; status?: unknown }) : {};
+  const message = typeof detail === "string" ? detail : (fields.message ?? fields.status);
+  return {
+    detail: typeof message === "string" ? message.slice(0, 300) : "",
+    outOfCredit: transcriptionProviderOutOfCredit(body),
+  };
+}
+
+/** Codes providers put in an error body when the account has run out of credit or quota. */
+const OUT_OF_CREDIT_CODES = new Set([
+  "quota_exceeded",
+  "insufficient_credits",
+  "insufficient_quota",
+  "payment_required",
+]);
+/** How providers say it where their error code is generic. */
+const OUT_OF_CREDIT_TEXT =
+  /out of call volume quota|exceeded your current quota|exceeds your quota|insufficient (?:credits|quota)/iu;
+
+/**
+ * Whether a provider's error body says its account has run out of credit or
+ * quota, rather than that its key is wrong or it is busy. Providers don't
+ * agree on a status for it: ElevenLabs answers an empty balance with 401 and
+ * `quota_exceeded`, OpenAI with 429 and `insufficient_quota`, Azure's free
+ * tier with 403 and "Out of call volume quota". Reads a JSON body, its
+ * `detail` or `error` object or string, or plain text.
+ */
+export function transcriptionProviderOutOfCredit(body: unknown): boolean {
+  if (typeof body === "string") return OUT_OF_CREDIT_TEXT.test(body);
+  if (!body || typeof body !== "object") return false;
+  for (const part of [(body as { detail?: unknown }).detail, (body as { error?: unknown }).error]) {
+    if (typeof part === "string" && OUT_OF_CREDIT_TEXT.test(part)) return true;
+    if (!part || typeof part !== "object") continue;
+    const fields = part as Record<string, unknown>;
+    for (const key of ["status", "code", "type"]) {
+      const value = fields[key];
+      if (typeof value === "string" && OUT_OF_CREDIT_CODES.has(value.toLowerCase())) return true;
+    }
+    if (typeof fields.message === "string" && OUT_OF_CREDIT_TEXT.test(fields.message)) return true;
   }
+  return false;
 }
 
 /** ElevenLabs Scribe, using the workspace's or organization's own ElevenLabs key. */
@@ -1027,7 +1074,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
       if (!response.ok) {
         throw elevenLabsError(
           response.status,
-          await errorDetail(response),
+          await elevenLabsFailure(response),
           "start a live transcript",
         );
       }
@@ -1088,7 +1135,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
         if (input.signal?.aborted) throw error;
         throw new RecordingTranscriptionError("Could not reach ElevenLabs", "network", true);
       }
-      if (!response.ok) throw elevenLabsError(response.status, await errorDetail(response));
+      if (!response.ok) throw elevenLabsError(response.status, await elevenLabsFailure(response));
       return parseElevenLabsTranscript(await response.json());
     },
   };

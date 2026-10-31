@@ -88,6 +88,8 @@ describe("database foundation boundary", () => {
       "runtime-posture-cli.ts",
       // Loaded only by migrate.ts; the root does not re-export it.
       "interrupted-turn-retirement-migration.ts",
+      // Its own subpath (@opengeni/db/app-action-targets); the root does not import it.
+      "app-action-targets.ts",
     ]);
 
     const offenders: string[] = [];

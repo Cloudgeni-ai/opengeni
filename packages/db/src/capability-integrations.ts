@@ -32,6 +32,7 @@ import { connectionScopeKey } from "./connection-scopes";
 import { withOrganizationIntegrationPolicyFence } from "./organization-integration-policy";
 import {
   ensureIntegrationFacetDefinition,
+  IntegrationChangeRequiresAdminError,
   integrationBindingKey,
   integrationDefinitionHasBindingOwner,
   integrationRuntimeKey,
@@ -157,6 +158,12 @@ export type InstallApiIntegrationInput = {
   facetDefinitions?: readonly ApiIntegrationFacetDefinition[];
   revision: StoredApiIntegrationRevision;
   owner?: ApiIntegrationOwner;
+  /**
+   * A member's add (no integration management): create only. An instance that
+   * is already set up, or a new revision that would move the other instances,
+   * throws {@link IntegrationChangeRequiresAdminError} inside the transaction.
+   */
+  memberCreate?: boolean;
 };
 
 export type InstalledApiIntegration = {
@@ -285,11 +292,17 @@ export async function installApiIntegration(
     snapshot.definitionProvenance === "curated"
       ? snapshot.definitionId
       : `custom:${snapshot.protocol}`;
-  return withOrganizationIntegrationPolicyFence(db, snapshot, (tx, policy) =>
-    installApiIntegrationInScope(tx, snapshot, () =>
+  return withOrganizationIntegrationPolicyFence(db, snapshot, (tx, policy) => {
+    // Re-checked under the policy fence: the organization may have reserved
+    // turning integrations on for admins since the route checked.
+    if (snapshot.memberCreate && policy.personalIntegrationSetup !== "members")
+      throw new IntegrationChangeRequiresAdminError(
+        "Your organization lets only admins turn on integrations",
+      );
+    return installApiIntegrationInScope(tx, snapshot, () =>
       assertOrganizationIntegrationAllowed(policy, key),
-    ),
-  );
+    );
+  });
 }
 
 async function installApiIntegrationInScope(
@@ -523,6 +536,13 @@ async function installApiIntegrationInScope(
           .for("update")
           .limit(1);
         const existingPluginInstallation = pluginInstallation;
+        // A member never moves the instances already set up to a new revision.
+        if (
+          input.memberCreate &&
+          pluginInstallation?.status === "active" &&
+          pluginInstallation.pluginVersionId !== pluginVersion.id
+        )
+          throw new IntegrationChangeRequiresAdminError();
         const oldFacetInstallations = pluginInstallation
           ? await installedFacetRows(tx as unknown as Database, pluginInstallation.id)
           : [];
@@ -675,6 +695,19 @@ async function installApiIntegrationInScope(
         const bindingOwners = previousBinding
           ? await listIntegrationFacetBindingOwners(tx as unknown as Database, previousBinding.id)
           : [];
+        // A member never changes an instance that is already set up. The one
+        // exception is the same plugin installation resuming its own install.
+        if (
+          input.memberCreate &&
+          previousBinding?.status === "active" &&
+          !(
+            owner.kind === "plugin" &&
+            bindingOwners.some(
+              (candidate) => candidate.kind === owner.kind && candidate.id === owner.id,
+            )
+          )
+        )
+          throw new IntegrationChangeRequiresAdminError();
         const componentOwners = await tx
           .select()
           .from(schema.capabilityComponentOwners)

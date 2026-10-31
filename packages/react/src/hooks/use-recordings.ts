@@ -2,6 +2,7 @@ import type {
   CreateRecordingPersonRequest,
   ListRecordingModelsResponse,
   Recording,
+  RecordingCreateTitleSource,
   RecordingLiveSegment,
   RecordingNote,
   RecordingNoteKind,
@@ -162,7 +163,10 @@ export function useRecordingsClient(options: RecordingsClientOverride = {}): {
 // --- Capture -------------------------------------------------------------------
 
 export type UseRecorderOptions = RecordingsClientOverride & {
+  /** Leave it out unless the person gave one; Opengeni then names the meeting. */
   title?: string;
+  /** `app` when `title` is your app's guess, such as "Zoom meeting", for Opengeni to replace. */
+  titleSource?: RecordingCreateTitleSource;
   visibility?: RecordingVisibility;
   /** Your own id for what this recording belongs to, to find it again with `useRecordings`. */
   externalRef?: string;
@@ -228,6 +232,7 @@ export type UseRecorderResult = RecorderSnapshot & {
     overrides?: Pick<
       UseRecorderOptions,
       | "title"
+      | "titleSource"
       | "systemAudio"
       | "microphone"
       | "visibility"
@@ -406,6 +411,10 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       const merged = {
         ...optionsRef.current,
         ...overrides,
+        // A title given at start is the person's unless the start says otherwise.
+        ...(overrides.title !== undefined && overrides.titleSource === undefined
+          ? { titleSource: undefined }
+          : {}),
         // A start can set one transcription option, such as the language, and
         // keep the rest the hook was given.
         ...(overrides.transcription
@@ -421,6 +430,7 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
         store: store(),
         uploader: uploader(),
         ...(merged.title ? { title: merged.title } : {}),
+        ...(merged.title && merged.titleSource ? { titleSource: merged.titleSource } : {}),
         ...(merged.visibility ? { visibility: merged.visibility } : {}),
         ...(merged.externalRef ? { externalRef: merged.externalRef } : {}),
         ...(merged.metadata ? { metadata: merged.metadata as never } : {}),

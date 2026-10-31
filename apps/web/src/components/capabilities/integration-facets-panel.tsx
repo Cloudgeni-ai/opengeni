@@ -650,9 +650,9 @@ function FacetStatusBadge({
       className={cn(
         "text-2xs",
         status === "active"
-          ? "border-success/30 bg-success/5 text-success"
+          ? "border-status-success/30 bg-status-success/5 text-status-success"
           : status === "needs_attention"
-            ? "border-warning/30 text-warning"
+            ? "border-status-waiting/30 text-status-waiting"
             : "text-fg-subtle",
       )}
     >
@@ -720,7 +720,7 @@ function FacetEditorDialog({
           <form className="grid gap-4" onSubmit={onSubmit}>
             {fields.length === 0 ? (
               unsupportedRequiredFields.length > 0 ? (
-                <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm leading-6 text-fg-muted">
+                <div className="rounded-lg border border-status-waiting/30 bg-status-waiting/10 p-4 text-sm leading-6 text-fg-muted">
                   This provider needs a dedicated setup flow for:{" "}
                   {unsupportedRequiredFields.join(", ")}. The generic editor will not submit an
                   incomplete configuration.

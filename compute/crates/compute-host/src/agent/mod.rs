@@ -483,10 +483,12 @@ enum Event<V> {
         request: BalloonRequest,
     },
     /// The guest of `id` answered the shrink of `request` (ADR 24), or
-    /// could not be asked or did not answer: `None`.
+    /// could not be asked or did not answer: `None`. `cause` is why it was
+    /// asked.
     Shrunk {
         id: Id,
         request: ShrinkRequest,
+        cause: compute_core::ShrinkCause,
         answer: Option<crate::restore_notice::Shrunk>,
     },
     /// A ready sandbox's fill ended.

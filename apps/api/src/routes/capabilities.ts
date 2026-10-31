@@ -14,9 +14,12 @@ import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/perso
 import type { Hono } from "hono";
 import {
   ConnectorConnectionRequiredError,
+  hasIntegrationAdminPermission,
+  hasIntegrationSetupPermission,
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  requireIntegrationSetupAuthorization,
   getConnectorToolPermissions,
   updateConnectorToolPermissions,
   getSessionMcpToolPermissions,
@@ -38,6 +41,7 @@ import { z } from "zod";
 import { discoverablePlugins } from "../integrations/marketplace-plugin-catalog";
 import { inspectMcpAuthentication } from "../integrations/oauth-client";
 import { parseRequestJson } from "../http/request-body";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 
 export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings } = deps;
@@ -89,25 +93,40 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    // Lets clients offer member setup only when the organization allows it.
+    // The routes enforce it either way, so a failed read just omits it.
+    const memberIntegrationSetup = await withOrganizationIntegrationPolicyFence(
+      db,
+      { accountId: grant.accountId, workspaceId },
+      async (_tx, policy) => policy.personalIntegrationSetup,
+    ).catch(() => undefined);
     return c.json(
-      CapabilityCatalogResponse.parse(
-        await buildCapabilityCatalog({
+      CapabilityCatalogResponse.parse({
+        ...(await buildCapabilityCatalog({
           db,
           workspaceId,
           settings,
           subjectId: grant.subjectId,
           accountId: grant.accountId,
-        }),
-      ),
+        })),
+        ...(memberIntegrationSetup ? { memberIntegrationSetup } : {}),
+      }),
     );
   });
 
   app.post("/v1/workspaces/:workspaceId/capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
     const payload = await parseRequestJson(c, CreateCapabilityCatalogItemRequest);
     return c.json(
-      await createCatalogItem({ db, accountId: grant.accountId, workspaceId, payload }),
+      await createCatalogItem({
+        db,
+        accountId: grant.accountId,
+        workspaceId,
+        payload,
+        // Members add new servers; only admins change existing ones.
+        ...(hasIntegrationAdminPermission(grant) ? {} : { memberCreate: { settings } }),
+      }),
       201,
     );
   });
@@ -222,23 +241,23 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/capabilities/:capabilityId/enable", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId);
-    // Integration admins enable anything. The personal setup permission turns
-    // a reviewed OAuth integration on for personal accounts, create-only.
-    const personalSetup = !hasPermission(
-      grant.permissions,
-      "capabilities:manage",
-      grant.permissionMode,
-    );
+    // Integration admins enable or change anything. Members turn on any
+    // integration that is not on yet. The personal setup permission turns a
+    // reviewed OAuth integration on for personal accounts. Both are create-only.
+    const memberSetup =
+      !hasIntegrationAdminPermission(grant) && hasIntegrationSetupPermission(grant);
+    const personalSetup = !hasIntegrationSetupPermission(grant);
     if (
       personalSetup &&
       !hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode)
     )
-      throw new MissingPermissionRefusal("capabilities:manage");
+      throw new MissingPermissionRefusal("connections:write");
     const payload = await parseRequestJson(c, EnableCapabilityRequest);
     const installation = await enableCapability({
       db,
       grant,
       ...(personalSetup ? { personalSetup: true } : {}),
+      ...(memberSetup ? { memberSetup: true } : {}),
       accountId: grant.accountId,
       workspaceId,
       settings,

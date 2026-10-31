@@ -155,8 +155,8 @@ describe("catalog connected accounts", () => {
     for (const label of [
       "member@example.test · Community",
       "member · Team",
-      "Only me",
-      "This workspace",
+      "Yours",
+      "Shared",
       "Connected",
       "Needs reconnect",
       "Failed",
@@ -465,10 +465,10 @@ describe("catalog connected accounts", () => {
       const rows = [...view.container.querySelectorAll("li")].map((row) => row.textContent);
       expect(rows[0]).toContain("mia@work.test");
       expect(rows[0]).not.toContain("From");
-      expect(rows[1]).toContain("Only me · From Personal workspace");
-      expect(rows[2]).toContain("Only me · From another workspace");
-      expect(rows[3]).toContain("From another workspace");
-      expect(rows[3]).not.toContain("This workspace");
+      expect(rows[1]).toContain("Yours · From Personal workspace");
+      expect(rows[2]).toContain("Yours · From another workspace");
+      expect(rows[3]).toContain("Shared · From another workspace");
+      expect(rows[3]).not.toContain("Yours");
       // Her own account is removed or reconnected where it was added, so it is
       // offered when she may manage her accounts there. A shared account from
       // another workspace is that workspace's to manage.
@@ -604,6 +604,63 @@ describe("catalog connected accounts", () => {
         { ...enabled, connectionRef: null },
       ] as CapabilityCatalogItem[])
         expect(catalogAddAccountOwnership(blocked, false)).toBeNull();
+    });
+
+    test("a service that can't identify accounts offers no Add, and says why", async () => {
+      const mine = account({ accountIdentity: "single", metadata: { email: "me@example.test" } });
+      const view = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[mine]}
+          management={management({ addOwnership: "personal" })}
+        />,
+      );
+      expect(buttons(view.container)).toEqual(["Remove me@example.test"]);
+      expect(view.container.textContent).toContain(
+        "This service doesn't tell us which account you signed in with, so you can connect one account. Disconnect it to use a different one.",
+      );
+      await view.unmount();
+
+      // Someone else's personal account is invisible to the rule.
+      const theirs = account({ subjectId: "someone-else", accountIdentity: "single" });
+      const shared = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[theirs]}
+          management={management({ addOwnership: "workspace" })}
+        />,
+      );
+      expect(buttons(shared.container)).toEqual(["Add account"]);
+      await shared.unmount();
+    });
+
+    test("an account from before identity is reconnected once before another is added", async () => {
+      const legacy = account({
+        accountIdentity: "reconnect",
+        metadata: { email: "me@example.test" },
+      });
+      const actions = management({ addOwnership: "personal" });
+      const view = await render(
+        <CatalogConnectedAccounts item={item} connections={[legacy]} management={actions} />,
+      );
+      expect(buttons(view.container)).toEqual([
+        "Reconnect me@example.test",
+        "Remove me@example.test",
+      ]);
+      expect(view.container.textContent).toContain(
+        "Reconnect your existing account once, then add another.",
+      );
+      await view.unmount();
+
+      const verified = await render(
+        <CatalogConnectedAccounts
+          item={item}
+          connections={[{ ...legacy, accountIdentity: "verified" }]}
+          management={actions}
+        />,
+      );
+      expect(buttons(verified.container)).toEqual(["Add account", "Remove me@example.test"]);
+      await verified.unmount();
     });
   });
 });
