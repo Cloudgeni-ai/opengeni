@@ -25,7 +25,7 @@ test("ordinary integration guidance is discoverable on every compute shape witho
         },
       );
       const instructions = persistentAgentInstructionInspectionFor(agent).composed;
-      expect(instructions.includes('"id":"builtin:opengeni-client"')).toBe(
+      expect(instructions.includes('{"name":"opengeni-client"')).toBe(
         bundledSkillIds === undefined,
       );
       expect(instructions).not.toContain("## Choose the product experience before the transport");

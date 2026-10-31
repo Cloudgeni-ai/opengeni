@@ -172,6 +172,7 @@ export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
+export * from "./billing-origin";
 export * from "./desktop-app";
 export * from "./event-triggers";
 export * from "./automation-templates";
@@ -6608,6 +6609,18 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
     updatedAt: primitives.string,
     /** General credits, including unrestricted legacy grants. May be negative after use. */
     generalBalanceMicros: z.number().int().optional(),
+    /**
+     * Credits: general credit outside the monthly plan allowance (top-ups,
+     * operator and unrestricted legacy grants). API usage spends only this.
+     * May be negative after use.
+     */
+    creditsMicros: z.number().int().optional(),
+    /**
+     * Credit debt that API work ran up (negative credits, up to the account's
+     * API spending). Plan credit never repays it, so app use still sees the
+     * whole plan credit. Absent means none.
+     */
+    apiDebtMicros: primitives.nonnegativeInteger.optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
     heldCreditMicros: primitives.nonnegativeInteger.optional(),
     heldGeneralCreditMicros: primitives.nonnegativeInteger.optional(),

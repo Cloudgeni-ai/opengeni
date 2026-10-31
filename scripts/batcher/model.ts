@@ -6,29 +6,40 @@ export const PRIORITY_LABEL = "queue-priority";
 /** Marks the members of the running batch; the batcher keeps it in sync every pass. */
 export const IN_BATCH_LABEL = "in-batch";
 export const VERSION_BRANCH = "changeset-release/main";
+/** Deployed history: its migrations may already have run, so they never move. */
+export const PRODUCTION_BRANCH = "production";
 export const BATCH_PREFIX = "batch/";
 export const BUILD_PREFIX = "batch-build/";
 export const CI_WORKFLOW = ".github/workflows/ci.yml";
 export const MANIFEST_TRAILER = "Batch-Manifest: ";
 
 /** Changes to CI or to the batcher itself are tested and landed alone. */
-export const CONTROL_PLANE = [/^\.github\//, /^scripts\/ci\//, /^scripts\/batcher\//];
+export const CONTROL_PLANE = [
+  /^\.github\//,
+  /^scripts\/ci\//,
+  /^scripts\/batcher\//,
+  // The batcher plans migration renumbering with it.
+  /^scripts\/migration-ordinals\.ts$/,
+];
 
 /**
  * Directories whose files carry a number that must be unique, such as database
  * migrations. Two changes that add the same number merge cleanly in Git but
- * fail CI together, so the batcher compares numbers before it tests anything.
+ * fail CI together, so the batcher compares numbers before it tests anything. A
+ * directory with `renumber` has files the batcher moves to a free number itself.
  */
 export const NUMBERED_FILES: {
   directory: string;
   pattern: RegExp;
   fix: (file: string) => string;
+  renumber?: true;
 }[] = [
   {
     directory: "packages/db/drizzle/",
     pattern: /^(\d+)_[^/]+\.sql$/,
     fix: (file) =>
       `Merge main into the branch and move it to the next free number: \`bun scripts/renumber-migration.ts ${file.replace(/\.sql$/, "")} --next\`.`,
+    renumber: true,
   },
 ];
 
@@ -52,20 +63,36 @@ export function numberedFiles(paths: string[]): NumberedFile[] {
   return found;
 }
 
+/** A change's added numbered files whose numbers main already uses for another file. */
+export function takenNumbers(
+  added: NumberedFile[],
+  onMain: NumberedFile[],
+): { file: NumberedFile; other: string }[] {
+  const taken = new Map(onMain.map((file) => [file.slot, file.path]));
+  return added.flatMap((file) => {
+    const other = taken.get(file.slot);
+    return other === undefined || other === file.path ? [] : [{ file, other }];
+  });
+}
+
+/** Whether the batcher moves this numbered file to a free number itself. */
+export function renumberable(file: NumberedFile): boolean {
+  return NUMBERED_FILES.some(
+    ({ directory, renumber }) => renumber === true && file.path.startsWith(directory),
+  );
+}
+
 /**
  * Why a change's added numbered files cannot land on main: the first one whose
  * number main already uses for another file, or null.
  */
 export function numberTaken(added: NumberedFile[], onMain: NumberedFile[]): string | null {
-  const taken = new Map(onMain.map((file) => [file.slot, file.path]));
-  for (const file of added) {
-    const other = taken.get(file.slot);
-    if (other === undefined || other === file.path) continue;
-    const name = (path: string) => path.slice(path.lastIndexOf("/") + 1);
-    const entry = NUMBERED_FILES.find(({ directory }) => file.path.startsWith(directory))!;
-    return `\`${name(file.path)}\` uses number ${file.number}, which main already uses for \`${name(other)}\`. ${entry.fix(name(file.path))}`;
-  }
-  return null;
+  const [first] = takenNumbers(added, onMain);
+  if (!first) return null;
+  const { file, other } = first;
+  const name = (path: string) => path.slice(path.lastIndexOf("/") + 1);
+  const entry = NUMBERED_FILES.find(({ directory }) => file.path.startsWith(directory))!;
+  return `\`${name(file.path)}\` uses number ${file.number}, which main already uses for \`${name(other)}\`. ${entry.fix(name(file.path))}`;
 }
 
 export interface Settings {
@@ -90,12 +117,33 @@ export interface QueuedPull {
   queuedAt: number;
   /** When PR CI passed on this exact head, or null while it has not. */
   greenAt: number | null;
-  /** Why the PR cannot land on main as it is (a Git conflict, a number main already uses), or null. */
+  /**
+   * Why the PR cannot land on main as it is (a Git conflict, a number main
+   * already uses, a Version PR whose PR CI failed), or null.
+   */
   conflict: string | null;
+  /**
+   * Added files whose numbers main already uses, which the batcher moves to
+   * free numbers on the PR's branch before testing it; empty when none.
+   */
+  renumber: string[];
+  /**
+   * It conflicts with main. The batcher merges main into its branch and
+   * regenerates the generated files that conflict, or ejects it when other
+   * files conflict too; it is not tested meanwhile.
+   */
+  regenerate: boolean;
   /** Numbered slots its added files use; two members of one batch never share one. */
   slots: string[];
   priority: boolean;
   version: boolean;
+  /**
+   * A Version PR that main has overtaken in files it also changes. It cannot
+   * land as reviewed until it is regenerated; it keeps holding the queue.
+   */
+  behind: boolean;
+  /** A Version PR's head commit time (epoch ms): its notices are looked up from then. */
+  headAt?: number;
   controlPlane: boolean;
 }
 
@@ -132,6 +180,11 @@ export interface Batch {
   manifest: Manifest;
   createdAt: number;
   runs: BatchRun[];
+  /**
+   * Members that pushed a new head whose merge at their place in the candidate
+   * gives exactly the tree this batch tests: PR number to that new head.
+   */
+  sameTree?: Record<number, string>;
 }
 
 export interface Observation {
@@ -152,7 +205,11 @@ export type Action =
   | { kind: "retry"; batch: Batch; runs: BatchRun[] }
   | { kind: "land"; batch: Batch }
   | { kind: "eject"; number: number; reason: string }
+  | { kind: "renumber"; number: number; paths: string[] }
+  | { kind: "regenerate"; number: number }
   | { kind: "build"; members: QueuedPull[]; pending: number[][] }
+  /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
+  | { kind: "hold"; number: number; headSha: string; headAt: number; behind: boolean }
   | { kind: "wait"; until: number };
 
 export type Verdict =
@@ -193,11 +250,13 @@ export function readyAt(pull: QueuedPull): number {
 }
 
 /**
- * Choose the next batch. Priority and Version PRs go first; a failed batch's
- * remaining halves come next; then ready PRs in queue order. CI and batcher
- * changes run alone. A priority PR already in a failed batch's halves keeps
- * its place there: building every priority PR again would retest the batch
- * that just failed, unsplit, on every pass.
+ * Choose the next batch. A queued Version PR holds the queue: it builds alone
+ * once it is green and current with main, and nothing else builds before it
+ * lands, so a release operator gets a stable main. Then priority PRs go
+ * first; a failed batch's remaining halves come next; then ready PRs in queue
+ * order. CI and batcher changes run alone. A priority PR already in a failed
+ * batch's halves keeps its place there: building every priority PR again
+ * would retest the batch that just failed, unsplit, on every pass.
  */
 export function nextBatch(
   pulls: QueuedPull[],
@@ -205,12 +264,27 @@ export function nextBatch(
   now: number,
   settings: Settings,
 ): Action | null {
-  const ready = pulls.filter((p) => p.greenAt !== null && p.conflict === null).sort(fifo);
+  const version = pulls.filter((p) => p.version && p.conflict === null).sort(fifo)[0];
+  // The batcher never renumbers a Version PR, so green and current is enough.
+  if (version)
+    return version.greenAt !== null && !version.behind
+      ? { kind: "build", members: [version], pending }
+      : {
+          kind: "hold",
+          number: version.number,
+          headSha: version.headSha,
+          headAt: version.headAt ?? 0,
+          behind: version.behind,
+        };
+
+  const ready = pulls
+    .filter((p) => p.greenAt !== null && p.conflict === null && !p.renumber.length && !p.regenerate)
+    .sort(fifo);
   if (!ready.length) return null;
-  const alone = (p: QueuedPull) => p.version || p.controlPlane;
+  const alone = (p: QueuedPull) => p.controlPlane;
 
   const bisecting = new Set(pending.flat());
-  const urgent = ready.filter((p) => (p.priority || p.version) && !bisecting.has(p.number));
+  const urgent = ready.filter((p) => p.priority && !bisecting.has(p.number));
   if (urgent.length) {
     const first = urgent[0]!;
     const members = alone(first)
@@ -305,6 +379,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
   for (const pull of pulls)
     if (pull.conflict !== null)
       actions.push({ kind: "eject", number: pull.number, reason: pull.conflict });
+    else if (pull.regenerate) actions.push({ kind: "regenerate", number: pull.number });
+    else if (pull.renumber.length)
+      actions.push({ kind: "renumber", number: pull.number, paths: pull.renumber });
 
   const batch = runningBatch(observation.batches);
   for (const extra of observation.batches.filter((b) => b !== batch))
@@ -315,7 +392,11 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     const numbers = manifest.members.map((m) => m.number);
     // An interrupted batch is tested again first, keeping any bisection.
     pending = [numbers, ...manifest.pending];
-    const left = manifest.members.find((m) => byNumber.get(m.number)?.headSha !== m.head);
+    // A new head that tests to the same tree (main merged in again, a rebase)
+    // changes nothing this batch tests, so it does not restart it.
+    const left = manifest.members.find(
+      (m) => byNumber.get(m.number)?.headSha !== (batch.sameTree?.[m.number] ?? m.head),
+    );
     // A priority PR goes into the next batch; it never cancels a running one.
     let reason: string | null = null;
     let changed: number | undefined;
