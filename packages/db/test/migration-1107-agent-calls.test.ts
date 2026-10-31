@@ -450,11 +450,11 @@ describe("1107 agent calls", () => {
   });
 });
 
-describe("1142 phones an embedding product rings", () => {
+describe("1143 phones an embedding product rings", () => {
   test("is a rolling migration", async () => {
     if (!client) return;
     const source = await Bun.file(
-      new URL("../drizzle/1142_agent_call_host_phones.sql", import.meta.url),
+      new URL("../drizzle/1143_agent_call_host_phones.sql", import.meta.url),
     ).text();
     expect(source).toStartWith("-- deployment-mode: rolling");
   });

@@ -84,7 +84,7 @@ A product that embeds Opengeni rings its own app with its own push credentials:
 2. Its backend, acting as the person (`asUser`), states how many of their
    phones it rings: `setAgentCallHostPhones(workspaceId, { phones, teammates })`
    (`PUT /v1/workspaces/:ws/agent-call-phones`, `phones: 0` removes them). The
-   row is per person per organization (`agent_call_host_phones`, 1142). Agents
+   row is per person per organization (`agent_call_host_phones`, 1143). Agents
    count these phones alongside the person's Opengeni app phones, so `no_phone`
    only means nobody can ring them.
 3. The backend subscribes a workspace webhook to `session.agentCall.ringing`
