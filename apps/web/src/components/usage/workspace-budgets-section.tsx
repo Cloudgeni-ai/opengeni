@@ -112,7 +112,7 @@ export function WorkspaceBudgetsSection({
       <Section title="Workspace budgets" description={description}>
         <EmptyState
           title="No shared workspaces yet"
-          description="Budgets apply to shared workspaces. Personal workspaces use the organization's credits directly."
+          description="Budgets apply to shared workspaces."
           className="py-6"
         />
       </Section>

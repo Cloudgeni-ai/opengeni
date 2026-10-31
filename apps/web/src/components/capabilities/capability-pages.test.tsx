@@ -182,6 +182,7 @@ describe("CatalogItemPage", () => {
     socialConnections: [],
     canManageSocial: true,
     canManageSkills: true,
+    canTurnOff: true,
     onBack: () => {},
   };
 
@@ -405,7 +406,7 @@ describe("CatalogItemPage", () => {
     await view.unmount();
   });
 
-  test("a member asks an admin to turn on a custom server before anything is signed in", async () => {
+  test("a member gets the admin setup page for a custom server that is not on yet", async () => {
     const custom = item({
       id: "mcp:team-tools",
       source: "manual",
@@ -434,10 +435,9 @@ describe("CatalogItemPage", () => {
       />,
     );
     const text = visibleText(view.container);
-    expect(text).toContain("Ask an admin to turn on Team tools");
-    expect(text).not.toContain("You choose when you connect");
-    expect(buttons(view.container, "Connect Team tools")).toHaveLength(0);
-    expect(onConnectAccount).not.toHaveBeenCalled();
+    expect(text).not.toContain("Ask an admin to turn on Team tools");
+    // The same page an admin gets: the member chooses who can use it when connecting.
+    expect(text).toContain("You choose when you connect");
     await view.unmount();
   });
 

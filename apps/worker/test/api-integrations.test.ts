@@ -245,7 +245,7 @@ describe("installed API Integration worker adapters", () => {
     try {
       for (const [index, server] of prepared.mcpServers.entries()) {
         const [tool] = await server.listTools();
-        expect(tool?.description).toContain(index === 0 ? "Personal: Alice" : "Workspace: Team");
+        expect(tool?.description).toContain(index === 0 ? "Alice · Yours" : "Team · Shared");
         await localMcpServers[index]!.preflightCall!("list_items", {});
         await server.callTool(tool!.name, {});
       }
@@ -272,7 +272,7 @@ describe("installed API Integration worker adapters", () => {
       });
       expect([...labels]).toEqual([...routed.accountLabels]);
       expect(labels.get(bindings[0]!.serverId)).toEqual({
-        model: "Inventory API — Personal: Alice",
+        model: "Inventory API — Alice · Yours",
         connector: "Inventory API",
         providerDomain: item.providerDomain,
         account: "Alice",

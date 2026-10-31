@@ -91,4 +91,49 @@ describe("project naming dialog", () => {
       }
     });
   }
+
+  test("offers Only me only where it is allowed, and says who sees the project", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const chosen: string[] = [];
+    const render = (audience: Parameters<typeof ChannelCreateDialog>[0]["audience"]) =>
+      act(async () =>
+        root.render(
+          <ChannelCreateDialog
+            open
+            name="Plans"
+            busy={false}
+            audience={audience}
+            onNameChange={() => {}}
+            onOpenChange={() => {}}
+            onSubmit={() => {}}
+          />,
+        ),
+      );
+    const dialogText = () => document.querySelector('[role="dialog"]')?.textContent ?? "";
+    try {
+      // Not offered (a Personal workspace, or Only me is off): no choice.
+      await render(undefined);
+      expect(dialogText()).not.toContain("Who can see it");
+      expect(dialogText()).toContain("for everyone in this workspace");
+
+      await render({ value: "workspace", onChange: (value) => chosen.push(value) });
+      expect(dialogText()).toContain("Who can see it");
+      expect(dialogText()).toContain("Everyone in this workspace sees it.");
+      const onlyMe = [...document.querySelectorAll('[role="dialog"] button')].find(
+        (button) => button.textContent === "Only me",
+      ) as HTMLButtonElement;
+      await act(async () => {
+        onlyMe.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(chosen).toEqual(["private"]);
+
+      await render({ value: "private", onChange: () => {} });
+      expect(dialogText()).toContain("Only you see it. It holds your Only me chats and Sites.");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });

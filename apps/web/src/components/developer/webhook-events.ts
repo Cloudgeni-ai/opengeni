@@ -34,6 +34,11 @@ export const WEBHOOK_EVENT_GROUPS: readonly WebhookEventGroup[] = [
         description: "Someone stopped a reply.",
       },
       {
+        type: "turn.superseded",
+        label: "Turn superseded",
+        description: "A new message took over a reply before it finished.",
+      },
+      {
         type: "session.status.changed",
         label: "Status changed",
         description: "A chat started, finished or began waiting.",

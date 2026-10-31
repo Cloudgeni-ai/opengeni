@@ -80,6 +80,10 @@ import {
   verifySlackUserLinkToken,
 } from "../src/integrations/slack-interactions";
 import { assertSlackTaskUploadTarget } from "../src/integrations/slack-task-file-upload";
+import {
+  slackMrkdwnFromMarkdown,
+  slackMrkdwnKeepingClaudeCiteTags,
+} from "../src/integrations/slack-mrkdwn";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const signingMaterial = ["slack", "interaction", crypto.randomUUID()].join("-");
@@ -10314,6 +10318,76 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
       terminal_delivery_state: "completed",
     });
+  });
+
+  test("keeps the formatting an earlier release bound before Claude citation tags were rewritten", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_MRKDWN_CITE_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_MRKDWN_CITE",
+        ts: "1762000000.000002",
+        text: "Is a rollback needed?",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    // Written with an escape so tools acting on the tags leave this file alone.
+    const output =
+      '**Rollback** is not needed: \u003ccite index="1-2">"the deploy was healthy"\u003c/cite>.';
+    const formatted = slackMrkdwnFromMarkdown(output);
+    const earlier = slackMrkdwnKeepingClaudeCiteTags(output);
+    expect(formatted).toBe('*Rollback* is not needed: "the deploy was healthy".');
+    expect(new Set([output, formatted, earlier]).size).toBe(3);
+    value.slack.failuresByText.set("is not needed", { status: 429, retryAfterSeconds: 30 });
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output } },
+    ]);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const attempted = value.slack.postAttempts.at(-1)!;
+    expect(attempted.text).toBe(formatted);
+    const operationId = attempted.clientMessageId!;
+    const digestOf = (text: string) =>
+      createHmac("sha256", environmentsEncryptionKeyBytes(value.deps.settings)!)
+        .update(
+          JSON.stringify({
+            operationId,
+            connectionId: value.connectionId,
+            targetKind: "channel",
+            targetId: attempted.channel,
+            threadTimestamp: attempted.threadTimestamp || null,
+            text,
+            blocks: null,
+          }),
+        )
+        .digest("hex");
+
+    // The claim the previous release would have left: its formatting, which
+    // kept the tags, with the provider call rejected.
+    await shared!.admin`
+      update slack_bot_post_operations set request_digest = ${digestOf(earlier)}
+      where connection_id = ${value.connectionId} and operation_id = ${operationId}`;
+    value.slack.failuresByText.clear();
+    await expireSlackProviderCooldown(value);
+    await shared!.admin`
+      update slack_interactions set delivery_retry_at = now() where id = ${route!.id}`;
+    const postsBefore = value.slack.posts.length;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+
+    // The retry keeps the bound bytes under the same operation, and posts once.
+    expect(value.slack.posts.slice(postsBefore)).toEqual([
+      expect.objectContaining({ text: earlier, clientMessageId: operationId }),
+    ]);
+    const [completed] = await shared!.admin<{ request_digest: string; status: string }[]>`
+      select request_digest, status from slack_bot_post_operations
+      where connection_id = ${value.connectionId} and operation_id = ${operationId}`;
+    expect(completed).toEqual({ request_digest: digestOf(earlier), status: "completed" });
   });
 
   test("posts one bounded pointer card when a worker the human started needs input", async () => {

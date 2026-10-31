@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/capabilities",
-  "version": "6.2.1",
+  "version": "6.3.1",
   "description": "Protocol-neutral capability integration compilers and local MCP adapters for Opengeni.",
   "license": "Apache-2.0",
   "repository": {

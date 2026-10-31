@@ -17,12 +17,15 @@ export function latestGreenMain(
   repository = "Cloudgeni-ai/opengeni",
   api: (path: string) => any = (path) => ghApiJson(path),
   notBefore?: string,
+  /** Only runs on these commits count; others are skipped before their statuses are read. */
+  accept: (sha: string) => boolean = () => true,
 ) {
   for (let page = 1; page <= 10; page++) {
     const runs = api(
       `repos/${repository}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=100&page=${page}${notBefore ? `&created=%3E%3D${encodeURIComponent(notBefore)}` : ""}`,
     ).workflow_runs;
     for (const run of runs) {
+      if (!accept(run.head_sha)) continue;
       const statuses = api(`repos/${repository}/commits/${run.head_sha}/statuses?per_page=100`);
       const status = statuses.find(
         (s: { context: string; state: string; target_url: string; creator?: { login?: string } }) =>
