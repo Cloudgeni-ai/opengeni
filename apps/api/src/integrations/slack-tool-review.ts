@@ -82,17 +82,32 @@ export function slackToolReviewBlocks(
   return blocks;
 }
 
+/** Line breaks, other controls and invisible format characters (joiners kept) read as one space. */
+function oneLine(text: string): string {
+  return text.replace(/(?![\u200c\u200d])\p{Cf}/gu, "").replace(/[\s\p{Cc}\u2028\u2029]+/gu, " ");
+}
+
 function reviewLines(review: ToolActionReview): string[] {
-  return [
-    review.title,
-    review.accountLabel,
-    review.consequence,
-    ...review.effects,
-    ...(review.samples ?? []).map((sample) =>
-      [sample.title, sample.subtitle].filter(Boolean).join(" — "),
-    ),
-    ...review.fields.map((field) => `${field.label}: ${field.preview}`),
-    review.moreFields ? `${review.moreFields} more fields in full details.` : null,
-    review.reason,
-  ].filter((line): line is string => Boolean(line));
+  const fields = review.fields.map((field) => `${field.label}: ${field.preview}`);
+  // An app action's fields are what the server found about its target; they
+  // come right under the question, before anything the agent sent.
+  const serverFacts = review.fields.some((field) => field.path.startsWith("/$target/"));
+  return (
+    [
+      review.title,
+      ...(serverFacts ? fields : []),
+      review.accountLabel,
+      review.consequence,
+      ...review.effects,
+      ...(review.samples ?? []).map((sample) =>
+        [sample.title, sample.subtitle].filter(Boolean).join(" — "),
+      ),
+      ...(serverFacts ? [] : fields),
+      review.moreFields ? `${review.moreFields} more fields in full details.` : null,
+      review.reason,
+    ]
+      .filter((line): line is string => Boolean(line))
+      // One line each, so no value or name can add a line that reads as another.
+      .map(oneLine)
+  );
 }

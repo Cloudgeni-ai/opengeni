@@ -2335,6 +2335,7 @@ export async function runTurnStreamAttempt(
                                 workspaceId: input.workspaceId,
                                 sessionId: input.sessionId,
                                 settings: eventing.modelRunSettings,
+                                cards: eventing.appActionApprovalCards,
                               },
                             ),
                           ),
