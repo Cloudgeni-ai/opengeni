@@ -118,8 +118,12 @@ import {
   type OrganizationAdminSection as OrganizationSettingsSection,
 } from "@opengeni/react/app/lib/organization-admin";
 import {
+  connectorLocation,
+  parseConnectorParam,
+  parseConnectorView,
   parseOrganizationRecordId,
   parseOrganizationView,
+  type ConnectorView,
   type OrganizationView,
 } from "@/lib/organization-route";
 import {
@@ -940,13 +944,14 @@ const workspaceOrganizationRoute = createRoute({
     checkoutSession?: string;
     section?: OrganizationAdminSection;
     account?: string;
-    view?: ModelsView | OrganizationView | DeveloperView;
+    view?: ModelsView | OrganizationView | DeveloperView | ConnectorView;
     person?: string;
     invitation?: string;
     workspace?: string;
     webhook?: string;
     agent?: string;
     serviceAccount?: string;
+    connector?: string;
   } & InsightsRawSearch &
     ReturnToSearch => {
     const checkout = parseCheckoutOutcome(search);
@@ -968,9 +973,13 @@ const workspaceOrganizationRoute = createRoute({
           ? parseOrganizationView(search.view)
           : section === "developer"
             ? (parseOrganizationView(search.view) ?? parseDeveloperView(search.view))
-            : undefined;
+            : section === "integrations"
+              ? parseConnectorView(search.view)
+              : undefined;
     const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
     const agent = section === "agents" ? parseAgentParam(search.agent) : undefined;
+    const connector =
+      section === "integrations" ? parseConnectorParam(search.connector) : undefined;
     const serviceAccount =
       section === "developer" ? parseServiceAccountParam(search.serviceAccount) : undefined;
     const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
@@ -995,6 +1004,7 @@ const workspaceOrganizationRoute = createRoute({
       ...(webhook ? { webhook } : {}),
       ...(agent ? { agent } : {}),
       ...(serviceAccount ? { serviceAccount } : {}),
+      ...(connector ? { connector } : {}),
       ...(section === "insights"
         ? Object.fromEntries(
             INSIGHTS_SEARCH_KEYS.flatMap((key) =>
@@ -1550,6 +1560,7 @@ function Organization() {
     webhook,
     agent,
     serviceAccount,
+    connector,
     from,
     fromLabel,
   } = workspaceOrganizationRoute.useSearch();
@@ -1574,6 +1585,11 @@ function Organization() {
           : undefined
       }
       connectedAgent={page === "agents" ? agent : undefined}
+      connectors={
+        page === "integrations"
+          ? connectorLocation({ connector, view: parseConnectorView(view) })
+          : undefined
+      }
       person={person}
       invitation={invitation}
       workspace={workspace}

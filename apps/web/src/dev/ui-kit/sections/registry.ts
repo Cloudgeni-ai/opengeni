@@ -138,6 +138,7 @@ export const SECTION_KEYS = [
   "page-dictation",
   "page-knowledge",
   "page-org-people",
+  "page-org-connectors",
   "page-eu-only",
 ] as const;
 
@@ -1021,6 +1022,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Everyone in Acme Robotics, with the person page.",
     usedOn: "Organization settings",
     load: () => import("./page-org-people"),
+  },
+  {
+    key: "page-org-connectors",
+    group: "Pages",
+    title: "Organization connectors",
+    purpose:
+      "Connectors an organization adds once for the workspaces it chooses: how people sign in, where each works, turning it off and replacing its key.",
+    usedOn: "Organization settings > Integrations",
+    load: () => import("./page-org-connectors"),
   },
   {
     key: "page-eu-only",
