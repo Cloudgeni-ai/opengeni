@@ -3373,10 +3373,21 @@ export class OpenGeniClient {
 
   // --- Turn queue ------------------------------------------------------------
 
-  async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
+  /**
+   * Read the session's prompt queue. Concurrent reads share one request; pass
+   * `fresh` after a change you observed so the read starts no earlier than
+   * this call instead of joining an older one still in flight.
+   */
+  async getQueue(
+    workspaceId: string,
+    sessionId: string,
+    options: GetSessionOptions = {},
+  ): Promise<SessionQueueSnapshot> {
     const path = `${sessionPath(workspaceId, sessionId)}/queue`;
-    return await this.sharedRead(path, () =>
-      this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
+    return await this.sharedRead(
+      path,
+      () => this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
+      options,
     );
   }
 
