@@ -718,7 +718,7 @@ async function drainRoute(
             idempotencyKey: `teams:${r.route_id}`,
             clientEventId: inbound.event_id,
             instructions:
-              "This conversation is delivered through Microsoft Teams. Reply clearly. Human approvals and private information requests must be completed in the authenticated Opengeni chat.",
+              "This conversation is delivered through Microsoft Teams. Replies are short by default: lead with the answer or outcome and any essential next step in a few sentences. Avoid headers, long lists, repeated conclusions, and detailed investigation logs unless the person asks for detail or the task requires it. Summarize completed work rather than narrating every step; preserve information needed to act or understand a material limitation. Human approvals and private information requests must be completed in the authenticated Opengeni chat.",
           },
           undefined,
           {
