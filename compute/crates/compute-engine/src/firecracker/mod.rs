@@ -15,7 +15,7 @@ mod holder;
 mod jail;
 mod logs;
 mod pager;
-mod process;
+pub(crate) mod process;
 mod room;
 mod run_state;
 mod runtime;
@@ -40,9 +40,7 @@ pub use self::api::ApiError;
 use self::balloon::Balloon;
 use self::drives::drive_config;
 pub use self::jail::BINARY_NAME;
-use self::jail::{
-    API_SOCKET, Jail, LAUNCH_LEFTOVERS, Launch, PID_FILE, jailer_args, remove_if_present,
-};
+use self::jail::{Jail, Launch, PID_FILE, jailer_args, remove_if_present, tidy};
 pub use self::process::Exit;
 use self::process::{Process, in_cgroup, parse_pid};
 use self::run_state::{RunState, set_run_state};
@@ -617,26 +615,6 @@ fn prepare(
     logs::open(dir)
 }
 
-/// Removes what one launch leaves in the jail: the jailer's copy of the
-/// binary, its pid file and device nodes, and the VMM's sockets. Listener
-/// sockets the host serves in the jail stay.
-fn tidy(jail: &Jail) -> io::Result<()> {
-    let sockets = [API_SOCKET.trim_start_matches('/'), "vsock.sock"];
-    for name in LAUNCH_LEFTOVERS.iter().chain(&sockets) {
-        let path = jail.root().join(name);
-        let removed = match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&path),
-            Ok(_) => fs::remove_file(&path),
-            Err(error) => Err(error),
-        };
-        match removed {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
 /// A running Firecracker VM.
 #[derive(Debug)]
 pub struct FirecrackerVm {
@@ -1191,6 +1169,12 @@ impl Engine for Firecracker {
         vm.cgroup
             .set_memory_max(bytes)
             .map_err(|error| EngineError::io("set_memory_limit", error))
+    }
+
+    fn set_only_copy(&self, vm: &FirecrackerVm, only: bool) -> Result<(), EngineError> {
+        vm.cgroup
+            .set_only_copy(only)
+            .map_err(|error| EngineError::io("set_only_copy", error))
     }
 
     async fn resize_drives(&self, vm: &FirecrackerVm, spec: &VmSpec) -> Result<(), EngineError> {

@@ -363,6 +363,13 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
         }
         self.untouched = false;
+        // Before anything of it can reach the store, its VM is fenced like
+        // any other's.
+        if matches!(step, Step::Archive | Step::Checkpoint)
+            && let Err(outcome) = self.no_longer_only_copy().await
+        {
+            return (outcome, self.live.take().map_or(After::NoVm, After::Kept));
+        }
         match step {
             Step::Pause
             | Step::Resume
@@ -397,6 +404,36 @@ impl<E: Engine, S: Store> Job<E, S> {
                 let outcome = self.forget().await;
                 (outcome, self.live.take().map_or(After::NoVm, After::Kept))
             }
+        }
+    }
+
+    /// Ahead of a step that may put a copy of the sandbox in the store: its
+    /// VM loses the mark that it is the sandbox's only copy, so the guard
+    /// stops it with the others from here on, and then its record does,
+    /// so no later VM of it is marked (see [`Record::only_copy`]). A VM
+    /// whose mark is cleared already, or a record that says so already,
+    /// changes nothing. A mark that cannot be cleared fails the step, with
+    /// nothing written.
+    async fn no_longer_only_copy(&mut self) -> Result<(), Outcome> {
+        if let Some(live) = &self.live {
+            self.engine
+                .set_only_copy(&live.vm, false)
+                .map_err(|error| failure(&error))?;
+        }
+        if self.record.only_copy {
+            self.commit(Change::new().copied())
+                .await
+                .map_err(|error| state_failure(&error))?;
+        }
+        Ok(())
+    }
+
+    /// Marks the VM `vm` just started its sandbox's only copy, or not, as
+    /// its record says (see [`Record::only_copy`]). A mark that cannot be
+    /// set leaves it fenced like any other, which is safe.
+    pub(super) fn mark_only_copy(&self, vm: &E::Vm) {
+        if let Err(error) = self.engine.set_only_copy(vm, self.record.only_copy) {
+            tracing::warn!(id = %self.id, %error, only_copy = self.record.only_copy, "the VM's mark as its sandbox's only copy is not set");
         }
     }
 

@@ -83,22 +83,31 @@ can be built and tested.
   per host, steps every 100 ms on that clock, and decides each step from
   the time, the deadline and what the kernel reports alone, never from
   what an earlier step asked for: from three seconds before the deadline it
-  asks for the cgroup that holds every VM to freeze until `cgroup.events`
-  reports `frozen 1`; from the deadline, until the VMs are frozen or gone
+  asks for each VM's own group in the cgroup that holds every VM to freeze
+  until `cgroup.events` reports `frozen 1`; from the deadline, until the
+  VMs are frozen or gone
   (`populated 0`), it writes `cgroup.kill` on every step into each VM's
   own group that is neither, and leaves the frozen ones frozen (a VM
   ending while frozen, deleted or killed, reads `frozen 0` until its
   memory is released, which is long enough for a step to see; killing
   every VM for it would end every program on a host whose lease is only
-  late); while the deadline is further off it thaws a freeze it finds. A
+  late); while the deadline is further off it thaws a freeze it finds.
+  When the VMs cannot be told apart (a process sits in the cgroup
+  itself, or what is inside it cannot be read), or none is a sandbox's
+  only copy (below) and none holds a freeze of its own, it freezes,
+  kills and thaws the cgroup that holds them all instead, as guards
+  before only copies did; a guard asked to stop while the lease runs
+  out leaves the VMs so, frozen as a whole, which is what such a guard
+  expects to find. A
   frozen VMM cannot answer, so time its group spends frozen does not
   count toward a request's deadline, and a step under way when the
   freeze came finishes after the thaw instead of failing. So a guard that
   restarts after one that froze the VMs and died thaws them once the
   lease is renewed, and goes on freezing if it is not. The guard also
   holds the kernel watchdog (`softdog` with `nowayout`, W = 3 s), and feeds
-  it only while the deadline is ahead or the VMs are confirmed frozen or
-  gone. So if the guard stalls or dies, or a freeze and a kill both hang,
+  it only while the deadline is ahead or every VM it stops is confirmed
+  frozen or gone. So if the guard stalls or dies, or a freeze and a kill
+  both hang,
   the machine reboots W after the last feed, and stops within S (1 s) of
   that. The guard is the agent's own program run as a service of its own
   (`compute-host guard`), in a cgroup beside the VMs' (not inside it, or
@@ -107,6 +116,37 @@ can be built and tested.
   while it runs, and an agent refuses to join a fleet unless it finds the
   lock held. A host without a control address has no deadline and never
   freezes.
+- **A sandbox's only copy runs on.** Fencing a host protects one thing:
+  that a sandbox the service hands to another host never also runs here.
+  The service hands a sandbox on only from a copy in object storage (an
+  adopt starts from the archive's pointer, [25](0025-pointers-in-the-control-service-and-objects-by-day.md),
+  and a sandbox with none waits for its host), and a host makes such a
+  copy only by archiving or checkpointing it, which starts only while
+  its lease is valid. So a VM whose sandbox has no copy in the store,
+  and that makes none while it runs, can never run twice, and stopping
+  it would protect nothing while it costs its programs: a CI runner's
+  sandbox, which is never archived (ADR 23), would lose its job to every
+  blip of the control service longer than the lead. The agent marks
+  such a VM, an extended attribute of its group naming the agent
+  process (`user.compute.only-copy`, its number and start time), and the
+  guard and the stop hook leave a marked VM running whatever the lease.
+  A sandbox is its only copy from its create, or its claim from the
+  ready pool, until the first archive or checkpoint of it begins: before
+  that step writes anything, the agent clears its VM's mark (or fails
+  the step if it cannot) and then records that the sandbox has a copy,
+  so no later VM of it is marked. A sandbox taken up from the store is
+  never its only copy. A mark holds only while the agent that set it
+  runs, since only that agent keeps the promise to clear it before a
+  copy: an agent of an earlier release, which knows nothing of marks,
+  may archive a marked VM, and a mark left by an agent that has ended is
+  stopped as any VM is until the next agent's recovery marks it again
+  from its record (an earlier release's agent rewrites a record without
+  the field, so a record that still says so is right), except that,
+  found running past the deadline, it is frozen rather than killed. A
+  mark that cannot be set or read is not there: the VM is stopped as
+  any other, which is safe. A host in a cloud host group is still reset
+  when the leader gives up on it (below), only copies with it; their
+  disks stay, as every unarchived sandbox's does.
 - **While its lease has run out the agent decides nothing.** It takes no
   decision of its own (no sampling, no idle sleep, no eviction, no ready
   clones), its store starts no archive, and the host's own tools get its
@@ -128,8 +168,9 @@ can be built and tested.
   deadline would run its VMs until the guard's next step. Hosts therefore
   hold a block-mode systemd sleep inhibitor and mask the sleep targets,
   and a system-sleep hook, if a suspend happens anyway, marks it under way
-  (the guard then treats the lease as run out and freezes) and waits for
-  the VMs to freeze before the machine sleeps; it lifts the mark after the
+  (the guard then treats the lease as run out and freezes every VM that is
+  not its sandbox's only copy) and waits for those to freeze before the
+  machine sleeps; it lifts the mark after the
   resume, and the guard thaws them only if the lease is still valid then.
   A hypervisor that pauses the whole host VM without the guest knowing is
   outside the guarantee: once it resumes, the old VMs can run before the

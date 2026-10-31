@@ -37,6 +37,7 @@ mod images;
 mod link;
 mod memory;
 mod observe;
+mod only_copy;
 mod pool;
 mod ready;
 mod rejoin;
@@ -185,6 +186,9 @@ struct World {
     started_weights: Mutex<Vec<(String, u16)>>,
     /// Memory limits set on VMs after they started.
     limits_set: Mutex<Vec<(String, Option<u64>)>>,
+    /// Each VM's mark as its sandbox's only copy, by name, as last set
+    /// (see `Engine::set_only_copy`); a VM that ends loses it.
+    only_copies: Mutex<HashMap<String, bool>>,
     /// Each time a VM was told its drives grew: which VM, how long its
     /// writable drives' files were then, and whether it was paused.
     drives_resized: Mutex<Vec<(String, Vec<u64>, bool)>>,
@@ -428,6 +432,7 @@ impl Fake {
             abort.abort();
             let _ = std::fs::remove_file(&socket);
             world.live.lock().unwrap().remove(&dead);
+            world.only_copies.lock().unwrap().remove(&dead);
         });
         let process = Process {
             serial: self.world.next_vm.fetch_add(1, Ordering::Relaxed),
@@ -970,6 +975,7 @@ impl Engine for Fake {
         vm.guest.abort();
         let _ = std::fs::remove_file(&vm.vsock);
         self.world.live.lock().unwrap().remove(&vm.name);
+        self.world.only_copies.lock().unwrap().remove(&vm.name);
         self.world.tearing_down.lock().unwrap().remove(&vm.name);
         Ok(())
     }
@@ -1091,6 +1097,15 @@ impl Engine for Fake {
             .lock()
             .unwrap()
             .push((vm.name.clone(), bytes));
+        Ok(())
+    }
+
+    fn set_only_copy(&self, vm: &FakeVm, only: bool) -> Result<(), EngineError> {
+        self.world
+            .only_copies
+            .lock()
+            .unwrap()
+            .insert(vm.name.clone(), only);
         Ok(())
     }
 

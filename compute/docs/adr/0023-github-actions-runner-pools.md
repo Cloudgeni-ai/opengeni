@@ -55,6 +55,11 @@ delivery can be late or missed.
   `opengeni-compute-github-runner`. Its start command counts the runner as
   a running command (ADR 3), so a job that waits quietly is never put to
   sleep, and runs Docker for the job. A runner takes one job and ends.
+  A runner's sandbox is never archived or checkpointed, so it is its own
+  only copy for as long as it runs: its host's guard never freezes it
+  when the host loses touch with the control service
+  ([18](0018-the-control-service-leases-and-fences.md)), and a job
+  outlasts such a blip.
 - **A sandbox ends with its job**: at once when GitHub reports the job
   completed, and at the latest when a reconciliation finds its runner gone
   from GitHub (ephemeral runners are removed when their job ends). An
