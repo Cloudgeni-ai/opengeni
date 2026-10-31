@@ -2,7 +2,7 @@
 // inside the real MessageTimeline, for a turn where the person needs a computer
 // that isn't connected yet. Machines come from a synthetic client, so each state
 // is deterministic and nothing reaches an API.
-//   ?state=other|active|offline|none   ?theme=light|dark
+//   ?state=other|requested|active|offline|none   ?theme=light|dark
 //   other:   a desktop that isn't the one the person means is online, their
 //            laptop is offline, and this chat runs on neither.
 //   active:  this chat already runs on the desktop.
@@ -49,20 +49,31 @@ const laptop: MachineView = {
 };
 
 class PreviewClient extends MockOpenGeniClient {
+  private active = state === "active";
   override async listMachines(): Promise<MachinesResponse> {
     const machines = state === "none" ? [] : state === "offline" ? [laptop] : [desktop, laptop];
     return {
-      activeSandboxId: state === "active" ? desktop.sandboxId : null,
+      activeSandboxId: this.active ? desktop.sandboxId : null,
       activeEpoch: 1,
-      machines,
+      machines: machines.map((machine) => ({
+        ...machine,
+        active: this.active && machine.sandboxId === desktop.sandboxId,
+      })),
     };
   }
   override async listAttachedBrowsers() {
     return { revision: 1, bridges: [], devices: [] } as never;
   }
-  // The card offers "Use" only where the chat can move; nothing moves here.
   async swapActiveSandbox() {
-    return {} as never;
+    this.active = true;
+    return { swapped: true, activeSandboxId: desktop.sandboxId, activeEpoch: 2 } as never;
+  }
+  override async sendMessage() {
+    return {
+      id: "accepted",
+      type: "user.message",
+      payload: { routing: "accepted_for_execution" },
+    } as never;
   }
 }
 
@@ -73,6 +84,7 @@ function events(): SessionEvent[] {
   log.push("user.message", {
     text: "The desktop isn't my laptop. My laptop is a Windows laptop I have at home.",
   });
+  log.push("turn.started", {}, turn);
   log.push(
     "tool.auth_needed",
     {
@@ -80,6 +92,9 @@ function events(): SessionEvent[] {
       toolName: "capability_authorization_request",
       providerDomain: "opengeni.ai",
       reason: "missing_connection",
+      ...(state === "requested" || state === "active"
+        ? { requestedSandboxId: desktop.sandboxId }
+        : {}),
       capability: {
         id: "api:connected-machine",
         name: "Connected Machine",
@@ -139,16 +154,28 @@ function Preview() {
         }}
       >
         <AppContext.Provider value={context}>
-          <div className="og-root h-screen overflow-auto bg-bg text-fg">
-            <main className="mx-auto max-w-[760px] px-4 py-8" data-shot="">
+          <div className="og-root h-screen overflow-hidden bg-bg text-fg">
+            <main className="mx-auto h-full max-w-[760px] py-4" data-shot="">
               <MessageTimeline
+                className="h-full"
+                turnSummary={{ rolling: true }}
                 events={events()}
                 renderAuthNeeded={(item: AuthNeededItem) => (
                   <SessionCapabilityCard
                     item={item}
                     workspaceId={WORKSPACE_ID}
                     sessionId="session-downloads"
-                    sendContext={() => ({ blocked: null, awaitingHuman: false, extras: {} })}
+                    sendContext={() => ({
+                      blocked: null,
+                      awaitingHuman: false,
+                      extras: {},
+                      personalMachineIntent: {
+                        mode: "session",
+                        expectedAuthorityEpoch: 1,
+                        workspaceSharedAcknowledged: false,
+                        sharedOutputWarningVersion: 1,
+                      },
+                    })}
                   />
                 )}
               />
