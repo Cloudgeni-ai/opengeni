@@ -389,6 +389,47 @@ export function planRecordingTranscriptionPieces(
   return pieces;
 }
 
+/** A stretch of a track with sound in it, on the track's timeline. */
+export type RecordingSoundRange = { startMilliseconds: number; endMilliseconds: number };
+
+/**
+ * Plan the pieces of a track over only its stretches with sound, so long
+ * quiet stretches (a microphone while its person listens, the computer's
+ * audio in a room meeting) are never sent or billed. Each stretch is split
+ * like a whole track when it is longer than the model takes. No stretches
+ * means nothing to send.
+ */
+export function planRecordingSoundPieces(
+  durationMilliseconds: number,
+  maxPieceMilliseconds: number | null,
+  sound: ReadonlyArray<RecordingSoundRange>,
+): RecordingTranscriptionPiece[] {
+  const duration = Math.max(0, Math.ceil(durationMilliseconds));
+  const ranges = sound
+    .map((range) => ({
+      startMilliseconds: Math.max(0, Math.floor(range.startMilliseconds)),
+      endMilliseconds: Math.min(duration, Math.ceil(range.endMilliseconds)),
+    }))
+    .filter((range) => range.endMilliseconds > range.startMilliseconds);
+  return ranges.flatMap((range, index) => {
+    const last = index === ranges.length - 1;
+    return planRecordingTranscriptionPieces(
+      range.endMilliseconds - range.startMilliseconds,
+      maxPieceMilliseconds,
+    ).map((piece) => ({
+      startMilliseconds: range.startMilliseconds + piece.startMilliseconds,
+      endMilliseconds: range.startMilliseconds + piece.endMilliseconds,
+      keepFromMilliseconds: range.startMilliseconds + piece.keepFromMilliseconds,
+      keepUntilMilliseconds:
+        piece.keepUntilMilliseconds === Number.POSITIVE_INFINITY
+          ? last
+            ? Number.POSITIVE_INFINITY
+            : range.endMilliseconds
+          : range.startMilliseconds + piece.keepUntilMilliseconds,
+    }));
+  });
+}
+
 /**
  * Join the pieces' results into one track result. Speaker ids are only
  * meaningful inside one call, so a track sent in several pieces has none.
