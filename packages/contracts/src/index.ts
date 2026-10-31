@@ -4476,9 +4476,9 @@ export const USER_SETUP_BLOCKERS: readonly UserSetupBlocker[] = [
     code: "personal_machine_permission_required",
     capabilityId: "api:connected-machine",
     problem:
-      "This is a personal (Only me) machine, and its owner has not allowed this chat to use it yet.",
-    rationale: "Allow this chat to use your computer.",
-    nextStep: "open this chat in Opengeni and allow it to use their machine",
+      "This is a personal (Only me) machine, and its owner has not turned it on for agents in this workspace yet.",
+    rationale: "Let your agents use your computer in this workspace.",
+    nextStep: "open this chat in Opengeni and allow their machine in this workspace",
   },
 ];
 
@@ -21714,9 +21714,10 @@ export type ChangeMachineAudienceRequest = z.infer<typeof ChangeMachineAudienceR
 /**
  * What the change does to one thing on the machine. `move_off`: the chat
  * leaves the machine (its history and files stay). `keep`: the owner's chat
- * stays and keeps its audience. `make_only_me` / `pause`: a schedule that runs
- * on the machine. `remove_first`: the same computer is connected a second
- * time; remove that copy before switching.
+ * stays and keeps its audience. `pause`: another person's schedule that runs
+ * on the machine; the new owner's own schedules keep running with no change
+ * and are not listed. `make_only_me` is no longer produced. `remove_first`: the
+ * same computer is connected a second time; remove that copy before switching.
  */
 export const MachineAudienceAction = /* @__PURE__ */ defineSchema(() =>
   z.enum(["move_off", "keep", "make_only_me", "pause", "remove_first"]),
@@ -21758,6 +21759,7 @@ export const MachineAudienceSummary = /* @__PURE__ */ defineSchema(() =>
     /** The owner's shared chats that stay on the machine and stay shared. */
     keptSharedChats: primitives.nonnegativeInteger,
     movedOffChats: primitives.nonnegativeInteger,
+    /** No longer produced: always 0. A schedule runs as its owner, so the new owner's schedules keep running unchanged. */
     schedulesMadeOnlyMe: primitives.nonnegativeInteger,
     schedulesPaused: primitives.nonnegativeInteger,
     stoppedTurns: primitives.nonnegativeInteger,
