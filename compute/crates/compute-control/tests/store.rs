@@ -340,6 +340,26 @@ async fn told_in_reports<S: Store>(
     assert_eq!(reported.info, shrunk.told_again(registered));
     assert_eq!(reported.info.memory_mib, 2048);
     assert_eq!(reported.capacity, capacity());
+
+    // Once given up on, what its last renewal tells changes nothing.
+    let count = renewals(store, host).await.expect("counted");
+    assert_eq!(store.give_up(host, count, now_ms()).await.unwrap(), Some(0));
+    let late = Renew {
+        host: host.0,
+        epoch,
+        seq: 9,
+        capacity: Some(telling(&HostInfo {
+            memory_mib: 3,
+            ..shrunk
+        })),
+    };
+    assert!(
+        !store
+            .renew(&late, std::slice::from_ref(name))
+            .await
+            .unwrap()
+    );
+    assert_eq!(row_of(store, host).await.info, reported.info);
 }
 
 #[tokio::test]

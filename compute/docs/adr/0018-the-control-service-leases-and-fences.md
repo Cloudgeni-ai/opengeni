@@ -33,7 +33,9 @@ can be built and tested.
   the host is now (its address, memory, processors, disk and offers, as
   it registers with them): a restarted agent keeps its registration while
   what it is configured with may have changed, and the service places on
-  what it says, keeping the name and boot it registered with. A
+  what it says, keeping the name and boot it registered with. A changed
+  class (profile or CPU template) applies to the sandboxes it places from
+  then on; each sandbox keeps the class it was placed under. A
   renewal is one row update, and capacity changes are sent at most once a
   second. Replicas read changed host rows every 250 ms into a view in
   memory; placement reads only that view. The host numbers its renewals
