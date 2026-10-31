@@ -12,7 +12,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture, RETIRING_FEATURE_TABLES } from "../src/runtime-posture";
 
-const migration = "1119_drop_retired_automation_and_pr_review.sql";
+const migration = "1142_drop_retired_automation_and_pr_review.sql";
 const sourceDirectory = join(import.meta.dir, "../drizzle");
 const retired = [...RETIRING_FEATURE_TABLES.automations, ...RETIRING_FEATURE_TABLES.prReview];
 const options = { rlsStrategy: "force" as const, targetSchema: "public" };

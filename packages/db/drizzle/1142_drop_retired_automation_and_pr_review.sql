@@ -1,5 +1,6 @@
 -- deployment-mode: rolling
 -- contract-step: Release the runtime-posture compatibility from PR #6710 before this migration; PR #6389 already removed all feature callers.
+-- online-safety-exception: explicit-lock: Fence only these eleven retired tables across the all-tenant emptiness check and their closed-group drop. The predecessor release has no feature callers, and lock acquisition fails within five seconds.
 -- The legacy automation intake and PR-review pack are not the current event
 -- sources, scheduled tasks or automation templates. Those live tables stay.
 -- No CASCADE: an unexpected surviving dependency must abort the whole file.
