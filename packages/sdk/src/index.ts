@@ -1217,6 +1217,8 @@ export type {
   EntitlementsMode,
   FileAccess,
   FileAsset,
+  UpdateFileReachRequest,
+  UpdateFileReachResponse,
   UpdateFileVisibilityRequest,
   UpdateFileVisibilityResponse,
   FileListRequest,

@@ -9311,6 +9311,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateFileReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/files/:fileId/reach",
+    "request": [
+      "UpdateFileReachRequest"
+    ],
+    "response": [
+      "UpdateFileReachResponse"
+    ],
+    "permission": "files:upload"
+  },
+  {
     "id": "updateFileVisibility",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/files/:fileId/visibility",
