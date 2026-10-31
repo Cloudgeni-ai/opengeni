@@ -168,7 +168,7 @@ const accounts = [
 ] as unknown as ConnectionMetadata[];
 
 // Identity and ownership identify an account; formatter punctuation and fallback prefixes do not.
-function accountSwitch(identity: string, ownership: "Only me" | "This workspace") {
+function accountSwitch(identity: string, ownership: "Yours" | "Shared") {
   const matches = [...container.querySelectorAll<HTMLButtonElement>('[role="switch"]')].filter(
     (button) => {
       const label = button.getAttribute("aria-label") ?? "";
@@ -217,8 +217,8 @@ test("connector settings attach multiple readable personal/workspace accounts wi
   await act(async () =>
     container.querySelector<HTMLButtonElement>('[aria-label="Mail account settings"]')!.click(),
   );
-  const personal = accountSwitch("alex@example.com", "Only me");
-  const workspace = accountSwitch("Support team", "This workspace");
+  const personal = accountSwitch("alex@example.com", "Yours");
+  const workspace = accountSwitch("Support team", "Shared");
   expect(personal.getAttribute("aria-checked")).toBe("true");
   expect(workspace.getAttribute("aria-checked")).toBe("true");
   await act(async () => personal.click());
@@ -240,10 +240,8 @@ test("connector settings attach multiple readable personal/workspace accounts wi
     container.querySelector<HTMLButtonElement>('[aria-label="Mail account settings"]')!.click(),
   );
   expect(container.textContent).toContain("Connected accounts");
-  expect(accountSwitch("alex@example.com", "Only me").getAttribute("aria-checked")).toBe("true");
-  expect(accountSwitch("Support team", "This workspace").getAttribute("aria-checked")).toBe(
-    "false",
-  );
+  expect(accountSwitch("alex@example.com", "Yours").getAttribute("aria-checked")).toBe("true");
+  expect(accountSwitch("Support team", "Shared").getAttribute("aria-checked")).toBe("false");
   expect(container.textContent).not.toContain("Connect another account");
   // Healthy chat settings contain only navigation and account attachment controls.
   expect(container.querySelectorAll("button")).toHaveLength(3);
@@ -484,9 +482,9 @@ test("your own accounts without an identity read apart: where each was added, th
   );
   expect(labels).toHaveLength(3);
   expect(new Set(labels).size).toBe(3);
-  expect(labels[0]).toMatch(/^Team tools account · Connected .+, Only me$/);
-  expect(labels[1]).toMatch(/^Team tools account · Connected .+, Only me$/);
-  expect(labels[2]).toBe("Team tools account, Only me · From Personal workspace");
+  expect(labels[0]).toMatch(/^Team tools account · Connected .+, Yours$/);
+  expect(labels[1]).toMatch(/^Team tools account · Connected .+, Yours$/);
+  expect(labels[2]).toBe("Team tools account, Yours · From Personal workspace");
 });
 
 test("account labels use readable metadata and never fall back to a raw connection ID", () => {
@@ -554,8 +552,8 @@ test("last account off disables only its connector; reenable restores accounts a
     act(async () => container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click());
   await act(async () => root.render(<Preview />));
   await click("Mail account settings");
-  await act(async () => accountSwitch("alex@example.com", "Only me").click());
-  await act(async () => accountSwitch("Support team", "This workspace").click());
+  await act(async () => accountSwitch("alex@example.com", "Yours").click());
+  await act(async () => accountSwitch("Support team", "Shared").click());
   expect(current.mcpServerIds).toEqual(new Set(["files", "hidden"]));
   expect(current.firstPartyToolIds).toEqual(new Set(["session_get"]));
   expect(chosen.mail).toEqual([]);
@@ -567,9 +565,9 @@ test("last account off disables only its connector; reenable restores accounts a
   expect(current.mcpServerIds.has("mail")).toBe(true);
   expect(chosen.mail).toEqual(accounts.map((account) => account.id));
   await click("Mail account settings");
-  expect(accountSwitch("alex@example.com", "Only me").getAttribute("aria-checked")).toBe("true");
-  expect(accountSwitch("Support team", "This workspace").getAttribute("aria-checked")).toBe("true");
-  await act(async () => accountSwitch("alex@example.com", "Only me").click());
+  expect(accountSwitch("alex@example.com", "Yours").getAttribute("aria-checked")).toBe("true");
+  expect(accountSwitch("Support team", "Shared").getAttribute("aria-checked")).toBe("true");
+  await act(async () => accountSwitch("alex@example.com", "Yours").click());
   await click("Back to connectors");
   await click("Mail");
   expect(container.querySelector('[aria-label="Mail account settings"]')).not.toBeNull();

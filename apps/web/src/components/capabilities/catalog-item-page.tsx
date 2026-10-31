@@ -752,6 +752,7 @@ export function CatalogItemPage({
                     : {}),
                   ...(addAccountOwnership
                     ? {
+                        addOwnership: addAccountOwnership,
                         onAdd: () =>
                           onAction({
                             type: "add_oauth_account",

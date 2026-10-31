@@ -1095,6 +1095,14 @@ export type ConnectionMetadata = {
   verifiedInstallAt?: string | null;
   verifiedInstallVersion?: number | null;
   metadata: Record<string, unknown>;
+  /**
+   * Whether this OAuth MCP account can be told apart from another account of
+   * the same service: `verified` (its account is known), `reconnect` (sign in
+   * again once before adding another), or `single` (the service doesn't say
+   * which account it is, so each person can connect one). Absent for other
+   * connections and from older servers.
+   */
+  accountIdentity?: "verified" | "reconnect" | "single" | undefined;
   createdBySubjectId: string | null;
   updatedBySubjectId: string | null;
   createdAt: string;

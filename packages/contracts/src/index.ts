@@ -14305,6 +14305,15 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
     verifiedInstallAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     verifiedInstallVersion: z.number().int().positive().nullable().optional(),
     metadata: z.record(primitives.string, z.unknown()),
+    /**
+     * Whether this OAuth MCP account can be told apart from another account of
+     * the same service: `verified` (its account is known), `reconnect` (the
+     * service identifies accounts but this one predates that or its check
+     * failed; sign in again once before adding another), or `single` (the
+     * service doesn't say which account it is, so each person can connect
+     * one). Absent for other connections and from older servers.
+     */
+    accountIdentity: z.enum(["verified", "reconnect", "single"]).optional(),
     createdBySubjectId: primitives.nullableString,
     updatedBySubjectId: primitives.nullableString,
     createdAt: primitives.string,
