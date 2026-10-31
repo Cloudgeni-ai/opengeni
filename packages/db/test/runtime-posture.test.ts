@@ -4047,7 +4047,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 withheld; 0978's, 0984's, 0988's, 1002's, 1060's, 1091's, 1107's and 1172's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 1103 and 1060 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1107's and 1172's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4176,7 +4176,6 @@ describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 w
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "summarize_queued_turns_by_hold()",
-      "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "native_push_device_v2(text)",
@@ -4188,6 +4187,9 @@ describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 w
       "read_external_identity_v1(uuid, text, text)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
+    expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
+      "runtime role lacks EXECUTE on private routine update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+    );
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
       "runtime role lacks EXECUTE on private routine grant_subscription_account_administrator(jsonb)",
     );
