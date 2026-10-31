@@ -1,4 +1,5 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+import type { SearchRecordForm } from "./hosted-search-evidence";
 export {
   activeAttemptSecretValues,
   installToolResultSecretMasking,
@@ -833,6 +834,12 @@ export {
   serializeInteractionInterventionRequests,
 } from "./run-events";
 export { toolCallIdFromSdkItem } from "./tool-call-identity";
+export {
+  HostedSearchEvidenceEchoGuard,
+  isHostedSearchEvidenceEchoText,
+  searchRecordFormMatters,
+  type SearchRecordForm,
+} from "./hosted-search-evidence";
 export {
   compactMcpResultCustomDataRunState,
   OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
@@ -10292,6 +10299,12 @@ export type RunAgentStreamOptions = {
   // reconcile dual-write never sees it.
   callModelInputFilter?: CallModelInputFilter;
   /**
+   * How the session's hosted web searches reach the model (see
+   * `SearchRecordForm`). The worker settles it before the run; it stays the
+   * same for every model call of the run.
+   */
+  searchRecordForm?: SearchRecordForm;
+  /**
    * Masks known secret values in the instructions and input of every model
    * call, after every filter that can add input (docs/secrets.md, Masking).
    */
@@ -10669,7 +10682,12 @@ async function runAgentStreamInternal(
     const ownedFilter = composeCallModelInputFilters(
       [
         inputWaitYield?.modelInputFilter,
-        measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
+        measuredModelInputFilter(
+          "input_filter_base",
+          baseModelInputFilterForSettings(settings, {
+            searchRecordForm: overrides.searchRecordForm,
+          }),
+        ),
         measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
         measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
         // A caller filter may synthesize model input. Re-apply the idempotent
@@ -10844,7 +10862,12 @@ async function runAgentStreamInternal(
   const callModelInputFilter = composeCallModelInputFilters(
     [
       inputWaitYield?.modelInputFilter,
-      measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
+      measuredModelInputFilter(
+        "input_filter_base",
+        baseModelInputFilterForSettings(settings, {
+          searchRecordForm: overrides.searchRecordForm,
+        }),
+      ),
       measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
       measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
       measuredModelInputFilter(

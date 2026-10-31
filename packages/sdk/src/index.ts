@@ -1135,6 +1135,7 @@ export type {
   NativePushDevice,
   NativePushRule,
   AgentCall,
+  AgentCallHostPhones,
   AgentCallState,
   InboxItem,
   InboxItemChoice,

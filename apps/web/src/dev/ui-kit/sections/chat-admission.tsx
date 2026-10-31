@@ -1,5 +1,5 @@
 import type { MachineView, Session, SessionMachineAccess } from "@opengeni/sdk";
-import { SessionAdmissionNotice } from "@opengeni/react/session-ui";
+import { SessionAdmissionNotice, SessionMachineAccessNotice } from "@opengeni/react/session-ui";
 import { Button } from "@opengeni/react/ui/button";
 
 import { KitSection, StateCell, StatesGrid } from "../kit";
@@ -94,35 +94,87 @@ const STATES: {
   },
 ];
 
+/* Before anyone sends, in a chat shared with the workspace. */
+const BEFORE_SENDING: { part: string; label: string; access: SessionMachineAccess }[] = [
+  {
+    part: "own-shared",
+    label: "Your own machine, in a shared chat",
+    access: access({ queuedTurnNotApprovedHere: false, queuedTurnApprovedMachines: [] }),
+  },
+  {
+    part: "others-shared",
+    label: "Someone else's machine, in a shared chat",
+    access: access({
+      isOwner: false,
+      queuedTurnNotApprovedHere: false,
+      queuedTurnApprovedMachines: [],
+    }),
+  },
+];
+
 export default function ChatAdmissionSection() {
   const shown = STATES.filter((state) => showPart(state.part));
+  const beforeSending = BEFORE_SENDING.filter((state) => showPart(state.part));
   return (
     <KitSection sectionKey="chat-admission">
-      <StatesGrid title="Above the composer" columns={1}>
-        {shown.map((state) => (
-          <StateCell key={state.part} label={state.label} align="stretch">
-            <div className="mx-auto w-full max-w-3xl">
-              <SessionAdmissionNotice
-                session={state.session}
-                machineAccess={state.access}
-                machines={state.machines}
-                machineAction={
-                  state.picker ? (
-                    <Button type="button" className="min-h-11">
-                      Choose machine
-                    </Button>
-                  ) : undefined
-                }
-                onMoveToMachine={async () => true}
-                canControl
-                paused={false}
-                busy={false}
-                onRecheck={async () => {}}
-              />
-            </div>
-          </StateCell>
-        ))}
-      </StatesGrid>
+      {beforeSending.length > 0 ? (
+        <StatesGrid title="Before sending, on a personal machine" columns={1}>
+          {beforeSending.map((state) => (
+            <StateCell key={state.part} label={state.label} align="stretch">
+              <div className="mx-auto w-full max-w-3xl">
+                <SessionMachineAccessNotice
+                  access={state.access}
+                  shared
+                  className="px-3.5 pt-2.5 md:px-4"
+                  action={
+                    state.access.isOwner ? (
+                      <Button
+                        type="button"
+                        variant="link"
+                        size="xs"
+                        className="h-auto px-0 align-baseline"
+                      >
+                        Use another machine
+                      </Button>
+                    ) : (
+                      <Button type="button" className="min-h-11">
+                        Choose machine
+                      </Button>
+                    )
+                  }
+                />
+              </div>
+            </StateCell>
+          ))}
+        </StatesGrid>
+      ) : null}
+      {shown.length > 0 ? (
+        <StatesGrid title="Above the composer" columns={1}>
+          {shown.map((state) => (
+            <StateCell key={state.part} label={state.label} align="stretch">
+              <div className="mx-auto w-full max-w-3xl">
+                <SessionAdmissionNotice
+                  session={state.session}
+                  machineAccess={state.access}
+                  machines={state.machines}
+                  machineAction={
+                    state.picker ? (
+                      <Button type="button" className="min-h-11">
+                        Choose machine
+                      </Button>
+                    ) : undefined
+                  }
+                  onMoveToMachine={async () => true}
+                  canControl
+                  paused={false}
+                  busy={false}
+                  onRecheck={async () => {}}
+                />
+              </div>
+            </StateCell>
+          ))}
+        </StatesGrid>
+      ) : null}
     </KitSection>
   );
 }

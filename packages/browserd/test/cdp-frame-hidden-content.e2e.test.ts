@@ -76,6 +76,14 @@ const DISABLED_BY_CLASS = `<!doctype html><title>Wizard</title><style>.disabled{
 /** A row action that takes the pointer only while its row is hovered. */
 const HOVER_ENABLED = `<!doctype html><title>Rows</title><style>.go{pointer-events:none}tr:hover .go{pointer-events:auto}</style><table><tr><td>Row one</td><td><button class="go">Go</button></td></tr></table>${FRAME_LOG}`;
 
+/** The same row action, armed only once the pointer has rested on its row
+ * for a moment, as rows and menus that wait for hover intent do: the frame
+ * applies the hover well after the move has reached it. */
+const HOVER_ENABLED_AFTER_REST = HOVER_ENABLED.replace("tr:hover .go", "tr.armed .go").replace(
+  "</table>",
+  '</table><script>const row=document.querySelector("tr");row.addEventListener("pointerenter",()=>setTimeout(()=>row.classList.add("armed"),200));row.addEventListener("pointerleave",()=>row.classList.remove("armed"));</script>',
+);
+
 function nodes(observation: BrowserObservation | null | undefined): InteractionSemanticNodeValue[] {
   const semantic = observation?.semantic;
   const pending: InteractionSemanticNodeValue[] =
@@ -309,6 +317,22 @@ for (const kind of FRAMES) {
     `in a ${kind} frame, a visible control that takes the pointer only on hover is hovered and clicked`,
     async () => {
       await withFramedPage(kind, HOVER_ENABLED, async ({ act, log }) => {
+        const clicked = await act({
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Go", exact: true },
+        });
+        expect(clicked.error ?? null).toBeNull();
+        expect(clicked.state).toBe("completed");
+        expect(await log()).toEqual(["click Go"]);
+      });
+    },
+    90_000,
+  );
+
+  e2e(
+    `in a ${kind} frame, a visible control that takes the pointer only once the pointer has rested on its row is hovered and clicked`,
+    async () => {
+      await withFramedPage(kind, HOVER_ENABLED_AFTER_REST, async ({ act, log }) => {
         const clicked = await act({
           type: "click",
           locator: { kind: "role", role: "button", name: "Go", exact: true },

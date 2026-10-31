@@ -126,7 +126,9 @@ function mapString(
  * Deep copy of `value` with `map` applied to every string a masker may
  * change (object keys are kept; an own `__proto__` key stays data). Binary
  * payloads are skipped and text payloads mapped decoded (see the module
- * comment). Inputs that need no change keep their identity.
+ * comment). Own symbol-keyed properties are copied unmapped: they are
+ * request-local marks that never reach a payload. Inputs that need no change
+ * keep their identity.
  */
 export function mapSecretMaskableStrings<T>(
   value: T,
@@ -169,7 +171,12 @@ export function mapSecretMaskableStrings<T>(
         configurable: true,
       });
     }
-    return changed ? next : entry;
+    if (!changed) return entry;
+    for (const symbol of Object.getOwnPropertySymbols(record)) {
+      if (Object.prototype.propertyIsEnumerable.call(record, symbol))
+        (next as Record<symbol, unknown>)[symbol] = (record as Record<symbol, unknown>)[symbol];
+    }
+    return next;
   };
   return visit(value, null, null, 0) as T;
 }

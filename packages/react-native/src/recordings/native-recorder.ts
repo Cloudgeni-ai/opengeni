@@ -145,6 +145,7 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
       isCaptureActive: async (id) => native.activeRecordingId() === id,
     });
   let unsubscribe: (() => void) | null = null;
+  let titleIsGuess = true;
   let subscriptions: Array<{ remove(): void }> = [];
   let ticker: ReturnType<typeof setInterval> | null = null;
   let live: LiveTranscriber | null = null;
@@ -243,10 +244,13 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
         return;
       }
       const recordingId = options.randomUUID();
+      // Until someone names it, a name the server found replaces the guess shown.
+      titleIsGuess = !options.title || options.titleSource === "app";
       unsubscribe ??= uploader.subscribe((status: RecordingUploadStatus) => {
         if (status.recordingId !== snapshot.recordingId) return;
         emit({
           upload: status,
+          ...(status.serverTitle && titleIsGuess ? { title: status.serverTitle } : {}),
           ...(status.failed
             ? { error: { code: "upload_failed" as const, message: status.failed.message } }
             : {}),
@@ -261,6 +265,7 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
           recordingId,
           ...(options.purpose ? { purpose: options.purpose } : {}),
           ...(options.title ? { title: options.title } : {}),
+          ...(options.title && options.titleSource ? { titleSource: options.titleSource } : {}),
           ...(options.visibility ? { visibility: options.visibility } : {}),
           startedAt: new Date().toISOString(),
           ...(options.externalRef ? { externalRef: options.externalRef } : {}),
@@ -391,6 +396,7 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
       const recordingId = snapshot.recordingId;
       if (!recordingId) throw new Error("Nothing is being recorded to rename.");
       await uploader.rename(options.workspaceId, recordingId, title);
+      titleIsGuess = false;
       if (snapshot.recordingId === recordingId) emit({ title });
     },
 

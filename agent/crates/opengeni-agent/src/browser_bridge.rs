@@ -850,6 +850,11 @@ struct ExtensionCapabilities {
     diagnostics: bool,
     raw_cdp: bool,
     linked_computer: bool,
+    /// Older extensions must update before privacy-dependent reads are used.
+    /// Older agents ignore this additive capability, so the extension can
+    /// roll out first without breaking their existing bridge protocol.
+    #[serde(default)]
+    payment_field_privacy: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1719,6 +1724,10 @@ async fn serve_extension<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                                 // Claimed before validation so a rejected hello is
                                 // still recorded as this generation's end.
                                 claim = Some((device_id.clone(), generation.clone()));
+                                if !device.capabilities.payment_field_privacy {
+                                    refusal = Some(AgentUnavailableReason::ExtensionOutdated);
+                                    return Err(BrowserBridgeError::Protocol("browser extension update is required for protected page reads".to_string()));
+                                }
                                 inventory.register(device, tabs, outbound.clone())?;
                                 let ready = serde_json::to_vec(&ExtensionReady {
                                     kind: "ready",
@@ -2276,7 +2285,7 @@ pub(crate) mod test_support {
             "capabilities": {
                 "tabInventory": true, "debuggerAttachment": true, "semanticObservation": true,
                 "screenshots": true, "liveFrames": true, "humanInput": true, "diagnostics": true,
-                "rawCdp": false, "linkedComputer": true
+                "rawCdp": false, "linkedComputer": true, "paymentFieldPrivacy": true
             }
         });
         if let Some(state) = state_generation {
@@ -2673,7 +2682,8 @@ mod tests {
                     "humanInput": true,
                     "diagnostics": true,
                     "rawCdp": false,
-                    "linkedComputer": true
+                    "linkedComputer": true,
+                    "paymentFieldPrivacy": true
                 }
             },
             "tabs": [tab("11")]
@@ -3521,6 +3531,42 @@ mod tests {
             assert_eq!(refusal["type"], "unavailable", "{refusal}");
             assert_eq!(refusal["reason"], reason, "{refusal}");
             assert_eq!(refusal["agentVersion"], env!("CARGO_PKG_VERSION"));
+            assert_eq!(server.inventory().snapshot().devices.len(), 0);
+            server.shutdown().await.expect("shutdown");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_extension_without_payment_privacy_is_told_to_update_before_it_registers() {
+        for capability in [None, Some(false)] {
+            let directory = tempfile::tempdir().expect("tempdir");
+            let server = BrowserBridgeServer::start(directory.path())
+                .await
+                .expect("start");
+            let mut socket = extension_socket(directory.path()).await;
+            let older = hello_with(
+                "11111111-1111-4111-8111-111111111111",
+                "connection-1",
+                |hello| {
+                    let caps = hello["device"]["capabilities"]
+                        .as_object_mut()
+                        .expect("capabilities");
+                    if let Some(value) = capability {
+                        caps.insert("paymentFieldPrivacy".to_string(), json!(value));
+                    } else {
+                        caps.remove("paymentFieldPrivacy");
+                    }
+                },
+            );
+            write_native_frame(&mut socket, &older)
+                .await
+                .expect("hello");
+            let refusal = read_json(&mut socket).await;
+            assert_eq!(refusal["type"], "unavailable", "{refusal}");
+            assert_eq!(refusal["reason"], "extension_outdated", "{refusal}");
+            assert!(refusal["detail"]
+                .as_str()
+                .is_some_and(|text| text.contains("protected page reads")));
             assert_eq!(server.inventory().snapshot().devices.len(), 0);
             server.shutdown().await.expect("shutdown");
         }

@@ -423,4 +423,19 @@ describe("known-value secret masking", () => {
   test("maskSecretValues compiles plain entries", () => {
     expect(maskSecretValues({ t: FAKE }, [{ value: FAKE, label: DB_REF }])).toEqual({ t: DB_REF });
   });
+
+  test("a masked copy keeps request-local symbol marks, which never reach a payload", () => {
+    const mark = Symbol("request-local");
+    const item = { t: FAKE, nested: { u: "plain" }, [mark]: "kept" };
+    const masked = maskSecretValues(item, [{ value: FAKE, label: DB_REF }]);
+    expect(masked).not.toBe(item);
+    expect(masked.t).toBe(DB_REF);
+    expect(masked[mark]).toBe("kept");
+    expect(masked.nested).toBe(item.nested);
+    expect(JSON.stringify(masked)).toBe(JSON.stringify({ t: DB_REF, nested: { u: "plain" } }));
+    // An unchanged input keeps its identity, marks included.
+    expect(maskSecretValues(item, [{ value: "other-secret-value-0002", label: DB_REF }])).toBe(
+      item,
+    );
+  });
 });

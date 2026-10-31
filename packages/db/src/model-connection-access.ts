@@ -1,4 +1,5 @@
 import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { modelIdListIncludes } from "@opengeni/contracts/claude-subscription-model-ids";
 import { rawRows, type Database } from "./database";
 import { SUBSCRIPTION_CORE_CODEX_PROVIDER } from "./subscription-core-codex-provider";
 import { SUBSCRIPTION_CORE_XAI_PROVIDER } from "./subscription-core-xai-adapter";
@@ -48,7 +49,8 @@ export function connectionModelAllowed(
   allowedModels: readonly string[] | null | undefined,
   modelId: string,
 ): boolean {
-  return allowedModels == null || allowedModels.includes(modelId);
+  // A model listed under any of its id forms is the same model.
+  return allowedModels == null || modelIdListIncludes(allowedModels, modelId);
 }
 
 /**

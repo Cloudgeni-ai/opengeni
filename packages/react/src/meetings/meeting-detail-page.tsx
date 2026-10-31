@@ -882,6 +882,21 @@ function MeetingDetailPageForRecording({
   const [namingFromAside, setNamingFromAside] = useState<string | null>(null);
   const [rememberingVoice, setRememberingVoice] = useState<RecordingPerson | null>(null);
   const notes = useRecordingNotes(recordingId, override);
+  // The notes name a meeting nobody named: show that name once they arrive.
+  // The name is written just after the notes, so it is read again shortly.
+  const notesRevision = notes.notes?.revision ?? 0;
+  const refreshMeeting = meeting.refresh;
+  const awaitingName = Boolean(recording && recording.titleSource !== "person");
+  const seenNotesRevision = useRef<number | null>(null);
+  useEffect(() => {
+    if (notes.loading) return;
+    const seen = seenNotesRevision.current;
+    seenNotesRevision.current = notesRevision;
+    if (seen === null || seen === notesRevision || !awaitingName) return;
+    void refreshMeeting();
+    const again = window.setTimeout(() => void refreshMeeting(), 3_000);
+    return () => window.clearTimeout(again);
+  }, [notes.loading, notesRevision, awaitingName, refreshMeeting]);
   // Summary when the meeting has written notes, else Transcript: decided once
   // the notes load, so notes written later don't move the reader.
   const [openingTab, setOpeningTab] = useState<MeetingTab | null>(null);

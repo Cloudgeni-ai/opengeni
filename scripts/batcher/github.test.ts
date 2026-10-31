@@ -69,6 +69,44 @@ describe("RestGitHub file and branch writes", () => {
     await expect(gh.readFiles("main", ["db/0007_b.sql"])).rejects.toThrow("Not a commit SHA");
   });
 
+  test("readFiles reads a large file GraphQL truncates in full through the blob API", async () => {
+    const large = `export const migration = "0007_b";\n${"// filler\n".repeat(400_000)}`;
+    const { gh, requests } = client(({ url, body }) => {
+      if (url.endsWith("/git/blobs/big"))
+        return { content: Buffer.from(large).toString("base64"), encoding: "base64" };
+      if (url.endsWith("/git/blobs/notutf8"))
+        return { content: Buffer.from([0xff, 0xfe, 0x00]).toString("base64"), encoding: "base64" };
+      const data: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(body.variables)) {
+        if (key === "f0")
+          data.f0 = { oid: "big", text: large.slice(0, 1000), isBinary: false, isTruncated: true };
+        if (key === "f1")
+          data.f1 = { oid: "notutf8", text: "x", isBinary: false, isTruncated: true };
+        if (key === "f2") data.f2 = { oid: "bin", text: null, isBinary: true, isTruncated: true };
+        if (key.startsWith("d"))
+          data[key] = String(value).endsWith(":src")
+            ? {
+                entries: ["index.ts", "odd.ts", "image.png"].map((name) => ({
+                  name,
+                  mode: 33188,
+                  type: "blob",
+                })),
+              }
+            : null;
+      }
+      return { data: { repository: data } };
+    });
+    const files = await gh.readFiles(SHA, ["src/index.ts", "src/odd.ts", "src/image.png"]);
+    expect(files.get("src/index.ts")).toEqual({ oid: "big", mode: "100644", text: large });
+    expect(files.get("src/odd.ts")?.text).toBeNull();
+    expect(files.get("src/image.png")?.text).toBeNull();
+    // Binary blobs are never fetched; only the two truncated text blobs are.
+    expect(requests.map((r) => r.url).filter((url) => url.includes("/git/blobs/"))).toEqual([
+      "https://api.github.com/repos/owner/repo/git/blobs/big",
+      "https://api.github.com/repos/owner/repo/git/blobs/notutf8",
+    ]);
+  });
+
   test("createTree adds blobs on a base tree, and updateBranch never forces", async () => {
     const { gh, requests } = client(() => ({ sha: "t".repeat(40) }));
     expect(
