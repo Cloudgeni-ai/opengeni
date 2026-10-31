@@ -243,32 +243,15 @@ impl Groups {
         let groups = Self {
             vms: dir.join("vms"),
         };
-        groups.set(&groups.vms, "0", true, false);
+        set_group(&groups.vms, "0", true, false);
         groups
-    }
-
-    /// Makes `path` a group whose freeze reads `freeze`, as populated and
-    /// frozen as said.
-    fn set(&self, path: &Path, freeze: &str, populated: bool, frozen: bool) {
-        std::fs::create_dir_all(path).unwrap();
-        std::fs::write(path.join("cgroup.freeze"), freeze).unwrap();
-        std::fs::write(
-            path.join("cgroup.events"),
-            format!(
-                "populated {}\nfrozen {}\n",
-                u8::from(populated),
-                u8::from(frozen)
-            ),
-        )
-        .unwrap();
-        std::fs::write(path.join("cgroup.procs"), "").unwrap();
     }
 
     /// A running VM's group, marked its sandbox's only copy if `only`;
     /// `None` if the test's file system keeps no user extended attributes.
     fn vm(&self, name: &str, only: bool) -> Option<PathBuf> {
         let path = self.vms.join(name);
-        self.set(&path, "0", true, false);
+        set_group(&path, "0", true, false);
         if only && Cgroup::at(&path).set_only_copy(true).is_err() {
             eprintln!(
                 "skipped: the test directory's file system keeps no user extended attributes"
@@ -291,12 +274,29 @@ impl Groups {
                 let frozen = above || asked(&path);
                 all &= frozen;
                 let freeze = std::fs::read_to_string(path.join("cgroup.freeze")).unwrap();
-                self.set(&path, &freeze, true, frozen);
+                set_group(&path, &freeze, true, frozen);
             }
         }
         let freeze = std::fs::read_to_string(self.vms.join("cgroup.freeze")).unwrap();
-        self.set(&self.vms, &freeze, true, all);
+        set_group(&self.vms, &freeze, true, all);
     }
+}
+
+/// Makes `path` a group whose freeze reads `freeze`, as populated and
+/// frozen as said.
+fn set_group(path: &Path, freeze: &str, populated: bool, frozen: bool) {
+    std::fs::create_dir_all(path).unwrap();
+    std::fs::write(path.join("cgroup.freeze"), freeze).unwrap();
+    std::fs::write(
+        path.join("cgroup.events"),
+        format!(
+            "populated {}\nfrozen {}\n",
+            u8::from(populated),
+            u8::from(frozen)
+        ),
+    )
+    .unwrap();
+    std::fs::write(path.join("cgroup.procs"), "").unwrap();
 }
 
 fn freeze_of(path: &Path) -> String {
@@ -371,7 +371,7 @@ fn the_guard_leaves_a_vm_that_is_its_sandboxes_only_copy_running() {
     assert!(fenced.ended("late", before));
     assert!(!fenced.ended("only", before));
     assert!(!only.join("cgroup.kill").exists(), "never the only copy");
-    groups.set(&late, "0", false, false);
+    set_group(&late, "0", false, false);
     assert!(step(&config).feed, "every fenced VM is frozen or gone");
     std::fs::remove_dir_all(&late).unwrap();
     // One whose mark an agent that has ended set is frozen, not killed.

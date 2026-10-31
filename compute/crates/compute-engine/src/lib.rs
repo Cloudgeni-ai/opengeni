@@ -408,8 +408,9 @@ pub trait Engine: Send + Sync + 'static {
     /// when the host's lease runs out (ADR 18). The mark stays with the VM
     /// until it ends or the mark is cleared, and holds only while the
     /// agent process that set it runs ([`cgroup::OnlyCopy`]): an agent
-    /// that restarts marks the VMs it takes back again. An engine whose
-    /// VMs no guard stops has nothing to mark, and does nothing.
+    /// that restarts marks the VMs it takes back again. A VM starts
+    /// unmarked, whatever an earlier VM under its name was. An engine
+    /// whose VMs no guard stops has nothing to mark, and does nothing.
     fn set_only_copy(&self, vm: &Self::Vm, only: bool) -> Result<(), EngineError> {
         let _ = (vm, only);
         Ok(())

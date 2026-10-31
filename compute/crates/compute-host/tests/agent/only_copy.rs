@@ -5,6 +5,7 @@
 //! anything of it.
 
 use std::future::Future;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use compute_core::HostPolicy;
@@ -177,5 +178,40 @@ async fn a_restarted_agent_marks_the_vms_it_takes_back_as_their_records_say() {
     }
     assert_eq!(marked(&lab, only), Some(true));
     assert_eq!(marked(&lab, copied), Some(false));
+    lab.assert_clean();
+}
+
+/// A group the kernel still holds after its VM ended keeps that VM's mark.
+/// A sandbox saved here and then archived has no VM whose mark the archive
+/// could clear, and its next VM starts into that group: it starts
+/// unmarked and nothing marks it, so the guard does not leave running a
+/// VM whose sandbox has a copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vm_started_into_a_marked_group_left_behind_is_not_marked() {
+    let root = Lab::root();
+    let world: Arc<World> = Arc::default();
+    world.groups_left.store(true, Ordering::SeqCst);
+    let store = Directory::new(root.join("shelf"));
+    let lab = Lab::start_stored(root, world, store).await;
+    let sandbox = id(4);
+    lab.create(sandbox, NEVER).await;
+    assert_eq!(lab.run(sandbox, &["set kept"]).await, ["ok"]);
+    assert_eq!(marked(&lab, sandbox), Some(true));
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    assert_eq!(marked(&lab, sandbox), Some(true), "its group kept the mark");
+
+    assert_eq!(
+        lab.sleep_to(sandbox, LevelName::Archived).await,
+        Reply::Done
+    );
+    lab.wait_level(sandbox, LevelName::Archived).await;
+    assert!(!recorded_only_copy(&lab, sandbox));
+    assert_eq!(lab.run(sandbox, &["get"]).await, ["kept"]);
+    assert_eq!(
+        marked(&lab, sandbox),
+        Some(false),
+        "its next VM is unmarked"
+    );
     lab.assert_clean();
 }

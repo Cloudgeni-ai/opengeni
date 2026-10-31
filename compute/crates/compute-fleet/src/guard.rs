@@ -809,7 +809,7 @@ mod tests {
             let step = guard.step(at(now), at(deadline), vms);
             let plan = guard.plan(at(now), at(deadline), vms, None, false);
             assert_eq!((plan.vms, plan.feed), (step.action, step.feed));
-            assert!(plan.groups.is_empty());
+            assert_eq!(plan.groups, Vec::<Option<GuardAction>>::new());
             // So are VMs none of which is marked or frozen on its own.
             let plan = guard.plan(at(now), at(deadline), vms, Some(&[RUN, HELD, EMPTY]), false);
             assert_eq!((plan.vms, plan.feed), (step.action, step.feed));

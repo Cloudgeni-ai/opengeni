@@ -372,6 +372,12 @@ impl Firecracker {
             .map_err(|error| EngineError::caused_by(ErrorKind::Transient, operation, error))?
             .map_err(|error| EngineError::io(operation, error))?
         };
+        // A group an earlier VM left (its removal gives up while the kernel
+        // still holds it) keeps that VM's mark: this one starts unmarked,
+        // before any of its processes are in the group.
+        self.cgroup_of(spec)
+            .set_only_copy(false)
+            .map_err(|error| EngineError::io(operation, error))?;
         let mut command = Command::new(&self.jailer);
         command
             .args(&args)

@@ -59,7 +59,10 @@ delivery can be late or missed.
   only copy for as long as it runs: its host's guard never freezes it
   when the host loses touch with the control service
   ([18](0018-the-control-service-leases-and-fences.md)), and a job
-  outlasts such a blip.
+  outlasts such a blip, as long as the host's agent stays up through it
+  (one that restarts meanwhile leaves the mark orphaned until its
+  recovery marks the VM again, and an orphaned VM found running past the
+  deadline is frozen).
 - **A sandbox ends with its job**: at once when GitHub reports the job
   completed, and at the latest when a reconciliation finds its runner gone
   from GitHub (ephemeral runners are removed when their job ends). An

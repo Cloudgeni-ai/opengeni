@@ -187,8 +187,12 @@ struct World {
     /// Memory limits set on VMs after they started.
     limits_set: Mutex<Vec<(String, Option<u64>)>>,
     /// Each VM's mark as its sandbox's only copy, by name, as last set
-    /// (see `Engine::set_only_copy`); a VM that ends loses it.
+    /// (see `Engine::set_only_copy`). A VM starts unmarked, and one that
+    /// ends loses its mark unless `groups_left` is set.
     only_copies: Mutex<HashMap<String, bool>>,
+    /// While set, a VM that ends leaves its group behind with its mark, as
+    /// a group whose removal gives up while the kernel still holds it.
+    groups_left: AtomicBool,
     /// Each time a VM was told its drives grew: which VM, how long its
     /// writable drives' files were then, and whether it was paused.
     drives_resized: Mutex<Vec<(String, Vec<u64>, bool)>>,
@@ -263,6 +267,14 @@ struct Process {
 impl World {
     fn violation(&self, text: String) {
         self.violations.lock().unwrap().push(text);
+    }
+
+    /// VM `name` ended: its group goes with its mark, unless groups are
+    /// left behind.
+    fn vm_ended(&self, name: &str) {
+        if !self.groups_left.load(Ordering::SeqCst) {
+            self.only_copies.lock().unwrap().remove(name);
+        }
     }
 
     /// Simulates a VMM crash: its guest stops answering at once, as a real
@@ -396,6 +408,13 @@ impl Fake {
         if !self.world.live.lock().unwrap().insert(name.clone()) {
             self.world.violation(format!("two VMs at once for {name}"));
         }
+        // Into the group an earlier VM left, if any: the engine clears its
+        // mark first.
+        self.world
+            .only_copies
+            .lock()
+            .unwrap()
+            .insert(name.clone(), false);
         if self.world.tearing_down.lock().unwrap().contains(&name) {
             self.world.violation(format!(
                 "a VM for {name} started during an old one's teardown"
@@ -432,7 +451,7 @@ impl Fake {
             abort.abort();
             let _ = std::fs::remove_file(&socket);
             world.live.lock().unwrap().remove(&dead);
-            world.only_copies.lock().unwrap().remove(&dead);
+            world.vm_ended(&dead);
         });
         let process = Process {
             serial: self.world.next_vm.fetch_add(1, Ordering::Relaxed),
@@ -975,7 +994,7 @@ impl Engine for Fake {
         vm.guest.abort();
         let _ = std::fs::remove_file(&vm.vsock);
         self.world.live.lock().unwrap().remove(&vm.name);
-        self.world.only_copies.lock().unwrap().remove(&vm.name);
+        self.world.vm_ended(&vm.name);
         self.world.tearing_down.lock().unwrap().remove(&vm.name);
         Ok(())
     }

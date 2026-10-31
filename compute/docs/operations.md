@@ -335,7 +335,8 @@ installs three units:
   the software watchdog (3 s, `nowayout`) where the machine has no
   hardware one, and no suspend;
 - `compute-guard.service`, never restarted on failure: it stops every VM
-  when the host's lease runs out, and the watchdog resets the machine if
+  that is not its sandbox's only copy when the host's lease runs out
+  (ADR 18), and the watchdog resets the machine if
   the guard itself ends or stalls. So that a host short of processors or
   memory (guests holding more than it has, the swap file busy) does not
   stall it into that reset, it runs at real-time priority, locks its own

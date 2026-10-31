@@ -413,7 +413,8 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// so no later VM of it is marked (see [`Record::only_copy`]). A VM
     /// whose mark is cleared already, or a record that says so already,
     /// changes nothing. A mark that cannot be cleared fails the step, with
-    /// nothing written.
+    /// nothing written. Without a VM there is no mark to clear: a group
+    /// left behind holds no process, and the next VM starts unmarked.
     async fn no_longer_only_copy(&mut self) -> Result<(), Outcome> {
         if let Some(live) = &self.live {
             self.engine
@@ -428,12 +429,15 @@ impl<E: Engine, S: Store> Job<E, S> {
         Ok(())
     }
 
-    /// Marks the VM `vm` just started its sandbox's only copy, or not, as
-    /// its record says (see [`Record::only_copy`]). A mark that cannot be
-    /// set leaves it fenced like any other, which is safe.
+    /// Marks the VM `vm` just started its sandbox's only copy if its record
+    /// says so (see [`Record::only_copy`]); it started unmarked. A mark
+    /// that cannot be set leaves it fenced like any other, which is safe.
     pub(super) fn mark_only_copy(&self, vm: &E::Vm) {
-        if let Err(error) = self.engine.set_only_copy(vm, self.record.only_copy) {
-            tracing::warn!(id = %self.id, %error, only_copy = self.record.only_copy, "the VM's mark as its sandbox's only copy is not set");
+        if !self.record.only_copy {
+            return;
+        }
+        if let Err(error) = self.engine.set_only_copy(vm, true) {
+            tracing::warn!(id = %self.id, %error, "the VM's mark as its sandbox's only copy is not set");
         }
     }
 
