@@ -541,7 +541,7 @@ export class MultiProviderModelProvider implements ModelProvider {
       }
     }
     if (modelName && isDirectModelId(modelName)) {
-      throw new Error("The selected OpenAI or Azure OpenAI connection is unavailable");
+      throw new Error("The selected model connection is unavailable");
     }
     // Preserve the legacy unlisted-model fallback, but bind it through the same
     // typed request-policy model as every configured Responses call. This keeps

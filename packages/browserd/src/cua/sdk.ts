@@ -69,11 +69,11 @@ async function loadCuaSdk(): Promise<typeof import("@trycua/cua-driver")> {
  * source-built executable. Closing the SDK also closes its private child. */
 export async function createCuaRuntime(environment: NodeJS.ProcessEnv = process.env) {
   const { CuaDriver, SessionPermissionMode } = await loadCuaSdk();
-  if (process.platform === "win32") return CuaDriver.create(undefined);
+  const workerName = process.platform === "win32" ? "cua-driver.exe" : "cua-driver";
   const binaryPath = compiled
-    ? join(dirname(process.execPath), "cua-driver")
+    ? join(dirname(process.execPath), workerName)
     : (process.env.OPENGENI_CUA_DRIVER_BINARY ??
-      join(import.meta.dir, "../../dist/cua", process.arch, "cua-driver"));
+      join(import.meta.dir, "../../dist/cua", process.arch, workerName));
   if (!(await Bun.file(binaryPath).exists()))
     throw new Error("This interaction runtime does not contain the CUA worker");
   const driver = await CuaDriver.createPrivateWorker({

@@ -6,8 +6,9 @@
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, DiskPolicy, DiskSpace, Durability, HoldId, Host, HostPolicy, Input, Level, Notice,
-    OpId, Outcome, Priority, Resource, SandboxId, Size, SleepPolicy, SleepRules, State, Step,
+    Action, At, Claims, DiskPolicy, DiskSpace, Durability, HoldId, Host, HostPolicy, Input, Level,
+    Notice, OpId, Outcome, Priority, Resource, SandboxId, Size, SleepPolicy, SleepRules, State,
+    Step,
 };
 
 const GIB: u64 = 1 << 30;
@@ -668,7 +669,7 @@ fn a_spare_vm_keeps_what_it_wrote_booked_until_the_next_reading() {
         bytes: 2 * GIB,
         inodes: 4,
     };
-    assert!(rig.host.spare_fits(GIB, copy, 0));
+    assert!(rig.host.spare_fits(GIB, copy, 0, Claims::default()));
     rig.send(Input::Spare {
         sandbox: spare,
         bytes: GIB,

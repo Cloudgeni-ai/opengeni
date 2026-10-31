@@ -6,9 +6,9 @@
 use std::time::Duration;
 
 use compute_core::{
-    Action, Admission, At, CpuCapacity, DiskSpace, Durability, HoldId, Host, HostPolicy, Input,
-    Level, Notice, OpId, Outcome, Priority, Resource, SandboxId, Size, SleepPolicy, SleepRules,
-    State, Step,
+    Action, Admission, At, Claims, CpuCapacity, DiskSpace, Durability, HoldId, Host, HostPolicy,
+    Input, Level, Notice, OpId, Outcome, Priority, Resource, SandboxId, Size, SleepPolicy,
+    SleepRules, State, Step,
 };
 
 const GIB: u64 = 1 << 30;
@@ -83,7 +83,8 @@ impl Rig {
     }
 
     fn spare_fits(&self, cpu: u64) -> bool {
-        self.host.spare_fits(GIB, DiskSpace::default(), cpu)
+        self.host
+            .spare_fits(GIB, DiskSpace::default(), cpu, Claims::default())
     }
 
     fn hold(&mut self, id: u128) -> Vec<Action> {
@@ -425,6 +426,16 @@ fn a_spare_vm_coming_up_books_its_processor_time_until_it_is_ready() {
     // Ready, so paused: it books none.
     rig.spare(false, 0);
     assert_eq!(rig.cpu().reserved, 0);
+    // A claim of it would book 600 again: a new spare leaves room for that.
+    let claim = Claims {
+        memory: 0,
+        cpu: 600,
+    };
+    assert!(rig.host.spare_fits(GIB, DiskSpace::default(), 400, claim));
+    assert!(
+        !rig.host.spare_fits(GIB, DiskSpace::default(), 401, claim),
+        "the claim's 600 are not free for a spare"
+    );
     let actions = rig.touch(1);
     assert!(matches!(started(&actions)[..], [(1, Step::Restore, _)]));
 }

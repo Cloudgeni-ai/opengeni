@@ -49,6 +49,7 @@ mod fetch;
 mod handle;
 mod holds;
 mod link;
+mod lost;
 mod observe;
 mod owners;
 mod ready;
@@ -450,10 +451,7 @@ enum Event<V> {
         id: Id,
         reading: Reading,
     },
-    Exited {
-        id: Id,
-        incarnation: u64,
-    },
+    Exited(Exit),
     /// The VM of `id`, under removal, is known to have ended; the rest of
     /// the removal may still be under way, or stop part way.
     VmEnded {
@@ -548,8 +546,8 @@ struct Slot<V> {
     /// VM processes started for it (boots and restores) since the agent
     /// started.
     launches: u64,
-    /// A VM that died while a step held it.
-    dead: Option<u64>,
+    /// A VM that died while a step held it: its incarnation, and how.
+    dead: Option<(u64, End)>,
     /// Listeners for connections the guest opens to the host.
     _ports: Option<Listeners>,
     /// The listener for its agent's connections, on a host with links.
@@ -658,6 +656,53 @@ enum Origin {
     /// sandbox each request is about, under the admission its listener
     /// gave the request, if it came through one.
     Fleet(OwnerEpoch, Option<Admission>),
+}
+
+/// A watched VM process went without the agent ending it (see
+/// [`HostAgent::own`]).
+#[derive(Debug)]
+struct Exit {
+    id: Id,
+    incarnation: u64,
+    end: End,
+    /// When the agent took the VM process on, on the boot clock the guard
+    /// records its kills by: a kill before then was of an earlier VM.
+    owned: compute_core::At,
+}
+
+/// How a sandbox's VM was lost: it went without the agent ending it, or
+/// the agent ended it because it could not go on. Its running programs
+/// are lost either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum End {
+    /// Its VM process ended on its own: its guest rebooted (as its kernel
+    /// does on a panic, and a reboot ends a Firecracker VM), its VMM
+    /// failed, or something killed it.
+    Exited,
+    /// Its memory could no longer be served, so its next page fault would
+    /// wait forever.
+    MemoryLost,
+    /// Its guest stopped taking connections: it halted, powered off or
+    /// hung.
+    Stopped,
+    /// The host ended it for memory (ADR 24).
+    ForMemory,
+    /// The host's guard ended it: the host's lease with the control
+    /// service ran out before the VM froze (ADR 18).
+    Fenced,
+}
+
+impl End {
+    /// Its name on events.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Exited => "vm_exited",
+            Self::MemoryLost => "memory_lost",
+            Self::Stopped => "guest_stopped",
+            Self::ForMemory => "ended_for_memory",
+            Self::Fenced => "fenced",
+        }
+    }
 }
 
 /// Keeps a sandbox awake while it lives. Dropping it lets the sandbox go

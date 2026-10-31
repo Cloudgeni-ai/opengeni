@@ -217,7 +217,9 @@ That increase expires immediately with workspace-less `plan_credit_expiry`
 receipts. Purchased portions survive. Video
 admission is prepaid, so video debits cannot create the opening debt repaid by
 a later grant. Promotional allocations are
-subtracted. Monthly plan credit pays **first**, before any other funding; only
+subtracted. Monthly plan credit pays **first** for app use, before any other funding (API
+use pays from credits only and is not counted as period usage; see
+[billing-origin.md](billing-origin.md)); only
 usage beyond the remaining monthly allowance allocates eligible promotional
 grants, then other general credit/top-ups. This overrides the original design's
 promotional-first order following Bendik's updated product decision. A single
@@ -259,6 +261,26 @@ The existing self-service setup receipt is one per verified human, under its
 canonical lock. Setup retries cannot issue another witness; additional organizations,
 invited users and unverified people cannot obtain one. There is **no backfill**:
 old completed setups with no trial receipt remain ineligible, even on replay.
+
+### Signup cutoff (1119)
+
+An owner can additionally set a signup cutoff with
+`opengeni_private.set_free_credit_signup_cutoff(timestamptz, text, text, bigint)`
+(revision-fenced, audited, owner-only; see
+[signup abuse protection](signup-abuse-protection.md#free-credit-signup-cutoff)).
+While it is set, `free_plan_credit_eligible` and the Free branch of
+`list_subscription_plan_maintenance_accounts` also require the receipt owner's
+`auth_users.created_at` to be at or after the cutoff. Every Free issuance path
+(the sweep, `grant_plan_credit_period` and `replace_plan_credit_period`, which
+delegates to it) goes through that check. Exact replays of an existing receipt
+still return it, and existing periods stay spendable until their normal expiry.
+A `NULL` cutoff or no revision means no cutoff.
+
+Set the cutoff **before** re-enabling Free in the catalog. To roll back, turn
+Free off in the catalog; that does not remove issued periods. Clearing the cutoff is
+not a rollback: while Free is on it funds every older eligible owner on the next
+sweep. If the signup challenge is disabled, the cutoff alone no longer implies a
+CAPTCHA.
 
 The old `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED` environment flag and
 `set_verified_signup_trial_credits_enabled` runtime switch no longer gate this

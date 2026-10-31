@@ -881,6 +881,7 @@ export async function runTurnStreamAttempt(
         countsTowardTokenCap: billingState.countsTowardTokenCap,
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
         sessionId: input.sessionId,
+        ...(billingState.billingOrigin ? { billingOrigin: billingState.billingOrigin } : {}),
       }),
       checkSteer
         ? hasPendingSteerForTurn(db, {

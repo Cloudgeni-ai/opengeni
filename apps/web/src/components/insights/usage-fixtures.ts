@@ -5,6 +5,7 @@
 import {
   addMeasures,
   emptyMeasures,
+  type UsageBucket,
   type UsageGroup,
   type UsageGroupBy,
   type UsageMeasures,
@@ -110,6 +111,7 @@ function sum(rows: UsageMeasures[]): UsageMeasures {
 }
 
 const DAY = 86_400_000;
+const BUCKET_MS: Record<UsageBucket, number> = { five_minutes: 300_000, hour: 3_600_000, day: DAY };
 
 /** A month of usage at the given scope, grouped by `groupBy`. */
 export function fixtureUsage(
@@ -119,6 +121,8 @@ export function fixtureUsage(
     totalCalls?: number;
     days?: number;
     prior?: boolean;
+    /** A resolved window to fill, bucket by bucket, instead of the default 30 UTC days. */
+    window?: { since: Date; until: Date; priorSince: Date; priorUntil: Date; bucket: UsageBucket };
   } = {},
 ): UsageResponse {
   const scope: UsageScope = options.scope ?? {
@@ -128,8 +132,14 @@ export function fixtureUsage(
   };
   const groupBy = options.groupBy ?? "model";
   const totalCalls = options.totalCalls ?? 4_000;
-  const days = options.days ?? 30;
-  const end = Date.UTC(2026, 9, 3);
+  const window = options.window;
+  const step = window ? BUCKET_MS[window.bucket] : DAY;
+  const end = window
+    ? Math.floor((window.until.getTime() - 1) / step) * step
+    : Date.UTC(2026, 9, 3);
+  const days = window
+    ? Math.max(1, (end - Math.floor(window.since.getTime() / step) * step) / step + 1)
+    : (options.days ?? 30);
   const perModel = FIXTURE_MODELS.map((spec) => ({
     spec,
     measures: callMeasures(spec, Math.round(totalCalls * spec.share)),
@@ -261,9 +271,12 @@ export function fixtureUsage(
   })();
 
   const series = Array.from({ length: days }, (_, index) => {
-    const start = new Date(end - (days - 1 - index) * DAY).toISOString();
-    const weekday = new Date(start).getUTCDay();
-    const weight = (weekday === 0 || weekday === 6 ? 0.3 : 1) * (0.6 + (0.4 * index) / days);
+    const start = new Date(end - (days - 1 - index) * step).toISOString();
+    const quiet =
+      step === DAY
+        ? [0, 6].includes(new Date(start).getUTCDay())
+        : (index * 7) % 11 === 3 || (index * 5) % 13 === 4;
+    const weight = (quiet ? 0.3 : 1) * (0.6 + (0.4 * index) / days);
     const pointGroups: Record<string, UsageMeasures> = {};
     const parts = perModel.map(({ spec }) => {
       const calls = Math.max(0, Math.round(((totalCalls * spec.share) / days) * weight * 1.4));
@@ -281,13 +294,13 @@ export function fixtureUsage(
   return {
     scope,
     range: "30d",
-    windowStart: new Date(end - (days - 1) * DAY).toISOString(),
-    windowEnd: new Date(end + DAY / 2).toISOString(),
-    priorWindowStart: null,
-    priorWindowEnd: null,
-    bucket: "day",
-    generatedAt: new Date(end + DAY / 2).toISOString(),
-    dataThrough: new Date(end + DAY / 2 - 60_000).toISOString(),
+    windowStart: (window?.since ?? new Date(end - (days - 1) * DAY)).toISOString(),
+    windowEnd: (window?.until ?? new Date(end + DAY / 2)).toISOString(),
+    priorWindowStart: window?.priorSince.toISOString() ?? null,
+    priorWindowEnd: window?.priorUntil.toISOString() ?? null,
+    bucket: window?.bucket ?? "day",
+    generatedAt: (window?.until ?? new Date(end + DAY / 2)).toISOString(),
+    dataThrough: new Date((window?.until.getTime() ?? end + DAY / 2) - 60_000).toISOString(),
     totals,
     prior:
       options.prior === false
@@ -352,7 +365,7 @@ export function fixtureUsage(
         "scheduleId",
         "source",
       ],
-      ranges: ["today", "week", "month", "30d", "90d", "ytd", "custom"],
+      ranges: ["1h", "3h", "24h", "today", "week", "month", "30d", "90d", "ytd", "custom"],
       seriesGroups: true,
     },
   };
