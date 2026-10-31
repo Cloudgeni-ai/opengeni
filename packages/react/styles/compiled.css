@@ -3981,6 +3981,12 @@
 :where(.og-root).bg-og-danger-fill,:where(.og-root) .bg-og-danger-fill {
     background-color: var(--og-color-danger-fill);
   }
+:where(.og-root).bg-og-danger\/5,:where(.og-root) .bg-og-danger\/5 {
+    background-color: var(--og-color-danger);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-danger) 5%, transparent);
+    }
+  }
 :where(.og-root).bg-og-danger\/8,:where(.og-root) .bg-og-danger\/8 {
     background-color: var(--og-color-danger);
     @supports (color: color-mix(in lab, red, red)) {

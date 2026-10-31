@@ -217,9 +217,10 @@ function customApiInstanceStatus(
 }
 
 function StatusIcon({ status }: { status: "ready" | "attention" | "unavailable" }) {
-  if (status === "ready") return <CheckCircle2Icon className="size-4 shrink-0 text-success" />;
+  if (status === "ready")
+    return <CheckCircle2Icon className="size-4 shrink-0 text-status-success" />;
   if (status === "unavailable") return <CloudOffIcon className="size-4 shrink-0 text-fg-subtle" />;
-  return <AlertTriangleIcon className="size-4 shrink-0 text-warning" />;
+  return <AlertTriangleIcon className="size-4 shrink-0 text-status-waiting" />;
 }
 
 function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
