@@ -734,7 +734,7 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
     ).rejects.toMatchObject({ status: 403 });
   });
 
-  test("D-52: a workspace's own account serves workspaces its admins also administer, and stays its own", async () => {
+  test("SUB-OWN-04, D-52: a workspace's own account serves workspaces its admins also administer, and stays its own", async () => {
     // Another shared workspace this person administers, and one they only use.
     const workspace = async (name: string, role: string, permissions: string[]) => {
       const [row] = await shared!.admin<{ id: string }[]>`

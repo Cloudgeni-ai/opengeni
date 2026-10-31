@@ -1005,7 +1005,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
   }
 });
 
-test("D-52: a workspace's own account keeps its owner when shared; going wider is an explicit move", async () => {
+test("SUB-OWN-04, D-52: a workspace's own account keeps its owner when shared; going wider is an explicit move", async () => {
   type Policy = {
     allowedModels: string[] | null;
     allowedWorkspaces: string[] | null;
