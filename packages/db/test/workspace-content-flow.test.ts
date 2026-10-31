@@ -1,9 +1,5 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 import {
   assertOrganizationContentExchangeAllowed,
@@ -28,8 +24,6 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("workspace-content-flow");
   if (!acquired) throw new Error("EU-only content flow tests require PostgreSQL");
   shared = acquired;
-  // As the runtime will once a later migration grants the change function; tests turn EU-only on.
-  await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl);
 }, 180_000);
 
