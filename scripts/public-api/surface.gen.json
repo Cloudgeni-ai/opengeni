@@ -14633,6 +14633,7 @@
       "shape": {
         "$": "object",
         "$.accountId": "string!",
+        "$.accountIdentity": "enum?=[\"\\\"reconnect\\\"\",\"\\\"single\\\"\",\"\\\"verified\\\"\"]",
         "$.authorityId": "string?",
         "$.connectionAuthorityGeneration": "integer?",
         "$.createdAt": "string!",
