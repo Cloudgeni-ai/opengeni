@@ -1030,7 +1030,13 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   (`compute.memory.shortfall`), and the guest shrinks by answer,
   what they freed and the programs they ended (`compute.memory.shrink.*`,
   `compute.memory.processes.ended`). Each shrink is a `compute.memory.shrink`
-  event naming its sandbox and the programs ended, and each running
+  event naming its sandbox, the programs ended and its cause
+  (`compute.memory.cause`): `short`, the host short of memory with every
+  sandbox held to its request, which says the host is too full for what it
+  runs, or `over_bound`, a sandbox the kernel could not hold to its bound,
+  which says that sandbox's memory does not compress. The log line asking
+  the guest names the same cause, with the shortfall or what it holds over
+  its bound. Each running
   sandbox's summary carries its peak use, request, compressed and swapped
   memory and its stall: a kind of job that keeps peaking far above its
   request, or stalling, wants a larger request. A sandbox that only stalls

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use compute_core::{
     Action, BalloonRequest, DiskSpace, Durability, Failure, Input, Level, Notice, OpId, Outcome,
-    ShrinkRequest, State, Step,
+    ShrinkCause, ShrinkRequest, State, Step,
 };
 use compute_engine::{CancellationToken, Engine, VmSpec};
 use tokio::time::Instant;
@@ -35,6 +35,7 @@ const ASK_LIMIT: Duration = Duration::from_secs(1);
 const SHRINK_LIMIT: Duration = Duration::from_secs(15);
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
+    #[expect(clippy::too_many_lines, reason = "one arm for each event")]
     pub(super) fn on_event(&mut self, event: Event<E::Vm>) {
         match event {
             Event::Prepared {
@@ -135,8 +136,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Event::Shrunk {
                 id,
                 request,
+                cause,
                 answer,
-            } => self.shrunk(id, request, answer),
+            } => self.shrunk(id, request, cause, answer),
         }
     }
 
@@ -328,8 +330,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 free,
                 keep,
                 request,
-            } => self.shrink(Id(sandbox), free, keep, request),
-            Action::EndForMemory { sandbox } => self.end_for_memory(Id(sandbox)),
+                cause,
+            } => self.shrink(Id(sandbox), free, keep, request, cause),
+            Action::EndForMemory { sandbox, cause } => self.end_for_memory(Id(sandbox), cause),
             Action::Bound { sandbox, low, high } => {
                 if let Some(live) = self.slots.get(&sandbox).and_then(|slot| slot.vm.as_ref())
                     && let Err(error) = self.engine.bound_memory(&live.vm, low, high)
@@ -342,8 +345,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Asks the guest of `id`'s running VM to free `free` bytes of memory,
     /// keeping `keep` in use, in the background (ADR 24). Its answer, or
-    /// that it gave none, names `request`.
-    fn shrink(&self, id: Id, free: u64, keep: u64, request: ShrinkRequest) {
+    /// that it gave none, names `request`; `cause` is why it is asked.
+    fn shrink(&self, id: Id, free: u64, keep: u64, request: ShrinkRequest, cause: ShrinkCause) {
         let events = self.events_tx.clone();
         let (Some(port), Some(slot)) = (
             self.restore_notice_port,
@@ -353,6 +356,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = events.send(Event::Shrunk {
                 id,
                 request,
+                cause,
                 answer: None,
             });
             return;
@@ -362,7 +366,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .and_then(|memory| memory.outgrowth)
             .map_or(SHRINK_LIMIT, |rule| rule.answer);
         let vsock = slot.spec.vsock_path();
-        tracing::warn!(%id, free_mib = free >> 20, keep_mib = keep >> 20, "host short of memory: asking a guest to shrink");
+        match cause {
+            ShrinkCause::Short {
+                shortfall,
+                available,
+            } => tracing::warn!(
+                %id,
+                free_mib = free >> 20,
+                keep_mib = keep >> 20,
+                shortfall_mib = shortfall >> 20,
+                available_mib = available >> 20,
+                "host short of memory with every sandbox held to its request: asking a guest to shrink"
+            ),
+            ShrinkCause::OverBound { over, available } => tracing::warn!(
+                %id,
+                free_mib = free >> 20,
+                keep_mib = keep >> 20,
+                over_mib = over >> 20,
+                available_mib = available >> 20,
+                "the kernel cannot hold a sandbox to its memory bound: asking a guest to shrink"
+            ),
+        }
         tokio::spawn(async move {
             let answer = match ask_shrink(&vsock, port, free, keep, limit).await {
                 Ok(answer) => Some(answer),
@@ -374,13 +398,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = events.send(Event::Shrunk {
                 id,
                 request,
+                cause,
                 answer,
             });
         });
     }
 
     /// Takes in a guest's answer to the shrink of `request`.
-    fn shrunk(&mut self, id: Id, request: ShrinkRequest, answer: Option<Shrunk>) {
+    fn shrunk(
+        &mut self,
+        id: Id,
+        request: ShrinkRequest,
+        cause: ShrinkCause,
+        answer: Option<Shrunk>,
+    ) {
         let metrics = self.observer.metrics();
         let Some(answer) = answer else {
             metrics.shrink(ShrinkOutcome::Failed, 0, 0);
@@ -403,11 +434,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             ended = answer.ended,
             %names,
             spent = answer.spent,
+            cause = cause_name(cause),
             "a guest shrank for host memory"
         );
         self.observer.emit(
             crate::observe::Event::new("compute.memory.shrink", crate::observe::Severity::Warn)
                 .with("compute.sandbox.id", id.to_string())
+                .with("compute.memory.cause", cause_name(cause))
                 .with("compute.memory.freed", answer.freed)
                 .with("compute.processes.ended", u64::from(answer.ended))
                 .with("compute.processes.names", names)
@@ -421,10 +454,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         });
     }
 
-    /// Ends `id`'s running VM for host memory (ADR 24): the host is short
-    /// with every running sandbox held to its request, and its guest could
-    /// not be shrunk. It is restored from its last copy as any lost VM is.
-    fn end_for_memory(&mut self, id: Id) {
+    /// Ends `id`'s running VM for host memory (ADR 24): its guest could not
+    /// be shrunk, and the host is short with every running sandbox held to
+    /// its request, or the kernel cannot hold it to its bound (`cause`). It
+    /// is restored from its last copy as any lost VM is.
+    fn end_for_memory(&mut self, id: Id, cause: ShrinkCause) {
         let Some(incarnation) = self
             .slots
             .get(&id.0)
@@ -434,12 +468,33 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // A step holds it, or it is gone: the core asks again.
             return;
         };
-        tracing::error!(%id, "host out of memory with every sandbox at its request: ending a VM");
-        self.alarm(
-            id,
-            Alarm::EndedForMemory,
-            "VM ended for host memory: its guest could not be shrunk",
-        );
+        let why = match cause {
+            ShrinkCause::Short {
+                shortfall,
+                available,
+            } => {
+                tracing::error!(
+                    %id,
+                    shortfall_mib = shortfall >> 20,
+                    available_mib = available >> 20,
+                    "host out of memory with every sandbox at its request: ending a VM"
+                );
+                "VM ended for host memory: the host was short with every sandbox at its request, \
+                 and its guest could not be shrunk"
+            }
+            ShrinkCause::OverBound { over, available } => {
+                tracing::error!(
+                    %id,
+                    over_mib = over >> 20,
+                    available_mib = available >> 20,
+                    "the kernel cannot hold a sandbox to its memory bound and its guest could not \
+                     be shrunk: ending a VM"
+                );
+                "VM ended for host memory: the kernel could not hold it to its memory bound, and \
+                 its guest could not be shrunk"
+            }
+        };
+        self.alarm(id, Alarm::EndedForMemory, why);
         self.lost_vm(id, incarnation, End::ForMemory);
     }
 
@@ -958,5 +1013,13 @@ fn count_step<V>(
                     .unwrap_or_else(|| "no error recorded".to_owned()),
             ));
         }
+    }
+}
+
+/// How a shrink's cause is named in events and logs.
+fn cause_name(cause: ShrinkCause) -> &'static str {
+    match cause {
+        ShrinkCause::Short { .. } => "short",
+        ShrinkCause::OverBound { .. } => "over_bound",
     }
 }
