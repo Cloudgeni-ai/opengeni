@@ -161,14 +161,20 @@ test("scoped checkout through first use, policy changes and paid top-ups stays c
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
     async function request(path: string, body?: unknown, method?: string) {
-      return await app.request(path, {
-        method: method ?? (body === undefined ? "GET" : "POST"),
-        headers: {
-          authorization: `Bearer ${path.startsWith("/v1/billing") ? billingKey : token}`,
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
+      const send = () =>
+        app.request(path, {
+          method: method ?? (body === undefined ? "GET" : "POST"),
+          headers: {
+            authorization: `Bearer ${path.startsWith("/v1/billing") ? billingKey : token}`,
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+      // The person works in the app: promotional credit pays only for app use
+      // (a delegated token alone is API use; docs/billing-origin.md).
+      return path.startsWith("/v1/billing")
+        ? await send()
+        : await database.withBillingOriginOverride("app", send);
     }
     async function json(path: string, body?: unknown, method?: string) {
       const r = await request(path, body, method);

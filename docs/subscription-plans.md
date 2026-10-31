@@ -217,7 +217,9 @@ That increase expires immediately with workspace-less `plan_credit_expiry`
 receipts. Purchased portions survive. Video
 admission is prepaid, so video debits cannot create the opening debt repaid by
 a later grant. Promotional allocations are
-subtracted. Monthly plan credit pays **first**, before any other funding; only
+subtracted. Monthly plan credit pays **first** for app use, before any other funding (API
+use pays from credits only and is not counted as period usage; see
+[billing-origin.md](billing-origin.md)); only
 usage beyond the remaining monthly allowance allocates eligible promotional
 grants, then other general credit/top-ups. This overrides the original design's
 promotional-first order following Bendik's updated product decision. A single
