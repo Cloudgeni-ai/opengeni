@@ -41,6 +41,7 @@ export default defineConfig({
     "src/passkey-only-account.ts",
     "src/model-picker-order.ts",
     "src/model-display.ts",
+    "src/claude-subscription-model-ids.ts",
     "src/secret-use-approval-question.ts",
     "src/tool-review-presentation.ts",
     "src/app-actions.ts",
