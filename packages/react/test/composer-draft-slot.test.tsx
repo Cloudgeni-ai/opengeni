@@ -123,13 +123,17 @@ function draftSlotServer(latencyMs: { save: number; submit: number }) {
   return { client, delivered, refused };
 }
 
-/** Start an action without waiting for it to finish. */
-async function start(run: () => Promise<boolean>): Promise<Promise<boolean>> {
-  let pending!: Promise<boolean>;
+/**
+ * Start an action without waiting for it to finish. The promise is boxed:
+ * an async function that returns a promise waits for it, which would run the
+ * two sends one after the other (and outside `act`) instead of overlapping.
+ */
+async function start(run: () => Promise<boolean>): Promise<{ result: Promise<boolean> }> {
+  let result!: Promise<boolean>;
   await actRun(() => {
-    pending = run();
+    result = run();
   });
-  return pending;
+  return { result };
 }
 
 /** Wait until both sends are settled by the server, whichever way. */
@@ -167,8 +171,8 @@ describe("one draft slot, two quick messages", () => {
         await actRun(() => hook.result.current.setValue("second"));
         const steering = await start(() => hook.result.current.steer());
         await settled(server);
-        expect(await actRun(() => sending)).toBe(true);
-        expect(await actRun(() => steering)).toBe(true);
+        expect(await actRun(() => sending.result)).toBe(true);
+        expect(await actRun(() => steering.result)).toBe(true);
         expect(server.refused).toEqual([]);
         expect(server.delivered).toEqual(["send first", "steer second"]);
         expect(hook.result.current.error).toBeNull();
