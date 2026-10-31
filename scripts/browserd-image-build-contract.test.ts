@@ -141,7 +141,7 @@ describe("browser controller image build contract", () => {
 
     expect(dockerfile).toContain("FROM scratch AS chrome-assets");
     expect(dockerfile).toContain(
-      "ADD --checksum=sha256:6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.47-1_amd64.deb /google-chrome-stable.deb",
+      "ADD --checksum=sha256:be1a1e161419f5c8272432f6860912550d8e29985e925913fa800493a0d0c955 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.79-1_amd64.deb /google-chrome-stable.deb",
     );
     expect(dockerfile).toContain("/tmp/google-chrome-stable.deb");
     expect(dockerfile).not.toContain("google-chrome-stable=${OPENGENI_GOOGLE_CHROME_VERSION}");
@@ -155,8 +155,8 @@ describe("browser controller image build contract", () => {
     );
 
     for (const dockerfile of dockerfiles) {
-      expect(dockerfile).toContain("ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.47-1~deb13u1");
-      expect(dockerfile).toContain("ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261022T170820Z");
+      expect(dockerfile).toContain("ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.73-1~deb13u1");
+      expect(dockerfile).toContain("ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261029T020000Z");
       expect(dockerfile).toContain(
         "https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main",
       );
