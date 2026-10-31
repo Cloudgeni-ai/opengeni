@@ -4,7 +4,7 @@
 // older parked runs never finish and pile up, slowing every scan of active
 // runs. Cancel parked runs that are clearly superseded; keep the approval gate.
 import { errorMessage } from "@opengeni/contracts/values";
-import { readWithTransientRetry } from "./github-read-retry";
+import { retryingFetch, type RetryOptions } from "./batch-receipt";
 
 export type ParkedRun = {
   id: number;
@@ -168,31 +168,45 @@ export function retryableMainRun(runs: MainRun[]): number | null {
   return newest.status === "completed" && newest.conclusion === "failure" ? newest.id : null;
 }
 
+/**
+ * The pass's GitHub API call. A read retries a network error, a timeout, a 5xx
+ * or a 429 like the batch receipt does, so one gateway error does not end the
+ * whole pass; a mutation is sent exactly once.
+ */
+export function cadenceApi(
+  repo: string,
+  token: string,
+  fetcher: typeof fetch = fetch,
+  retry: RetryOptions = {},
+) {
+  return async (path: string, init?: RequestInit): Promise<unknown> => {
+    const method = init?.method ?? "GET";
+    const request: RequestInit = {
+      ...init,
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+      },
+    };
+    const res = await retryingFetch(
+      fetcher,
+      `https://api.github.com/repos/${repo}/${path}`,
+      request,
+      30_000,
+      method === "GET" ? retry : { ...retry, delaysMs: [] },
+    );
+    if (!res.ok && res.status !== 202) throw new Error(`${method} ${path}: ${res.status}`);
+    return res.status === 202 || res.status === 204 ? null : res.json();
+  };
+}
+
 async function main() {
   const repo = process.env.GITHUB_REPOSITORY ?? "Cloudgeni-ai/opengeni";
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error("GITHUB_TOKEN is required");
   const dryRun = process.argv.includes("--dry-run");
-  // Transient read retries stop well inside the job's 10-minute timeout.
-  const retryTiming = { deadline: Date.now() + 6 * 60_000 };
-  const api = async (path: string, init?: RequestInit) => {
-    const request = () =>
-      fetch(`https://api.github.com/repos/${repo}/${path}`, {
-        ...init,
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/vnd.github+json",
-          "x-github-api-version": "2022-11-28",
-        },
-        signal: AbortSignal.timeout(30_000),
-      });
-    // One 502 on a read must not end the whole pass; a mutation is never repeated.
-    const read = (init?.method ?? "GET") === "GET";
-    const res = read ? await readWithTransientRetry(request, retryTiming) : await request();
-    if (!res.ok && res.status !== 202)
-      throw new Error(`${init?.method ?? "GET"} ${path}: ${res.status}`);
-    return res.status === 202 || res.status === 204 ? null : res.json();
-  };
+  const api = cadenceApi(repo, token);
   const mainSha = ((await api("commits/main")) as { sha: string }).sha;
   type CiRun = {
     id: number;

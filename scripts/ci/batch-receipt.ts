@@ -21,7 +21,6 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BATCH_PREFIX, CI_WORKFLOW, parseManifest } from "../batcher/model";
-import { readWithTransientRetry, type ReadRetryTiming } from "./github-read-retry";
 
 export const RECEIPT_FILE = "batch-receipt.json";
 /** The landing commit message the batcher writes (scripts/batcher/pass.ts). */
@@ -197,24 +196,57 @@ export async function findFinalSha(
   return null;
 }
 
+/** Waits between attempts of a read that hit a transient failure. */
+export const RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000, 10_000];
+
+export interface RetryOptions {
+  /** Waits before each retry; empty means a single attempt. */
+  delaysMs?: readonly number[];
+  sleep?: (ms: number) => Promise<void>;
+}
+
 /**
- * GitHub reads with complete pagination; any gap throws. A gateway error or
- * dropped connection is retried a few times first, so one 502 does not turn
- * an attested landing into a full main CI run.
+ * One read, retried after a network error, a timeout, a 5xx or a 429 so a
+ * passing GitHub blip does not cost a batch its receipt. Each attempt gets a
+ * fresh timeout. The last attempt's response or error is returned or thrown,
+ * so persistent failures still read as unreadable evidence.
+ */
+export async function retryingFetch(
+  fetcher: typeof fetch,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  { delaysMs = RETRY_DELAYS_MS, sleep = (ms) => Bun.sleep(ms) }: RetryOptions = {},
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const last = attempt >= delaysMs.length;
+    try {
+      const response = await fetcher(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      if (last || (response.status < 500 && response.status !== 429)) return response;
+      await response.body?.cancel();
+    } catch (error) {
+      if (last) throw error;
+    }
+    await sleep(delaysMs[attempt]!);
+  }
+}
+
+/**
+ * GitHub reads with complete pagination; any gap throws. Each read retries
+ * transient failures unless `retry.delaysMs` is empty.
  */
 export function githubReads(
   repository: string,
   token: string,
   fetcher: typeof fetch = fetch,
-  timing: ReadRetryTiming = {},
+  retry: RetryOptions = {},
 ): Reads {
   const api = `https://api.github.com/repos/${repository}`;
   const headers = { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" };
+  const read = (url: string, init: RequestInit, timeoutMs: number) =>
+    retryingFetch(fetcher, url, init, timeoutMs, retry);
   const get = async (path: string): Promise<Row> => {
-    const response = await readWithTransientRetry(
-      () => fetcher(`${api}/${path}`, { headers, signal: AbortSignal.timeout(30_000) }),
-      timing,
-    );
+    const response = await read(`${api}/${path}`, { headers }, 30_000);
     if (!response.ok) throw new Error(`GitHub ${response.status} for ${path}`);
     return (await response.json()) as Row;
   };
@@ -256,21 +288,14 @@ export function githubReads(
       );
       if (artifacts.length !== 1) return null;
       // The archive URL redirects to signed storage, which must not get the token.
-      const redirect = await readWithTransientRetry(
-        () =>
-          fetcher(artifacts[0]!.archive_download_url, {
-            headers,
-            redirect: "manual",
-            signal: AbortSignal.timeout(30_000),
-          }),
-        timing,
+      const redirect = await read(
+        artifacts[0]!.archive_download_url,
+        { headers, redirect: "manual" },
+        30_000,
       );
       const location = redirect.headers.get("location");
       if (redirect.status !== 302 || !location) return null;
-      const archive = await readWithTransientRetry(
-        () => fetcher(location, { signal: AbortSignal.timeout(60_000) }),
-        timing,
-      );
+      const archive = await read(location, {}, 60_000);
       if (!archive.ok) return null;
       const directory = mkdtempSync(join(tmpdir(), "batch-receipt-"));
       try {
@@ -332,14 +357,11 @@ export function outputs(receipt: Receipt, finalSha: string | null = null): Recor
 
 if (import.meta.main) {
   const local = localPush(process.env);
-  // Transient read retries stop in time for the fallback to run inside the
-  // job's 10-minute timeout.
-  const timing = { deadline: Date.now() + 5 * 60_000 };
   let receipt: Receipt;
   try {
     receipt = await classifyMainPush(
       local,
-      githubReads(local.repository, process.env.GITHUB_TOKEN ?? "", fetch, timing),
+      githubReads(local.repository, process.env.GITHUB_TOKEN ?? ""),
     );
   } catch (error) {
     receipt = { kind: "full", reason: `evidence unreadable: ${(error as Error).message}` };
@@ -349,7 +371,9 @@ if (import.meta.main) {
       ? local.sha
       : receipt.kind === "intermediate"
         ? await findFinalSha(
-            githubReads(local.repository, process.env.GITHUB_TOKEN ?? "", fetch, timing),
+            // findFinalSha already polls, so its reads don't retry on their own:
+            // that keeps a GitHub outage within the job's time limit.
+            githubReads(local.repository, process.env.GITHUB_TOKEN ?? "", fetch, { delaysMs: [] }),
             receipt.batch.tree,
           )
         : null;

@@ -16711,6 +16711,17 @@
         "$.workspaceId": "string!"
       }
     },
+    "FeedbackBreadcrumb": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.at": "string!",
+        "$.kind": "enum!=[\"\\\"lifecycle\\\"\",\"\\\"navigation\\\"\",\"\\\"network\\\"\"]",
+        "$.label": "string!"
+      }
+    },
     "FeedbackContext": {
       "io": [
         "input",
@@ -16719,6 +16730,8 @@
       "shape": {
         "$": "object",
         "$.appVersion": "string?",
+        "$.breadcrumbs": "array?",
+        "$.breadcrumbs[]": "ref(FeedbackBreadcrumb)",
         "$.buildNumber": "string?",
         "$.deviceModel": "string?",
         "$.locale": "string?",
@@ -16727,7 +16740,12 @@
         "$.platform": "string?",
         "$.recentErrors": "array?",
         "$.recentErrors[]": "ref(FeedbackRecentError)",
+        "$.recentExceptions": "array?",
+        "$.recentExceptions[]": "ref(FeedbackRecentException)",
+        "$.recentRequests": "array?",
+        "$.recentRequests[]": "ref(FeedbackRecentRequest)",
         "$.screen": "string?",
+        "$.sessionId": "string?",
         "$.source": "enum!=[\"\\\"desktop\\\"\",\"\\\"mobile\\\"\",\"\\\"web\\\"\"]",
         "$.timeZone": "string?",
         "$.trigger": "enum?=[\"\\\"menu\\\"\",\"\\\"shake\\\"\"]"
@@ -16745,6 +16763,33 @@
         "$.screen": "string?",
         "$.status": "integer?",
         "$.title": "string?"
+      }
+    },
+    "FeedbackRecentException": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.at": "string!",
+        "$.kind": "enum!=[\"\\\"error\\\"\",\"\\\"resource\\\"\",\"\\\"unhandled_rejection\\\"\"]",
+        "$.message": "string!",
+        "$.source": "string?",
+        "$.stack": "string?"
+      }
+    },
+    "FeedbackRecentRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.at": "string!",
+        "$.correlationId": "string?",
+        "$.durationMs": "integer!",
+        "$.method": "string!",
+        "$.path": "string!",
+        "$.status": "integer!"
       }
     },
     "FeedbackScreenshot": {
@@ -33593,8 +33638,11 @@
       "ExternalVaultProviderKind": "type",
       "FeatureUnavailableReason": "type",
       "Feedback": "type",
+      "FeedbackBreadcrumb": "type",
       "FeedbackContext": "type",
       "FeedbackRecentError": "type",
+      "FeedbackRecentException": "type",
+      "FeedbackRecentRequest": "type",
       "FeedbackScreenshot": "type",
       "FeedbackScreenshotUpload": "type",
       "FeedbackSentiment": "type",
@@ -35084,6 +35132,7 @@
       "isTransientRequestError": "value",
       "OPENGENI_API_CONTRACT_HEADER": "value",
       "OPENGENI_API_CONTRACT_REVISION": "value",
+      "OPENGENI_CORRELATION_HEADER": "value",
       "OPENGENI_MAINTENANCE_ERROR_CODE": "value",
       "OpenGeniAllowanceExhaustedError": "value",
       "OpenGeniApiContractMismatchError": "value",
