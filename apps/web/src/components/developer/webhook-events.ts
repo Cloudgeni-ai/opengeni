@@ -72,7 +72,6 @@ export const WEBHOOK_EVENT_GROUPS: readonly WebhookEventGroup[] = [
   },
   {
     label: "Calls",
-    workspaceOnly: true,
     events: [
       {
         type: "session.agentCall.ringing",

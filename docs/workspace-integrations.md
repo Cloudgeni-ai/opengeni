@@ -361,7 +361,7 @@ secret and a subset of:
 | `recording.notes.updated` | Someone, or an agent, saved a meeting's written-up notes |
 | `recording.deleted` | A recording and its audio, transcripts and speaker matches were deleted |
 
-Organization webhooks accept session and recording events. A create or update that names
+Organization webhooks accept session events (agent calls included) and recording events. A create or update that names
 `usage.*` returns HTTP 422 with guidance to register a workspace webhook instead;
 the shared public event-type vocabulary remains unchanged.
 

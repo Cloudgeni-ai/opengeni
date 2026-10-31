@@ -138,15 +138,13 @@ export const ListWorkspaceWebhooksResponse = /* @__PURE__ */ defineSchema(() =>
 export type ListWorkspaceWebhooksResponse = z.infer<typeof ListWorkspaceWebhooksResponse>;
 
 /**
- * Organization webhooks fan out session and recording events; usage and agent
- * call events are per-workspace.
+ * Organization webhooks fan out session (agent calls included) and recording
+ * events; usage events are per-workspace.
  */
 export const OrganizationWebhookEventType = WorkspaceWebhookEventType.exclude([
   "usage.threshold_reached",
   "usage.exhausted",
   "usage.period_reset",
-  "session.agentCall.ringing",
-  "session.agentCall.settled",
 ]);
 export type OrganizationWebhookEventType = z.infer<typeof OrganizationWebhookEventType>;
 const OrganizationEventTypes = /* @__PURE__ */ defineSchema(() =>

@@ -5,6 +5,7 @@ import {
   CredentialProviderResponse,
   InitiatingHuman,
   OrganizationWebhook,
+  OrganizationWebhookEventType,
   PutOrganizationCredentialProviderRequest,
   resolveWorkspaceDefaultSandboxImage,
   signOpenGeniPayload,
@@ -271,6 +272,14 @@ test("organization webhooks accept session event types only; usage events stay p
       eventTypes: ["usage.exhausted"],
     }).success,
   ).toBe(true);
+  // Agent call events are session events: organization endpoints take them.
+  expect(
+    UpdateOrganizationWebhookRequest.safeParse({
+      workspaceFilter: null,
+      eventTypes: ["session.notification.posted", "session.agentCall.ringing"],
+    }).success,
+  ).toBe(true);
+  expect(OrganizationWebhookEventType.options).toContain("session.agentCall.settled");
   const invalid = CreateOrganizationWebhookRequest.safeParse({
     ...base,
     eventTypes: ["usage.exhausted"],
