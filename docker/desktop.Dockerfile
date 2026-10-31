@@ -30,7 +30,7 @@ ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb
 
 FROM scratch AS chrome-assets
 
-ADD --checksum=sha256:6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.47-1_amd64.deb /google-chrome-stable.deb
+ADD --checksum=sha256:be1a1e161419f5c8272432f6860912550d8e29985e925913fa800493a0d0c955 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.79-1_amd64.deb /google-chrome-stable.deb
 
 FROM rust:1.82-bookworm AS computer-native-build
 
@@ -337,8 +337,8 @@ ARG WEBSOCKIFY_REF=v0.12.0
 ARG TTYD_VERSION=1.7.7
 ARG NODE_MAJOR=20
 ARG TARGETARCH
-ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.47-1~deb13u1
-ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261022T170820Z
+ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.73-1~deb13u1
+ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261029T020000Z
 
 # noninteractive + a fixed TZ on EVERY apt layer (mandatory — see header).
 ENV DEBIAN_FRONTEND=noninteractive
