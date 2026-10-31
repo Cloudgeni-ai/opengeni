@@ -172,7 +172,7 @@ describe("scheduled task form projection", () => {
     });
   });
 
-  test("keeps user pause, connection pause, and disabled sync distinct", () => {
+  test("keeps user pause distinct and reads every saved source sync as retired", () => {
     const task = scheduledTask();
     expect(scheduledTaskStateLabel(task)).toMatchObject({
       label: "Active",
@@ -222,8 +222,8 @@ describe("scheduled task form projection", () => {
         },
       }),
     ).toMatchObject({
-      label: "Connection paused",
-      reason: "connection_paused",
+      label: "Sync retired",
+      reason: "provider_retired",
     });
   });
 
@@ -727,7 +727,7 @@ describe("groupScheduledTasksForList", () => {
     expect(groups.paused).toEqual([]);
   });
 
-  test("separates every schedule that will not fire, not only user pauses", () => {
+  test("separates every schedule that will not fire, including retired syncs", () => {
     const active = { ...scheduledTask(), id: "task-active" };
     const userPaused = {
       ...scheduledTask(),
@@ -736,7 +736,7 @@ describe("groupScheduledTasksForList", () => {
     };
     const connectionPaused = {
       ...scheduledTask(),
-      id: "task-connection-paused",
+      id: "task-retired-sync",
       action: knowledgeSyncAction(),
       metadata: {
         knowledgeSourceSync: { sourceEnabled: true, connectionPaused: true },
@@ -744,7 +744,7 @@ describe("groupScheduledTasksForList", () => {
     };
     const sourceDisabled = {
       ...scheduledTask(),
-      id: "task-source-disabled",
+      id: "task-retired-disabled-sync",
       action: knowledgeSyncAction(),
       metadata: {
         knowledgeSourceSync: { sourceEnabled: false, connectionPaused: false },
@@ -760,8 +760,8 @@ describe("groupScheduledTasksForList", () => {
     // The user-paused row ran most recently, so it leads its own section.
     expect(groups.paused.map((task) => task.id)).toEqual([
       "task-user-paused",
-      "task-connection-paused",
-      "task-source-disabled",
+      "task-retired-sync",
+      "task-retired-disabled-sync",
     ]);
   });
 });
@@ -1070,6 +1070,7 @@ test.each([
   ["Atlassian", "api.atlassian.com", "atlassian-mcp"],
   ["Google Drive", "googleapis.com", "google-drive-mcp"],
   ["Google Drive", "www.googleapis.com", "google-drive-mcp"],
+  ["OneDrive", "graph.microsoft.com", "microsoft-onedrive"],
 ])(
   "historical %s schedules are retired while hosted MCP tasks remain active",
   (_name, providerDomain, serverId) => {

@@ -5,10 +5,6 @@ import {
   proxyActivities,
 } from "@temporalio/workflow";
 import type * as activities from "../activities";
-import {
-  KNOWLEDGE_SOURCE_SYNC_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
-  KNOWLEDGE_SOURCE_SYNC_ACTIVITY_MAXIMUM_ATTEMPTS,
-} from "../knowledge-source-sync-activity-policy";
 
 type WorkflowControlActivities = Pick<
   typeof activities,
@@ -118,23 +114,6 @@ export function videoGenerationActivityForTaskQueue(baseTaskQueue: string) {
 export const documentActivity = proxyActivities<Pick<typeof activities, "indexDocument">>({
   startToCloseTimeout: "30 minutes",
   retry: { maximumAttempts: 1 },
-});
-
-/** Connector inventory/download/index batches are provider-I/O activities. The
- * implementation heartbeats between bounded items and owns its resumable
- * checkpoint; Temporal retries therefore repeat only idempotent source/object
- * operations and never invoke the agent runtime. */
-export const knowledgeSourceSyncActivity = proxyActivities<
-  Pick<typeof activities, "runKnowledgeSourceSyncBatch">
->({
-  startToCloseTimeout: "1 hour",
-  heartbeatTimeout: KNOWLEDGE_SOURCE_SYNC_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
-  retry: {
-    initialInterval: "2 seconds",
-    backoffCoefficient: 2,
-    maximumInterval: "1 minute",
-    maximumAttempts: KNOWLEDGE_SOURCE_SYNC_ACTIVITY_MAXIMUM_ATTEMPTS,
-  },
 });
 
 /**

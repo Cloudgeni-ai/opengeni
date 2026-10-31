@@ -1,7 +1,7 @@
 import {
-  GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
-  isRetiredNativeGoogleDriveTask,
-} from "@opengeni/contracts/google-drive-native-retirement";
+  isKnowledgeSourceSyncRetirementReason,
+  retiredKnowledgeSourceSyncTask,
+} from "@opengeni/contracts/knowledge-source-sync-retirement";
 import {
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   readScheduledTaskBillingOrigin,
@@ -9,10 +9,6 @@ import {
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
 export { scheduledTaskSessionTitle } from "./scheduled-task-title";
-import {
-  ATLASSIAN_NATIVE_RETIRED_REASON,
-  isRetiredNativeAtlassianTask,
-} from "@opengeni/contracts/atlassian-native-retirement";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
@@ -449,26 +445,20 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           }
           throw new Error("scheduled agent run is missing accepted execution truth");
         }
-        if (
-          priorRun.status === "queued" &&
-          isRetiredNativeGoogleDriveTask(acceptedExecution.task)
-        ) {
+        // A queued run accepted before Knowledge-source sync was retired
+        // settles failed once instead of recovering a new session.
+        const retiredSource =
+          priorRun.status === "queued"
+            ? retiredKnowledgeSourceSyncTask(acceptedExecution.task)
+            : null;
+        if (retiredSource) {
           await markScheduledTaskRunFailedIfQueued(
             db,
             priorRun.workspaceId,
             priorRun.id,
-            GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+            retiredSource.reason,
           );
-          return scheduledRunTerminalResult(GOOGLE_DRIVE_NATIVE_RETIRED_REASON);
-        }
-        if (priorRun.status === "queued" && isRetiredNativeAtlassianTask(acceptedExecution.task)) {
-          await markScheduledTaskRunFailedIfQueued(
-            db,
-            priorRun.workspaceId,
-            priorRun.id,
-            ATLASSIAN_NATIVE_RETIRED_REASON,
-          );
-          return scheduledRunTerminalResult(ATLASSIAN_NATIVE_RETIRED_REASON);
+          return scheduledRunTerminalResult(retiredSource.reason);
         }
         await recordScheduledTaskFiredUsage(db, acceptedExecution, priorRun);
         if (priorRun.status === "dispatched") {
@@ -538,18 +528,13 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
-      if (isRetiredNativeGoogleDriveTask(task))
-        return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
-      if (isRetiredNativeAtlassianTask(task))
-        return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
-      if (task.action.kind !== "agent_turn") {
-        return { action: "blocked", reason: "legacy_source_schedule_requires_migration" };
-      }
+      // Saved Knowledge-source tasks (frozen sync actions and source-bound
+      // agent tasks) never fetch provider content again; they fail closed
+      // before run admission, model selection or session creation.
+      const retiredSource = retiredKnowledgeSourceSyncTask(task);
+      if (retiredSource) return { action: "blocked", reason: retiredSource.reason };
       if (task.status !== "active") {
         return { action: "blocked", reason: "scheduled_task_paused" };
-      }
-      if (task.agentConfig.knowledgeSource && knowledgeSourceSyncEffectivelyPaused(task)) {
-        return { action: "blocked", reason: "knowledge_source_paused" };
       }
       const structuredAlertOccurrence = scheduledAlertOccurrenceIdentity({
         workspaceId: task.workspaceId,
@@ -2478,10 +2463,7 @@ function scheduledAdmissionRefusalResult(
 function scheduledRunTerminalResult(
   error: string | null,
 ): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
-  if (error === GOOGLE_DRIVE_NATIVE_RETIRED_REASON)
-    return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
-  if (error === ATLASSIAN_NATIVE_RETIRED_REASON)
-    return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
+  if (isKnowledgeSourceSyncRetirementReason(error)) return { action: "blocked", reason: error };
   if (error === "scheduled_authority_exhausted") {
     return { action: "blocked", reason: "scheduled_authority_exhausted" };
   }
@@ -3508,15 +3490,4 @@ export function scheduledGeneratedChatSettings(
       : {}),
     ...(agentConfig.skills?.length ? { skills: SessionSkills.parse(agentConfig.skills) } : {}),
   };
-}
-
-function knowledgeSourceSyncEffectivelyPaused(task: {
-  status: "active" | "paused";
-  metadata: Record<string, unknown>;
-}): boolean {
-  if (task.status === "paused") return true;
-  const value = task.metadata.knowledgeSourceSync;
-  if (!value || typeof value !== "object") return false;
-  const control = value as Record<string, unknown>;
-  return control.sourceEnabled === false || control.connectionPaused === true;
 }

@@ -193,6 +193,10 @@ const retiredDeadWebComponentMethods = [
   "listScheduledTaskSlackChannels",
   "publishSandboxFileArtifact",
   "saveAtlassianSources",
+  // Integration Knowledge sync is retired, with its Google Drive source
+  // dialog; these routes now answer 410 for existing callers.
+  "browseGoogleDriveFacetSource",
+  "saveGoogleDriveFacetSource",
 ];
 
 function countIdentifier(source: string, identifier: string): number {

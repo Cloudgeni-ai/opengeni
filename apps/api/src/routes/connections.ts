@@ -133,14 +133,14 @@ import {
   type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { ATLASSIAN_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/atlassian-native-retirement";
+import { GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/google-drive-native-retirement";
 import { pinnedFetch } from "@opengeni/network";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
-  browseGoogleDrive,
   completeGoogleDriveOAuthCallback,
   disconnectGoogleDrive,
-  saveGoogleDriveSource,
   startGoogleDriveOAuth,
   transitionGoogleDriveLifecycle,
 } from "../integrations/google-drive";
@@ -156,10 +156,8 @@ import {
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { disconnectPersonalGitHub } from "../integrations/personal-github";
 import {
-  browseAtlassianSources,
   completeAtlassianOAuthCallback,
   disconnectAtlassian,
-  saveAtlassianSources,
   startAtlassianOAuth,
   transitionAtlassianLifecycle,
 } from "../integrations/atlassian";
@@ -904,44 +902,16 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/browse", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
-    return c.json(
-      await browseAtlassianSources(deps, {
-        workspaceId,
-        subjectId: grant.subjectId,
-        connectionId: c.req.param("connectionId"),
-      }),
-    );
+    await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    // Knowledge sync from integrations is retired; the route stays for old clients.
+    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   });
 
   app.post("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/source", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "connections:write",
-    );
-    const { grant } = authorization;
-    const connection = await saveAtlassianSources(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      grant,
-      connectionId: c.req.param("connectionId"),
-      payload: await c.req.json(),
-      canManageOrganizationDestination:
-        authorization.accountGrant?.permissions.includes("account:admin") === true,
-      canManageWorkspaceDestination: await workspaceSettingsAuthorized(
-        deps,
-        authorization,
-        workspaceId,
-      ),
-      canManagePersonalDestination:
-        authorization.contextIntegrity && authorization.authenticatedSubjectId === grant.subjectId,
-    });
-    return c.json(ConnectionResponse.parse({ connection }));
+    await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   });
 
   app.get("/v1/integrations/google-drive/callback", async (c) => {
@@ -987,16 +957,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       assertIntegrationsEnabled();
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
-      return c.json(
-        await browseGoogleDrive(deps, {
-          workspaceId,
-          subjectId: grant.subjectId,
-          connectionId: c.req.param("connectionId"),
-          parentId: c.req.query("parentId") ?? "root",
-          ...(c.req.query("pageToken") ? { pageToken: c.req.query("pageToken") } : {}),
-        }),
-      );
+      await requireAccessGrant(c, deps, workspaceId, "connections:read");
+      // Knowledge sync from integrations is retired; the route stays for old clients.
+      throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
     },
   );
 
@@ -1005,32 +968,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       assertIntegrationsEnabled();
       const workspaceId = c.req.param("workspaceId");
-      const authorization = await requireAccessGrantAuthorization(
-        c,
-        deps,
-        workspaceId,
-        "connections:write",
-      );
-      const { grant } = authorization;
-      const connection = await saveGoogleDriveSource(deps, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-        grant,
-        connectionId: c.req.param("connectionId"),
-        payload: await c.req.json(),
-        canManageOrganizationDestination:
-          authorization.accountGrant?.permissions.includes("account:admin") === true,
-        canManageWorkspaceDestination: await workspaceSettingsAuthorized(
-          deps,
-          authorization,
-          workspaceId,
-        ),
-        canManagePersonalDestination:
-          authorization.contextIntegrity &&
-          authorization.authenticatedSubjectId === grant.subjectId,
-      });
-      return c.json(ConnectionResponse.parse({ connection }));
+      await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+      throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
     },
   );
 

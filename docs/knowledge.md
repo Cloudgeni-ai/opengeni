@@ -45,17 +45,24 @@ not parse or publish them into Knowledge. The agent first identifies useful
 lasting information, then explicitly retains supporting evidence or a reusable
 reference when warranted.
 Off leaves the file available to the chat while refusing new agent Knowledge.
-Document parsing and indexing are mechanical infrastructure. Configured Drive
-sources are ordinary scheduled agent tasks: their exact source and
-connection selection lives in `agentConfig.knowledgeSource` and is frozen in the
-accepted run. The attempt-only `knowledge_source_fetch` tool transfers and
-prepares source content with provider ACLs and durable checkpoints;
-`knowledge_source_read` lists content changed in that run and reads bounded
-passages. The agent selects findings and saves them with `knowledge_save`.
-No separate ingestion workflow decides what the company should remember.
-Native Jira/Confluence source sync is retired: existing schedules cannot fetch
-new content, while imported Documents and history remain. Atlassian agent tools
-use its hosted MCP connector; see [Atlassian](atlassian.md).
+Document parsing and indexing are mechanical infrastructure.
+
+Integrations give agents tools and access; they do not import provider content
+into Knowledge. For recurring work, such as summarising a Drive folder or a Jira
+project every morning, create an ordinary agent schedule that uses the
+integration's tools; the agent saves lasting findings with `knowledge_save`
+under the usual learning policy. No separate ingestion workflow or integration
+scheduler decides what the company should remember.
+
+Integration Knowledge sync (Google Drive, OneDrive, Jira/Confluence) is retired.
+Saved source tasks, whether a frozen `knowledge_source_sync` action or an agent
+task carrying `agentConfig.knowledgeSource`, read as **Sync retired**: new
+fires, manual runs and resume are refused, and queued runs settle failed with
+the retirement reason before any session or model is created. The reasons and
+copy live in `packages/contracts/src/knowledge-source-sync-retirement.ts`.
+Imported Documents, Knowledge entries, source provenance and run history remain
+readable, and old tasks can still be deleted. See [Atlassian](atlassian.md) and
+[Google Drive](google-drive.md) for their MCP connections.
 
 A failed vector-index batch keeps its last completed projection and the durable
 queue retries it with backoff. The stored job reason stays the SQL lifecycle's

@@ -1,4 +1,3 @@
-import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
 import { publishStartupProgress } from "./model-usage";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
@@ -178,11 +177,6 @@ export type PrepareTurnToolRuntimeDeps = {
   independentSessionTitles?: boolean;
   /** Connected-vault providers and the shared read budget for this attempt. */
   vaultAccess: AttemptVaultAccess;
-  fetchKnowledgeSource?:
-    | ((
-        input: import("../types").RunKnowledgeSourceSyncBatchInput,
-      ) => Promise<import("../types").RunKnowledgeSourceSyncBatchResult>)
-    | undefined;
   input: RunAgentTurnInput;
   catalogSourceSettings: Settings;
   db: ActivityServices["db"];
@@ -699,23 +693,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       });
     },
   });
-  const sourceTools = deps.fetchKnowledgeSource
-    ? await createKnowledgeSourceAttemptTools({
-        db,
-        context: {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          actor: {
-            kind: "agent",
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            attemptId: input.attemptId,
-            executionGeneration: attempt.executionGeneration,
-          },
-        },
-        fetch: deps.fetchKnowledgeSource,
-      })
-    : [];
   const operationRecoveryEnabled = githubRestMcp.settings.mcpServers.some(
     (server) =>
       server.operationRecovery &&
@@ -877,7 +854,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]
       : []),
     ...skillTools,
-    ...sourceTools,
     ...(deps.runCredentialRenewals
       ? [
           createRefreshCredentialsAttemptToolDefinition({
