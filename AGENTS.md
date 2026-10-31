@@ -725,7 +725,7 @@ Sandbox preparation is controlled by:
 - `OPENGENI_SANDBOX_PREPARATION_PROFILES=none`, `azure`, `github`, or comma-separated profile names
 - `OPENGENI_SANDBOX_ENV_ALLOWLIST=...` for extra explicit host env vars
 
-Explicit `OPENGENI_GIT_*` settings can set sandbox git author/committer identity. Ambient host `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables only pass through when the `github` preparation profile or env allowlist permits them.
+Explicit `OPENGENI_GIT_*` settings can set sandbox git author/committer identity (the default for App and host repositories). Otherwise commit identity is per repository: the worker writes each mounted repository's local `user.name`/`user.email` from its own credential binding (App bot or the user's GitHub noreply address), and a per-turn `git` wrapper drops a stale baked `GIT_AUTHOR_*`/`GIT_COMMITTER_*` identity in older sandboxes. Ambient host `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables only pass through when the `github` preparation profile or env allowlist permits them.
 
 Do not expect model provider credentials to automatically appear in the sandbox unless explicitly allowed.
 

@@ -929,6 +929,16 @@ export function createRecordingActivities(
               });
             },
           });
+        // Every track's audio is prepared before any is transcribed, so the
+        // whole meeting is playable within seconds of the recording ending.
+        // Transcribing one track can take many minutes, and a player with only
+        // the first track meanwhile looks like the rest was never recorded.
+        const prepared: Array<{
+          plan: (typeof plans)[number];
+          track: (typeof job.recording.tracks)[number];
+          offsetMilliseconds: number;
+          audio: Awaited<ReturnType<typeof preparedTrackAudio>>;
+        }> = [];
         for (const plan of plans) {
           const track = job.recording.tracks.find((item) => item.trackNumber === plan.trackNumber)!;
           const chunks = job.chunks.filter((chunk) => chunk.trackNumber === plan.trackNumber);
@@ -954,6 +964,9 @@ export function createRecordingActivities(
             }),
           );
           telemetry.preparedBytes += audio.storedBytes;
+          prepared.push({ plan, track, offsetMilliseconds, audio });
+        }
+        for (const { plan, track, offsetMilliseconds, audio } of prepared) {
           heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber });
           // The model's own diarization is still requested when it has one, so
           // a failure of ours falls back to it.
