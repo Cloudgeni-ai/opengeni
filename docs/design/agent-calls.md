@@ -87,8 +87,9 @@ A product that embeds Opengeni rings its own app with its own push credentials:
    row is per person per organization (`1143_agent_call_host_phones`). Agents
    count these phones alongside the person's Opengeni app phones, so `no_phone`
    only means nobody can ring them.
-3. The backend subscribes a workspace webhook to `session.agentCall.ringing`
-   and `session.agentCall.settled`, and on ringing sends a VoIP push to the
+3. The backend subscribes a workspace or organization webhook to
+   `session.agentCall.ringing` and `session.agentCall.settled` (organization
+   endpoints since `1172_organization_webhook_agent_calls`), and on ringing sends a VoIP push to the
    person's opted-in phones. The event's `devices` counts only the phones
    Opengeni rang itself.
 4. The app reports the call to CallKit with the shared React Native package
