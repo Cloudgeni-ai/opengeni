@@ -780,12 +780,12 @@ describe("embedded worker lifecycle contract", () => {
             has_dependents: false,
             configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
           },
-          // Migration 1103: the subscription account-administrator grant. Its
-          // runtime grant stays deferred for previous-release compatibility.
+          // Migration 1103: the subscription account-administrator grant,
+          // created without runtime EXECUTE; 1149 granted it.
           {
             name: "grant_subscription_account_administrator(jsonb)",
             owner: "opengeni_migrator",
-            can_execute: false,
+            can_execute: true,
             public_execute: false,
             security_definer: true,
             trigger_callable: false,
