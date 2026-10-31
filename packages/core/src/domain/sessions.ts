@@ -1,6 +1,7 @@
 import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
 import type { TeamsConversationProof } from "@opengeni/db";
+import type { BillingOrigin } from "@opengeni/contracts";
 import {
   isDirectModelId,
   MESSAGE_TIME_ZONE_METADATA_KEY,
@@ -27,6 +28,7 @@ import type {
   SessionTurnSurface,
 } from "@opengeni/contracts";
 import { resolveTurnSurface } from "../turn-surface";
+import { resolveTurnBillingOrigin } from "../billing-origin";
 import { turnAppActionGrant } from "../app-action-turn-grant";
 import { recordTurnAppActionGrant } from "@opengeni/db";
 import {
@@ -187,6 +189,7 @@ import {
   getSessionLineage,
   getSessionTurn,
   getSessionTurnInitiatingHumanSubjectId,
+  readTurnBillingOrigin,
   getSessionTurnForAttempt,
   getSessionTurnPersonalConnectionDelegations,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
@@ -930,6 +933,11 @@ export type SessionCreateRequestOptions = {
    */
   surface?: SessionTurnSurface;
   /**
+   * Who pays (`BillingOrigin`) when the entry point knows it, for example a
+   * schedule's frozen origin. Omitted derives it (see resolveTurnBillingOrigin).
+   */
+  billingOrigin?: BillingOrigin;
+  /**
    * Agent-configuration creator kind (renderer default and default-config
    * policy). Omitted derives `slack` from a Slack surface, else the public API.
    */
@@ -1016,6 +1024,8 @@ export async function createAndStartSessionWithOutcome(input: {
   initialMessage: string;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the initial turn (`BillingOrigin`). */
+  billingOrigin?: BillingOrigin | null;
   /**
    * Live product usage counters: a newly created session (never a replay)
    * counts once, and its initial user message once unless deferred.
@@ -1584,6 +1594,7 @@ async function finishStartSession(
     ) => Promise<void>;
     deferInitialTurn?: boolean;
     surface?: SessionTurnSurface | null;
+    billingOrigin?: BillingOrigin | null;
     modelContext?: string | null;
     timeZone?: string | null;
     openingTools?: readonly string[];
@@ -1679,6 +1690,7 @@ async function finishStartSession(
       ...(initialTimeZone ? { initialTimeZone } : {}),
       ...(input.openingTools?.length ? { initialOpeningTools: [...input.openingTools] } : {}),
       surface: input.surface ?? null,
+      billingOrigin: input.billingOrigin ?? null,
       createdEventPayload: {
         toolPolicy: input.toolPolicy,
         ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
@@ -1967,6 +1979,8 @@ type PostUserMessageTurnInput = {
   origin?: "human" | "operator";
   /** Content-free product surface the request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin of the sender, frozen on the turn (`BillingOrigin`). */
+  billingOrigin?: BillingOrigin | null;
   actor?: string;
   actorLabel?: string;
   commandActor?: SessionCommandActor;
@@ -2171,6 +2185,7 @@ export async function postUserMessageTurn(
               turnExecutionPolicy: input.turnExecutionPolicy,
               source: input.origin === "operator" ? "api" : "user",
               surface: input.surface ?? null,
+              billingOrigin: input.billingOrigin ?? null,
               ...(input.recordAgentRunUsage !== undefined
                 ? { recordAgentRunUsage: input.recordAgentRunUsage }
                 : {}),
@@ -2490,7 +2505,18 @@ export async function retryFailedSession(
       action: "agent_run:create",
       quantity: 1,
       model,
-      ...(turn ? { acceptedTurn: { sessionId: session.id, turnId: turn.id } } : {}),
+      // A retry runs the failed turn again, billed as that turn was.
+      ...(turn
+        ? {
+            acceptedTurn: { sessionId: session.id, turnId: turn.id },
+            billingOrigin:
+              (await readTurnBillingOrigin(deps.db, {
+                accountId: grant.accountId,
+                workspaceId,
+                turnId: turn.id,
+              })) ?? "app",
+          }
+        : {}),
     },
   );
   const result = await runIdempotentPersistenceTransaction(
@@ -2596,6 +2622,15 @@ async function createSessionForRequestInFileScope(
     grant,
     authorization,
     requested: requestOptions.surface,
+  });
+  // Who pays for this chat's work: frozen on its first turn, inherited after.
+  const billingOrigin = await resolveTurnBillingOrigin(unresolvedDeps.db, {
+    grant,
+    authorization,
+    // A Teams conversation is a bot set up in the app.
+    requestedOrigin:
+      requestOptions.billingOrigin ?? (requestOptions.teamsConversation ? "app" : undefined),
+    requestedSurface: requestOptions.surface,
   });
   payload.metadata = sessionCreationMetadata(payload.metadata);
   const creationMetadata = externalCreationMetadata(payload.metadata, authorization, grant);
@@ -4019,6 +4054,7 @@ async function createSessionForRequestInFileScope(
         action: "agent_run:create",
         quantity: 1,
         model,
+        billingOrigin,
       }),
     );
   }
@@ -4099,6 +4135,7 @@ async function createSessionForRequestInFileScope(
       visibility: effectiveVisibility,
       initialMessage: payload.initialMessage ?? "",
       surface,
+      billingOrigin,
       metrics: unresolvedDeps.observability ?? null,
       ...(unresolvedDeps.observability
         ? { startupObservability: unresolvedDeps.observability }
@@ -4159,6 +4196,7 @@ async function createSessionForRequestInFileScope(
                     action: "agent_run:create",
                     quantity: 1,
                     model,
+                    billingOrigin,
                     acceptedTurn: { sessionId, turnId },
                   },
                 );
@@ -4410,6 +4448,8 @@ async function acceptSessionUserMessageInFileScope(
      * in-process embedding host). Omitted derives it from the grant.
      */
     surface?: SessionTurnSurface;
+    /** Who pays, when the entry point knows it (see resolveTurnBillingOrigin). */
+    billingOrigin?: BillingOrigin;
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -4437,6 +4477,14 @@ async function acceptSessionUserMessageInFileScope(
       })
     : undefined;
 
+  // Who pays for this message's work, frozen on its turn.
+  const billingOrigin = await resolveTurnBillingOrigin(db, {
+    grant,
+    authorization: input.authorization,
+    // A Teams conversation is a bot set up in the app.
+    requestedOrigin: input.billingOrigin ?? (input.teamsConversation ? "app" : undefined),
+    requestedSurface: input.surface,
+  });
   const promptInitiator = creationInitiatorForGrant(grant);
   const delegatedServiceInitiator =
     promptInitiator.initiator?.kind === "service"
@@ -4641,6 +4689,7 @@ async function acceptSessionUserMessageInFileScope(
         action: "agent_run:create",
         quantity: 1,
         model: effectiveModel,
+        billingOrigin,
       });
     }
     if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
@@ -4798,6 +4847,7 @@ async function acceptSessionUserMessageInFileScope(
               action: "agent_run:create",
               quantity: 1,
               model: effectiveModel,
+              billingOrigin,
               acceptedTurn: { sessionId, turnId },
             },
           );
@@ -4808,6 +4858,7 @@ async function acceptSessionUserMessageInFileScope(
       delivery,
       origin: source === "api" ? "operator" : "human",
       surface,
+      billingOrigin,
       actor: grant.subjectId,
       ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
       commandActor,

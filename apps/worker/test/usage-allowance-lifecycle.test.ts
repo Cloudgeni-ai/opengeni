@@ -112,10 +112,7 @@ describe("allowance admission lifecycle boundaries", () => {
       "const admissionDenial = await agentRunAdmissionDenial(",
       human,
     );
-    const refused = source.indexOf(
-      "return await refuseAdmission(admissionDenial, true,",
-      admission,
-    );
+    const refused = source.indexOf("return await refuseAdmission(", admission);
     const accepted = source.indexOf("const acceptedModel =", refused);
     expect(human).toBeGreaterThan(0);
     expect(admission).toBeGreaterThan(human);
@@ -123,6 +120,10 @@ describe("allowance admission lifecycle boundaries", () => {
     expect(accepted).toBeGreaterThan(refused);
     expect(source.slice(admission, refused)).toContain(
       "initiatingHumanSubjectId: causalHumanSubjectId",
+    );
+    // Run receipts record API work without credits as out of credits.
+    expect(source.slice(refused, accepted)).toContain(
+      'admissionDenial === "api_credits_required" ? "insufficient_credits" : admissionDenial,',
     );
     const recorder = source.indexOf("const refuseAdmission = async");
     expect(source.slice(recorder, human)).toContain("recordScheduledTaskAdmissionRefusal(db,");

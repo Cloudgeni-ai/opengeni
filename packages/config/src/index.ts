@@ -6,6 +6,7 @@ import {
   DEFAULT_AGENT_INSTRUCTIONS,
   DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
   DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
+  DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
 } from "./defaults";
 export {
   DEFAULT_OPENROUTER_MODEL_ID,
@@ -16,6 +17,7 @@ export {
   DEFAULT_AGENT_INSTRUCTIONS,
   DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
   DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
+  DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
 } from "./defaults";
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
@@ -340,6 +342,22 @@ export const McpOperationRecoverySchema = z
 /** Public, digest-pinned desktop image used by Modal unless the operator overrides it. */
 export const DEFAULT_MODAL_IMAGE_REF =
   "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805";
+
+/**
+ * Whether this account keeps the billing terms from before the app/API split:
+ * any credit pays any use, no own-key platform fee, no newly metered tools.
+ */
+export function isLegacyBillingAccount(
+  settings: Pick<Settings, "billingLegacyAccountIds">,
+  accountId: string | null | undefined,
+): boolean {
+  return (
+    typeof accountId === "string" &&
+    (settings.billingLegacyAccountIds ?? DEFAULT_BILLING_LEGACY_ACCOUNT_IDS).includes(
+      accountId.toLowerCase(),
+    )
+  );
+}
 
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
@@ -2301,6 +2319,23 @@ const SettingsSchema = z.object({
   stripeCreditsProductId: z.string().optional(),
   // Enables subscription service paths only; top-up billing remains independent.
   subscriptionPlansEnabled: EnvBoolean.default(false),
+  // Internal accounts billed on the terms from before the app/API split
+  // (docs/billing-origin.md#internal-accounts-cloudgeni-and-our-team): any
+  // credit pays any use, no own-key platform fee, no newly metered tool
+  // charges. Defaults to DEFAULT_BILLING_LEGACY_ACCOUNT_IDS (CloudGeni's host
+  // account and our own team's organizations); "none" lists no account.
+  billingLegacyAccountIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value.trim().toLowerCase() === "none"
+          ? []
+          : value
+              .split(",")
+              .map((id) => id.trim().toLowerCase())
+              .filter(Boolean)
+        : value,
+    z.array(z.string().uuid()).default([...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS]),
+  ),
   mcpServers: z
     .array(
       z.object({
@@ -6354,6 +6389,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
     subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
+    billingLegacyAccountIds: optional("OPENGENI_BILLING_LEGACY_ACCOUNT_IDS"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };
   const parsed = SettingsSchema.parse(raw);
