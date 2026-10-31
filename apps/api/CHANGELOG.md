@@ -1,5 +1,78 @@
 # @opengeni/api-router
 
+## 6.2.1
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+  - @opengeni/core@6.2.0
+  - @opengeni/db@6.2.0
+  - @opengeni/config@6.2.0
+  - @opengeni/runtime@6.2.0
+  - @opengeni/artifact-tool@6.2.0
+  - @opengeni/capabilities@6.2.0
+  - @opengeni/codemode@6.2.0
+  - @opengeni/codex@6.2.0
+  - @opengeni/documents@6.2.0
+  - @opengeni/events@6.2.0
+  - @opengeni/github@6.2.0
+  - @opengeni/interaction@6.2.0
+  - @opengeni/observability@6.2.0
+  - @opengeni/storage@6.2.0
+  - @opengeni/tool-gateway@6.2.0
+  - @opengeni/vaults@6.2.0
+  - @opengeni/vaults-bitwarden@6.2.0
+  - @opengeni/vaults-keeper@6.2.0
+  - @opengeni/vaults-onepassword@6.2.0
+  - @opengeni/vaults-protonpass@6.2.0
+  - @opengeni/agent-proto@6.2.0
+  - @opengeni/network@6.2.0
+  - @opengeni/xai-subscription@6.2.0
+
+## 6.1.1
+
+### Minor Changes
+
+- 0422c7b: Connecting Gmail now asks Google only to read mail. When an agent later needs to draft, send or organize mail, the chat shows "Give Gmail more access" with an Allow button, which reconnects the same account and asks only for the missing permission; everything already allowed stays. Once the account holds that access, the agent carries on by itself, the same way it does after a first connection. Every Gmail tool stays in the agent's tool list; a tool the account cannot use yet stops before anything runs and before any approval card. Accounts connected earlier keep their access.
+
+  Connect begin requests accept an optional `requestedScopes` list for a reconnect (`reconnectAccountId` is required with it), and OAuth provider profiles can declare `incrementalScopes` that are asked for only when requested or already granted. The connection token resolver now returns `grantedScopes` for every OAuth credential. The capability continuation request also accepts `{ connectionId }`: after a reconnect from an account's own card, the chat continues once that account is active and holds the scopes the card asked for.
+
+### Patch Changes
+
+- 9552358: Managed authentication now runs on Better Auth 1.7.14 (from 1.6.26), the line that receives Better Auth's security fixes. The account schema is unchanged, so there is no migration. Deployments that set `OPENGENI_BETTER_AUTH_ALLOWED_HOSTS` keep resolving the public host from `x-forwarded-host`, which 1.7 no longer trusts by default; the host must still be one of the allowed hosts. Two 1.7 defaults are turned off so authentication behaves as before: auth writes stay outside a database transaction (otherwise a password sign-up without email verification failed, because the new user was not yet visible when its first session was admitted), and auth requests no longer wait on a schema introspection of the database (a test checks the migrated schema against Better Auth's instead).
+- Updated dependencies [9552358]
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/core@6.1.0
+  - @opengeni/contracts@6.1.0
+  - @opengeni/runtime@6.1.0
+  - @opengeni/db@6.1.0
+  - @opengeni/artifact-tool@6.1.0
+  - @opengeni/capabilities@6.1.0
+  - @opengeni/codemode@6.1.0
+  - @opengeni/codex@6.1.0
+  - @opengeni/config@6.1.0
+  - @opengeni/documents@6.1.0
+  - @opengeni/events@6.1.0
+  - @opengeni/github@6.1.0
+  - @opengeni/interaction@6.1.0
+  - @opengeni/observability@6.1.0
+  - @opengeni/storage@6.1.0
+  - @opengeni/tool-gateway@6.1.0
+  - @opengeni/vaults@6.1.0
+  - @opengeni/vaults-bitwarden@6.1.0
+  - @opengeni/vaults-keeper@6.1.0
+  - @opengeni/vaults-onepassword@6.1.0
+  - @opengeni/vaults-protonpass@6.1.0
+  - @opengeni/agent-proto@6.1.0
+  - @opengeni/network@6.1.0
+  - @opengeni/xai-subscription@6.1.0
+
 ## 6.0.2
 
 ### Minor Changes

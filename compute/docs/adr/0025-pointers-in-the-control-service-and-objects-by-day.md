@@ -83,7 +83,11 @@ order, which write lands.
   listing missed.
 - **The sweep runs from the control image**, `compute-control sweep
   --store ... --delete` with the service's database, daily as before.
-  `compute-host sweep` remains for a host on its own.
+  `compute-host sweep` remains for a host on its own, and the control
+  image no longer carries `compute-host`: a chart of an earlier release,
+  which runs `compute-host sweep` from that image, fails at once against
+  an image of this one instead of sweeping, so the chart and the image
+  are upgraded together.
 - **Moving pointers into the service is automatic and safe while hosts
   upgrade.** Until a fleet's pointers are imported, the service answers
   hosts' pointer requests as unavailable (they try again), its own

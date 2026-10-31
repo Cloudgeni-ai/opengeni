@@ -1,5 +1,43 @@
 # @opengeni/sdk
 
+## 6.2.1
+
+### Minor Changes
+
+- cbfd911: Insights can show the last hour, the last 3 hours and the last 24 hours, and a custom range now takes a start and end time to the minute. Usage requests accept `range` values `1h`, `3h` and `24h`, and custom `from`/`to` as UTC instants (`YYYY-MM-DDTHH:MMZ`, end exclusive) as well as UTC days (end inclusive). Buckets follow the window length: 5 minutes up to 3 hours, hourly up to 2 days, then daily, so `bucket` can now be `five_minutes`. The prior window is always the same length immediately before. Usage responses list `availableRanges`, the ranges that server serves.
+- 7c94b6e: Find in a chat (Cmd/Ctrl+F) now covers the whole chat and starts at the newest match. It counts matches in the background, so the bar reads "3 / 120" instead of "1 / 50+"; in a chat with thousands of matches it shows how many it has found so far. Previous from the first match goes to the newest, Next from the newest goes straight to the first, and Enter, Shift+Enter, the arrows and Cmd/Ctrl+G all step through matches. Closing and reopening the bar starts again at the newest match. Session message search accepts `order: "newest"` to walk messages newest first; the default stays `oldest`, and `groupBy: "session"` only supports `oldest`.
+
+### Patch Changes
+
+- Updated dependencies [cbfd911]
+- Updated dependencies [7c94b6e]
+- Updated dependencies [7af3643]
+  - @opengeni/contracts@6.2.0
+  - @opengeni/connect@6.2.0
+
+## 6.1.1
+
+### Minor Changes
+
+- 0422c7b: Connecting Gmail now asks Google only to read mail. When an agent later needs to draft, send or organize mail, the chat shows "Give Gmail more access" with an Allow button, which reconnects the same account and asks only for the missing permission; everything already allowed stays. Once the account holds that access, the agent carries on by itself, the same way it does after a first connection. Every Gmail tool stays in the agent's tool list; a tool the account cannot use yet stops before anything runs and before any approval card. Accounts connected earlier keep their access.
+
+  Connect begin requests accept an optional `requestedScopes` list for a reconnect (`reconnectAccountId` is required with it), and OAuth provider profiles can declare `incrementalScopes` that are asked for only when requested or already granted. The connection token resolver now returns `grantedScopes` for every OAuth credential. The capability continuation request also accepts `{ connectionId }`: after a reconnect from an account's own card, the chat continues once that account is active and holds the scopes the card asked for.
+
+- 6573dc7: The system instructions and tool list follow how a chat started and never change mid-chat, so earlier requests stay cacheable. A chat that a scheduled task or event trigger starts unattended is told so from its first turn, like a session created with `unattended: true`. When the switch, or a person writing in an automation's chat, makes a turn's attendance differ from how the chat started, that turn's input carries a short note saying so (the unattended guidance, or that a person is now present and can answer). In a chat switched to unattended after it started, a question or hand-off to a person returns at once with a result saying no one will answer.
+
+  Unattended sessions no longer wait on a person anywhere. A call that needs someone's approval under the workspace's tool permissions is refused at once with an error result saying nobody can approve it in an unattended session, in model tool calls and in Codemode, so the agent works around it and lists it as a step left for a person. Nothing is approved and no approval request is opened; permissions stay exactly as configured. Chats that scheduled tasks and event triggers start are unattended by default; a task chooses with `agentConfig.unattended`, and a task that sets `approvalTimeoutSeconds` without it stays attended. A new **Work without me** switch in a chat's Agent tab turns unattended mode on or off from the next turn, through `PUT /v1/workspaces/:workspaceId/sessions/:id/unattended` (SDK `updateSessionUnattended`); session reads include `unattended`. Explicit choices (the switch, the create option, a task's `agentConfig.unattended`) stay; only the automatic default of a scheduled or event-triggered chat ends when a person writes in it from the web app, Slack or a voice call. Interactive sessions are unchanged.
+
+- 9cf4bc0: Sessions can be created unattended. `unattended: true` on session create says no person will see or answer questions until the task ends, as in an API automation or another headless run. Until now the agent could not tell, so it ended such runs with a question nobody would read. An unattended session's instructions say a question ends the work unanswered: settle open choices with the most conventional option, finish the reversible work inside the workspace, never take or stand in for a step only a person can take, leave that and anything destructive, external or unauthorised undone, and end with the result, the assumptions made and the steps left for a person. Tools that wait for a person (`request_human_input`, `interaction_request_human`) are not offered. The setting is frozen at create under a reserved metadata key that caller metadata never sets, is not inherited by child sessions, a fork reads as attended, and a keyed retry that changes it conflicts. Interactive sessions are unchanged byte for byte.
+
+### Patch Changes
+
+- Updated dependencies [0422c7b]
+- Updated dependencies [9f02c05]
+- Updated dependencies [6573dc7]
+- Updated dependencies [9cf4bc0]
+  - @opengeni/contracts@6.1.0
+  - @opengeni/connect@6.1.0
+
 ## 6.0.2
 
 ### Major Changes

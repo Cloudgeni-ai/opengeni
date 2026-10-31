@@ -52,11 +52,36 @@ impl Head {
     }
 }
 
+/// One object a stored copy keeps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Part {
+    /// A manifest, by its name: `<day>/<digest>`, or a digest alone in the
+    /// old layout.
+    Manifest(String),
+    Chunk(ChunkRef),
+}
+
+impl Part {
+    /// Its key in the store, as a listing gives it.
+    pub fn key(&self) -> Result<String> {
+        match self {
+            Self::Manifest(name) => ChunkStore::manifest_key(name),
+            Self::Chunk(reference) => Ok(reference.key()),
+        }
+    }
+}
+
 /// The chunk and manifest keys the copy whose pointer holds `pointer`
 /// keeps. Anything unreadable fails, so a sweep stops before deleting what
 /// it could not account for; only a damaged or missing working-set pack
 /// does not, since a wake without it is just slower.
 pub async fn names(store: &ChunkStore, pointer: &[u8]) -> Result<Vec<String>> {
+    parts(store, pointer).await?.iter().map(Part::key).collect()
+}
+
+/// The chunks and manifests the copy whose pointer holds `pointer` keeps,
+/// as [`names`] gives their keys.
+pub async fn parts(store: &ChunkStore, pointer: &[u8]) -> Result<Vec<Part>> {
     let head = Head::parse(pointer)?;
     let mut manifests = vec![head.disk];
     // A working-set pack holds memory pages, so it is kept only with the
@@ -65,32 +90,32 @@ pub async fn names(store: &ChunkStore, pointer: &[u8]) -> Result<Vec<String>> {
     if let Some(memory) = &head.memory {
         manifests.extend([memory.state.clone(), memory.memory.clone()]);
     }
-    let mut names = Vec::new();
+    let mut kept = Vec::new();
     for name in manifests {
         let manifest = store.get_manifest(&name).await?;
-        names.push(ChunkStore::manifest_key(&name)?);
-        names.extend(
+        kept.extend(
             manifest
                 .extents
-                .iter()
-                .filter_map(|extent| match &extent.source {
-                    ExtentSource::Chunk { reference, .. } => Some(reference.key()),
+                .into_iter()
+                .filter_map(|extent| match extent.source {
+                    ExtentSource::Chunk { reference, .. } => Some(Part::Chunk(reference)),
                     ExtentSource::Zero | ExtentSource::Base { .. } => None,
                 }),
         );
+        kept.push(Part::Manifest(name));
     }
-    names.extend(head.profile.as_ref().map(ChunkRef::key));
+    kept.extend(head.profile.map(Part::Chunk));
     if let Some(index) = pack {
-        names.push(index.key());
         match pack_parts(store, index).await {
-            Ok(parts) => names.extend(parts.iter().map(ChunkRef::key)),
+            Ok(parts) => kept.extend(parts.into_iter().map(Part::Chunk)),
             Err(error) if error.is_permanent() => {
                 tracing::warn!(%error, "working-set pack unreadable; its parts may be swept");
             }
             Err(error) => return Err(error),
         }
+        kept.push(Part::Chunk(index.clone()));
     }
-    Ok(names)
+    Ok(kept)
 }
 
 /// What a sweep reads of a working-set pack's index: the chunks of its

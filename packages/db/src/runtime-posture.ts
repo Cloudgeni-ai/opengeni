@@ -54,9 +54,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * control worker's content-free queued-turn hold summary (0988), the API's
  * inventory of browsers an agent session holds (1002), the only writer of
  * the EU-only inference setting and its history (1060), the secret history
- * scrub's reader and cell writer (1091) and the subscription
+ * scrub's reader and cell writer (1091), the subscription
  * account-administrator grant (1103), which records a request's verified
- * account:admin proof for one transaction. Each is
+ * account:admin proof for one transaction, and agent calls' device lookup,
+ * register, claim, device count, busy check and ring (1107). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -76,6 +77,12 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "grant_subscription_account_administrator(jsonb)",
+  "native_push_device_v2(text)",
+  "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+  "claim_native_push_deliveries_v2(uuid, integer, integer)",
+  "agent_call_device_count_v1(text, boolean)",
+  "agent_call_ringing_v1(text)",
+  "ring_agent_call_v1(uuid, boolean)",
 ] as const;
 
 /**
@@ -97,7 +104,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * only they reach as pending. 1103 withholds the subscription
  * account-administrator grant; until it is granted, only organization
  * membership administrators administer the organization's subscription
- * accounts.
+ * accounts. 1107 withholds the agent call routines and the native push v2
+ * functions that carry the iOS VoIP token; until they are granted, native push
+ * keeps its v1 functions, no phone takes calls and agents cannot place one.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -106,11 +115,18 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "grant_subscription_account_administrator(jsonb)",
+  "native_push_device_v2(text)",
+  "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+  "claim_native_push_deliveries_v2(uuid, integer, integer)",
+  "agent_call_device_count_v1(text, boolean)",
+  "agent_call_ringing_v1(text)",
+  "ring_agent_call_v1(uuid, boolean)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
  * The tables each runtime definer reads or writes as its owner. Once they all
- * exist, the routine must exist too.
+ * exist, the routine must exist too. Target-schema tables are named bare,
+ * `opengeni_private` tables with their schema.
  */
 const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   Record<(typeof RUNTIME_DEFINER_ROUTINES)[number], readonly string[]>
@@ -170,6 +186,26 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "session_history_items_repair_audit",
   ],
   "grant_subscription_account_administrator(jsonb)": ["organization_memberships"],
+  "native_push_device_v2(text)": ["opengeni_private.native_push_devices", "auth_sessions"],
+  "register_native_push_device_v2(text, text, text, text, text, text[], text)": [
+    "opengeni_private.native_push_devices",
+    "auth_sessions",
+  ],
+  "claim_native_push_deliveries_v2(uuid, integer, integer)": [
+    "opengeni_private.native_push_deliveries",
+    "opengeni_private.native_push_devices",
+  ],
+  "agent_call_device_count_v1(text, boolean)": [
+    "opengeni_private.native_push_devices",
+    "auth_sessions",
+  ],
+  "agent_call_ringing_v1(text)": ["agent_calls"],
+  "ring_agent_call_v1(uuid, boolean)": [
+    "agent_calls",
+    "opengeni_private.native_push_deliveries",
+    "opengeni_private.native_push_devices",
+    "auth_sessions",
+  ],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -1773,6 +1809,7 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  */
 export const FORCE_RLS_TABLES = [
   "additional_organization_creation_receipts",
+  "agent_calls",
   "agent_instruction_operations",
   "agent_learning_revisions",
   "agent_learning_snapshots",
@@ -2733,6 +2770,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
 
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
+  "agent_calls",
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
@@ -3881,6 +3919,11 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  // RUNTIME_DEFINER_ROUTINE_TABLES names private tables with their schema.
+  const definerTableByName = new Map<string, { owner: string }>([
+    ...tableByName,
+    ...posture.privateTables.map((table) => [`opengeni_private.${table.name}`, table] as const),
+  ]);
   for (const table of posture.privateTables) {
     if (DECLARED_PRIVATE_TABLES.has(table.name)) {
       // Keep table-level flags exact for required-grant checks below. Column
@@ -6347,7 +6390,9 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(...unknownRoutineViolations(routine, "opengeni_private", expectedRole));
     }
     if (RUNTIME_DEFINER_ROUTINE_NAMES.has(routine.name)) {
-      violations.push(...runtimeDefinerRoutineViolations(routine, tableByName, targetSchema));
+      violations.push(
+        ...runtimeDefinerRoutineViolations(routine, definerTableByName, targetSchema),
+      );
     }
     if (routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE) {
       if (
@@ -6508,7 +6553,7 @@ export function evaluateRuntimeDatabasePosture(
   }
   for (const name of RUNTIME_DEFINER_ROUTINES) {
     if (
-      RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => tableByName.has(table)) &&
+      RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => definerTableByName.has(table)) &&
       posture.privateRoutines.filter((routine) => routine.name === name).length !== 1
     ) {
       violations.push(`runtime definer ${name} is missing or ambiguous`);

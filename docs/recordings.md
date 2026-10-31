@@ -698,6 +698,17 @@ text as plain text, never as a link. Copy on the Summary copies the Markdown
 with each mention replaced by its current name. Write a plain name, not a
 mention, for anyone who isn't a speaker or in the directory.
 
+Speaker labels belong to one transcript version, and a new version numbers
+its voices afresh. So when another version becomes the shown one (a re-run
+completes, or someone switches versions), each `speaker:` link in the notes
+moves to the label whose speech overlaps most of its own, the way names carry
+over; a track label such as `track-0` stays itself. A link whose voice has no
+counterpart becomes its plain link text, so a link never names a voice it
+wasn't written about. `person:` links never change. This rewrite is a new
+notes revision with a `recording.notes.updated` event (its `sessionId` is
+null), so an edit made against the old text is refused, but it keeps who
+wrote the notes and when.
+
 The standalone `MeetingNotes` section doesn't load the speakers and people,
 so there every mention shows its link text as plain text; chips and Copy are
 on `MeetingDetailPage`.

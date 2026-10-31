@@ -69,9 +69,12 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
   ) {
     return "organization_byok";
   }
+  // Keep in step with DIRECT_MODEL_PROVIDER_ID_PREFIXES in @opengeni/contracts;
+  // the session entry must not import the zod-backed contracts barrel.
   if (
     model.provider?.startsWith("workspace-openai-") ||
-    model.provider?.startsWith("workspace-azure-openai-")
+    model.provider?.startsWith("workspace-azure-openai-") ||
+    model.provider?.startsWith("workspace-compatible-")
   )
     return "byok";
   if (

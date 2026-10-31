@@ -1,6 +1,6 @@
 //! A VM's logs: its guest's serial console, which is the VMM's standard
 //! output, and the VMM's own log; and what the guest last wrote on its
-//! console.
+//! console, and what the logs last said when the VM was lost.
 //!
 //! Firecracker on x86 gives a guest no way to power off, so Linux halts
 //! instead, as it does for a halt: it stops its processors and its VM runs
@@ -16,18 +16,31 @@ use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use crate::LastWords;
 use crate::error::{EngineError, ErrorKind};
 
 /// The VMM's standard output in the VM's logs: its guest's serial console.
 pub(super) const CONSOLE_LOG: &str = "console.log";
 
-/// The VMM's own log file in the VM's logs.
+/// The VMM's own log file in the VM's logs: its standard error, and the
+/// jailer's, where a panic goes.
 const VMM_LOG: &str = "vmm.log";
+
+/// The log of the pager serving a VM's memory, in the VM's logs: its
+/// standard error.
+pub(super) const PAGER_LOG: &str = "pager.log";
 
 /// How much of the console's end is read for the guest's last line: some
 /// minutes of the VMM's lines after it. The host trims long logs only from
 /// their start.
 const TAIL: u64 = 64 << 10;
+
+/// How many of the guest's last lines [`last_words`] keeps: a kernel
+/// panic's reason and the start of its trace.
+const GUEST_LINES: usize = 40;
+
+/// How many of the VMM's and the pager's last lines [`last_words`] keeps.
+const OWN_LINES: usize = 20;
 
 /// What Linux writes as its last words when it halts, alone on its line
 /// or after the time printk stamps on it: for a halt, and for a power-off
@@ -78,13 +91,116 @@ pub(super) fn halted(
 /// its line, is not halted. Reads at most [`TAIL`] bytes and the one
 /// before them, which says whether their first line is whole.
 fn says_halted(path: &Path, name: &str) -> io::Result<bool> {
+    Ok(last_line_halted(&tail(path)?, name))
+}
+
+/// The end of the file at `path` from its first whole line in its last
+/// [`TAIL`] bytes: reads at most those and the one before them, which
+/// says whether their first line is whole (see [`whole_lines`]).
+fn tail(path: &Path) -> io::Result<Vec<u8>> {
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
     let start = length.saturating_sub(TAIL + 1);
     file.seek(SeekFrom::Start(start))?;
     let mut read = Vec::new();
     file.take(TAIL + 1).read_to_end(&mut read)?;
-    Ok(last_line_halted(whole_lines(&read, start), name))
+    Ok(whole_lines(&read, start).to_vec())
+}
+
+/// What VM `name`'s logs in `dir` last said (see
+/// [`crate::Engine::last_words`]). The files are read in a blocking task,
+/// never on the caller's thread.
+pub(super) async fn last_words(dir: PathBuf, name: String) -> LastWords {
+    tokio::task::spawn_blocking(move || read_last_words(&dir, &name))
+        .await
+        .unwrap_or_else(|error| LastWords {
+            guest: format!("(not read: {error})"),
+            ..LastWords::default()
+        })
+}
+
+/// See [`last_words`]. The console holds the guest's lines and the VMM's
+/// own; of the VMM's, its API server's only answer the host's requests,
+/// such as its balloon's statistics every few seconds, so they are left
+/// out. The VMM's log follows its lines on the console: a panic goes
+/// there. A missing log says nothing: a VM without a pager has no pager
+/// log.
+fn read_last_words(dir: &Path, name: &str) -> LastWords {
+    let read = |file: &str| match tail(&dir.join(file)) {
+        Ok(text) => Ok(String::from_utf8_lossy(&text).into_owned()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(format!("({file} unreadable: {error})")),
+    };
+    let (guest, mut vmm) = match read(CONSOLE_LOG) {
+        Ok(console) => {
+            let (vmms, guests): (Vec<String>, Vec<String>) =
+                lines(&console).partition(|line| vmm_wrote(line, name));
+            let vmms = vmms.into_iter().filter(|line| !answers_host(line, name));
+            (last(guests, GUEST_LINES), last(vmms, OWN_LINES))
+        }
+        Err(unreadable) => (unreadable, String::new()),
+    };
+    let log =
+        read(VMM_LOG).map_or_else(|unreadable| unreadable, |log| last(lines(&log), OWN_LINES));
+    if !log.is_empty() {
+        if !vmm.is_empty() {
+            vmm.push('\n');
+        }
+        vmm.push_str(&log);
+    }
+    let pager =
+        read(PAGER_LOG).map_or_else(|unreadable| unreadable, |log| last(lines(&log), OWN_LINES));
+    LastWords { guest, vmm, pager }
+}
+
+/// The lines of `text` that say something, as plain text: without the
+/// serial console's carriage returns, terminal colours or other control
+/// characters, nor the zeros a log trimmed from its start reads as.
+fn lines(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split('\n')
+        .map(plain)
+        .filter(|line| !line.trim().is_empty())
+}
+
+/// `line` without terminal escapes (`ESC [ ... final`) or other control
+/// characters but tabs, and without trailing blanks.
+fn plain(line: &str) -> String {
+    let mut kept = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(char) = chars.next() {
+        if char == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                // Parameters and intermediates, up to the final byte.
+                for char in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&char) {
+                        break;
+                    }
+                }
+            }
+        } else if !char.is_control() || char == '\t' {
+            kept.push(char);
+        }
+    }
+    kept.truncate(kept.trim_end().len());
+    kept
+}
+
+/// The last `count` of `lines`, one to a line.
+fn last(lines: impl IntoIterator<Item = String>, count: usize) -> String {
+    let lines: Vec<String> = lines.into_iter().collect();
+    lines[lines.len().saturating_sub(count)..].join("\n")
+}
+
+/// Whether `line`, one of VM `name`'s VMM's (see [`vmm_wrote`]), is its
+/// API server's, as in `... [<name>:fc_api] The API server received ...`.
+fn answers_host(line: &str, name: &str) -> bool {
+    line.split_once(' ').is_some_and(|(_, rest)| {
+        rest.strip_prefix('[')
+            .and_then(|rest| rest.strip_prefix(name))
+            .and_then(|rest| rest.strip_prefix(":fc_api"))
+            .is_some_and(|rest| rest.starts_with([']', ':']))
+    })
 }
 
 /// What of `read`, read from `start` bytes into its file, begins with a
@@ -334,5 +450,93 @@ mod tests {
         drop(open(&logs).unwrap());
         assert_eq!(fs::read(logs.join(CONSOLE_LOG)).unwrap(), b"");
         assert_eq!(fs::read(logs.join(VMM_LOG)).unwrap(), b"");
+    }
+
+    #[test]
+    fn last_words_keep_what_says_why_a_vm_was_lost() {
+        use std::fmt::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let api = format!(
+            "2026-10-30T15:12:48.801090024 [{NAME}:fc_api] The API server received a Get \
+             request on \"/balloon/statistics\".\n"
+        );
+        let mut console =
+            String::from("\x1b[2m2026-10-30T15:10:00Z\x1b[0m \x1b[32m INFO\x1b[0m booted\r\n");
+        for line in 0..60 {
+            write!(console, "[  100.{line:06}] guest line {line}\r\n").unwrap();
+            console.push_str(&api);
+        }
+        console.push_str("[  101.000000] Kernel panic - not syncing: Fatal exception\r\n");
+        write!(
+            console,
+            "2026-10-30T15:12:49.000000000 [{NAME}:main] Vmm is stopping.\n{api}"
+        )
+        .unwrap();
+        fs::write(dir.path().join(CONSOLE_LOG), console).unwrap();
+        fs::write(
+            dir.path().join(VMM_LOG),
+            "thread 'fc_vcpu 0' panicked at src/vmm/src/vstate/vcpu.rs:1:1\n\0\0\n",
+        )
+        .unwrap();
+
+        let words = read_last_words(dir.path(), NAME);
+        let guest: Vec<&str> = words.guest.lines().collect();
+        assert_eq!(guest.len(), GUEST_LINES, "{guest:?}");
+        assert_eq!(guest[0], "[  100.000021] guest line 21");
+        assert_eq!(
+            guest.last(),
+            Some(&"[  101.000000] Kernel panic - not syncing: Fatal exception")
+        );
+        // The VMM's own lines and its log, without its answers to the
+        // host; and no pager, so nothing for it.
+        assert_eq!(
+            words.vmm,
+            format!(
+                "2026-10-30T15:12:49.000000000 [{NAME}:main] Vmm is stopping.\n\
+                 thread 'fc_vcpu 0' panicked at src/vmm/src/vstate/vcpu.rs:1:1"
+            )
+        );
+        assert_eq!(words.pager, "");
+
+        // Colours and control characters go; what the guest wrote stays.
+        fs::write(dir.path().join(CONSOLE_LOG), console_start()).unwrap();
+        fs::write(dir.path().join(PAGER_LOG), "memory file gone\n").unwrap();
+        let words = read_last_words(dir.path(), NAME);
+        assert_eq!(words.guest, "2026-10-30T15:10:00Z  INFO booted");
+        assert_eq!(words.pager, "memory file gone");
+    }
+
+    fn console_start() -> &'static str {
+        "\x1b[2m2026-10-30T15:10:00Z\x1b[0m \x1b[32m INFO\x1b[0m booted\r\n\r\n"
+    }
+
+    #[test]
+    fn last_words_say_what_could_not_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        // No logs at all: nothing to say.
+        assert_eq!(read_last_words(dir.path(), NAME), LastWords::default());
+        // A log that cannot be read says so in its place.
+        fs::create_dir(dir.path().join(CONSOLE_LOG)).unwrap();
+        let words = read_last_words(dir.path(), NAME);
+        assert!(
+            words.guest.starts_with("(console.log unreadable: "),
+            "{words:?}"
+        );
+        assert_eq!(words.vmm, "");
+    }
+
+    #[test]
+    fn only_the_api_servers_lines_answer_the_host() {
+        let line = |module: &str| format!("2026-10-30T15:12:49.000000000 [{NAME}:{module}] x");
+        assert!(answers_host(&line("fc_api"), NAME));
+        assert!(answers_host(&line("fc_api:INFO"), NAME));
+        assert!(!answers_host(&line("main"), NAME));
+        assert!(!answers_host(&line("fc_vcpu 0"), NAME));
+        assert!(!answers_host(&line("fc_api_more"), NAME));
+        assert!(!answers_host(
+            "2026-10-30T15:12:49.000000000 [other:fc_api] x",
+            NAME
+        ));
     }
 }

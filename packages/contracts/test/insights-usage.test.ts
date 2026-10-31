@@ -12,7 +12,9 @@ import {
   OrganizationInsightsUsageQuery,
   WorkspaceInsightsCallsQuery,
   WorkspaceInsightsUsageQuery,
+  insightsUsageBucket,
   resolveInsightsUsageCustomWindow,
+  resolveInsightsUsageWindow,
 } from "@opengeni/contracts/insights-usage";
 
 const id = "11111111-1111-4111-8111-111111111111";
@@ -510,6 +512,96 @@ describe("Insights query contracts", () => {
       }
     }
   });
+
+  test("rolling hour ranges end now, start on a bucket and compare with an equal prior", () => {
+    const now = new Date("2026-10-30T11:24:37.500Z");
+    for (const [range, since, bucket] of [
+      ["1h", "2026-10-30T10:25:00.000Z", "five_minutes"],
+      ["3h", "2026-10-30T08:25:00.000Z", "five_minutes"],
+      ["24h", "2026-10-29T12:00:00.000Z", "hour"],
+      ["today", "2026-10-30T00:00:00.000Z", "hour"],
+      ["week", "2026-10-24T00:00:00.000Z", "day"],
+    ] as const) {
+      for (const schema of [WorkspaceInsightsUsageQuery, OrganizationInsightsCallsQuery])
+        expect(schema.parse({ range }).range).toBe(range);
+      const window = resolveInsightsUsageWindow({ range }, now);
+      expect(window.since.toISOString()).toBe(since);
+      expect(window.until.toISOString()).toBe(now.toISOString());
+      expect(window.priorUntil.toISOString()).toBe(since);
+      expect(window.priorUntil.getTime() - window.priorSince.getTime()).toBe(
+        window.until.getTime() - window.since.getTime(),
+      );
+      expect(window.bucket).toBe(bucket);
+    }
+    // Twelve 5-minute buckets for the hour, the last one still filling.
+    const hour = resolveInsightsUsageWindow({ range: "1h" }, now);
+    expect(Math.ceil((hour.until.getTime() - hour.since.getTime()) / 300_000)).toBe(12);
+    for (const range of ["1h", "3h", "24h"] as const)
+      for (const query of [
+        { range, from: "2026-10-30T09:00Z", to: "2026-10-30T10:00Z" },
+        { range, from: "2026-10-30", to: "2026-10-30" },
+      ])
+        expect(WorkspaceInsightsUsageQuery.safeParse(query).success).toBe(false);
+    expect(() => resolveInsightsUsageWindow({ range: "1h" }, new Date(Number.NaN))).toThrow();
+    expect(() => resolveInsightsUsageWindow({ range: "custom" }, now)).toThrow();
+  });
+
+  test("custom instants use an exclusive end and pick 5-minute, hourly or daily buckets by length", () => {
+    for (const [from, to, bucket] of [
+      ["2026-10-30T09:15Z", "2026-10-30T09:16Z", "five_minutes"],
+      ["2026-10-30T09:15Z", "2026-10-30T12:15Z", "five_minutes"],
+      ["2026-10-30T09:15Z", "2026-10-30T12:16Z", "hour"],
+      ["2026-10-30T09:15:30Z", "2026-11-01T09:15:30Z", "hour"],
+      ["2026-10-30T09:15:00.250Z", "2026-11-01T09:15:00.251Z", "day"],
+      ["2025-10-30T00:00Z", "2026-11-04T00:00Z", "day"],
+    ] as const) {
+      for (const schema of [
+        WorkspaceInsightsUsageQuery,
+        OrganizationInsightsUsageQuery,
+        WorkspaceInsightsCallsQuery,
+        OrganizationInsightsCallsQuery,
+      ])
+        expect(schema.parse({ range: "custom", from, to })).toMatchObject({ from, to });
+      const window = resolveInsightsUsageCustomWindow({ from, to });
+      expect(Date.parse(window.windowStart)).toBe(Date.parse(from));
+      expect(Date.parse(window.windowEnd)).toBe(Date.parse(to));
+      expect(window.priorWindowEnd).toBe(window.windowStart);
+      expect(Date.parse(window.priorWindowEnd) - Date.parse(window.priorWindowStart)).toBe(
+        Date.parse(to) - Date.parse(from),
+      );
+      expect(window.bucket).toBe(bucket);
+      expect(insightsUsageBucket("custom", Date.parse(to) - Date.parse(from))).toBe(bucket);
+      // Non-day-aligned custom windows are valid responses.
+      expect(
+        InsightsUsageResponse.safeParse({ ...response(), range: "custom", ...window }).success,
+      ).toBe(true);
+      expect(
+        InsightsUsageResponse.safeParse({
+          ...response(),
+          range: "custom",
+          ...window,
+          bucket: bucket === "day" ? "hour" : "day",
+        }).success,
+      ).toBe(false);
+    }
+    for (const [from, to] of [
+      ["2026-10-30T09:15Z", "2026-10-30T09:15Z"],
+      ["2026-10-30T09:15Z", "2026-10-30T09:14Z"],
+      ["2026-10-30T09:15Z", "2026-10-31"],
+      ["2026-10-30", "2026-10-31T00:00Z"],
+      ["2026-10-30T09:15+01:00", "2026-10-30T10:15+01:00"],
+      ["2026-10-30T09:15", "2026-10-30T10:15"],
+      ["2026-10-30T24:00Z", "2026-10-31T01:00Z"],
+      ["2026-02-30T09:00Z", "2026-03-01T09:00Z"],
+      ["2025-10-30T00:00Z", "2026-11-05T00:01Z"],
+      ["0000-01-01T00:00Z", "0000-01-01T01:00Z"],
+    ] as const) {
+      expect(WorkspaceInsightsUsageQuery.safeParse({ range: "custom", from, to }).success).toBe(
+        false,
+      );
+      expect(() => resolveInsightsUsageCustomWindow({ from, to })).toThrow();
+    }
+  });
 });
 
 describe("Insights response contracts", () => {
@@ -670,6 +762,23 @@ describe("Insights response contracts", () => {
     expect(
       InsightsUsageResponse.safeParse({ ...response(), range: "today", bucket: "hour" }).success,
     ).toBe(true);
+    for (const [range, bucket] of [
+      ["1h", "five_minutes"],
+      ["3h", "five_minutes"],
+      ["24h", "hour"],
+    ] as const) {
+      expect(InsightsUsageResponse.safeParse({ ...response(), range, bucket }).success).toBe(true);
+      expect(InsightsUsageResponse.safeParse({ ...response(), range, bucket: "day" }).success).toBe(
+        false,
+      );
+    }
+    expect(
+      InsightsUsageResponse.safeParse({ ...response(), availableRanges: ["1h", "week", "custom"] })
+        .success,
+    ).toBe(true);
+    expect(
+      InsightsUsageResponse.safeParse({ ...response(), availableRanges: ["2h"] }).success,
+    ).toBe(false);
     expect(
       InsightsUsageResponse.safeParse({ ...response(), prior: { ...measures(), calls: 0 } })
         .success,

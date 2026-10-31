@@ -116,7 +116,11 @@ export async function sessionTitleApiConnectionId(input: {
     provider.credentialSource.mechanism !== "api_key"
   )
     return null;
-  if (provider.kind === "direct-openai-workspace" || provider.kind === "direct-azure-workspace") {
+  if (
+    provider.kind === "direct-openai-workspace" ||
+    provider.kind === "direct-azure-workspace" ||
+    provider.kind === "direct-compatible-workspace"
+  ) {
     const connection = await loadDirectModelProviderConnection(
       db,
       settings,
