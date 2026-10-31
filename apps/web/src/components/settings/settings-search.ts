@@ -34,6 +34,17 @@ interface SettingsTopic {
 const PAGE_KEYWORDS: Record<string, readonly string[]> = {
   "workspace:general": ["workspace name", "workspace id", "preferences"],
   "workspace:access": ["people", "members", "invite", "permissions", "roles", "share"],
+  "workspace:available": [
+    "available",
+    "shared",
+    "owner",
+    "who manages",
+    "organization",
+    "model accounts",
+    "machines",
+    "vaults",
+    "connectors",
+  ],
   "workspace:learning": ["knowledge", "skills", "instructions", "memory", "review", "learn"],
   "workspace:usage": ["budget", "spend", "limit", "monthly", "cost"],
   "workspace:api-keys": ["token", "bearer", "sdk", "key"],
