@@ -3482,6 +3482,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getKnowledgeEntryReach",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/knowledge/entries/:entryId/reach",
+    "request": [],
+    "response": [
+      "KnowledgeEntryReachRecord"
+    ]
+  },
+  {
     "id": "getMcpConnectionRequest",
     "method": "GET",
     "path": "/v1/mcp-connections/requests/:request",
@@ -9386,6 +9395,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "InboxSettings"
+    ]
+  },
+  {
+    "id": "updateKnowledgeEntryReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/knowledge/entries/:entryId/reach",
+    "request": [
+      "UpdateKnowledgeEntryReachRequest"
+    ],
+    "response": [
+      "KnowledgeEntryReachRecord"
     ]
   },
   {

@@ -128,6 +128,8 @@ import type {
   KnowledgeEntryRecord,
   KnowledgeEntrySaveRequest,
   KnowledgeEntryWriteReceipt,
+  KnowledgeEntryReach,
+  KnowledgeEntryReachRecord,
   KnowledgeEntryReviewRequest,
   KnowledgeEntryBatchReviewRequest,
   KnowledgeEntryRestoreRequest,
@@ -8741,6 +8743,33 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/knowledge/entries/${entryId}/archive`,
       request,
+    );
+  }
+
+  /** Where an organization or personal Knowledge entry works besides the
+   * workspace it was added in, and whether the caller may change it. */
+  async getKnowledgeEntryReach(
+    workspaceId: string,
+    entryId: string,
+  ): Promise<KnowledgeEntryReachRecord> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/knowledge/entries/${encodeURIComponent(entryId)}/reach`,
+    );
+  }
+
+  /** Choose where an entry works. Organization: every shared workspace
+   * (`null`) or the listed ones, plus members' Personal workspaces when
+   * switched on. Personal: the owner's listed workspaces, or all (`null`). */
+  async updateKnowledgeEntryReach(
+    workspaceId: string,
+    entryId: string,
+    reach: KnowledgeEntryReach,
+  ): Promise<KnowledgeEntryReachRecord> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/knowledge/entries/${encodeURIComponent(entryId)}/reach`,
+      reach,
     );
   }
 

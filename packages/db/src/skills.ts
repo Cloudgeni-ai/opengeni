@@ -10,13 +10,8 @@ import type {
   SkillActor,
   SkillReviewReference,
 } from "@opengeni/contracts";
-import {
-  rawRows,
-  withRlsContext,
-  withWorkspaceRls,
-  withWorkspaceSubjectRls,
-  type Database,
-} from "./database";
+import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
+import { listSharedWorkspaceIdsForAccount } from "./organization-shared-workspaces";
 
 /** The existing portable artifact framing; never substitutes for a historical content hash. */
 export function skillFilesContentHash(files: readonly SkillFile[]): string {
@@ -442,16 +437,7 @@ export async function updateOrganizationSkillReach(
   if (input.allowedWorkspaceIds !== null) {
     const listed = [...new Set(input.allowedWorkspaceIds)].sort();
     if (listed.length > 0) {
-      const shared = await withRlsContext(
-        db,
-        { accountId: input.accountId, workspaceId: null },
-        async (scoped) =>
-          await rawRows<{ workspace_id: string }>(
-            scoped,
-            sql`SELECT workspace_id FROM list_organization_workspace_ids(${input.accountId}::uuid)`,
-          ),
-      );
-      const sharedIds = new Set(shared.map((row) => row.workspace_id));
+      const sharedIds = new Set(await listSharedWorkspaceIdsForAccount(db, input.accountId));
       const unknown = listed.filter((workspaceId) => !sharedIds.has(workspaceId));
       if (unknown.length > 0) return { status: "unknown_workspaces", workspaceIds: unknown };
     }

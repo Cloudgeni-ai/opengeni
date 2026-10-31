@@ -12,9 +12,12 @@ import {
   KnowledgeEntryReviewRequest,
   KnowledgeEntryRestoreRequest,
   KnowledgeEntrySaveRequest,
+  KnowledgeEntryReachRecord,
   KnowledgeOriginalFileDownload,
+  UpdateKnowledgeEntryReachRequest,
 } from "@opengeni/contracts";
 import {
+  changeKnowledgeEntryReach,
   prepareKnowledgeFile,
   prepareKnowledgeSave,
   searchKnowledgeEntries,
@@ -35,6 +38,7 @@ import {
   archiveKnowledgeEntry,
   getAgentLearningSettings,
   getKnowledgeEntry,
+  getKnowledgeEntryReach,
   listAgentLearningOverrides,
   listKnowledgeEntryHistory,
   listKnowledgeReviewBatches,
@@ -405,6 +409,38 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
           ...request,
           entryId: Id.parse(c.req.param("entryId")),
         }),
+      );
+    }),
+  );
+  // Where an organization or personal entry works besides the workspace it
+  // was added in. Readable by anyone who can open the entry here; changed by
+  // whoever may write its scope (the owner, for a personal entry).
+  app.get(`${base}/:entryId/reach`, (c) =>
+    run(c, false, async (context) => {
+      if (context.actor.kind === "agent")
+        throw new HTTPException(403, { message: "Only people choose where Knowledge works." });
+      const reach = await getKnowledgeEntryReach(
+        deps.db,
+        context,
+        Id.parse(c.req.param("entryId")),
+      );
+      if (!reach) throw new HTTPException(404, { message: "Knowledge entry not found" });
+      return c.json(KnowledgeEntryReachRecord.parse(reach));
+    }),
+  );
+  app.put(`${base}/:entryId/reach`, (c) =>
+    run(c, true, async (context) => {
+      if (context.actor.kind === "agent")
+        throw new HTTPException(403, { message: "Only people choose where Knowledge works." });
+      const request = await parseRequestJson(
+        c,
+        UpdateKnowledgeEntryReachRequest,
+        KNOWLEDGE_REQUEST,
+      );
+      return c.json(
+        KnowledgeEntryReachRecord.parse(
+          await changeKnowledgeEntryReach(deps, context, Id.parse(c.req.param("entryId")), request),
+        ),
       );
     }),
   );
