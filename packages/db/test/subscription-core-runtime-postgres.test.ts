@@ -117,13 +117,7 @@ async function fixture(connectionKind: "subscription" | "api_key" = "subscriptio
     name: "Subscription runtime fixture",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
-  // Migration 0680 seeds every organization enabled on the shared core. These
-  // dormant-gate fixtures start from the pre-cutover world (no Codex row) and
-  // enable or disable the gate explicitly.
-  await shared!.admin`
-    delete from subscription_provider_cutovers
-    where account_id = ${accountId}::uuid and provider = 'codex'`;
-  // ...and its seeded organization settings row, which the fixture writes itself.
+  // Replace the seeded organization settings with this fixture's policy.
   await shared!.admin`
     delete from subscription_settings
     where account_id = ${accountId}::uuid and workspace_id is null`;
@@ -735,7 +729,7 @@ describe("provider-neutral subscription runtime persistence", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-    "personal placement authority is cutover-gated, exact-turn scoped, and generation-fenced",
+    "personal placement authority ignores retired account switches but remains receipt, turn and generation fenced",
     async () => {
       const state = await fixture();
       const [membership] = await shared!.admin<{ id: string; personal_workspace_id: string }[]>`
@@ -1099,13 +1093,18 @@ describe("provider-neutral subscription runtime persistence", () => {
         return observed;
       };
 
+      // Account switches no longer select an old runtime. The live provider
+      // protocol receipt and all exact turn/owner/generation fences remain.
+      await shared!.admin`
+        delete from subscription_provider_cutovers
+        where account_id = ${state.accountId}::uuid and provider = 'codex'`;
       expect(await runAccessCase({ cutover: "absent" })).toMatchObject({
-        authorized: false,
-        visible: false,
+        authorized: true,
+        visible: true,
       });
       expect(await runAccessCase({ cutover: "disabled" })).toMatchObject({
-        authorized: false,
-        visible: false,
+        authorized: true,
+        visible: true,
       });
       expect(await runAccessCase({ cutover: "enabled" })).toMatchObject({
         authorized: true,
@@ -1273,6 +1272,11 @@ describe("provider-neutral subscription runtime persistence", () => {
           initiator: { kind: "subject", subjectId: state.subjectId },
         }),
       );
+      // Model an old accepted turn with no personal authority explicitly.
+      // Current acceptance no longer depends on the removed account switch.
+      await shared!.admin`
+        update session_turns set subscription_authority = '{"version":2,"personal":[]}'::jsonb
+        where account_id = ${state.accountId}::uuid and id = ${missingTurn.id}::uuid`;
       expect(await runAccessCase({ cutover: "enabled", turnId: missingTurn.id })).toMatchObject({
         authorized: false,
         visible: false,
@@ -1320,11 +1324,8 @@ describe("provider-neutral subscription runtime persistence", () => {
         reselectionPoints: [],
         now: new Date(),
       });
-      const rollbackWorld = new Error("rollback placement-world cutover row");
-      const loadPlacementWorld = async (
-        request: ReturnType<typeof placementRequest>,
-        enableCutover: boolean,
-      ) => {
+      const rollbackWorld = new Error("rollback placement-world fixture");
+      const loadPlacementWorld = async (request: ReturnType<typeof placementRequest>) => {
         let result:
           | Awaited<
               ReturnType<
@@ -1342,14 +1343,6 @@ describe("provider-neutral subscription runtime persistence", () => {
                 transaction as never,
                 { accountId: state.accountId, workspaceId: membership!.personal_workspace_id },
                 async (ownerDb) => {
-                  if (enableCutover) {
-                    await rawRows(
-                      ownerDb,
-                      sql`insert into subscription_provider_cutovers (account_id, provider, enabled)
-                        values (${state.accountId}::uuid, 'codex', true)
-                        on conflict (account_id, provider) do update set enabled = true`,
-                    );
-                  }
                   result = await withSubscriptionCorePlacementWorld(
                     ownerDb,
                     request,
@@ -1378,7 +1371,6 @@ describe("provider-neutral subscription runtime persistence", () => {
           humanSubjectId: state.subjectId,
           acceptedAuthorityV2: { version: 2, personal: [] },
         }),
-        false,
       );
       expect(ownedWorld?.status).toBe("completed");
 
@@ -1393,7 +1385,6 @@ describe("provider-neutral subscription runtime persistence", () => {
           humanSubjectId: null,
           acceptedAuthorityV2: { version: 2, personal: [] },
         }),
-        false,
       );
       expect(ownerlessWorld?.status).toBe("completed");
 
@@ -1412,7 +1403,6 @@ describe("provider-neutral subscription runtime persistence", () => {
             ],
           },
         }),
-        true,
       );
       expect(personalWorld?.status).toBe("completed");
       if (personalWorld?.status === "completed") {
@@ -1426,7 +1416,7 @@ describe("provider-neutral subscription runtime persistence", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-    "SUB-LEASE-03: chat-turn leases are generation-fenced and provider cutovers fail closed by default",
+    "SUB-LEASE-03: chat-turn leases are generation-fenced",
     async () => {
       const state = await fixture();
       const actor = {
@@ -1443,10 +1433,6 @@ describe("provider-neutral subscription runtime persistence", () => {
         holderId: `worker-${crypto.randomUUID()}`,
         generation: 1,
       };
-      await shared!.admin`
-        insert into subscription_provider_cutovers (account_id, provider, enabled)
-        values (${state.accountId}::uuid, 'codex', true)`;
-
       await withSessionRlsActorContext(actor, () =>
         withRlsContext(
           client!.db,
@@ -2806,13 +2792,8 @@ describe("provider-neutral subscription runtime persistence", () => {
         ) on conflict (account_id, workspace_id) do update
           set personal_connections_allowed = true`;
       // The accepted turn froze the owner's personal Codex authority in its v2
-      // entry, which the helper reads once the Codex cutover row is enabled
-      // (migration 0712 removed the legacy-generation v1 branch). Accepted
-      // authority is immutable to the application role; the fixture writes it
-      // as the table owner.
-      await shared!.admin`
-        insert into subscription_provider_cutovers (account_id, provider, enabled)
-        values (${state.accountId}::uuid, 'codex', true)`;
+      // entry. Accepted authority is immutable to the application role; the
+      // fixture writes it as the table owner.
       await shared!.admin`
         update session_turns
         set subscription_authority = ${shared!.admin.json({
