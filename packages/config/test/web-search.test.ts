@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
+  DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
   WEB_SEARCH_PROVIDER_CATALOG,
   WEB_SEARCH_PROVIDER_IDS,
   getSettings,
@@ -400,6 +401,24 @@ describe("web search tool plan", () => {
     ).toBe(false);
     expect(
       paidHostedToolsChargeCredits({ billingMode: "stripe", billingLegacyAccountIds: [] }, legacy),
+    ).toBe(true);
+  });
+
+  test("every internal account on the default legacy list sees no new charges", () => {
+    const billed = getSettings({ OPENGENI_ENV: "test", OPENGENI_USAGE_LIMITS_MODE: "managed" });
+    expect(DEFAULT_BILLING_LEGACY_ACCOUNT_IDS.length).toBeGreaterThan(1);
+    for (const accountId of DEFAULT_BILLING_LEGACY_ACCOUNT_IDS) {
+      const turn = { accountId, chargesOpenGeniCredits: true };
+      // Loaded settings and a caller that passes no list both use the default.
+      expect(paidHostedToolsChargeCredits(billed, turn)).toBe(false);
+      expect(paidHostedToolsChargeCredits({ billingMode: "stripe" }, turn)).toBe(false);
+    }
+    // An ordinary account on the same settings is charged.
+    expect(
+      paidHostedToolsChargeCredits(billed, {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        chargesOpenGeniCredits: true,
+      }),
     ).toBe(true);
   });
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { RunRawModelStreamEvent } from "@openai/agents-core";
+import { DEFAULT_BILLING_LEGACY_ACCOUNT_IDS } from "@opengeni/config";
 import { modelCallProcessingResidency } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
@@ -181,11 +182,16 @@ describe("hosted web search on a credit-billed turn", () => {
     expect(debits).toEqual([]);
   });
 
-  test("CloudGeni's legacy billing account is never charged for hosted search", async () => {
+  test("internal accounts (CloudGeni and our team) are never charged for hosted search", async () => {
     const debits = spyWrites();
-    const accountId = "25eacc5d-f383-4f79-910a-b3d11dbf1310";
-    await settleResponse(false, true, { responseId: "resp_legacy_with_usage", accountId });
-    await settleResponse(false, false, { responseId: "resp_legacy_without_usage", accountId });
+    expect(DEFAULT_BILLING_LEGACY_ACCOUNT_IDS).toContain("25eacc5d-f383-4f79-910a-b3d11dbf1310");
+    for (const [index, accountId] of DEFAULT_BILLING_LEGACY_ACCOUNT_IDS.entries()) {
+      await settleResponse(false, true, { responseId: `resp_legacy_usage_${index}`, accountId });
+      await settleResponse(false, false, {
+        responseId: `resp_legacy_no_usage_${index}`,
+        accountId,
+      });
+    }
     expect(debits).toEqual([]);
   });
 });
