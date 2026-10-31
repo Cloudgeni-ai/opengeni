@@ -4029,7 +4029,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's, 1060's, 1091's and 1107's stay deferred", () => {
+describe("runtime definers: follow-up grants are required, only explicitly deferred routines stay optional", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4161,12 +4161,6 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "grant_subscription_account_administrator(jsonb)",
-      "native_push_device_v2(text)",
-      "register_native_push_device_v2(text, text, text, text, text, text[], text)",
-      "claim_native_push_deliveries_v2(uuid, integer, integer)",
-      "agent_call_device_count_v1(text, boolean)",
-      "agent_call_ringing_v1(text)",
-      "ring_agent_call_v1(uuid, boolean)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(

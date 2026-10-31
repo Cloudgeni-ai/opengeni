@@ -362,7 +362,7 @@ realTest(
 );
 
 realTest(
-  "this binary requires the definer and table grants 0947, 0950, 1093, 1101 and 1110 make",
+  "this binary requires the definer and table grants 0947, 0950, 1093, 1101, 1110 and 1128 make",
   async () => {
     const admin = database!.admin;
     const current = async () =>
@@ -371,6 +371,27 @@ realTest(
         options,
       );
     expect(await current()).toEqual([]);
+    for (const signature of [
+      "native_push_device_v2(text)",
+      "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+      "claim_native_push_deliveries_v2(uuid, integer, integer)",
+      "agent_call_device_count_v1(text, boolean)",
+      "agent_call_ringing_v1(text)",
+      "ring_agent_call_v1(uuid, boolean)",
+    ]) {
+      try {
+        await admin.unsafe(
+          `REVOKE EXECUTE ON FUNCTION opengeni_private.${signature} FROM opengeni_app`,
+        );
+        expect(await current()).toContain(
+          `runtime role lacks EXECUTE on private routine ${signature}`,
+        );
+      } finally {
+        await admin.unsafe(
+          `GRANT EXECUTE ON FUNCTION opengeni_private.${signature} TO opengeni_app`,
+        );
+      }
+    }
     try {
       await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) FROM opengeni_app`;
       expect(await current()).toContain(

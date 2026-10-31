@@ -503,6 +503,8 @@ describe("embedded worker lifecycle contract", () => {
       [
         ...[
           "api_keys",
+          "auth_sessions",
+          "agent_calls",
           "company_profile_activation_events",
           "company_profile_agent_automatic_activation_receipts",
           "company_profile_agent_confirmation_receipts",
@@ -623,6 +625,21 @@ describe("embedded worker lifecycle contract", () => {
           can_trigger: false,
         })),
         ...[
+          ...["native_push_devices", "native_push_deliveries"].map((name) => ({
+            name,
+            owner: "opengeni_migrator",
+            rls_enabled: false,
+            rls_forced: false,
+            rls_active: false,
+            policy_count: 0,
+            can_select: false,
+            can_insert: false,
+            can_update: false,
+            can_delete: false,
+            can_truncate: false,
+            can_references: false,
+            can_trigger: false,
+          })),
           {
             name: "modal_native_origin_read_capabilities",
             owner: "opengeni_migrator",
@@ -780,6 +797,24 @@ describe("embedded worker lifecycle contract", () => {
             has_dependents: false,
             configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
           },
+          // Migration 1128 grants all six routines withheld by 1107.
+          ...[
+            "native_push_device_v2(text)",
+            "register_native_push_device_v2(text, text, text, text, text, text[], text)",
+            "claim_native_push_deliveries_v2(uuid, integer, integer)",
+            "agent_call_device_count_v1(text, boolean)",
+            "agent_call_ringing_v1(text)",
+            "ring_agent_call_v1(uuid, boolean)",
+          ].map((name) => ({
+            name,
+            owner: "opengeni_migrator",
+            can_execute: true,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+          })),
           // Migration 1103: the subscription account-administrator grant. Its
           // runtime grant stays deferred for previous-release compatibility.
           {
