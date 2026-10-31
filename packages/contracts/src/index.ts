@@ -21342,7 +21342,8 @@ export type DeviceEnrollmentDenyResponse = z.infer<typeof DeviceEnrollmentDenyRe
 // person: someone signed in, or a credential acting as them (a personal API
 // key, or an organization key or organization MCP client acting as that
 // person). A key, service or agent acting as itself gets 422. Omitted keeps the
-// original workspace-shared token for existing integrations.
+// original workspace-shared token for existing integrations, except that a
+// signed-in teammate without enrollments:manage gets their own (`user`) token.
 export const MintEnrollTokenRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     allowScreenControl: primitives.boolean.default(false),

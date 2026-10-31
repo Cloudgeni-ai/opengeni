@@ -2934,7 +2934,9 @@ export class OpenGeniClient {
    * non-interactive enroll path. The returned `token` is SECRET — surface it once
    * with a copy-now warning; it cannot be re-read. `allowScreenControl` bakes the
    * screen-control consent into the token. `scope: "user"` connects the signed-in
-   * person's own machine; `"workspace"` (or omitted) shares it with the workspace.
+   * person's own machine; `"workspace"` shares it with the workspace. Omitted, a
+   * signed-in teammate without `enrollments:manage` gets `"user"` and everyone
+   * else `"workspace"`.
    * Check the response's `scope` before showing a command: an older server ignores
    * the request and mints a workspace-shared token.
    */
