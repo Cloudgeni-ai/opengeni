@@ -289,14 +289,31 @@ describe("computeControl", () => {
             provision: false,
             host: "db.example.com",
             name: "it's",
-            sslmode: "verify-full",
+            sslmode: "require",
           },
         },
       }),
     );
     expect(external.database).toBe(
-      "host='db.example.com' port='5432' dbname='it\\'s' user='compute' sslmode='verify-full'",
+      "host='db.example.com' port='5432' dbname='it\\'s' user='compute' sslmode='require'",
     );
+    // The service's Postgres client takes disable, prefer and require only,
+    // and with require always checks the certificate, as verify-full would:
+    // any other mode would render a service that cannot start.
+    for (const sslmode of ["verify-full", "verify-ca", "allow"]) {
+      const refused = await helmTemplate({
+        ...enabled,
+        postgres: { enabled: false },
+        computeControl: {
+          ...enabled.computeControl,
+          database: { existingSecret: "compute-db", provision: false, host: "db.example.com", sslmode },
+        },
+      });
+      expect(refused.exitCode).not.toBe(0);
+      expect(refused.stderr).toContain(
+        "computeControl.database.sslmode must be disable, prefer or require",
+      );
+    }
   });
 
   test("provisions only the chart's own Postgres", async () => {

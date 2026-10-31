@@ -66,7 +66,16 @@ enabling it changes no session's backend.
 
    The password reaches the service in a variable of its own, so it needs
    no quoting. The service creates its tables at start and upgrades them
-   in place, recording their version. It also takes two Postgres advisory
+   in place, recording their version. For a managed database set
+   `database.sslmode: require` (the service takes `disable`, `prefer` and
+   `require`): the service, its sweep and every other `compute-control`
+   command then connect over TLS and check the database's certificate
+   against the image's system authorities, as `verify-full` would. For a
+   private authority, mount it and name it as `COMPUTE_CONTROL_DATABASE_CA`
+   in `extraEnv`, which reaches the sweep too (`--database-ca` on the
+   command line). Without `require` and without an authority the
+   connection is unencrypted, for a database beside the service. It also
+   takes two Postgres advisory
    locks (7231401 for its schema, and its leader lock); keep them free in
    a shared database.
    Its connections give up on a database the network stops answering:
