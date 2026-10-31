@@ -28,6 +28,7 @@ mod lifecycles;
 mod pointers;
 mod schema;
 mod templates;
+mod told;
 
 use connect::{OPEN_WITHIN, bounded};
 
@@ -505,7 +506,7 @@ impl PostgresStore {
                 &epoch,
                 &nonce(register.attempt),
                 &Json(&rulings),
-                &Json(&register.capacity),
+                &Json(&register.capacity.split().0),
             ],
         )
         .await
@@ -565,7 +566,8 @@ impl Store for PostgresStore {
     }
 
     async fn renew(&self, renew: &Renew, names: &[String]) -> Result<bool> {
-        // A renewal without a capacity keeps the one last heard.
+        // A renewal without a capacity keeps the one last heard, and one
+        // without a description the one last heard.
         let mut client = self.client().await?;
         let tx = client.transaction().await.map_err(database)?;
         let in_service = renew
@@ -575,17 +577,25 @@ impl Store for PostgresStore {
         if pointers::outdated(&tx, in_service).await? {
             return Ok(false);
         }
+        let (capacity, told) = renew
+            .capacity
+            .as_ref()
+            .map(Capacity::split)
+            .map_or((None, None), |(capacity, told)| (Some(capacity), told));
+        let info = told::description(&tx, renew.host, renew.epoch, told.as_ref()).await?;
         let updated = tx
             .execute(
                 "update compute_hosts set renewals = renewals + 1, seq = greatest(seq, $3), \
-                 capacity = coalesce($4, capacity), changed = nextval('compute_changes') \
+                 capacity = coalesce($4, capacity), info = coalesce($6, info), \
+                 changed = nextval('compute_changes') \
                  where id = $1 and epoch = $2 and state <> 'lost' and name = any($5)",
                 &[
                     &big(renew.host)?,
                     &big(renew.epoch)?,
                     &big(renew.seq)?,
-                    &renew.capacity.as_ref().map(Json),
+                    &capacity.as_ref().map(Json),
                     &names,
+                    &info.as_ref().map(Json),
                 ],
             )
             .await
@@ -600,15 +610,19 @@ impl Store for PostgresStore {
         if pointers::outdated(&tx, report.capacity.pointers_in_service).await? {
             return Ok(false);
         }
+        let (capacity, told) = report.capacity.split();
+        let info = told::description(&tx, report.host, report.epoch, told.as_ref()).await?;
         let updated = tx
             .execute(
-                "update compute_hosts set capacity = $3, changed = nextval('compute_changes') \
+                "update compute_hosts set capacity = $3, info = coalesce($5, info), \
+                 changed = nextval('compute_changes') \
                  where id = $1 and epoch = $2 and state <> 'lost' and name = any($4)",
                 &[
                     &big(report.host)?,
                     &big(report.epoch)?,
-                    &Json(&report.capacity),
+                    &Json(&capacity),
                     &names,
+                    &info.as_ref().map(Json),
                 ],
             )
             .await
