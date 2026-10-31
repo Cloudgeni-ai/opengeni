@@ -13612,6 +13612,51 @@ export const capabilityInstallations = pgTable(
   }),
 );
 
+/**
+ * An organization's MCP connector, added once by an organization owner or
+ * admin and served to the workspaces its reach selects: every shared workspace
+ * (`allowedWorkspaceIds` null) or the listed ones, plus members' Personal
+ * workspaces when `allowPersonalWorkspaces` is on. `config` has the shape of a
+ * workspace installation's config; `customDefinition` holds a custom server's
+ * name and endpoint and is null for a catalog connector. A workspace's own
+ * installation of the same capability, on or off, wins (resolved by readers).
+ */
+export const organizationConnectors = pgTable(
+  "organization_connectors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    capabilityId: text("capability_id").notNull(),
+    customDefinition: jsonb("custom_definition").$type<{
+      name: string;
+      description?: string | null;
+      endpointUrl: string;
+    }>(),
+    config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status").$type<"active" | "disabled">().notNull().default("active"),
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(false),
+    generation: integer("generation").notNull().default(1),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    capability: unique("organization_connectors_capability_key").on(
+      table.accountId,
+      table.capabilityId,
+    ),
+    statusCheck: check(
+      "organization_connectors_status_chk",
+      sql`${table.status} in ('active', 'disabled')`,
+    ),
+  }),
+);
+
 // --- Capabilities platform ---------------------------------------------------
 // Authoritative Plugin, immutable Version, Facet, installation, and ownership
 // state. The generic catalog/installations ledger is reserved for MCP.
