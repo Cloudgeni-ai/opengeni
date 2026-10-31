@@ -349,13 +349,15 @@ ENV LC_ALL=C.UTF-8
 # ---- Layer 1: headless tool layer (parity with docker/sandbox.Dockerfile) ----
 # Agents' shell loops mint idempotency keys with $(uuidgen); on Debian it comes
 # from uuid-runtime, not util-linux, and the build proves it prints a v4 UUID.
+# poppler-utils gives PDF text page by page (pdftotext -f N -l N, pdfinfo),
+# which AnyDoc's Markdown does not mark.
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     printf '%s\n' \
       "deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main" \
       > /etc/apt/sources.list.d/opengeni-chromium-snapshot.list; \
     base_packages=" \
-        bash ca-certificates coreutils curl gpg git jq openssh-client postgresql-client \
+        bash ca-certificates coreutils curl gpg git jq openssh-client poppler-utils postgresql-client \
         fuse3 procps rclone ripgrep unzip wget python3 python3-pip python3-venv python-is-python3 \
         apt-transport-https net-tools netcat-openbsd sudo util-linux uuid-runtime xxd file \
     "; \
@@ -366,7 +368,9 @@ RUN set -eux; \
     done; \
     rm -rf /var/lib/apt/lists/*; \
     psql --version; \
-    uuidgen | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
+    uuidgen | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'; \
+    pdftotext -v; \
+    pdfinfo -v
 
 # Node.js LTS from NodeSource. Pin the 20.x LTS line instead of inheriting the
 # distribution's moving Node release, mirroring the gh keyring+repo layer.
