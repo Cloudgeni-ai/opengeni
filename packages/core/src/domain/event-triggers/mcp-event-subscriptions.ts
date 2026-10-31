@@ -49,6 +49,7 @@ import {
   type McpEventOccurrence,
   type McpEventsFailure,
 } from "./mcp-events-protocol";
+import { fundedBillingOrigin } from "../../billing-origin";
 import { eventMatchesTrigger } from "./matching";
 import { boundEvent, firstText, parseEventTime, type NormalizedEventInput } from "./normalize";
 import { postTriggerNotices } from "./trigger-notices";
@@ -223,6 +224,7 @@ async function pollStep(context: StepContext): Promise<StepOutcome> {
         },
         cursor,
         truncated: result.truncated,
+        apiSourceBillingOrigin: fundedBillingOrigin(subscription.accountId, "api"),
       });
       if (!recorded) throw new Error("The subscription was removed while it was polled");
       gapPending = recorded.subscription.gapPending;
@@ -702,6 +704,8 @@ export async function receiveMcpEventWebhook(input: {
       },
       // A delivered cursor is a safe watermark; absent means none.
       cursor: read.occurrence.cursor ?? null,
+      // A source an API caller set up by URL fires its automations as API use.
+      apiSourceBillingOrigin: fundedBillingOrigin(subscription.accountId, "api"),
     });
     if (!recorded) return { outcome: "gone" };
     if (recorded.matchedTaskIds.length === 0 && !recorded.duplicate) {

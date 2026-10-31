@@ -7,6 +7,7 @@ import {
   getBillingBalance,
   grantPlanCreditPeriod,
   upsertOrganizationPlan,
+  withBillingOriginOverride,
 } from "@opengeni/db";
 import * as provider from "@opengeni/runtime/model-call";
 import { acquireRestrictedRuntimeTestDatabase } from "@opengeni/testing/shared-pg";
@@ -94,11 +95,16 @@ test("direct model API refuses held Free credits before dispatch and preserves p
         request: { messages: [{ role: "user", content: "fixture" }] } as never,
       });
 
-    await call();
+    // The key's own calls are API use: the Free plan's credit never pays.
+    await expect(call()).rejects.toMatchObject({ status: 402, code: "api_credits_required" });
+    expect(dispatch).not.toHaveBeenCalled();
+    // App use (the app's own sign-in fixes this scope in production) may.
+    const appCall = () => withBillingOriginOverride("app", call);
+    await appCall();
     expect(dispatch).toHaveBeenCalledTimes(1);
     await shared.admin`select opengeni_private.set_promotion_enforcement(true,'test','direct model admission regression',true)`;
     await shared.admin`select opengeni_private.set_promotion_decision(${grant.accountId}::uuid,'held','test','direct API farming','{}'::jsonb,'operator:test',0)`;
-    await expect(call()).rejects.toMatchObject({ status: 402, code: "insufficient_credits" });
+    await expect(appCall()).rejects.toMatchObject({ status: 402, code: "insufficient_credits" });
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(await getBillingBalance(client.db, grant.accountId)).toMatchObject({
       balanceMicros: 10_000_000,
@@ -111,8 +117,9 @@ test("direct model API refuses held Free credits before dispatch and preserves p
       amountMicros: 3_000_000,
       idempotencyKey: crypto.randomUUID(),
     });
+    await appCall();
     await call();
-    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(dispatch).toHaveBeenCalledTimes(3);
     expect(await getBillingBalance(client.db, grant.accountId)).toMatchObject({
       balanceMicros: 13_000_000,
       heldCreditMicros: 10_000_000,

@@ -1,3 +1,6 @@
+// The models section renders the shared models page, which navigates through
+// the page's navigation host; the router mock below backs it.
+import "@/navigation-host";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";

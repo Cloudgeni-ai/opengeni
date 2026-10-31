@@ -6,6 +6,7 @@ export default defineConfig({
   entry: [
     "src/modal-native-proof-v2.ts",
     "src/allowance-refusal.ts",
+    "src/billing-origin.ts",
     "src/timeline-order.ts",
     "src/learning-refusal.ts",
     "src/values.ts",
@@ -41,6 +42,7 @@ export default defineConfig({
     "src/passkey-only-account.ts",
     "src/model-picker-order.ts",
     "src/model-display.ts",
+    "src/claude-subscription-model-ids.ts",
     "src/secret-use-approval-question.ts",
     "src/tool-review-presentation.ts",
     "src/app-actions.ts",

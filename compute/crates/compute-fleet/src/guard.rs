@@ -5,8 +5,8 @@
 //! reads the lease's deadline from a file the agent writes in `/run`, and
 //! steps this machine every 100 ms:
 //!
-//! - a second before the deadline it asks the kernel to freeze the cgroup
-//!   that holds every VM;
+//! - three seconds before the deadline ([`Guard::LEAD`]) it asks the
+//!   kernel to freeze the cgroup that holds every VM;
 //! - from the deadline, until the kernel reports the VMs frozen or gone,
 //!   it kills each VM that is neither (each VM has a group of its own in
 //!   that cgroup), and leaves the frozen ones frozen: one VM ending while
@@ -120,8 +120,13 @@ pub struct Guard {
 }
 
 impl Guard {
-    /// How long before the deadline the guard starts freezing.
-    pub const LEAD: Duration = Duration::from_secs(1);
+    /// How long before the deadline the guard starts freezing. A VM
+    /// freezes only once each of its threads can stop, and one waiting
+    /// on its disk cannot until that write ends, which on a host whose
+    /// disk is busy can take seconds: whatever has not frozen by the
+    /// deadline is killed, so the freeze starts early enough for a busy
+    /// VM to finish it.
+    pub const LEAD: Duration = Duration::from_secs(3);
 
     /// The guard.
     #[must_use]
@@ -189,16 +194,28 @@ mod tests {
     fn it_freezes_ahead_of_the_deadline_and_thaws_on_renewal() {
         let guard = Guard::new();
         let deadline = at(10_000);
-        assert_eq!(guard.step(at(8_900), deadline, RUNNING).action, None);
+        let lead = u64::try_from(Guard::LEAD.as_millis()).unwrap();
+        assert_eq!(lead, 3_000);
         assert_eq!(
-            guard.step(at(9_000), deadline, RUNNING),
+            guard
+                .step(at(10_000 - lead - 100), deadline, RUNNING)
+                .action,
+            None
+        );
+        assert_eq!(
+            guard.step(at(10_000 - lead), deadline, RUNNING),
             GuardStep {
                 action: Some(GuardAction::Freeze),
                 feed: true
             }
         );
         // Asked for, the freeze is not asked for again.
-        assert_eq!(guard.step(at(9_100), deadline, FREEZING).action, None);
+        assert_eq!(
+            guard
+                .step(at(10_000 - lead + 100), deadline, FREEZING)
+                .action,
+            None
+        );
         assert_eq!(FROZEN.vms(), Vms::Frozen);
         // Stopped, it keeps feeding past the deadline.
         assert_eq!(

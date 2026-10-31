@@ -36,6 +36,7 @@ import {
   sessionTurnSurfaceOrNull,
   turnExecutionPolicyAuditMetadata,
   type SessionTurnSurface,
+  type BillingOrigin,
   type McpPersonalConnectionDelegation,
   type McpConnectionAccountBinding,
   type ConnectionAccountIntent,
@@ -2276,6 +2277,11 @@ export async function submitHumanPromptInTransaction(
     source: "user" | "api";
     /** Content-free product surface the request entered through. */
     surface?: SessionTurnSurface | null;
+    /**
+     * Funding origin of whoever sent this message, frozen on its turn. An
+     * edit is billed to its sender too; null inherits the session's latest.
+     */
+    billingOrigin?: BillingOrigin | null;
     /** Record the admitted run's durable usage fact in this transaction. */
     recordAgentRunUsage?: boolean;
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
@@ -2861,6 +2867,7 @@ export async function submitHumanPromptInTransaction(
           source: input.source,
           // An edit resubmits the same logical message: keep where it entered.
           surface: sessionTurnSurfaceOrNull(editedSourceTurn?.surface) ?? input.surface ?? null,
+          billingOrigin: input.billingOrigin ?? null,
           promptRouting: routing,
           position: effectiveDelivery === "steer" ? 0 : existingQueued.length + 1,
           prompt: input.text,

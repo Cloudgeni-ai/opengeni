@@ -79,8 +79,8 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
     offsets: "all",
   },
   "packages/contracts/src/cua-desktop-tools.windows.gen.json": {
-    bytes: 248_409,
-    sha256: "6e8f4da503bdd91d8d16b91cb97bd5d14c21249a3bca247debac7271cb9b6157",
+    bytes: 249_245,
+    sha256: "97c5235a12b36015a27ec1876e2d8878c4ad0f2e1fb6642bb7c36746966ffbaf",
     offsets: "all",
   },
   // Lucide's SVG path data for the bot avatar icons; its move-to commands look like labels.
