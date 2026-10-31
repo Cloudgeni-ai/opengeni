@@ -9,6 +9,7 @@ import {
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import {
+  authorizationHoldsOrganizationAdministration,
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -86,7 +87,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
               facetKey: decoded(c.req.param("facetKey")),
               payload: await c.req.json(),
               canManageOrganizationDestination:
-                authorization.accountGrant?.permissions.includes("account:admin") === true,
+                authorizationHoldsOrganizationAdministration(authorization),
               canManageWorkspaceDestination: hasPermission(
                 grant.permissions,
                 "capabilities:manage",

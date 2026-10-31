@@ -11119,8 +11119,8 @@ export class OpenGeniClient {
 
   /**
    * One page of sessions across every shared workspace of the organization the
-   * caller may read within its live workspace scope (an organization API key or
-   * organization owner). Each row carries its `workspaceId`; read events,
+   * caller may read within its live workspace scope (an organization API key, or
+   * the organization's owner or an admin). Each row carries its `workspaceId`; read events,
    * history, and files through the ordinary workspace methods. Personal
    * workspaces are never included and private sessions stay invisible.
    */
