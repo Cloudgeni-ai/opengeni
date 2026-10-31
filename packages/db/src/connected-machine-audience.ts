@@ -146,7 +146,7 @@ export async function previewMachineAudienceChange(
         sql`select preview_connected_machine_audience_change(
           ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.enrollmentId}::uuid,
           ${targetScope(input.target)}, ${input.ownerSubjectId},
-          -- Unused since migration 1143; kept for the signature.
+          -- Unused since migration 1157; kept for the signature.
           false
         ) as value`,
       );
@@ -176,7 +176,7 @@ export async function changeMachineAudience(
         sql`select change_connected_machine_audience(
           ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.enrollmentId}::uuid,
           ${input.expectedGeneration}::bigint, ${targetScope(input.target)},
-          -- Unused since migration 1143; kept for the signature.
+          -- Unused since migration 1157; kept for the signature.
           ${input.ownerSubjectId}, false
         ) as value`,
       );

@@ -50,7 +50,7 @@ BEGIN
     RETURN;
   END IF;
   IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-    RAISE EXCEPTION '1143 connected machine audience inventory drift'
+    RAISE EXCEPTION '1157 connected machine audience inventory drift'
       USING ERRCODE = '55000';
   END IF;
   EXECUTE replace(definition, anchor, replacement);
