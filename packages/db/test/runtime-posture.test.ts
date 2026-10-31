@@ -2211,7 +2211,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
-          1 + // 1129 transcribed pieces kept for a version's retries.
+          1 + // 1148 transcribed pieces kept for a version's retries.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
@@ -2229,7 +2229,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
-          1 + // 1129 transcribed pieces kept for a version's retries.
+          1 + // 1148 transcribed pieces kept for a version's retries.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
