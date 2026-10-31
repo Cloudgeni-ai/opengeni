@@ -7,6 +7,7 @@ import {
   nextFreeOrdinal,
   parseMigrationFile,
   planRenumber,
+  rewriteText,
   selectCompanionTests,
   type MigrationName,
 } from "../migration-ordinals";
@@ -45,9 +46,16 @@ const SYMLINK_MODE = "120000";
  * companion tests and rewrite references. Moving the later ones too keeps the
  * PR's migrations running in the order its author wrote them. Only the PR's
  * own changed files are read and rewritten, since nothing else can name a
- * migration the PR adds. Anything the tool would leave for a person (a changed
- * text file that could not be read, or a bare number it cannot attribute)
- * makes the plan manual.
+ * migration the PR adds.
+ *
+ * A bare number (`1143` with no `1143_slug` beside it) in a file that does not
+ * name the migration is rewritten only on lines the PR wrote, that is lines
+ * main's copy of the file lacks, and only when that number can mean nothing
+ * else to the PR's author: the PR adds no other migration with it, and main
+ * had none when the PR branched. Lines main already had keep their numbers,
+ * since they name main's migrations. Anything else the tool would leave for a
+ * person (a changed text file that could not be read, or a bare number it
+ * cannot attribute) makes the plan manual.
  */
 export function planMigrationMoves(input: {
   paths: readonly string[];
@@ -64,6 +72,13 @@ export function planMigrationMoves(input: {
   changed?: readonly string[];
   /** The PR's changed files as they are at the merged commit. */
   files: ReadonlyMap<string, RepoFile>;
+  /**
+   * The PR's changed files as they are on main (a path main lacks is absent).
+   * Without it, or `branchLedger`, every unattributed bare number is manual.
+   */
+  mainFiles?: ReadonlyMap<string, RepoFile>;
+  /** Every file name in the migrations directory where the PR branched from main. */
+  branchLedger?: readonly string[];
 }): MovePlan {
   const reservedAbove = Math.max(-1, ...(input.reserved ?? [])) + 1;
   let ledger = input.ledger
@@ -99,7 +114,25 @@ export function planMigrationMoves(input: {
       files: texts,
       companionTests: selectCompanionTests(texts, from, siblings),
     });
-    if (plan.unrewrittenBare.length)
+    const ownMentions = plan.unrewrittenBare.length
+      ? rewriteOwnMentions({
+          paths: plan.unrewrittenBare,
+          from,
+          to: plan.to,
+          texts,
+          mainFiles: input.mainFiles,
+          // Whether the digits could name another migration to the author.
+          unambiguous:
+            input.branchLedger !== undefined &&
+            !input.branchLedger.some(
+              (file) => parseMigrationFile(file)?.ordinal === from.ordinal,
+            ) &&
+            [...new Set([...input.paths, ...(input.added ?? [])])].filter(
+              (added) => parseMigrationFile(added)?.ordinal === from.ordinal,
+            ).length === 1,
+        })
+      : new Map<string, string>();
+    if (ownMentions === null)
       return {
         kind: "manual",
         reason: `${plan.unrewrittenBare.map((p) => `\`${p}\``).join(", ")} mentions ${from.ordinal} without naming \`${from.basename}\`, so the batcher cannot tell which migration it means.`,
@@ -112,6 +145,7 @@ export function planMigrationMoves(input: {
       origin.delete(rename.from);
     }
     for (const [target, text] of plan.contents) texts.set(target, text);
+    for (const [target, text] of ownMentions) texts.set(target, text);
     ledger = [...ledger.filter((entry) => entry.file !== from.file), plan.to];
     moves.push({ from: path, to: `${MIGRATIONS_DIR}/${plan.to.file}` });
   }
@@ -130,4 +164,37 @@ export function planMigrationMoves(input: {
   }
   entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   return { kind: "moved", moves, entries };
+}
+
+/**
+ * Rewrite `from`'s bare number to `to`'s on the lines of each path that main's
+ * copy lacks, leaving main's lines alone. Null when the number is ambiguous
+ * there, or main's copy of a path could not be read.
+ */
+function rewriteOwnMentions(input: {
+  paths: readonly string[];
+  from: MigrationName;
+  to: MigrationName;
+  texts: ReadonlyMap<string, string>;
+  mainFiles: ReadonlyMap<string, RepoFile> | undefined;
+  unambiguous: boolean;
+}): Map<string, string> | null {
+  if (!input.unambiguous || !input.mainFiles) return null;
+  const rewritten = new Map<string, string>();
+  for (const path of input.paths) {
+    const onMain = input.mainFiles.get(path);
+    if (onMain && onMain.text === null) return null;
+    const mainLines = new Set(onMain?.text?.split("\n") ?? []);
+    const text = input.texts.get(path)!;
+    const next = text
+      .split("\n")
+      .map((line) =>
+        mainLines.has(line)
+          ? line
+          : rewriteText(line, input.from, input.to, [], { bareOrdinal: true }).text,
+      )
+      .join("\n");
+    if (next !== text) rewritten.set(path, next);
+  }
+  return rewritten;
 }

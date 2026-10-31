@@ -1,4 +1,3 @@
-import { withClaudeConnectionCredential } from "@opengeni/config";
 import { unboundGitHubRepositoryResources } from "@opengeni/core";
 import {
   getSessionAuthorityProjection,
@@ -133,11 +132,11 @@ import {
 import {
   buildClaudeCoreRequestAuthorization,
   claudeCoreSettingsCredential,
-  claudeCoreModelScope,
   claudeCoreRequestPreparer,
   claudeSubscriptionProviderIds,
   claudeSubscriptionUpstreamModelIds,
   selectClaudeTurnCapacity,
+  withClaudeCoreConnectionCredential,
   type ClaudeCoreRequestAuthorization,
 } from "./claude-core";
 import {
@@ -744,11 +743,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // The settings carry the account identity but never the live
             // bearer: every core request gets it from its custody, so a
             // request outside a custody wrapper fails closed upstream.
-            selectedCapabilitySettings = withClaudeConnectionCredential(
+            selectedCapabilitySettings = withClaudeCoreConnectionCredential(
               capabilitySettings,
-              "claude_subscription",
               claudeCoreSettingsCredential(token, claudeCore.connectionId),
-              claudeCoreModelScope(turnExecutionPolicy.productModelId),
               { connectionId: claudeCore.connectionId, credentialVersion: token.credentialVersion },
             );
           } else if (billingState.isClaudeTurn) {
@@ -806,6 +803,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelHistoryProjector,
             generatedImageHistoryProjector,
             compactionModelHistoryProjector,
+            searchRecords,
           } = governance.ok;
 
           // A codex-subscription turn resolves the bearer for THIS turn's effective
@@ -2229,6 +2227,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               compactionModelHistoryProjector,
               generatedImageHistoryProjector,
               modelHistoryProjector,
+              searchRecords,
               compactionModeOptions,
               initialRunCredentialMaterial,
               initialGitCredentials,

@@ -173,15 +173,6 @@ function queueSnapshot(
   };
 }
 
-function queueStoppingSettlement() {
-  return {
-    state: "stopping" as const,
-    attemptCount: 1,
-    interruptionPendingCount: 0,
-    quiescencePendingCount: 1,
-  };
-}
-
 describe("useWorkspaceSessions", () => {
   test("compact reads use the optional summary transport and retain causal revisions", async () => {
     let reads = 0;
@@ -3356,111 +3347,23 @@ describe("useComposer queue-vs-steer", () => {
     await flush();
 
     await flushing(async () => await hook.result.current.pause());
-    // The response proves the Pause interrupted live work.
+    // The receipt still reports physical settlement, so the current attempt is
+    // shown stopping before any queue snapshot refresh arrives.
     expect(hook.result.current.stoppingAttempt).toBe("current");
     expect(hook.result.current.effectiveControl).toMatchObject({
       state: "paused",
       controlVersion: 4,
     });
 
-    // The queue snapshot at the Pause revision catches up but is still settling.
-    await hook.rerender(pendingControl);
+    // A snapshot that is still behind the receipt does not end the projection.
+    await hook.rerender({ ...queueSnapshot([]).effectiveControl, controlVersion: 3 });
     expect(hook.result.current.stoppingAttempt).toBe("current");
+
+    // Once the authoritative control catches up, the queue snapshot owns the
+    // stopping projection, in the same render.
     await hook.rerender({ ...pendingControl, settlement: null });
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     expect(hook.result.current.effectiveControl?.state).toBe("paused");
-    expect(hook.result.current.stoppingAttempt).toBeNull();
-    await hook.unmount();
-  });
-
-  test("a Pause that interrupted live work stays stopping until that attempt quiesces", async () => {
-    const active = queueSnapshot([]).effectiveControl;
-    const paused = {
-      ...active,
-      state: "paused" as const,
-      directState: "paused" as const,
-      controlVersion: 4,
-      controlEtag: "control-4",
-    };
-    const pauseResponse = (interruptionCount: number): SessionControlResponse => ({
-      receipt: promptReceipt(null, "session.paused"),
-      effectiveControl: paused,
-      interruptionCount,
-      wakeCount: 0,
-      cancelledSessionCount: 0,
-      cancelledTurnCount: 0,
-    });
-    let interruptionCount = 1;
-    const client = fakeClient({ pauseSession: async () => pauseResponse(interruptionCount) });
-    type Props = {
-      events: SessionEvent[];
-      effectiveControl: SessionQueueSnapshot["effectiveControl"];
-      stoppingPreviousAttempt?: boolean;
-    };
-    const earlierQuiescence = makeEvent(5, "session.queue.changed", {
-      operation: "attempt_quiesced",
-    });
-    const hook = await renderHook(
-      (props: Props) =>
-        useComposer(SESSION_ID, {
-          client,
-          workspaceId: WORKSPACE_ID,
-          events: props.events,
-          effectiveControl: props.effectiveControl,
-          stoppingPreviousAttempt: props.stoppingPreviousAttempt,
-        }),
-      { events: [earlierQuiescence], effectiveControl: active } as Props,
-    );
-    await flush();
-
-    await flushing(async () => await hook.result.current.pause());
-    // A quiescence from before the Pause does not end it.
-    expect(hook.result.current.stoppingAttempt).toBe("current");
-
-    const pausedEvent = makeEvent(6, "session.control.paused");
-    await hook.rerender({ events: [earlierQuiescence, pausedEvent], effectiveControl: active });
-    expect(hook.result.current.stoppingAttempt).toBe("current");
-    // A snapshot from before the Pause cannot end it either.
-    await hook.rerender({
-      events: [earlierQuiescence, pausedEvent],
-      effectiveControl: active,
-      stoppingPreviousAttempt: false,
-    });
-    expect(hook.result.current.stoppingAttempt).toBe("current");
-    // A snapshot at the Pause that still reports the stopping attempt keeps it.
-    await hook.rerender({
-      events: [earlierQuiescence, pausedEvent],
-      effectiveControl: { ...paused, settlement: queueStoppingSettlement() },
-      stoppingPreviousAttempt: true,
-    });
-    expect(hook.result.current.stoppingAttempt).toBe("current");
-
-    await hook.rerender({
-      events: [
-        earlierQuiescence,
-        pausedEvent,
-        makeEvent(7, "session.queue.changed", { operation: "attempt_quiesced" }),
-      ],
-      effectiveControl: { ...paused, settlement: queueStoppingSettlement() },
-      stoppingPreviousAttempt: true,
-    });
-    expect(hook.result.current.stoppingAttempt).toBeNull();
-
-    // A settled snapshot ends a later stopping Pause even without its event.
-    await hook.rerender({ events: [], effectiveControl: active });
-    await flushing(async () => await hook.result.current.pause());
-    expect(hook.result.current.stoppingAttempt).toBe("current");
-    await hook.rerender({
-      events: [],
-      effectiveControl: { ...paused, settlement: queueStoppingSettlement() },
-      stoppingPreviousAttempt: false,
-    });
-    expect(hook.result.current.stoppingAttempt).toBeNull();
-
-    // A Pause that interrupted nothing has nothing to stop.
-    interruptionCount = 0;
-    await hook.rerender({ events: [], effectiveControl: active });
-    await flushing(async () => await hook.result.current.pause());
-    expect(hook.result.current.stoppingAttempt).toBeNull();
     await hook.unmount();
   });
 
@@ -3513,10 +3416,13 @@ describe("useComposer queue-vs-steer", () => {
 
     await flushing(async () => await hook.result.current.pause());
     expect(hook.result.current.effectiveControl?.controlEtag).toBe("control-4");
+    // Nothing was interrupted, so nothing is shown stopping.
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     await flushing(async () => await hook.result.current.resume());
 
     expect(resumeEtags).toEqual(["control-4"]);
     expect(hook.result.current.effectiveControl?.controlEtag).toBe("control-5");
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     await hook.unmount();
   });
 

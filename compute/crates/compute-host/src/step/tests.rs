@@ -846,10 +846,12 @@ async fn a_checkpoint_cancelled_while_its_guest_syncs_reports_it_wrote() {
     );
 }
 
-/// A failed disk check, or one an agent never finished, keeps every later
-/// snapshot of the VM untrusted, even by a new agent; only a new VM starts
-/// clean. A new agent watches through the description the engine kept,
-/// and through nothing else.
+/// A failed disk check, or a sync an agent never finished, keeps every
+/// later snapshot of the VM untrusted, even by a new agent; only a new VM
+/// starts clean. An agent that stops between a check's start and its sync,
+/// as it may while the VMM takes a snapshot, costs nothing: only the sync
+/// can take an error from the description. A new agent watches through
+/// the description the engine kept, and through nothing else.
 #[tokio::test]
 async fn a_disk_check_that_failed_or_never_ended_outlives_the_agent() {
     let sandbox = Sandbox::new().await;
@@ -872,13 +874,27 @@ async fn a_disk_check_that_failed_or_never_ended_outlives_the_agent() {
         "another file was taken for the disk"
     );
 
-    // An agent stops part way through a check.
+    // An agent stops after starting a check, before its sync: the next
+    // sync through the kept description still sees every lost write.
     watch.begin().unwrap();
+    assert!(!marker.exists(), "a check marked the disk before its sync");
     let kept = watch.description().unwrap();
     drop(watch);
+    let adopted = DiskWatch::adopt(paths, kept);
+    assert!(
+        !adopted.failed(),
+        "a check stopped before its sync cost trust"
+    );
+    adopted.sync().unwrap();
+    assert!(!marker.exists(), "a clean sync left its marker");
+
+    // An agent stops part way through a sync, which leaves its marker.
+    let kept = adopted.description().unwrap();
+    drop(adopted);
+    fs::write(&marker, "").unwrap();
     assert!(
         DiskWatch::adopt(paths, kept).failed(),
-        "an unfinished check was forgotten"
+        "an unfinished sync was forgotten"
     );
 
     let watch = DiskWatch::fresh(paths).unwrap();
@@ -915,8 +931,9 @@ async fn a_disk_check_that_failed_or_never_ended_outlives_the_agent() {
 }
 
 /// A VM whose disk no one can vouch for, here because an agent stopped
-/// part way through a check, is never saved, yet keeps running: the save
-/// fails as unsavable and leaves the VM and its record as they were.
+/// part way through a disk check's sync, is never saved, yet keeps
+/// running: the save fails as unsavable and leaves the VM and its record
+/// as they were.
 #[tokio::test]
 async fn a_vm_whose_disk_cannot_be_vouched_for_is_kept_unsaved() {
     let sandbox = Sandbox::new().await;

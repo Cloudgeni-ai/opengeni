@@ -226,6 +226,15 @@ describe("isCreditExhaustion", () => {
     expect(isCreditExhaustion({ detail: "insufficient Opengeni credits" })).toBe(true);
   });
 
+  test("matches the refusal of an API turn that has no credits", () => {
+    expect(isCreditExhaustion("API usage uses credits, not your plan credit.")).toBe(true);
+    expect(
+      isCreditExhaustion({
+        error: "Activity task failed: API usage uses credits, not your plan credit.",
+      }),
+    ).toBe(true);
+  });
+
   test("matches the budget_exhausted segment limit on its own", () => {
     expect(isCreditExhaustion({ segmentLimit: "budget_exhausted" })).toBe(true);
     expect(

@@ -197,6 +197,14 @@ the HTTP API, send the same names as `modelContextTools` next to
 with the browser's own context.
 With the dock off, entries that only open a dock panel hide with it.
 
+`starters` replaces Opengeni's suggestions under the new-chat composer with
+the host's own, such as tasks that fit the app the chat sits in (the Excel
+add-in suggests explaining a sheet or writing a formula). Each one has an
+`id`, a `title`, an optional `description` and `icon`, and the `prompt` it puts
+in the composer for the person to edit and send. An empty list shows none, and
+the `starters` feature still turns them off. The new-chat page's recent chats
+lead with the ones the person opened there most recently.
+
 Links in agent messages to Opengeni objects (files, Sites, editable
 artifacts) open in the dock when it is on, and otherwise open the object's
 page in the web app through `openUrl`. `resolveLink` lets the host open them
@@ -308,8 +316,8 @@ control (`sessions:control`) plus one of these:
   custom MCP servers, shared or workspace connections, other people's
   connections, or removing or reconfiguring an integration, and an
   organization can reserve turning integrations on for admins.
-- `connections:write` with `connections:read` and `capabilities:manage` (or an
-  integration that is already on): any account, shared or personal.
+- `connections:write` with `connections:read`: any account, shared or
+  personal, turning the integration on if it is not on yet.
 - `connections:read` alone, when the integration is already on and bound to a
   shared workspace account.
 

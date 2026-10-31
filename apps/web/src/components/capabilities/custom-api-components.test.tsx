@@ -27,7 +27,9 @@ describe("custom API components", () => {
       <CustomApiSection
         instances={[installedInstance()]}
         connections={null}
+        canAdd
         canManage
+        canChange
         busyKey={null}
         onConnect={() => {}}
         onUpdate={() => {}}
@@ -57,7 +59,9 @@ describe("custom API components", () => {
           },
         ]}
         connections={[]}
+        canAdd
         canManage
+        canChange
         busyKey={null}
         onConnect={() => {}}
         onUpdate={() => {}}
@@ -72,6 +76,31 @@ describe("custom API components", () => {
         (button) => button.textContent,
       );
       expect(labels).toEqual([]);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a member connects and removes custom APIs; reconnecting and updating stay with admins", async () => {
+    const rendered = await render(
+      <CustomApiSection
+        instances={[{ ...installedInstance(), requiresConnection: true }]}
+        connections={[]}
+        canAdd
+        canManage
+        canChange={false}
+        busyKey={null}
+        onConnect={() => {}}
+        onUpdate={() => {}}
+        onReconnect={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    try {
+      const enabled = Array.from(rendered.container.querySelectorAll("button"))
+        .filter((button) => !button.disabled)
+        .map((button) => button.textContent?.trim());
+      expect(enabled).toEqual(["Connect custom API", "Remove"]);
     } finally {
       await rendered.unmount();
     }

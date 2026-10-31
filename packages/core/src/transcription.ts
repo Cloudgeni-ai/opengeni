@@ -1,6 +1,7 @@
 import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
 import type { TranscribeAudioResponse, VoiceInputErrorCode } from "@opengeni/contracts";
 import type { CreditDebitAttribution, UsageEventProcessingResidency } from "@opengeni/db";
+import type { RecordingTranscriptionErrorCode } from "./recording-transcription";
 
 /**
  * Server-owned upstream budget for one provider attempt. Resumable recording
@@ -152,6 +153,12 @@ export class TranscriptionServiceError extends Error {
   readonly retryable: boolean;
   /** Explicit rejection before any transcription result; safe to try another provider. */
   readonly fallbackSafe: boolean;
+  /**
+   * What the provider said, in the meeting pipeline's words, where voice
+   * input's own code is coarser: a rejected key and a spent balance are both
+   * `unavailable` to voice input, but a meeting tells its owner which.
+   */
+  readonly providerCode: RecordingTranscriptionErrorCode | undefined;
 
   constructor(input: {
     code: Exclude<VoiceInputErrorCode, TranscriptionBillingRefusalCode>;
@@ -159,6 +166,7 @@ export class TranscriptionServiceError extends Error {
     status?: number;
     retryable?: boolean;
     fallbackSafe?: boolean;
+    providerCode?: RecordingTranscriptionErrorCode | undefined;
   }) {
     super(input.message);
     this.name = "TranscriptionServiceError";
@@ -166,6 +174,7 @@ export class TranscriptionServiceError extends Error {
     this.status = input.status ?? statusForVoiceInputError(input.code);
     this.retryable = input.retryable ?? false;
     this.fallbackSafe = input.fallbackSafe ?? false;
+    this.providerCode = input.providerCode;
   }
 }
 

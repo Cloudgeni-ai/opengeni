@@ -157,6 +157,7 @@ export * from "./domain/scheduled-task-audience";
 export * from "./domain/automation-templates";
 export * from "./domain/bot-templates";
 export * from "./domain/site-audience";
+export * from "./domain/project-audience";
 export * from "./domain/file-audience";
 export * from "./domain/sessions";
 export * from "./domain/insights";
@@ -207,6 +208,14 @@ export {
   type HostSessionUsageLimit,
 } from "./host-session-usage-limit";
 export { resolveTurnSurface } from "./turn-surface";
+export {
+  billingOriginForGrant,
+  configureBillingLegacyAccounts,
+  fundedBillingOrigin,
+  requestBillingOrigin,
+  resolveTurnBillingOrigin,
+  stampRequestBillingOrigin,
+} from "./billing-origin";
 export { turnAppActionGrant } from "./app-action-turn-grant";
 
 export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";

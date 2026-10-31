@@ -86,13 +86,6 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     sendBlocked?: (() => boolean) | undefined;
     /** Latest server-derived workstream control; bound into Send/Steer OCC. */
     effectiveControl?: EffectiveSessionControl | null | undefined;
-    /**
-     * The queue snapshot's `stoppingPreviousAttempt`, read together with
-     * `effectiveControl`. Ends the stopping state of an accepted Pause once a
-     * snapshot at or after the Pause no longer reports a stopping attempt.
-     * Leave unset when `effectiveControl` does not come from a queue snapshot.
-     */
-    stoppingPreviousAttempt?: boolean | undefined;
     /** Immediate user-visible destination for an ordinary Send before admission replies. */
     sendDestination?: (() => "chat" | "queue") | undefined;
     /**
@@ -687,24 +680,6 @@ function isSteeringSettlementEvent(event: SessionEvent): boolean {
   return STEERING_SETTLEMENT_EVENT_TYPES.has(event.type);
 }
 
-/** The interrupted attempt has physically stopped. */
-function isAttemptQuiescedEvent(event: SessionEvent): boolean {
-  if (event.type !== "session.queue.changed") return false;
-  const payload: unknown = event.payload;
-  return (
-    typeof payload === "object" &&
-    payload !== null &&
-    (payload as { operation?: unknown }).operation === "attempt_quiesced"
-  );
-}
-
-/** An accepted Pause that interrupted a live attempt, until it quiesces. */
-type PauseStoppingState = {
-  controlVersion: number;
-  /** Session events at or below this sequence predate the Pause. */
-  afterSequence: number;
-};
-
 function steeringAcceptedEvent(
   steering: ComposerSteeringState,
   events: readonly SessionEvent[],
@@ -881,7 +856,6 @@ export function useComposer(
   );
   const [pausing, setPausing] = useState(false);
   const [acceptedControl, setAcceptedControl] = useState<EffectiveSessionControl | null>(null);
-  const [pauseStopping, setPauseStopping] = useState<PauseStoppingState | null>(null);
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   // Background draft reads recover independently of Send/Steer/control failures.
@@ -979,8 +953,6 @@ export function useComposer(
     acceptedControl ?? options.effectiveControl ?? null,
   );
   effectiveControlRef.current = acceptedControl ?? options.effectiveControl ?? null;
-  const latestEventSequenceRef = useRef(0);
-  latestEventSequenceRef.current = options.events?.at(-1)?.sequence ?? 0;
   const liveExtrasVersion = JSON.stringify(resolveSendExtras(options.sendExtras));
 
   // A composer is bound to one session: switching targets must not leak the
@@ -1046,7 +1018,6 @@ export function useComposer(
     );
     setPausing(false);
     setAcceptedControl(null);
-    setPauseStopping(null);
     setResuming(false);
     setError(null);
     setDraftReadError(null);
@@ -1458,17 +1429,9 @@ export function useComposer(
     client,
     workspaceId,
     sessionId,
-    (event) =>
-      isComposerDraftEvent(event) ||
-      isSteeringSettlementEvent(event) ||
-      isAttemptQuiescedEvent(event),
+    (event) => isComposerDraftEvent(event) || isSteeringSettlementEvent(event),
     (event) => {
       if (isComposerDraftEvent(event)) void loadDraft(false);
-      if (isAttemptQuiescedEvent(event)) {
-        setPauseStopping((current) =>
-          current && event.sequence > current.afterSequence ? null : current,
-        );
-      }
       if (!isSteeringSettlementEvent(event)) return;
       steeringSettlementEventsRef.current = [
         ...steeringSettlementEventsRef.current.slice(-15),
@@ -1481,7 +1444,7 @@ export function useComposer(
       });
     },
     {
-      enabled: Boolean(sessionId) && (durableDrafts || steering !== null || pauseStopping !== null),
+      enabled: Boolean(sessionId) && (durableDrafts || steering !== null),
       ...(options.events !== undefined ? { events: options.events } : {}),
     },
     reconcileSteering,
@@ -1503,35 +1466,15 @@ export function useComposer(
     }
     setAcceptedControl((current) => (current === acceptedControl ? null : current));
   }, [acceptedControl, options.effectiveControl]);
-
-  // An accepted Pause shows its stopping state until the interrupted attempt
-  // quiesces: its event, a queue snapshot at or after the Pause that no longer
-  // reports a stopping attempt, or a later control change ends it.
-  useEffect(() => {
-    if (!pauseStopping) return;
-    const quiesced = (options.events ?? []).some(
-      (event) => event.sequence > pauseStopping.afterSequence && isAttemptQuiescedEvent(event),
-    );
-    const queueControl = options.effectiveControl;
-    const settledBySnapshot =
-      queueControl != null &&
-      queueControl.controlVersion >= pauseStopping.controlVersion &&
-      (options.stoppingPreviousAttempt === false || queueControl.settlement === null);
-    const control = acceptedControl ?? options.effectiveControl ?? null;
-    const controlMovedOn =
-      control !== null &&
-      control.controlVersion > pauseStopping.controlVersion &&
-      control.state !== "paused";
-    if (quiesced || settledBySnapshot || controlMovedOn) {
-      setPauseStopping((current) => (current === pauseStopping ? null : current));
-    }
-  }, [
-    acceptedControl,
-    options.effectiveControl,
-    options.events,
-    options.stoppingPreviousAttempt,
-    pauseStopping,
-  ]);
+  // The accepted receipt is newer than the authoritative control only until
+  // that control catches up; derive it per render so a caught-up snapshot wins
+  // in the same frame instead of after the clearing effect.
+  const pendingAcceptedControl =
+    acceptedControl &&
+    (!options.effectiveControl ||
+      options.effectiveControl.controlVersion < acceptedControl.controlVersion)
+      ? acceptedControl
+      : null;
 
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
     if (!durableDrafts || targetKeyRef.current !== targetKey) return null;
@@ -2790,7 +2733,6 @@ export function useComposer(
       try {
         const clientEventId = generateClientEventId();
         const effectiveControl = effectiveControlRef.current;
-        const afterSequence = latestEventSequenceRef.current;
         const result = await replayOutcomeUnknown(() =>
           client.pauseSession(workspaceId, sessionId, {
             clientEventId,
@@ -2805,14 +2747,6 @@ export function useComposer(
           targetGeneration.current === ownedGeneration
         ) {
           setAcceptedControl(result.effectiveControl);
-          // The response proves the Pause interrupted live work; show that it
-          // is stopping now instead of waiting for a queue read to say so.
-          if ((result.interruptionCount ?? 0) > 0) {
-            setPauseStopping({
-              controlVersion: result.effectiveControl.controlVersion,
-              afterSequence,
-            });
-          }
         }
       } catch (cause) {
         if (
@@ -3303,10 +3237,14 @@ export function useComposer(
     removeOptimisticMessage,
     steer,
     steering: visibleSteering,
+    // Receipt-backed: an accepted Steer stops the previous attempt, and an
+    // accepted Pause whose receipt still reports physical settlement stops the
+    // current one. Once the authoritative control catches up, the queue
+    // snapshot owns this projection.
     stoppingAttempt: identityMatches
       ? visibleSteering?.phase === "accepted" && visibleSteering.stoppingPreviousAttempt === true
         ? "previous"
-        : pauseStopping
+        : pendingAcceptedControl?.state === "paused" && pendingAcceptedControl.settlement !== null
           ? "current"
           : null
       : null,

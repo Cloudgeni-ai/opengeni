@@ -781,7 +781,7 @@ describe("SessionChrome", () => {
     ).toBeNull();
     expect(
       mounted.container.querySelector('[data-testid="session-chrome-stopping"]')?.textContent,
-    ).toContain("Stopping previous work");
+    ).toContain("Previous work stopping");
     expect(mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')).toBeNull();
   });
 
@@ -805,7 +805,7 @@ describe("SessionChrome", () => {
 
     expect(
       mounted.container.querySelector('[data-testid="session-chrome-stopping"]')?.textContent,
-    ).toContain("Stopping previous work");
+    ).toContain("Previous work stopping");
     expect(
       mounted.container.querySelector('[data-og-session-chrome-signal="steering"]'),
     ).toBeNull();
@@ -821,7 +821,7 @@ describe("SessionChrome", () => {
 
     expect(
       mounted.container.querySelector('[data-testid="session-chrome-stopping"]')?.textContent,
-    ).toContain("Stopping current work");
+    ).toContain("Current work stopping");
     expect(mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')).toBeNull();
   });
 
@@ -846,7 +846,7 @@ describe("SessionChrome", () => {
     expect(stopping.nextElementSibling).toBe(activity);
     expect(stopping.className).toContain("ml-auto");
     expect(stopping.className).toContain("whitespace-nowrap");
-    expect(stopping.getAttribute("title")).toBe("Stopping current work");
+    expect(stopping.getAttribute("title")).toBe("Current work stopping");
     expect(activity.className).not.toContain("ml-auto");
   });
 
@@ -863,7 +863,7 @@ describe("SessionChrome", () => {
 
     expect(
       mounted.container.querySelector('[data-testid="session-chrome-stopping"]')?.textContent,
-    ).toContain("Stopping current work");
+    ).toContain("Current work stopping");
     expect(mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')).toBeNull();
   });
 

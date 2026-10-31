@@ -130,6 +130,44 @@ A person who opens someone else's Only me file gets `403` with
 it; nothing about the file's name or owner is returned. A file that does not
 exist is still `404`. Migration `0854_file_visibility.sql` is rolling.
 
+## Who can open a document, spreadsheet or presentation
+
+Documents, spreadsheets and presentations have the same two audiences:
+**Only me** (`visibility: "private"`) or **Workspace** (`"workspace"`). A new
+one follows where it is made: Only me when an agent makes it in an Only me
+chat, or imports it from an Only me file; otherwise the workspace. A person
+creating one from the app gets the workspace unless they ask for Only me with
+`visibility` on `POST /editable-artifacts` or `POST /editable-artifacts/imports`.
+Its owner is the person it was made for: the signed-in person, the person whose
+turn made it, or, for a run without a person in an Only me chat (such as a
+meeting summary), the chat's owner. Sites made in an Only me chat follow the
+same rule. Every document that existed before audiences stays shared with the
+workspace and has no owner, so nobody can limit it.
+
+An Only me one opens only for its owner: the owner themselves, or an agent
+turn acting for them or running in their own Only me chat. Colleagues,
+workspace administrators, keys and services cannot read, edit, export or open
+a live session on it, and the artifact library does not list it for them.
+This is decided once, in `opengeni_private.authorize_editable_artifact_actor`,
+which every read, edit, export, live session and catalog projection already
+uses. Opening someone else's Only me document answers like a document that
+does not exist.
+
+A file an agent exports from an Only me document is an Only me file for the
+document's owner, even when the export runs in a chat shared with the
+workspace. Exports of a shared document follow their chat, like every file an
+agent makes.
+
+Only the owner changes the audience, from the app:
+`PUT /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/visibility`
+with `{ visibility }` (`client.updateEditableArtifactVisibility`), or the
+document's Artifacts menu. Agents cannot change it. Limiting to Only me needs
+Only me to be allowed for the owner, as for chats and Sites. A change advances
+the artifact's authorization revision, so open live sessions are decided again
+and anyone who lost access is closed out. Responses and catalog items carry
+`visibility` and `ownedByViewer`. Migration `1160_editable_artifact_audience.sql`
+is rolling.
+
 ## Presentation and version semantics
 
 The workspace library opens as a preview gallery: cards with a thumbnail, the

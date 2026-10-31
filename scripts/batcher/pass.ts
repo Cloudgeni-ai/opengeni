@@ -6,7 +6,13 @@ import {
   type PullFile,
 } from "./github";
 import { MIGRATIONS_DIR } from "../migration-ordinals";
-import { planMigrationMoves } from "./renumber";
+import {
+  REGENERATION_ARTIFACT,
+  REGENERATION_FILE,
+  parseRegeneration,
+  type Regeneration,
+} from "./regenerate";
+import { planMigrationMoves, type TreeEntry } from "./renumber";
 import {
   BATCH_PREFIX,
   BUILD_PREFIX,
@@ -17,6 +23,7 @@ import {
   QUEUE_LABEL,
   VERSION_BRANCH,
   decide,
+  failedRun,
   inBatchChanges,
   isControlPlane,
   numberTaken,
@@ -42,6 +49,15 @@ export const PR_WORKFLOW = ".github/workflows/pr-ci.yml";
 
 export const CONFLICTING =
   "it conflicts with main. Merge main into the branch, then queue it again.";
+
+const code = (path: string) => `\`${path}\``;
+
+/** A conflict regenerating cannot settle, naming the files that conflict. */
+export const conflictsIn = (paths: string[]) =>
+  `it conflicts with main in ${paths.map(code).join(", ")}. Merge main into the branch, then queue it again.`;
+
+export const couldNotRegenerate = (detail: string) =>
+  `it conflicts with main and the batcher could not regenerate its generated files: ${detail}. Merge main into the branch, then queue it again.`;
 
 /** File statuses that put a new path on main. */
 const ADDED = new Set(["added", "renamed", "copied"]);
@@ -88,6 +104,8 @@ interface Context {
   autoMerge: Map<number, string>;
   /** Head, branch and changed files of each queued PR whose migration the pass moves. */
   renumbering: Map<number, { headSha: string; headRef: string; files: PullFile[] }>;
+  /** Head and branch of each queued PR whose generated files the pass regenerates. */
+  regenerating: Map<number, { headSha: string; headRef: string }>;
   /** Numbered slots each queued PR adds, as last observed. */
   queuedSlots: Map<number, string[]>;
   /** Plan only: create no branches, not even scratch ones. */
@@ -105,6 +123,7 @@ function context(gh: GitHub, options: PassOptions & { dryRun?: boolean }): Conte
     randomId: options.randomId ?? (() => crypto.randomUUID().replaceAll("-", "").slice(0, 12)),
     autoMerge: new Map(),
     renumbering: new Map(),
+    regenerating: new Map(),
     queuedSlots: new Map(),
     dryRun: options.dryRun ?? false,
     ejected: new Set(),
@@ -118,6 +137,7 @@ async function observe(ctx: Context): Promise<Observation> {
   const pulls: QueuedPull[] = [];
   ctx.autoMerge.clear();
   ctx.renumbering.clear();
+  ctx.regenerating.clear();
   ctx.queuedSlots.clear();
   // Main's numbered files per directory, read once a pass and only when needed.
   const mainNumbered = new Map<string, Promise<NumberedFile[]>>();
@@ -148,7 +168,17 @@ async function observe(ctx: Context): Promise<Observation> {
     // A Version PR is regenerated, never merged with main. A Git conflict
     // means main changed a file it also changes, so the overlap check below
     // holds it for a regenerate instead of ejecting it.
-    let conflict = pull.mergeable === "CONFLICTING" && !version ? CONFLICTING : null;
+    // Any other conflict may be only in generated files, which the batcher
+    // regenerates; never on a production branch, which only lands as it is,
+    // nor for a member of the running batch, whose branch it must not move.
+    const regenerate =
+      pull.mergeable === "CONFLICTING" &&
+      !version &&
+      pull.headRef !== PRODUCTION_BRANCH &&
+      !pull.labels.includes(IN_BATCH_LABEL);
+    let conflict = pull.mergeable === "CONFLICTING" && !version && !regenerate ? CONFLICTING : null;
+    if (regenerate)
+      ctx.regenerating.set(pull.number, { headSha: pull.headSha, headRef: pull.headRef });
     let headAt: number | undefined;
     if (version) {
       headAt = (await gh.commit(pull.headSha)).date;
@@ -165,8 +195,9 @@ async function observe(ctx: Context): Promise<Observation> {
         conflict = VERSION_CI_MISSING;
     }
     const renumber: string[] = [];
+    // Numbers are compared once the conflict is settled, on the new head.
     for (const directory of new Set(
-      added.map((f) => f.slot.slice(0, f.slot.lastIndexOf("/") + 1)),
+      regenerate ? [] : added.map((f) => f.slot.slice(0, f.slot.lastIndexOf("/") + 1)),
     )) {
       const main = await onMain(directory);
       const taken = takenNumbers(added, main);
@@ -204,6 +235,7 @@ async function observe(ctx: Context): Promise<Observation> {
       greenAt: green ? (check?.completedAt ?? now) : null,
       conflict,
       renumber: conflict === null ? renumber : [],
+      regenerate,
       slots: added.map((f) => f.slot),
       priority: pull.labels.includes(PRIORITY_LABEL),
       version,
@@ -231,12 +263,30 @@ async function observe(ctx: Context): Promise<Observation> {
       tip: branch.sha,
       manifest,
       createdAt: commit.date,
-      runs: await gh.runs(branch.name, branch.sha),
+      runs: await withFailedJobs(ctx, await gh.runs(branch.name, branch.sha)),
     };
     if (manifest.base === mainSha) batch.sameTree = await sameTree(ctx, batch, commit, pulls);
     batches.push(batch);
   }
   return { now, mainSha, pulls, batches };
+}
+
+/**
+ * The failed jobs of each finished run that did not pass, which a bisection
+ * blames (see `Manifest.blame`). Not knowing them only means a retry.
+ */
+async function withFailedJobs(ctx: Context, runs: Batch["runs"]): Promise<Batch["runs"]> {
+  return Promise.all(
+    runs.map(async (summary) => {
+      if (!failedRun(summary)) return summary;
+      try {
+        return { ...summary, failedJobs: await ctx.gh.failedJobs(summary.id, summary.attempt) };
+      } catch (error) {
+        ctx.log(`Could not list the failed jobs of ${summary.url}: ${String(error)}`);
+        return { ...summary, failedJobs: null };
+      }
+    }),
+  );
 }
 
 /**
@@ -259,7 +309,7 @@ async function sameTree(
   const same: Record<number, string> = {};
   const heads = new Map(
     pulls
-      .filter((p) => p.conflict === null && !p.renumber.length)
+      .filter((p) => p.conflict === null && !p.renumber.length && !p.regenerate)
       .map((p) => [p.number, p.headSha]),
   );
   const moved = manifest.members.flatMap((member, index) => {
@@ -428,7 +478,8 @@ async function tryMoveMigrations(
   await gh.createBranch(scratch, pull.headSha);
   try {
     let base = { sha: pull.headSha, tree: (await gh.commit(pull.headSha)).tree };
-    if ((await gh.compareFiles(mainSha, pull.headSha))?.mergeBase !== mainSha) {
+    const branchPoint = (await gh.compareFiles(mainSha, pull.headSha))?.mergeBase;
+    if (branchPoint !== mainSha) {
       const merged = await gh.mergeInto(scratch, mainSha, `Merge main into #${number}`);
       if (merged.kind === "conflict") return await eject(ctx, number, CONFLICTING);
       base = merged;
@@ -449,6 +500,11 @@ async function tryMoveMigrations(
       reserved,
       changed,
       files: await gh.readFiles(base.sha, changed),
+      // Which lines the PR wrote, and what its migration numbers meant then.
+      mainFiles: await gh.readFiles(mainSha, changed),
+      ...(branchPoint
+        ? { branchLedger: (await gh.listDirectory(MIGRATIONS_DIR, branchPoint)).map(fileName) }
+        : {}),
     });
     if (plan.kind === "manual") return await manual(plan.reason);
     const moved = plan.moves.map((m) => `\`${fileName(m.from)}\` to \`${fileName(m.to)}\``);
@@ -488,6 +544,151 @@ async function tryMoveMigrations(
       )
       .catch((error: unknown) =>
         ctx.log(`Could not tell #${number} about the move: ${String(error)}`),
+      );
+  } finally {
+    // Leftover scratch branches are removed at the start of every pass.
+    await gh
+      .deleteBranch(scratch)
+      .catch((error: unknown) => ctx.log(`Could not delete ${scratch}: ${String(error)}`));
+  }
+}
+
+/**
+ * A queued PR conflicts with main. Two PRs that both regenerated one generated
+ * file conflict there although neither did anything wrong, so before ejecting
+ * it the batcher asks a regeneration run (scripts/ci/regenerate-merge.ts),
+ * which merges main and runs the PR's generators with a read-only token. This
+ * pass never runs PR code: it checks the run's result and writes it to the
+ * branch through GitHub's API as three commits, main's version of the
+ * conflicted files, the merge of main, whose tree must be exactly the one the
+ * run regenerated on, and the regenerated files. Anything else ejects the PR,
+ * naming the files that conflict; GitHub failing only postpones it a pass.
+ */
+async function regenerateGenerated(ctx: Context, number: number) {
+  const pull = ctx.regenerating.get(number);
+  if (!pull) return;
+  try {
+    await tryRegenerate(ctx, number, pull);
+  } catch (error) {
+    if (isTransientGitHubFailure(error)) {
+      const detail =
+        error instanceof GitHubError ? `GitHub answered ${error.status}` : String(error);
+      ctx.log(`Not regenerating #${number} this pass: ${detail}`);
+      return;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    await eject(ctx, number, couldNotRegenerate(detail.slice(0, 300)));
+  }
+}
+
+async function tryRegenerate(
+  ctx: Context,
+  number: number,
+  pull: { headSha: string; headRef: string },
+) {
+  const { gh } = ctx;
+  const mainSha = await gh.mainSha();
+  const dispatch = async () => {
+    ctx.log(`Regenerating #${number}'s generated files on main ${mainSha.slice(0, 10)}`);
+    await gh.dispatchRegeneration(number, pull.headSha, mainSha);
+  };
+  const [latest] = await gh.regenerations(number, pull.headSha);
+  if (!latest) return await dispatch();
+  if (latest.status !== "completed") {
+    ctx.log(`Waiting for #${number}'s regeneration: ${latest.url}`);
+    return;
+  }
+  if (latest.conclusion !== "success")
+    return await eject(ctx, number, couldNotRegenerate(`${latest.url} did not succeed`));
+  const text = await gh.artifactText(latest.id, REGENERATION_ARTIFACT, REGENERATION_FILE);
+  const result = text === null ? null : parseRegeneration(text, number, pull.headSha);
+  if (!result)
+    return await eject(ctx, number, couldNotRegenerate(`${latest.url} left no valid result`));
+  if (result.outcome === "conflict")
+    return await eject(ctx, number, conflictsIn(result.conflicted));
+  if (result.outcome === "clean")
+    // Main merged cleanly there; GitHub saw a later main, so ask again on it.
+    return result.main === mainSha ? await eject(ctx, number, CONFLICTING) : await dispatch();
+  // The PR's own generators ran in the job that wrote the result, so nothing
+  // in it is trusted: the commit it merged must be main or behind it.
+  if (
+    result.main !== mainSha &&
+    (await gh.compareFiles(result.main, mainSha)).mergeBase !== result.main
+  )
+    return await eject(
+      ctx,
+      number,
+      couldNotRegenerate(`${latest.url} merged ${result.main.slice(0, 10)}, which is not on main`),
+    );
+  await applyRegeneration(ctx, number, pull, result, latest.url);
+}
+
+async function applyRegeneration(
+  ctx: Context,
+  number: number,
+  pull: { headSha: string; headRef: string },
+  result: Extract<Regeneration, { outcome: "regenerated" }>,
+  url: string,
+) {
+  const { gh } = ctx;
+  const listed = result.conflicted.map(code).join(", ");
+  const onMain = await gh.readFiles(result.main, result.conflicted);
+  const takeMain: TreeEntry[] = result.conflicted.map((path) => {
+    const file = onMain.get(path);
+    return file ? { path, mode: file.mode, sha: file.oid } : { path, mode: "100644", sha: null };
+  });
+  const head = await gh.commit(pull.headSha);
+  const taken = await gh.createCommit(
+    await gh.createTree(head.tree, takeMain),
+    [pull.headSha],
+    `Take main's ${result.conflicted.join(", ")} before merging main\n\nThe merge batcher regenerates them after the merge.`,
+  );
+  const scratch = `${BUILD_PREFIX}regenerate-${number}-${ctx.randomId()}`;
+  await gh.createBranch(scratch, taken);
+  try {
+    const merged = await gh.mergeInto(scratch, result.main, `Merge main into #${number}`);
+    if (merged.kind === "conflict") return await eject(ctx, number, conflictsIn(result.conflicted));
+    if (merged.tree !== result.mergedTree)
+      return await eject(
+        ctx,
+        number,
+        couldNotRegenerate(`GitHub's merge of main differs from the one ${url} regenerated on`),
+      );
+    const entries: TreeEntry[] = [];
+    for (const file of result.files)
+      entries.push(
+        "deleted" in file
+          ? { path: file.path, mode: "100644", sha: null }
+          : { path: file.path, mode: file.mode, sha: await gh.createBlob(file.content) },
+      );
+    const tip = entries.length
+      ? await gh.createCommit(
+          await gh.createTree(merged.tree, entries),
+          [merged.sha],
+          `Regenerate ${result.files.map((f) => f.path).join(", ")}\n\nRegenerated by the merge batcher after merging main, with ${result.commands.map(code).join(", ")}.`,
+        )
+      : merged.sha;
+    try {
+      // Fast-forward only: if the PR moved meanwhile, the next pass looks again.
+      await gh.updateBranch(pull.headRef, tip);
+    } catch (error) {
+      if (!(error instanceof GitHubError && error.status === 422)) throw error;
+      const now = await gh.branchHead(pull.headRef);
+      if (now !== null && now !== pull.headSha) {
+        ctx.log(`Not regenerating #${number}: its branch moved meanwhile`);
+        return;
+      }
+      return await eject(ctx, number, couldNotRegenerate("GitHub refused to update its branch"));
+    }
+    ctx.log(`Regenerated #${number}'s ${result.conflicted.join(", ")} as ${tip}`);
+    // The branch is fixed; a failed note must not eject the PR.
+    await gh
+      .comment(
+        number,
+        `Main changed generated files this PR also changes, so it conflicted in ${listed}. The merge batcher merged main into the branch, took main's version of them and regenerated them with ${result.commands.map(code).join(", ")} (${tip}, from ${url}). The PR stays queued and is batched once PR CI passes on the new head. Pull the branch before you push to it again.`,
+      )
+      .catch((error: unknown) =>
+        ctx.log(`Could not tell #${number} about the regeneration: ${String(error)}`),
       );
   } finally {
     // Leftover scratch branches are removed at the start of every pass.
@@ -558,7 +759,12 @@ async function versionOverlaps(
  * Merge the members onto main on a scratch branch with GitHub's own merge,
  * then publish the tip with its manifest as batch/<id>. That one push starts CI.
  */
-async function build(ctx: Context, members: QueuedPull[], pending: number[][]) {
+async function build(
+  ctx: Context,
+  members: QueuedPull[],
+  pending: number[][],
+  blame: string[] = [],
+) {
   const { gh } = ctx;
   const base = await gh.mainSha();
   const id = ctx.randomId();
@@ -608,7 +814,14 @@ async function build(ctx: Context, members: QueuedPull[], pending: number[][]) {
       });
     }
     if (!built.length) return;
-    const manifest: Manifest = { schemaVersion: 2, id, base, members: built, pending };
+    const manifest: Manifest = {
+      schemaVersion: 2,
+      id,
+      base,
+      members: built,
+      pending,
+      ...(blame.length ? { blame } : {}),
+    };
     const tip = await gh.createCommit(built.at(-1)!.tree, [head], renderManifest(manifest));
     await gh.createBranch(`${BATCH_PREFIX}${id}`, tip);
     ctx.log(
@@ -635,8 +848,10 @@ async function act(ctx: Context, action: Action) {
       return eject(ctx, action.number, action.reason);
     case "renumber":
       return moveMigrations(ctx, action.number, action.paths);
+    case "regenerate":
+      return regenerateGenerated(ctx, action.number);
     case "build":
-      return build(ctx, action.members, action.pending);
+      return build(ctx, action.members, action.pending, action.blame);
     case "hold":
       await noteVersionHold(ctx, action);
       return;
@@ -679,8 +894,10 @@ export function describe(action: Action): string {
       return `eject #${action.number}: ${action.reason}`;
     case "renumber":
       return `move #${action.number}'s ${action.paths.map(fileName).join(", ")} to the next free number`;
+    case "regenerate":
+      return `regenerate #${action.number}'s conflicting generated files, or eject it if other files conflict`;
     case "build":
-      return `build ${action.members.map((m) => `#${m.number}`).join(", ")}${action.pending.length ? ` (then ${JSON.stringify(action.pending)})` : ""}`;
+      return `build ${action.members.map((m) => `#${m.number}`).join(", ")}${action.pending.length ? ` (then ${JSON.stringify(action.pending)})` : ""}${action.blame?.length ? `, bisecting a failure in ${action.blame.join(", ")}` : ""}`;
     case "hold":
       return action.behind
         ? `hold the queue for Version PR #${action.number}: main changed files it also changes, so it waits to be regenerated`

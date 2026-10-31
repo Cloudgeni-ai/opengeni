@@ -76,6 +76,14 @@ const DISABLED_BY_CLASS = `<!doctype html><title>Wizard</title><style>.disabled{
 /** A row action that takes the pointer only while its row is hovered. */
 const HOVER_ENABLED = `<!doctype html><title>Rows</title><style>.go{pointer-events:none}tr:hover .go{pointer-events:auto}</style><table><tr><td>Row one</td><td><button class="go">Go</button></td></tr></table>${FRAME_LOG}`;
 
+/** The same row action, armed only once the pointer has rested on its row
+ * for a moment, as rows and menus that wait for hover intent do: the frame
+ * applies the hover well after the move has reached it. */
+const HOVER_ENABLED_AFTER_REST = HOVER_ENABLED.replace("tr:hover .go", "tr.armed .go").replace(
+  "</table>",
+  '</table><script>const row=document.querySelector("tr");row.addEventListener("pointerenter",()=>setTimeout(()=>row.classList.add("armed"),200));row.addEventListener("pointerleave",()=>row.classList.remove("armed"));</script>',
+);
+
 function nodes(observation: BrowserObservation | null | undefined): InteractionSemanticNodeValue[] {
   const semantic = observation?.semantic;
   const pending: InteractionSemanticNodeValue[] =
@@ -322,6 +330,22 @@ for (const kind of FRAMES) {
   );
 
   e2e(
+    `in a ${kind} frame, a visible control that takes the pointer only once the pointer has rested on its row is hovered and clicked`,
+    async () => {
+      await withFramedPage(kind, HOVER_ENABLED_AFTER_REST, async ({ act, log }) => {
+        const clicked = await act({
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Go", exact: true },
+        });
+        expect(clicked.error ?? null).toBeNull();
+        expect(clicked.state).toBe("completed");
+        expect(await log()).toEqual(["click Go"]);
+      });
+    },
+    90_000,
+  );
+
+  e2e(
     `in a ${kind} frame, a refusal after the hover's move stays an unknown outcome when the frame reacts to the pointer`,
     async () => {
       await withFramedPage(
@@ -339,6 +363,33 @@ for (const kind of FRAMES) {
           expect(clicked.state).toBe("outcome_unknown");
           expect(clicked.error?.code).toBe("outcome_unknown");
         },
+      );
+    },
+    90_000,
+  );
+
+  // Chromium can route a move meant for a frame to the page holding it (a
+  // frame in its own process gets moves only once Chromium knows where it
+  // draws), and then nothing in the frame is under the pointer. A shield
+  // the page lays over the frame until the pointer first moves makes that
+  // happen on every run.
+  e2e(
+    `in a ${kind} frame, a control that takes the pointer only on hover is hovered and clicked when the first move stops at the page holding the frame`,
+    async () => {
+      await withFramedPage(
+        kind,
+        HOVER_ENABLED,
+        async ({ act, log, evaluate }) => {
+          const clicked = await act({
+            type: "click",
+            locator: { kind: "role", role: "button", name: "Go", exact: true },
+          });
+          expect(await evaluate("shieldMoves")).toBe(1);
+          expect(clicked.error ?? null).toBeNull();
+          expect(clicked.state).toBe("completed");
+          expect(await log()).toEqual(["click Go"]);
+        },
+        'globalThis.shieldMoves=0;const frameBox=document.querySelector("iframe").getBoundingClientRect();const shield=document.createElement("div");shield.style.cssText=`position:absolute;left:${frameBox.left}px;top:${frameBox.top}px;width:${frameBox.width}px;height:${frameBox.height}px`;shield.addEventListener("pointermove",()=>{shieldMoves+=1;shield.remove()});document.body.append(shield);',
       );
     },
     90_000,
