@@ -35,7 +35,15 @@ import {
   Text,
   View,
 } from "react-native";
-import { Button, fontStyle, Icon, useNativeTimelineTheme, withAlpha } from "../timeline";
+import {
+  Button,
+  fontStyle,
+  Icon,
+  useNativeTimelineTheme,
+  withAlpha,
+} from "../timeline";
+import * as DocumentPicker from "expo-document-picker";
+import { importAudioFile, showAudioImportError } from "./audio-import";
 import {
   liveCostHint,
   meetingDateLabel,
@@ -43,7 +51,11 @@ import {
   phoneRecorderErrorText,
   phoneUploadLine,
 } from "./phone-text";
-import { isCapturing, useMeetingRecorder, type MeetingRecorder } from "./recorder";
+import {
+  isCapturing,
+  useMeetingRecorder,
+  type MeetingRecorder,
+} from "./recorder";
 
 export type MeetingsListProps = {
   /** The SDK client. The `OpenGeniProvider`'s client otherwise. */
@@ -111,17 +123,27 @@ export function MeetingsList({
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const recorder = useMeetingRecorder();
-  const scope = { ...(client ? { client } : {}), ...(workspaceId ? { workspaceId } : {}) };
-  const list = useRecordings({ ...scope, ...(externalRef ? { externalRef } : {}) });
+  const scope = {
+    ...(client ? { client } : {}),
+    ...(workspaceId ? { workspaceId } : {}),
+  };
+  const list = useRecordings({
+    ...scope,
+    ...(externalRef ? { externalRef } : {}),
+  });
   // The live preview is offered only where the workspace has a live model.
-  const models = useRecordingModels({ ...scope, enabled: liveTranscript && !recordingOff });
+  const models = useRecordingModels({
+    ...scope,
+    enabled: liveTranscript && !recordingOff,
+  });
   const liveModel = models.liveModels.find((entry) => entry.available) ?? null;
   const refreshList = list.refresh;
   const [pulling, setPulling] = useState(false);
   const hostRefresh = useRef(onRefresh);
   hostRefresh.current = onRefresh;
   const refreshAll = useCallback(
-    () => Promise.all([refreshList(), Promise.resolve(hostRefresh.current?.())]),
+    () =>
+      Promise.all([refreshList(), Promise.resolve(hostRefresh.current?.())]),
     [refreshList],
   );
 
@@ -139,9 +161,17 @@ export function MeetingsList({
   useEffect(() => {
     if (finishedCount > 0) void refreshList();
   }, [finishedCount, refreshList]);
+  // An imported recording shows up once the server has it, while its audio uploads.
+  const createdCount = recorder
+    ? Object.values(recorder.uploads).filter((upload) => upload.created).length
+    : 0;
+  useEffect(() => {
+    if (createdCount > 0) void refreshList();
+  }, [createdCount, refreshList]);
   const capturingId = isCapturing(recorder) ? recorder?.recordingId : null;
   // Refresh once the server has the new recording, so it shows in the list.
-  const listedId = capturingId && recorder?.upload?.created ? capturingId : null;
+  const listedId =
+    capturingId && recorder?.upload?.created ? capturingId : null;
   const capturingStarted = useRef<string | null>(null);
   useEffect(() => {
     if (listedId && capturingStarted.current !== listedId) {
@@ -163,7 +193,10 @@ export function MeetingsList({
           }}
         />
       }
-      contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: bottomInset + 32 }}
+      contentContainerStyle={{
+        paddingHorizontal: 16,
+        paddingBottom: bottomInset + 32,
+      }}
     >
       {header}
       {recordingOff ? (
@@ -175,7 +208,8 @@ export function MeetingsList({
           liveTranscript={
             liveTranscript && liveModel
               ? {
-                  defaultOn: liveTranscriptDefault ?? models.liveTranscript ?? false,
+                  defaultOn:
+                    liveTranscriptDefault ?? models.liveTranscript ?? false,
                   usdPerHour: liveModel.usdPerHour,
                 }
               : null
@@ -198,7 +232,14 @@ export function MeetingsList({
       {list.loading && list.recordings.length === 0 ? (
         <ActivityIndicator style={{ marginTop: 24 }} color={c["fg-muted"]} />
       ) : list.error && list.recordings.length === 0 ? (
-        <Text style={{ ...fontStyle(theme), fontSize: 14, color: c.danger, padding: 4 }}>
+        <Text
+          style={{
+            ...fontStyle(theme),
+            fontSize: 14,
+            color: c.danger,
+            padding: 4,
+          }}
+        >
           {msg("native.meetings.meetingsList.meetingsCouldntLoadPullDown")}
         </Text>
       ) : list.recordings.length === 0 ? (
@@ -228,7 +269,9 @@ export function MeetingsList({
           {list.recordings.map((recording, index) => {
             // Recording here until Stop; after it, Transcribing.
             const here =
-              recording.state === "capturing" ? meetingHereStatus(recorder, recording.id) : null;
+              recording.state === "capturing"
+                ? meetingHereStatus(recorder, recording.id)
+                : null;
             return (
               <MeetingRow
                 key={recording.id}
@@ -276,12 +319,16 @@ function MeetingRow(props: {
   const status = props.live
     ? null
     : meetingStatusLabel(
-        props.transcribingHere ? { kind: "transcribing", version: null } : meetingPhase(recording),
+        props.transcribingHere
+          ? { kind: "transcribing", version: null }
+          : meetingPhase(recording),
         msg,
       );
   const facts = [
     meetingDateLabel(msg, recording.startedAt),
-    recording.durationMilliseconds ? formatDuration(recording.durationMilliseconds, msg) : null,
+    recording.durationMilliseconds
+      ? formatDuration(recording.durationMilliseconds, msg)
+      : null,
   ].filter(Boolean);
   const liveLabel = props.paused
     ? msg("meetings.recorderPanel.paused")
@@ -312,7 +359,12 @@ function MeetingRow(props: {
       <View style={{ flex: 1, gap: 3 }}>
         <Text
           numberOfLines={2}
-          style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 20, color: c.fg }}
+          style={{
+            ...fontStyle(theme, 500),
+            fontSize: 15,
+            lineHeight: 20,
+            color: c.fg,
+          }}
         >
           {meetingTitle(recording, msg)}
         </Text>
@@ -322,14 +374,22 @@ function MeetingRow(props: {
           ) : null}
           <Text
             numberOfLines={2}
-            style={{ ...fontStyle(theme), fontSize: 13, color: c["fg-muted"], flexShrink: 1 }}
+            style={{
+              ...fontStyle(theme),
+              fontSize: 13,
+              color: c["fg-muted"],
+              flexShrink: 1,
+            }}
           >
             {facts.join(" · ")}
           </Text>
         </View>
       </View>
       {props.live ? (
-        <StatusText label={liveLabel} color={props.paused ? c["fg-muted"] : c.danger} />
+        <StatusText
+          label={liveLabel}
+          color={props.paused ? c["fg-muted"] : c.danger}
+        />
       ) : status ? (
         <StatusText
           label={status.label}
@@ -342,19 +402,33 @@ function MeetingRow(props: {
   );
 }
 
-function StatusText(props: { label: string; color: string; spinning?: boolean }) {
+function StatusText(props: {
+  label: string;
+  color: string;
+  spinning?: boolean;
+}) {
   const theme = useNativeTimelineTheme();
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
-      {props.spinning ? <ActivityIndicator size="small" color={props.color} /> : null}
-      <Text style={{ ...fontStyle(theme, 500), fontSize: 12, color: props.color }}>
+      {props.spinning ? (
+        <ActivityIndicator size="small" color={props.color} />
+      ) : null}
+      <Text
+        style={{ ...fontStyle(theme, 500), fontSize: 12, color: props.color }}
+      >
         {props.label}
       </Text>
     </View>
   );
 }
 
-function StopButton({ recorder, style }: { recorder: MeetingRecorder; style?: object }) {
+function StopButton({
+  recorder,
+  style,
+}: {
+  recorder: MeetingRecorder;
+  style?: object;
+}) {
   const msg = useOpenGeniText();
   const live = recorder.state === "recording" || recorder.state === "paused";
   const stop = () => {
@@ -362,7 +436,10 @@ function StopButton({ recorder, style }: { recorder: MeetingRecorder; style?: ob
       msg("native.meetings.meetingsList.stopRecording"),
       msg("native.meetings.meetingsList.theMeetingIsUploadedAndTranscribed"),
       [
-        { text: msg("native.meetings.meetingsList.keepRecording"), style: "cancel" },
+        {
+          text: msg("native.meetings.meetingsList.keepRecording"),
+          style: "cancel",
+        },
         {
           text: msg("meetings.recorderPanel.stop"),
           style: "destructive",
@@ -403,10 +480,14 @@ function RecorderCard({
   const live = recorder.state === "recording" || recorder.state === "paused";
   const busy = recorder.state === "starting" || recorder.state === "stopping";
   const line = phoneUploadLine(msg, recorder);
-  const error = recorder.error ? phoneRecorderErrorText(msg, recorder.error) : null;
+  const error = recorder.error
+    ? phoneRecorderErrorText(msg, recorder.error)
+    : null;
   const silent = useSilentMicrophone(recorder, recorder.state === "recording");
   const [liveChoice, setLiveChoice] = useState<boolean | null>(null);
-  const liveOn = liveTranscript ? (liveChoice ?? liveTranscript.defaultOn) : false;
+  const liveOn = liveTranscript
+    ? (liveChoice ?? liveTranscript.defaultOn)
+    : false;
 
   const start = () => {
     // Unnamed: Opengeni names it after the calendar event at the time, or
@@ -438,7 +519,14 @@ function RecorderCard({
       }}
     >
       {!recorder.supported ? (
-        <Text style={{ ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] }}>
+        <Text
+          style={{
+            ...fontStyle(theme),
+            fontSize: 14,
+            lineHeight: 20,
+            color: c["fg-muted"],
+          }}
+        >
           {msg("native.meetings.meetingsList.thisVersionOfTheAppCantRecord")}
         </Text>
       ) : live || busy ? (
@@ -447,9 +535,12 @@ function RecorderCard({
             <RecordingDot paused={recorder.state === "paused"} />
             <Text
               accessibilityRole="timer"
-              accessibilityLabel={msg("native.meetings.meetingsList.recordedDuration", {
-                duration: formatDuration(recorder.elapsedMilliseconds, msg),
-              })}
+              accessibilityLabel={msg(
+                "native.meetings.meetingsList.recordedDuration",
+                {
+                  duration: formatDuration(recorder.elapsedMilliseconds, msg),
+                },
+              )}
               style={{
                 ...fontStyle(theme, 600),
                 fontSize: 34,
@@ -461,11 +552,20 @@ function RecorderCard({
               {formatClock(recorder.elapsedMilliseconds)}
             </Text>
             <View style={{ flex: 1 }} />
-            <Text style={{ ...fontStyle(theme, 500), fontSize: 13, color: c["fg-muted"] }}>
+            <Text
+              style={{
+                ...fontStyle(theme, 500),
+                fontSize: 13,
+                color: c["fg-muted"],
+              }}
+            >
               {stateLabel}
             </Text>
           </View>
-          <LevelMeter recorder={recorder} active={recorder.state === "recording"} />
+          <LevelMeter
+            recorder={recorder}
+            active={recorder.state === "recording"}
+          />
           <LivePreview recorder={recorder} />
           <View style={{ flexDirection: "row", gap: 10 }}>
             {recorder.state === "paused" ? (
@@ -493,7 +593,9 @@ function RecorderCard({
         <>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={msg("native.meetings.meetingsList.startRecordingAMeeting")}
+            accessibilityLabel={msg(
+              "native.meetings.meetingsList.startRecordingAMeeting",
+            )}
             onPress={start}
             style={({ pressed }) => ({
               flexDirection: "row",
@@ -504,7 +606,9 @@ function RecorderCard({
               paddingHorizontal: 16,
               paddingVertical: 12,
               borderRadius: theme.radius.lg,
-              backgroundColor: pressed ? withAlpha(c["danger-fill"], 0.85) : c["danger-fill"],
+              backgroundColor: pressed
+                ? withAlpha(c["danger-fill"], 0.85)
+                : c["danger-fill"],
             })}
           >
             <Icon name="mic" size={20} color={c["danger-fg"]} />
@@ -520,13 +624,35 @@ function RecorderCard({
               {msg("native.meetings.meetingsList.recordAMeeting")}
             </Text>
           </Pressable>
-          <Text style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c["fg-muted"] }}>
-            {msg("native.meetings.meetingsList.recordsWithThisPhoneSMicrophone")}
+          <Text
+            style={{
+              ...fontStyle(theme),
+              fontSize: 13,
+              lineHeight: 18,
+              color: c["fg-muted"],
+            }}
+          >
+            {msg(
+              "native.meetings.meetingsList.recordsWithThisPhoneSMicrophone",
+            )}
           </Text>
           {liveTranscript ? (
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 12, minHeight: 44 }}>
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 12,
+                minHeight: 44,
+              }}
+            >
               <View style={{ flex: 1, gap: 2 }}>
-                <Text style={{ ...fontStyle(theme, 500), fontSize: 15, color: c.fg }}>
+                <Text
+                  style={{
+                    ...fontStyle(theme, 500),
+                    fontSize: 15,
+                    color: c.fg,
+                  }}
+                >
                   {msg("meetings.recorderPanel.liveTranscript")}
                 </Text>
                 <Text
@@ -546,20 +672,32 @@ function RecorderCard({
                 </Text>
               </View>
               <Switch
-                accessibilityLabel={msg("meetings.recorderPanel.liveTranscript")}
+                accessibilityLabel={msg(
+                  "meetings.recorderPanel.liveTranscript",
+                )}
                 value={liveOn}
                 onValueChange={setLiveChoice}
               />
             </View>
           ) : null}
+          <ImportAudio recorder={recorder} externalRef={externalRef} />
         </>
       )}
       {error ? (
         <View style={{ gap: 4 }}>
-          <Text style={{ ...fontStyle(theme, 600), fontSize: 14, color: c.danger }}>
+          <Text
+            style={{ ...fontStyle(theme, 600), fontSize: 14, color: c.danger }}
+          >
             {error.title}
           </Text>
-          <Text style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c["fg-muted"] }}>
+          <Text
+            style={{
+              ...fontStyle(theme),
+              fontSize: 13,
+              lineHeight: 18,
+              color: c["fg-muted"],
+            }}
+          >
             {error.body}
           </Text>
           {recorder.error?.code === "microphone_denied" ? (
@@ -572,22 +710,152 @@ function RecorderCard({
           ) : null}
         </View>
       ) : silent ? (
-        <Text style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c.danger }}>
+        <Text
+          style={{
+            ...fontStyle(theme),
+            fontSize: 13,
+            lineHeight: 18,
+            color: c.danger,
+          }}
+        >
           {msg("native.meetings.meetingsList.noSoundIsReachingTheMicrophone")}
         </Text>
       ) : line && (live || busy || recorder.upload) ? (
-        <Text style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c["fg-muted"] }}>
+        <Text
+          style={{
+            ...fontStyle(theme),
+            fontSize: 13,
+            lineHeight: 18,
+            color: c["fg-muted"],
+          }}
+        >
           {line}
         </Text>
       ) : null}
       {!live && !busy && recorder.recovered.length > 0 && !recorder.upload ? (
-        <Text style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c["fg-muted"] }}>
-          {msg("native.meetings.meetingsList.finishingTheUploadOfMeetingsRecordedEarlier", {
-            count: recorder.recovered.length,
-          })}
+        <Text
+          style={{
+            ...fontStyle(theme),
+            fontSize: 13,
+            lineHeight: 18,
+            color: c["fg-muted"],
+          }}
+        >
+          {msg(
+            "native.meetings.meetingsList.finishingTheUploadOfMeetingsRecordedEarlier",
+            {
+              count: recorder.recovered.length,
+            },
+          )}
         </Text>
       ) : null}
+      <ImportedUploads recorder={recorder} />
     </View>
+  );
+}
+
+/* A quiet second way in: a phone call recorded with the Phone app's own
+   button, a voice memo or any audio file becomes a meeting. Sharing a file
+   to the app does the same without opening this screen. */
+function ImportAudio({
+  recorder,
+  externalRef,
+}: {
+  recorder: MeetingRecorder;
+  externalRef: string | null;
+}) {
+  const msg = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const [importing, setImporting] = useState(false);
+  const pick = async () => {
+    setImporting(true);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "audio/*",
+        copyToCacheDirectory: true,
+        multiple: true,
+      });
+      if (result.canceled) return;
+      for (const asset of result.assets) {
+        try {
+          await importAudioFile(recorder.importAudio, {
+            uri: asset.uri,
+            name: asset.name,
+            mimeType: asset.mimeType ?? null,
+            externalRef,
+            // The picker's copy; the recording keeps its own.
+            deleteAfter: true,
+          });
+        } catch (error) {
+          showAudioImportError(msg, error);
+        }
+      }
+    } finally {
+      setImporting(false);
+    }
+  };
+  return (
+    <View
+      style={{
+        gap: 6,
+        borderTopWidth: 1,
+        borderTopColor: c.border,
+        paddingTop: 12,
+      }}
+    >
+      <Button
+        label={
+          importing
+            ? msg("native.meetings.audioImport.importing")
+            : msg("native.meetings.audioImport.importARecording")
+        }
+        icon="audio-lines"
+        variant="secondary"
+        busy={importing}
+        disabled={importing}
+        onPress={() => void pick()}
+        style={{ alignSelf: "flex-start" }}
+      />
+      <Text
+        style={{
+          ...fontStyle(theme),
+          fontSize: 13,
+          lineHeight: 18,
+          color: c["fg-muted"],
+        }}
+      >
+        {msg("native.meetings.audioImport.importHint")}
+      </Text>
+    </View>
+  );
+}
+
+/** While imported files upload: they show in the list once the server has them. */
+function ImportedUploads({ recorder }: { recorder: MeetingRecorder }) {
+  const msg = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const count = Object.values(recorder.uploads).filter(
+    (upload) =>
+      upload.recordingId !== recorder.recordingId &&
+      !recorder.recovered.includes(upload.recordingId) &&
+      !upload.created &&
+      !upload.finalized &&
+      !upload.discarded &&
+      !upload.failed,
+  ).length;
+  if (count === 0) return null;
+  return (
+    <Text
+      style={{
+        ...fontStyle(theme),
+        fontSize: 13,
+        lineHeight: 18,
+        color: theme.colors["fg-muted"],
+      }}
+    >
+      {msg("native.meetings.audioImport.uploading", { count })}
+    </Text>
   );
 }
 
@@ -601,8 +869,16 @@ function RecordingDot({ paused }: { paused: boolean }) {
     }
     const pulse = Animated.loop(
       Animated.sequence([
-        Animated.timing(opacity, { toValue: 0.35, duration: 700, useNativeDriver: true }),
-        Animated.timing(opacity, { toValue: 1, duration: 700, useNativeDriver: true }),
+        Animated.timing(opacity, {
+          toValue: 0.35,
+          duration: 700,
+          useNativeDriver: true,
+        }),
+        Animated.timing(opacity, {
+          toValue: 1,
+          duration: 700,
+          useNativeDriver: true,
+        }),
       ]),
     );
     pulse.start();
@@ -645,9 +921,19 @@ function LivePreview({ recorder }: { recorder: MeetingRecorder }) {
     .filter(Boolean)
     .join(" ");
   const textStyle = { ...fontStyle(theme), fontSize: 15, lineHeight: 21 };
-  if (turns.length === 0 && live.every((track) => track.state === "unavailable")) {
+  if (
+    turns.length === 0 &&
+    live.every((track) => track.state === "unavailable")
+  ) {
     return (
-      <Text style={{ ...fontStyle(theme), fontSize: 13, lineHeight: 18, color: c["fg-muted"] }}>
+      <Text
+        style={{
+          ...fontStyle(theme),
+          fontSize: 13,
+          lineHeight: 18,
+          color: c["fg-muted"],
+        }}
+      >
         {msg("meetings.recorderPanel.liveTextIsnTAvailable", { value: "" })}
       </Text>
     );
@@ -656,7 +942,14 @@ function LivePreview({ recorder }: { recorder: MeetingRecorder }) {
   return (
     <View style={{ gap: 6 }}>
       <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8 }}>
-        <Text style={{ ...fontStyle(theme, 600), fontSize: 12, color: c["fg-muted"], flex: 1 }}>
+        <Text
+          style={{
+            ...fontStyle(theme, 600),
+            fontSize: 12,
+            color: c["fg-muted"],
+            flex: 1,
+          }}
+        >
           {`${msg("meetings.liveTranscript.liveTranscript")} ${msg("meetings.liveTranscript.preview")}`}
         </Text>
         {status ? (
@@ -679,11 +972,18 @@ function LivePreview({ recorder }: { recorder: MeetingRecorder }) {
           borderColor: c.border,
           backgroundColor: c["surface-2"],
         }}
-        contentContainerStyle={{ paddingHorizontal: 12, paddingVertical: 10, gap: 10 }}
+        contentContainerStyle={{
+          paddingHorizontal: 12,
+          paddingVertical: 10,
+          gap: 10,
+        }}
         scrollEventThrottle={100}
         onScroll={(event) => {
-          const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-          following.current = contentSize.height - contentOffset.y - layoutMeasurement.height < 24;
+          const { contentOffset, contentSize, layoutMeasurement } =
+            event.nativeEvent;
+          following.current =
+            contentSize.height - contentOffset.y - layoutMeasurement.height <
+            24;
         }}
         onContentSizeChange={onContentSizeChange}
       >
@@ -735,7 +1035,10 @@ const SILENT_AFTER_MS = 10_000;
  * resumed. A microphone that has delivered sound is working, so a pause in
  * the conversation, however long, never counts.
  */
-function useSilentMicrophone(recorder: MeetingRecorder, active: boolean): boolean {
+function useSilentMicrophone(
+  recorder: MeetingRecorder,
+  active: boolean,
+): boolean {
   const [silent, setSilent] = useState(false);
   const levels = recorder.levels;
   useEffect(() => {
@@ -757,7 +1060,13 @@ function useSilentMicrophone(recorder: MeetingRecorder, active: boolean): boolea
   return silent;
 }
 
-function LevelMeter({ recorder, active }: { recorder: MeetingRecorder; active: boolean }) {
+function LevelMeter({
+  recorder,
+  active,
+}: {
+  recorder: MeetingRecorder;
+  active: boolean;
+}) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const width = useRef(new Animated.Value(0)).current;
@@ -792,7 +1101,10 @@ function LevelMeter({ recorder, active }: { recorder: MeetingRecorder; active: b
           height: 6,
           borderRadius: 3,
           backgroundColor: c.danger,
-          width: width.interpolate({ inputRange: [0, 1], outputRange: ["0%", "100%"] }),
+          width: width.interpolate({
+            inputRange: [0, 1],
+            outputRange: ["0%", "100%"],
+          }),
         }}
       />
     </View>

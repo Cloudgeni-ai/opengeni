@@ -36089,6 +36089,8 @@
       "createRealtimeWebsocketTransportStarter": "value"
     },
     "@opengeni/sdk/recordings": {
+      "audioFileCreatedAt": "value",
+      "audioFileDurationMilliseconds": "value",
       "BrowserRecorder": "type",
       "BrowserRecorderErrorCode": "type",
       "BrowserRecorderOptions": "type",
@@ -38328,6 +38330,7 @@
       "formatDuration": "value",
       "groupLiveTurns": "value",
       "groupTranscriptTurns": "value",
+      "ImportRecordingAudioInput": "type",
       "languageName": "value",
       "LiveTranscriptLine": "type",
       "LiveTranscriptTurn": "type",

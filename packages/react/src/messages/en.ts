@@ -21,14 +21,16 @@ export const englishMessages = {
     "Couldn't load this action, so it can't be approved yet. You can still decline it.",
   "approvalSurface.decline": "Decline",
   "approvalSurface.declining": "Declining…",
-  "approvalSurface.lengthActionsAreWaitingFor": "{length} actions are waiting for you",
+  "approvalSurface.lengthActionsAreWaitingFor":
+    "{length} actions are waiting for you",
   "approvalSurface.loadingActionDetails": "Loading action details…",
   "approvalSurface.nextAction": "Next action",
   "approvalSurface.ofLength": "of {length}",
   /** Marks a field an MCP server's question does not require. */
   "approvalSurface.optional": "Optional",
   "approvalSurface.previousAction": "Previous action",
-  "approvalSurface.reviewTheActionBeforeIt": "Review the action before it runs.",
+  "approvalSurface.reviewTheActionBeforeIt":
+    "Review the action before it runs.",
   /** Answers an MCP server's question that has fields to fill in. */
   "approvalSurface.sendAnswer": "Send answer",
   "approvalSurface.sendingAnswer": "Sending answer…",
@@ -39,7 +41,8 @@ export const englishMessages = {
   "approvalSurface.youDonTHaveAccess":
     "You don't have access to review this action. Ask someone with access to this chat to decide.",
   "artifacts.artifactChrome.artifact": "Artifact",
-  "artifacts.artifactChrome.artifactViewingIsnTEnabled": "Artifact viewing isn't enabled",
+  "artifacts.artifactChrome.artifactViewingIsnTEnabled":
+    "Artifact viewing isn't enabled",
   "artifacts.artifactChrome.aTemporaryProblemPreventedThis":
     "A temporary problem prevented this Site from loading. Try again.",
   "artifacts.artifactChrome.aTemporaryProblemPreventedThis2":
@@ -50,7 +53,8 @@ export const englishMessages = {
   "artifacts.artifactChrome.checkTheAddressAndOpen2":
     "Check the address and open the artifact from your workspace library.",
   "artifacts.artifactChrome.close": "Close",
-  "artifacts.artifactChrome.couldNotOpenThisArtifact": "Could not open this artifact",
+  "artifacts.artifactChrome.couldNotOpenThisArtifact":
+    "Could not open this artifact",
   "artifacts.artifactChrome.couldnTLoadThisSite": "Couldn’t load this Site.",
   "artifacts.artifactChrome.couldnTLoadThisSite2": "Couldn't load this Site",
   "artifacts.artifactChrome.countvalueWorkspaceToolsAvailableTo":
@@ -79,28 +83,39 @@ export const englishMessages = {
   "artifacts.artifactChrome.siteVersion": "Site version",
   "artifacts.artifactChrome.startingTheSecureEditingSession":
     "Starting the secure editing session…",
-  "artifacts.artifactChrome.thisAppDoesnTServe": "This app doesn't serve editable artifacts yet.",
+  "artifacts.artifactChrome.thisAppDoesnTServe":
+    "This app doesn't serve editable artifacts yet.",
   "artifacts.artifactChrome.thisAppHasnTInstalled":
     "This app hasn't installed the document, spreadsheet, and presentation editors.",
-  "artifacts.artifactChrome.thisArtifactCanTOpen": "This artifact can't open here",
-  "artifacts.artifactChrome.thisArtifactIsnTAvailable": "This artifact isn't available",
-  "artifacts.artifactChrome.thisArtifactLinkIsnT": "This artifact link isn't valid",
+  "artifacts.artifactChrome.thisArtifactCanTOpen":
+    "This artifact can't open here",
+  "artifacts.artifactChrome.thisArtifactIsnTAvailable":
+    "This artifact isn't available",
+  "artifacts.artifactChrome.thisArtifactLinkIsnT":
+    "This artifact link isn't valid",
   "artifacts.artifactChrome.thisSiteIsArchived": "This Site is archived.",
-  "artifacts.artifactChrome.thisSiteIsArchivedOr": "This Site is archived or unpublished.",
+  "artifacts.artifactChrome.thisSiteIsArchivedOr":
+    "This Site is archived or unpublished.",
   "artifacts.artifactChrome.thisSiteIsnTAvailable": "This Site isn't available",
   "artifacts.artifactChrome.thisSiteLinkIsnT": "This Site link isn't valid",
-  "artifacts.artifactChrome.thisSiteReferenceIsInvalid": "This Site reference is invalid.",
+  "artifacts.artifactChrome.thisSiteReferenceIsInvalid":
+    "This Site reference is invalid.",
   "artifacts.artifactChrome.tryAgain": "Try again",
-  "artifacts.artifactChrome.uppercaseSliceSharedEditor": "{upperCase}{slice} · shared editor",
+  "artifacts.artifactChrome.uppercaseSliceSharedEditor":
+    "{upperCase}{slice} · shared editor",
   "artifacts.artifactChrome.versionRevision": "Version {revision}",
   "artifacts.artifactDownload.document": "Document",
   "artifacts.artifactDownload.download": "Download",
-  "artifacts.artifactDownload.downloadDocumentAsDocx": "Download document as DOCX",
-  "artifacts.artifactDownload.downloadFailedTryAgain": "Download failed. Try again.",
-  "artifacts.artifactDownload.downloadPresentationAsPptx": "Download presentation as PPTX",
+  "artifacts.artifactDownload.downloadDocumentAsDocx":
+    "Download document as DOCX",
+  "artifacts.artifactDownload.downloadFailedTryAgain":
+    "Download failed. Try again.",
+  "artifacts.artifactDownload.downloadPresentationAsPptx":
+    "Download presentation as PPTX",
   "artifacts.artifactDownload.preparing": "Preparing…",
   "artifacts.artifactDownload.presentation": "Presentation",
-  "artifacts.artifactDownload.waitForDocumentChangesTo": "Wait for document changes to sync",
+  "artifacts.artifactDownload.waitForDocumentChangesTo":
+    "Wait for document changes to sync",
   "artifacts.artifactDownload.waitForPresentationChangesTo":
     "Wait for presentation changes to sync",
   "artifacts.artifactSurface.document": "Document",
@@ -122,7 +137,8 @@ export const englishMessages = {
   "artifacts.documentEditor.italic": "Italic",
   "artifacts.documentEditor.lengthComments": "{length} comments",
   "artifacts.documentEditor.localestringBlocks": "· {localeString} blocks",
-  "artifacts.documentEditor.numberedListItemListordinal": "Numbered list item {listOrdinal}",
+  "artifacts.documentEditor.numberedListItemListordinal":
+    "Numbered list item {listOrdinal}",
   "artifacts.documentEditor.open": "Open",
   "artifacts.documentEditor.page": "Page",
   "artifacts.documentEditor.paginatedLayout": "Paginated layout",
@@ -130,7 +146,8 @@ export const englishMessages = {
   "artifacts.documentEditor.readOnly": "Read only",
   "artifacts.documentEditor.resolved": "Resolved",
   "artifacts.documentEditor.resolvedComments_one": "{count} resolved comment",
-  "artifacts.documentEditor.resolvedComments_other": "{count} resolved comments",
+  "artifacts.documentEditor.resolvedComments_other":
+    "{count} resolved comments",
   "artifacts.documentEditor.retry": "Retry",
   "artifacts.documentEditor.saving": "Saving…",
   "artifacts.documentEditor.savingDocumentChanges": "Saving document changes",
@@ -141,24 +158,32 @@ export const englishMessages = {
   "artifacts.documentEditor.trackedChanges_one": "{count} tracked change",
   "artifacts.documentEditor.trackedChanges_other": "{count} tracked changes",
   "artifacts.documentEditor.underline": "Underline",
-  "artifacts.documentEditor.unresolvedComments_one": "{count} unresolved comment",
-  "artifacts.documentEditor.unresolvedComments_other": "{count} unresolved comments",
-  "artifacts.editableArtifactUi.artifactSessionClosed": "Artifact session closed",
+  "artifacts.documentEditor.unresolvedComments_one":
+    "{count} unresolved comment",
+  "artifacts.documentEditor.unresolvedComments_other":
+    "{count} unresolved comments",
+  "artifacts.editableArtifactUi.artifactSessionClosed":
+    "Artifact session closed",
   "artifacts.editableArtifactUi.connecting": "Connecting…",
-  "artifacts.editableArtifactUi.couldNotOpenThisArtifact": "Could not open this artifact",
+  "artifacts.editableArtifactUi.couldNotOpenThisArtifact":
+    "Could not open this artifact",
   "artifacts.editableArtifactUi.live": "Live",
   "artifacts.editableArtifactUi.liveReadOnly": "Live · Read only",
   "artifacts.editableArtifactUi.reconnecting": "Reconnecting…",
   "artifacts.editableArtifactUi.retry": "Retry",
   "artifacts.editableArtifactUi.syncing": "Syncing…",
-  "artifacts.editableArtifactUi.thisArtifactVersionIsNot": "This artifact version is not supported",
+  "artifacts.editableArtifactUi.thisArtifactVersionIsNot":
+    "This artifact version is not supported",
   "artifacts.editableArtifactUi.youNoLongerHaveAccess":
     "You no longer have access to this artifact",
   "artifacts.editableArtifactWorkbench.document": "Document",
   "artifacts.editableDocument.accessChanged": "Access changed",
-  "artifacts.editableDocument.couldNotOpenThisDocument": "Could not open this document",
-  "artifacts.editableDocument.couldNotProjectThisDocument": "Could not project this document",
-  "artifacts.editableDocument.documentCommitObserverFailed": "Document commit observer failed",
+  "artifacts.editableDocument.couldNotOpenThisDocument":
+    "Could not open this document",
+  "artifacts.editableDocument.couldNotProjectThisDocument":
+    "Could not project this document",
+  "artifacts.editableDocument.documentCommitObserverFailed":
+    "Document commit observer failed",
   "artifacts.editableDocument.openingDocument": "Opening document",
   "artifacts.editableDocument.theDocumentChangedRetryThis":
     "The document changed; retry this edit on the latest version",
@@ -166,10 +191,13 @@ export const englishMessages = {
     "The document session changed before this edit could be saved",
   "artifacts.editableDocument.theEditedParagraphIsNo":
     "The edited paragraph is no longer available",
-  "artifacts.editableDocument.thisDocumentIsReadOnly": "This document is read only",
+  "artifacts.editableDocument.thisDocumentIsReadOnly":
+    "This document is read only",
   "artifacts.editablePresentation.accessChanged": "Access changed",
-  "artifacts.editablePresentation.anEarlierChangeMustSettle": "An earlier change must settle first",
-  "artifacts.editablePresentation.couldNotOpenThisPresentation": "Could not open this presentation",
+  "artifacts.editablePresentation.anEarlierChangeMustSettle":
+    "An earlier change must settle first",
+  "artifacts.editablePresentation.couldNotOpenThisPresentation":
+    "Could not open this presentation",
   "artifacts.editablePresentation.couldNotProjectThisPresentation":
     "Could not project this presentation",
   "artifacts.editablePresentation.inheritedMasterAndLayoutObjects":
@@ -186,19 +214,23 @@ export const englishMessages = {
     "The presentation object changed; retry this edit",
   "artifacts.editablePresentation.thePresentationTextChangedRetry":
     "The presentation text changed; retry this edit",
-  "artifacts.editablePresentation.thisPresentationIsReadOnly": "This presentation is read only",
+  "artifacts.editablePresentation.thisPresentationIsReadOnly":
+    "This presentation is read only",
   "artifacts.editablePresentation.thisPresentationObjectDoesNot":
     "This presentation object does not contain editable text",
   "artifacts.editableSpreadsheet.accessChanged": "Access changed",
   "artifacts.editableSpreadsheet.adding": "Adding…",
   "artifacts.editableSpreadsheet.addingWorksheet": "Adding worksheet",
   "artifacts.editableSpreadsheet.addWorksheet": "Add worksheet",
-  "artifacts.editableSpreadsheet.aWorksheetAlreadyHasThis": "A worksheet already has this name.",
+  "artifacts.editableSpreadsheet.aWorksheetAlreadyHasThis":
+    "A worksheet already has this name.",
   "artifacts.editableSpreadsheet.cancel": "Cancel",
-  "artifacts.editableSpreadsheet.couldNotOpenThisWorkbook": "Could not open this workbook",
+  "artifacts.editableSpreadsheet.couldNotOpenThisWorkbook":
+    "Could not open this workbook",
   "artifacts.editableSpreadsheet.couldNotRenameWorksheetTry":
     "Could not rename worksheet. Try again.",
-  "artifacts.editableSpreadsheet.doubleClickOrPressF2": "Double-click or press F2 to rename",
+  "artifacts.editableSpreadsheet.doubleClickOrPressF2":
+    "Double-click or press F2 to rename",
   "artifacts.editableSpreadsheet.openingWorkbook": "Opening workbook",
   "artifacts.editableSpreadsheet.readOnly": "Read only",
   "artifacts.editableSpreadsheet.renaming": "Renaming…",
@@ -207,13 +239,16 @@ export const englishMessages = {
   "artifacts.editableSpreadsheet.sheetIndex": "Sheet{index}",
   "artifacts.editableSpreadsheet.someEarlierChangesCouldNot":
     "Some earlier changes could not sync.",
-  "artifacts.editableSpreadsheet.spreadsheetUnavailable": "Spreadsheet unavailable",
+  "artifacts.editableSpreadsheet.spreadsheetUnavailable":
+    "Spreadsheet unavailable",
   "artifacts.editableSpreadsheet.thisSheetGenerationIsNot":
     "This sheet generation is not writable yet",
-  "artifacts.editableSpreadsheet.thisWorkbookHasNoWorksheets": "This workbook has no worksheets.",
+  "artifacts.editableSpreadsheet.thisWorkbookHasNoWorksheets":
+    "This workbook has no worksheets.",
   "artifacts.editableSpreadsheet.use131CharactersWithout":
     "Use 1–31 characters without \\ / ? * [ ] :.",
-  "artifacts.editableSpreadsheet.waitingForEarlierEdits": "Waiting for earlier edits…",
+  "artifacts.editableSpreadsheet.waitingForEarlierEdits":
+    "Waiting for earlier edits…",
   "artifacts.editableSpreadsheet.workbook": "Workbook",
   "artifacts.editableSpreadsheet.worksheetName": "Worksheet name",
   "artifacts.editableSpreadsheet.worksheets": "Worksheets",
@@ -221,7 +256,8 @@ export const englishMessages = {
     "You no longer have access to this artifact",
   "artifacts.presentationEditor.addSlide": "Add slide",
   "artifacts.presentationEditor.addTextBox": "Add text box",
-  "artifacts.presentationEditor.anEarlierChangeNeedsAttention": "An earlier change needs attention",
+  "artifacts.presentationEditor.anEarlierChangeNeedsAttention":
+    "An earlier change needs attention",
   "artifacts.presentationEditor.arialSansSerif": "Arial, sans-serif",
   "artifacts.presentationEditor.changeNotSaved": "Change not saved",
   "artifacts.presentationEditor.chart": "Chart",
@@ -238,16 +274,21 @@ export const englishMessages = {
   "artifacts.presentationEditor.previousSlide": "Previous slide",
   "artifacts.presentationEditor.retry": "Retry",
   "artifacts.presentationEditor.saving": "Saving…",
-  "artifacts.presentationEditor.savingEarlierChanges": "Saving earlier changes…",
-  "artifacts.presentationEditor.savingPresentationChanges": "Saving presentation changes",
-  "artifacts.presentationEditor.selectAnObjectToEdit": "Select an object to edit",
+  "artifacts.presentationEditor.savingEarlierChanges":
+    "Saving earlier changes…",
+  "artifacts.presentationEditor.savingPresentationChanges":
+    "Saving presentation changes",
+  "artifacts.presentationEditor.selectAnObjectToEdit":
+    "Select an object to edit",
   "artifacts.presentationEditor.shape": "Shape",
-  "artifacts.presentationEditor.slideActiveindexEditor": "Slide {activeIndex} editor",
+  "artifacts.presentationEditor.slideActiveindexEditor":
+    "Slide {activeIndex} editor",
   "artifacts.presentationEditor.slideIndex": "Slide {index}",
   "artifacts.presentationEditor.slideIndexValue": "Slide {index}{value}",
   "artifacts.presentationEditor.slides": "Slides",
   "artifacts.presentationEditor.table": "Table",
-  "artifacts.presentationEditor.thisPresentationHasNoSlides": "This presentation has no slides.",
+  "artifacts.presentationEditor.thisPresentationHasNoSlides":
+    "This presentation has no slides.",
   "artifacts.presentationEditor.useBracketKeysToSelect":
     "Use bracket keys to select objects, arrows to move, Alt plus arrows to resize, Enter to edit text, and Page Up or Page Down to change slides.",
   "artifacts.presentationEditor.viewOnly": "View only",
@@ -257,45 +298,57 @@ export const englishMessages = {
   "artifacts.siteView.vRevision": "v{revision}",
   "artifacts.spreadsheetCommandQueue.messageLengthChangesNotSaved":
     "{message} ({length} changes not saved)",
-  "artifacts.spreadsheetCommandQueue.spreadsheetChangeFailed": "Spreadsheet change failed",
+  "artifacts.spreadsheetCommandQueue.spreadsheetChangeFailed":
+    "Spreadsheet change failed",
   "artifacts.spreadsheetDownload.download": "Download",
-  "artifacts.spreadsheetDownload.downloadFailedTryAgain": "Download failed. Try again.",
-  "artifacts.spreadsheetDownload.downloadWorkbookAsXlsx": "Download workbook as XLSX",
+  "artifacts.spreadsheetDownload.downloadFailedTryAgain":
+    "Download failed. Try again.",
+  "artifacts.spreadsheetDownload.downloadWorkbookAsXlsx":
+    "Download workbook as XLSX",
   "artifacts.spreadsheetDownload.preparing": "Preparing…",
-  "artifacts.spreadsheetDownload.waitForWorkbookChangesTo": "Wait for workbook changes to sync",
+  "artifacts.spreadsheetDownload.waitForWorkbookChangesTo":
+    "Wait for workbook changes to sync",
   "artifacts.spreadsheetDownload.workbook": "Workbook",
   "artifacts.spreadsheetGrid.addWorksheet": "Add worksheet",
   "artifacts.spreadsheetGrid.clipboardDataContainsAnUnterminated":
     "Clipboard data contains an unterminated quoted cell",
-  "artifacts.spreadsheetGrid.clipboardDataIsTooLarge": "Clipboard data is too large to paste",
+  "artifacts.spreadsheetGrid.clipboardDataIsTooLarge":
+    "Clipboard data is too large to paste",
   "artifacts.spreadsheetGrid.clipboardRangeDoesNotFit":
     "Clipboard range does not fit in this worksheet",
-  "artifacts.spreadsheetGrid.clipboardRangeIsTooLarge": "Clipboard range is too large to paste",
+  "artifacts.spreadsheetGrid.clipboardRangeIsTooLarge":
+    "Clipboard range is too large to paste",
   "artifacts.spreadsheetGrid.editAddress": "Edit {address}",
   "artifacts.spreadsheetGrid.emptyWorkbook": "Empty workbook",
   "artifacts.spreadsheetGrid.formulaOrValue": "Formula or value",
   "artifacts.spreadsheetGrid.fx": "fx",
   "artifacts.spreadsheetGrid.notSaved": "Not saved",
-  "artifacts.spreadsheetGrid.resizeColumnColumnname": "Resize column {columnName}",
+  "artifacts.spreadsheetGrid.resizeColumnColumnname":
+    "Resize column {columnName}",
   "artifacts.spreadsheetGrid.resizeRowRow": "Resize row {row}",
   "artifacts.spreadsheetGrid.retry": "Retry",
   "artifacts.spreadsheetGrid.saving": "Saving…",
-  "artifacts.spreadsheetGrid.savingSpreadsheetChanges": "Saving spreadsheet changes",
+  "artifacts.spreadsheetGrid.savingSpreadsheetChanges":
+    "Saving spreadsheet changes",
   "artifacts.spreadsheetGrid.selectedCellsAreStillLoading":
     "Selected cells are still loading; copy again when ready",
   "artifacts.spreadsheetGrid.selectedRange": "Selected range",
-  "artifacts.spreadsheetGrid.selectedRangeIsTooLarge": "Selected range is too large to copy",
+  "artifacts.spreadsheetGrid.selectedRangeIsTooLarge":
+    "Selected range is too large to copy",
   "artifacts.spreadsheetGrid.sheetIndex": "Sheet{index}",
   "artifacts.spreadsheetGrid.sheetnameSpreadsheet": "{sheetName} spreadsheet",
-  "artifacts.spreadsheetGrid.spreadsheetActionFailed": "Spreadsheet action failed",
+  "artifacts.spreadsheetGrid.spreadsheetActionFailed":
+    "Spreadsheet action failed",
   "artifacts.spreadsheetGrid.spreadsheetSyncStatus": "Spreadsheet sync status",
   "artifacts.spreadsheetGrid.thisSpreadsheetAdapterDoesNot":
     "This spreadsheet adapter does not support rectangular paste",
-  "artifacts.spreadsheetGrid.thisWorkbookHasNoWorksheets": "This workbook has no worksheets.",
+  "artifacts.spreadsheetGrid.thisWorkbookHasNoWorksheets":
+    "This workbook has no worksheets.",
   "artifacts.spreadsheetGrid.workbook": "Workbook",
   "artifacts.spreadsheetGrid.worksheets": "Worksheets",
   "artifacts.spreadsheetResize.sizePixels": "{size} pixels",
-  "artifacts.spreadsheetResize.spreadsheetResizeFailed": "Spreadsheet resize failed",
+  "artifacts.spreadsheetResize.spreadsheetResizeFailed":
+    "Spreadsheet resize failed",
   "automations.actor.bot": "A bot",
   "automations.actor.botNamed": "{name} (bot)",
   "automations.actor.self": "{product}",
@@ -316,7 +369,8 @@ export const englishMessages = {
   "automations.conditions.fieldFor": "Field for condition {index}",
   "automations.conditions.heading": "Only when",
   "automations.conditions.onlyWhen": "only when {field} {operator} {value}",
-  "automations.conditions.onlyWhenCount_other": "only when {count} conditions hold",
+  "automations.conditions.onlyWhenCount_other":
+    "only when {count} conditions hold",
   "automations.conditions.onlyWhenSet": "only when {field} {operator}",
   "automations.conditions.optional": "Optional",
   "automations.conditions.remove": "Remove condition {index}",
@@ -345,9 +399,11 @@ export const englishMessages = {
     "Off by default, so what automations do, such as their chats finishing, doesn't start another run. Chains of automations stop after three.",
   "automations.editor.loadEventsFailed": "The events couldn't load.",
   "automations.editor.loadingSources": "Loading sources…",
-  "automations.editor.mcpOneEventHint": "Each MCP server trigger listens to one event.",
+  "automations.editor.mcpOneEventHint":
+    "Each MCP server trigger listens to one event.",
   "automations.editor.noSources": "No event sources yet.",
-  "automations.editor.noSourcesAskAdmin": "No event sources yet. Ask a workspace admin to add one.",
+  "automations.editor.noSourcesAskAdmin":
+    "No event sources yet. Ask a workspace admin to add one.",
   "automations.editor.once": "Run once, then finish",
   "automations.editor.onceDescription":
     "The first matching event runs it, then it stops listening. Good for “tell me when this happens”.",
@@ -360,7 +416,8 @@ export const englishMessages = {
     "Sent to the MCP server when {product} subscribes, as a JSON object.",
   "automations.editor.templateWants":
     "Listens for {events} from {source}, which you haven't added yet.",
-  "automations.editor.triggersMax": "An automation can listen for up to {max} events.",
+  "automations.editor.triggersMax":
+    "An automation can listen for up to {max} events.",
   "automations.eventType.every": "Every event",
   "automations.eventType.everyPrefix": "Every {prefix} event",
   "automations.eventTypes.either": "{first} or {second}",
@@ -376,7 +433,8 @@ export const englishMessages = {
   "automations.form.creating": "Creating…",
   "automations.form.editTitle": "Edit automation",
   "automations.form.instructions": "Instructions",
-  "automations.form.instructionsHintChat": "Posted in this chat on each run, as if you sent it.",
+  "automations.form.instructionsHintChat":
+    "Posted in this chat on each run, as if you sent it.",
   "automations.form.instructionsHintNewChat":
     "Each run starts a new chat with these instructions, with the workspace's default tools and your access.",
   "automations.form.instructionsPlaceholder":
@@ -398,7 +456,8 @@ export const englishMessages = {
   "automations.issue.eventTypeTooLong": "That event type is too long.",
   "automations.issue.eventTypesEmpty": "Pick at least one event.",
   "automations.issue.eventTypesTooMany": "Pick at most {max} events.",
-  "automations.issue.instructions": "Describe what the agent should do on each run.",
+  "automations.issue.instructions":
+    "Describe what the agent should do on each run.",
   "automations.issue.maxRunsPerHour": "Enter a whole number from 1 to {max}.",
   "automations.issue.mcpOneEvent":
     "An MCP server trigger listens to one event. Add another trigger for more.",
@@ -406,16 +465,19 @@ export const englishMessages = {
   "automations.issue.onceRepeats":
     "A run-once automation can't also repeat on a schedule. Remove the schedule or make it one time.",
   "automations.issue.source": "Choose where the events come from.",
-  "automations.issue.sourceGone": "This source is gone or you can no longer use it.",
+  "automations.issue.sourceGone":
+    "This source is gone or you can no longer use it.",
   "automations.name.untitled": "Untitled automation",
   "automations.panel.actionFailed": "That didn't work. {reason}",
   "automations.panel.back": "All automations",
   "automations.panel.delete": "Delete",
-  "automations.panel.deleteBody": "It stops running. Chats from earlier runs stay.",
+  "automations.panel.deleteBody":
+    "It stops running. Chats from earlier runs stay.",
   "automations.panel.deleteConfirm": "Delete automation",
   "automations.panel.deleteTitle": "Delete “{name}”?",
   "automations.panel.deleting": "Deleting…",
-  "automations.panel.description": "Run the agent on a schedule, or when something happens.",
+  "automations.panel.description":
+    "Run the agent on a schedule, or when something happens.",
   "automations.panel.descriptionChat":
     "Pick this chat up again on a schedule, or when something happens.",
   "automations.panel.edit": "Edit",
@@ -423,7 +485,8 @@ export const englishMessages = {
   "automations.panel.emptyChat": "Nothing picks this chat up again yet.",
   "automations.panel.finished": "Finished",
   "automations.panel.fromScratch": "Start from scratch",
-  "automations.panel.fromScratchDescription": "Write what it does and choose when it runs.",
+  "automations.panel.fromScratchDescription":
+    "Write what it does and choose when it runs.",
   "automations.panel.instructions": "Instructions",
   "automations.panel.list": "Automations",
   "automations.panel.loadFailed": "Couldn't load automations",
@@ -442,11 +505,13 @@ export const englishMessages = {
   "automations.panel.runsFailed": "Couldn't load the runs.",
   "automations.panel.saveAsTemplate": "Save as template",
   "automations.panel.savedTemplates": "Saved in this workspace",
-  "automations.panel.templateDeleteBody": "Automations made from it keep running.",
+  "automations.panel.templateDeleteBody":
+    "Automations made from it keep running.",
   "automations.panel.templateDeleteConfirm": "Delete template",
   "automations.panel.templateDeleteTitle": "Delete the “{name}” template?",
   "automations.panel.templateMenu": "More actions for the {name} template",
-  "automations.panel.templateSaved": "Saved “{name}” as a template for this workspace.",
+  "automations.panel.templateSaved":
+    "Saved “{name}” as a template for this workspace.",
   "automations.panel.templates": "Templates",
   "automations.panel.title": "Automations",
   "automations.panel.toggle": "{name} is on",
@@ -489,7 +554,8 @@ export const englishMessages = {
   "automations.picker.addEvent": "Add an event",
   "automations.picker.cantReceive": "{product} can't receive this one.",
   "automations.picker.choose": "Choose an event",
-  "automations.picker.empty": "No matching events. Type the exact event type to use it.",
+  "automations.picker.empty":
+    "No matching events. Type the exact event type to use it.",
   "automations.picker.everyEventDescription": "Anything this source sends.",
   "automations.picker.groupChats": "Chats",
   "automations.picker.groupMeetings": "Meetings",
@@ -498,14 +564,17 @@ export const englishMessages = {
     "The list of events couldn't load ({reason}). You can still type an event type.",
   "automations.picker.loading": "Loading events…",
   "automations.picker.picked": "Picked events",
-  "automations.picker.prefixDescription": "Every event whose type starts with {prefix}",
+  "automations.picker.prefixDescription":
+    "Every event whose type starts with {prefix}",
   "automations.picker.removeType": "Remove {type}",
   "automations.picker.search": "Search or type an event type",
-  "automations.picker.unlisted": "An event type this source sends that isn't listed yet.",
+  "automations.picker.unlisted":
+    "An event type this source sends that isn't listed yet.",
   "automations.picker.use": "Use “{type}”",
   "automations.rows.became_one": "It became {count} event.",
   "automations.rows.became_other": "It became {count} events.",
-  "automations.rows.bodyGone": "What was sent is no longer kept, so it can't be replayed.",
+  "automations.rows.bodyGone":
+    "What was sent is no longer kept, so it can't be replayed.",
   "automations.rows.bodyKept":
     "{product} keeps what was sent for {days} days, so it can be replayed until then.",
   "automations.rows.dataTruncated":
@@ -531,12 +600,14 @@ export const englishMessages = {
     "The automation was paused or deleted before the run started.",
   "automations.run.error.chainLimit":
     "Skipped so automations don't wake each other in a loop: its events came from a chain of automations that reached the limit.",
-  "automations.run.error.chatBusy": "Skipped because the chat was still busy with earlier work.",
+  "automations.run.error.chatBusy":
+    "Skipped because the chat was still busy with earlier work.",
   "automations.run.error.chatWaitingForAccount":
     "Skipped because the chat is waiting for a model account. Pick another model in the chat.",
   "automations.run.error.chatChanged":
     "The chat's tools or settings changed after the automation was set up.",
-  "automations.run.error.chatEnded": "Its chat has ended, so the run couldn't start there.",
+  "automations.run.error.chatEnded":
+    "Its chat has ended, so the run couldn't start there.",
   "automations.run.error.chatGone": "The chat it runs in no longer exists.",
   "automations.run.error.chatPaused":
     "Skipped because the chat was paused. Resume the chat to let later runs start; skipped runs aren't replayed.",
@@ -544,14 +615,17 @@ export const englishMessages = {
     "The machine it runs on isn't available. Reconnect it or choose another machine.",
   "automations.run.error.modelUnavailable":
     "Its model is no longer available. Edit the automation and choose another model.",
-  "automations.run.error.monthlyCostLimit": "The monthly model cost limit was reached.",
+  "automations.run.error.monthlyCostLimit":
+    "The monthly model cost limit was reached.",
   "automations.run.error.monthlyRunLimit": "The monthly run limit was reached.",
   "automations.run.error.outOfCredits": "The workspace is out of credits.",
   "automations.run.error.rigUnavailable": "Its rig has no usable version.",
   "automations.run.error.turnFailed":
     "The agent ran into an error. Open the chat to see what happened.",
-  "automations.run.error.turnInterrupted": "A newer message in the chat interrupted the run.",
-  "automations.run.error.turnStopped": "The run was stopped before it finished.",
+  "automations.run.error.turnInterrupted":
+    "A newer message in the chat interrupted the run.",
+  "automations.run.error.turnStopped":
+    "The run was stopped before it finished.",
   "automations.run.error.turnWithdrawn":
     "The run was taken out of the chat's queue before it started.",
   "automations.run.error.unknown": "Something went wrong with this run.",
@@ -606,7 +680,8 @@ export const englishMessages = {
   "automations.source.workspace.name": "This workspace",
   "automations.statusReason.accountChanged":
     "The connection for {source} now signs in as {account}. Reconnect the original account.",
-  "automations.statusReason.appNotEnabled": "{source} isn't turned on for the connected account.",
+  "automations.statusReason.appNotEnabled":
+    "{source} isn't turned on for the connected account.",
   "automations.statusReason.awaitingSecret":
     "Paste the signing secret the sending app shows for this webhook. Until then its deliveries are refused.",
   "automations.statusReason.callbackUnreachable":
@@ -615,25 +690,31 @@ export const englishMessages = {
     "Its app is no longer added to this workspace. Add it again and connect your account.",
   "automations.statusReason.deliveryModeUnsupported":
     "{source} won't deliver these events in a way {product} can receive.",
-  "automations.statusReason.eventsUnsupported": "{source} doesn't offer events.",
-  "automations.statusReason.eventTypeGone": "{source} no longer offers these events.",
+  "automations.statusReason.eventsUnsupported":
+    "{source} doesn't offer events.",
+  "automations.statusReason.eventTypeGone":
+    "{source} no longer offers these events.",
   "automations.statusReason.forbidden":
     "{source} doesn't let your account receive these events with these settings.",
   "automations.statusReason.githubEventNotSubscribed":
     "The GitHub App isn't subscribed to \"{event}\" events. Turn them on in the App's Permissions & events settings.",
   "automations.statusReason.hostSignIn":
     "{source} signs in through the app {product} runs in, which automations can't use for events.",
-  "automations.statusReason.invalidArguments": "{source} rejected this trigger's settings.",
+  "automations.statusReason.invalidArguments":
+    "{source} rejected this trigger's settings.",
   "automations.statusReason.missingPermission":
     "{source} no longer allows reading what these events need. Reconnect it and allow access.",
   "automations.statusReason.needsPublicAddress":
     "{source} sends these events only to a public https address, which {product} doesn't have here.",
-  "automations.statusReason.notAnswering": "{source} hasn't answered for over an hour.",
+  "automations.statusReason.notAnswering":
+    "{source} hasn't answered for over an hour.",
   "automations.statusReason.pushOnly":
     "{source} sends these events only over a held-open connection, which {product} doesn't support yet.",
-  "automations.statusReason.reconnect": "Reconnect {source} to keep its events coming.",
+  "automations.statusReason.reconnect":
+    "Reconnect {source} to keep its events coming.",
   "automations.statusReason.turnedOff": "Turned off.",
-  "automations.statusReason.unavailable": "{source} can't receive events right now.",
+  "automations.statusReason.unavailable":
+    "{source} can't receive events right now.",
   "automations.statusReason.withDetail": "{reason} It said: {detail}",
   "automations.summary.from": "From",
   "automations.template.automationFailed.description":
@@ -641,8 +722,10 @@ export const englishMessages = {
   "automations.template.automationFailed.instructions":
     "A chat one of my automations ran failed; the event's data.sessionId names it and data.error says how. Read the end of that chat with session_events and work out what went wrong. Then notify me with notify_user: say in two plain sentences what failed and what would fix it. Don't retry the work yourself.",
   "automations.template.automationFailed.name": "When an automation fails",
-  "automations.template.automationFailed.when": "When a chat one of your automations ran fails",
-  "automations.template.costCheck.description": "Flag unusual cloud spend from the last day.",
+  "automations.template.automationFailed.when":
+    "When a chat one of your automations ran fails",
+  "automations.template.costCheck.description":
+    "Flag unusual cloud spend from the last day.",
   "automations.template.costCheck.instructions":
     "Summarize yesterday's cloud spend by service and flag anything that is more than 20% above the weekly average.",
   "automations.template.costCheck.name": "Daily cost check",
@@ -662,7 +745,8 @@ export const englishMessages = {
   "automations.template.meetingNotes.instructions":
     "Write notes for the meeting from the event; its data.recordingId names the meeting. Read the whole meeting with meeting_read, following nextCursor until it is null; it lists each speaker's label (and personId for a person from the workspace), the notes taken during it and the written-up notes with their revision. Write the notes in Markdown, in this order: a one-paragraph overview; a ## heading for each topic discussed, with nested bullets; ## Decisions; and ## Action items as a checklist, each with its owner and a due date when one was said. Write all of it in the meeting's language, the headings too. Use the names and terms people used, and leave out small talk. Link a person from the workspace as [Name](person:<personId>) and any other speaker as [Name](speaker:<label>), using the labels and ids meeting_read gave. Unless the meeting already has notes (a revision above 0), save them with meeting_notes_save and expectedRevision 0. Reply with the notes.",
   "automations.template.meetingNotes.name": "Meeting notes",
-  "automations.template.meetingNotes.when": "When a meeting's transcript is ready",
+  "automations.template.meetingNotes.when":
+    "When a meeting's transcript is ready",
   "automations.template.morningBrief.description":
     "What changed in your repositories and any open incidents.",
   "automations.template.morningBrief.instructions":
@@ -675,7 +759,8 @@ export const englishMessages = {
   "automations.template.prReview.name": "Review new pull requests",
   "automations.template.prReview.when": "When a pull request opens",
   "automations.templateDialog.description": "Description",
-  "automations.templateDialog.descriptionHint": "One sentence on what it does. Optional.",
+  "automations.templateDialog.descriptionHint":
+    "One sentence on what it does. Optional.",
   "automations.templateDialog.name": "Name",
   "automations.templateDialog.nameRequired": "Give the template a name.",
   "automations.templateDialog.renameSubmit": "Save",
@@ -695,13 +780,16 @@ export const englishMessages = {
   "automations.wait.chip.nextRun": "Next: {time}",
   "automations.wait.details.heading": "This chat's automations",
   "automations.wait.details.more_one": "{count} more automation is waiting too",
-  "automations.wait.details.more_other": "{count} more automations are waiting too",
+  "automations.wait.details.more_other":
+    "{count} more automations are waiting too",
   "automations.wait.details.open": "Click to see or change them",
   "automations.wait.event": "Waiting for an event",
   "automations.wait.eventFrom": "Waiting for {event}",
   "automations.wait.eventOrNextRun": "Waiting for {event}. Next run: {time}",
-  "automations.wait.more_one": "{wait}. {count} more automation is waiting too.",
-  "automations.wait.more_other": "{wait}. {count} more automations are waiting too.",
+  "automations.wait.more_one":
+    "{wait}. {count} more automation is waiting too.",
+  "automations.wait.more_other":
+    "{wait}. {count} more automations are waiting too.",
   "automations.wait.nextRun": "Next run: {time}",
   "automations.wait.none": "Nothing upcoming",
   "automations.wait.openPanel": "{wait}. Open this chat's automations.",
@@ -712,9 +800,11 @@ export const englishMessages = {
   "automations.when.onceOnEvent": "Runs once, on the first matching event.",
   "automations.when.scheduleAndEvents": "{schedule} · {events}",
   "automations.when.sentence": "{words}.",
-  "automations.when.sentenceWithEvents": "{words}, and when a matching event arrives.",
+  "automations.when.sentenceWithEvents":
+    "{words}, and when a matching event arrives.",
   "automations.whenField.addSchedule": "Add a schedule",
-  "automations.whenField.both": "It runs on the schedule and whenever a matching event arrives.",
+  "automations.whenField.both":
+    "It runs on the schedule and whenever a matching event arrives.",
   "automations.whenField.manual": "Runs only when someone presses Run now.",
   "automations.whenField.manualUntilAdded":
     "Runs only when someone presses Run now, until you add a schedule or an event.",
@@ -733,14 +823,16 @@ export const englishMessages = {
   "browserSelectControl.pageOptions": "Page options",
   "browserSelectControl.pageSelectionOptions": "Page selection options",
   "browserSelectControl.selectionDidNotComplete": "Selection did not complete.",
-  "browserSelectControl.selectionFailedReadTheOptions": "Selection failed. Read the options again.",
+  "browserSelectControl.selectionFailedReadTheOptions":
+    "Selection failed. Read the options again.",
   "browserSelectControl.thisControlIsDisabled": "This control is disabled.",
   "browserViewer.aBrowserAppearsHereWhen":
     "A browser appears here when this agent—or another agent in the workspace—opens one.",
   "browserViewer.acting": "Acting",
   "browserViewer.actionNeeded": "Action needed",
   "browserViewer.address": "Address",
-  "browserViewer.agentNotifiedContinuingWork": "Agent notified. Continuing work.",
+  "browserViewer.agentNotifiedContinuingWork":
+    "Agent notified. Continuing work.",
   "browserViewer.agentSandbox": "Agent sandbox",
   "browserViewer.availablePageControls": "Available page controls",
   "browserViewer.back": "Back",
@@ -759,7 +851,8 @@ export const englishMessages = {
   "browserViewer.browserOpenedDesktopViewIs":
     "Browser opened. Desktop view is unavailable on this placement.",
   "browserViewer.browserStateFailurecode": "Browser state: {failureCode}",
-  "browserViewer.browserTextCouldNotBe": "Browser text could not be copied to the local clipboard",
+  "browserViewer.browserTextCouldNotBe":
+    "Browser text could not be copied to the local clipboard",
   "browserViewer.browserUnavailable": "Browser unavailable",
   "browserViewer.cancelled": "Cancelled",
   "browserViewer.changingTheDefaultAffectsOnly":
@@ -768,7 +861,8 @@ export const englishMessages = {
   "browserViewer.chromeConnectionReady": "Chrome connection ready",
   "browserViewer.chromeKeepsThisProfileS":
     "Chrome keeps this profile's state directly; {product} does not copy it automatically.",
-  "browserViewer.chromeReconnectedOpenAFresh": "Chrome reconnected—open a fresh browser/desktop.",
+  "browserViewer.chromeReconnectedOpenAFresh":
+    "Chrome reconnected—open a fresh browser/desktop.",
   "browserViewer.closeBrowserDiagnostics": "Close browser diagnostics",
   "browserViewer.closeTitle": "Close {title}",
   "browserViewer.cloudBrowser": "Cloud browser",
@@ -786,14 +880,18 @@ export const englishMessages = {
   "browserViewer.couldNotNavigate": "Could not navigate.",
   "browserViewer.couldNotOpenABrowser": "Could not open a browser.",
   "browserViewer.couldNotOpenATab": "Could not open a tab.",
-  "browserViewer.couldNotOpenTheRequested": "Could not open the requested browser tab.",
+  "browserViewer.couldNotOpenTheRequested":
+    "Could not open the requested browser tab.",
   "browserViewer.couldNotReload": "Could not reload.",
   "browserViewer.couldNotReopenThisBrowser": "Could not reopen this browser.",
-  "browserViewer.couldNotSaveThisBrowser": "Could not save this browser profile.",
+  "browserViewer.couldNotSaveThisBrowser":
+    "Could not save this browser profile.",
   "browserViewer.couldNotSaveThisDownload": "Could not save this download.",
   "browserViewer.couldNotSwitchTabs": "Could not switch tabs.",
-  "browserViewer.couldNotUpdateTheBrowser": "Could not update the browser request.",
-  "browserViewer.couldNotUpdateThisBrowser": "Could not update this browser profile.",
+  "browserViewer.couldNotUpdateTheBrowser":
+    "Could not update the browser request.",
+  "browserViewer.couldNotUpdateThisBrowser":
+    "Could not update this browser profile.",
   "browserViewer.current": "Current",
   "browserViewer.currentAgent": "Current agent",
   "browserViewer.currentTab": "Current tab",
@@ -806,12 +904,14 @@ export const englishMessages = {
   "browserViewer.download": "Download",
   "browserViewer.downloadFailed": "Download failed",
   "browserViewer.downloadingReceived": "Downloading · {received}",
-  "browserViewer.downloadingReceivedOfBytes": "Downloading · {received} of {bytes}",
+  "browserViewer.downloadingReceivedOfBytes":
+    "Downloading · {received} of {bytes}",
   "browserViewer.downloads": "Downloads",
   "browserViewer.driver": "Driver",
   "browserViewer.engine": "Engine",
   "browserViewer.failedRequests": "Failed requests",
-  "browserViewer.filenameSavedToDestinationpath": "{filename} saved to {destinationPath}.",
+  "browserViewer.filenameSavedToDestinationpath":
+    "{filename} saved to {destinationPath}.",
   "browserViewer.findingBrowsers": "Finding browsers…",
   "browserViewer.followAgent": "Follow agent",
   "browserViewer.forward": "Forward",
@@ -820,10 +920,12 @@ export const englishMessages = {
     "Hidden from new browsers. This already-open browser is unchanged.",
   "browserViewer.hiddenProfilesLength": "Hidden profiles · {length}",
   "browserViewer.hideFromNewBrowsers": "Hide from new browsers",
-  "browserViewer.includesEarlierPagesInThis": "Includes earlier pages in this tab.",
+  "browserViewer.includesEarlierPagesInThis":
+    "Includes earlier pages in this tab.",
   "browserViewer.inputFailed": "Input failed",
   "browserViewer.inputResultUnknown": "Input result unknown",
-  "browserViewer.inspectThePageBeforeContinuing": "Inspect the page before continuing.",
+  "browserViewer.inspectThePageBeforeContinuing":
+    "Inspect the page before continuing.",
   "browserViewer.installTheOpengeniBrowserExtension":
     "Install the {extensionName} extension in the profile you want to use.",
   "browserViewer.interactiveBrowserPage": "Interactive browser page",
@@ -842,14 +944,18 @@ export const englishMessages = {
   "browserViewer.makeDefault": "Make default",
   "browserViewer.nameHiddenFromNewBrowsers":
     "{name} hidden from new browsers. Existing browsers are unchanged.",
-  "browserViewer.nameOpensByDefault": "{name} will open by default in future browsers.",
-  "browserViewer.nameReasonOpenANew": "{name}. {reason} Open a new browser to continue.",
+  "browserViewer.nameOpensByDefault":
+    "{name} will open by default in future browsers.",
+  "browserViewer.nameReasonOpenANew":
+    "{name}. {reason} Open a new browser to continue.",
   "browserViewer.nameVersionOpensByDefault":
     "{name} version {ordinal} will open by default in future browsers.",
-  "browserViewer.nameVersionOrdinalIsThe": "{name} version {ordinal} is the default",
+  "browserViewer.nameVersionOrdinalIsThe":
+    "{name} version {ordinal} is the default",
   "browserViewer.nameVersionOrdinalSavedAnother":
     "{name} version {ordinal} saved. Another version remains the default.",
-  "browserViewer.nameVersionOrdinalSavedFor": "{name} version {ordinal} saved for future browsers.",
+  "browserViewer.nameVersionOrdinalSavedFor":
+    "{name} version {ordinal} saved for future browsers.",
   "browserViewer.network": "Network",
   "browserViewer.newBrowser": "New browser",
   "browserViewer.newest100": "Newest 100",
@@ -872,7 +978,8 @@ export const englishMessages = {
   "browserViewer.openNameVersionOrdinal": "Open {name} version {ordinal}",
   "browserViewer.openTabs_one": "{browserName} · {count} open tab",
   "browserViewer.openTabs_other": "{browserName} · {count} open tabs",
-  "browserViewer.openThisBrowserWindowIn": "Open this browser window in Desktop",
+  "browserViewer.openThisBrowserWindowIn":
+    "Open this browser window in Desktop",
   "browserViewer.pageControlsRemainAvailable": "Page controls remain available",
   "browserViewer.pageError": "Page error",
   "browserViewer.pageErrors": "Page errors",
@@ -893,7 +1000,8 @@ export const englishMessages = {
   "browserViewer.refreshBrowsers": "Refresh browsers",
   "browserViewer.reload": "Reload",
   "browserViewer.replace": "Replace",
-  "browserViewer.replaceAnExistingWorkspaceFile": "Replace an existing workspace file",
+  "browserViewer.replaceAnExistingWorkspaceFile":
+    "Replace an existing workspace file",
   "browserViewer.request": "Request",
   "browserViewer.requestCancelled": "Request cancelled.",
   "browserViewer.restoreName": "Restore {name}",
@@ -915,7 +1023,8 @@ export const englishMessages = {
   "browserViewer.searchOrEnterAddress": "Search or enter address",
   "browserViewer.semantic": "Semantic",
   "browserViewer.semanticBrowser": "Semantic browser",
-  "browserViewer.semanticPageStructureAvailable": "Semantic page structure available",
+  "browserViewer.semanticPageStructureAvailable":
+    "Semantic page structure available",
   "browserViewer.signInNeeded": "Sign in needed",
   "browserViewer.signInNeedsAttention": "Sign-in needs attention",
   "browserViewer.startedFromVersionBaserevisionordinal":
@@ -925,14 +1034,18 @@ export const englishMessages = {
   "browserViewer.temporary": "Temporary",
   "browserViewer.temporaryBrowser": "Temporary browser",
   "browserViewer.theBrowserPageChanged": "The browser page changed.",
-  "browserViewer.theBrowserWillReconnectHere": "The browser will reconnect here when it is ready.",
-  "browserViewer.theComputerRunningItReached": "The computer running it reached its time limit.",
+  "browserViewer.theBrowserWillReconnectHere":
+    "The browser will reconnect here when it is ready.",
+  "browserViewer.theComputerRunningItReached":
+    "The computer running it reached its time limit.",
   "browserViewer.theConnectionToItWas": "The connection to it was lost.",
-  "browserViewer.thisBrowserCannotSaveReusable": "This browser cannot save reusable profile state.",
+  "browserViewer.thisBrowserCannotSaveReusable":
+    "This browser cannot save reusable profile state.",
   "browserViewer.thisBrowserIsNotReusable": "This browser is not reusable yet.",
   "browserViewer.thisBrowserProfileIsNo":
     "This browser profile is no longer available. Refresh and choose another.",
-  "browserViewer.thisChatMovedToAnother": "This chat moved to another computer.",
+  "browserViewer.thisChatMovedToAnother":
+    "This chat moved to another computer.",
   "browserViewer.thisChromeProfileIsLive":
     "This Chrome profile is live again, but the previous browser cannot move to the new connection. Use Browser → New browser → Connected Chrome.",
   "browserViewer.thisMachineOnly": "This machine only",
@@ -942,7 +1055,8 @@ export const englishMessages = {
   "browserViewer.tryAgain": "Try again",
   "browserViewer.unavailable": "Unavailable",
   "browserViewer.useByDefault": "Use by default",
-  "browserViewer.useNameVersionOrdinalBy": "Use {name} version {ordinal} by default",
+  "browserViewer.useNameVersionOrdinalBy":
+    "Use {name} version {ordinal} by default",
   "browserViewer.verificationFailed": "Verification failed",
   "browserViewer.verificationNeeded": "Verification needed",
   "browserViewer.verified": "Verified",
@@ -1127,19 +1241,23 @@ export const englishMessages = {
     "Clear the conversation context (destructive; audit-preserved).",
   "commands.registry.clearTheLocalTimelineView":
     "Clear the local timeline view (this device only; no server change).",
-  "commands.registry.compactTheConversationContextNow": "Compact the conversation context now.",
+  "commands.registry.compactTheConversationContextNow":
+    "Compact the conversation context now.",
   "commands.registry.contextCleared": "Context cleared.",
   "commands.registry.goalIsAlreadyInA": "Goal is already in a terminal state.",
   "commands.registry.goalPaused": "Goal paused.",
   "commands.registry.goalResumed": "Goal resumed.",
   "commands.registry.localViewCleared": "Local view cleared.",
-  "commands.registry.noActiveSessionYetStart": "No active session yet — start a session first.",
+  "commands.registry.noActiveSessionYetStart":
+    "No active session yet — start a session first.",
   "commands.registry.onlyAPausedGoalCan": "Only a paused goal can be resumed.",
-  "commands.registry.pauseOrResumeTheSession": "Pause or resume the session's goal loop.",
+  "commands.registry.pauseOrResumeTheSession":
+    "Pause or resume the session's goal loop.",
   "commands.registry.pauseTheSessionAndWait":
     "Pause the session and wait for the current inference to settle, then clear context.",
   "commands.registry.showAvailableCommands": "Show available commands.",
-  "commands.registry.thisSessionHasNoGoal": "This session has no goal to control.",
+  "commands.registry.thisSessionHasNoGoal":
+    "This session has no goal to control.",
   "commands.registry.thisViewCanTBe":
     "This view can't be cleared here (no local timeline to reset).",
   "composer.appShotSummary": "{app} · App-shot",
@@ -1152,7 +1270,8 @@ export const englishMessages = {
   "composerMessages.heldSendGaveUp":
     "This is taking longer than usual, so it wasn't sent. Try again in a moment.",
   "composerMessages.addMessageToQueue": "Add message to queue",
-  "composerMessages.addToQueueEnterSteer": "Add to queue (Enter); steer now with Cmd/Ctrl+Enter",
+  "composerMessages.addToQueueEnterSteer":
+    "Add to queue (Enter); steer now with Cmd/Ctrl+Enter",
   "composerMessages.alsoPausedBy": "Also paused by",
   "composerMessages.aNarrowerPause": "a narrower pause",
   "composerMessages.attachFiles": "Attach files",
@@ -1166,10 +1285,12 @@ export const englishMessages = {
   "composerMessages.fileSlice": "File {slice}",
   "composerMessages.hidePauseDetails": "Hide pause details",
   "composerMessages.keepMine": "Keep mine",
-  "composerMessages.messagesWaitInTheQueue": "Messages wait in the queue until you resume.",
+  "composerMessages.messagesWaitInTheQueue":
+    "Messages wait in the queue until you resume.",
   "composerMessages.messageTheAgent": "Message the agent…",
   "composerMessages.messageTheAgent2": "Message the agent",
-  "composerMessages.messageTheAgentItWill": "Message the agent — it will wait in the queue…",
+  "composerMessages.messageTheAgentItWill":
+    "Message the agent — it will wait in the queue…",
   "composerMessages.model": "Model",
   "composerMessages.pausedBy": "Paused by",
   "composerMessages.pausedByDisplayname": "Paused by {displayName}",
@@ -1180,15 +1301,20 @@ export const englishMessages = {
   "composerMessages.previewName": "Preview {name}",
   "composerMessages.previewUnavailable": "Preview unavailable",
   "composerMessages.queue": "Queue",
-  "composerMessages.queuedAhead_one": "{count} waiting prompt; your message joins the queue.",
-  "composerMessages.queuedAhead_other": "{count} waiting prompts; your message joins the queue.",
+  "composerMessages.queuedAhead_one":
+    "{count} waiting prompt; your message joins the queue.",
+  "composerMessages.queuedAhead_other":
+    "{count} waiting prompts; your message joins the queue.",
   "composerMessages.queuedPromptAlreadySent": "Already sent",
-  "composerMessages.queueMessageEnterSteerWith": "Queue message (Enter); steer with Cmd/Ctrl+Enter",
+  "composerMessages.queueMessageEnterSteerWith":
+    "Queue message (Enter); steer with Cmd/Ctrl+Enter",
   "composerMessages.queueRunsAfterCurrentWork":
     "Queue: runs after the agent finishes its current work",
-  "composerMessages.reasonsThisWorkstreamIsPaused": "Reasons this workstream is paused",
+  "composerMessages.reasonsThisWorkstreamIsPaused":
+    "Reasons this workstream is paused",
   "composerMessages.removeName": "Remove {name}",
-  "composerMessages.removeRestoredResourceIndex": "Remove restored resource {index}",
+  "composerMessages.removeRestoredResourceIndex":
+    "Remove restored resource {index}",
   "composerMessages.restoredPromptResources": "Restored prompt resources",
   "composerMessages.resume": "Resume",
   "composerMessages.resumeFromThisSession": "Resume from this session",
@@ -1205,15 +1331,19 @@ export const englishMessages = {
   "composerMessages.sendMessage": "Send message",
   "composerMessages.sendMessageEnter": "Send message (Enter)",
   "composerMessages.showPauseDetails": "Show pause details",
-  "composerMessages.singleSendBusyTitle": "Send (Enter): the agent reads it as soon as it can",
+  "composerMessages.singleSendBusyTitle":
+    "Send (Enter): the agent reads it as soon as it can",
   "composerMessages.singleSendPausedPlaceholder":
     "Message the agent — it reads it when it resumes…",
-  "composerMessages.singleSendPausedTitle": "Send (Enter): the agent reads it when it resumes",
+  "composerMessages.singleSendPausedTitle":
+    "Send (Enter): the agent reads it when it resumes",
   "composerMessages.singleSendPauseTitle":
     "Pause this workstream; your messages and approvals are kept",
-  "composerMessages.singleSendReadOnResume": "The agent reads new messages when it resumes.",
+  "composerMessages.singleSendReadOnResume":
+    "The agent reads new messages when it resumes.",
   "composerMessages.singleSendTitle": "Send message (Enter)",
-  "composerMessages.singleSendWaitingAhead_one": "{count} message is waiting; yours follows it.",
+  "composerMessages.singleSendWaitingAhead_one":
+    "{count} message is waiting; yours follows it.",
   "composerMessages.singleSendWaitingAhead_other":
     "{count} messages are waiting; yours follows them.",
   "composerMessages.slashCommands": "Slash commands",
@@ -1237,9 +1367,11 @@ export const englishMessages = {
   "composerMessages.useOtherDraft": "Use other draft",
   "composerMessages.workspacePaused": "Workspace paused",
   "composerTranscriptionControl.discardDictation": "Discard dictation",
-  "composerTranscriptionControl.discardSavedRecording": "Discard saved recording",
+  "composerTranscriptionControl.discardSavedRecording":
+    "Discard saved recording",
   "composerTranscriptionControl.dismissErrormessage": "Dismiss: {errorMessage}",
-  "composerTranscriptionControl.insertSavedTranscript": "Insert saved transcript",
+  "composerTranscriptionControl.insertSavedTranscript":
+    "Insert saved transcript",
   "composerTranscriptionControl.microphoneAccessIsBlockedAllow":
     "Microphone access is blocked. Allow it in site settings, then try again.",
   "composerTranscriptionControl.pauseAutomaticRetry": "Pause automatic retry",
@@ -1250,7 +1382,8 @@ export const englishMessages = {
   "composerTranscriptionControl.recordingSavedOnThisDevice": "Recording saved.",
   "composerTranscriptionControl.requestingMicrophone": "Requesting microphone…",
   "composerTranscriptionControl.retryVoiceInput": "Retry voice input",
-  "composerTranscriptionControl.savedRetryingTranscription": "Saved. Retrying transcription…",
+  "composerTranscriptionControl.savedRetryingTranscription":
+    "Saved. Retrying transcription…",
   "composerTranscriptionControl.savedTranscriptionFailedRetryWhen":
     "Saved. Transcription failed, retry when ready.",
   "composerTranscriptionControl.savingAudioLocally": "Saving audio…",
@@ -1260,7 +1393,8 @@ export const englishMessages = {
     "Stops and transcribes in {seconds}s",
   "composerTranscriptionControl.theRecordingCouldNotBe":
     "The recording could not be read. Try again.",
-  "composerTranscriptionControl.transcribeSavedRecording": "Transcribe saved recording",
+  "composerTranscriptionControl.transcribeSavedRecording":
+    "Transcribe saved recording",
   "composerTranscriptionControl.transcribing": "Transcribing…",
   "composerTranscriptionControl.transcriptSavedCheckYourDraft":
     "Transcript saved. Check your draft before inserting again.",
@@ -1268,8 +1402,10 @@ export const englishMessages = {
     "Transcript saved. Insert it into your draft?",
   "composerTranscriptionControl.usageLimitReachedRecordingSaved":
     "Usage limit reached. Recording saved for later.",
-  "composerTranscriptionControl.voiceInputCouldNotStart": "Voice input could not start. Try again.",
-  "composerTranscriptionControl.voiceInputIsNotConfigured": "Voice input is not configured.",
+  "composerTranscriptionControl.voiceInputCouldNotStart":
+    "Voice input could not start. Try again.",
+  "composerTranscriptionControl.voiceInputIsNotConfigured":
+    "Voice input is not configured.",
   "composerTranscriptionControl.voiceInputIsNotSupported":
     "Voice input is not supported on this device.",
   "composerTranscriptionControl.voiceInputIsnTAllowed":
@@ -1286,16 +1422,20 @@ export const englishMessages = {
   "computerViewer.actionNeeded": "Action needed",
   "computerViewer.advanced": "Advanced",
   "computerViewer.advancedDesktopViews": "Advanced desktop views",
-  "computerViewer.agentNotifiedContinuingWork": "Agent notified. Continuing work.",
+  "computerViewer.agentNotifiedContinuingWork":
+    "Agent notified. Continuing work.",
   "computerViewer.agentSandbox": "Agent sandbox",
   "computerViewer.appControls": "App controls",
   "computerViewer.appControlsRemainAvailable": "App controls remain available",
-  "computerViewer.appControlsWorkInThe": "App · controls work in the background",
+  "computerViewer.appControlsWorkInThe":
+    "App · controls work in the background",
   "computerViewer.appsAndWindows": "Apps and windows",
-  "computerViewer.backgroundViewUseAppControls": "Background view · use app controls",
+  "computerViewer.backgroundViewUseAppControls":
+    "Background view · use app controls",
   "computerViewer.bringToFront": "Bring to front",
   "computerViewer.checkAgain": "Check again",
-  "computerViewer.chromeReconnectedOpenAFresh": "Chrome reconnected—open a fresh browser/desktop.",
+  "computerViewer.chromeReconnectedOpenAFresh":
+    "Chrome reconnected—open a fresh browser/desktop.",
   "computerViewer.chromeReconnectedOpenAFresh2":
     "Chrome reconnected—open a fresh browser/desktop. Use Browser → New browser → Connected Chrome.",
   "computerViewer.closingDesktop": "Closing desktop…",
@@ -1307,10 +1447,13 @@ export const englishMessages = {
   "computerViewer.controlsUnavailable": "Controls unavailable",
   "computerViewer.couldNotCopyFromThe": "Could not copy from the desktop.",
   "computerViewer.couldNotOpenADesktop": "Could not open a desktop.",
-  "computerViewer.couldNotOpenTheRequested": "Could not open the requested desktop view.",
+  "computerViewer.couldNotOpenTheRequested":
+    "Could not open the requested desktop view.",
   "computerViewer.couldNotPasteIntoThe": "Could not paste into the desktop.",
-  "computerViewer.couldNotSwitchDesktopViews": "Could not switch desktop views.",
-  "computerViewer.couldNotUpdateTheDesktop": "Could not update the desktop request.",
+  "computerViewer.couldNotSwitchDesktopViews":
+    "Could not switch desktop views.",
+  "computerViewer.couldNotUpdateTheDesktop":
+    "Could not update the desktop request.",
   "computerViewer.currentAgent": "Current agent",
   "computerViewer.desktop": "Desktop",
   "computerViewer.desktopActionFailed": "Desktop action failed.",
@@ -1325,19 +1468,23 @@ export const englishMessages = {
   "computerViewer.desktopNeedsAttention": "Desktop needs attention",
   "computerViewer.desktopNeedsYourHelp": "Desktop needs your help",
   "computerViewer.desktopPaused": "Desktop paused",
-  "computerViewer.desktopTextCouldNotBe": "Desktop text could not be copied to the local clipboard",
-  "computerViewer.desktopViewIsNotReady": "Desktop view is not ready for pointer input.",
+  "computerViewer.desktopTextCouldNotBe":
+    "Desktop text could not be copied to the local clipboard",
+  "computerViewer.desktopViewIsNotReady":
+    "Desktop view is not ready for pointer input.",
   "computerViewer.disconnected": "Disconnected",
   "computerViewer.findingWorkspaceDesktops": "Finding workspace desktops…",
   "computerViewer.focused": "Focused",
   "computerViewer.followAgent": "Follow agent",
   "computerViewer.fullDesktop": "Full desktop",
-  "computerViewer.fullScreenInputMayMove": "Full screen · input may move pointer and focus",
+  "computerViewer.fullScreenInputMayMove":
+    "Full screen · input may move pointer and focus",
   "computerViewer.interactiveAppView": "Interactive app view",
   "computerViewer.interactiveDesktopView": "Interactive desktop view",
   "computerViewer.interactiveScreenView": "Interactive screen view",
   "computerViewer.interactiveWindowView": "Interactive window view",
-  "computerViewer.keyboardOnlyMouseUnavailable": "Keyboard only · mouse unavailable",
+  "computerViewer.keyboardOnlyMouseUnavailable":
+    "Keyboard only · mouse unavailable",
   "computerViewer.linux": "Linux",
   "computerViewer.live": "Live",
   "computerViewer.liveFramesAndInputStay":
@@ -1345,7 +1492,8 @@ export const englishMessages = {
   "computerViewer.liveViewDisconnected": "Live view disconnected",
   "computerViewer.mac": "Mac",
   "computerViewer.machineLocked": "Machine locked",
-  "computerViewer.mouseOnlyKeyboardUnavailable": "Mouse only · keyboard unavailable",
+  "computerViewer.mouseOnlyKeyboardUnavailable":
+    "Mouse only · keyboard unavailable",
   "computerViewer.newDesktop": "New desktop",
   "computerViewer.openANewDesktop": "Open a new desktop",
   "computerViewer.openingDesktop": "Opening desktop…",
@@ -1363,8 +1511,10 @@ export const englishMessages = {
   "computerViewer.reconnectToUseAppControls": "Reconnect to use app controls.",
   "computerViewer.reconnectToUseDesktopInput": "Reconnect to use desktop input",
   "computerViewer.refreshDesktops": "Refresh desktops",
-  "computerViewer.refreshToCheckDesktopControls": "Refresh to check desktop controls.",
-  "computerViewer.refreshToCheckDesktopControls2": "Refresh to check desktop controls",
+  "computerViewer.refreshToCheckDesktopControls":
+    "Refresh to check desktop controls.",
+  "computerViewer.refreshToCheckDesktopControls2":
+    "Refresh to check desktop controls",
   "computerViewer.requestCancelled": "Request cancelled.",
   "computerViewer.restoringDesktop": "Restoring desktop…",
   "computerViewer.screen": "Screen",
@@ -1376,7 +1526,8 @@ export const englishMessages = {
     "The desktop connection expired. Open a new desktop.",
   "computerViewer.theDesktopConnectionWasLost":
     "The desktop connection was lost. Try opening it again.",
-  "computerViewer.theDesktopCouldNotBe": "The desktop could not be opened. Try again.",
+  "computerViewer.theDesktopCouldNotBe":
+    "The desktop could not be opened. Try again.",
   "computerViewer.theDesktopIsBeingPrepared":
     "The desktop is being prepared on its placement. It will appear here when ready.",
   "computerViewer.theDesktopStoppedAfterIt":
@@ -1386,16 +1537,22 @@ export const englishMessages = {
   "computerViewer.thisViewHasNoAccessibility":
     "This view has no accessibility controls. Use the live image instead.",
   "computerViewer.tryAgain": "Try again",
-  "computerViewer.unlockTheConnectedMacThen": "Unlock the connected Mac, then try again.",
+  "computerViewer.unlockTheConnectedMacThen":
+    "Unlock the connected Mac, then try again.",
   "computerViewer.unnamedControl": "Unnamed control",
   "computerViewer.verificationNeeded": "Verification needed",
   "computerViewer.viewOnly": "View only",
-  "computerViewer.viewOnlyDirectInputUnavailable": "View only · direct input unavailable",
-  "computerViewer.viewOnlyMouseAndKeyboard": "View only · mouse and keyboard unavailable",
-  "computerViewer.viewOnlyRefreshToCheck": "View only · refresh to check desktop controls.",
+  "computerViewer.viewOnlyDirectInputUnavailable":
+    "View only · direct input unavailable",
+  "computerViewer.viewOnlyMouseAndKeyboard":
+    "View only · mouse and keyboard unavailable",
+  "computerViewer.viewOnlyRefreshToCheck":
+    "View only · refresh to check desktop controls.",
   "computerViewer.waitingForDesktop": "Waiting for desktop…",
-  "computerViewer.windowAppControlsWorkIn": "Window · app controls work in the background",
-  "computerViewer.windowClicksAndTypingStay": "Window · clicks and typing stay in the background",
+  "computerViewer.windowAppControlsWorkIn":
+    "Window · app controls work in the background",
+  "computerViewer.windowClicksAndTypingStay":
+    "Window · clicks and typing stay in the background",
   "computerViewer.windows": "Windows",
   "computerViewer.windowView": "Window view",
   "computerViewer.yourMachine": "Your machine",
@@ -1446,7 +1603,8 @@ export const englishMessages = {
   "connectChooser.unavailable": "Unavailable",
   "connectChooser.whoCanUseThisConnection": "Who can use this connection?",
   "connectionCatalog.connectedOfLengthAdded": "{connected} of {length} added",
-  "connectionCatalog.noConnectionsMatchYourSearch": "No connections match your search.",
+  "connectionCatalog.noConnectionsMatchYourSearch":
+    "No connections match your search.",
   "connectionCatalog.viewAllConnections": "View all connections",
   "connectionDiscovery.addAConnection": "Add a connection",
   "connectionDiscovery.backToConnections": "Back to connections",
@@ -1455,12 +1613,14 @@ export const englishMessages = {
   "connectionDiscovery.connectLabel": "Connect {label}",
   "connectionDiscovery.findAConnection": "Find a connection",
   "connectionDiscovery.loadingServices": "Loading services",
-  "connectionDiscovery.noServicesMatchYourSearch": "No services match your search.",
+  "connectionDiscovery.noServicesMatchYourSearch":
+    "No services match your search.",
   "connectionDiscovery.retry": "Retry",
   "connectionDiscovery.searchServices": "Search services",
   "connectionDiscovery.searchServices2": "Search services…",
   "connectionDiscovery.showMoreServices": "Show more services",
-  "connectionDiscovery.someServicesCouldNotBe": "Some services could not be loaded.",
+  "connectionDiscovery.someServicesCouldNotBe":
+    "Some services could not be loaded.",
   "connectionInstalled.connected": "Connected",
   "connectionInstalled.needsAttention": "Needs attention",
   "connectionTypePicker.connectionType": "Connection type",
@@ -1475,7 +1635,8 @@ export const englishMessages = {
   "connectSetup.finishingSetup": "Finishing setup…",
   "connectSetup.addSelectedTools": "Add selected tools",
   "connectSetup.adminApprovalLink": "Admin approval link",
-  "connectSetup.afterTheyApproveConnectAgain": "After they approve, connect again.",
+  "connectSetup.afterTheyApproveConnectAgain":
+    "After they approve, connect again.",
   "connectSetup.anOrganizationOwnerApprovesThe":
     "An organization owner approves the request on GitHub.",
   "connectSetup.anOwnerThenConnectsThe":
@@ -1489,7 +1650,8 @@ export const englishMessages = {
   "connectSetup.chooseAnAccount": "Choose an account",
   "connectSetup.chooseAnOption": "Choose an option",
   "connectSetup.chooseResources": "Choose resources",
-  "connectSetup.chooseTheToolsAgentsCan": "Choose the tools agents can use with this account.",
+  "connectSetup.chooseTheToolsAgentsCan":
+    "Choose the tools agents can use with this account.",
   "connectSetup.chooseTools": "Choose tools",
   "connectSetup.chooseWhichToolsToAdd": "Choose which tools to add",
   "connectSetup.completeProviderAuthorizationThenCheck":
@@ -1522,28 +1684,34 @@ export const englishMessages = {
   "connectSetup.opensInNewTab": "(opens in a new tab)",
   "connectSetup.personalConnection": "Personal connection",
   "connectSetup.readyToConnect": "Ready to connect",
-  "connectSetup.sendTheApprovalLinkTo": "Send the admin approval link to your Microsoft 365 admin.",
+  "connectSetup.sendTheApprovalLinkTo":
+    "Send the admin approval link to your Microsoft 365 admin.",
   "connectSetup.setupCancelled": "Setup cancelled",
   "connectSetup.setupCouldNotFinish": "Setup could not finish",
-  "connectSetup.setupCouldNotContinueTryAgain": "Setup couldn't continue. You can try again.",
+  "connectSetup.setupCouldNotContinueTryAgain":
+    "Setup couldn't continue. You can try again.",
   "connectSetup.setupExpired": "Setup expired",
   "connectSetup.setupOutcomeNeedsChecking": "Setup outcome needs checking",
-  "connectSetup.signInWindowClosed": "Sign-in window closed. You can try connecting again.",
+  "connectSetup.signInWindowClosed":
+    "Sign-in window closed. You can try connecting again.",
   "connectSetup.theIntegrationSourceChangedReview":
     "The integration source changed. Review the updated tools before adding them.",
   "connectSetup.trySigningInAgain": "Try signing in again",
   "connectSetup.verificationCode": "Verification code:",
   "connectSetup.verifyingConnection": "Verifying connection…",
-  "connectSetup.waitingForAnOrganizationOwner": "Waiting for an organization owner",
+  "connectSetup.waitingForAnOrganizationOwner":
+    "Waiting for an organization owner",
   "connectSetup.waitingForAuthorization": "Waiting for you to sign in…",
   "connectSetup.waitingForAuthorization2": "Waiting for you to sign in",
-  "connectSetup.workInThisWorkspaceCan": "Work in this workspace can use this connection.",
+  "connectSetup.workInThisWorkspaceCan":
+    "Work in this workspace can use this connection.",
   "connectSetup.workspaceConnection": "Workspace connection",
   "connectSetup.yourRequestWasSentGithub":
     "Your request was sent. GitHub asked the owners of your organization to approve {product}.",
   "connectWindowHost.allowPopups":
     "Your browser blocked the sign-in window. Allow pop-ups for this page, then try again.",
-  "conversationRenderBoundary.chatUnavailable": "This chat couldn't be displayed.",
+  "conversationRenderBoundary.chatUnavailable":
+    "This chat couldn't be displayed.",
   "conversationRenderBoundary.tryAgain": "Try again",
   "copyButton.copied": "Copied",
   "copyButton.copy": "Copy",
@@ -1579,16 +1747,22 @@ export const englishMessages = {
   "counts.tools_other": "{count} tools",
   "desktopDictation.host.cantRecord": "This computer can't record audio.",
   "desktopDictation.host.couldNotStart": "Dictation couldn't start. Try again.",
-  "desktopDictation.host.microphoneBlocked": "{product} isn't allowed to use the microphone.",
-  "desktopDictation.host.needsCredits": "Voice input needs credits. Your speech is saved.",
-  "desktopDictation.host.notAllowed": "Voice input isn't allowed in this workspace.",
+  "desktopDictation.host.microphoneBlocked":
+    "{product} isn't allowed to use the microphone.",
+  "desktopDictation.host.needsCredits":
+    "Voice input needs credits. Your speech is saved.",
+  "desktopDictation.host.notAllowed":
+    "Voice input isn't allowed in this workspace.",
   "desktopDictation.host.notSaved": "The audio couldn't be saved. Try again.",
   "desktopDictation.host.stopped": "Dictation stopped. Try again.",
   "desktopDictation.host.tooLong": "Too long to transcribe. Try a shorter one.",
-  "desktopDictation.host.transcriptionFailed": "Transcription failed. Your speech is saved.",
+  "desktopDictation.host.transcriptionFailed":
+    "Transcription failed. Your speech is saved.",
   "desktopDictation.host.unreadable": "The audio couldn't be read. Try again.",
-  "desktopDictation.host.usageLimit": "Usage limit reached. Your speech is saved.",
-  "desktopDictation.host.voiceInputOff": "Voice input is off for this workspace.",
+  "desktopDictation.host.usageLimit":
+    "Usage limit reached. Your speech is saved.",
+  "desktopDictation.host.voiceInputOff":
+    "Voice input is off for this workspace.",
   "desktopDictation.settings.accessibilityDescription":
     "Lets {product} type the text into other apps. Without it, the text is only copied.",
   "desktopDictation.settings.accessibilityLabel": "Accessibility",
@@ -1606,7 +1780,8 @@ export const englishMessages = {
     "Throws away the dictation you're speaking; its speech stays in Recent dictations. Esc does this too.",
   "desktopDictation.settings.cancelShortcutLabel": "Cancel shortcut",
   "desktopDictation.settings.cancelledDictation": "Cancelled, not transcribed",
-  "desktopDictation.settings.chordHold": "Hold the keys while you speak, and let go to finish.",
+  "desktopDictation.settings.chordHold":
+    "Hold the keys while you speak, and let go to finish.",
   "desktopDictation.settings.chordToggle":
     "Press the keys together and let go to start. Press them again to finish.",
   "desktopDictation.settings.clearHistory": "Clear",
@@ -1618,25 +1793,34 @@ export const englishMessages = {
     "Kept on this computer only, with what you said, to play or transcribe again.",
   "desktopDictation.settings.historyTitle": "Recent dictations",
   "desktopDictation.settings.keyCombination": "Key combination…",
-  "desktopDictation.settings.keyCombinationDescription": "Press the keys you want to use.",
-  "desktopDictation.settings.languageDescription": "The language you speak with this shortcut.",
+  "desktopDictation.settings.keyCombinationDescription":
+    "Press the keys you want to use.",
+  "desktopDictation.settings.languageDescription":
+    "The language you speak with this shortcut.",
   "desktopDictation.settings.languageLabel": "Language",
   "desktopDictation.settings.modeHold": "Hold while speaking",
-  "desktopDictation.settings.modeHoldDescription": "Dictates while you hold the keys down.",
+  "desktopDictation.settings.modeHoldDescription":
+    "Dictates while you hold the keys down.",
   "desktopDictation.settings.modeLabel": "How the keys work",
   "desktopDictation.settings.modeToggle": "Press to start and finish",
-  "desktopDictation.settings.modeToggleDescription": "Press once to start and again to finish.",
+  "desktopDictation.settings.modeToggleDescription":
+    "Press once to start and again to finish.",
   "desktopDictation.settings.noShortcut": "None",
   "desktopDictation.settings.otherKeyCombination": "Other key combination…",
   "desktopDictation.settings.outputCopy": "Copy it only",
-  "desktopDictation.settings.outputCopyDescription": "Paste it yourself where you want it.",
-  "desktopDictation.settings.outputDescription": "Where the text goes when you finish.",
+  "desktopDictation.settings.outputCopyDescription":
+    "Paste it yourself where you want it.",
+  "desktopDictation.settings.outputDescription":
+    "Where the text goes when you finish.",
   "desktopDictation.settings.outputLabel": "Text",
   "desktopDictation.settings.outputPaste": "Type it where the cursor is",
   "desktopDictation.settings.outputPasteAndCopy": "Type it and keep it copied",
-  "desktopDictation.settings.outputPasteAndCopyDescription": "It stays on the clipboard too.",
-  "desktopDictation.settings.outputPasteDescription": "Your clipboard is put back afterwards.",
-  "desktopDictation.settings.pairHold": "Hold both keys while you speak, and let go to finish.",
+  "desktopDictation.settings.outputPasteAndCopyDescription":
+    "It stays on the clipboard too.",
+  "desktopDictation.settings.outputPasteDescription":
+    "Your clipboard is put back afterwards.",
+  "desktopDictation.settings.pairHold":
+    "Hold both keys while you speak, and let go to finish.",
   "desktopDictation.settings.pairToggle":
     "Press both keys together, left and right, to start. Press them again to finish.",
   "desktopDictation.settings.pasteAccessibility":
@@ -1648,12 +1832,14 @@ export const englishMessages = {
   "desktopDictation.settings.pasteXdotool":
     "Install xdotool so {product} can type into other apps. Until then, the text is copied.",
   "desktopDictation.settings.play": "Play",
-  "desktopDictation.settings.recordKeys": "Press the key combination now. Esc cancels.",
+  "desktopDictation.settings.recordKeys":
+    "Press the key combination now. Esc cancels.",
   "desktopDictation.settings.remove": "Remove shortcut",
   "desktopDictation.settings.retryShortcutDescription":
     "Transcribes your last dictation again and types it, such as after a failure.",
   "desktopDictation.settings.retryShortcutLabel": "Retry shortcut",
-  "desktopDictation.settings.saveFailed": "Couldn't save the change. Try again.",
+  "desktopDictation.settings.saveFailed":
+    "Couldn't save the change. Try again.",
   "desktopDictation.settings.shortcutFailed":
     "The shortcut couldn't be set up. Turn dictation off and on again.",
   "desktopDictation.settings.shortcutLabel": "Shortcut",
@@ -1666,46 +1852,63 @@ export const englishMessages = {
   "desktopDictation.settings.stopPlaying": "Stop",
   "desktopDictation.settings.title": "Dictation",
   "desktopDictation.settings.toggleLabel": "Dictate from anywhere",
-  "desktopDictation.settings.toggleOff": "Off. Turn on to dictate into any app with a shortcut.",
-  "desktopDictation.settings.toggleOn": "{shortcut} starts and finishes dictation in any app.",
-  "desktopDictation.settings.toggleOnHold": "Hold {shortcut} while you speak, in any app.",
-  "desktopDictation.settings.toggleOnMany": "Each shortcut dictates in its language, in any app.",
+  "desktopDictation.settings.toggleOff":
+    "Off. Turn on to dictate into any app with a shortcut.",
+  "desktopDictation.settings.toggleOn":
+    "{shortcut} starts and finishes dictation in any app.",
+  "desktopDictation.settings.toggleOnHold":
+    "Hold {shortcut} while you speak, in any app.",
+  "desktopDictation.settings.toggleOnMany":
+    "Each shortcut dictates in its language, in any app.",
   "desktopDictation.settings.transcribeAgain": "Transcribe again",
-  "desktopDictation.settings.usedByAnother": "Another shortcut uses these keys.",
+  "desktopDictation.settings.usedByAnother":
+    "Another shortcut uses these keys.",
   "desktopDictation.settings.vocabularyDescription":
     "Names and words to listen for, such as people, products and terms you use. One per line.",
   "desktopDictation.settings.vocabularyLabel": "Vocabulary",
   "desktopDictation.settings.vocabularyPlaceholder": "Ada Lovelace\nKubernetes",
   "desktopDictation.settings.vocabularyTermTooLong":
     "“{term}” is too long. Keep each to {max} characters.",
-  "desktopDictation.settings.vocabularyTooMany": "Keep the list to {max} names and words.",
-  "desktopViewer.clickReturnControlOrCtrl": "· click Return control (or Ctrl+Alt+Shift)",
+  "desktopDictation.settings.vocabularyTooMany":
+    "Keep the list to {max} names and words.",
+  "desktopViewer.clickReturnControlOrCtrl":
+    "· click Return control (or Ctrl+Alt+Shift)",
   "desktopViewer.connectingToTheDesktop": "Connecting to the desktop…",
   "desktopViewer.couldnTConnect": "Couldn’t connect",
   "desktopViewer.couldnTOpenDesktop": "Couldn’t open desktop",
   "desktopViewer.desktopDisconnected": "Desktop disconnected",
-  "desktopViewer.desktopStreamingIsDisabledOn": "Desktop streaming is disabled on this deployment.",
+  "desktopViewer.desktopStreamingIsDisabledOn":
+    "Desktop streaming is disabled on this deployment.",
   "desktopViewer.desktopUnavailable": "Desktop unavailable",
   "desktopViewer.driveTheMouseKeyboard": "Drive the mouse & keyboard",
   "desktopViewer.openingTheDesktop": "Opening the desktop…",
   "desktopViewer.returnControl": "Return control",
-  "desktopViewer.returnControlOrPressCtrl": "Return control (or press Ctrl+Alt+Shift)",
-  "desktopViewer.sharedSandboxOthersAreWatching": "Shared sandbox — others are watching",
-  "desktopViewer.spinningUpTheDesktopThis": "Spinning up the desktop — this takes a few seconds.",
+  "desktopViewer.returnControlOrPressCtrl":
+    "Return control (or press Ctrl+Alt+Shift)",
+  "desktopViewer.sharedSandboxOthersAreWatching":
+    "Shared sandbox — others are watching",
+  "desktopViewer.spinningUpTheDesktopThis":
+    "Spinning up the desktop — this takes a few seconds.",
   "desktopViewer.takeControl": "Take control",
   "desktopViewer.takeControlOfTheDesktop": "Take control of the desktop",
   "desktopViewer.takingTooLongRetry": "Taking too long? Retry",
-  "desktopViewer.theDesktopAcknowledgmentFailed": "The desktop acknowledgment failed.",
-  "desktopViewer.theDesktopIsnTAvailable": "The desktop isn’t available for this sandbox.",
+  "desktopViewer.theDesktopAcknowledgmentFailed":
+    "The desktop acknowledgment failed.",
+  "desktopViewer.theDesktopIsnTAvailable":
+    "The desktop isn’t available for this sandbox.",
   "desktopViewer.theDesktopIsWarmBut":
     "The desktop is warm but the live stream didn’t come up. This usually clears on a retry.",
-  "desktopViewer.theSandboxOsDoesNot": "The sandbox OS does not support a desktop stream.",
+  "desktopViewer.theSandboxOsDoesNot":
+    "The sandbox OS does not support a desktop stream.",
   "desktopViewer.theStreamDropped": "The stream dropped.",
   "desktopViewer.thisDeploymentIsHeadlessTerminal":
     "This deployment is headless — terminal, files, and diff only.",
-  "desktopViewer.thisDeploymentStreamsTheDesktop": "This deployment streams the desktop read-only.",
-  "desktopViewer.thisSandboxBackendCannotStream": "This sandbox backend cannot stream a desktop.",
-  "desktopViewer.thisSandboxDoesnTHave": "This sandbox doesn't have a desktop yet.",
+  "desktopViewer.thisDeploymentStreamsTheDesktop":
+    "This deployment streams the desktop read-only.",
+  "desktopViewer.thisSandboxBackendCannotStream":
+    "This sandbox backend cannot stream a desktop.",
+  "desktopViewer.thisSandboxDoesnTHave":
+    "This sandbox doesn't have a desktop yet.",
   "desktopViewer.thisSessionHasReachedIts":
     "This session has reached its live-viewer limit. Try again shortly.",
   "desktopViewer.tooManyViewers": "Too many viewers",
@@ -1714,33 +1917,41 @@ export const englishMessages = {
   "desktopViewer.waitingForTheSandboxTo": "Waiting for the sandbox to start…",
   "desktopViewer.warmingTheSandbox": "Warming the sandbox…",
   "desktopViewer.youReInControl": "You're in control",
-  "deviceAuthorization.authorizationAddressUnavailable": "Authorization address unavailable.",
+  "deviceAuthorization.authorizationAddressUnavailable":
+    "Authorization address unavailable.",
   "deviceAuthorization.authPage": "auth page",
   "deviceAuthorization.codeCopied": "Code copied",
   "deviceAuthorization.copied": "Copied",
   "deviceAuthorization.copyCode": "Copy code",
-  "deviceAuthorization.couldnTCopyTheCode": "Couldn't copy the code. Copy it manually instead.",
+  "deviceAuthorization.couldnTCopyTheCode":
+    "Couldn't copy the code. Copy it manually instead.",
   "deviceAuthorization.deviceAuthorization": "Device authorization",
-  "deviceAuthorization.enterThisCodeAtProviderlabel": "Enter this code at {providerLabel}.",
+  "deviceAuthorization.enterThisCodeAtProviderlabel":
+    "Enter this code at {providerLabel}.",
   "deviceAuthorization.open": "Open",
   "deviceAuthorization.theProvider": "the provider",
   "deviceAuthorization.waitingForAuthorization": "Waiting for authorization…",
   "diffView.noChanges": "No changes",
   "diffView.noRepositoryMounted": "No repository mounted",
-  "enrollmentConsent.alsoLetTheAgentControl": "Also let the agent control my mouse & keyboard",
-  "enrollmentConsent.approvingLetsTheOpengeniAgent": "Approving lets the {product} agent run on",
+  "enrollmentConsent.alsoLetTheAgentControl":
+    "Also let the agent control my mouse & keyboard",
+  "enrollmentConsent.approvingLetsTheOpengeniAgent":
+    "Approving lets the {product} agent run on",
   "enrollmentConsent.bodyDisconnectTheAgentTo":
     "{body} Disconnect the agent to revoke access instantly.",
   "enrollmentConsent.cancel": "Cancel",
   "enrollmentConsent.code": "code",
   "enrollmentConsent.connecting": "Connecting…",
-  "enrollmentConsent.couldNotCompleteEnrollment": "Could not complete enrollment",
+  "enrollmentConsent.couldNotCompleteEnrollment":
+    "Could not complete enrollment",
   "enrollmentConsent.enrollmentDenied": "Enrollment denied",
   "enrollmentConsent.everyoneWithAccessToThis":
     "Everyone with access to this workspace can use this machine.",
-  "enrollmentConsent.giveTheAgentYourWhole": "Give the agent your whole machine?",
+  "enrollmentConsent.giveTheAgentYourWhole":
+    "Give the agent your whole machine?",
   "enrollmentConsent.grantFullAccess": "Grant full access",
-  "enrollmentConsent.labelAccessWhileConnected": "{label} access while connected",
+  "enrollmentConsent.labelAccessWhileConnected":
+    "{label} access while connected",
   "enrollmentConsent.machineConnected": "Machine connected",
   "enrollmentConsent.machinenameIsNowConnectedWith":
     "{machineName} is now connected with {lowerCase} access. You can close this page — it will appear in your Machines dashboard.",
@@ -1768,7 +1979,8 @@ export const englishMessages = {
   "enrollmentConsent.workspace": "Workspace",
   "enrollmentConsent.youDeclinedToConnectMachinename":
     "You declined to connect {machineName}. The agent has no access to this machine. You can re-run the install one-liner to try again.",
-  "enrollmentDeviceFlow.andConfirmTheCodeShown": "and confirm the code shown there matches.",
+  "enrollmentDeviceFlow.andConfirmTheCodeShown":
+    "and confirm the code shown there matches.",
   "enrollmentDeviceFlow.approveTheMachine": "Approve the machine",
   "enrollmentDeviceFlow.codeExpired": "Code expired",
   "enrollmentDeviceFlow.confirmCode": "Confirm code",
@@ -1783,14 +1995,18 @@ export const englishMessages = {
   "enrollmentDeviceFlow.n1RunOnTheMachine": "1 · Run on the machine",
   "enrollmentDeviceFlow.n2ApproveTheMachine": "2 · Approve the machine",
   "enrollmentDeviceFlow.openApprovalPage": "Open approval page",
-  "enrollmentDeviceFlow.runTheCommandAboveYour": "Run the command above — your code appears here",
-  "enrollmentDeviceFlow.theOneLinerPrintsA": "The one-liner prints a short code. Open",
-  "enrollmentDeviceFlow.theOnePrintedByThe": "— the one printed by the one-liner — at",
+  "enrollmentDeviceFlow.runTheCommandAboveYour":
+    "Run the command above — your code appears here",
+  "enrollmentDeviceFlow.theOneLinerPrintsA":
+    "The one-liner prints a short code. Open",
+  "enrollmentDeviceFlow.theOnePrintedByThe":
+    "— the one printed by the one-liner — at",
   "enrollmentDeviceFlow.waitingForApproval": "Waiting for approval",
   "field.optional": "Optional",
   "fileBrowser.actionsForName": "Actions for {name}",
   "fileBrowser.cancel": "Cancel",
-  "fileBrowser.contentsOnMachineOpenWhen": "contents on machine — open when live",
+  "fileBrowser.contentsOnMachineOpenWhen":
+    "contents on machine — open when live",
   "fileBrowser.couldNotLoadFilesMessage": "Could not load files: {message}",
   "fileBrowser.delete": "Delete",
   "fileBrowser.deletePermanently": "Delete permanently",
@@ -1801,7 +2017,8 @@ export const englishMessages = {
   "fileBrowser.folderName": "Folder name",
   "fileBrowser.liveFilesAreTemporarilyUnavailable":
     "Live files are temporarily unavailable. Showing the latest captured revision.",
-  "fileBrowser.liveRefreshFailedShowingThe": "Live refresh failed. Showing the last loaded files.",
+  "fileBrowser.liveRefreshFailedShowingThe":
+    "Live refresh failed. Showing the last loaded files.",
   "fileBrowser.moreActions": "More actions",
   "fileBrowser.newFile": "New file",
   "fileBrowser.newFolder": "New folder",
@@ -1820,16 +2037,22 @@ export const englishMessages = {
   "generatedVideoPlayer.videoPlaybackFailed": "Video playback failed.",
   "hooks.latestQuestion.theLatestQuestionIsChanging":
     "The latest question is changing queue state. Try again.",
-  "hooks.latestQuestion.theLatestQuestionIsIn": "The latest question is in the prompt queue.",
-  "hooks.useBrowserFrameStream.browserViewLostConnection": "Browser view lost connection.",
-  "hooks.useBrowserSession.noBrowserTabIsSelected": "No browser tab is selected.",
+  "hooks.latestQuestion.theLatestQuestionIsIn":
+    "The latest question is in the prompt queue.",
+  "hooks.useBrowserFrameStream.browserViewLostConnection":
+    "Browser view lost connection.",
+  "hooks.useBrowserSession.noBrowserTabIsSelected":
+    "No browser tab is selected.",
   "hooks.useBrowserSession.theBrowserPageChangedOpen":
     "The browser page changed. Open the options again.",
-  "hooks.useBrowserSession.theBrowserSourceIsNo": "The browser source is no longer selected.",
+  "hooks.useBrowserSession.theBrowserSourceIsNo":
+    "The browser source is no longer selected.",
   "hooks.useComposer.deliveryWasInterruptedRetryTo":
     "Delivery was interrupted; retry to reconcile this message.",
-  "hooks.useComposer.draftSyncTimedOutRetrying": "Draft sync timed out. Retrying…",
-  "hooks.useComposer.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
+  "hooks.useComposer.draftSyncTimedOutRetrying":
+    "Draft sync timed out. Retrying…",
+  "hooks.useComposer.messageReferenceCorrelationid":
+    "{message} Reference: {correlationId}.",
   "hooks.useComposer.notConfirmedCheckStatus":
     "The request could not be confirmed. Check its status before retrying.",
   "hooks.useComposer.notConfirmedCheckStatusWithReference":
@@ -1844,12 +2067,15 @@ export const englishMessages = {
     "The message draft could not be saved before delivery.",
   "hooks.useComposer.theRequestCouldNotBe":
     "The request could not be confirmed. Check its status before retrying.",
-  "hooks.useComputerFrameStream.desktopViewLostConnection": "Desktop view lost connection.",
+  "hooks.useComputerFrameStream.desktopViewLostConnection":
+    "Desktop view lost connection.",
   "hooks.useComputerInputPosture.desktopInputAvailabilityCouldNot":
     "Desktop input availability could not be verified.",
-  "hooks.useComputerSession.desktopInputDidNotComplete": "Desktop input did not complete.",
+  "hooks.useComputerSession.desktopInputDidNotComplete":
+    "Desktop input did not complete.",
   "hooks.useComputerSession.noDesktopIsSelected": "No desktop is selected.",
-  "hooks.useComputerSession.theDesktopSourceIsNo": "The desktop source is no longer selected.",
+  "hooks.useComputerSession.theDesktopSourceIsNo":
+    "The desktop source is no longer selected.",
   "hooks.useComputerSession.theDisplayedDesktopFrameIs":
     "The displayed desktop frame is no longer selected.",
   "hooks.useComputerSession.theSelectedDesktopTargetIs":
@@ -1863,21 +2089,27 @@ export const englishMessages = {
   "hooks.useMachines.itWasMovedSomewhere":
     "It was moved somewhere else at the same moment. Try again.",
   "hooks.useMachines.thatMachineIsOffline": "That machine is offline.",
-  "hooks.useMachines.thatMachineIsNoLonger": "That machine is no longer connected.",
-  "hooks.useMachines.thatMachineCouldntBeReached": "That machine couldn't be reached. Try again.",
+  "hooks.useMachines.thatMachineIsNoLonger":
+    "That machine is no longer connected.",
+  "hooks.useMachines.thatMachineCouldntBeReached":
+    "That machine couldn't be reached. Try again.",
   "hooks.useMachines.itsComputerIsStillStarting":
     "Its computer is still starting up. Try again in a moment.",
-  "hooks.useMachines.itsComputerIsntWorking": "Its computer isn't working properly right now.",
-  "hooks.useMachines.itsComputerCouldntBeRestored": "Its computer couldn't be restored.",
+  "hooks.useMachines.itsComputerIsntWorking":
+    "Its computer isn't working properly right now.",
+  "hooks.useMachines.itsComputerCouldntBeRestored":
+    "Its computer couldn't be restored.",
   "hooks.useMachines.tryAgain": "Try again.",
   "hooks.useMachines.thatMachineHasntReported":
     "That machine hasn't reported its workspace folder. Update the agent on it and reconnect, then try again.",
   "hooks.useMachines.thisChatSWorkingFolder":
     "This chat's working folder isn't inside that machine's workspace. Start a new chat on that machine instead.",
-  "hooks.useMachines.onlyTheMachineSOwner": "Only the machine's owner can use it in this chat.",
+  "hooks.useMachines.onlyTheMachineSOwner":
+    "Only the machine's owner can use it in this chat.",
   "hooks.useMachines.theMachineSOwnerHas":
     "The machine's owner has not allowed this chat to use it.",
-  "hooks.useNewConversation.newChatsAreNotEnabled": "New chats are not enabled for this product.",
+  "hooks.useNewConversation.newChatsAreNotEnabled":
+    "New chats are not enabled for this product.",
   "hooks.useSandboxFiles.createFile": "create file",
   "hooks.useSandboxFiles.createFolder": "create folder",
   "hooks.useSandboxFiles.fileSaveCancelledBecauseThe":
@@ -1886,8 +2118,10 @@ export const englishMessages = {
     "{path} changed on the machine. Reload it or explicitly overwrite the live version.",
   "hooks.useSandboxFiles.pathExceedsTheCapturedPreview":
     "{path} exceeds the captured preview limit.",
-  "hooks.useSandboxFiles.pathIsNoLongerAvailable": "{path} is no longer available in this capture.",
-  "hooks.useSandboxFiles.pathWasNotChangedIn": "{path} was not changed in this captured turn.",
+  "hooks.useSandboxFiles.pathIsNoLongerAvailable":
+    "{path} is no longer available in this capture.",
+  "hooks.useSandboxFiles.pathWasNotChangedIn":
+    "{path} was not changed in this captured turn.",
   "hooks.useTranscription.noDiagnosticDetail": "No diagnostic detail.",
   "hooks.useTranscription.transcriptionAdapterStartExceededStarttimeoutms":
     "Transcription adapter start exceeded {startTimeoutMs}ms.",
@@ -1898,14 +2132,17 @@ export const englishMessages = {
   "hooks.useTurnQueue.thatQueuedPromptChangedBefore":
     "That queued prompt changed before Steer could be sent.",
   "humanInputDelegation.message": "Let the agent decide: {question}",
-  "humanInputDelegation.messageWithMore": "Let the agent decide: {question} (+{more} more)",
+  "humanInputDelegation.messageWithMore":
+    "Let the agent decide: {question} (+{more} more)",
   "humanInputForm.back": "Back",
   "humanInputForm.loadingTheExactSkillFiles": "Loading the exact Skill files…",
-  "humanInputForm.loadTheExactSkillFiles": "Load the exact Skill files before saving.",
+  "humanInputForm.loadTheExactSkillFiles":
+    "Load the exact Skill files before saving.",
   "humanInputForm.loadTheExactSkillProposal":
     "Load the exact Skill proposal before approving permanent deletion.",
   "humanInputForm.next": "Next",
-  "humanInputForm.otherAnswerForVisiblelabel": "{other} answer for {visibleLabel}",
+  "humanInputForm.otherAnswerForVisiblelabel":
+    "{other} answer for {visibleLabel}",
   "humanInputForm.permanentlyDeletesThisSkillAnd":
     "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged.",
   "humanInputForm.questionOfTotal": "Question {current} of {total}",
@@ -1923,13 +2160,17 @@ export const englishMessages = {
   "humanInputForm.thisQuestionCanTBe": "This question can't be answered here.",
   "humanInputForm.typeYourAnswer": "Type your answer…",
   "humanInputModel.apiKey": "API key",
-  "humanInputModel.aStrongPasswordWillBe": "A strong password will be generated",
+  "humanInputModel.aStrongPasswordWillBe":
+    "A strong password will be generated",
   "humanInputModel.chooseAtLeastMin": "Choose at least {min}.",
   "humanInputModel.chooseAtLeastOptions_one": "Choose at least {count} option.",
-  "humanInputModel.chooseAtLeastOptions_other": "Choose at least {count} options.",
+  "humanInputModel.chooseAtLeastOptions_other":
+    "Choose at least {count} options.",
   "humanInputModel.chooseMinMax": "Choose {min}–{max}.",
-  "humanInputModel.chooseNoMoreThanOptions_one": "Choose no more than {count} option.",
-  "humanInputModel.chooseNoMoreThanOptions_other": "Choose no more than {count} options.",
+  "humanInputModel.chooseNoMoreThanOptions_one":
+    "Choose no more than {count} option.",
+  "humanInputModel.chooseNoMoreThanOptions_other":
+    "Choose no more than {count} options.",
   "humanInputModel.chooseUpToMax": "Choose up to {max}.",
   "humanInputModel.collapse": "Collapse",
   "humanInputModel.deadlinePassed": "deadline passed",
@@ -1948,7 +2189,8 @@ export const englishMessages = {
   "humanInputModel.onlyMe": "Only me",
   "humanInputModel.optional": "Optional",
   "humanInputModel.other": "Other",
-  "humanInputModel.savedToVaultnameItemname": "Saved to {vaultName} › {itemName}",
+  "humanInputModel.savedToVaultnameItemname":
+    "Saved to {vaultName} › {itemName}",
   "humanInputModel.savesToTheVaultVault": "Saves to the {vault} vault",
   "humanInputModel.savesToTheWorkspaceVault": "Saves to the workspace vault",
   "humanInputModel.savesToThisTask": "Saves to this task",
@@ -1998,7 +2240,8 @@ export const englishMessages = {
     "Link revoked. Your {product} account and existing work are unchanged.",
   "identityLinkConsent.linkYourAccount": "Link your account",
   "identityLinkConsent.linkYourOpengeniAccount": "Link your {product} account",
-  "identityLinkConsent.loadingTheAccountLinkRequest": "Loading the account-link request…",
+  "identityLinkConsent.loadingTheAccountLinkRequest":
+    "Loading the account-link request…",
   "identityLinkConsent.onlyContinueIfYouStarted":
     "Only continue if you started this request in a product you trust. Linking lets that product act as your account with the permissions you select. It does not merge accounts or move existing work.",
   "identityLinkConsent.organization": "Organization",
@@ -2010,8 +2253,10 @@ export const englishMessages = {
   "identityLinkConsent.thisRequestHasExpiredStart":
     "This request has expired. Start a new request from your product.",
   "identityLinkConsent.tryAgain": "Try again",
-  "identityLinkConsent.youCanCloseThisPage": "You can close this page without granting access.",
-  "identityLinkConsent.yourCurrentPermissionsStillApply": "Your current permissions still apply.",
+  "identityLinkConsent.youCanCloseThisPage":
+    "You can close this page without granting access.",
+  "identityLinkConsent.yourCurrentPermissionsStillApply":
+    "Your current permissions still apply.",
   "identityLinkConsent.yourOpengeniIdentity": "Your {product} identity",
   /** A model or feature the server switched off because the workspace is EU-only. */
   "inferenceRegion.notSupportedInEu": "Not supported in EU",
@@ -2046,8 +2291,10 @@ export const englishMessages = {
   "interactiveAnswer.selected": "Selected",
   "interactiveAnswer.selectedCount_one": "{count} selected",
   "interactiveAnswer.selectedCount_other": "{count} selected",
-  "interactiveAnswer.selectedMax_one": "{count} selected, the most you can pick",
-  "interactiveAnswer.selectedMax_other": "{count} selected, the most you can pick",
+  "interactiveAnswer.selectedMax_one":
+    "{count} selected, the most you can pick",
+  "interactiveAnswer.selectedMax_other":
+    "{count} selected, the most you can pick",
   "interactiveAnswer.sendFailed": "Couldn't send. Try again.",
   "interactiveAnswer.sent": "Sent",
   "interactiveAnswer.showAll": "Show all",
@@ -2062,7 +2309,8 @@ export const englishMessages = {
     "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
-  "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
+  "lib.format.messageReferenceCorrelationid":
+    "{message} Reference: {correlationId}.",
   "lib.format.minutes": "{count}m",
   "lib.format.accountUnavailable":
     "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
@@ -2071,8 +2319,10 @@ export const englishMessages = {
   "lib.format.now": "now",
   "lib.format.outOfCreditsThisWorkspace":
     "There aren't enough credits for this model. Add credits, or choose another model. The conversation is preserved.",
-  "lib.format.providerBlockedRequest": "The model provider blocked this request.",
-  "lib.format.providerBlockedRequestDetail": "The model provider blocked this request. {detail}",
+  "lib.format.providerBlockedRequest":
+    "The model provider blocked this request.",
+  "lib.format.providerBlockedRequestDetail":
+    "The model provider blocked this request. {detail}",
   "lib.format.reconcileBeforeRetry":
     "This client cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
   "lib.format.seconds": "{count}s",
@@ -2082,7 +2332,8 @@ export const englishMessages = {
     "The model provider refused the request: this deployment's provider quota is exhausted.",
   "lib.format.theModelProviderRejectedThis":
     "The model provider rejected this deployment's engine credentials. Sending messages won't help until the deployment's engine configuration is fixed.",
-  "lib.format.theServiceEncounteredADatabase": "The service encountered a database error.",
+  "lib.format.theServiceEncounteredADatabase":
+    "The service encountered a database error.",
   "lib.format.thisClientCannotResumeThe":
     "This client cannot resume the workspace. Ask your administrator for a control-capable client.",
   "lib.format.thisSiteSAssistantCan":
@@ -2103,47 +2354,59 @@ export const englishMessages = {
     "An image from earlier in this conversation can't be read from storage",
   "lib.providerRecovery.opengeniToolServiceUnavailable":
     "Opengeni’s tool service is temporarily unavailable",
-  "lib.providerRecovery.aRequiredMcpServerIs": "A required MCP server is unreachable",
-  "lib.providerRecovery.aRequiredMcpServerIsn": "A required MCP server isn't responding",
+  "lib.providerRecovery.aRequiredMcpServerIs":
+    "A required MCP server is unreachable",
+  "lib.providerRecovery.aRequiredMcpServerIsn":
+    "A required MCP server isn't responding",
   "lib.providerRecovery.aServiceThisTurnDepends":
     "A service this turn depends on is temporarily unavailable",
   "lib.providerRecovery.atTheProvider": "at the provider",
-  "lib.providerRecovery.atTheProviderProviderlabel": "at the provider ({providerLabel})",
+  "lib.providerRecovery.atTheProviderProviderlabel":
+    "at the provider ({providerLabel})",
   "lib.providerRecovery.modelEndedItsResponseUnexpectedly":
     "{model} ended its response unexpectedly",
   "lib.providerRecovery.modelIsOverloadedAt": "{model} is overloaded{at}",
   "lib.providerRecovery.modelIsRateLimitedAt": "{model} is rate limited{at}",
-  "lib.providerRecovery.modelIsTemporarilyUnavailableAt": "{model} is temporarily unavailable{at}",
-  "lib.providerRecovery.modelStoppedRespondingAt": "{model} stopped responding{at}",
+  "lib.providerRecovery.modelIsTemporarilyUnavailableAt":
+    "{model} is temporarily unavailable{at}",
+  "lib.providerRecovery.modelStoppedRespondingAt":
+    "{model} stopped responding{at}",
   "lib.providerRecovery.modelStoppedRightAfterCompacting":
     "{model} stopped right after compacting the conversation",
-  "lib.providerRecovery.opengeniCanTReachAn": "{product} can't reach an upstream service",
+  "lib.providerRecovery.opengeniCanTReachAn":
+    "{product} can't reach an upstream service",
   "lib.providerRecovery.opengeniIsApplyingAConfiguration":
     "{product} is applying a configuration update",
   "lib.providerRecovery.opengeniIsMovingTheWorkspace":
     "{product} is moving the workspace to a fresh sandbox",
-  "lib.providerRecovery.opengeniIsPreparingTheSandbox": "{product} is preparing the sandbox",
-  "lib.providerRecovery.opengeniIsRecoveringTheSandbox": "{product} is recovering the sandbox",
-  "lib.providerRecovery.opengeniIsSavingTheSandbox": "{product} is saving the sandbox workspace",
+  "lib.providerRecovery.opengeniIsPreparingTheSandbox":
+    "{product} is preparing the sandbox",
+  "lib.providerRecovery.opengeniIsRecoveringTheSandbox":
+    "{product} is recovering the sandbox",
+  "lib.providerRecovery.opengeniIsSavingTheSandbox":
+    "{product} is saving the sandbox workspace",
   "lib.providerRecovery.opengeniRetriedTimesWithoutSuccess_one":
     "{product} retried {count} time without success.",
   "lib.providerRecovery.opengeniRetriedTimesWithoutSuccess_other":
     "{product} retried {count} times without success.",
   "lib.providerRecovery.subjectRetryingAttempt":
     "{subject} — retrying (attempt {attempt} of {maxAttempts})…",
-  "lib.providerRecovery.subjectRetryingAutomatically": "{subject} — retrying automatically…",
+  "lib.providerRecovery.subjectRetryingAutomatically":
+    "{subject} — retrying automatically…",
   "lib.providerRecovery.theModel": "The model",
   "lib.providerRecovery.theSandboxIsnTReady": "The sandbox isn't ready yet",
   "lib.providerRecovery.theSandboxReachedItsMaximum":
     "The sandbox reached its maximum lifetime, so {product} is moving the workspace to a fresh sandbox",
-  "lib.providerRecovery.tryAgainInAFew": "Try again in a few minutes, or switch to another model.",
+  "lib.providerRecovery.tryAgainInAFew":
+    "Try again in a few minutes, or switch to another model.",
   "lib.providerRecovery.tryAgainInAFew2": "Try again in a few minutes.",
   "lib.transientRetry.actionMayNotHaveGoneThrough":
     "{product} is updating, so that may not have gone through. Try again in a moment.",
   "lib.transientRetry.opengeniIsUpdatingWeLl":
     "{product} is updating. We'll reconnect automatically.",
   "list.loading": "Loading {label}",
-  "loadFailure.didNotLoad": "This didn't load. Check your connection, then reload.",
+  "loadFailure.didNotLoad":
+    "This didn't load. Check your connection, then reload.",
   "loadFailure.partDidNotLoad": "This part didn't load.",
   "loadFailure.reload": "Reload",
   "machineCard.active": "Active",
@@ -2175,13 +2438,16 @@ export const englishMessages = {
   "machineInputDisplay.agentNeedsInput": "Agent needs input",
   "machineInputDisplay.agentPaused": "Agent paused",
   "machineInputDisplay.agentProgress": "Agent progress",
-  "machineInputDisplay.agentProgressNotesCount_other": "{count} agent progress notes",
+  "machineInputDisplay.agentProgressNotesCount_other":
+    "{count} agent progress notes",
   "machineInputDisplay.agentResultReceived": "Agent result received",
-  "machineInputDisplay.agentResultsReceivedCount_other": "{count} agent results received",
+  "machineInputDisplay.agentResultsReceivedCount_other":
+    "{count} agent results received",
   "machineInputDisplay.agentsNeedInputCount_other": "{count} agents need input",
   "machineInputDisplay.agentsPausedCount_other": "{count} agents paused",
   "machineInputDisplay.agentsUnblockedCount_other": "{count} agents unblocked",
-  "machineInputDisplay.agentsWaitingForCapacityCount_other": "{count} agents waiting for capacity",
+  "machineInputDisplay.agentsWaitingForCapacityCount_other":
+    "{count} agents waiting for capacity",
   "machineInputDisplay.agentUnblocked": "Agent unblocked",
   "machineInputDisplay.agentUpdate": "Agent update",
   "machineInputDisplay.agentUpdatesCount_other": "{count} agent updates",
@@ -2189,16 +2455,20 @@ export const englishMessages = {
   "machineInputDisplay.automationRun": "Automation run",
   "machineInputDisplay.automationRunsCount_other": "{count} automation runs",
   "machineInputDisplay.commandResultReceived": "Command result received",
-  "machineInputDisplay.commandResultsReceivedCount_other": "{count} command results received",
+  "machineInputDisplay.commandResultsReceivedCount_other":
+    "{count} command results received",
   "machineInputDisplay.countTimesLabel": "{count}× {label}",
   "machineInputDisplay.directionFromName": "Direction from {name}",
   "machineInputDisplay.evidenceLabel": "Evidence:",
-  "machineInputDisplay.goalContinuationsCount_other": "{count} goal continuations",
+  "machineInputDisplay.goalContinuationsCount_other":
+    "{count} goal continuations",
   "machineInputDisplay.goalContinued": "Goal continued",
   "machineInputDisplay.goalLabel": "Goal:",
-  "machineInputDisplay.lengthUpdatesPreviewSuffix": "{length} updates · {preview}{suffix}",
+  "machineInputDisplay.lengthUpdatesPreviewSuffix":
+    "{length} updates · {preview}{suffix}",
   "machineInputDisplay.nameFailed": "{name} failed",
-  "machineInputDisplay.nameIsWaitingForCapacity": "{name} is waiting for capacity",
+  "machineInputDisplay.nameIsWaitingForCapacity":
+    "{name} is waiting for capacity",
   "machineInputDisplay.nameNeedsInput": "{name} needs input",
   "machineInputDisplay.namePaused": "{name} paused",
   "machineInputDisplay.nameUnblocked": "{name} unblocked",
@@ -2207,17 +2477,22 @@ export const englishMessages = {
   "machineInputDisplay.progressFromName": "Progress from {name}",
   "machineInputDisplay.resultFromName": "Result from {name}",
   "machineInputDisplay.secretUseAnswered": "Secret use answered",
-  "machineInputDisplay.secretUsesAnsweredCount_other": "{count} secret uses answered",
+  "machineInputDisplay.secretUsesAnsweredCount_other":
+    "{count} secret uses answered",
   "machineInputDisplay.setupFinished": "Setup finished",
   "machineInputDisplay.setupsFinishedCount_other": "{count} setups finished",
   "machineInputDisplay.updateFromName": "Update from {name}",
   "machineInputDisplay.updates": "Updates",
-  "machineInputDisplay.updatesFromAgents_one": "{count} update from {agents} agents",
-  "machineInputDisplay.updatesFromAgents_other": "{count} updates from {agents} agents",
+  "machineInputDisplay.updatesFromAgents_one":
+    "{count} update from {agents} agents",
+  "machineInputDisplay.updatesFromAgents_other":
+    "{count} updates from {agents} agents",
   "machineInputDisplay.updatesFromName_one": "{count} update from {name}",
   "machineInputDisplay.updatesFromName_other": "{count} updates from {name}",
-  "machineInputDisplay.updatesFromTwoNames_one": "{count} update from {first} and {second}",
-  "machineInputDisplay.updatesFromTwoNames_other": "{count} updates from {first} and {second}",
+  "machineInputDisplay.updatesFromTwoNames_one":
+    "{count} update from {first} and {second}",
+  "machineInputDisplay.updatesFromTwoNames_other":
+    "{count} updates from {first} and {second}",
   "machineInputDisplay.videoReady": "Video ready",
   "machineInputDisplay.videoUpdate": "Video update",
   "machineInputDisplay.videoUpdatesCount_other": "{count} video updates",
@@ -2255,12 +2530,15 @@ export const englishMessages = {
   "machines.machineDetail.everyWorkspaceInTheOrganization":
     "Every workspace in the organization can use it.",
   "machines.machineDetail.justNow": "just now",
-  "machines.machineDetail.keptOutExtraCopiesOf_one": "Kept out {count} extra copy of the agent",
-  "machines.machineDetail.keptOutExtraCopiesOf_other": "Kept out {count} extra copies of the agent",
+  "machines.machineDetail.keptOutExtraCopiesOf_one":
+    "Kept out {count} extra copy of the agent",
+  "machines.machineDetail.keptOutExtraCopiesOf_other":
+    "Kept out {count} extra copies of the agent",
   "machines.machineDetail.lastSeen": "Last seen",
   "machines.machineDetail.live": "live",
   "machines.machineDetail.mostRecentlyValue": ", most recently {value}",
-  "machines.machineDetail.onlyItsOwnerCanRun": "Only its owner can run chats on it.",
+  "machines.machineDetail.onlyItsOwnerCanRun":
+    "Only its owner can run chats on it.",
   "machines.machineDetail.onlyMe": "Only me",
   "machines.machineDetail.removeMachine": "Remove machine",
   "machines.machineDetail.removeMachineName": "Remove machine {name}",
@@ -2269,7 +2547,8 @@ export const englishMessages = {
   "machines.machineDetail.starting": "Starting…",
   "machines.machineDetail.thisWorkspace": "This workspace",
   "machines.machineDetail.whoCanUseIt": "Who can use it?",
-  "machines.machineDetail.whoCanUseNameLabel": "Who can use {name}: {label}. Change",
+  "machines.machineDetail.whoCanUseNameLabel":
+    "Who can use {name}: {label}. Change",
   "machines.machineDetail.wholeOrganization": "Whole organization",
   "machines.machineOperationPolicy.bytesNotPositive":
     "{label} must be a positive safe-integer byte count or blank",
@@ -2277,7 +2556,8 @@ export const englishMessages = {
     "{label} must be a whole number of bytes or blank",
   "machines.machineOperationPolicy.commandExecutionFailsClosedUntil":
     "Command execution fails closed until the current runner, OS, and service configuration can enforce it, or the unsupported limit is cleared. You can still save limits now for later enforcement.",
-  "machines.machineOperationPolicy.cpuMaximumMillicores": "CPU maximum (millicores)",
+  "machines.machineOperationPolicy.cpuMaximumMillicores":
+    "CPU maximum (millicores)",
   "machines.machineOperationPolicy.cpuNotWholeNumber":
     "CPU maximum must be a whole number of millicores or blank",
   "machines.machineOperationPolicy.cpuOutOfRange":
@@ -2288,11 +2568,13 @@ export const englishMessages = {
     "1000 millicores = one CPU core. Blank is unlimited.",
   "machines.machineOperationPolicy.optionalLimitsAppliedSeparatelyTo":
     "Optional limits applied separately to each newly admitted exec and Git command. Running commands keep their admitted policy. Blank means unrestricted. The runner or host may apply a stricter explicit policy; browser, computer-use, and terminal capabilities remain unchanged.",
-  "machines.machineOperationPolicy.perCommandResourcePolicy": "Per-command resource policy",
+  "machines.machineOperationPolicy.perCommandResourcePolicy":
+    "Per-command resource policy",
   "machines.machineOperationPolicy.reclaimAboveCeiling":
     "Reclaim threshold cannot exceed the hard ceiling",
   "machines.machineOperationPolicy.reclaimThreshold": "Reclaim threshold",
-  "machines.machineOperationPolicy.reclaimThresholdBytes": "Reclaim threshold (bytes)",
+  "machines.machineOperationPolicy.reclaimThresholdBytes":
+    "Reclaim threshold (bytes)",
   "machines.machineOperationPolicy.savePolicy": "Save policy",
   "machines.machineOperationPolicy.thisRunnerCannotEnforceThe":
     "This runner cannot enforce the configured CPU limit.",
@@ -2313,23 +2595,28 @@ export const englishMessages = {
     "Couldn't update to {target}, so the current version was kept",
   "machines.machineStatus.latestIsVDesired": "Latest is v{desired}",
   "machines.machineStatus.newerThanTheRelease": "Newer than the release",
-  "machines.machineStatus.newerThanTheReleasedV": "Newer than the released v{desired}",
+  "machines.machineStatus.newerThanTheReleasedV":
+    "Newer than the released v{desired}",
   "machines.machineStatus.noReleaseConfigured": "No release configured",
   "machines.machineStatus.reasonReason": "Reason: {reason}.",
-  "machines.machineStatus.reconnectedTimesSinceSetup_one": "Reconnected {count} time since setup",
+  "machines.machineStatus.reconnectedTimesSinceSetup_one":
+    "Reconnected {count} time since setup",
   "machines.machineStatus.reconnectedTimesSinceSetup_other":
     "Reconnected {count} times since setup",
   "machines.machineStatus.restartingTheAgent": "Restarting the agent…",
   "machines.machineStatus.sendAgain": "Send again",
-  "machines.machineStatus.sendingTheUpdateToTarget": "Sending the update to {target}…",
+  "machines.machineStatus.sendingTheUpdateToTarget":
+    "Sending the update to {target}…",
   "machines.machineStatus.theAgentCouldnTCheck":
     "the agent couldn't confirm whether previous work has finished. Check the agent log and try again. If this persists, finish active commands, restart the agent service, then retry the update",
   "machines.machineStatus.previousWorkCleanupUnconfirmed":
     "the agent couldn't confirm cleanup of earlier work. The agent log identifies the affected command or helper. Try again after cleanup; if it cannot recover, finish active commands and restart the agent service before retrying",
   "machines.machineStatus.theAgentHasnTConfirmed":
     "The agent hasn't confirmed the update to {target}",
-  "machines.machineStatus.theAgentRefusedTheRequest": "the agent refused the request",
-  "machines.machineStatus.theAgentSentAnUnexpected": "the agent sent an unexpected reply",
+  "machines.machineStatus.theAgentRefusedTheRequest":
+    "the agent refused the request",
+  "machines.machineStatus.theAgentSentAnUnexpected":
+    "the agent sent an unexpected reply",
   "machines.machineStatus.theInstalledAgentClosesIts":
     "The installed agent closes its browsers when it restarts. Updating now closes them.",
   "machines.machineStatus.theMachineWasOffline": "the machine was offline",
@@ -2338,7 +2625,8 @@ export const englishMessages = {
   "machines.machineStatus.updateNow": "Update now",
   "machines.machineStatus.updatesToTargetWhenCurrent":
     "Updates to {target} when current work finishes",
-  "machines.machineStatus.updateHeldDuration": "Update to {target} has been waiting {duration}",
+  "machines.machineStatus.updateHeldDuration":
+    "Update to {target} has been waiting {duration}",
   "machines.machineStatus.waitingForInteractions":
     "Waiting for browser or computer-use work to finish. It will not be stopped for the update.",
   "machines.machineStatus.waitingForUploads":
@@ -2352,12 +2640,14 @@ export const englishMessages = {
   "machines.machineStatus.offlineUpdateReport":
     "Machine not connected; showing its last update report",
   "machines.machineStatus.blockerOtherWork": "Other work",
-  "machines.machineStatus.blockerNativeCounters": "Machine work (overlapping counters)",
+  "machines.machineStatus.blockerNativeCounters":
+    "Machine work (overlapping counters)",
   "machines.machineStatus.blockerPreviousUpdate":
     "An earlier update still holds the controller fence",
   "machines.machineStatus.blockerCount": "{label}: {count}",
   "machines.machineStatus.blockerBrowserAction": "Browser action",
-  "machines.machineStatus.blockerBrowserSession": "Browser session that would close on restart",
+  "machines.machineStatus.blockerBrowserSession":
+    "Browser session that would close on restart",
   "machines.machineStatus.blockerBrowserCreation": "Browser opening",
   "machines.machineStatus.blockerBrowserClosing": "Browser closing",
   "machines.machineStatus.blockerBrowserRecovery": "Browser recovery",
@@ -2365,12 +2655,15 @@ export const englishMessages = {
   "machines.machineStatus.blockerBrowserTransfer": "Browser state transfer",
   "machines.machineStatus.blockerComputerAction": "Computer action",
   "machines.machineStatus.blockerVirtualDesktop": "Open virtual desktop",
-  "machines.machineStatus.blockerComputerSession": "Computer session changing state",
+  "machines.machineStatus.blockerComputerSession":
+    "Computer session changing state",
   "machines.machineStatus.blockerComputerCreation": "Computer session opening",
   "machines.machineStatus.blockerComputerClosing": "Computer session closing",
   "machines.machineStatus.blockerSeatTransfer": "Desktop changing owners",
-  "machines.machineStatus.blockerControllerRequest": "Browser or computer request",
-  "machines.machineStatus.blockerControllerLifecycle": "Browser or computer session changing state",
+  "machines.machineStatus.blockerControllerRequest":
+    "Browser or computer request",
+  "machines.machineStatus.blockerControllerLifecycle":
+    "Browser or computer session changing state",
   "machines.machineStatus.blockerStream": "Open screen stream",
   "machines.machineStatus.blockerProducer": "Screen-stream work or cleanup",
   "machines.machineStatus.blockerUpload": "File upload",
@@ -2379,7 +2672,8 @@ export const englishMessages = {
   "machines.machineStatus.blockerQueuedRequest": "Queued machine request",
   "machines.machineStatus.blockerQueuedOperation": "Queued command",
   "machines.machineStatus.blockerCleanup": "Cleanup not yet confirmed",
-  "machines.machineStatus.blockerUnknown": "Work not identified by this version",
+  "machines.machineStatus.blockerUnknown":
+    "Work not identified by this version",
   "machines.machineStatus.updateToTargetFailed": "Update to {target} failed",
   "machines.machineStatus.updateToTargetPostponedOpen":
     "Update to {target} postponed: open browsers would close",
@@ -2401,7 +2695,8 @@ export const englishMessages = {
   "machinesDashboard.connectAMachine": "Connect a machine",
   "machinesDashboard.connectYourOwnComputerTo":
     "Connect your own computer to run the agent on it — your files, your terminal, your desktop.",
-  "machinesDashboard.couldNotLoadMachinesMessage": "Could not load machines: {message}",
+  "machinesDashboard.couldNotLoadMachinesMessage":
+    "Could not load machines: {message}",
   "machinesDashboard.machines": "Machines",
   "machinesDashboard.noMachinesYet": "No machines yet",
   "machinesDashboard.retry": "Retry",
@@ -2412,15 +2707,18 @@ export const englishMessages = {
   "machineStatusPill.offline": "Offline",
   "machineStatusPill.online": "Online",
   "machineStatusPill.reconnecting": "Reconnecting",
-  "machineStatusPill.sessionsOnThisMachine_one": "{count} session is on this machine",
-  "machineStatusPill.sessionsOnThisMachine_other": "{count} sessions are on this machine",
+  "machineStatusPill.sessionsOnThisMachine_one":
+    "{count} session is on this machine",
+  "machineStatusPill.sessionsOnThisMachine_other":
+    "{count} sessions are on this machine",
   "machineStatusPill.sharedCount": "Shared · {count}",
   "markdown.artifactUnavailable": "(artifact unavailable)",
   "markdown.closeFindToShowThe": "Close Find to show the formatted message",
   "markdown.copyCode": "Copy code",
   "markdown.copyTable": "Copy table",
   "markdown.couldnTOpenThisFile": "Couldn't open this file. Select to retry.",
-  "markdown.generationStoppedBeforeThePreview": "Generation stopped before the preview was ready.",
+  "markdown.generationStoppedBeforeThePreview":
+    "Generation stopped before the preview was ready.",
   "markdown.image": "Image",
   "markdown.imageUnavailable": "Image unavailable",
   "markdown.linkUnavailable": "(link unavailable)",
@@ -2435,14 +2733,21 @@ export const englishMessages = {
   "markdown.previewIncomplete": "Preview incomplete",
   "markdown.previewUnavailable": "(preview unavailable)",
   "markdown.showFormattedMessage": "Show formatted message",
-  "markdown.thisChatNeedsAWorkspace": "This chat link needs a workspace-aware host to open",
-  "markdown.thisArtifactNeedsAWorkspace": "This artifact needs a workspace-aware host to open",
-  "markdown.thisFileNeedsAWorkspace": "This file needs a workspace-aware host to open",
+  "markdown.thisChatNeedsAWorkspace":
+    "This chat link needs a workspace-aware host to open",
+  "markdown.thisArtifactNeedsAWorkspace":
+    "This artifact needs a workspace-aware host to open",
+  "markdown.thisFileNeedsAWorkspace":
+    "This file needs a workspace-aware host to open",
   "markdown.thisLinkIsUnavailable": "This link is unavailable",
-  "markdown.thisMatchIsNoLonger": "This match is no longer in the message source.",
-  "markdown.thisSandboxFileReferenceIs": "This sandbox file reference is invalid",
-  "markdown.thisSandboxFileRequiresA": "This sandbox file requires a session-aware handler",
-  "markdown.thisSiteNeedsAWorkspace": "This Site needs a workspace-aware host to open",
+  "markdown.thisMatchIsNoLonger":
+    "This match is no longer in the message source.",
+  "markdown.thisSandboxFileReferenceIs":
+    "This sandbox file reference is invalid",
+  "markdown.thisSandboxFileRequiresA":
+    "This sandbox file requires a session-aware handler",
+  "markdown.thisSiteNeedsAWorkspace":
+    "This Site needs a workspace-aware host to open",
   "mcpConnectionStatus.connect": "Connect",
   "mcpConnectionStatus.connected": "Connected",
   "mcpConnectionStatus.reviewConnection": "Review connection",
@@ -2451,7 +2756,8 @@ export const englishMessages = {
   "meetings.ask.placeholder": "Ask about this meeting",
   /** The send button of "Ask about this meeting". */
   "meetings.ask.send": "Ask",
-  "meetings.deleteDialog.couldnTDeleteThisMeeting": "Couldn't delete this meeting",
+  "meetings.deleteDialog.couldnTDeleteThisMeeting":
+    "Couldn't delete this meeting",
   "meetings.deleteDialog.deleteMeeting": "Delete meeting?",
   "meetings.deleteDialog.deleteMeeting2": "Delete meeting",
   "meetings.deleteDialog.deleteTitle": "Delete “{title}”?",
@@ -2461,36 +2767,50 @@ export const englishMessages = {
     "The audio, transcript and speaker names are deleted. This can't be undone.",
   "meetings.detailPage.aboutEstimateForThisDuration":
     "About ${estimate} for this {duration} meeting.",
-  "meetings.detailPage.aboutLessThan001": "Less than $0.01 for this {duration} meeting.",
+  "meetings.detailPage.aboutLessThan001":
+    "Less than $0.01 for this {duration} meeting.",
   "meetings.detailPage.aboutThisTranscript": "About this transcript",
   "meetings.detailPage.addCredits": "Add credits",
   "meetings.detailPage.auto": "Auto",
   "meetings.detailPage.backToMeetings": "Back to Meetings",
-  "meetings.detailPage.canTLoadThePreview": "Can't show the live text right now",
-  "meetings.detailPage.checkYourConnectionThenTry": "Check your connection, then try again.",
+  "meetings.detailPage.canTLoadThePreview":
+    "Can't show the live text right now",
+  "meetings.detailPage.checkYourConnectionThenTry":
+    "Check your connection, then try again.",
   "meetings.detailPage.confirm": "Confirm",
-  "meetings.detailPage.connectProvidernameFirst": "Connect {providerName} first",
+  "meetings.detailPage.connectProvidernameFirst":
+    "Connect {providerName} first",
   "meetings.detailPage.connectAModel": "Connect a model",
   "meetings.detailPage.couldnTChangeWhoCan": "Couldn't change who can see this",
   "meetings.detailPage.couldnTConfirmThisName": "Couldn't confirm this name",
-  "meetings.detailPage.couldnTLoadTheTranscript": "Couldn't load the transcript",
+  "meetings.detailPage.couldnTLoadTheTranscript":
+    "Couldn't load the transcript",
   "meetings.detailPage.couldnTLoadThisMeeting": "Couldn't load this meeting",
   "meetings.detailPage.couldnTNameThisSpeaker": "Couldn't name this speaker",
-  "meetings.detailPage.couldnTRememberThisVoice": "Couldn't remember this voice",
-  "meetings.detailPage.couldnTRememberYourVoice": "Couldn't remember your voice",
-  "meetings.detailPage.couldnTRenameThisMeeting": "Couldn't rename this meeting.",
-  "meetings.detailPage.couldnTRenameThisMeeting2": "Couldn't rename this meeting",
-  "meetings.detailPage.couldnTStartTranscribing": "Couldn't start transcribing.",
+  "meetings.detailPage.couldnTRememberThisVoice":
+    "Couldn't remember this voice",
+  "meetings.detailPage.couldnTRememberYourVoice":
+    "Couldn't remember your voice",
+  "meetings.detailPage.couldnTRenameThisMeeting":
+    "Couldn't rename this meeting.",
+  "meetings.detailPage.couldnTRenameThisMeeting2":
+    "Couldn't rename this meeting",
+  "meetings.detailPage.couldnTStartTranscribing":
+    "Couldn't start transcribing.",
   "meetings.detailPage.couldnTSwitchVersions": "Couldn't switch versions",
   "meetings.detailPage.couldnTTurnDownThis": "Couldn't turn down this name",
   "meetings.detailPage.countSpeakers_one": "{count} speaker",
   "meetings.detailPage.countSpeakers_other": "{count} speakers",
   "meetings.detailPage.deleteMeeting": "Delete meeting",
-  "meetings.detailPage.displaynameSVoiceIsForgotten": "{displayName}'s voice is forgotten",
-  "meetings.detailPage.displaynameSVoiceWillBe": "{displayName}'s voice will be remembered",
-  "meetings.detailPage.enterAWholeNumberFrom": "Enter a whole number from 1 to 32.",
+  "meetings.detailPage.displaynameSVoiceIsForgotten":
+    "{displayName}'s voice is forgotten",
+  "meetings.detailPage.displaynameSVoiceWillBe":
+    "{displayName}'s voice will be remembered",
+  "meetings.detailPage.enterAWholeNumberFrom":
+    "Enter a whole number from 1 to 32.",
   "meetings.detailPage.error": "Error",
-  "meetings.detailPage.everyoneInThisWorkspaceCan": "Everyone in the workspace can open it.",
+  "meetings.detailPage.everyoneInThisWorkspaceCan":
+    "Everyone in the workspace can open it.",
   "meetings.detailPage.failed": "Failed",
   "meetings.detailPage.itMayHaveBeenDeleted":
     "It may have been deleted, or only the person who recorded it can open it.",
@@ -2512,11 +2832,14 @@ export const englishMessages = {
   "meetings.detailPage.namedDisplayname": "Named {displayName}",
   "meetings.detailPage.namedYou": "Named you",
   "meetings.detailPage.nameNameThisSpeaker": "{name}, name this speaker",
-  "meetings.detailPage.namesArenTSuggestedIn": "Names aren't suggested in later meetings",
+  "meetings.detailPage.namesArenTSuggestedIn":
+    "Names aren't suggested in later meetings",
   "meetings.detailPage.nameSuggestedFromTheirVoice":
     "{name}, suggested from their voice. Confirm or correct",
-  "meetings.detailPage.noLiveTextWasSaved": "No live text was saved for this meeting.",
-  "meetings.detailPage.noSpeechWasFoundIn": "No speech was found in this recording.",
+  "meetings.detailPage.noLiveTextWasSaved":
+    "No live text was saved for this meeting.",
+  "meetings.detailPage.noSpeechWasFoundIn":
+    "No speech was found in this recording.",
   "meetings.detailPage.notFinishedYet": "Not finished yet",
   "meetings.detailPage.nothingSaidYetTextShows": "Nothing said yet.",
   "meetings.detailPage.notName": "Not {name}",
@@ -2540,7 +2863,8 @@ export const englishMessages = {
   "meetings.detailPage.reviewlineTapADashedName": "{reviewLine}",
   "meetings.detailPage.save": "Save",
   "meetings.detailPage.saving": "Saving…",
-  "meetings.detailPage.setItWhenTheMeeting": "Pick one if the transcript got the language wrong.",
+  "meetings.detailPage.setItWhenTheMeeting":
+    "Pick one if the transcript got the language wrong.",
   "meetings.detailPage.settings": "Settings",
   "meetings.detailPage.couldnTTryAgainReload":
     "Couldn't try again from here. Reload the page and the upload carries on.",
@@ -2558,7 +2882,8 @@ export const englishMessages = {
   "meetings.detailPage.summary": "Summary",
   "meetings.detailPage.theAudioForThisMeeting":
     "The audio is gone, so this meeting can't be played or transcribed again.",
-  "meetings.detailPage.theAudioCouldnTBeUploaded": "The audio couldn't be uploaded.",
+  "meetings.detailPage.theAudioCouldnTBeUploaded":
+    "The audio couldn't be uploaded.",
   "meetings.detailPage.theAudioIsOnThe":
     "The rest of the audio is on the device that recorded it. If it's still recording, the transcript starts when it stops. If not, open Opengeni on that device to finish the upload.",
   "meetings.detailPage.theAudioWasDeletedOn":
@@ -2567,12 +2892,14 @@ export const englishMessages = {
   "meetings.detailPage.theNewVersionReplacesThis":
     "The new version replaces this one when it's ready.",
   "meetings.detailPage.theTranscriptFailed": "The transcript failed",
-  "meetings.detailPage.theTranscriptShowsHereWhen": "The transcript appears here when it's ready.",
+  "meetings.detailPage.theTranscriptShowsHereWhen":
+    "The transcript appears here when it's ready.",
   "meetings.detailPage.theUploadDidnTFinish": "The upload didn't finish",
   "meetings.detailPage.they": "they",
   "meetings.detailPage.theyAgreedRemember": "They agreed. Remember",
   "meetings.detailPage.thisMeetingDoesnTExist": "This meeting doesn't exist",
-  "meetings.detailPage.thisMeetingHasnTBeen": "This meeting hasn't been transcribed.",
+  "meetings.detailPage.thisMeetingHasnTBeen":
+    "This meeting hasn't been transcribed.",
   "meetings.detailPage.thisSpeakerIsUnnamedAgain": "Name removed",
   "meetings.detailPage.title": "Title",
   "meetings.detailPage.transcribe": "Transcribe",
@@ -2582,7 +2909,8 @@ export const englishMessages = {
   "meetings.detailPage.transcribingAgain": "Transcribing again…",
   "meetings.detailPage.transcribingAgain2": "Transcribing again",
   "meetings.detailPage.transcribingAgainFailed": "Transcribing again failed",
-  "meetings.detailPage.transcribingAgainWithModelnameThis": "Transcribing again with {modelName}.",
+  "meetings.detailPage.transcribingAgainWithModelnameThis":
+    "Transcribing again with {modelName}.",
   "meetings.detailPage.transcribingLongAudio":
     "Transcribing {duration} of audio. A long meeting takes a while, so you can leave this page and come back.",
   "meetings.detailPage.transcribingThisUsuallyTakesA":
@@ -2609,7 +2937,8 @@ export const englishMessages = {
     "Who spoke? One name was suggested from a voice.",
   "meetings.detailPage.whoSpokeNamesWereSuggested_other":
     "Who spoke? {count} names were suggested from a voice.",
-  "meetings.detailPage.whoSpokeSpeakersHaveNoName_one": "Who spoke? One speaker has no name yet.",
+  "meetings.detailPage.whoSpokeSpeakersHaveNoName_one":
+    "Who spoke? One speaker has no name yet.",
   "meetings.detailPage.whoSpokeSpeakersHaveNoName_other":
     "Who spoke? {count} speakers have no name yet.",
   "meetings.detailPage.whoSpokeSpeakersToNameNames_one":
@@ -2623,7 +2952,8 @@ export const englishMessages = {
   "meetings.detailPage.workspace": "Workspace",
   "meetings.detailPage.yesItSName": "Yes, it's {name}",
   "meetings.detailPage.yourVoiceIsForgotten": "Your voice is forgotten",
-  "meetings.detailPage.yourVoiceWillBeRemembered": "Your voice will be remembered",
+  "meetings.detailPage.yourVoiceWillBeRemembered":
+    "Your voice will be remembered",
   "meetings.languages.detectAutomatically": "Detect automatically",
   "meetings.listPage.checkYourConnectionThenTry":
     "Check your connection and try again. A recording in progress keeps going.",
@@ -2646,7 +2976,8 @@ export const englishMessages = {
     "Record a meeting and get a transcript of who said what.",
   "meetings.listPage.recorded": "Recorded",
   "meetings.listPage.recording": "Recording",
-  "meetings.listPage.searchFindsWordsInMeeting": "Searches titles and transcripts.",
+  "meetings.listPage.searchFindsWordsInMeeting":
+    "Searches titles and transcripts.",
   "meetings.listPage.searchMeetings": "Search meetings",
   "meetings.listPage.showOlderMeetings": "Show older meetings",
   "meetings.listPage.startARecordingAboveWhen":
@@ -2694,7 +3025,8 @@ export const englishMessages = {
   "meetings.notes.writtenByAgent": "Written by an agent · {time}",
   "meetings.player.backCountSeconds_one": "Back {count} second",
   "meetings.player.backCountSeconds_other": "Back {count} seconds",
-  "meetings.player.formatclockOfFormatclock2": "{formatClock} of {formatClock2}",
+  "meetings.player.formatclockOfFormatclock2":
+    "{formatClock} of {formatClock2}",
   "meetings.player.forwardCountSeconds_one": "Forward {count} second",
   "meetings.player.forwardCountSeconds_other": "Forward {count} seconds",
   "meetings.player.pause": "Pause",
@@ -2709,24 +3041,29 @@ export const englishMessages = {
     "Allow this app to use the microphone in your computer's privacy settings, then start again.",
   "meetings.recorderPanel.allowThisAppToRecordComputerAudio":
     "Allow this app under System Settings > Privacy & Security > Screen & System Audio Recording, then start again.",
-  "meetings.recorderPanel.aPieceOfTheAudio": "Part of the audio was too large to upload.",
+  "meetings.recorderPanel.aPieceOfTheAudio":
+    "Part of the audio was too large to upload.",
   "meetings.recorderPanel.audio": "Audio",
   "meetings.recorderPanel.cancel": "Cancel",
   "meetings.recorderPanel.canTRecordATab": "Can't record a tab's audio here",
-  "meetings.recorderPanel.canTRecordComputerAudio": "Can't record computer audio",
+  "meetings.recorderPanel.canTRecordComputerAudio":
+    "Can't record computer audio",
   "meetings.recorderPanel.capturingwhatValue": "{capturingWhat} {value}",
   "meetings.recorderPanel.computerAudio": "Computer audio",
   "meetings.recorderPanel.computerAudioDidnTStart":
     "Computer audio didn't start. Start again, or record without computer audio.",
-  "meetings.recorderPanel.computerAudioIsnTAllowed": "Computer audio isn't allowed",
+  "meetings.recorderPanel.computerAudioIsnTAllowed":
+    "Computer audio isn't allowed",
   "meetings.recorderPanel.connectAMicrophoneOrCheck":
     "Connect a microphone or check that no other app is holding it, then start again.",
-  "meetings.recorderPanel.couldnTRenameThisMeeting": "Couldn't rename this meeting",
+  "meetings.recorderPanel.couldnTRenameThisMeeting":
+    "Couldn't rename this meeting",
   "meetings.recorderPanel.detectLanguage": "Detect language",
   "meetings.recorderPanel.finishing": "Finishing",
   "meetings.recorderPanel.includeATabSAudio": "Include a tab's audio",
   "meetings.recorderPanel.includeComputerAudio": "Include computer audio",
-  "meetings.recorderPanel.recordingOptionsLanguage": "Recording options, {language}",
+  "meetings.recorderPanel.recordingOptionsLanguage":
+    "Recording options, {language}",
   "meetings.recorderPanel.listeningWhatSSaidShows": "Listening…",
   "meetings.recorderPanel.liveTextIsnTAvailable":
     "No live text this time.{value} You still get the transcript after you stop.",
@@ -2739,7 +3076,8 @@ export const englishMessages = {
     "Microphone only: other people on a call won't be heard.",
   "meetings.recorderPanel.nameIt": "Name it",
   "meetings.recorderPanel.nameThisMeeting": "Name this meeting",
-  "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting, or it's named for you",
+  "meetings.recorderPanel.nameThisMeetingOptional":
+    "Name this meeting, or it's named for you",
   "meetings.recorderPanel.namedForYou": "Named for you",
   "meetings.recorderPanel.newRecording": "New recording",
   "meetings.recorderPanel.noLiveTranscriptionProviderIs":
@@ -2747,8 +3085,10 @@ export const englishMessages = {
   "meetings.recorderPanel.noMicrophoneFound": "No microphone found",
   "meetings.recorderPanel.noSoundServerIsRunning":
     "No sound server (PipeWire or PulseAudio) is running. Start one, or record without computer audio.",
-  "meetings.recorderPanel.nothingIsRecordedWhilePaused": "Nothing is recorded while paused.",
-  "meetings.recorderPanel.nothingWasRecordedSoNo": "Nothing was recorded, so no meeting was saved.",
+  "meetings.recorderPanel.nothingIsRecordedWhilePaused":
+    "Nothing is recorded while paused.",
+  "meetings.recorderPanel.nothingWasRecordedSoNo":
+    "Nothing was recorded, so no meeting was saved.",
   "meetings.recorderPanel.notUploadingNoConnectionRecording":
     "Offline. Recording continues and uploads when you're back online.",
   "meetings.recorderPanel.notUploadingNoConnectionThe":
@@ -2761,13 +3101,16 @@ export const englishMessages = {
   "meetings.recorderPanel.recordingNotUploading": "Recording · not uploading",
   "meetings.recorderPanel.recordingStopped": "Recording stopped",
   "meetings.recorderPanel.recordingTheTabSAudio": "Recording the tab's audio.",
-  "meetings.recorderPanel.recordingYourComputerSAudio": "Recording your computer's audio.",
+  "meetings.recorderPanel.recordingYourComputerSAudio":
+    "Recording your computer's audio.",
   "meetings.recorderPanel.recordingYourMicrophoneAndComputerAudio":
     "Recording your microphone and computer audio.",
   "meetings.recorderPanel.recordingYourMicrophoneAndTabAudio":
     "Recording your microphone and the tab's audio.",
-  "meetings.recorderPanel.recordingYourMicrophoneOnly": "Recording your microphone.",
-  "meetings.recorderPanel.recordsTheOtherPeopleIn": "Hears the other side of a call in any app",
+  "meetings.recorderPanel.recordingYourMicrophoneOnly":
+    "Recording your microphone.",
+  "meetings.recorderPanel.recordsTheOtherPeopleIn":
+    "Hears the other side of a call in any app",
   "meetings.recorderPanel.recordsTheOtherPeopleIn2":
     "Hears a call in another tab, like Google Meet",
   "meetings.recorderPanel.recordsYourMicrophoneAndEverything":
@@ -2780,8 +3123,10 @@ export const englishMessages = {
   "meetings.recorderPanel.resume": "Resume",
   "meetings.recorderPanel.save": "Save",
   "meetings.recorderPanel.saving": "Saving…",
-  "meetings.recorderPanel.savingTheRestOfTheAudio": "Saving the rest of the audio.",
-  "meetings.recorderPanel.showsWhatSSaidAs": "Shows rough text while you record.",
+  "meetings.recorderPanel.savingTheRestOfTheAudio":
+    "Saving the rest of the audio.",
+  "meetings.recorderPanel.showsWhatSSaidAs":
+    "Shows rough text while you record.",
   "meetings.recorderPanel.starting": "Starting",
   "meetings.recorderPanel.startingAllowTheMicrophoneAnd":
     "Starting… Allow the microphone and computer audio if asked.",
@@ -2793,7 +3138,8 @@ export const englishMessages = {
   "meetings.recorderPanel.stop": "Stop",
   "meetings.recorderPanel.tabAudio": "Tab audio",
   "meetings.recorderPanel.takeNotes": "Take notes",
-  "meetings.recorderPanel.theLiveTranscriptAddsAbout": "About ${value} per hour.",
+  "meetings.recorderPanel.theLiveTranscriptAddsAbout":
+    "About ${value} per hour.",
   "meetings.recorderPanel.theLiveTranscriptionAccountHas":
     "Live transcription is out of credit. Ask an admin to top it up.",
   "meetings.recorderPanel.theLiveTranscriptionProviderIs":
@@ -2802,8 +3148,10 @@ export const englishMessages = {
     "Live transcription rejected the workspace's key. Ask an admin to check it.",
   "meetings.recorderPanel.theMeetingWasDeletedOr":
     "The meeting was deleted, or you no longer have access to it.",
-  "meetings.recorderPanel.theServerRefusedTheAudio": "The server refused the audio.",
-  "meetings.recorderPanel.theServerRefusedTheAudio2": "The server refused the audio: {value}.",
+  "meetings.recorderPanel.theServerRefusedTheAudio":
+    "The server refused the audio.",
+  "meetings.recorderPanel.theServerRefusedTheAudio2":
+    "The server refused the audio: {value}.",
   "meetings.recorderPanel.theTabSAudioWasn": "The tab's audio wasn't shared",
   "meetings.recorderPanel.thisBrowserCanTRecord": "This browser can't record",
   "meetings.recorderPanel.thisBrowserCanTShare":
@@ -2821,7 +3169,8 @@ export const englishMessages = {
     "Use a current version of Chrome, Edge, Safari or Firefox to record meetings.",
   "meetings.recorderPanel.whenYourBrowserAsksWhat":
     "When your browser asks what to share, pick the meeting tab and turn on Share tab audio. Or record without it.",
-  "meetings.recorderPanel.youCanUseOtherPages": "Closing this tab stops the recording.",
+  "meetings.recorderPanel.youCanUseOtherPages":
+    "Closing this tab stops the recording.",
   "meetings.recorderPanel.youNoLongerHavePermission":
     "You no longer have permission to add recordings to this workspace.",
   "meetings.recorderPanel.theUsageAllowanceIsUsed":
@@ -2832,7 +3181,8 @@ export const englishMessages = {
   "meetings.recordings.durationSeconds": "{seconds}\u00a0sec",
   "meetings.recordings.durationMinutes": "{minutes}\u00a0min",
   "meetings.recordings.durationHours": "{hours}\u00a0h",
-  "meetings.recordings.durationHoursMinutes": "{hours}\u00a0h {minutes}\u00a0min",
+  "meetings.recordings.durationHoursMinutes":
+    "{hours}\u00a0h {minutes}\u00a0min",
   /** A meeting's state in the list. */
   "meetings.recordings.inProgress": "In progress",
   "meetings.recordings.transcribing": "Transcribing",
@@ -2886,7 +3236,8 @@ export const englishMessages = {
   "meetings.settings.agreedForThemselves": "Agreed for themselves",
   "meetings.settings.agreedForThemselvesNotHeard":
     "Agreed for themselves · Not heard in a meeting yet",
-  "meetings.settings.anAgentWritesTheNotes": "An agent writes the notes after each meeting",
+  "meetings.settings.anAgentWritesTheNotes":
+    "An agent writes the notes after each meeting",
   "meetings.settings.anOrganizationAdminNeedsTo":
     "An organization admin needs to connect a transcription provider before meetings are transcribed.",
   "meetings.settings.anOrganizationAdminNeedsTo2":
@@ -2894,18 +3245,21 @@ export const englishMessages = {
   "meetings.settings.asLongAsTheMeeting": "As long as the meeting",
   "meetings.settings.audioIsDeletedAfterRetentionperiodname":
     "Audio is deleted after {retentionPeriodName}",
-  "meetings.settings.audioIsDeletedOnceThe": "Audio is deleted once the transcript is ready",
+  "meetings.settings.audioIsDeletedOnceThe":
+    "Audio is deleted once the transcript is ready",
   "meetings.settings.audioIsKeptAsLong": "Audio is kept as long as its meeting",
   "meetings.settings.connectATranscriptionProviderTo":
     "Connect a transcription provider to transcribe meetings",
   "meetings.settings.connectProvidernameFirst": "Connect {providerName} first",
   "meetings.settings.connectProvidernameToShowA":
     "Connect {providerName} to show a live transcript",
-  "meetings.settings.connectYourProvidernameFirst": "Connect your {providerName} first",
+  "meetings.settings.connectYourProvidernameFirst":
+    "Connect your {providerName} first",
   "meetings.settings.couldnTForgetThisVoice": "Couldn't forget this voice",
   "meetings.settings.couldnTForgetYourVoice": "Couldn't forget your voice",
   "meetings.settings.couldnTRememberYourVoice": "Couldn't remember your voice",
-  "meetings.settings.couldnTUpdateMeetingSettings": "Couldn't update meeting settings",
+  "meetings.settings.couldnTUpdateMeetingSettings":
+    "Couldn't update meeting settings",
   "meetings.settings.countDays_one": "{count} day",
   "meetings.settings.countDays_other": "{count} days",
   "meetings.settings.countedFromWhenAMeeting":
@@ -2918,15 +3272,18 @@ export const englishMessages = {
     "Defaults for new meetings, and how long meetings are kept.",
   "meetings.settings.deleteAudioAfterRetentionperiodname":
     "Delete audio after {retentionPeriodName}?",
-  "meetings.settings.deleteAudioOnceTranscribed": "Delete audio once transcribed?",
-  "meetings.settings.deleteMeetingsAfterPeriod": "Delete meetings after {period}?",
+  "meetings.settings.deleteAudioOnceTranscribed":
+    "Delete audio once transcribed?",
+  "meetings.settings.deleteMeetingsAfterPeriod":
+    "Delete meetings after {period}?",
   "meetings.settings.deleteOldAudio": "Delete old audio",
   "meetings.settings.deleteOldMeetings": "Delete old meetings",
   "meetings.settings.deleteOnceTranscribed": "Delete once transcribed",
   "meetings.settings.deleteTranscribedAudio": "Delete transcribed audio",
   "meetings.settings.deletingTheAudioKeepsThe":
     "Deleting the audio keeps the transcript, but the meeting can't be played or transcribed again.",
-  "meetings.settings.displaynameSVoiceIsForgotten": "{displayName}'s voice is forgotten",
+  "meetings.settings.displaynameSVoiceIsForgotten":
+    "{displayName}'s voice is forgotten",
   "meetings.settings.everyoneInThisWorkspaceCan":
     "Everyone in this workspace can open a new meeting. Whoever recorded it can make it private.",
   "meetings.settings.everyVoiceRememberedInThis":
@@ -2944,28 +3301,39 @@ export const englishMessages = {
   "meetings.settings.meetings": "Meetings",
   "meetings.settings.meetingsAreDeletedAfterRetentionperiodname":
     "Meetings are deleted after {retentionPeriodName}",
-  "meetings.settings.meetingsAreKeptUntilSomeone": "Meetings are kept until someone deletes them",
-  "meetings.settings.meetingsNoLongerGetNotes": "Meetings no longer get notes written for them",
+  "meetings.settings.meetingsAreKeptUntilSomeone":
+    "Meetings are kept until someone deletes them",
+  "meetings.settings.meetingsNoLongerGetNotes":
+    "Meetings no longer get notes written for them",
   "meetings.settings.meetingsRecordedMoreThanPeriod":
     "Meetings older than {period} are deleted now with their audio and transcripts, and the rest when they turn {period}. This can't be undone.",
   "meetings.settings.newMeetingsArePrivate": "New meetings are private",
-  "meetings.settings.newMeetingsAreSharedWith": "New meetings are shared with the workspace",
-  "meetings.settings.newMeetingsAreTranscribedIn": "New meetings are transcribed in {languageName}",
+  "meetings.settings.newMeetingsAreSharedWith":
+    "New meetings are shared with the workspace",
+  "meetings.settings.newMeetingsAreTranscribedIn":
+    "New meetings are transcribed in {languageName}",
   "meetings.settings.newMeetingsAreTranscribedIn2":
     "Whoever records can pick another. Pick a language if most meetings use it: detecting it can drift in the live text.",
-  "meetings.settings.newMeetingsDetectTheirLanguage": "New meetings detect their language",
-  "meetings.settings.newMeetingsDonTShow": "New meetings don't show a live transcript",
-  "meetings.settings.newMeetingsShowALive": "New meetings show a live transcript",
+  "meetings.settings.newMeetingsDetectTheirLanguage":
+    "New meetings detect their language",
+  "meetings.settings.newMeetingsDonTShow":
+    "New meetings don't show a live transcript",
+  "meetings.settings.newMeetingsShowALive":
+    "New meetings show a live transcript",
   "meetings.settings.newMeetingsUseName": "New meetings use {name}",
-  "meetings.settings.newMeetingsUseTheDefault": "New meetings use the default model",
+  "meetings.settings.newMeetingsUseTheDefault":
+    "New meetings use the default model",
   "meetings.settings.nobodyElseYetPeopleCan": "Nobody else yet.",
   "meetings.settings.onlyMe": "Only me",
   "meetings.settings.onlyThePersonWhoRecorded":
     "Only the person who recorded a meeting can open it, until they share it with the workspace.",
   "meetings.settings.onlyTheyCanForgetIt": "Only they can forget it",
-  "meetings.settings.onlyWorkspaceAdminsCanChange": "Only workspace admins can change this.",
-  "meetings.settings.peopleAreRecognizedByVoice": "People are recognized by voice",
-  "meetings.settings.peopleWhoseVoicesSuggestNames": "Voices that suggest names in meetings.",
+  "meetings.settings.onlyWorkspaceAdminsCanChange":
+    "Only workspace admins can change this.",
+  "meetings.settings.peopleAreRecognizedByVoice":
+    "People are recognized by voice",
+  "meetings.settings.peopleWhoseVoicesSuggestNames":
+    "Voices that suggest names in meetings.",
   "meetings.settings.providernameChargesAboutValuePer":
     " {providerName} adds about ${value} per hour of audio.",
   "meetings.settings.providernameIsnTAvailableHere":
@@ -2978,10 +3346,12 @@ export const englishMessages = {
   "meetings.settings.saving": "Saving…",
   "meetings.settings.showsWhatSSaidWhile":
     "Shows rough text while recording. It can be turned off per meeting.{value}",
-  "meetings.settings.someoneConfirmedTheyAgreed": "Someone confirmed they agreed",
+  "meetings.settings.someoneConfirmedTheyAgreed":
+    "Someone confirmed they agreed",
   "meetings.settings.someoneConfirmedTheyAgreedNot":
     "Someone confirmed they agreed · Not heard in a meeting yet",
-  "meetings.settings.stopRecognizingPeopleByVoice": "Stop recognizing people by voice?",
+  "meetings.settings.stopRecognizingPeopleByVoice":
+    "Stop recognizing people by voice?",
   "meetings.settings.suggestsNamesForSpeakersIt":
     "Suggests names for voices heard before. Only people who agreed are recognized. Turning it off forgets every voice.",
   "meetings.settings.suggestsNamesForSpeakersIt2":
@@ -3006,33 +3376,39 @@ export const englishMessages = {
     "When a meeting's transcript is ready, an agent writes its notes: a summary, decisions and action items.",
   "meetings.settings.whoSeesNewMeetings": "Who sees new meetings",
   "meetings.settings.workspace": "Workspace",
-  "meetings.settings.writeNotesAfterEachMeeting": "Write notes after each meeting",
+  "meetings.settings.writeNotesAfterEachMeeting":
+    "Write notes after each meeting",
   "meetings.settings.youAgreedOpengeniLearnsYour":
     "You agreed. Your voice is learned the next time you're named in a meeting.",
   "meetings.settings.yourSubscription": "Your subscription",
   "meetings.settings.yourVoice": "Your voice",
   "meetings.settings.yourVoiceIsForgotten": "Your voice is forgotten",
-  "meetings.settings.yourVoiceWillBeRemembered": "Your voice will be remembered",
+  "meetings.settings.yourVoiceWillBeRemembered":
+    "Your voice will be remembered",
   "meetings.transcript.changeSpeaker": "Change speaker",
   "meetings.transcript.corrected": " (corrected)",
   "meetings.transcript.correctTheWords": "Correct the words",
   /** The pencil beside a transcript turn; opens "Correct the words" for it. */
-  "meetings.transcript.correctTheWordsOfNameAt": "Correct the words of {name} at {formatClock}",
+  "meetings.transcript.correctTheWordsOfNameAt":
+    "Correct the words of {name} at {formatClock}",
   "meetings.transcript.couldnTChangeTheSpeaker": "Couldn't change the speaker",
   "meetings.transcript.couldnTClearThisName": "Couldn't clear this name",
   "meetings.transcript.couldnTConfirmThisName": "Couldn't confirm this name",
   "meetings.transcript.couldnTForgetThisVoice": "Couldn't forget this voice",
   "meetings.transcript.couldnTNameThisSpeaker": "Couldn't name this speaker",
-  "meetings.transcript.couldnTSaveTheCorrection": "Couldn't save the correction",
+  "meetings.transcript.couldnTSaveTheCorrection":
+    "Couldn't save the correction",
   "meetings.transcript.couldnTSaveThisName": "Couldn't save this name.",
   "meetings.transcript.couldnTTurnDownThis": "Couldn't turn down this name",
-  "meetings.transcript.fixWhatTheTranscriptGot": "Fix what the transcript got wrong.",
+  "meetings.transcript.fixWhatTheTranscriptGot":
+    "Fix what the transcript got wrong.",
   "meetings.transcript.forExampleMajaBerg": "For example, Maja Berg",
   "meetings.transcript.forgetDisplaynameSVoice": "Forget {displayName}'s voice",
   "meetings.transcript.forgetMyVoice": "Forget my voice",
   "meetings.transcript.isThisDisplayname": "Is this {displayName}?",
   "meetings.transcript.itSMe": "It's me",
-  "meetings.transcript.moreActionsForNameAt": "More actions for {name} at {formatClock}",
+  "meetings.transcript.moreActionsForNameAt":
+    "More actions for {name} at {formatClock}",
   "meetings.transcript.name": "Name",
   "meetings.transcript.nameChangeWhoThisIs": "{name}, change who this is",
   "meetings.transcript.nameNameThisSpeaker": "{name}, name this speaker",
@@ -3041,7 +3417,8 @@ export const englishMessages = {
   "meetings.transcript.noLeaveUnnamed": "No, leave unnamed",
   "meetings.transcript.orPickWhoItIs": "Or pick who it is",
   "meetings.transcript.playFromFormatclock": "Play from {formatClock}",
-  "meetings.transcript.rememberDisplaynameSVoice": "Remember {displayName}'s voice…",
+  "meetings.transcript.rememberDisplaynameSVoice":
+    "Remember {displayName}'s voice…",
   "meetings.transcript.rememberMyVoice": "Remember my voice",
   "meetings.transcript.removeName": "Remove name",
   "meetings.transcript.samePersonAsDisplayname": "Same person as {displayName}",
@@ -3049,11 +3426,14 @@ export const englishMessages = {
   "meetings.transcript.saveName": "Save name",
   "meetings.transcript.saving": "Saving…",
   "meetings.transcript.someoneNew": "Someone new…",
-  "meetings.transcript.speakernameAtFormatclock": "{speakerName} at {formatClock}",
+  "meetings.transcript.speakernameAtFormatclock":
+    "{speakerName} at {formatClock}",
   "meetings.transcript.suggested": "Suggested",
-  "meetings.transcript.suggestedBecauseTheVoiceSounds": "Sounds like them ({suggestionMatch})",
+  "meetings.transcript.suggestedBecauseTheVoiceSounds":
+    "Sounds like them ({suggestionMatch})",
   "meetings.transcript.suggestedBecauseTheVoiceSounds2": "Sounds like them",
-  "meetings.transcript.theNameIsAddedTo": "Anyone in the workspace can pick this name later.",
+  "meetings.transcript.theNameIsAddedTo":
+    "Anyone in the workspace can pick this name later.",
   "meetings.transcript.transcript": "Transcript",
   "meetings.transcript.usedToSuggestNamesIn": "Remembered voice",
   "meetings.transcript.valueMatch": "{value}% match",
@@ -3076,19 +3456,23 @@ export const englishMessages = {
   "messageTimeline.auto": "Auto",
   "messageTimeline.backToYourMessage": "Back to your message",
   "messageTimeline.cancelled": "Cancelled",
-  "messageTimeline.chatHistoryAboveIsUnchanged": "Chat history above is unchanged",
+  "messageTimeline.chatHistoryAboveIsUnchanged":
+    "Chat history above is unchanged",
   "messageTimeline.codexApps": "Codex Apps",
-  "messageTimeline.compactingConversationHistory": "Compacting conversation history…",
+  "messageTimeline.compactingConversationHistory":
+    "Compacting conversation history…",
   "messageTimeline.connect": "Connect",
   "messageTimeline.connecting": "connecting",
   "messageTimeline.connectProvider": "Connect {provider}",
   "messageTimeline.continuingTowardTheGoal": "Continuing toward the goal",
-  "messageTimeline.conversationHistoryCompacted": "Conversation history compacted",
+  "messageTimeline.conversationHistoryCompacted":
+    "Conversation history compacted",
   "messageTimeline.conversationHistoryCompactedBeforeAfter":
     "Conversation history compacted · ~{before} → ~{after} estimated history tokens",
   "messageTimeline.copyAnswer": "Copy answer",
   "messageTimeline.copyMessage": "Copy message",
-  "messageTimeline.couldnTLoadLaterActivity": "Couldn’t load later activity. {message}",
+  "messageTimeline.couldnTLoadLaterActivity":
+    "Couldn’t load later activity. {message}",
   "messageTimeline.couldnTStart": "Couldn't start",
   "messageTimeline.details": "Details",
   "messageTimeline.earlierMessagesSummarizedForNewModel":
@@ -3109,11 +3493,13 @@ export const englishMessages = {
   "messageTimeline.goalUpdated": "Goal updated",
   "messageTimeline.installProvider": "Install {provider}",
   "messageTimeline.itIsnTConnectedYet": "It isn't connected yet.",
-  "messageTimeline.itNeedsAdditionalAccessTo": "It needs additional access to continue.",
+  "messageTimeline.itNeedsAdditionalAccessTo":
+    "It needs additional access to continue.",
   "messageTimeline.itNeedsPermissionTo":
     "It needs your permission to {access}. Everything it can already do stays the same.",
   "messageTimeline.itsAccessExpired": "Its access expired.",
-  "messageTimeline.itsConnectionNeedsAttention": "Its connection needs attention.",
+  "messageTimeline.itsConnectionNeedsAttention":
+    "Its connection needs attention.",
   "messageTimeline.jumpingToStart": "Jumping to start…",
   "messageTimeline.jumpToLatest": "Jump to latest",
   "messageTimeline.jumpToStart": "Jump to start",
@@ -3157,7 +3543,8 @@ export const englishMessages = {
   "messageTimeline.skipped": "Skipped",
   "messageTimeline.summarizingEarlierMessagesForNewModel":
     "Summarizing earlier messages for the new model…",
-  "messageTimeline.theAgentRequestedStructuredInput": "The agent requested structured input.",
+  "messageTimeline.theAgentRequestedStructuredInput":
+    "The agent requested structured input.",
   "messageTimeline.thisAutomationWasNotGranted":
     "This automation was not granted access to your personal connection.",
   "messageTimeline.thisConnectionCannotAuthenticateThe":
@@ -3184,9 +3571,12 @@ export const englishMessages = {
   "messageTimeline.youLetTheAgentDecide": "You let the agent decide",
   "modelPicker.codexOnlySession": "Codex-only session",
   "modelPicker.model": "Model",
-  "modelPickerModel.billedToTheConnectedProvider": "Billed to the connected provider account",
-  "modelPickerModel.billedToTheOrganizationProvider": "Billed to the organization provider account",
-  "modelPickerModel.billedToTheWorkspaceProvider": "Billed to the workspace provider account",
+  "modelPickerModel.billedToTheConnectedProvider":
+    "Billed to the connected provider account",
+  "modelPickerModel.billedToTheOrganizationProvider":
+    "Billed to the organization provider account",
+  "modelPickerModel.billedToTheWorkspaceProvider":
+    "Billed to the workspace provider account",
   "modelPickerModel.chatgptCodexPlan": "ChatGPT / Codex plan",
   "modelPickerModel.claudePlan": "Claude plan",
   "modelPickerModel.codexOnlySession": "Codex-only session",
@@ -3196,11 +3586,13 @@ export const englishMessages = {
   "modelPickerModel.free": "Free",
   "modelPickerModel.loadingModelCatalog": "Loading model catalog…",
   "modelPickerModel.modelAndEffort": "Model and effort",
-  "modelPickerModel.noMatchingModelsTryA": "No matching models. Try a model or provider name.",
+  "modelPickerModel.noMatchingModelsTryA":
+    "No matching models. Try a model or provider name.",
   "modelPickerModel.noModelsAvailable": "No models available.",
   "modelPickerModel.openModels": "Open Models",
   "modelPickerModel.providedByOpengeni": "Provided by {product}",
-  "modelPickerModel.providerTermsAndLimitsApply": "Provider terms and limits apply",
+  "modelPickerModel.providerTermsAndLimitsApply":
+    "Provider terms and limits apply",
   "modelPickerModel.searchModelsOrProviders": "Search models or providers",
   "modelPickerModel.searchModelsOrProviders2": "Search models or providers…",
   "modelPickerModel.selected": "Selected",
@@ -3208,39 +3600,55 @@ export const englishMessages = {
   "modelPickerModel.supergrokXaiPlan": "SuperGrok / xAI plan",
   "modelPickerModel.thinking": "Thinking",
   "modelPickerModel.thinkingEffort": "Thinking effort",
-  "modelPickerModel.thisModelCannotViewThe": "This model cannot view the attached images.",
-  "modelPickerModel.useASubscriptionOrA": "Use a subscription or a provider key you already have.",
+  "modelPickerModel.thisModelCannotViewThe":
+    "This model cannot view the attached images.",
+  "modelPickerModel.useASubscriptionOrA":
+    "Use a subscription or a provider key you already have.",
   "modelPickerModel.xHigh": "X-high",
   "modelPolicy.apiKeys": "API keys",
   "modelPolicy.billedToTheOrganizationAnthropic":
     "Billed to the organization Anthropic API account",
-  "modelPolicy.billedToTheOrganizationOpenrouter": "Billed to the organization OpenRouter account",
-  "modelPolicy.billedToTheOrganizationOpper": "Billed to the organization Opper account",
-  "modelPolicy.billedToTheOrganizationOpenai": "Billed to the organization OpenAI API account",
+  "modelPolicy.billedToTheOrganizationOpenrouter":
+    "Billed to the organization OpenRouter account",
+  "modelPolicy.billedToTheOrganizationOpper":
+    "Billed to the organization Opper account",
+  "modelPolicy.billedToTheOrganizationOpenai":
+    "Billed to the organization OpenAI API account",
   "modelPolicy.billedToTheOrganizationAzureOpenai":
     "Billed to the organization Azure OpenAI account",
-  "modelPolicy.billedToTheOrganizationProvider": "Billed to the organization provider account",
-  "modelPolicy.billedToTheOrganizationVercel": "Billed to the organization Vercel account",
-  "modelPolicy.billedToTheWorkspaceAnthropic": "Billed to the workspace Anthropic API account",
-  "modelPolicy.billedToTheWorkspaceOpenrouter": "Billed to the workspace OpenRouter account",
-  "modelPolicy.billedToTheWorkspaceOpper": "Billed to the workspace Opper account",
-  "modelPolicy.billedToTheWorkspaceProvider": "Billed to the workspace provider account",
-  "modelPolicy.billedToTheWorkspaceVercel": "Billed to the workspace Vercel account",
+  "modelPolicy.billedToTheOrganizationProvider":
+    "Billed to the organization provider account",
+  "modelPolicy.billedToTheOrganizationVercel":
+    "Billed to the organization Vercel account",
+  "modelPolicy.billedToTheWorkspaceAnthropic":
+    "Billed to the workspace Anthropic API account",
+  "modelPolicy.billedToTheWorkspaceOpenrouter":
+    "Billed to the workspace OpenRouter account",
+  "modelPolicy.billedToTheWorkspaceOpper":
+    "Billed to the workspace Opper account",
+  "modelPolicy.billedToTheWorkspaceProvider":
+    "Billed to the workspace provider account",
+  "modelPolicy.billedToTheWorkspaceVercel":
+    "Billed to the workspace Vercel account",
   "modelPolicy.blockedByWorkspacePolicy": "Blocked by workspace policy",
   "modelPolicy.claudeSubscription": "Claude",
-  "modelPolicy.claudeSubscriptionExternalBilling": "Claude subscription · external billing",
+  "modelPolicy.claudeSubscriptionExternalBilling":
+    "Claude subscription · external billing",
   "modelPolicy.codex": "Codex",
-  "modelPolicy.codexSubscriptionExternalBilling": "Codex subscription · external billing",
+  "modelPolicy.codexSubscriptionExternalBilling":
+    "Codex subscription · external billing",
   "modelPolicy.connectedClaudeSubscription": "Connected Claude subscription",
   "modelPolicy.connectedCodexSubscription": "Connected Codex subscription",
-  "modelPolicy.connectedSupergrokSubscription": "Connected SuperGrok subscription",
+  "modelPolicy.connectedSupergrokSubscription":
+    "Connected SuperGrok subscription",
   "modelPolicy.credentialNotReady": "Credential not ready",
   "modelPolicy.credentialsRequired": "Credentials required",
   "modelPolicy.deploymentApiKey": "Deployment API key",
   "modelPolicy.deploymentAzureIdentity": "Deployment Azure identity",
   "modelPolicy.deploymentProvidedConnection": "Deployment-provided connection",
   "modelPolicy.external": "External",
-  "modelPolicy.externalProviderNoOpengeniCredits": "External provider · no {product} credits",
+  "modelPolicy.externalProviderNoOpengeniCredits":
+    "External provider · no {product} credits",
   "modelPolicy.extraHigh": "Extra high",
   "modelPolicy.fast": "Fast",
   "modelPolicy.freeCredits": "Free credits",
@@ -3252,7 +3660,8 @@ export const englishMessages = {
   "modelPolicy.needsCredits": "Not covered by your credits",
   "modelPolicy.notEntitled": "Not entitled",
   "modelPolicy.opengeniCredits": "{product} credits",
-  "modelPolicy.opengeniCreditsAutomaticManagedRoute": "{product} credits · automatic managed route",
+  "modelPolicy.opengeniCreditsAutomaticManagedRoute":
+    "{product} credits · automatic managed route",
   "modelPolicy.opengeniCreditsOff": "{product} credits off",
   "modelPolicy.opengeniNoModelCredits": "{product} · no model credits",
   "modelPolicy.organizationProviders": "Organization providers",
@@ -3261,7 +3670,8 @@ export const englishMessages = {
   "modelPolicy.reconnectRequired": "Reconnect required",
   "modelPolicy.routeUnknown": "Route unknown",
   "modelPolicy.standard": "Standard",
-  "modelPolicy.supergrokSubscriptionExternalBilling": "SuperGrok subscription · external billing",
+  "modelPolicy.supergrokSubscriptionExternalBilling":
+    "SuperGrok subscription · external billing",
   "modelPolicy.ultrafast": "Ultrafast",
   "modelPolicy.unavailable": "Unavailable",
   "modelPolicy.unsupported": "Unsupported",
@@ -3270,7 +3680,8 @@ export const englishMessages = {
     "Uses the connected Claude subscription · no {product} credits",
   "modelPolicy.usesTheWorkspaceClaudeSubscription":
     "Uses the workspace Claude subscription · no {product} credits",
-  "modelPolicy.workspaceOpenrouterConnection": "Workspace OpenRouter connection",
+  "modelPolicy.workspaceOpenrouterConnection":
+    "Workspace OpenRouter connection",
   "modelPolicy.workspaceOpperConnection": "Workspace Opper connection",
   "modelPolicy.workspaceProviderConnection": "Workspace provider connection",
   "modelPolicy.workspaceProviders": "Workspace providers",
@@ -3280,7 +3691,8 @@ export const englishMessages = {
   "modelPolicyPicker.codex": "Codex",
   "modelPolicyPicker.externalProvider": "External provider",
   "modelPolicyPicker.models": "Models",
-  "modelPolicyPicker.organizationProviderAccount": "Organization provider account",
+  "modelPolicyPicker.organizationProviderAccount":
+    "Organization provider account",
   "modelPolicyPicker.workspaceProviderAccount": "Workspace provider account",
   "modelPolicyPickerMenu.aiGateway": "AI Gateway",
   "modelPolicyPickerMenu.apiKey": "API key",
@@ -3299,19 +3711,23 @@ export const englishMessages = {
   "native.presentation.approvalRequired": "Approval required",
   "native.presentation.approve": "Approve",
   "native.presentation.archivedMemory": "Archived memory",
-  "native.presentation.askTheAgentToHelp": "Ask the agent to help with work in this session.",
+  "native.presentation.askTheAgentToHelp":
+    "Ask the agent to help with work in this session.",
   "native.presentation.assistant": "Assistant",
   "native.presentation.attachDocument": "Attach document",
   "native.presentation.attachedFile": "Attached file",
   "native.presentation.attachImage": "Attach image",
   "native.presentation.cancelled": "Cancelled",
-  "native.presentation.compactingConversationHistory": "Compacting conversation history",
+  "native.presentation.compactingConversationHistory":
+    "Compacting conversation history",
   "native.presentation.complete": "Complete",
   "native.presentation.connecting": "Connecting…",
-  "native.presentation.connectionRequired": "Connection required for {provider}",
+  "native.presentation.connectionRequired":
+    "Connection required for {provider}",
   "native.presentation.contextUpdated": "Context updated",
   "native.presentation.continuingTowardTheGoal": "Continuing toward the goal",
-  "native.presentation.conversationHistoryCompacted": "Conversation history compacted",
+  "native.presentation.conversationHistoryCompacted":
+    "Conversation history compacted",
   "native.presentation.conversationHistoryCompactionSkipped":
     "Conversation history compaction skipped",
   "native.presentation.couldNotOpenTheFile": "Could not open the file picker.",
@@ -3335,7 +3751,8 @@ export const englishMessages = {
   "native.presentation.keptTheSessionPin": "Kept the session pin",
   "native.presentation.knowledgeArchived": "Knowledge archived",
   "native.presentation.knowledgeAwaitingReview": "Knowledge awaiting review",
-  "native.presentation.knowledgeCouldNotBeSaved": "Knowledge could not be saved",
+  "native.presentation.knowledgeCouldNotBeSaved":
+    "Knowledge could not be saved",
   "native.presentation.knowledgePublished": "Knowledge published",
   "native.presentation.knowledgeRejected": "Knowledge rejected",
   "native.presentation.limitReached": "Limit reached",
@@ -3349,7 +3766,8 @@ export const englishMessages = {
   "native.presentation.moveEarlier": "Move earlier",
   "native.presentation.moveLater": "Move later",
   "native.presentation.noCandidateSelected": "No candidate selected",
-  "native.presentation.noProductionCandidateWasSelected": "No production candidate was selected",
+  "native.presentation.noProductionCandidateWasSelected":
+    "No production candidate was selected",
   "native.presentation.noQueuedPrompts": "No queued prompts",
   "native.presentation.other": "Other",
   "native.presentation.pause": "Pause",
@@ -3383,13 +3801,15 @@ export const englishMessages = {
   "native.presentation.singleSendStarting": "Starting",
   "native.presentation.skip": "Skip",
   "native.presentation.skipped": "Skipped",
-  "native.presentation.somethingWentWrongTryAgain": "Something went wrong. Try again.",
+  "native.presentation.somethingWentWrongTryAgain":
+    "Something went wrong. Try again.",
   "native.presentation.startAConversation": "Start a conversation",
   "native.presentation.steer": "Steer",
   "native.presentation.stuck": "Stuck",
   "native.presentation.submitAnswers": "Submit answers",
   "native.presentation.thinking": "Thinking",
-  "native.presentation.thisDraftChangedElsewhere": "This draft changed elsewhere.",
+  "native.presentation.thisDraftChangedElsewhere":
+    "This draft changed elsewhere.",
   "native.presentation.thought": "Thought",
   "native.presentation.tool": "Tool",
   "native.presentation.turn": "Turn",
@@ -3397,7 +3817,8 @@ export const englishMessages = {
   "native.presentation.updatedMemoryInPlace": "Updated memory in place",
   "native.presentation.uploadFailed": "Upload failed",
   "native.presentation.uploading": "Uploading…",
-  "native.presentation.usedTheActiveSubscription": "Used the active subscription",
+  "native.presentation.usedTheActiveSubscription":
+    "Used the active subscription",
   "native.presentation.useSavedDraft": "Use saved draft",
   "native.presentation.waitingForCapacity": "Waiting for capacity",
   "native.presentation.waitingOnYou": "Waiting on you",
@@ -3406,6 +3827,22 @@ export const englishMessages = {
   "native.presentation.youAnswered": "You answered",
   "native.presentation.youLetTheAgentDecide": "You let the agent decide",
   "native.presentation.yourInputIsNeeded": "Your input is needed",
+  /** Heads the alert when an audio file shared to the app or picked with Import doesn't become a meeting. */
+  "native.meetings.audioImport.couldntImport": "Couldn't import the recording",
+  /** The Import button on the phone's meetings screen, under Record a meeting. */
+  "native.meetings.audioImport.importARecording": "Import a recording",
+  "native.meetings.audioImport.importHint":
+    "Recorded a phone call or a voice memo? Share it to this app, or import it here, for a transcript and notes.",
+  "native.meetings.audioImport.importing": "Importing…",
+  "native.meetings.audioImport.unreadable":
+    "The file couldn't be read. Share it to the app again.",
+  "native.meetings.audioImport.unsupported":
+    "This kind of audio can't be imported. Phone call recordings and voice memos (M4A) can, as can AAC, WebM and Ogg files.",
+  /** While imported recordings upload, before they show in the list. */
+  "native.meetings.audioImport.uploading_one":
+    "Uploading the imported recording…",
+  "native.meetings.audioImport.uploading_other":
+    "Uploading {count} imported recordings…",
   "native.meetings.meetingView.aNewTranscriptIsMadeFromTheFullAudio":
     "Makes a new transcript from the audio. Speaker names carry over.",
   "native.meetings.meetingView.delete": "Delete",
@@ -3416,7 +3853,8 @@ export const englishMessages = {
   "native.meetings.meetingView.recordingNowTheTranscriptStarts":
     "Recording. The transcript comes after you stop.",
   "native.meetings.meetingView.renameName": "Rename {name}",
-  "native.meetings.meetingView.searchPeopleOrTypeAName": "Search people or type a name",
+  "native.meetings.meetingView.searchPeopleOrTypeAName":
+    "Search people or type a name",
   "native.meetings.meetingView.shareWithWorkspace": "Share with workspace",
   "native.meetings.meetingView.speakerName": "Speaker name",
   "native.meetings.meetingView.thisMeetingCouldntLoad":
@@ -3442,9 +3880,11 @@ export const englishMessages = {
   "native.meetings.meetingsList.recordedDuration": "Recorded {duration}",
   "native.meetings.meetingsList.recordsWithThisPhoneSMicrophone":
     "Keeps recording when the screen is locked. You get a transcript of who said what.",
-  "native.meetings.meetingsList.showsWhatSSaid": "Shows rough text while you record.",
+  "native.meetings.meetingsList.showsWhatSSaid":
+    "Shows rough text while you record.",
   "native.meetings.meetingsList.starting": "Starting…",
-  "native.meetings.meetingsList.startRecordingAMeeting": "Start recording a meeting",
+  "native.meetings.meetingsList.startRecordingAMeeting":
+    "Start recording a meeting",
   "native.meetings.meetingsList.stopRecording": "Stop recording?",
   "native.meetings.meetingsList.theMeetingIsUploadedAndTranscribed":
     "The meeting is uploaded and transcribed.",
@@ -3454,7 +3894,8 @@ export const englishMessages = {
     "Another app or a call is using it. Try again when it's free.",
   "native.meetings.phoneText.connecting": "Connecting…",
   "native.meetings.phoneText.dateTime": "{date}, {time}",
-  "native.meetings.phoneText.itAddsAboutPerHour": "It adds about ${value} per hour of audio.",
+  "native.meetings.phoneText.itAddsAboutPerHour":
+    "It adds about ${value} per hour of audio.",
   "native.meetings.phoneText.keepsRecordingWhenLocked":
     "Keeps recording when the screen is locked or you switch apps.",
   "native.meetings.phoneText.microphoneAccessIsOff": "Microphone access is off",
@@ -3479,7 +3920,8 @@ export const englishMessages = {
   "native.realtime.agentCall.muted": "Muted",
   "native.realtime.agentCall.newSession": "New session",
   "native.realtime.agentCall.onCall": "On call",
-  "native.realtime.agentCall.statusTitleReturnToCall": "{status}: {title}. Return to call",
+  "native.realtime.agentCall.statusTitleReturnToCall":
+    "{status}: {title}. Return to call",
   "native.realtime.callView.backToChat": "Back to chat",
   "native.realtime.callView.connecting": "Connecting…",
   "native.realtime.callView.end": "End",
@@ -3490,7 +3932,8 @@ export const englishMessages = {
   "native.realtime.callView.reconnecting": "Reconnecting…",
   "native.realtime.callView.speaker": "Speaker",
   "native.realtime.callView.unmute": "Unmute",
-  "native.realtime.nativeCall.couldNotStartTheCall": "Could not start the call.",
+  "native.realtime.nativeCall.couldNotStartTheCall":
+    "Could not start the call.",
   "native.realtime.nativeCall.voiceDisconnected": "Voice disconnected.",
   "native.realtime.nativeCall.voiceIsNotReadyYet": "Voice is not ready yet.",
   "native.realtime.wakePhrase.copied": "Copied",
@@ -3517,9 +3960,11 @@ export const englishMessages = {
   "native.timeline.activity.thought": "Thought",
   "native.timeline.annotations.done": "Done",
   "native.timeline.annotations.removeAllTitle_one": "Remove this annotation?",
-  "native.timeline.annotations.removeAllTitle_other": "Remove {count} annotations?",
+  "native.timeline.annotations.removeAllTitle_other":
+    "Remove {count} annotations?",
   "native.timeline.annotations.removeAllMessage_one": "Your note will be lost.",
-  "native.timeline.annotations.removeAllMessage_other": "Your notes will be lost.",
+  "native.timeline.annotations.removeAllMessage_other":
+    "Your notes will be lost.",
   "native.timeline.annotations.removeAllConfirm": "Remove",
   "native.timeline.annotations.cancel": "Cancel",
   "native.timeline.composer.errorDismiss": "{error} Dismiss",
@@ -3533,14 +3978,17 @@ export const englishMessages = {
   "native.timeline.decisions.reject": "Reject",
   "native.timeline.decisions.rejected": "Rejected",
   "native.timeline.feedback.commentOptional": "Comment (optional)",
-  "native.timeline.feedback.couldnTSendFeedbackDetail": "Couldn't send feedback.{detail}",
+  "native.timeline.feedback.couldnTSendFeedbackDetail":
+    "Couldn't send feedback.{detail}",
   "native.timeline.feedback.tryAgain": "Try again.",
   "native.timeline.imageViewer.close": "Close",
-  "native.timeline.imageViewer.couldnTShareThisImage": "Couldn't share this image.",
+  "native.timeline.imageViewer.couldnTShareThisImage":
+    "Couldn't share this image.",
   "native.timeline.imageViewer.doubleTapToZoom": "Double-tap to zoom",
   "native.timeline.imageViewer.share": "Share",
   "native.timeline.inChatConnect.close": "Close",
-  "native.timeline.inChatConnect.couldNotLoad": "Couldn't load this connection. Try again.",
+  "native.timeline.inChatConnect.couldNotLoad":
+    "Couldn't load this connection. Try again.",
   /** Answers an MCP server's yes/no question from the inbox. */
   "native.timeline.inbox.allow": "Allow",
   "native.timeline.inbox.allowed": "Allowed",
@@ -3594,7 +4042,8 @@ export const englishMessages = {
   "native.timeline.inbox.tryAgain": "Try again.",
   "native.timeline.inbox.unread": "Unread",
   "native.timeline.inbox.unsnooze": "Unsnooze",
-  "native.timeline.inbox.untilLocaledatestringTime": "Until {localeDateString} {time}",
+  "native.timeline.inbox.untilLocaledatestringTime":
+    "Until {localeDateString} {time}",
   "native.timeline.inbox.untilTime": "Until {time}",
   "native.timeline.inbox.untilTomorrowMorning": "Until tomorrow morning",
   "native.timeline.inbox.untitledSession": "Untitled session",
@@ -3606,7 +4055,8 @@ export const englishMessages = {
   "native.timeline.messages.agentAnswered": "Agent answered",
   "native.timeline.messages.agentSkipped": "Agent skipped",
   "native.timeline.messages.agents": "Agents",
-  "native.timeline.messages.aLittleLongerThanUsual": "A little longer than usual…",
+  "native.timeline.messages.aLittleLongerThanUsual":
+    "A little longer than usual…",
   "native.timeline.messages.backToYourMessage": "Back to your message",
   "native.timeline.messages.cancel": "Cancel",
   "native.timeline.messages.cancelDictation": "Cancel dictation",
@@ -3622,8 +4072,10 @@ export const englishMessages = {
   "native.timeline.messages.copyTable": "Copy table",
   "native.timeline.messages.couldNotPinThisChat": "Couldn't pin this chat.",
   "native.timeline.messages.couldNotUnpinThisChat": "Couldn't unpin this chat.",
-  "native.timeline.messages.couldnTLoadThisSession": "Couldn't load this session",
-  "native.timeline.messages.couldnTRenameThisChat": "Couldn't rename this chat. {reason}",
+  "native.timeline.messages.couldnTLoadThisSession":
+    "Couldn't load this session",
+  "native.timeline.messages.couldnTRenameThisChat":
+    "Couldn't rename this chat. {reason}",
   "native.timeline.messages.dictate": "Dictate",
   "native.timeline.messages.discard": "Discard",
   "native.timeline.messages.expired": "Expired",
@@ -3638,7 +4090,8 @@ export const englishMessages = {
   "native.timeline.messages.knowledgeSaveFailed": "Knowledge save failed",
   "native.timeline.messages.loadingEarlierMessages": "Loading earlier messages",
   "native.timeline.messages.messageNotSent": "Message not sent",
-  "native.timeline.messages.namePreviewUnavailable": "{name} (preview unavailable)",
+  "native.timeline.messages.namePreviewUnavailable":
+    "{name} (preview unavailable)",
   "native.timeline.messages.onAMachine": "On a machine",
   "native.timeline.messages.output": "Output",
   "native.timeline.messages.pauseGoal": "Pause goal",
@@ -3656,9 +4109,11 @@ export const englishMessages = {
   "native.timeline.messages.save": "Save",
   "native.timeline.messages.savedToKnowledge": "Saved to knowledge",
   "native.timeline.messages.savedToMemory": "Saved to memory",
-  "native.timeline.messages.savedToVaultnameItemname": "Saved to {vaultName} › {itemName}",
+  "native.timeline.messages.savedToVaultnameItemname":
+    "Saved to {vaultName} › {itemName}",
   "native.timeline.messages.saving": "Saving…",
-  "native.timeline.messages.scrollSidewaysToSeeEvery": "Scroll sideways to see every column",
+  "native.timeline.messages.scrollSidewaysToSeeEvery":
+    "Scroll sideways to see every column",
   "native.timeline.messages.sendAFollowUp": "Send a follow-up...",
   "native.timeline.messages.sendFeedback": "Send feedback",
   "native.timeline.messages.sending": "Sending…",
@@ -3667,14 +4122,17 @@ export const englishMessages = {
   "native.timeline.messages.skipped": "Skipped",
   "native.timeline.messages.startACall": "Start a call",
   "native.timeline.messages.steer": "Steer",
-  "native.timeline.messages.steerFirstQueuedMessage": "Steer first queued message",
-  "native.timeline.messages.stillWaitingForAResponse": "Still waiting for a response…",
+  "native.timeline.messages.steerFirstQueuedMessage":
+    "Steer first queued message",
+  "native.timeline.messages.stillWaitingForAResponse":
+    "Still waiting for a response…",
   "native.timeline.messages.stop": "Stop",
   "native.timeline.messages.stopping": "Stopping",
   "native.timeline.messages.stuck": "Stuck",
   "native.timeline.messages.stuckAccessBody":
     "This chat can't continue until access it needs is restored. Its work is kept; try again once that's sorted.",
-  "native.timeline.messages.thatDidnTGoThrough": "That didn't go through. Try again in a moment.",
+  "native.timeline.messages.thatDidnTGoThrough":
+    "That didn't go through. Try again in a moment.",
   "native.timeline.messages.thinking": "Thinking",
   "native.timeline.messages.thisChatCouldnTStart":
     "This chat couldn't start its next step. Nothing is needed from you, and its work is kept. Try again to continue.",
@@ -3695,7 +4153,8 @@ export const englishMessages = {
     "Your dictation is ready. Insert it into your draft?",
   "native.timeline.messages.yourRecordingIsSaved": "Your recording is saved.",
   "native.timeline.messageTimeline.agentAsked": "Agent asked",
-  "native.timeline.messageTimeline.loadEarlierMessages": "Load earlier messages",
+  "native.timeline.messageTimeline.loadEarlierMessages":
+    "Load earlier messages",
   "native.timeline.messageTimeline.retry": "Retry",
   "native.timeline.messageTimeline.workerReportedBack": "Worker reported back",
   "native.timeline.modelPicker.done": "Done",
@@ -3710,13 +4169,18 @@ export const englishMessages = {
   "native.timeline.previews.preparingPreview": "Preparing preview…",
   "native.timeline.previews.previewIncomplete": "Preview incomplete",
   "native.timeline.previews.retry": "Retry",
-  "native.timeline.previews.thePreviewCouldnTLoad": "The preview couldn't load.",
+  "native.timeline.previews.thePreviewCouldnTLoad":
+    "The preview couldn't load.",
   "native.timeline.previews.theSiteCouldnTLoad": "The Site couldn't load.",
-  "native.timeline.previews.thisSiteHasNoPublished": "This Site has no published version.",
-  "native.timeline.previews.thisSiteReferenceIsInvalid": "This Site reference is invalid.",
+  "native.timeline.previews.thisSiteHasNoPublished":
+    "This Site has no published version.",
+  "native.timeline.previews.thisSiteReferenceIsInvalid":
+    "This Site reference is invalid.",
   "native.timeline.primitives.noOutput": "(no output)",
-  "native.timeline.primitives.showFullOutputLengthLines": "show full output ({length} lines)",
-  "native.timeline.secretFieldModel.aStrongPasswordWillBe": "A strong password will be generated",
+  "native.timeline.primitives.showFullOutputLengthLines":
+    "show full output ({length} lines)",
+  "native.timeline.secretFieldModel.aStrongPasswordWillBe":
+    "A strong password will be generated",
   "native.timeline.secretFieldModel.code": "Code",
   "native.timeline.secretFieldModel.generate": "Generate",
   "native.timeline.secretFieldModel.hideSecret": "Hide secret",
@@ -3724,10 +4188,13 @@ export const englishMessages = {
   "native.timeline.secretFieldModel.newPassword": "New password",
   "native.timeline.secretFieldModel.onlyMe": "Only me",
   "native.timeline.secretFieldModel.password": "Password",
-  "native.timeline.secretFieldModel.savedToVaultnameItemname": "Saved to {vaultName} › {itemName}",
-  "native.timeline.secretFieldModel.savesToTheVaultVault": "Saves to the {vault} vault",
+  "native.timeline.secretFieldModel.savedToVaultnameItemname":
+    "Saved to {vaultName} › {itemName}",
+  "native.timeline.secretFieldModel.savesToTheVaultVault":
+    "Saves to the {vault} vault",
   "native.timeline.secretFieldModel.saveTo": "Save to",
-  "native.timeline.secretFieldModel.setupKeyOrOtpauthLink": "Setup key or otpauth:// link",
+  "native.timeline.secretFieldModel.setupKeyOrOtpauthLink":
+    "Setup key or otpauth:// link",
   "native.timeline.secretFieldModel.showSecret": "Show secret",
   "native.timeline.secretFieldModel.thisDoesnTMatchThe":
     "This doesn't match the expected format. You can still send it.",
@@ -3742,7 +4209,8 @@ export const englishMessages = {
   "native.timeline.sessionScreen.tapToRetrySuffix": " · tap to retry",
   "native.timeline.sessionSignals.doneWhen": "DONE WHEN",
   "native.timeline.sessionSignals.evidence": "EVIDENCE",
-  "native.timeline.sessionSignals.noCommandsAreRunning": "No commands are running.",
+  "native.timeline.sessionSignals.noCommandsAreRunning":
+    "No commands are running.",
   "native.timeline.sessionSignals.objective": "OBJECTIVE",
   "native.timeline.sessionSignals.whyItPaused": "WHY IT PAUSED",
   "native.timeline.sheet.close": "Close",
@@ -3797,7 +4265,8 @@ export const englishMessages = {
     "Couldn't transcribe this recording ({reason}). It's saved, so you can retry.",
   "native.voiceInput.couldnTReachTranscriptionYour":
     "Couldn't reach transcription. Your recording is saved. Retry when you're back online.",
-  "native.voiceInput.couldnTStartTheMicrophone": "Couldn't start the microphone. Try again.",
+  "native.voiceInput.couldnTStartTheMicrophone":
+    "Couldn't start the microphone. Try again.",
   "nativePreviews.preparingPreview": "Preparing preview…",
   "newConversation.askAnything": "Ask anything…",
   "newConversation.chatCreatedFinishOrRemove":
@@ -3805,13 +4274,15 @@ export const englishMessages = {
   "newConversation.creationIsNotConfirmedRetry":
     "Creation is not confirmed. Retry checks the same request; your newer draft stays here.",
   "newConversation.howCanIHelp": "How can I help?",
-  "newConversation.newChatsAreNotEnabled": "New chats are not enabled for this product.",
+  "newConversation.newChatsAreNotEnabled":
+    "New chats are not enabled for this product.",
   "newConversation.retry": "Retry",
   "newConversation.send": "Send",
   "openGeniChat.askAnything": "Ask anything…",
   "openGeniChat.closeChats": "Close chats",
   "openGeniChat.howCanIHelp": "How can I help?",
-  "openGeniChat.newChatsAreNotEnabled": "New chats are not enabled for this product.",
+  "openGeniChat.newChatsAreNotEnabled":
+    "New chats are not enabled for this product.",
   "openGeniChat.openChats": "Open chats",
   "openGeniChat.send": "Send",
   "openGeniLinks.fileIsTooLargeTo": "File is too large to download here.",
@@ -3826,7 +4297,8 @@ export const englishMessages = {
   "pluginDetails.commands": "Commands",
   "pluginDetails.connect": "Connect",
   "pluginDetails.connectedPrefix": "Connected ·",
-  "pluginDetails.contentsHavenTBeenIndexed": "Contents haven’t been indexed for this repository.",
+  "pluginDetails.contentsHavenTBeenIndexed":
+    "Contents haven’t been indexed for this repository.",
   "pluginDetails.customSource": "Custom source",
   "pluginDetails.hooks": "Hooks",
   "pluginDetails.hostedApps": "Hosted apps",
@@ -3841,14 +4313,16 @@ export const englishMessages = {
   "pluginDetails.mcpServers": "MCP servers",
   "pluginDetails.noBundledMcpServers": "No bundled MCP servers.",
   "pluginDetails.noBundledSkills": "No bundled skills.",
-  "pluginDetails.noInstallableSkillsOrRemote": "No installable skills or remote MCP servers.",
+  "pluginDetails.noInstallableSkillsOrRemote":
+    "No installable skills or remote MCP servers.",
   "pluginDetails.notInstalledHere": "Not installed here:",
   "pluginDetails.openaiPluginRegistry": "OpenAI plugin registry",
   "pluginDetails.overview": "Overview",
   "pluginDetails.pluginContentsAreUnavailableInstallation":
     "Plugin contents are unavailable. Installation is disabled until the repository can be inspected.",
   "pluginDetails.readMore": "Read more",
-  "pluginDetails.serverDetailsHavenTBeen": "Server details haven’t been indexed.",
+  "pluginDetails.serverDetailsHavenTBeen":
+    "Server details haven’t been indexed.",
   "pluginDetails.showLess": "Show less",
   "pluginDetails.skills": "Skills",
   "pluginDetails.thisPluginExceedsTheCurrent":
@@ -3858,7 +4332,8 @@ export const englishMessages = {
   "pluginDiscovery.anthropicPluginRegistry": "Anthropic plugin registry",
   "pluginDiscovery.availableToInstall": "Available to install",
   "pluginDiscovery.browsePlugins": "Browse plugins",
-  "pluginDiscovery.bundlesOfSkillsAndConnections": "Bundles of skills and connections",
+  "pluginDiscovery.bundlesOfSkillsAndConnections":
+    "Bundles of skills and connections",
   "pluginDiscovery.couldnTLoadPlugins": "Couldn’t load plugins.",
   "pluginDiscovery.discoverPlugins": "Discover plugins",
   "pluginDiscovery.installed": "Installed",
@@ -3874,9 +4349,11 @@ export const englishMessages = {
   "preparedMcpSetup.chatAccessFailed":
     "Connected, but chat access could not be confirmed. Your key is saved; do not submit it again.",
   "preparedMcpSetup.checkChatAccess": "Check chat access",
-  "preparedMcpSetup.checkingChatAccess": "Connected. Checking this chat's tool access…",
+  "preparedMcpSetup.checkingChatAccess":
+    "Connected. Checking this chat's tool access…",
   "preparedMcpSetup.connect": "Connect",
-  "preparedMcpSetup.connected": "Connected. Its tools are available from your next message.",
+  "preparedMcpSetup.connected":
+    "Connected. Its tools are available from your next message.",
   "preparedMcpSetup.loadFailed":
     "Could not load this connection setup. Your key has not been submitted.",
   "preparedMcpSetup.needsManager":
@@ -3915,8 +4392,10 @@ export const englishMessages = {
     "Your composer already has a draft. Replace it with this queued prompt?",
   "queueSurface.loadingInputs": "Loading inputs…",
   "queueSurfaceImplementation.changingDirection": "Changing direction…",
-  "queueSurfaceImplementation.deleteQueuedPromptIndex": "Delete queued prompt {index}",
-  "queueSurfaceImplementation.deleteThisQueuedPrompt": "Delete this queued prompt",
+  "queueSurfaceImplementation.deleteQueuedPromptIndex":
+    "Delete queued prompt {index}",
+  "queueSurfaceImplementation.deleteThisQueuedPrompt":
+    "Delete this queued prompt",
   "queueSurfaceImplementation.deleting": "Deleting…",
   "queueSurfaceImplementation.deletingQueuedPrompt": "Deleting queued prompt…",
   "queueSurfaceImplementation.draggingQueuedPromptPositionOf":
@@ -3934,27 +4413,34 @@ export const englishMessages = {
     "Hide full content for queued prompt {number}",
   "queueSurfaceImplementation.hideFullPrompt": "Hide full prompt",
   "queueSurfaceImplementation.incomingUpdates_one": "{count} incoming update",
-  "queueSurfaceImplementation.incomingUpdates_other": "{count} incoming updates",
-  "queueSurfaceImplementation.incomingUpdatesWaitingToRun": "Incoming updates waiting to run",
+  "queueSurfaceImplementation.incomingUpdates_other":
+    "{count} incoming updates",
+  "queueSurfaceImplementation.incomingUpdatesWaitingToRun":
+    "Incoming updates waiting to run",
   "queueSurfaceImplementation.liftedQueuedPromptCanonicalindexOf":
     "Lifted queued prompt {canonicalIndex} of {countValue}. Use arrow keys to move it, then press Space to drop.",
   "queueSurfaceImplementation.menuSurfaceClassOgRoot":
     "{MENU_SURFACE_CLASS} og-root z-50 max-h-(--radix-dropdown-menu-content-available-height) w-52 max-w-[calc(100vw-16px)] overflow-x-hidden overflow-y-auto",
-  "queueSurfaceImplementation.moreActionsForQueuedPrompt": "More actions for queued prompt {index}",
+  "queueSurfaceImplementation.moreActionsForQueuedPrompt":
+    "More actions for queued prompt {index}",
   "queueSurfaceImplementation.moveDown": "Move down",
   "queueSurfaceImplementation.moveToBottom": "Move to bottom",
   "queueSurfaceImplementation.moveToTop": "Move to top",
   "queueSurfaceImplementation.moveUp": "Move up",
   "queueSurfaceImplementation.movingQueuedPromptToPosition":
     "Moving queued prompt to position {targetIndex}.",
-  "queueSurfaceImplementation.movingQueuedPromptToThe": "Moving queued prompt to the composer…",
+  "queueSurfaceImplementation.movingQueuedPromptToThe":
+    "Moving queued prompt to the composer…",
   "queueSurfaceImplementation.movingToComposer": "Moving to composer…",
-  "queueSurfaceImplementation.pendingMachineInputs_one": "{count} pending machine input",
-  "queueSurfaceImplementation.pendingMachineInputs_other": "{count} pending machine inputs",
+  "queueSurfaceImplementation.pendingMachineInputs_one":
+    "{count} pending machine input",
+  "queueSurfaceImplementation.pendingMachineInputs_other":
+    "{count} pending machine inputs",
   "queueSurfaceImplementation.queuedPromptDeleted": "Queued prompt deleted.",
   "queueSurfaceImplementation.queuedPromptIndexSummarySummary":
     "Queued prompt {index} summary: {summary}",
-  "queueSurfaceImplementation.queuedPromptIsNowThe": "Queued prompt is now the next direction.",
+  "queueSurfaceImplementation.queuedPromptIsNowThe":
+    "Queued prompt is now the next direction.",
   "queueSurfaceImplementation.queuedPromptMovedBackTo":
     "Queued prompt moved back to the composer for editing.",
   "queueSurfaceImplementation.queuedPromptMovedToPosition":
@@ -3970,9 +4456,11 @@ export const englishMessages = {
     "{count} queued prompt and {pending}",
   "queueSurfaceImplementation.queuedPromptsAndPendingInputs_other":
     "{count} queued prompts and {pending}",
-  "queueSurfaceImplementation.queueReorderCancelled": "Queue reorder cancelled.",
+  "queueSurfaceImplementation.queueReorderCancelled":
+    "Queue reorder cancelled.",
   "queueSurfaceImplementation.readOnly": "Read-only",
-  "queueSurfaceImplementation.reorderQueuedPromptIndex": "Reorder queued prompt {index}",
+  "queueSurfaceImplementation.reorderQueuedPromptIndex":
+    "Reorder queued prompt {index}",
   "queueSurfaceImplementation.requestingThisQueuedPromptAs":
     "Requesting this queued prompt as the next direction…",
   "queueSurfaceImplementation.resources_one": "{count} resource",
@@ -3985,7 +4473,8 @@ export const englishMessages = {
   "queueSurfaceImplementation.steer": "Steer",
   "queueSurfaceImplementation.steerInterruptTheCurrentTurn":
     "Steer: the agent reads this message as soon as it can, usually within seconds. Running tools aren't cut off.",
-  "queueSurfaceImplementation.steerQueuedPromptIndex": "Steer queued prompt {index}",
+  "queueSurfaceImplementation.steerQueuedPromptIndex":
+    "Steer queued prompt {index}",
   "queueSurfaceImplementation.thatPromptChangedBeforeIt":
     "That prompt changed before it could be moved to the composer.",
   "queueSurfaceImplementation.thatPromptChangedBeforeIt2":
@@ -4001,9 +4490,12 @@ export const englishMessages = {
   "queueSurfaceImplementation.updatesWillJoinThisPrompt_other":
     "{count} updates will join this prompt",
   "queueSurfaceImplementation.viewFullPrompt": "View full prompt",
-  "queueSurfaceState.dismissQueueErrorAndRetry": "Dismiss queue error and retry",
-  "queueSurfaceState.queuedWorkIsSavedAnd": "Queued work is saved and starts automatically.",
-  "queueSurfaceState.queuedWorkStaysSavedUntil": "Queued work stays saved until you resume.",
+  "queueSurfaceState.dismissQueueErrorAndRetry":
+    "Dismiss queue error and retry",
+  "queueSurfaceState.queuedWorkIsSavedAnd":
+    "Queued work is saved and starts automatically.",
+  "queueSurfaceState.queuedWorkStaysSavedUntil":
+    "Queued work stays saved until you resume.",
   "queueSurfaceState.queueErrorDetails": "Queue error details",
   "queueSurfaceState.retryLoadingTheQueue": "Retry loading the queue",
   "queueSurfaceState.stoppingCurrentAttempt": "Stopping current attempt…",
@@ -4011,12 +4503,15 @@ export const englishMessages = {
   "realtime.realtimeControl.audioMuted": "audio muted",
   "realtime.realtimeControl.audioOutputBlocked": "Audio output blocked",
   "realtime.realtimeControl.billedToYourAiGateway": "Billed to your AI Gateway",
-  "realtime.realtimeControl.billedToYourElevenlabs": "Billed to your ElevenLabs account",
+  "realtime.realtimeControl.billedToYourElevenlabs":
+    "Billed to your ElevenLabs account",
   "realtime.realtimeControl.bridgeError": "bridge error",
   "realtime.realtimeControl.chatgptCodexPlan": "ChatGPT / Codex plan",
   "realtime.realtimeControl.checkingVoice": "Checking voice",
-  "realtime.realtimeControl.chooseAnotherVoiceModel": "Choose another voice model.",
-  "realtime.realtimeControl.chooseVoiceModelAndOptions": "Choose voice model and options",
+  "realtime.realtimeControl.chooseAnotherVoiceModel":
+    "Choose another voice model.",
+  "realtime.realtimeControl.chooseVoiceModelAndOptions":
+    "Choose voice model and options",
   "realtime.realtimeControl.clientAck": "client ack",
   "realtime.realtimeControl.connectedCodex": "Connected Codex",
   "realtime.realtimeControl.connectedSupergrok": "Connected SuperGrok",
@@ -4028,7 +4523,8 @@ export const englishMessages = {
   "realtime.realtimeControl.dismissFailuretext": "Dismiss: {failureText}",
   "realtime.realtimeControl.endingVoice": "Ending voice…",
   "realtime.realtimeControl.endVoiceConversation": "End voice conversation",
-  "realtime.realtimeControl.findingTheVoiceModelsYou": "Finding the voice models you can use.",
+  "realtime.realtimeControl.findingTheVoiceModelsYou":
+    "Finding the voice models you can use.",
   "realtime.realtimeControl.ignoredProviderEvents": "ignored provider events",
   "realtime.realtimeControl.interruptNaturallyWheneverYouWant":
     "Interrupt naturally whenever you want.",
@@ -4052,7 +4548,8 @@ export const englishMessages = {
   "realtime.realtimeControl.providerStarted": "provider started",
   "realtime.realtimeControl.realtimeDiagnostics": "Realtime diagnostics",
   "realtime.realtimeControl.realtimeVoice": "Realtime voice",
-  "realtime.realtimeControl.recommendedDescription": "Recommended · {description}",
+  "realtime.realtimeControl.recommendedDescription":
+    "Recommended · {description}",
   "realtime.realtimeControl.reconnectAttempt": "reconnect attempt",
   "realtime.realtimeControl.reconnecting": "Reconnecting…",
   "realtime.realtimeControl.resumeAudio": "Resume audio",
@@ -4069,23 +4566,30 @@ export const englishMessages = {
   "realtime.realtimeControl.startVoice": "Start voice",
   "realtime.realtimeControl.supergrokXaiPlan": "SuperGrok / xAI plan",
   "realtime.realtimeControl.talkLiveWithTheAgent": "Talk live with the agent.",
-  "realtime.realtimeControl.theConnectionCouldNotBe": "The connection could not be started.",
-  "realtime.realtimeControl.theVoiceSessionCouldNot": "The voice session could not be created.",
+  "realtime.realtimeControl.theConnectionCouldNotBe":
+    "The connection could not be started.",
+  "realtime.realtimeControl.theVoiceSessionCouldNot":
+    "The voice session could not be created.",
   "realtime.realtimeControl.tryVoiceAgain": "Try voice again",
   "realtime.realtimeControl.unmuteMicrophone": "Unmute microphone",
   "realtime.realtimeControl.unmuteVoiceAudio": "Unmute voice audio",
   "realtime.realtimeControl.usageLimitReached": "Usage limit reached",
-  "realtime.realtimeControl.usedWhenYouStartA": "Used when you start a voice conversation.",
+  "realtime.realtimeControl.usedWhenYouStartA":
+    "Used when you start a voice conversation.",
   "realtime.realtimeControl.usesOpengeniCredits": "Uses {product} credits",
   "realtime.realtimeControl.voiceActiveElsewhere": "Voice active elsewhere",
   "realtime.realtimeControl.voiceAndTypedMessagesShare":
     "Voice and typed messages share this session.",
-  "realtime.realtimeControl.voiceCouldNotLoad": "Voice couldn't load. Try again later.",
+  "realtime.realtimeControl.voiceCouldNotLoad":
+    "Voice couldn't load. Try again later.",
   "realtime.realtimeControl.voiceLanguage": "Language",
-  "realtime.realtimeControl.voiceLanguageAppLanguage": "Your app language, {language}",
+  "realtime.realtimeControl.voiceLanguageAppLanguage":
+    "Your app language, {language}",
   "realtime.realtimeControl.voiceLanguageAutomatic": "Automatic",
-  "realtime.realtimeControl.voiceLanguageAutomaticValue": "Automatic · {language}",
-  "realtime.realtimeControl.voiceLanguageWorkspaceLanguage": "Set for this workspace, {language}",
+  "realtime.realtimeControl.voiceLanguageAutomaticValue":
+    "Automatic · {language}",
+  "realtime.realtimeControl.voiceLanguageWorkspaceLanguage":
+    "Set for this workspace, {language}",
   "realtime.realtimeControl.voiceLanguageDescription":
     "The voice listens and replies in this language.",
   "realtime.realtimeControl.voiceModel": "Voice model",
@@ -4097,15 +4601,21 @@ export const englishMessages = {
   "realtime.sessionRealtime.codexLive": "Codex Live",
   "realtime.sessionRealtime.codexRealtimeControllerFailedTo":
     "Codex realtime controller failed to load",
-  "realtime.sessionRealtime.connectCodexToUseThis": "Connect Codex to use this voice model",
-  "realtime.sessionRealtime.connectCodexToUseThis2": "Connect Codex to use this voice model.",
+  "realtime.sessionRealtime.connectCodexToUseThis":
+    "Connect Codex to use this voice model",
+  "realtime.sessionRealtime.connectCodexToUseThis2":
+    "Connect Codex to use this voice model.",
   "realtime.sessionRealtime.deepSessionIntegration": "Deep session integration",
   "realtime.sessionRealtime.resumeThisSessionBeforeStarting":
     "Resume this session before starting voice.",
-  "realtime.sessionRealtime.theSelectedVoiceModelIs": "The selected voice model is still preparing",
-  "realtime.sessionRealtime.thisSessionWasCancelled": "This session was cancelled.",
-  "realtime.sessionRealtime.thisVoiceModelIsUnavailable": "This voice model is unavailable.",
-  "realtime.sessionRealtime.voiceIsAlreadyActiveFor": "Voice is already active for this session.",
+  "realtime.sessionRealtime.theSelectedVoiceModelIs":
+    "The selected voice model is still preparing",
+  "realtime.sessionRealtime.thisSessionWasCancelled":
+    "This session was cancelled.",
+  "realtime.sessionRealtime.thisVoiceModelIsUnavailable":
+    "This voice model is unavailable.",
+  "realtime.sessionRealtime.voiceIsAlreadyActiveFor":
+    "Voice is already active for this session.",
   "realtime.sessionRealtime.waitForTheCurrentSession":
     "Wait for the current session transition to finish.",
   "sandboxFiles.bytes": "bytes).",
@@ -4116,14 +4626,17 @@ export const englishMessages = {
   "sandboxFiles.couldNotDecodePathAs": "Could not decode {path} as an image.",
   "sandboxFiles.couldNotOpenLiveFile": "Could not open live file",
   "sandboxFiles.couldNotOpenLiveWorkspace": "Could not open live workspace",
-  "sandboxFiles.couldNotOpenViewpathMessage": "Could not open {viewPath}: {message}",
+  "sandboxFiles.couldNotOpenViewpathMessage":
+    "Could not open {viewPath}: {message}",
   "sandboxFiles.detached": "(detached)",
   "sandboxFiles.dirtycountChanged": "{dirtyCount} changed",
   "sandboxFiles.edit": "Edit",
   "sandboxFiles.filesUnavailable": "Files unavailable",
   "sandboxFiles.imagePreviewUnavailable": "Image preview unavailable",
-  "sandboxFiles.largeFileShowingATruncated": "Large file — showing a truncated preview (",
-  "sandboxFiles.lineFocuslineIsPastThe": "Line {focusLine} is past the end of this file.",
+  "sandboxFiles.largeFileShowingATruncated":
+    "Large file — showing a truncated preview (",
+  "sandboxFiles.lineFocuslineIsPastThe":
+    "Line {focusLine} is past the end of this file.",
   "sandboxFiles.loadingRepository": "Loading repository…",
   "sandboxFiles.loadingViewpath": "Loading {viewPath}…",
   "sandboxFiles.noCapturedRevisionIsAvailable":
@@ -4144,13 +4657,17 @@ export const englishMessages = {
   "sandboxFiles.retryLiveFile": "Retry live file",
   "sandboxFiles.retryLiveWorkspace": "Retry live workspace",
   "sandboxFiles.selectAFileInThe": "Select a file in the tree to preview it.",
-  "sandboxFiles.theCapturedCopyIsNo": "The captured copy is no longer available.",
+  "sandboxFiles.theCapturedCopyIsNo":
+    "The captured copy is no longer available.",
   "sandboxFiles.thisDirectoryIsEmpty": "This directory is empty",
-  "sandboxFiles.thisFileIsLargerThan": "This file is larger than the captured preview limit.",
+  "sandboxFiles.thisFileIsLargerThan":
+    "This file is larger than the captured preview limit.",
   "sandboxFiles.thisFileWasIndexedBut":
     "This file was indexed, but it was not changed in the captured turn.",
-  "sandboxFiles.thisSandboxDoesNotExpose": "This sandbox does not expose a file system.",
-  "sandboxFiles.uncommittedChangesInDirtycountFiles": "Uncommitted changes in {dirtyCount} files",
+  "sandboxFiles.thisSandboxDoesNotExpose":
+    "This sandbox does not expose a file system.",
+  "sandboxFiles.uncommittedChangesInDirtycountFiles":
+    "Uncommitted changes in {dirtyCount} files",
   "sandboxFiles.view": "View",
   "sandboxFiles.viewpathIsABinaryFile": "{viewPath} is a binary file (",
   "sandboxFiles.wakingSandbox": "Waking sandbox",
@@ -4168,7 +4685,8 @@ export const englishMessages = {
   "sandboxTerminal.connectionError": "connection error",
   "sandboxTerminal.connectOnInput": "connect on input",
   "sandboxTerminal.legacyInput": "legacy input",
-  "sandboxTerminal.legacyInputWaitForShell": "Legacy input — wait for shell startup before typing.",
+  "sandboxTerminal.legacyInputWaitForShell":
+    "Legacy input — wait for shell startup before typing.",
   "sandboxTerminal.loadingTerminal": "Loading terminal…",
   "sandboxTerminal.outputOnly": "output only",
   "sandboxTerminal.pty": "pty:",
@@ -4185,10 +4703,12 @@ export const englishMessages = {
   "sandboxWorkspace.branch": "Branch",
   "sandboxWorkspace.browser": "Browser",
   "sandboxWorkspace.changes": "Changes",
-  "sandboxWorkspace.connectingToTheLiveWorking": "Connecting to the live working tree…",
+  "sandboxWorkspace.connectingToTheLiveWorking":
+    "Connecting to the live working tree…",
   "sandboxWorkspace.connectingWorkspace": "Connecting workspace",
   "sandboxWorkspace.couldNotOpMessage": "Could not {op}: {message}",
-  "sandboxWorkspace.couldnTReachTheSandbox": "Couldn't reach the sandbox for this session.",
+  "sandboxWorkspace.couldnTReachTheSandbox":
+    "Couldn't reach the sandbox for this session.",
   "sandboxWorkspace.desktop": "Desktop",
   "sandboxWorkspace.files": "Files",
   "sandboxWorkspace.filesCouldNotBeLoaded": "Files could not be loaded.",
@@ -4197,8 +4717,10 @@ export const englishMessages = {
   "sandboxWorkspace.liveRefreshFailedShowingThe":
     "Live refresh failed. Showing the last loaded changes.",
   "sandboxWorkspace.loadingWorkspace": "Loading workspace",
-  "sandboxWorkspace.localEditsNotYetCommitted": "Local edits not yet committed will appear here.",
-  "sandboxWorkspace.lookingForTheLatestFiles": "Looking for the latest files and changes…",
+  "sandboxWorkspace.localEditsNotYetCommitted":
+    "Local edits not yet committed will appear here.",
+  "sandboxWorkspace.lookingForTheLatestFiles":
+    "Looking for the latest files and changes…",
   "sandboxWorkspace.machineLabel": "Machine: {label}",
   "sandboxWorkspace.noBranchChanges": "No branch changes",
   "sandboxWorkspace.noCapturedRevisionIsAvailable":
@@ -4207,25 +4729,31 @@ export const englishMessages = {
   "sandboxWorkspace.noUncommittedChanges": "No uncommitted changes",
   "sandboxWorkspace.openingName": "Opening {name}",
   "sandboxWorkspace.openLiveWorkspace": "Open live workspace",
-  "sandboxWorkspace.openTheLiveWorkspaceTo": "Open the live workspace to view current changes.",
-  "sandboxWorkspace.readingTheCurrentWorkingTree": "Reading the current working tree…",
+  "sandboxWorkspace.openTheLiveWorkspaceTo":
+    "Open the live workspace to view current changes.",
+  "sandboxWorkspace.readingTheCurrentWorkingTree":
+    "Reading the current working tree…",
   "sandboxWorkspace.reload": "Reload",
   "sandboxWorkspace.retry": "Retry",
   "sandboxWorkspace.sandboxUnavailable": "Sandbox unavailable",
-  "sandboxWorkspace.savedChangesPreviewIsUnavailable": "Saved changes preview is unavailable",
+  "sandboxWorkspace.savedChangesPreviewIsUnavailable":
+    "Saved changes preview is unavailable",
   "sandboxWorkspace.staged": "Staged",
-  "sandboxWorkspace.stageFilesToReviewThe": "Stage files to review the next commit here.",
+  "sandboxWorkspace.stageFilesToReviewThe":
+    "Stage files to review the next commit here.",
   "sandboxWorkspace.terminal": "Terminal",
   "sandboxWorkspace.theDesktopCouldNotBe": "The desktop could not be opened.",
   "sandboxWorkspace.theLiveWorkspaceViewerLimit":
     "The live workspace viewer limit has been reached. Close another viewer and retry.",
-  "sandboxWorkspace.thisBranchMatchesTheRemote": "This branch matches the remote default branch.",
+  "sandboxWorkspace.thisBranchMatchesTheRemote":
+    "This branch matches the remote default branch.",
   "sandboxWorkspace.thisMachineDoesNotCurrently":
     "This machine does not currently expose a live file system.",
   "sandboxWorkspace.uncommitted": "Uncommitted",
   "sandboxWorkspace.wakeTheSandboxToCompare":
     "Wake the sandbox to compare this branch with the remote default branch.",
-  "sandboxWorkspace.wakeTheSandboxToInspect": "Wake the sandbox to inspect staged changes.",
+  "sandboxWorkspace.wakeTheSandboxToInspect":
+    "Wake the sandbox to inspect staged changes.",
   "sandboxWorkspace.wakingWorkspace": "Waking workspace",
   "sandboxWorkspace.workspaceIsResting": "Workspace is resting",
   "secretRefChip.secret": "Secret:",
@@ -4238,12 +4766,14 @@ export const englishMessages = {
     "Run it on “{approved}”, or remove it from the queue and send it again to use “{machine}”.",
   "sessionAdmission.approvedElsewhereOfflineNext":
     "“{approved}” is offline right now. Run it there once it’s back, or remove it from the queue and send it again to use “{machine}”.",
-  "sessionAdmission.approvedElsewhereTitle": "Your message is waiting for “{approved}”",
+  "sessionAdmission.approvedElsewhereTitle":
+    "Your message is waiting for “{approved}”",
   "sessionAdmission.approvedElsewhereUnavailableNext":
     "“{approved}” isn’t available to this chat right now. Remove the message from the queue and send it again to use “{machine}”.",
   "sessionAdmission.cantRecheckNote":
     "Someone with permission to control this session can recheck after the issue is resolved.",
-  "sessionAdmission.chooseAMachineForThisChat": "Choose a machine for this chat",
+  "sessionAdmission.chooseAMachineForThisChat":
+    "Choose a machine for this chat",
   "sessionAdmission.chooseMachine": "Choose machine",
   "sessionAdmission.continueWaitingWork_one": "Continue with it",
   "sessionAdmission.continueWaitingWork_other": "Continue with them",
@@ -4265,7 +4795,8 @@ export const englishMessages = {
   "sessionAdmission.grantTitle": "Not approved for this chat",
   "sessionAdmission.machineChangeFailed":
     "The machine change could not be confirmed. Refresh and try again.",
-  "sessionAdmission.machineChangedBody": "The saved message has not started yet.",
+  "sessionAdmission.machineChangedBody":
+    "The saved message has not started yet.",
   "sessionAdmission.machineChangedNext":
     "Recheck access to try it on the selected machine. It will not retry automatically.",
   "sessionAdmission.machineChangedTitle": "Machine changed",
@@ -4282,18 +4813,21 @@ export const englishMessages = {
     "Your next message brings it to the agent. Say what you want done with it.",
   "sessionAdmission.messagesWaitingForYouNext_other":
     "Your next message brings them to the agent. Say what you want done with them.",
-  "sessionAdmission.messagesWaitingForYouTitle_one": "A message from {people} is waiting for you",
+  "sessionAdmission.messagesWaitingForYouTitle_one":
+    "A message from {people} is waiting for you",
   "sessionAdmission.messagesWaitingForYouTitle_other":
     "{count} messages from {people} are waiting for you",
   "sessionAdmission.moving": "Moving…",
-  "sessionAdmission.needsDifferentMachineTitle": "This message needs a different machine",
+  "sessionAdmission.needsDifferentMachineTitle":
+    "This message needs a different machine",
   "sessionAdmission.noMachineChoices":
     "No workspace or cloud machine is available for this chat right now.",
   "sessionAdmission.notApprovedHereBody":
     "It was sent before this chat moved to “{machine}”, so it isn’t approved for this machine.",
   "sessionAdmission.notApprovedHereNext":
     "Remove it from the queue and send it again to use “{machine}”, or move the chat to a workspace or cloud machine.",
-  "sessionAdmission.notApprovedHereTitle": "Your message can’t run on “{machine}”",
+  "sessionAdmission.notApprovedHereTitle":
+    "Your message can’t run on “{machine}”",
   "sessionAdmission.otherMachineDraftNext":
     "Your draft stays here. Choose a machine you can use, or ask {owner} about sharing this machine with the workspace.",
   "sessionAdmission.otherMachineExplanation":
@@ -4306,7 +4840,8 @@ export const englishMessages = {
     "{owner} sent it for another machine, so it can’t run on “{machine}”.",
   "sessionAdmission.othersApprovedElsewhereNext":
     "{owner} can move the chat back to that machine, or send the message again here.",
-  "sessionAdmission.othersApprovedElsewhereTitle": "A message is waiting for another machine",
+  "sessionAdmission.othersApprovedElsewhereTitle":
+    "A message is waiting for another machine",
   "sessionAdmission.othersMessagesWaitingNext_one":
     "{owner}’s next message brings it to the agent.",
   "sessionAdmission.othersMessagesWaitingNext_other":
@@ -4315,7 +4850,8 @@ export const englishMessages = {
     "A message from {people} is waiting for {owner}",
   "sessionAdmission.othersMessagesWaitingTitle_other":
     "{count} messages from {people} are waiting for {owner}",
-  "sessionAdmission.othersUpdatesWaitingNext": "Only {owner} can let the agent continue with them.",
+  "sessionAdmission.othersUpdatesWaitingNext":
+    "Only {owner} can let the agent continue with them.",
   "sessionAdmission.othersUpdatesWaitingTitle_one":
     "An update from {people}’s agents is waiting for {owner}",
   "sessionAdmission.othersUpdatesWaitingTitle_other":
@@ -4342,7 +4878,8 @@ export const englishMessages = {
   "sessionAdmission.recheckFailed":
     "The recheck could not be confirmed. Check the session status before trying again.",
   "sessionAdmission.rechecking": "Rechecking…",
-  "sessionAdmission.refreshFailed": "Session status could not be refreshed. Try refreshing again.",
+  "sessionAdmission.refreshFailed":
+    "Session status could not be refreshed. Try refreshing again.",
   "sessionAdmission.refreshRequiredNote":
     "Session controls changed. Refresh the status before rechecking.",
   "sessionAdmission.refreshSessionStatus": "Refresh session status",
@@ -4361,14 +4898,16 @@ export const englishMessages = {
     "This chat runs on your personal machine “{machine}”, and only you can let the agent use it.",
   "sessionAdmission.waitingForYouNext":
     "Continue to let the agent read them now, with your access.",
-  "sessionAdmission.waitingForYouTitle_one": "An update from {people}’s agents is waiting for you",
+  "sessionAdmission.waitingForYouTitle_one":
+    "An update from {people}’s agents is waiting for you",
   "sessionAdmission.waitingForYouTitle_other":
     "{count} updates from {people}’s agents are waiting for you",
   "sessionAdmission.yourMessagesWaitingNext_one":
     "{owner}’s next message brings it to their agent. To run it yourself, move the chat to a machine you can use.",
   "sessionAdmission.yourMessagesWaitingNext_other":
     "{owner}’s next message brings them to their agent. To run them yourself, move the chat to a machine you can use.",
-  "sessionAdmission.yourMessagesWaitingTitle_one": "Your message is waiting for {owner}",
+  "sessionAdmission.yourMessagesWaitingTitle_one":
+    "Your message is waiting for {owner}",
   "sessionAdmission.yourMessagesWaitingTitle_other":
     "{count} of your messages are waiting for {owner}",
   "sessionAdmission.yourUpdatesWaitingNext":
@@ -4379,14 +4918,16 @@ export const englishMessages = {
     "{count} updates from your agents are waiting for {owner}",
   "sessionAgentsModel.active": "Active",
   "sessionAgentsModel.completed": "Completed",
-  "sessionAgentsModel.couldNotStartItsNextStep": "Could not start its next step",
+  "sessionAgentsModel.couldNotStartItsNextStep":
+    "Could not start its next step",
   "sessionAgentsModel.failed": "Failed",
   "sessionAgentsModel.idle": "Idle",
   "sessionAgentsModel.needsYou": "Needs you",
   "sessionAgentsModel.needsYouFor": "Needs you · {duration}",
   "sessionAgentsModel.paused": "Paused",
   "sessionAgentsModel.stuck": "Stuck",
-  "sessionAgentsModel.waitingForYourInputSince": "Waiting for your input since {time}",
+  "sessionAgentsModel.waitingForYourInputSince":
+    "Waiting for your input since {time}",
   "sessionAuthRecommendation.reconnectThisIntegrationToUse":
     "Reconnect this integration to use its tools in this conversation.",
   "sessionAuthRecommendation.reviewPermissionToUseYour":
@@ -4394,20 +4935,24 @@ export const englishMessages = {
   "sessionCapabilityFrame.closeConnectionSetup": "Close connection setup",
   "sessionCapabilityFrame.connectedAvailableInThisConversation":
     "Connected · Available in this conversation",
-  "sessionCapabilityFrame.guidanceOnlyNoAccountAccess": "Guidance only · no account access",
+  "sessionCapabilityFrame.guidanceOnlyNoAccountAccess":
+    "Guidance only · no account access",
   "sessionCapabilityFrame.installedWorkspace": "Installed · Workspace",
   "sessionCapabilityFrame.nameSetup": "{name} setup",
-  "sessionCapabilityFrame.youChooseWhatToAuthorize": "You choose what to authorize",
+  "sessionCapabilityFrame.youChooseWhatToAuthorize":
+    "You choose what to authorize",
   "sessionCapabilityPolicy.chatAccessChangedClickAdd":
     "Chat access changed. Click Add tools to review the current choices again.",
   "sessionCapabilityPolicy.connectedButTheFullSession":
     "Connected, but the full session tool selection could not be read. Review the Tools picker before continuing.",
-  "sessionCapabilityPolicy.connectionSetupWasInterrupted": "Connection setup was interrupted.",
+  "sessionCapabilityPolicy.connectionSetupWasInterrupted":
+    "Connection setup was interrupted.",
   "sessionCapabilityPolicy.theAuthorizedIntegrationCouldNot":
     "The authorized integration could not be identified. Review its connection card to finish setup.",
   "sessionCapabilityPolicy.theConnectionWasAuthorizedBut":
     "The connection was authorized, but enabling its tools could not be verified.",
-  "sessionCapabilityPolicy.theParentChatChainCould": "The parent chat chain could not be verified.",
+  "sessionCapabilityPolicy.theParentChatChainCould":
+    "The parent chat chain could not be verified.",
   "sessionCapabilityPolicy.thisChatSCapabilitiesDo":
     "This chat's capabilities do not allow these tools. Review its capability settings before adding tools again.",
   "sessionChrome.actionNotConfirmed": "Action not confirmed",
@@ -4438,16 +4983,20 @@ export const englishMessages = {
   "sessionChrome.deleteThisQueuedPrompt": "Delete this queued prompt",
   "sessionChrome.dismiss": "Dismiss",
   "sessionChrome.dismissAll": "Dismiss all",
-  "sessionChrome.dismissIncomingCommandResults": "Dismiss incoming command results",
-  "sessionChrome.dismissIncomingPendingkindlabel": "Dismiss incoming {pendingKindLabel}",
-  "sessionChrome.dismissUnconfirmedQueuedPrompt": "Dismiss unconfirmed queued prompt",
+  "sessionChrome.dismissIncomingCommandResults":
+    "Dismiss incoming command results",
+  "sessionChrome.dismissIncomingPendingkindlabel":
+    "Dismiss incoming {pendingKindLabel}",
+  "sessionChrome.dismissUnconfirmedQueuedPrompt":
+    "Dismiss unconfirmed queued prompt",
   "sessionChrome.done": "Done",
   "sessionChrome.doneWhen": "Done when",
   "sessionChrome.editInComposer": "Edit in composer",
   "sessionChrome.editMessage": "Edit message",
   "sessionChrome.editQueuedPromptIndex": "Edit queued prompt {index}",
   "sessionChrome.goal": "Goal",
-  "sessionChrome.goalActionNotConfirmedError": "Goal action not confirmed. {error}",
+  "sessionChrome.goalActionNotConfirmedError":
+    "Goal action not confirmed. {error}",
   "sessionChrome.goalAndActions": "Goal and actions",
   "sessionChrome.goalPrefix": "Goal ·",
   "sessionChrome.goalValue": "Goal · {value}",
@@ -4474,7 +5023,8 @@ export const englishMessages = {
   "sessionChrome.noAgentDetails": "No agent details.",
   "sessionChrome.noprogressstreakStalled": "{noProgressStreak} stalled",
   "sessionChrome.notConfirmed": "Not confirmed",
-  "sessionChrome.notConfirmedCheckTheQueue": "Not confirmed. Check the queue before retrying.",
+  "sessionChrome.notConfirmedCheckTheQueue":
+    "Not confirmed. Check the queue before retrying.",
   "sessionChrome.opengeniUsageAllowanceExhaustedResume":
     "{product} usage allowance exhausted. Resume when your allowance is available.",
   "sessionChrome.pause": "Pause",
@@ -4497,8 +5047,10 @@ export const englishMessages = {
   "sessionChrome.queued": "Queued",
   "sessionChrome.queuedCount_one": "{count} queued",
   "sessionChrome.queuedCount_other": "{count} queued",
-  "sessionChrome.queuedcountQueuedNeedsAttention": "{queuedCount} queued · needs attention",
-  "sessionChrome.queuedcountVoiceRequestsQueued": "{queuedCount} voice requests queued",
+  "sessionChrome.queuedcountQueuedNeedsAttention":
+    "{queuedCount} queued · needs attention",
+  "sessionChrome.queuedcountVoiceRequestsQueued":
+    "{queuedCount} voice requests queued",
   "sessionChrome.queuedMessagesAndActions": "Queued messages and actions",
   "sessionChrome.queuedPromptCount_one": "{count} queued prompt",
   "sessionChrome.queuedPromptCount_other": "{count} queued prompts",
@@ -4526,19 +5078,24 @@ export const englishMessages = {
     "Not confirmed. Check your waiting messages before retrying.",
   "sessionChrome.singleSendRemoveMessageIndex": "Remove message {index}",
   "sessionChrome.singleSendVoiceHandoffWaiting": "Voice handoff waiting",
-  "sessionChrome.singleSendVoiceRequestsWaiting": "{queuedCount} voice requests waiting",
+  "sessionChrome.singleSendVoiceRequestsWaiting":
+    "{queuedCount} voice requests waiting",
   "sessionChrome.singleSendVoiceRequestWaiting": "Voice request waiting",
   "sessionChrome.singleSendWaiting": "Waiting",
   "sessionChrome.singleSendWaitingCount_one": "{count} waiting message",
   "sessionChrome.singleSendWaitingCount_other": "{count} waiting messages",
   "sessionChrome.singleSendWaitingMessages": "Waiting messages",
-  "sessionChrome.singleSendWaitingMessagesAndActions": "Waiting messages and actions",
-  "sessionChrome.singleSendWaitingMessagesNeedAttention": "Waiting messages need attention",
-  "sessionChrome.singleSendWaitingNeedsAttention": "{queuedCount} waiting · needs attention",
+  "sessionChrome.singleSendWaitingMessagesAndActions":
+    "Waiting messages and actions",
+  "sessionChrome.singleSendWaitingMessagesNeedAttention":
+    "Waiting messages need attention",
+  "sessionChrome.singleSendWaitingNeedsAttention":
+    "{queuedCount} waiting · needs attention",
   "sessionChrome.singleSendWaitingShortCount_one": "{count} waiting",
   "sessionChrome.singleSendWaitingShortCount_other": "{count} waiting",
   "sessionChrome.singleSendWaitingUnavailable": "Waiting messages unavailable",
-  "sessionChrome.singleSendWaitingUnavailableSentence": "Waiting messages unavailable.",
+  "sessionChrome.singleSendWaitingUnavailableSentence":
+    "Waiting messages unavailable.",
   "sessionChrome.steer": "Steer",
   "sessionChrome.steerLatestQueuedMessage": "Steer latest queued message",
   "sessionChrome.steerQueuedPromptIndex": "Steer queued prompt {index}",
@@ -4568,8 +5125,10 @@ export const englishMessages = {
     "Waiting for input{value}{until}. Relevant session input—including a child result, background-command result, agent message, schedule, or your prompt—wakes it sooner.",
   "sessionChrome.waitingForOtherSessionWork":
     "Waiting for other session work to finish before the goal continues automatically.",
-  "sessionChrome.waitingToBeIncludedIn": "Waiting to be included in an agent turn.",
-  "sessionChrome.waitingToContinueAutomatically": "Waiting to continue automatically.",
+  "sessionChrome.waitingToBeIncludedIn":
+    "Waiting to be included in an agent turn.",
+  "sessionChrome.waitingToContinueAutomatically":
+    "Waiting to continue automatically.",
   "sessionChrome.waitRecheckDue": "Recheck due · waiting to resume",
   "sessionChrome.waitStatus": "Wait status",
   "sessionCommandsPanel.backgroundCommand": "Background command",
@@ -4578,40 +5137,50 @@ export const englishMessages = {
   "sessionCommandsPanel.commandsUnavailable": "Commands unavailable.",
   "sessionCommandsPanel.expandCommand": "Expand command",
   "sessionCommandsPanel.loadingCommands": "Loading commands…",
-  "sessionCommandsPanel.noBackgroundCommandsRunning": "No background commands running.",
+  "sessionCommandsPanel.noBackgroundCommandsRunning":
+    "No background commands running.",
   "sessionCommandsPanel.retry": "Retry",
   "sessionCommandsPanel.running": "Running",
   "sessionCommandsPanel.startedClocktime": "Started {clockTime}",
   "sessionCommandsPanel.stop": "Stop",
   "sessionCommandsPanel.stopCommandpreview": "Stop {commandPreview}",
   "sessionCommandsPanel.stopping": "Stopping…",
-  "sessionCommandsPanel.stopRequestedStatusUnavailable": "Stop requested · status unavailable",
+  "sessionCommandsPanel.stopRequestedStatusUnavailable":
+    "Stop requested · status unavailable",
   "sessionConnectionRequest.couldnTLoadConnectionDetails":
     "Couldn't load connection details. Retry to check the current integration.",
-  "sessionConnectionRequest.loadingConnectionDetails": "Loading connection details…",
+  "sessionConnectionRequest.loadingConnectionDetails":
+    "Loading connection details…",
   "sessionConnectionRequest.retry": "Retry",
   "sessionConnectionRequest.thisRequestCouldNotBe":
     "This request could not be matched to one available OAuth integration. Review its connection settings before continuing.",
-  "sessionConversation.archivedConversationReadOnly": "Archived conversation · Read only",
+  "sessionConversation.archivedConversationReadOnly":
+    "Archived conversation · Read only",
   "sessionConversation.loadingPreview": "Loading preview…",
   "sessionConversation.retry": "Retry",
   "sessionConversation.sitePreviewUnavailable": "Site preview unavailable",
   "sessionConversation.tryAgain": "Try again",
-  "sessionConversation.yourAnswerWasnTSent": "Your answer wasn't sent. Try again.",
+  "sessionConversation.yourAnswerWasnTSent":
+    "Your answer wasn't sent. Try again.",
   "sessionFeedbackModel.rateThisReply": "Rate this reply",
   "sessionFeedbackModel.rateThisSession": "Rate this session",
   "sessionFeedbackModel.sendFeedback": "Send feedback",
-  "sessionFeedbackModel.shareWhatWorkedOrWhat": "Share what worked or what could be better.",
-  "sessionFeedbackModel.tellUsWhatCouldMake": "Tell us what could make {product} better.",
+  "sessionFeedbackModel.shareWhatWorkedOrWhat":
+    "Share what worked or what could be better.",
+  "sessionFeedbackModel.tellUsWhatCouldMake":
+    "Tell us what could make {product} better.",
   "sessionFeedbackModel.thumbsDown": "Thumbs down",
   "sessionFeedbackModel.thumbsUp": "Thumbs up",
   "sessionIntegrationCapabilityCard.chatAccessFailed":
     "Connected, but it couldn't be added to this chat's tools. Choose it in this chat's tools.",
-  "sessionIntegrationCapabilityCard.closeSignInWindow": "You can close the sign-in window.",
+  "sessionIntegrationCapabilityCard.closeSignInWindow":
+    "You can close the sign-in window.",
   "sessionIntegrationCapabilityCard.connected": "Your account is connected",
   "sessionIntegrationCapabilityCard.connectName": "Connect {name}",
-  "sessionIntegrationCapabilityCard.couldNotLoad": "Couldn't check this connection.",
-  "sessionIntegrationCapabilityCard.couldNotStart": "Couldn't start connecting. Try again.",
+  "sessionIntegrationCapabilityCard.couldNotLoad":
+    "Couldn't check this connection.",
+  "sessionIntegrationCapabilityCard.couldNotStart":
+    "Couldn't start connecting. Try again.",
   "sessionIntegrationCapabilityCard.finishSigningIn":
     "Finish signing in to {name} in the window that opened.",
   "sessionIntegrationCapabilityCard.integration": "Integration",
@@ -4630,7 +5199,8 @@ export const englishMessages = {
   "sessionIntegrationCapabilityCard.reopenSignIn": "Reopen window",
   "sessionIntegrationCapabilityCard.retry": "Retry",
   "sessionIntegrationCapabilityCard.signIn": "Sign in",
-  "sessionIntegrationCapabilityCard.signInFailed": "Sign-in couldn't continue. Try again.",
+  "sessionIntegrationCapabilityCard.signInFailed":
+    "Sign-in couldn't continue. Try again.",
   "sessionIntegrationCapabilityCard.signInWindowGone":
     "Finish signing in to {name}. If you closed the sign-in window, open it again.",
   "sessionIntegrationCapabilityCard.stopWaiting": "Cancel",
@@ -4649,7 +5219,8 @@ export const englishMessages = {
   "sessionListModel.today": "Today",
   "sessionListModel.yesterday": "Yesterday",
   "sessionMcpCapabilityCard.connected": "Connected",
-  "sessionMcpCapabilityCard.connectionDetailsAreUnavailable": "Connection details are unavailable.",
+  "sessionMcpCapabilityCard.connectionDetailsAreUnavailable":
+    "Connection details are unavailable.",
   "sessionMcpCapabilityCard.connectionSetupCouldNotFinish":
     "Connection setup could not finish. Try again.",
   "sessionMcpCapabilityCard.connectName": "Connect {name}",
@@ -4658,20 +5229,25 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.continueToName": "Continue to {name}",
   "sessionMcpCapabilityCard.couldNotDetermineHowTo":
     "Could not determine how to sign in. Try again.",
-  "sessionMcpCapabilityCard.couldnTLoadConnectionDetails": "Couldn't load connection details.",
+  "sessionMcpCapabilityCard.couldnTLoadConnectionDetails":
+    "Couldn't load connection details.",
   "sessionMcpCapabilityCard.done": "Done",
-  "sessionMcpCapabilityCard.everyoneInThisWorkspace": "Everyone in this workspace",
-  "sessionMcpCapabilityCard.finishingYourConnection": "Finishing your connection…",
+  "sessionMcpCapabilityCard.everyoneInThisWorkspace":
+    "Everyone in this workspace",
+  "sessionMcpCapabilityCard.finishingYourConnection":
+    "Finishing your connection…",
   "sessionMcpCapabilityCard.finishSigningInWithName":
     "Finish signing in with {name} in the opened window. This will close automatically when you’re connected.",
-  "sessionMcpCapabilityCard.loadingConnectionDetails": "Loading connection details…",
+  "sessionMcpCapabilityCard.loadingConnectionDetails":
+    "Loading connection details…",
   "sessionMcpCapabilityCard.mcpServer": "MCP server",
   "sessionMcpCapabilityCard.moreThanOnePersonalAccount":
     "More than one personal account matches. Choose the account in connection settings before reconnecting.",
   "sessionMcpCapabilityCard.onlyAnAdminCanTurnOn":
     "Only an admin can turn on {name}. Ask an admin to turn it on, then connect your account.",
   "sessionMcpCapabilityCard.onlyMe": "Only me",
-  "sessionMcpCapabilityCard.preparingYourConnection": "Preparing your connection…",
+  "sessionMcpCapabilityCard.preparingYourConnection":
+    "Preparing your connection…",
   "sessionMcpCapabilityCard.retry": "Retry",
   "sessionMcpCapabilityCard.reviewAccessBeforeSigningIn":
     "Review access before signing in. You'll return to this conversation after authorization.",
@@ -4702,16 +5278,20 @@ export const englishMessages = {
     "This recommendation is not an available OAuth MCP integration. Review the current connection catalog.",
   "sessionMcpCapabilityCard.trySigningInAgain": "Try signing in again",
   "sessionMcpCapabilityCard.useInThisConversation": "Use in this conversation",
-  "sessionMcpCapabilityCard.whoCanUseThisConnection": "Who can use this connection?",
-  "sessionMcpCapabilityCard.yourAccountIsConnected": "Your account is connected.",
+  "sessionMcpCapabilityCard.whoCanUseThisConnection":
+    "Who can use this connection?",
+  "sessionMcpCapabilityCard.yourAccountIsConnected":
+    "Your account is connected.",
   "sessionMcpCapabilityCard.yourAccountIsConnectedEnable":
     "Your account is connected. Enable it for this conversation to finish.",
   "sessionMcpCapabilityCard.yourAccountNeedsReconnectionBefore":
     "Your account needs reconnection before it can be used here.",
   "sessionProxyScope.chatIsUnavailableRightNow":
     "Chat is unavailable right now. Ask an administrator for help.",
-  "sessionProxyScope.couldNotLoadTheConversation": "Could not load the conversation.",
-  "sessionProxyScope.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
+  "sessionProxyScope.couldNotLoadTheConversation":
+    "Could not load the conversation.",
+  "sessionProxyScope.messageReferenceCorrelationid":
+    "{message} Reference: {correlationId}.",
   "sessionProxyScope.thisServerDoesNotReport":
     "This server does not report its workspace. Update @opengeni/sdk on the server, or pass workspaceId.",
   "sessionStatusModel.cancelled": "Cancelled",
@@ -4724,7 +5304,8 @@ export const englishMessages = {
   "sessionStatusModel.stuck": "Stuck",
   "sessionStatusModel.waitingOnYou": "Waiting on you",
   "sitesUi.archiveSite": "Archive Site",
-  "sitesUi.archiveThisSiteForWorkspace": "Archive this Site for workspace users?",
+  "sitesUi.archiveThisSiteForWorkspace":
+    "Archive this Site for workspace users?",
   "sitesUi.chooseAVersion": "Choose a version",
   "sitesUi.confirmChange": "Confirm change",
   "sitesUi.confirmSiteChange": "Confirm Site change",
@@ -4736,11 +5317,13 @@ export const englishMessages = {
   "sitesUi.manageSite": "Manage Site",
   "sitesUi.nextPage": "Next page",
   "sitesUi.noStatusSites": "No {status} Sites.",
-  "sitesUi.olderVersionsAreNotIncluded": "Older versions are not included in this response.",
+  "sitesUi.olderVersionsAreNotIncluded":
+    "Older versions are not included in this response.",
   "sitesUi.refreshSite": "Refresh Site",
   "sitesUi.refreshSites": "Refresh Sites",
   "sitesUi.restoreSite": "Restore Site",
-  "sitesUi.restoreThisSiteForWorkspace": "Restore this Site for workspace users?",
+  "sitesUi.restoreThisSiteForWorkspace":
+    "Restore this Site for workspace users?",
   "sitesUi.reviewRollback": "Review rollback",
   "sitesUi.revisionRevision": "Revision {revision}",
   "sitesUi.revisionRevisionCreatedat": "Revision {revision} · {createdAt}",
@@ -4760,7 +5343,8 @@ export const englishMessages = {
   "skillDiscovery.browseSkillsSh": "Browse skills.sh ↗",
   "skillDiscovery.couldNotLoadSkills": "Could not load skills.",
   "skillDiscovery.discoverSkills": "Discover skills",
-  "skillDiscovery.enterAtLeastTwoCharacters": "Enter at least two characters to search skills.sh.",
+  "skillDiscovery.enterAtLeastTwoCharacters":
+    "Enter at least two characters to search skills.sh.",
   "skillDiscovery.installed": "Installed",
   "skillDiscovery.loadingSkills": "Loading skills…",
   "skillDiscovery.noMatchesForQuery": "No matches for “{query}”.",
@@ -4773,7 +5357,8 @@ export const englishMessages = {
   "thisComputer.offer": "Let agents work on {machineName}.",
   "thisComputer.offerAction": "Use this computer",
   "thisComputer.notNow": "Not now",
-  "thisComputer.intro": "Agents can work on {machineName} for you, like a helper at the keyboard.",
+  "thisComputer.intro":
+    "Agents can work on {machineName} for you, like a helper at the keyboard.",
   "thisComputer.abilities.screen": "See the screen and use apps",
   "thisComputer.abilities.files": "Open, edit and save files",
   "thisComputer.abilities.background": "Work while you do something else",
@@ -4783,17 +5368,20 @@ export const englishMessages = {
   "thisComputer.tray": "tray",
   "thisComputer.turnOn": "Turn on",
   "thisComputer.settingUp": "Setting up {machineName}…",
-  "thisComputer.settingUpDetail": "This only happens once and takes about a minute.",
+  "thisComputer.settingUpDetail":
+    "This only happens once and takes about a minute.",
   "thisComputer.permissionsTitle": "Allow access on your Mac",
   "thisComputer.permissionsIntro":
     "Your Mac keeps apps from seeing the screen or using the keyboard until you allow it. Turn on {productName} in a few places, and we'll show you where.",
   "thisComputer.screenRecording.title": "Let {productName} see the screen",
-  "thisComputer.screenRecording.why": "So agents can see what's on your screen.",
+  "thisComputer.screenRecording.why":
+    "So agents can see what's on your screen.",
   "thisComputer.screenRecording.listName": "Screen & System Audio Recording",
   "thisComputer.accessibility.title": "Let {productName} click and type",
   "thisComputer.accessibility.why": "So agents can use the mouse and keyboard.",
   "thisComputer.accessibility.listName": "Accessibility",
-  "thisComputer.inputMonitoring.title": "Let {productName} notice when you take over",
+  "thisComputer.inputMonitoring.title":
+    "Let {productName} notice when you take over",
   "thisComputer.inputMonitoring.why":
     "So agents stop the moment you use the mouse or keyboard yourself.",
   "thisComputer.inputMonitoring.listName": "Input Monitoring",
@@ -4807,15 +5395,19 @@ export const englishMessages = {
   "thisComputer.waitingForSwitch":
     "If your Mac asks first, choose {openSettings}. Then turn on the switch next to {productName}.",
   "thisComputer.allowed": "Allowed",
-  "thisComputer.passwordHint": "Your Mac may ask for your password or Touch ID.",
-  "thisComputer.quitHint": "If your Mac offers to quit {productName}, choose {later}.",
+  "thisComputer.passwordHint":
+    "Your Mac may ask for your password or Touch ID.",
+  "thisComputer.quitHint":
+    "If your Mac offers to quit {productName}, choose {later}.",
   "thisComputer.askFolders": "Continue",
   "thisComputer.waitingForFolders": "Choose {allow} each time your Mac asks.",
   "thisComputer.foldersRefused":
     "In System Settings, open {productName} and turn on Desktop, Documents and Downloads.",
   "thisComputer.doneTitle": "You're all set",
-  "thisComputer.done": "Agents can now use {machineName}. Pause any time from the {tray}.",
-  "thisComputer.tryThis": "Try asking: “Open the Calculator and work out 12 × 7.”",
+  "thisComputer.done":
+    "Agents can now use {machineName}. Pause any time from the {tray}.",
+  "thisComputer.tryThis":
+    "Try asking: “Open the Calculator and work out 12 × 7.”",
   "thisComputer.close": "Done",
   "thisComputer.later": "Finish later",
   "thisComputer.ready": "Agents can use {machineName}",
@@ -4839,7 +5431,8 @@ export const englishMessages = {
     "Choose Opengeni Agent in System Settings. After changing its permissions, pause and resume the agent to apply them. Pausing stops its current work.",
   "thisComputer.resumeHint": "You can also resume it from the {tray}.",
   "thisComputer.finishSetup": "Finish setting up",
-  "thisComputer.finishSetupDetail": "Let agents see your screen and use the mouse and keyboard.",
+  "thisComputer.finishSetupDetail":
+    "Let agents see your screen and use the mouse and keyboard.",
   "thisComputer.resuming": "Resuming…",
   "thisComputer.tryAgain": "Try again",
   "thisComputer.error.offline":
@@ -4850,7 +5443,8 @@ export const englishMessages = {
   "thisComputer.error.takeoverFailed":
     "Another helper is already running on this computer. Restart the computer and try again.",
   "thisComputer.error.busy": "Setup is already in progress.",
-  "thisComputer.error.connectFailed": "Couldn't finish setting up this computer. Try again.",
+  "thisComputer.error.connectFailed":
+    "Couldn't finish setting up this computer. Try again.",
   "thisComputer.error.removed": "This computer is no longer in this workspace.",
   "thisComputer.error.signedOut": "Sign in again, then try again.",
   "thisComputer.error.reconnectRequired":
@@ -4862,24 +5456,32 @@ export const englishMessages = {
   "thisComputer.computerUse.on": "Agents can use {machineName}",
   "thisComputer.computerUse.permission":
     "To let agents see and control the screen, allow {appName} in System Settings.",
-  "thisComputer.computerUse.signedOut": "Sign in again to let agents use {machineName}.",
-  "thisComputer.computerUse.offline": "Couldn't reach the server. Check your internet connection.",
+  "thisComputer.computerUse.signedOut":
+    "Sign in again to let agents use {machineName}.",
+  "thisComputer.computerUse.offline":
+    "Couldn't reach the server. Check your internet connection.",
   "thisComputer.computerUse.error": "Computer use couldn't turn on.",
-  "thisComputer.computerUse.stalled": "{machineName} is taking too long to connect.",
+  "thisComputer.computerUse.stalled":
+    "{machineName} is taking too long to connect.",
   "thisComputer.computerUse.stalled.signIn":
     "The server isn't accepting {machineName}'s sign-in, so it can't connect.",
   "thisComputer.computerUse.stalled.server":
     "The agent is running, but the server can't see {machineName} yet.",
-  "thisComputer.computerUse.stalled.agent": "The agent on this computer isn't starting.",
+  "thisComputer.computerUse.stalled.agent":
+    "The agent on this computer isn't starting.",
   "thisComputer.computerUse.stalled.anotherAgent":
     "Another copy of the agent on this computer is in the way.",
-  "thisComputer.computerUse.stalled.handover": "Moving the agent into the app is taking too long.",
+  "thisComputer.computerUse.stalled.handover":
+    "Moving the agent into the app is taking too long.",
   "thisComputer.computerUse.openSettings": "Open System Settings",
   "thisComputer.computerUse.signIn": "Sign in",
   "thisComputer.computerUse.pill.turningOn": "Turning on computer use…",
-  "thisComputer.computerUse.pill.permission": "Allow screen access for computer use",
-  "thisComputer.computerUse.pill.signedOut": "Computer use needs you to sign in",
-  "thisComputer.computerUse.pill.offline": "Computer use can't reach the server",
+  "thisComputer.computerUse.pill.permission":
+    "Allow screen access for computer use",
+  "thisComputer.computerUse.pill.signedOut":
+    "Computer use needs you to sign in",
+  "thisComputer.computerUse.pill.offline":
+    "Computer use can't reach the server",
   "thisComputer.computerUse.pill.stalled": "Computer use can't connect",
   "thisComputer.computerUse.pill.error": "Computer use isn't working",
   "thisComputer.card.name": "Your computer",
@@ -4905,7 +5507,8 @@ export const englishMessages = {
   "thisComputer.card.shareConversation": "Share link to this chat",
   "thisComputer.card.installThenOpen":
     "Install the app, then return here to open it and connect. The app will confirm your account and ask for any system permissions it needs.",
-  "thisComputer.card.connectFailed": "Couldn't open the connection flow. Try again.",
+  "thisComputer.card.connectFailed":
+    "Couldn't open the connection flow. Try again.",
   "thisComputer.card.hostSetupUnavailable":
     "This app hasn't enabled computer setup here. Ask its administrator how to connect your computer.",
   "time.justNow": "Just now",
@@ -4970,13 +5573,16 @@ export const englishMessages = {
   "timeline.activityRail.fact": "Fact",
   "timeline.activityRail.hideStartupDetails": "Hide startup details",
   "timeline.activityRail.history": "History",
-  "timeline.activityRail.mergedIntoAnExistingMemory": "Merged into an existing memory.",
+  "timeline.activityRail.mergedIntoAnExistingMemory":
+    "Merged into an existing memory.",
   "timeline.activityRail.message": "Message",
-  "timeline.activityRail.nameCouldNotBeDisplayed": "{name} · couldn't be displayed",
+  "timeline.activityRail.nameCouldNotBeDisplayed":
+    "{name} · couldn't be displayed",
   "timeline.activityRail.preference": "Preference",
   "timeline.activityRail.procedure": "Procedure",
   "timeline.activityRail.savedToMemory": "Saved to memory",
-  "timeline.activityRail.unableToStartYetYour": "Unable to start yet. Your messages are saved.",
+  "timeline.activityRail.unableToStartYetYour":
+    "Unable to start yet. Your messages are saved.",
   "timeline.activityRail.updatedInPlace": "Updated in place.",
   "timeline.activityRail.updatedMemory": "Updated memory",
   "timeline.activityRail.viewInMemory": "View in memory",
@@ -5053,7 +5659,8 @@ export const englishMessages = {
   "timeline.commandStep.reinstallPackages.running": "Reinstalling packages",
   /** Code fetched from the internet and run straight away (`curl … | sh`). */
   "timeline.commandStep.runDownloadedCode.done": "Ran a downloaded script",
-  "timeline.commandStep.runDownloadedCode.running": "Running a downloaded script",
+  "timeline.commandStep.runDownloadedCode.running":
+    "Running a downloaded script",
   /** Inline code run by an interpreter; `language` is "Python", "JavaScript", "shell", … */
   "timeline.commandStep.runCode.done": "Ran {language} code",
   "timeline.commandStep.runCode.running": "Running {language} code",
@@ -5086,7 +5693,8 @@ export const englishMessages = {
     "Chat history is unchanged. If your next message fails too, start a new session.",
   "timeline.compactionCopy.checkpointExceedsThisModelS":
     "Checkpoint exceeds this model's context budget. Chat history is unchanged.",
-  "timeline.compactionCopy.checkpointMadeNoProgress": "Checkpoint made no progress",
+  "timeline.compactionCopy.checkpointMadeNoProgress":
+    "Checkpoint made no progress",
   "timeline.compactionCopy.checkpointWouldNotReduceMemory":
     "Checkpoint would not reduce memory size",
   "timeline.compactionCopy.compactionInterrupted": "Compaction interrupted",
@@ -5098,7 +5706,8 @@ export const englishMessages = {
   "timeline.compactionCopy.error": "Error",
   "timeline.compactionCopy.itWillRetryIfStill":
     "It will retry if still needed. Chat history is unchanged.",
-  "timeline.compactionCopy.noActiveHistoryToCompact": "No active history to compact",
+  "timeline.compactionCopy.noActiveHistoryToCompact":
+    "No active history to compact",
   "timeline.compactionCopy.noSubscriptionCapacityRightNow":
     "No subscription capacity right now. It runs with your next message if still needed.",
   "timeline.compactionCopy.parameter": "Parameter",
@@ -5109,15 +5718,19 @@ export const englishMessages = {
   "timeline.compactionCopy.theProviderRejectsThisRequest":
     "The provider rejects this request the same way until the conversation changes.",
   "timeline.fleetDecisionRow.admission": "Admission",
-  "timeline.fleetDecisionRow.admissionPacingWasDisabled": "Admission pacing was disabled",
-  "timeline.fleetDecisionRow.admissionWouldHaveBeenPaced": "Admission would have been paced",
+  "timeline.fleetDecisionRow.admissionPacingWasDisabled":
+    "Admission pacing was disabled",
+  "timeline.fleetDecisionRow.admissionWouldHaveBeenPaced":
+    "Admission would have been paced",
   "timeline.fleetDecisionRow.allObservedSubscriptionsWereCapped":
     "All observed subscriptions were capped",
   "timeline.fleetDecisionRow.allocatorDisabled": "Allocator disabled",
-  "timeline.fleetDecisionRow.borrowedForStandardWork": "Borrowed for standard work",
+  "timeline.fleetDecisionRow.borrowedForStandardWork":
+    "Borrowed for standard work",
   "timeline.fleetDecisionRow.borrowedOutsideThePreferredGroup":
     "Borrowed outside the preferred group",
-  "timeline.fleetDecisionRow.boundedCandidateScores": "Bounded candidate scores",
+  "timeline.fleetDecisionRow.boundedCandidateScores":
+    "Bounded candidate scores",
   "timeline.fleetDecisionRow.candidatecountInTheBoundedReplay":
     "{candidateCount} in the bounded replay",
   "timeline.fleetDecisionRow.candidateScores": "Candidate scores",
@@ -5138,35 +5751,44 @@ export const englishMessages = {
   "timeline.fleetDecisionRow.explicitIsolationLeftNoEligible":
     "Explicit isolation left no eligible candidate",
   "timeline.fleetDecisionRow.fleetPolicyShadow": "Fleet policy shadow",
-  "timeline.fleetDecisionRow.fleetPolicyShadowDetails": "Fleet policy shadow details",
-  "timeline.fleetDecisionRow.hiddenByThisViewS": "hidden by this view’s safety limit.",
+  "timeline.fleetDecisionRow.fleetPolicyShadowDetails":
+    "Fleet policy shadow details",
+  "timeline.fleetDecisionRow.hiddenByThisViewS":
+    "hidden by this view’s safety limit.",
   "timeline.fleetDecisionRow.highConfidence": "High confidence",
-  "timeline.fleetDecisionRow.hysteresisAvoidedALowValue": "Hysteresis avoided a low-value switch",
+  "timeline.fleetDecisionRow.hysteresisAvoidedALowValue":
+    "Hysteresis avoided a low-value switch",
   "timeline.fleetDecisionRow.idleCapacityBorrowing": "Idle-capacity borrowing",
   "timeline.fleetDecisionRow.idleCapacityWasBorrowedFor":
     "Idle capacity was borrowed for standard work",
-  "timeline.fleetDecisionRow.inFlightAssignmentWasFenced": "In-flight assignment was fenced",
-  "timeline.fleetDecisionRow.keptTheFencedInFlight": "Kept the fenced in-flight assignment",
+  "timeline.fleetDecisionRow.inFlightAssignmentWasFenced":
+    "In-flight assignment was fenced",
+  "timeline.fleetDecisionRow.keptTheFencedInFlight":
+    "Kept the fenced in-flight assignment",
   "timeline.fleetDecisionRow.keptTheSessionPin": "Kept the session pin",
   "timeline.fleetDecisionRow.lowConfidence": "Low confidence",
   "timeline.fleetDecisionRow.lowerScoresRankFirstCandidate":
     "Lower scores rank first. Candidate aliases are temporary and local to this event.",
   "timeline.fleetDecisionRow.mediumConfidence": "Medium confidence",
   "timeline.fleetDecisionRow.namedPolicyBorrowing": "Named-policy borrowing",
-  "timeline.fleetDecisionRow.noCandidatePassedThePolicy": "No candidate passed the policy checks",
+  "timeline.fleetDecisionRow.noCandidatePassedThePolicy":
+    "No candidate passed the policy checks",
   "timeline.fleetDecisionRow.noCandidateSelected": "No candidate selected",
   "timeline.fleetDecisionRow.none": "None",
   "timeline.fleetDecisionRow.noProductionCandidateWasSelected":
     "No production candidate was selected",
   "timeline.fleetDecisionRow.notBorrowed": "Not borrowed",
   "timeline.fleetDecisionRow.observedCandidates": "Observed candidates",
-  "timeline.fleetDecisionRow.observedCapacityWasAvailable": "Observed capacity was available",
+  "timeline.fleetDecisionRow.observedCapacityWasAvailable":
+    "Observed capacity was available",
   "timeline.fleetDecisionRow.observedDynamicCapacityWasSaturated":
     "Observed dynamic capacity was saturated",
-  "timeline.fleetDecisionRow.outsideExplicitIsolation": "Outside explicit isolation",
+  "timeline.fleetDecisionRow.outsideExplicitIsolation":
+    "Outside explicit isolation",
   "timeline.fleetDecisionRow.pacedBeforePlacement": "Paced before placement",
   "timeline.fleetDecisionRow.production": "Production",
-  "timeline.fleetDecisionRow.productionAndShadowMatched": "Production and shadow matched",
+  "timeline.fleetDecisionRow.productionAndShadowMatched":
+    "Production and shadow matched",
   "timeline.fleetDecisionRow.productionAndShadowOutcomesDiffered":
     "Production and shadow outcomes differed",
   "timeline.fleetDecisionRow.quotaCeilingReached": "Quota ceiling reached",
@@ -5177,15 +5799,18 @@ export const englishMessages = {
   "timeline.fleetDecisionRow.selectedCandidatekey": "Selected {candidateKey}",
   "timeline.fleetDecisionRow.selectedTheLowestPressureCandidate":
     "Selected the lowest-pressure candidate",
-  "timeline.fleetDecisionRow.sessionAffinityWasAlreadyBest": "Session affinity was already best",
+  "timeline.fleetDecisionRow.sessionAffinityWasAlreadyBest":
+    "Session affinity was already best",
   "timeline.fleetDecisionRow.shadowObservationOnlyItDid":
     "Shadow observation only — it did not change the subscription serving this turn.",
   "timeline.fleetDecisionRow.shadowPolicy": "Shadow policy",
-  "timeline.fleetDecisionRow.shadowPreferredAnotherCandidate": "Shadow preferred another candidate",
+  "timeline.fleetDecisionRow.shadowPreferredAnotherCandidate":
+    "Shadow preferred another candidate",
   "timeline.fleetDecisionRow.standardWorkWasPacedFor":
     "Standard work was paced for queued manager demand",
   "timeline.fleetDecisionRow.strandedCapacity": "Stranded capacity",
-  "timeline.fleetDecisionRow.theEmergencyFuseBlockedNew": "The emergency fuse blocked new work",
+  "timeline.fleetDecisionRow.theEmergencyFuseBlockedNew":
+    "The emergency fuse blocked new work",
   "timeline.fleetDecisionRow.theFencedAssignmentWasMissing":
     "The fenced assignment was missing from the snapshot",
   "timeline.fleetDecisionRow.thePolicySelectedSubscriptionWas":
@@ -5194,22 +5819,26 @@ export const englishMessages = {
     "The standard-work starvation bound was reached",
   "timeline.fleetDecisionRow.unavailable": "Unavailable",
   "timeline.fleetDecisionRow.unknownConfidence": "Unknown confidence",
-  "timeline.fleetDecisionRow.usedTheActiveSubscription": "Used the active subscription",
+  "timeline.fleetDecisionRow.usedTheActiveSubscription":
+    "Used the active subscription",
   "timeline.fleetDecisionRow.waitingForCapacity": "Waiting for capacity",
   "timeline.fleetDecisionRow.wouldAdmitNewWork": "Would admit new work",
   "timeline.fleetDecisionRow.wouldPaceNewWork": "Would pace new work",
   "timeline.genieCopy.aLittleHocusALittle": "A little hocus. A little pocus…",
-  "timeline.genieCopy.checkingTheFinePrintOn": "Checking the fine print on infinity…",
+  "timeline.genieCopy.checkingTheFinePrintOn":
+    "Checking the fine print on infinity…",
   "timeline.genieCopy.consultingTheCarpet": "Consulting the carpet…",
   "timeline.genieCopy.decantingALittleMagic": "Decanting a little magic…",
-  "timeline.genieCopy.dustingOffAThousandYears": "Dusting off a thousand years…",
+  "timeline.genieCopy.dustingOffAThousandYears":
+    "Dusting off a thousand years…",
   "timeline.genieCopy.findingTheGoodStardust": "Finding the good stardust…",
   "timeline.genieCopy.fluffingTheMagicCarpet": "Fluffing the magic carpet…",
   "timeline.genieCopy.negotiatingWithTheLamp": "Negotiating with the lamp…",
   "timeline.genieCopy.polishingTheLamp": "Polishing the lamp…",
   "timeline.genieCopy.puttingAWishIntoMotion": "Putting a wish into motion…",
   "timeline.genieCopy.rearrangingTheStars": "Rearranging the stars…",
-  "timeline.genieCopy.summoningALittleCleverness": "Summoning a little cleverness…",
+  "timeline.genieCopy.summoningALittleCleverness":
+    "Summoning a little cleverness…",
   "timeline.genieCopy.untanglingWishes": "Untangling wishes…",
   "timeline.genieCopy.waitingForAResponse": "Waiting for a response…",
   "timeline.genieCopy.warmingUpTheAbracadabra": "Warming up the abracadabra…",
@@ -5221,7 +5850,8 @@ export const englishMessages = {
   "timeline.genieLoading.preparingYourTaskTakingLonger":
     "Preparing your task. Taking longer than usual.",
   "timeline.genieLoading.showDetails": "Show details",
-  "timeline.genieLoading.stillWaitingForAResponse": "Still waiting for a response…",
+  "timeline.genieLoading.stillWaitingForAResponse":
+    "Still waiting for a response…",
   "timeline.genieLoading.thinking": "Thinking…",
   "timeline.genieLoading.waitingForAResponse": "Waiting for a response.",
   "timeline.genieLoading.waitingForAResponseTaking":
@@ -5231,7 +5861,8 @@ export const englishMessages = {
   "timeline.knowledgeReceipt.couldNotStartTheRetry2":
     "Could not start the retry. Please try again.",
   "timeline.knowledgeReceipt.knowledgeArchived": "Knowledge archived",
-  "timeline.knowledgeReceipt.knowledgeSavedForReview": "Knowledge saved for review",
+  "timeline.knowledgeReceipt.knowledgeSavedForReview":
+    "Knowledge saved for review",
   "timeline.knowledgeReceipt.processingTheFileAgainLeaves":
     "Processing the file again leaves the review decision unchanged.",
   "timeline.knowledgeReceipt.retryPreparation": "Retry preparation",
@@ -5240,9 +5871,11 @@ export const englishMessages = {
   "timeline.knowledgeReceipt.savedInNeedsReviewThis":
     "Saved in Needs review. This task continues; future tasks can use it after approval.",
   "timeline.knowledgeReceipt.savedToKnowledge": "Saved to Knowledge",
-  "timeline.knowledgeReceipt.sourcePreparationFailed": "Source preparation failed",
+  "timeline.knowledgeReceipt.sourcePreparationFailed":
+    "Source preparation failed",
   "timeline.knowledgeReceipt.sourceRemainsRejected": "Source remains rejected",
-  "timeline.knowledgeReceipt.sourceSavedToKnowledge": "Source saved to Knowledge",
+  "timeline.knowledgeReceipt.sourceSavedToKnowledge":
+    "Source saved to Knowledge",
   "timeline.knowledgeReceipt.startingRetry": "Starting retry…",
   "timeline.knowledgeReceipt.theOriginalFileRemainsAttached":
     "The original file remains attached. Searchable text has not been retained.",
@@ -5258,18 +5891,22 @@ export const englishMessages = {
     "This chat isn't allowed to make this change in Knowledge.",
   "timeline.learningRefusal.notSavedToKnowledge": "Not saved to Knowledge",
   "timeline.learningRefusal.notSavedToSkills": "Not saved to Skills",
-  "timeline.learningRefusal.notSavedToWorkspaceInstructions": "Not saved to workspace instructions",
+  "timeline.learningRefusal.notSavedToWorkspaceInstructions":
+    "Not saved to workspace instructions",
   "timeline.learningRefusal.openKnowledge": "Open Knowledge",
   "timeline.learningRefusal.openSkill": "Open Skill",
   "timeline.learningRefusal.openSkills": "Open Skills",
-  "timeline.learningRefusal.openWorkspaceInstructions": "Open workspace instructions",
+  "timeline.learningRefusal.openWorkspaceInstructions":
+    "Open workspace instructions",
   "timeline.learningRefusal.siteAgent":
     "This save was refused under the Site policy in effect at the time.",
   "timeline.learningRefusal.skillLearningOff":
     "Agent learning for Skills is off where this would be saved. Turn it on in Agent learning settings, then ask again.",
-  "timeline.learningRefusal.skillNotPermitted": "This chat isn't allowed to change this Skill.",
+  "timeline.learningRefusal.skillNotPermitted":
+    "This chat isn't allowed to change this Skill.",
   "timeline.noticePresentation.waitedElapsed": "Waited · {elapsed}",
-  "timeline.noticePresentation.waitedForAgentsElapsed_one": "Waited for {count} agent · {elapsed}",
+  "timeline.noticePresentation.waitedForAgentsElapsed_one":
+    "Waited for {count} agent · {elapsed}",
   "timeline.noticePresentation.waitedForAgentsElapsed_other":
     "Waited for {count} agents · {elapsed}",
   "timeline.noticePresentation.waitedForAgentsSince_one":
@@ -5282,33 +5919,45 @@ export const englishMessages = {
   "timeline.noticePresentation.waitingForAgentsSince_other":
     "Waiting for {count} agents · since {since}",
   "timeline.noticePresentation.waitingSince": "Waiting · since {since}",
-  "timeline.noticePresentation.declinedAutomatically": "Declined automatically.",
-  "timeline.noticePresentation.declinedAutomaticallyTitle": "Declined automatically: “{title}”.",
+  "timeline.noticePresentation.declinedAutomatically":
+    "Declined automatically.",
+  "timeline.noticePresentation.declinedAutomaticallyTitle":
+    "Declined automatically: “{title}”.",
   "timeline.noticePresentation.declinedAutomaticallyTitleWithDetail":
     "Declined automatically: “{title}” ({detail}).",
-  "timeline.noticePresentation.youApprovedActions_one": "You approved {count} action.",
-  "timeline.noticePresentation.youApprovedActions_other": "You approved {count} actions.",
+  "timeline.noticePresentation.youApprovedActions_one":
+    "You approved {count} action.",
+  "timeline.noticePresentation.youApprovedActions_other":
+    "You approved {count} actions.",
   "timeline.noticePresentation.youApprovedAndRejected":
     "You approved {approved} and declined {rejected}.",
   "timeline.noticePresentation.youApprovedThis": "You approved this.",
   "timeline.noticePresentation.youApprovedTitle": "You approved “{title}”.",
-  "timeline.noticePresentation.youApprovedTitleWithDetail": "You approved “{title}” ({detail}).",
-  "timeline.noticePresentation.youRejectedActions_one": "You declined {count} action.",
-  "timeline.noticePresentation.youRejectedActions_other": "You declined {count} actions.",
+  "timeline.noticePresentation.youApprovedTitleWithDetail":
+    "You approved “{title}” ({detail}).",
+  "timeline.noticePresentation.youRejectedActions_one":
+    "You declined {count} action.",
+  "timeline.noticePresentation.youRejectedActions_other":
+    "You declined {count} actions.",
   "timeline.noticePresentation.youRejectedThis": "You declined this.",
   "timeline.noticePresentation.youRejectedTitle": "You declined “{title}”.",
-  "timeline.noticePresentation.youRejectedTitleWithDetail": "You declined “{title}” ({detail}).",
-  "timeline.noticePresentation.youRespondedToThisApproval": "You responded to this approval.",
-  "timeline.patchApplyCommand.commandToApplyTheseChanges": "Command to apply these changes",
+  "timeline.noticePresentation.youRejectedTitleWithDetail":
+    "You declined “{title}” ({detail}).",
+  "timeline.noticePresentation.youRespondedToThisApproval":
+    "You responded to this approval.",
+  "timeline.patchApplyCommand.commandToApplyTheseChanges":
+    "Command to apply these changes",
   "timeline.patchApplyCommand.copied": "Copied",
   "timeline.patchApplyCommand.copiedPasteItInA":
     "Copied. Paste it in a terminal in your project folder and press Enter. The link in it expires in {lifetime}.",
-  "timeline.patchApplyCommand.copyCommandToApplyThese": "Copy command to apply these changes",
+  "timeline.patchApplyCommand.copyCommandToApplyThese":
+    "Copy command to apply these changes",
   "timeline.patchApplyCommand.copyThisCommandThenRun":
     "Copy this command, then run it in your project folder. The link in it expires in {lifetime}.",
   "timeline.patchApplyCommand.couldnTPrepareTheCommand":
     "Couldn't prepare the command. Try again, or download the file and run git apply.",
-  "timeline.patchApplyCommand.curlFsslShellquoteGitApply": "curl -fsSL {shellQuote} | git apply",
+  "timeline.patchApplyCommand.curlFsslShellquoteGitApply":
+    "curl -fsSL {shellQuote} | git apply",
   "timeline.patchApplyCommand.downloadFilenameThenRunGit":
     "Download {filename}, then run git apply {filename} in your project folder.",
   "timeline.patchApplyCommand.preparing": "Preparing…",
@@ -5323,11 +5972,15 @@ export const englishMessages = {
     "Couldn't check your payment from here. If you paid, your credits still arrive.",
   "timeline.paymentPage.creditsAdded": "You added {amount} in credits",
   "timeline.paymentPage.creditsGotFree": "You got {amount} in free credits",
-  "timeline.paymentPage.expired": "This payment page expired. Nothing was charged.",
-  "timeline.paymentPage.linkExpired": "This link has expired. Ask here for a new one.",
+  "timeline.paymentPage.expired":
+    "This payment page expired. Nothing was charged.",
+  "timeline.paymentPage.linkExpired":
+    "This link has expired. Ask here for a new one.",
   "timeline.paymentPage.openBilling": "Open billing",
-  "timeline.paymentPage.opensBillingPage": "Opens your billing page in a new tab.",
-  "timeline.paymentPage.opensSecurePage": "Opens a secure payment page in a new tab.",
+  "timeline.paymentPage.opensBillingPage":
+    "Opens your billing page in a new tab.",
+  "timeline.paymentPage.opensSecurePage":
+    "Opens a secure payment page in a new tab.",
   "timeline.paymentPage.opensSecurePageConfirms":
     "Opens a secure payment page in a new tab. Your credits show up here once you've paid.",
   "timeline.paymentPage.pay": "Pay",
@@ -5341,12 +5994,16 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.connectingTools": "Connecting tools",
   "timeline.platformActivityPresentation.conversationHistoryDidnTLoad":
     "Conversation history didn’t load",
-  "timeline.platformActivityPresentation.conversationHistoryLoaded": "Conversation history loaded",
+  "timeline.platformActivityPresentation.conversationHistoryLoaded":
+    "Conversation history loaded",
   "timeline.platformActivityPresentation.conversationHistoryLoadingInterrupted":
     "Conversation history loading interrupted",
-  "timeline.platformActivityPresentation.couldNotMessageName": "Couldn't message {name}",
-  "timeline.platformActivityPresentation.couldNotSpawnName": "Couldn't spawn {name}",
-  "timeline.platformActivityPresentation.filePreparationFailed": "File preparation failed",
+  "timeline.platformActivityPresentation.couldNotMessageName":
+    "Couldn't message {name}",
+  "timeline.platformActivityPresentation.couldNotSpawnName":
+    "Couldn't spawn {name}",
+  "timeline.platformActivityPresentation.filePreparationFailed":
+    "File preparation failed",
   "timeline.platformActivityPresentation.filePreparationInterrupted":
     "File preparation interrupted",
   "timeline.platformActivityPresentation.filesReady": "Files ready",
@@ -5355,12 +6012,17 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.messagedName": "Messaged {name}",
   "timeline.platformActivityPresentation.messagingName": "Messaging {name}",
   "timeline.platformActivityPresentation.messagingWorker": "Messaging worker",
-  "timeline.platformActivityPresentation.modelDidnTRespond": "Model didn’t respond",
-  "timeline.platformActivityPresentation.modelRequestDispatched": "Model request dispatched",
-  "timeline.platformActivityPresentation.modelStartedResponding": "Model started responding",
-  "timeline.platformActivityPresentation.modelWaitInterrupted": "Model wait interrupted",
+  "timeline.platformActivityPresentation.modelDidnTRespond":
+    "Model didn’t respond",
+  "timeline.platformActivityPresentation.modelRequestDispatched":
+    "Model request dispatched",
+  "timeline.platformActivityPresentation.modelStartedResponding":
+    "Model started responding",
+  "timeline.platformActivityPresentation.modelWaitInterrupted":
+    "Model wait interrupted",
   "timeline.platformActivityPresentation.preparingFiles": "Preparing files",
-  "timeline.platformActivityPresentation.preparingRepository": "Preparing repository",
+  "timeline.platformActivityPresentation.preparingRepository":
+    "Preparing repository",
   "timeline.platformActivityPresentation.preparingRuntimeAndModelRequest":
     "Preparing runtime and model request",
   "timeline.platformActivityPresentation.repositoryPreparationFailed":
@@ -5373,41 +6035,55 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.runtimeModelPreparationInterrupted":
     "Runtime/model preparation interrupted",
   "timeline.platformActivityPresentation.sandboxCreated": "Sandbox created",
-  "timeline.platformActivityPresentation.sandboxDidnTStart": "Sandbox didn’t start",
+  "timeline.platformActivityPresentation.sandboxDidnTStart":
+    "Sandbox didn’t start",
   "timeline.platformActivityPresentation.sandboxEnvironmentAlreadyReady":
     "Sandbox Environment already ready",
-  "timeline.platformActivityPresentation.sandboxEnvironmentReady": "Sandbox Environment ready",
+  "timeline.platformActivityPresentation.sandboxEnvironmentReady":
+    "Sandbox Environment ready",
   "timeline.platformActivityPresentation.sandboxEnvironmentSetupFailed":
     "Sandbox Environment setup failed",
   "timeline.platformActivityPresentation.sandboxEnvironmentSetupInterrupted":
     "Sandbox Environment setup interrupted",
   "timeline.platformActivityPresentation.sandboxReady": "Sandbox ready",
-  "timeline.platformActivityPresentation.sandboxReattached": "Sandbox reattached",
+  "timeline.platformActivityPresentation.sandboxReattached":
+    "Sandbox reattached",
   "timeline.platformActivityPresentation.sandboxRestored": "Sandbox restored",
-  "timeline.platformActivityPresentation.sandboxStartupInterrupted": "Sandbox startup interrupted",
+  "timeline.platformActivityPresentation.sandboxStartupInterrupted":
+    "Sandbox startup interrupted",
   "timeline.platformActivityPresentation.settingUpSandboxEnvironment":
     "Setting up sandbox environment",
   "timeline.platformActivityPresentation.spawnedName": "Spawned {name}",
   "timeline.platformActivityPresentation.spawningName": "Spawning {name}",
   "timeline.platformActivityPresentation.spawningWorker": "Spawning worker",
   "timeline.platformActivityPresentation.startingSandbox": "Starting sandbox",
-  "timeline.platformActivityPresentation.toolConnectionFailed": "Tool connection failed",
-  "timeline.platformActivityPresentation.toolConnectionInterrupted": "Tool connection interrupted",
+  "timeline.platformActivityPresentation.toolConnectionFailed":
+    "Tool connection failed",
+  "timeline.platformActivityPresentation.toolConnectionInterrupted":
+    "Tool connection interrupted",
   "timeline.platformActivityPresentation.toolsReady": "Tools ready",
-  "timeline.platformActivityPresentation.waitingForAWorker": "Waiting for a worker",
+  "timeline.platformActivityPresentation.waitingForAWorker":
+    "Waiting for a worker",
   "timeline.platformActivityPresentation.waitingForModel": "Waiting for model",
   "timeline.platformActivityPresentation.waitingForSandboxCheckpoint":
     "Waiting for sandbox checkpoint",
-  "timeline.platformActivityPresentation.waitingForSandboxRecovery": "Waiting for sandbox recovery",
-  "timeline.platformActivityPresentation.waitingForSandboxRotation": "Waiting for sandbox rotation",
-  "timeline.platformActivityPresentation.workerInterrupted": "Worker interrupted",
+  "timeline.platformActivityPresentation.waitingForSandboxRecovery":
+    "Waiting for sandbox recovery",
+  "timeline.platformActivityPresentation.waitingForSandboxRotation":
+    "Waiting for sandbox rotation",
+  "timeline.platformActivityPresentation.workerInterrupted":
+    "Worker interrupted",
   "timeline.platformActivityPresentation.workerMessaged": "Worker messaged",
-  "timeline.platformActivityPresentation.workerMessageFailed": "Worker message failed",
+  "timeline.platformActivityPresentation.workerMessageFailed":
+    "Worker message failed",
   "timeline.platformActivityPresentation.workerSpawned": "Worker spawned",
-  "timeline.platformActivityPresentation.workerSpawnFailed": "Worker spawn failed",
+  "timeline.platformActivityPresentation.workerSpawnFailed":
+    "Worker spawn failed",
   "timeline.platformActivityPresentation.workerStarted": "Worker started",
-  "timeline.platformActivityPresentation.workerStartupFailed": "Worker startup failed",
-  "timeline.platformActivityPresentation.workerWaitInterrupted": "Worker wait interrupted",
+  "timeline.platformActivityPresentation.workerStartupFailed":
+    "Worker startup failed",
+  "timeline.platformActivityPresentation.workerWaitInterrupted":
+    "Worker wait interrupted",
   "timeline.platformActivityRow.command": "Command",
   "timeline.platformActivityRow.details": "Details",
   "timeline.platformActivityRow.includesOverlappingSandboxStartupCustom":
@@ -5420,13 +6096,17 @@ export const englishMessages = {
   "timeline.projection.details": "Details",
   "timeline.projection.interrupted": "Interrupted.",
   "timeline.projection.needsYou": "Needs you",
-  "timeline.projection.returnedToYourPreferredModel": "Returned to your preferred model.",
-  "timeline.projection.switchedToAFallbackModel": "Switched to a fallback model.",
+  "timeline.projection.returnedToYourPreferredModel":
+    "Returned to your preferred model.",
+  "timeline.projection.switchedToAFallbackModel":
+    "Switched to a fallback model.",
   "timeline.projection.switchedToAnotherSubscriptionAccount":
     "Switched to another subscription account.",
   "timeline.projection.theTurnFailed": "The turn failed.",
-  "timeline.projection.theTurnFailedBeforeRetrying": "The turn failed before retrying.",
-  "timeline.projection.theTurnStoppedUnexpectedly": "The turn stopped unexpectedly",
+  "timeline.projection.theTurnFailedBeforeRetrying":
+    "The turn failed before retrying.",
+  "timeline.projection.theTurnStoppedUnexpectedly":
+    "The turn stopped unexpectedly",
   "timeline.projection.thisTaskSUsageLimit":
     "This task's usage limit is reached. A person can raise or remove the limit to continue.",
   "timeline.projection.tryAgainAfterYourQuota":
@@ -5443,13 +6123,16 @@ export const englishMessages = {
   "timeline.retainedImage.bytesAreUnavailable": "bytes are unavailable",
   "timeline.retainedImage.expiredOrUnavailable": "expired or unavailable",
   "timeline.retainedImage.retrievalFailed": "retrieval failed",
-  "timeline.retainedImage.retrievalIsNotConfigured": "retrieval is not configured",
+  "timeline.retainedImage.retrievalIsNotConfigured":
+    "retrieval is not configured",
   "timeline.retainedImage.urlIsUnavailable": "URL is unavailable",
   "timeline.rollingActivity.thinking": "Thinking",
   "timeline.rollingActivity.working": "Working",
   "timeline.screenshotLightbox.close": "Close",
-  "timeline.screenshotLightbox.downloadDownloadfilename": "Download {downloadFilename}",
-  "timeline.screenshotLightbox.escOrClickOutsideTo": "Esc or click outside to close",
+  "timeline.screenshotLightbox.downloadDownloadfilename":
+    "Download {downloadFilename}",
+  "timeline.screenshotLightbox.escOrClickOutsideTo":
+    "Esc or click outside to close",
   "timeline.screenshotLightbox.expandedLowercase": "Expanded {lowerCase}",
   "timeline.screenshotLightbox.fit": "Fit",
   "timeline.screenshotLightbox.nextImage": "Next image",
@@ -5466,17 +6149,22 @@ export const englishMessages = {
   "timeline.shared.loadingFullOutput": "Loading the full output…",
   "timeline.shared.noOutput": "(no output)",
   "timeline.shared.outputBoundedAt": "Output bounded at",
-  "timeline.shared.outputPreviewFailed": "Showing a preview. The full output didn't load.",
+  "timeline.shared.outputPreviewFailed":
+    "Showing a preview. The full output didn't load.",
   "timeline.shared.outputPreviewOnly": "Showing a preview of this output.",
   "timeline.shared.retryFullOutput": "Retry",
   "timeline.shared.screenshot": "Screenshot",
-  "timeline.shared.showFullOutputLengthLines": "show full output ({length} lines)",
+  "timeline.shared.showFullOutputLengthLines":
+    "show full output ({length} lines)",
   "timeline.shared.truncationReason": "reason",
   "timeline.startupDispatchDetails.automaticStartRetryAtLocaletimestring":
     "Automatic start retry at {localeTimeString}.",
-  "timeline.startupDispatchDetails.automaticStartRetryIsDue": "Automatic start retry is due.",
-  "timeline.startupDispatchDetails.dispatchAttempts_one": "{count} dispatch attempt.",
-  "timeline.startupDispatchDetails.dispatchAttempts_other": "{count} dispatch attempts.",
+  "timeline.startupDispatchDetails.automaticStartRetryIsDue":
+    "Automatic start retry is due.",
+  "timeline.startupDispatchDetails.dispatchAttempts_one":
+    "{count} dispatch attempt.",
+  "timeline.startupDispatchDetails.dispatchAttempts_other":
+    "{count} dispatch attempts.",
   "timeline.startupDispatchDetails.lastRecordedDispatchErrorLasterror":
     "Last recorded dispatch error: {lastError}",
   "timeline.startupDispatchDetails.startConfirmationIsUnavailable":
@@ -5496,12 +6184,14 @@ export const englishMessages = {
   "timeline.startupTimings.inProgress": "In progress",
   "timeline.startupTimings.interrupted": "Interrupted",
   "timeline.startupTimings.latestTurn": "Latest turn",
-  "timeline.startupTimings.noStartupTimingsRecordedYet": "No startup timings recorded yet.",
+  "timeline.startupTimings.noStartupTimingsRecordedYet":
+    "No startup timings recorded yet.",
   "timeline.startupTimings.noTurnIdRecorded": "No turn ID recorded",
   "timeline.startupTimings.phase": "Phase",
   "timeline.startupTimings.credentialResolution": "Run credential resolution",
   "timeline.startupTimings.credentialMint": "Credential minting",
-  "timeline.startupTimings.credentialMaterialization": "Credential materialization",
+  "timeline.startupTimings.credentialMaterialization":
+    "Credential materialization",
   "timeline.startupTimings.clientPublication": "Client publication",
   "timeline.startupTimings.clientReadiness": "Sandbox client readiness",
   "timeline.startupTimings.credentialSeed": "Client credential seeding",
@@ -5509,8 +6199,10 @@ export const englishMessages = {
   "timeline.startupTimings.artifactRuntime": "Artifact runtime readiness",
   "timeline.platformActivityPresentation.preparationRunning": "{phase}…",
   "timeline.platformActivityPresentation.preparationFailed": "{phase} failed",
-  "timeline.platformActivityPresentation.preparationInterrupted": "{phase} interrupted",
-  "timeline.platformActivityPresentation.preparationCompleted": "{phase} complete",
+  "timeline.platformActivityPresentation.preparationInterrupted":
+    "{phase} interrupted",
+  "timeline.platformActivityPresentation.preparationCompleted":
+    "{phase} complete",
   "timeline.startupTimings.ready": "Ready",
   "timeline.startupTimings.repository": "Repository",
   "timeline.startupTimings.roundMs": "{round} ms",
@@ -5521,20 +6213,24 @@ export const englishMessages = {
   "timeline.startupTimings.startupPhasesFor": "Startup phases for",
   "timeline.startupTimings.status": "Status",
   "timeline.startupTimings.tools": "Tools",
-  "timeline.startupTimings.turnTurnidStartedStartedat": "Turn: {turnId} · Started: {startedAt}",
+  "timeline.startupTimings.turnTurnidStartedStartedat":
+    "Turn: {turnId} · Started: {startedAt}",
   "timeline.startupTimings.unassignedEvents": "Unassigned events",
   "timeline.startupTimings.unassignedEvents2": "unassigned events",
   "timeline.startupTimings.unknownTurn": "unknown",
   "timeline.startupTimings.workerQueue": "Worker queue",
-  "timeline.toolDiff.rawPatchCouldNotParse": "raw patch (could not parse hunks)",
+  "timeline.toolDiff.rawPatchCouldNotParse":
+    "raw patch (could not parse hunks)",
   "timeline.toolDisplayName.toolCall": "Tool call",
-  "timeline.toolPresentation.applyingFilecountFiles": "Applying {fileCount} files",
+  "timeline.toolPresentation.applyingFilecountFiles":
+    "Applying {fileCount} files",
   "timeline.toolPresentation.applyingPatch": "Applying patch",
   "timeline.toolPresentation.applyingPathbasename": "Applying {pathBasename}",
   "timeline.toolPresentation.arguments": "Arguments",
   "timeline.toolPresentation.ask": "Ask",
   "timeline.toolPresentation.binaryOutput": "binary output",
-  "timeline.toolPresentation.binaryOutputSuppressed": "(binary output suppressed)",
+  "timeline.toolPresentation.binaryOutputSuppressed":
+    "(binary output suppressed)",
   "timeline.toolPresentation.blockedByYourPermissionSettings":
     "Blocked by your permission settings",
   "timeline.toolPresentation.callUser.answered": "Answered",
@@ -5549,9 +6245,11 @@ export const englishMessages = {
   "timeline.toolPresentation.edited": "Edited",
   "timeline.toolPresentation.editedLengthFiles": "Edited {length} files",
   "timeline.toolPresentation.error": "Error",
-  "timeline.toolPresentation.fileDeletedNoDiffTo": "File deleted — no diff to show.",
+  "timeline.toolPresentation.fileDeletedNoDiffTo":
+    "File deleted — no diff to show.",
   "timeline.toolPresentation.itMayHaveRun": "It may have run",
-  "timeline.toolPresentation.lengthToolsTruncatepreview": "{length} tools · {truncatePreview}",
+  "timeline.toolPresentation.lengthToolsTruncatepreview":
+    "{length} tools · {truncatePreview}",
   "timeline.toolPresentation.lookedUpTools": "Looked up tools",
   "timeline.toolPresentation.lookingUpTools": "Looking up tools",
   "timeline.toolPresentation.lookupFailed": "Lookup failed",
@@ -5566,7 +6264,8 @@ export const englishMessages = {
   "timeline.toolPresentation.outcomeUnknown": "outcome unknown",
   "timeline.toolPresentation.outputContainedANulByte":
     "output contained a NUL byte and could not be stored; the turn failed on this tool's output insert — no output event ever arrived.",
-  "timeline.toolPresentation.outputLostNulByteCould": "output lost — NUL byte could not be stored",
+  "timeline.toolPresentation.outputLostNulByteCould":
+    "output lost — NUL byte could not be stored",
   "timeline.toolPresentation.pageUnavailable": "(page unavailable)",
   "timeline.toolPresentation.patchFailed": "patch failed",
   "timeline.toolPresentation.queryUnavailable": "(query unavailable)",
@@ -5586,8 +6285,10 @@ export const englishMessages = {
   "timeline.toolPresentation.typedOnTheKeyboard": "Typed on the keyboard",
   "timeline.toolPresentation.usedTheScreen": "Used the screen",
   "timeline.toolPresentation.lookedForScreens": "Looked for a screen to use",
-  "timeline.toolPresentation.couldNotLookForMachines": "Couldn't look for machines",
-  "timeline.toolPresentation.couldNotMoveToTheMachine": "Couldn't move to the machine",
+  "timeline.toolPresentation.couldNotLookForMachines":
+    "Couldn't look for machines",
+  "timeline.toolPresentation.couldNotMoveToTheMachine":
+    "Couldn't move to the machine",
   "timeline.toolPresentation.couldNotOpenTheScreen": "Couldn't open the screen",
   "timeline.toolPresentation.couldNotUseTheScreen": "Couldn't use the screen",
   "timeline.toolPresentation.searchedTheWeb": "Searched the web",
@@ -5598,14 +6299,17 @@ export const englishMessages = {
     "searching… results fold into the model context (no output event).",
   "timeline.toolPresentation.searchingTheWeb": "Searching the web",
   "timeline.toolPresentation.searchingWithinPage": "Searching within page",
-  "timeline.toolPresentation.searchTruncatepreview": "Search “{truncatePreview}”",
+  "timeline.toolPresentation.searchTruncatepreview":
+    "Search “{truncatePreview}”",
   "timeline.toolPresentation.sendingInputToSessionSessionid":
     "sending input to session {sessionId}…",
   "timeline.toolPresentation.sessionBgsessionALaterWrite":
     "↳ session {bgSession} — a later write_stdin can target this PTY.",
-  "timeline.toolPresentation.sessionSessionidPtyVanished": "session {sessionId} PTY vanished",
+  "timeline.toolPresentation.sessionSessionidPtyVanished":
+    "session {sessionId} PTY vanished",
   "timeline.toolPresentation.settingTitle": "Setting title…",
-  "timeline.toolPresentation.theToolCallFailedWith": "the tool call failed with no output.",
+  "timeline.toolPresentation.theToolCallFailedWith":
+    "the tool call failed with no output.",
   "timeline.toolPresentation.thisActionMayHaveRun":
     "This action may have run. Check the result in the connected app before trying again.",
   "timeline.toolPresentation.toolCallFailed": "tool call failed",
@@ -5625,7 +6329,8 @@ export const englishMessages = {
   "timeline.toolRenderers.capabilityQueryQuery": "capability query: {query}",
   "timeline.toolRenderers.capturingFrame": "capturing frame…",
   "timeline.toolRenderers.clickedXY": "Clicked ({x}, {y})",
-  "timeline.toolRenderers.computerCallFailedNoImage": "computer_call failed — no image returned.",
+  "timeline.toolRenderers.computerCallFailedNoImage":
+    "computer_call failed — no image returned.",
   "timeline.toolRenderers.computerCallInterruptedNoImage":
     "computer_call interrupted — no image returned.",
   "timeline.toolRenderers.computerUseIsReadOnly":
@@ -5642,7 +6347,8 @@ export const englishMessages = {
   "timeline.toolRenderers.filesCount_one": "{count} file",
   "timeline.toolRenderers.filesCount_other": "{count} files",
   "timeline.toolRenderers.generatedImage": "Generated image",
-  "timeline.toolRenderers.generatedImageWidthHeight": "Generated image · {width}×{height}",
+  "timeline.toolRenderers.generatedImageWidthHeight":
+    "Generated image · {width}×{height}",
   "timeline.toolRenderers.generateVideo": "Generate video",
   "timeline.toolRenderers.generatingImage": "Generating image",
   "timeline.toolRenderers.generatingVideo": "Generating video",
@@ -5652,14 +6358,17 @@ export const englishMessages = {
   "timeline.toolRenderers.imageLabel": "Image {label}.",
   "timeline.toolRenderers.imageRetrievalFailed": "image retrieval failed",
   "timeline.toolRenderers.imageStateReplaceall": "Image {state}: {replaceAll}.",
-  "timeline.toolRenderers.inlineImageOmittedNotRetained": "inline image omitted · not retained",
+  "timeline.toolRenderers.inlineImageOmittedNotRetained":
+    "inline image omitted · not retained",
   "timeline.toolRenderers.isNotAFile": "is not a file",
   "timeline.toolRenderers.isNotASupportedImage": "is not a supported image",
   "timeline.toolRenderers.loadingImage": "loading image…",
   "timeline.toolRenderers.loadingOutput": "Loading output…",
   "timeline.toolRenderers.loadingRetainedNoun": "loading retained {noun}…",
-  "timeline.toolRenderers.loadingTheGeneratedImage": "Loading the generated image…",
-  "timeline.toolRenderers.loadingTheRetainedNoun": "Loading the retained {noun}…",
+  "timeline.toolRenderers.loadingTheGeneratedImage":
+    "Loading the generated image…",
+  "timeline.toolRenderers.loadingTheRetainedNoun":
+    "Loading the retained {noun}…",
   "timeline.toolRenderers.lookedUpTools": "Looked up tools",
   "timeline.toolRenderers.lookingUpTools": "Looking up tools",
   "timeline.toolRenderers.lookupFailed": "Lookup failed",
@@ -5679,7 +6388,8 @@ export const englishMessages = {
   "timeline.toolRenderers.nounRetrievalFailed": "{noun} retrieval failed",
   "timeline.toolRenderers.observedBrowser": "Observed browser",
   "timeline.toolRenderers.open": "Open",
-  "timeline.toolRenderers.openFilenameInArtifacts": "Open {filename} in Artifacts",
+  "timeline.toolRenderers.openFilenameInArtifacts":
+    "Open {filename} in Artifacts",
   "timeline.toolRenderers.openInArtifacts": "Open in Artifacts",
   "timeline.toolRenderers.opening": "Opening…",
   "timeline.toolRenderers.openTitle": "Open {title}",
@@ -5705,8 +6415,10 @@ export const englishMessages = {
   "timeline.toolRenderers.result": "Result",
   "timeline.toolRenderers.resultsFoldedIntoModelContext":
     "results folded into model context — no list available.",
-  "timeline.toolRenderers.retainingSourceAndCompiledHtml": "retaining source and compiled HTML…",
-  "timeline.toolRenderers.retainingWorkspaceBytes": "retaining workspace bytes…",
+  "timeline.toolRenderers.retainingSourceAndCompiledHtml":
+    "retaining source and compiled HTML…",
+  "timeline.toolRenderers.retainingWorkspaceBytes":
+    "retaining workspace bytes…",
   "timeline.toolRenderers.retrievalFailed": "retrieval failed.",
   "timeline.toolRenderers.retry": "Retry",
   "timeline.toolRenderers.retryDownload": "Retry download",
@@ -5714,7 +6426,8 @@ export const englishMessages = {
   "timeline.toolRenderers.retryOpen": "Retry open",
   "timeline.toolRenderers.running": "Running…",
   "timeline.toolRenderers.screenshot": "Screenshot",
-  "timeline.toolRenderers.screenshotStateReplaceall": "Screenshot {state}: {replaceAll}.",
+  "timeline.toolRenderers.screenshotStateReplaceall":
+    "Screenshot {state}: {replaceAll}.",
   "timeline.toolRenderers.scrolled": "Scrolled",
   "timeline.toolRenderers.searchFailed": "Search failed",
   "timeline.toolRenderers.searching": "Searching…",
@@ -5727,8 +6440,10 @@ export const englishMessages = {
     "The configured value is preserved exactly and available through authorized secret reads.",
   "timeline.toolRenderers.theInlineMediatypeOutputWas":
     "The inline {mediaType} output was omitted from the audit timeline and its source bytes were not retained.",
-  "timeline.toolRenderers.theToolCallFailedWith": "the tool call failed with no output.",
-  "timeline.toolRenderers.theVideoWillAppearHere": "The video will appear here when it is ready.",
+  "timeline.toolRenderers.theToolCallFailedWith":
+    "the tool call failed with no output.",
+  "timeline.toolRenderers.theVideoWillAppearHere":
+    "The video will appear here when it is ready.",
   "timeline.toolRenderers.tooLarge": "too large",
   "timeline.toolRenderers.toolLookupFailed": "Tool lookup failed",
   "timeline.toolRenderers.typedSliceValue": "Typed “{slice}{value}”",
@@ -5742,7 +6457,8 @@ export const englishMessages = {
   "timeline.toolRenderers.viewedPathbasename": "Viewed {pathBasename}",
   "timeline.toolRenderers.viewedPathbasenameImageOmittedNot":
     "Viewed {pathBasename} · image omitted · not retained",
-  "timeline.toolRenderers.viewImageFailedNoImage": "view_image failed — no image data returned.",
+  "timeline.toolRenderers.viewImageFailedNoImage":
+    "view_image failed — no image data returned.",
   "timeline.toolRenderers.viewImageInterrupted": "view_image interrupted.",
   "timeline.toolRenderers.viewPathbasename": "View {pathBasename}",
   "timeline.toolRenderers.waited": "Waited",
@@ -5955,7 +6671,8 @@ export const englishMessages = {
   "timeline.toolStep.wait.done": "Waited",
   "timeline.toolStep.wait.running": "Waiting",
   "timeline.toolStep.withdrawNotification.done": "Withdrew a notification",
-  "timeline.toolStep.withdrawNotification.running": "Withdrawing a notification",
+  "timeline.toolStep.withdrawNotification.running":
+    "Withdrawing a notification",
   "timeline.toolStep.workInBrowser.done": "Worked in the browser",
   "timeline.toolStep.workInBrowser.running": "Working in the browser",
   "timeline.toolStep.workInExcel.done": "Worked in Excel",
@@ -5965,7 +6682,8 @@ export const englishMessages = {
   "timeline.turnSteps.retry": "Retry",
   "timeline.turnSteps.showEarlierSteps": "Show earlier steps",
   "timeline.turnSteps.showSteps": "Show steps",
-  "timeline.turnSummary.contextCompactedExpandForDetails": "Context compacted; expand for details",
+  "timeline.turnSummary.contextCompactedExpandForDetails":
+    "Context compacted; expand for details",
   "timeline.turnSummary.copyTurn": "Copy turn",
   "timeline.turnSummary.interrupted": "· interrupted",
   "timeline.turnSummary.preparation": "Preparation",
@@ -5974,7 +6692,8 @@ export const englishMessages = {
   "timeline.turnSummary.workedFor": "Worked for",
   "timeline.turnSummary.working": "Working",
   "timeline.turnSummaryModel.compactions_one": "Conversation history compacted",
-  "timeline.turnSummaryModel.compactions_other": "{count} conversation history compactions",
+  "timeline.turnSummaryModel.compactions_other":
+    "{count} conversation history compactions",
   "timeline.turnSummaryModel.compacts_one": "compacted",
   "timeline.turnSummaryModel.compacts_other": "{count} compacts",
   "timeline.turnSummaryModel.daysHours": "{days}d {hours}h",
@@ -5990,9 +6709,11 @@ export const englishMessages = {
   "timelineAnnotationChrome.addANote": "Add a note…",
   "timelineAnnotationChrome.note": "Note",
   "timelineAnnotationChrome.showLess": "Show less",
-  "timelineAnnotationChrome.showLessAnnotationOrdinal": "Show less annotation {ordinal}",
+  "timelineAnnotationChrome.showLessAnnotationOrdinal":
+    "Show less annotation {ordinal}",
   "timelineAnnotationChrome.showMore": "Show more",
-  "timelineAnnotationChrome.showMoreAnnotationOrdinal": "Show more annotation {ordinal}",
+  "timelineAnnotationChrome.showMoreAnnotationOrdinal":
+    "Show more annotation {ordinal}",
   "timelineAnnotationChrome.viewSource": "view source",
   "timelineAnnotationChrome.viewSourcelabelSourceTruncateannotationquote":
     "View {sourceLabel} source: {truncateAnnotationQuote}",
@@ -6000,15 +6721,18 @@ export const englishMessages = {
   "timelineAnnotations.annotationOrdinal": "Annotation {ordinal}",
   "timelineAnnotations.removeAllAnnotations": "Remove all annotations",
   "timelineAnnotations.reviewCountlabel": "Review {countLabel}",
-  "timelineAnnotations.sourceIsOutsideTheLoaded": "Source is outside the loaded timeline window.",
+  "timelineAnnotations.sourceIsOutsideTheLoaded":
+    "Source is outside the loaded timeline window.",
   "timelineAnnotationsDialog.annotationOrdinal": "Annotation {ordinal}",
   "timelineAnnotationsDialog.close": "Close",
   "timelineAnnotationsDialog.editQuotedNotes": "Edit quoted notes",
   "timelineAnnotationsDialog.quotedNotes": "Quoted notes",
-  "timelineAnnotationsDialog.removeAnnotationOrdinal": "Remove annotation {ordinal}",
+  "timelineAnnotationsDialog.removeAnnotationOrdinal":
+    "Remove annotation {ordinal}",
   "timelineAnnotationsDialog.sourceIsOutsideTheLoaded":
     "Source is outside the loaded timeline window.",
-  "timelineAnnotationSelection.addANoteAboutPreview": "Add a note about “{preview}”",
+  "timelineAnnotationSelection.addANoteAboutPreview":
+    "Add a note about “{preview}”",
   "timelineAnnotationSelection.addNote": "Add note",
   "timelineAnnotationShared.assistant": "Assistant",
   "timelineAnnotationShared.toolOutput": "Tool output",
@@ -6039,7 +6763,8 @@ export const englishMessages = {
   "toolActionReview.hiddenfieldsMoreValues": "{hiddenFields} more values",
   "toolActionReview.includes": "Includes",
   "toolActionReview.inDetails": "in details",
-  "toolActionReview.itMayHaveRunCheck": "It may have run. Check the result before trying again.",
+  "toolActionReview.itMayHaveRunCheck":
+    "It may have run. Check the result before trying again.",
   "toolActionReview.loadingDetails": "Loading details…",
   "toolActionReview.more": "more",
   "toolActionReview.n1MoreValue": "1 more value",
@@ -6051,8 +6776,10 @@ export const englishMessages = {
   "toolActionReview.partlyDone": "Partly done",
   "toolActionReview.previous": "Previous",
   "toolActionReview.reasonItDidNotRun": "{reason} It did not run.",
-  "toolActionReview.someOfItRanCheck": "Some of it ran. Check the result before continuing.",
-  "toolActionReview.theActionRanButReturned": "The action ran but returned an error.",
+  "toolActionReview.someOfItRanCheck":
+    "Some of it ran. Check the result before continuing.",
+  "toolActionReview.theActionRanButReturned":
+    "The action ran but returned an error.",
   "toolActionReview.theDetailsOfThisOlder":
     "The details of this older request couldn't be recovered, so it can't be approved. Decline it to let the agent continue.",
   "toolActionReview.theExactValuesSavedFor":
@@ -6068,15 +6795,20 @@ export const englishMessages = {
   "toolActionReview.viewAllLocalestringNoun": "View all {localeString} {noun}",
   "toolActionReview.viewLabelPreview": "View {label}: {preview}",
   "toolActionReview.viewTheNoun": "View the {noun}",
-  "toolActionReview.yourPermissionSettingsBlockThis": "Your permission settings block this action.",
+  "toolActionReview.yourPermissionSettingsBlockThis":
+    "Your permission settings block this action.",
   "usage.allowanceCopy.anOrganizationAdminCanRaise":
     "An organization admin can raise the workspace budget.",
-  "usage.allowanceCopy.aWorkspaceAdminCanRaise": "A workspace admin can raise this limit.",
-  "usage.allowanceCopy.itDoesnTResetAutomatically": "It doesn't reset automatically.",
+  "usage.allowanceCopy.aWorkspaceAdminCanRaise":
+    "A workspace admin can raise this limit.",
+  "usage.allowanceCopy.itDoesnTResetAutomatically":
+    "It doesn't reset automatically.",
   "usage.allowanceCopy.resetsDate": "Resets {date}.",
   "usage.allowanceCopy.usageLimitReached": "Usage limit reached",
-  "usage.allowanceCopy.workspaceUsageLimitReached": "Workspace usage limit reached",
-  "usage.sessionUsageLimit.amountApiEquivalentModelUsage": "{amount} API-equivalent model usage.",
+  "usage.allowanceCopy.workspaceUsageLimitReached":
+    "Workspace usage limit reached",
+  "usage.sessionUsageLimit.amountApiEquivalentModelUsage":
+    "{amount} API-equivalent model usage.",
   "usage.sessionUsageLimit.apiEquivalentModelUsageFor":
     "API-equivalent model usage for this chat and its agents. In-progress requests may take usage above the limit.",
   "usage.sessionUsageLimit.atLeastUsedOfLimit": "At least {used} of {limit}",
@@ -6095,7 +6827,8 @@ export const englishMessages = {
   "usage.sessionUsageLimit.openMainTask": "Open main task",
   "usage.sessionUsageLimit.pauseAtLimit": "Pause at {limit}",
   "usage.sessionUsageLimit.preparingUsage": "Preparing usage",
-  "usage.sessionUsageLimit.raiseOrRemoveTheLimit": "Raise or remove the limit to continue.",
+  "usage.sessionUsageLimit.raiseOrRemoveTheLimit":
+    "Raise or remove the limit to continue.",
   "usage.sessionUsageLimit.raiseOrRemoveTheLimit2":
     "Raise or remove the limit, then resume the goal.",
   "usage.sessionUsageLimit.someModelUsageHasNo":
@@ -6110,28 +6843,35 @@ export const englishMessages = {
   "usage.sessionUsageLimit.usageLimitReached": "Usage limit reached",
   "usage.sessionUsageLimit.usageUnavailable": "Usage unavailable",
   "usageLimitNotice.dismiss": "Dismiss",
-  "usageLimitNotice.thisWorkspaceHasReachedIts": "This workspace has reached its usage limit.",
+  "usageLimitNotice.thisWorkspaceHasReachedIts":
+    "This workspace has reached its usage limit.",
   "usageLimitNotice.thisWorkspaceHasUsedPercent":
     "This workspace has used {percent}% of its usage budget.",
   "usageLimitNotice.youVeReachedYourUsage": "You've reached your usage limit.",
-  "usageLimitNotice.youVeUsedPercentOf": "You've used {percent}% of your usage limit.",
-  "usageMemberList.aboutAmountAtTheCurrent": "About {amount} at the current budget",
+  "usageLimitNotice.youVeUsedPercentOf":
+    "You've used {percent}% of your usage limit.",
+  "usageMemberList.aboutAmountAtTheCurrent":
+    "About {amount} at the current budget",
   "usageMemberList.aboutAnEqualShare": "About an equal share",
   "usageMemberList.cancel": "Cancel",
   "usageMemberList.changeLimitForName": "Change limit for {name}",
-  "usageMemberList.couldnTSaveTheLimit": "Couldn't save the limit. Refresh and try again.",
-  "usageMemberList.countMembersHaveNoIndividual": "{count} members have no individual limit.",
+  "usageMemberList.couldnTSaveTheLimit":
+    "Couldn't save the limit. Refresh and try again.",
+  "usageMemberList.countMembersHaveNoIndividual":
+    "{count} members have no individual limit.",
   "usageMemberList.default": "Default",
   "usageMemberList.defaultAmount": "Default · {amount}",
   "usageMemberList.defaultPercent": "Default · {percent}%",
-  "usageMemberList.eachPeriodDoesnTGrow": "Each period. Doesn't grow when the budget does.",
+  "usageMemberList.eachPeriodDoesnTGrow":
+    "Each period. Doesn't grow when the budget does.",
   "usageMemberList.enterAnAmountOfZero": "Enter an amount of zero or more.",
   "usageMemberList.equalSharePercent": "Equal share · {percent}%",
   "usageMemberList.fixedAmount": "Fixed amount",
   "usageMemberList.limit": "Limit",
   "usageMemberList.limitForName": "Limit for {name}",
   "usageMemberList.limitReached": "Limit reached",
-  "usageMemberList.memberLimitsAddUpTo": "Member limits add up to {percent}% of the budget.",
+  "usageMemberList.memberLimitsAddUpTo":
+    "Member limits add up to {percent}% of the budget.",
   "usageMemberList.memberUsage": "Member usage",
   "usageMemberList.multipleAnEqualShare": "{multiple}× an equal share",
   "usageMemberList.nearLimit": "Near limit",

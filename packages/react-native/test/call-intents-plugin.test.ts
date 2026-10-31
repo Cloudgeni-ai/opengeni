@@ -2,28 +2,40 @@ import { describe, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { intentsSource, pluginFeatures, resolveOptions } = require("../plugin/call-intents.cjs") as {
-  intentsSource(call: Record<string, unknown>): string;
-  pluginFeatures(props?: Record<string, unknown> | null): { call: boolean; recording: boolean };
-  resolveOptions(props?: Record<string, unknown>): {
-    call: Record<string, unknown> & { phrases: string[] };
-    alternativeAppNames: string[];
-    appIntents: boolean;
+const { intentsSource, pluginFeatures, resolveOptions } =
+  require("../plugin/call-intents.cjs") as {
+    intentsSource(call: Record<string, unknown>): string;
+    pluginFeatures(props?: Record<string, unknown> | null): {
+      call: boolean;
+      recording: boolean;
+      audioImport: boolean;
+    };
+    resolveOptions(props?: Record<string, unknown>): {
+      call: Record<string, unknown> & { phrases: string[] };
+      alternativeAppNames: string[];
+      appIntents: boolean;
+    };
   };
-};
 
 describe("native call config plugin", () => {
   test("generates an App Intent and App Shortcut phrases with the app-name interpolation", () => {
     const { call } = resolveOptions({
-      call: { title: "Call the agent", phrases: ["Call {app}", 'Ring "{app}" now'] },
+      call: {
+        title: "Call the agent",
+        phrases: ["Call {app}", 'Ring "{app}" now'],
+      },
     });
     const source = intentsSource(call);
-    expect(source).toContain('static let title: LocalizedStringResource = "Call the agent"');
+    expect(source).toContain(
+      'static let title: LocalizedStringResource = "Call the agent"',
+    );
     expect(source).toContain('"Call \\(.applicationName)"');
     expect(source).toContain('"Ring \\"\\(.applicationName)\\" now"');
     expect(source).toContain("internal import OpenGeniCall");
     expect(source).toContain("OpenGeniCallLauncher.requestStart()");
-    expect(source).toContain("struct OpenGeniCallShortcuts: AppShortcutsProvider");
+    expect(source).toContain(
+      "struct OpenGeniCallShortcuts: AppShortcutsProvider",
+    );
   });
 
   test("defaults apply without options", () => {
@@ -42,38 +54,71 @@ describe("native call config plugin", () => {
   });
 
   test("rejects phrases without exactly one app name", () => {
-    expect(() => resolveOptions({ call: { phrases: ["Call the agent"] } })).toThrow("{app}");
-    expect(() => resolveOptions({ call: { phrases: ["{app} calls {app}"] } })).toThrow("{app}");
+    expect(() =>
+      resolveOptions({ call: { phrases: ["Call the agent"] } }),
+    ).toThrow("{app}");
+    expect(() =>
+      resolveOptions({ call: { phrases: ["{app} calls {app}"] } }),
+    ).toThrow("{app}");
     expect(() => resolveOptions({ call: { phrases: [] } })).toThrow("phrases");
   });
 
   test("sets up calls only when asked, so a meetings-only app gets no VoIP or Siri setup", () => {
     // The bare plugin has always meant calls.
-    expect(pluginFeatures()).toEqual({ call: true, recording: false });
-    expect(pluginFeatures(null)).toEqual({ call: true, recording: false });
+    expect(pluginFeatures()).toEqual({
+      call: true,
+      recording: false,
+      audioImport: false,
+    });
+    expect(pluginFeatures(null)).toEqual({
+      call: true,
+      recording: false,
+      audioImport: false,
+    });
     expect(pluginFeatures({ microphonePermission: "Talk." })).toEqual({
       call: true,
       recording: false,
+      audioImport: false,
     });
-    expect(pluginFeatures({ recording: true })).toEqual({ call: false, recording: true });
-    expect(pluginFeatures({ recording: true, call: {} })).toEqual({ call: true, recording: true });
+    expect(pluginFeatures({ recording: true })).toEqual({
+      call: false,
+      recording: true,
+      audioImport: false,
+    });
+    expect(pluginFeatures({ recording: true, call: {} })).toEqual({
+      call: true,
+      recording: true,
+      audioImport: false,
+    });
     expect(pluginFeatures({ recording: true, call: true })).toEqual({
       call: true,
       recording: true,
+      audioImport: false,
     });
-    expect(pluginFeatures({ call: false })).toEqual({ call: false, recording: false });
+    expect(pluginFeatures({ call: false })).toEqual({
+      call: false,
+      recording: false,
+      audioImport: false,
+    });
   });
 });
 
 const control = require("../plugin/call-control.cjs") as {
   CONTROL_TARGET: string;
-  resolveControl(call: Record<string, unknown>, appName?: string): null | Record<string, string>;
+  resolveControl(
+    call: Record<string, unknown>,
+    appName?: string,
+  ): null | Record<string, string>;
   controlSource(
     call: Record<string, unknown>,
     control: Record<string, string>,
     kind: string,
   ): string;
-  controlInfoPlist(input: { displayName: string; version: string; buildNumber: string }): string;
+  controlInfoPlist(input: {
+    displayName: string;
+    version: string;
+    buildNumber: string;
+  }): string;
   controlBuildSettings(input: {
     bundleIdentifier: string;
     control: Record<string, string>;
@@ -86,17 +131,30 @@ describe("call control extension", () => {
   test("is opt-in", () => {
     expect(control.resolveControl({}, "Agent")).toBeNull();
     expect(control.resolveControl({ control: false }, "Agent")).toBeNull();
-    expect(control.resolveControl({ control: true }, "Agent")?.title).toBe("Call Agent");
+    expect(control.resolveControl({ control: true }, "Agent")?.title).toBe(
+      "Call Agent",
+    );
   });
 
   test("generates a control whose button runs the app's call intent", () => {
     const { call } = resolveOptions({ call: { title: "Call the agent" } });
-    const options = control.resolveControl({ control: { title: "Ring {app}" } }, "Agent")!;
-    const source = control.controlSource(call, options, "com.example.app.call-control");
+    const options = control.resolveControl(
+      { control: { title: "Ring {app}" } },
+      "Agent",
+    )!;
+    const source = control.controlSource(
+      call,
+      options,
+      "com.example.app.call-control",
+    );
     expect(source).toContain("struct OpenGeniStartCallIntent: AppIntent");
     expect(source).toContain("static let openAppWhenRun: Bool = true");
-    expect(source).toContain('StaticControlConfiguration(kind: "com.example.app.call-control")');
-    expect(source).toContain("ControlWidgetButton(action: OpenGeniStartCallIntent())");
+    expect(source).toContain(
+      'StaticControlConfiguration(kind: "com.example.app.call-control")',
+    );
+    expect(source).toContain(
+      "ControlWidgetButton(action: OpenGeniStartCallIntent())",
+    );
     expect(source).toContain('Label("Ring Agent", systemImage: "phone.fill")');
     expect(source).toContain("@main");
     // The extension never links the call module; only the app's copy starts calls.
@@ -120,19 +178,23 @@ describe("call control extension", () => {
       developmentTeam: "TEAM123",
       debug: false,
     });
-    expect(settings.PRODUCT_BUNDLE_IDENTIFIER).toBe('"com.example.app.CallControl"');
+    expect(settings.PRODUCT_BUNDLE_IDENTIFIER).toBe(
+      '"com.example.app.CallControl"',
+    );
     expect(settings.IPHONEOS_DEPLOYMENT_TARGET).toBe("18.0");
     expect(settings.DEVELOPMENT_TEAM).toBe("TEAM123");
     expect(settings.INFOPLIST_FILE).toContain(control.CONTROL_TARGET);
   });
 
   test("rejects unusable options", () => {
-    expect(() => control.resolveControl({ control: true }, "")).toThrow("no name");
-    expect(() => control.resolveControl({ control: { bundleIdSuffix: "a.b" } }, "A")).toThrow(
-      "bundleIdSuffix",
+    expect(() => control.resolveControl({ control: true }, "")).toThrow(
+      "no name",
     );
-    expect(() => control.resolveControl({ control: { deploymentTarget: "17.0" } }, "A")).toThrow(
-      "deploymentTarget",
-    );
+    expect(() =>
+      control.resolveControl({ control: { bundleIdSuffix: "a.b" } }, "A"),
+    ).toThrow("bundleIdSuffix");
+    expect(() =>
+      control.resolveControl({ control: { deploymentTarget: "17.0" } }, "A"),
+    ).toThrow("deploymentTarget");
   });
 });

@@ -12,7 +12,10 @@ const DEFAULTS = {
 };
 
 function swiftString(value) {
-  return JSON.stringify(String(value)).replace(/\\u([0-9a-fA-F]{4})/g, "\\u{$1}");
+  return JSON.stringify(String(value)).replace(
+    /\\u([0-9a-fA-F]{4})/g,
+    "\\u{$1}",
+  );
 }
 
 /** A phrase literal: `{app}` becomes the app-name interpolation Siri requires. */
@@ -65,13 +68,16 @@ struct OpenGeniCallShortcuts: AppShortcutsProvider {
 function resolveOptions(props = {}) {
   const call = { ...DEFAULTS, ...(props.call ?? {}) };
   if (!Array.isArray(call.phrases) || call.phrases.length === 0) {
-    throw new Error("@opengeni/react-native: call.phrases must list at least one phrase.");
+    throw new Error(
+      "@opengeni/react-native: call.phrases must list at least one phrase.",
+    );
   }
   call.phrases.forEach(swiftPhrase);
   return {
     call,
     alternativeAppNames: call.alternativeAppNames ?? [],
-    microphonePermission: props.microphonePermission ?? DEFAULTS.microphonePermission,
+    microphonePermission:
+      props.microphonePermission ?? DEFAULTS.microphonePermission,
     appIntents: call.appIntents !== false,
   };
 }
@@ -84,8 +90,13 @@ function resolveOptions(props = {}) {
  */
 function pluginFeatures(props = {}) {
   const recording = props?.recording === true;
-  const call = props?.call === false ? false : props?.call !== undefined || !recording;
-  return { call, recording };
+  const audioImport = props?.audioImport === true;
+  // Calls stay the default only for the plugin used without any feature.
+  const call =
+    props?.call === false
+      ? false
+      : props?.call !== undefined || (!recording && !audioImport);
+  return { call, recording, audioImport };
 }
 
 module.exports = { SWIFT_FILE, intentsSource, pluginFeatures, resolveOptions };

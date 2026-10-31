@@ -7,6 +7,8 @@ import type {
   FinalizeRecordingRequest,
 } from "@opengeni/contracts";
 import {
+  audioFileCreatedAt,
+  audioFileDurationMilliseconds,
   createIndexedDbRecordingChunkStore,
   createMemoryRecordingChunkStore,
   desktopSystemAudioSource,
@@ -27,7 +29,10 @@ const RECORDING = "22222222-2222-4222-8222-222222222222";
 /** An in-memory server with the recording API's contract, plus a fake storage. */
 function fakeServer() {
   const stored = new Map<string, Uint8Array>();
-  const reserved = new Map<string, { sha256: string; byteLength: number; uploaded: boolean }>();
+  const reserved = new Map<
+    string,
+    { sha256: string; byteLength: number; uploaded: boolean }
+  >();
   const state = {
     created: 0,
     finalized: null as FinalizeRecordingRequest | null,
@@ -54,7 +59,10 @@ function fakeServer() {
     throw error;
   };
   const client: RecordingTransport = {
-    async createRecording(_workspaceId: string, request: CreateRecordingRequest) {
+    async createRecording(
+      _workspaceId: string,
+      request: CreateRecordingRequest,
+    ) {
       state.calls.push("create");
       refusal();
       state.created += 1;
@@ -68,7 +76,10 @@ function fakeServer() {
         ...(fromCalendar
           ? { title: state.calendarTitle, titleSource: "calendar" }
           : request.title
-            ? { title: request.title, titleSource: request.titleSource ?? "person" }
+            ? {
+                title: request.title,
+                titleSource: request.titleSource ?? "person",
+              }
             : { title: "Recording", titleSource: "default" }),
       } as never;
     },
@@ -77,7 +88,9 @@ function fakeServer() {
       _recordingId: string,
       request: CreateRecordingUploadsRequest,
     ) {
-      state.calls.push(`reserve:${request.trackNumber}:${request.chunks.length}`);
+      state.calls.push(
+        `reserve:${request.trackNumber}:${request.chunks.length}`,
+      );
       refusal();
       if (!state.capturing) {
         throw Object.assign(new Error("not capturing"), {
@@ -146,7 +159,11 @@ function fakeServer() {
       state.calls.push("delete");
       state.deleted = true;
     },
-    async updateRecording(_workspaceId: string, _recordingId: string, request: { title?: string }) {
+    async updateRecording(
+      _workspaceId: string,
+      _recordingId: string,
+      request: { title?: string },
+    ) {
       state.calls.push("update");
       if (request.title !== undefined) state.titles.push(request.title);
       return { id: RECORDING } as never;
@@ -273,9 +290,9 @@ describe("RecordingUploader", () => {
     await uploader.addChunk(await testChunk(0, 0, "a"));
     const status = await uploader.finish(RECORDING);
     expect(status.finalized).toBe(true);
-    expect(server.state.calls.filter((call) => call.startsWith("reserve")).length).toBeGreaterThan(
-      1,
-    );
+    expect(
+      server.state.calls.filter((call) => call.startsWith("reserve")).length,
+    ).toBeGreaterThan(1);
     expect(server.stored.has("0/0")).toBe(true);
   });
 
@@ -284,7 +301,8 @@ describe("RecordingUploader", () => {
     const { uploader } = uploaderFor(server);
     const createdBeforeAudio: boolean[] = [];
     uploader.subscribe((status) => {
-      if (status.created && server.stored.size === 0) createdBeforeAudio.push(true);
+      if (status.created && server.stored.size === 0)
+        createdBeforeAudio.push(true);
     });
     await uploader.begin({
       workspaceId: WORKSPACE,
@@ -390,7 +408,8 @@ describe("RecordingUploader", () => {
     // retry() itself runs the upload again: no other call finishes it.
     const finalized = new Promise<RecordingUploadStatus>((resolve) => {
       uploader.subscribe((status) => {
-        if (status.recordingId === RECORDING && status.finalized) resolve(status);
+        if (status.recordingId === RECORDING && status.finalized)
+          resolve(status);
       });
     });
     expect(uploader.retry(RECORDING)).toBe(true);
@@ -458,13 +477,21 @@ describe("RecordingUploader", () => {
       recordingId: RECORDING,
       create,
     });
-    for (let attempt = 0; attempt < 20 && server.state.created === 0; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < 20 && server.state.created === 0;
+      attempt += 1
+    ) {
       await new Promise((done) => setTimeout(done, 1));
     }
     // The app was killed while capturing: a new run finds it still "capturing".
     const next = uploaderFor(server, store).uploader;
     expect(await next.resume()).toEqual([RECORDING]);
-    for (let attempt = 0; attempt < 50 && !next.status(RECORDING)?.discarded; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < 50 && !next.status(RECORDING)?.discarded;
+      attempt += 1
+    ) {
       await new Promise((done) => setTimeout(done, 1));
     }
     expect(next.status(RECORDING)?.discarded).toBe(true);
@@ -482,7 +509,11 @@ describe("RecordingUploader", () => {
     });
     await uploader.addChunk(await testChunk(0, 0, "a"));
     // Let the background pass create it on the server.
-    for (let attempt = 0; attempt < 20 && server.state.created === 0; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < 20 && server.state.created === 0;
+      attempt += 1
+    ) {
       await new Promise((done) => setTimeout(done, 1));
     }
     await uploader.discard(RECORDING);
@@ -509,7 +540,11 @@ describe("RecordingUploader", () => {
       },
     };
     const { uploader } = uploaderFor(server, store);
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     const adding = uploader.addChunk(await testChunk(0, 0, "a"));
     await held;
     const discarding = uploader.discard(RECORDING);
@@ -526,13 +561,19 @@ describe("RecordingUploader", () => {
     let createStarted: (() => void) | null = null;
     const started = new Promise<void>((done) => (createStarted = done));
     const create0 = server.client.createRecording.bind(server.client);
-    server.client.createRecording = async (...args: Parameters<typeof create0>) => {
+    server.client.createRecording = async (
+      ...args: Parameters<typeof create0>
+    ) => {
       createStarted!();
       await new Promise<void>((done) => (finishCreate = done));
       return await create0(...args);
     };
     const { uploader, store } = uploaderFor(server);
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await started;
     // The record still says the server has no copy, so discard has none to remove.
     await uploader.discard(RECORDING);
@@ -552,13 +593,19 @@ describe("RecordingUploader", () => {
     let createStarted: (() => void) | null = null;
     const started = new Promise<void>((done) => (createStarted = done));
     const create0 = server.client.createRecording.bind(server.client);
-    server.client.createRecording = async (...args: Parameters<typeof create0>) => {
+    server.client.createRecording = async (
+      ...args: Parameters<typeof create0>
+    ) => {
       createStarted!();
       await new Promise<void>((done) => (finishCreate = done));
       return await create0(...args);
     };
     const { uploader } = uploaderFor(server);
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await started;
     await uploader.rename(WORKSPACE, RECORDING, "Customer call");
     finishCreate!();
@@ -576,7 +623,11 @@ describe("RecordingUploader", () => {
     const server = fakeServer();
     server.state.calendarTitle = "Quarterly planning with Acme";
     const { uploader } = uploaderFor(server);
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await uploader.addChunk(await testChunk(0, 0, "a"));
     const status = await uploader.finish(RECORDING);
     expect(status.serverTitle).toBe("Quarterly planning with Acme");
@@ -586,7 +637,9 @@ describe("RecordingUploader", () => {
   test("a server from before title sources still gets the app's title", async () => {
     const server = fakeServer();
     const create0 = server.client.createRecording.bind(server.client);
-    server.client.createRecording = async (...args: Parameters<typeof create0>) => {
+    server.client.createRecording = async (
+      ...args: Parameters<typeof create0>
+    ) => {
       if (args[1].titleSource !== undefined) {
         throw Object.assign(new Error("Unrecognized key: titleSource"), {
           status: 400,
@@ -631,8 +684,14 @@ describe("RecordingUploader", () => {
     const { uploader } = uploaderFor(server);
     let refused = true;
     const create0 = server.client.createRecording.bind(server.client);
-    server.client.createRecording = async (...args: Parameters<typeof create0>) => {
-      if (refused) throw Object.assign(new Error("offline"), { status: 0, retryable: true });
+    server.client.createRecording = async (
+      ...args: Parameters<typeof create0>
+    ) => {
+      if (refused)
+        throw Object.assign(new Error("offline"), {
+          status: 0,
+          retryable: true,
+        });
       return await create0(...args);
     };
     server.state.refuse = null;
@@ -653,18 +712,30 @@ describe("RecordingUploader", () => {
   test("a rename after the server has the recording waits out a dropped connection", async () => {
     const server = fakeServer();
     const { uploader, store } = uploaderFor(server);
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
-    for (let attempt = 0; attempt < 50 && !uploader.status(RECORDING)?.created; attempt += 1) {
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
+    for (
+      let attempt = 0;
+      attempt < 50 && !uploader.status(RECORDING)?.created;
+      attempt += 1
+    ) {
       await new Promise((done) => setTimeout(done, 1));
     }
     const update0 = server.client.updateRecording!.bind(server.client);
     let failures = 2;
-    server.client.updateRecording = async (...args: Parameters<typeof update0>) => {
+    server.client.updateRecording = async (
+      ...args: Parameters<typeof update0>
+    ) => {
       if (failures-- > 0) throw new TypeError("network down");
       return await update0(...args);
     };
     await uploader.rename(WORKSPACE, RECORDING, "Weekly sync");
-    expect((await store.getRecording(RECORDING))?.pendingTitle).toBe("Weekly sync");
+    expect((await store.getRecording(RECORDING))?.pendingTitle).toBe(
+      "Weekly sync",
+    );
     await uploader.addChunk(await testChunk(0, 0, "a"));
     await uploader.finish(RECORDING);
     expect(server.state.titles).toEqual(["Weekly sync"]);
@@ -674,7 +745,11 @@ describe("RecordingUploader", () => {
   test("a rename once the recording is finalized goes straight to the server", async () => {
     const server = fakeServer();
     const { uploader } = uploaderFor(server);
-    await uploader.begin({ workspaceId: WORKSPACE, recordingId: RECORDING, create });
+    await uploader.begin({
+      workspaceId: WORKSPACE,
+      recordingId: RECORDING,
+      create,
+    });
     await uploader.addChunk(await testChunk(0, 0, "a"));
     await uploader.finish(RECORDING);
     await uploader.rename(WORKSPACE, RECORDING, "Retro");
@@ -712,14 +787,14 @@ describe("RecordingUploader", () => {
       databaseName: "t",
     });
     const chunks = await reopened.listChunks(RECORDING);
-    expect(chunks.map((item) => `${item.trackNumber}/${item.chunkNumber}`)).toEqual([
-      "0/0",
-      "0/1",
-      "1/0",
-    ]);
+    expect(
+      chunks.map((item) => `${item.trackNumber}/${item.chunkNumber}`),
+    ).toEqual(["0/0", "0/1", "1/0"]);
     expect(chunks[0]).not.toHaveProperty("bytes");
     expect(chunks[0]!.byteLength).toBe(2);
-    expect(new TextDecoder().decode((await reopened.readChunk(RECORDING, 0, 0))!)).toBe("m0");
+    expect(
+      new TextDecoder().decode((await reopened.readChunk(RECORDING, 0, 0))!),
+    ).toBe("m0");
     expect((await reopened.getRecording(RECORDING))?.chunkCounts).toEqual({
       0: 2,
       1: 1,
@@ -780,7 +855,9 @@ describe("RecordingUploader", () => {
         durationMilliseconds: 5_000,
       },
     ]);
-    expect(new TextDecoder().decode((await store.readChunk(RECORDING, 0, 0))!)).toBe("old");
+    expect(
+      new TextDecoder().decode((await store.readChunk(RECORDING, 0, 0))!),
+    ).toBe("old");
   });
 });
 
@@ -792,8 +869,12 @@ describe("desktopSystemAudioSource", () => {
     data: Float32Array;
   };
 
-  function fakeDesktop(start: () => Promise<{ captureId: string; sampleRate: number }>) {
-    const sampleListeners = new Set<(id: string, samples: Float32Array) => void>();
+  function fakeDesktop(
+    start: () => Promise<{ captureId: string; sampleRate: number }>,
+  ) {
+    const sampleListeners = new Set<
+      (id: string, samples: Float32Array) => void
+    >();
     const endedListeners = new Set<(id: string, error: unknown) => void>();
     const stopped: string[] = [];
     const bridge = {
@@ -819,7 +900,8 @@ describe("desktopSystemAudioSource", () => {
       stopped,
       listeners: () => sampleListeners.size + endedListeners.size,
       samples: (id: string, values: number[]) => {
-        for (const listener of sampleListeners) listener(id, new Float32Array(values));
+        for (const listener of sampleListeners)
+          listener(id, new Float32Array(values));
       },
       end: (id: string) => {
         for (const listener of [...endedListeners]) listener(id, null);
@@ -827,7 +909,9 @@ describe("desktopSystemAudioSource", () => {
     };
   }
 
-  function withMediaGlobals<T>(run: (frames: Frame[], tracks: EventTarget[]) => Promise<T>) {
+  function withMediaGlobals<T>(
+    run: (frames: Frame[], tracks: EventTarget[]) => Promise<T>,
+  ) {
     const frames: Frame[] = [];
     const tracks: EventTarget[] = [];
     const scope = globalThis as Record<string, unknown>;
@@ -878,7 +962,10 @@ describe("desktopSystemAudioSource", () => {
 
   test("an app that only records other apps' audio defines it on its own global", async () => {
     await withMediaGlobals(async (frames) => {
-      const desktop = fakeDesktop(async () => ({ captureId: "cap-1", sampleRate: 4 }));
+      const desktop = fakeDesktop(async () => ({
+        captureId: "cap-1",
+        sampleRate: 4,
+      }));
       const scope = globalThis as Record<string, unknown>;
       // Half an implementation is no implementation.
       scope.opengeniSystemAudio = { start: desktop.bridge.systemAudio!.start };
@@ -982,16 +1069,26 @@ describe("uploadRecordingAudio", () => {
         return { recordingId, discarded: false, failed: null } as never;
       },
     } as unknown as RecordingUploader;
-    const bytes = new Uint8Array(RECORDING_AUDIO_UPLOAD_PIECE_BYTES + 10).fill(7);
+    const bytes = new Uint8Array(RECORDING_AUDIO_UPLOAD_PIECE_BYTES + 10).fill(
+      7,
+    );
     await uploadRecordingAudio({
       uploader,
       workspaceId: "workspace",
       recordingId: "recording",
       audio: new Blob([bytes], { type: "audio/webm;codecs=opus" }),
       durationMilliseconds: 4_000,
-      create: { purpose: "dictation", transcription: { keyterms: ["Kubernetes"] } },
+      create: {
+        purpose: "dictation",
+        transcription: { keyterms: ["Kubernetes"] },
+      },
     });
-    expect(calls.map((call) => call.kind)).toEqual(["begin", "chunk", "chunk", "finish"]);
+    expect(calls.map((call) => call.kind)).toEqual([
+      "begin",
+      "chunk",
+      "chunk",
+      "finish",
+    ]);
     expect(calls[0]!.value).toMatchObject({
       workspaceId: "workspace",
       recordingId: "recording",
@@ -999,16 +1096,26 @@ describe("uploadRecordingAudio", () => {
         recordingId: "recording",
         purpose: "dictation",
         transcription: { keyterms: ["Kubernetes"] },
-        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }],
+        tracks: [
+          {
+            trackNumber: 0,
+            source: "microphone",
+            mimeType: "audio/webm;codecs=opus",
+          },
+        ],
       },
     });
-    const chunks = calls.slice(1, 3).map((call) => call.value as RecordingChunk);
+    const chunks = calls
+      .slice(1, 3)
+      .map((call) => call.value as RecordingChunk);
     expect(chunks.map((chunk) => chunk.bytes.byteLength)).toEqual([
       RECORDING_AUDIO_UPLOAD_PIECE_BYTES,
       10,
     ]);
     expect(chunks[0]!.startMilliseconds).toBe(0);
-    expect(chunks[1]!.startMilliseconds + chunks[1]!.durationMilliseconds).toBe(4_000);
+    expect(chunks[1]!.startMilliseconds + chunks[1]!.durationMilliseconds).toBe(
+      4_000,
+    );
     expect(chunks[0]!.sha256).toBe(await sha256Hex(chunks[0]!.bytes));
   });
 
@@ -1022,7 +1129,147 @@ describe("uploadRecordingAudio", () => {
       }),
     ).rejects.toThrow(TypeError);
     await expect(
-      uploadRecordingAudio({ uploader, workspaceId: "w", audio: new Blob([new Uint8Array(3)]) }),
+      uploadRecordingAudio({
+        uploader,
+        workspaceId: "w",
+        audio: new Blob([new Uint8Array(3)]),
+      }),
     ).rejects.toThrow(TypeError);
+  });
+
+  test("places a brought-in file at its own date, for as long as it plays", async () => {
+    const order: string[] = [];
+    let begun: { create: CreateRecordingRequest } | undefined;
+    let endedAt: Date | undefined;
+    const uploader = {
+      begin: async (value: { create: CreateRecordingRequest }) => {
+        order.push("begin");
+        begun = value;
+      },
+      addChunk: async () => {
+        order.push("chunk");
+      },
+      finish: async (recordingId: string, options: { endedAt: Date }) => {
+        order.push("finish");
+        endedAt = options.endedAt;
+        return { recordingId, discarded: false, failed: null } as never;
+      },
+    } as unknown as RecordingUploader;
+    await uploadRecordingAudio({
+      uploader,
+      workspaceId: "w",
+      recordingId: "call",
+      audio: new Blob([mp4WithDuration(0, 44_100, 44_100 * 754)], {
+        type: "audio/mp4",
+      }),
+      source: "upload",
+      create: { purpose: "meeting", startedAt: "2026-10-31T09:00:00.000Z" },
+      onStored: (id) => order.push(`stored:${id}`),
+    });
+    expect(order).toEqual(["begin", "chunk", "stored:call", "finish"]);
+    expect(begun!.create.startedAt).toBe("2026-10-31T09:00:00.000Z");
+    expect(begun!.create.tracks[0]!.source).toBe("upload");
+    expect(endedAt!.toISOString()).toBe("2026-10-31T09:12:34.000Z");
+  });
+});
+
+/** A minimal MP4: an ftyp box, then a moov holding one mvhd. */
+function mp4WithDuration(
+  version: 0 | 1,
+  timescale: number,
+  duration: number,
+  created?: Date,
+): Uint8Array<ArrayBuffer> {
+  const box = (type: string, body: Uint8Array) => {
+    const out = new Uint8Array(8 + body.byteLength);
+    new DataView(out.buffer).setUint32(0, out.byteLength);
+    out.set(new TextEncoder().encode(type), 4);
+    out.set(body, 8);
+    return out;
+  };
+  const mvhd = new Uint8Array(version === 1 ? 112 : 100);
+  const view = new DataView(mvhd.buffer);
+  mvhd[0] = version;
+  const createdSeconds = created
+    ? Math.round(created.getTime() / 1000) + 2_082_844_800
+    : 0;
+  if (version === 1) {
+    view.setBigUint64(4, BigInt(createdSeconds));
+    view.setUint32(20, timescale);
+    view.setBigUint64(24, BigInt(duration));
+  } else {
+    view.setUint32(4, createdSeconds);
+    view.setUint32(12, timescale);
+    view.setUint32(16, duration);
+  }
+  const ftyp = box("ftyp", new TextEncoder().encode("M4A \0\0\0\0isomM4A "));
+  const moov = box("moov", box("mvhd", mvhd));
+  const file = new Uint8Array(ftyp.byteLength + moov.byteLength);
+  file.set(ftyp);
+  file.set(moov, ftyp.byteLength);
+  return file;
+}
+
+describe("audioFileDurationMilliseconds", () => {
+  test("reads an M4A's length from its movie header, in both header versions", () => {
+    expect(
+      audioFileDurationMilliseconds(mp4WithDuration(0, 600, 600 * 65)),
+    ).toBe(65_000);
+    expect(
+      audioFileDurationMilliseconds(
+        mp4WithDuration(1, 48_000, 48_000 * 3 * 3600),
+      ),
+    ).toBe(3 * 3600 * 1000);
+  });
+
+  test("knows nothing of other containers or a broken header", () => {
+    expect(
+      audioFileDurationMilliseconds(
+        new TextEncoder().encode("\x1aE\xdf\xa3webm"),
+      ),
+    ).toBeNull();
+    expect(
+      audioFileDurationMilliseconds(mp4WithDuration(0, 0, 100)),
+    ).toBeNull();
+    expect(
+      audioFileDurationMilliseconds(mp4WithDuration(0, 600, 0xffffffff)),
+    ).toBeNull();
+    expect(
+      audioFileDurationMilliseconds(
+        mp4WithDuration(0, 600, 6000).subarray(0, 40),
+      ),
+    ).toBeNull();
+  });
+
+  test("reads when an M4A was recorded, when it says", () => {
+    const at = new Date("2026-10-31T14:05:09.000Z");
+    expect(audioFileCreatedAt(mp4WithDuration(0, 600, 6000, at))).toEqual(at);
+    expect(audioFileCreatedAt(mp4WithDuration(1, 600, 6000, at))).toEqual(at);
+    expect(audioFileCreatedAt(mp4WithDuration(0, 600, 6000))).toBeNull();
+  });
+
+  test("an import without a start lands at the time the file was recorded", async () => {
+    let startedAt: string | undefined;
+    let endedAt: Date | undefined;
+    const uploader = {
+      begin: async (value: { create: CreateRecordingRequest }) => {
+        startedAt = value.create.startedAt;
+      },
+      addChunk: async () => {},
+      finish: async (recordingId: string, options: { endedAt: Date }) => {
+        endedAt = options.endedAt;
+        return { recordingId, discarded: false, failed: null } as never;
+      },
+    } as unknown as RecordingUploader;
+    const at = new Date("2026-10-31T14:05:00.000Z");
+    await uploadRecordingAudio({
+      uploader,
+      workspaceId: "w",
+      audio: new Blob([mp4WithDuration(0, 1000, 90_000, at)], {
+        type: "audio/mp4",
+      }),
+    });
+    expect(startedAt).toBe(at.toISOString());
+    expect(endedAt!.toISOString()).toBe("2026-10-31T14:06:30.000Z");
   });
 });

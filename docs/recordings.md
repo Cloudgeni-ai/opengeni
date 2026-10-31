@@ -314,6 +314,28 @@ Native screens:
   knows the workspace.
 - `MeetingsList`: the recorder plus the list. `useMeetingView`: one
   meeting's transcript, player and actions, for a screen of your own.
+- Meetings from audio recorded elsewhere. A phone app can't record the other
+  side of a phone call, but the phone's own call recording can be brought in:
+  on iPhone the Phone app's record button saves the call to Notes, and on
+  Android the phone app saves it as a file. The person shares that recording
+  (or a voice memo, or any M4A, AAC, WebM or Ogg file) to the app, and it
+  becomes a meeting with a transcript and notes. It is saved on the phone first
+  and uploaded in the background, like a recording made in the app, and it is
+  placed at the time the file says it was recorded. To set it up:
+  - Add `audioImport: true` to the config plugin's options. On iOS the app
+    then accepts audio documents, so the share sheet offers it. On Android it
+    shows under "Open with" for audio files.
+  - Mount `useSharedAudioImport({ onImported, onError })` once inside
+    `MeetingRecorderProvider`. It takes the file the app was opened with,
+    files shared while it runs, and any file iOS left in the app's
+    Documents/Inbox before the app could take it.
+  - With expo-router, return `sharedAudioRedirect(path) ?? path` from
+    `redirectSystemPath` in `app/+native-intent.tsx`. That way a shared file
+    opens Meetings rather than an unknown screen.
+
+  `MeetingsList` also has an Import a recording button that does the same
+  with a picked file. `useRecorder().importAudio` (React) and
+  `uploadRecordingAudio` (SDK) are the same step for a host's own UI.
 
 The SDK client uses the web platform's `crypto` (request ids and upload
 checksums), which Hermes doesn't have. Mount the recorder inside
