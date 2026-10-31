@@ -77,11 +77,26 @@ saying why the agent called, and the conversation lands in that chat.
 
 ## Products embedding Opengeni
 
-`session.agentCall.ringing` and `session.agentCall.settled` carry what a
-product needs to ring its own app with its own push credentials. The shared
-React Native package provides the CallKit and PushKit side
-(`useIncomingAgentCalls`, `useNativeVoipToken`), and the SDK has
-`getAgentCall`, `answerAgentCall` and `declineAgentCall`.
+A product that embeds Opengeni rings its own app with its own push credentials:
+
+1. Its app asks the person, per phone, whether agents may call it (off by
+   default), and keeps the phone's PushKit token in the product's backend.
+2. Its backend, acting as the person (`asUser`), states how many of their
+   phones it rings: `setAgentCallHostPhones(workspaceId, { phones, teammates })`
+   (`PUT /v1/workspaces/:ws/agent-call-phones`, `phones: 0` removes them). The
+   row is per person per organization (`agent_call_host_phones`, 1128). Agents
+   count these phones alongside the person's Opengeni app phones, so `no_phone`
+   only means nobody can ring them.
+3. The backend subscribes a workspace webhook to `session.agentCall.ringing`
+   and `session.agentCall.settled`, and on ringing sends a VoIP push to the
+   person's opted-in phones. The event's `devices` counts only the phones
+   Opengeni rang itself.
+4. The app reports the call to CallKit with the shared React Native package
+   (`useIncomingAgentCalls`, `useNativeVoipToken`) and answers or declines
+   through `getAgentCall`, `answerAgentCall` and `declineAgentCall`, relayed
+   by its backend as the person. Answering then starts the chat's voice call,
+   exactly as in the Opengeni app. A missed call posts the usual
+   `session.notification.posted`, which the product delivers like any other.
 
 ## Testing
 

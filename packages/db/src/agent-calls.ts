@@ -1,7 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 import { agentCallRoutinesGranted } from "./native-push";
-import { agentCalls } from "./schema";
+import { agentCallHostPhones, agentCalls } from "./schema";
 
 // Agents calling people (1107, docs/design/agent-calls.md). A call rings the
 // callee's opted-in phones until its deadline; the first answer wins, and a
@@ -74,12 +74,104 @@ export type AgentCallRefusal =
   | "declined_recently";
 
 export type PlaceAgentCallResult =
-  | { placed: true; call: AgentCallRow }
+  | {
+      placed: true;
+      call: AgentCallRow;
+      /** Of `call.devices`, the phones Opengeni rang itself (the rest the embedding product rings). */
+      nativeDevices: number;
+    }
   | { placed: false; refusal: AgentCallRefusal };
 
 /**
- * How many of a person's phones an agent may ring (for their own agents, or a
- * teammate's). None until the agent call routines are granted.
+ * The phones a product embedding Opengeni rings for agent calls itself, as
+ * the person stated through it (1128). Null when they stated none.
+ */
+export type AgentCallHostPhones = { phones: number; teammates: boolean; updatedAt: string };
+
+/** Most phones a product can state it rings for one person. */
+export const AGENT_CALL_HOST_PHONES_MAX = 20;
+
+export async function getAgentCallHostPhones(
+  db: Database,
+  input: { accountId: string; subjectId: string },
+): Promise<AgentCallHostPhones | null> {
+  return await withRlsContext(db, { accountId: input.accountId }, async (scoped) => {
+    const row = await hostPhonesRow(scoped, input);
+    return row
+      ? { phones: row.phones, teammates: row.teammates, updatedAt: row.updatedAt.toISOString() }
+      : null;
+  });
+}
+
+/**
+ * Record how many of the person's phones the embedding product rings for
+ * agents (0 removes them), and whether teammates' agents may ring them.
+ */
+export async function setAgentCallHostPhones(
+  db: Database,
+  input: { accountId: string; subjectId: string; phones: number; teammates: boolean },
+): Promise<AgentCallHostPhones | null> {
+  const phones = Math.trunc(input.phones);
+  if (phones < 0 || phones > AGENT_CALL_HOST_PHONES_MAX) {
+    throw new RangeError(`phones must be between 0 and ${AGENT_CALL_HOST_PHONES_MAX}`);
+  }
+  return await withRlsContext(db, { accountId: input.accountId }, async (scoped) => {
+    const key = and(
+      eq(agentCallHostPhones.accountId, input.accountId),
+      eq(agentCallHostPhones.subjectId, input.subjectId),
+    );
+    if (phones === 0) {
+      await scoped.delete(agentCallHostPhones).where(key);
+      return null;
+    }
+    const [row] = await scoped
+      .insert(agentCallHostPhones)
+      .values({
+        accountId: input.accountId,
+        subjectId: input.subjectId,
+        phones,
+        teammates: input.teammates,
+      })
+      .onConflictDoUpdate({
+        target: [agentCallHostPhones.accountId, agentCallHostPhones.subjectId],
+        set: { phones, teammates: input.teammates, updatedAt: sql`now()` },
+      })
+      .returning();
+    if (!row) throw new Error("Failed to save the phones");
+    return { phones: row.phones, teammates: row.teammates, updatedAt: row.updatedAt.toISOString() };
+  });
+}
+
+async function hostPhonesRow(db: Database, input: { accountId: string; subjectId: string }) {
+  const [row] = await db
+    .select()
+    .from(agentCallHostPhones)
+    .where(
+      and(
+        eq(agentCallHostPhones.accountId, input.accountId),
+        eq(agentCallHostPhones.subjectId, input.subjectId),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
+/** The embedding product's phones an agent may ring (own agents, or a teammate's with `member`). */
+async function hostPhoneCount(
+  db: Database,
+  input: { accountId: string; calleeSubjectId: string; member: boolean },
+): Promise<number> {
+  const row = await hostPhonesRow(db, {
+    accountId: input.accountId,
+    subjectId: input.calleeSubjectId,
+  });
+  if (!row || (input.member && !row.teammates)) return 0;
+  return row.phones;
+}
+
+/**
+ * How many of a person's Opengeni app phones an agent may ring (for their
+ * own agents, or a teammate's). None until the agent call routines are granted.
  */
 export async function countAgentCallDevices(
   db: Database,
@@ -120,7 +212,12 @@ export async function placeAgentCall(
       await scoped.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`opengeni:agent-call:${input.calleeSubjectId}`}::text, 0))`,
       );
-      if ((await countAgentCallDevices(scoped, input)) === 0) {
+      // Calls need the call routines granted, wherever the phones ring.
+      if (!(await agentCallRoutinesGranted(scoped))) {
+        return { placed: false, refusal: "no_phone" };
+      }
+      const hostPhones = await hostPhoneCount(scoped, input);
+      if (hostPhones === 0 && (await countAgentCallDevices(scoped, input)) === 0) {
         return { placed: false, refusal: "no_phone" };
       }
       const [busy] = await rawRows<{ ringing: boolean }>(
@@ -165,13 +262,13 @@ export async function placeAgentCall(
         scoped,
         sql`select opengeni_private.ring_agent_call_v1(${row.id}::uuid, ${input.member}::boolean) as devices`,
       );
-      const devices = Number(rung?.devices ?? 0);
+      const nativeDevices = Number(rung?.devices ?? 0);
       const [updated] = await scoped
         .update(agentCalls)
-        .set({ devices })
+        .set({ devices: nativeDevices + hostPhones })
         .where(eq(agentCalls.id, row.id))
         .returning();
-      return { placed: true, call: mapCall(updated ?? row) };
+      return { placed: true, call: mapCall(updated ?? row), nativeDevices };
     },
   );
 }

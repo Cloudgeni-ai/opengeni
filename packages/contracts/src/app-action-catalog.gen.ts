@@ -2993,6 +2993,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getAgentCallHostPhones",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-call-phones",
+    "request": [],
+    "response": [
+      "AgentCallHostPhones"
+    ]
+  },
+  {
     "id": "getAgentLearningSettings",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/agent-learning/read",
@@ -8501,6 +8510,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SendTestEventResponse"
+    ]
+  },
+  {
+    "id": "setAgentCallHostPhones",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/agent-call-phones",
+    "request": [
+      "SetAgentCallHostPhonesRequest"
+    ],
+    "response": [
+      "AgentCallHostPhones"
     ]
   },
   {

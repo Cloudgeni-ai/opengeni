@@ -15,8 +15,10 @@ import {
   createSession,
   createWorkspaceWebhook,
   getAgentCall,
+  getAgentCallHostPhones,
   placeAgentCall,
   registerNativePushDevice,
+  setAgentCallHostPhones,
   settleAgentCall,
   withRlsContext,
   type DbClient,
@@ -445,5 +447,90 @@ describe("1107 agent calls", () => {
       reason: "Production is down",
       outcome: "missed",
     });
+  });
+});
+
+describe("1128 phones an embedding product rings", () => {
+  test("is a rolling migration", async () => {
+    if (!client) return;
+    const source = await Bun.file(
+      new URL("../drizzle/1128_agent_call_host_phones.sql", import.meta.url),
+    ).text();
+    expect(source).toStartWith("-- deployment-mode: rolling");
+  });
+
+  test("a person reachable only through the product can be called, and Opengeni rings nothing itself", async () => {
+    if (!client) return;
+    const p = await person("host-only");
+    const account = { accountId: p.scope.accountId, subjectId: p.subjectId };
+    expect(await getAgentCallHostPhones(db(), account)).toBeNull();
+    expect(await call(p)).toEqual({ placed: false, refusal: "no_phone" });
+
+    const saved = await setAgentCallHostPhones(db(), { ...account, phones: 2, teammates: false });
+    expect(saved).toMatchObject({ phones: 2, teammates: false });
+    expect(await getAgentCallHostPhones(db(), account)).toMatchObject({ phones: 2 });
+
+    const placed = await call(p);
+    if (!placed.placed) throw new Error(`expected a call, got ${placed.refusal}`);
+    expect(placed.nativeDevices).toBe(0);
+    expect(placed.call).toMatchObject({ state: "ringing", devices: 2 });
+    const queued = await owned!.admin<Array<{ count: number }>>`
+      select count(*)::integer as count from opengeni_private.native_push_deliveries
+      where payload->>'callId' = ${placed.call.id}`;
+    expect(queued[0]?.count).toBe(0);
+    // Still one call at a time, as for app phones.
+    expect(await call(p)).toEqual({ placed: false, refusal: "busy" });
+    await settleAgentCall(db(), { ...p.scope, callId: placed.call.id, outcome: "cancelled" });
+
+    // Zero phones removes them.
+    expect(
+      await setAgentCallHostPhones(db(), { ...account, phones: 0, teammates: false }),
+    ).toBeNull();
+    expect(await getAgentCallHostPhones(db(), account)).toBeNull();
+  });
+
+  test("teammates' agents ring the product's phones only when the person allows it", async () => {
+    if (!client) return;
+    const p = await person("host-teammates");
+    const account = { accountId: p.scope.accountId, subjectId: p.subjectId };
+    const teammateCall = () =>
+      placeAgentCall(db(), {
+        ...p.scope,
+        sessionId: p.session.id,
+        calleeSubjectId: p.subjectId,
+        callerSubjectId: "user:someone-else",
+        callerLabel: "Someone",
+        reason: "Quick question",
+        member: true,
+      });
+    await setAgentCallHostPhones(db(), { ...account, phones: 1, teammates: false });
+    expect(await teammateCall()).toEqual({ placed: false, refusal: "no_phone" });
+    await setAgentCallHostPhones(db(), { ...account, phones: 1, teammates: true });
+    const placed = await teammateCall();
+    expect(placed.placed).toBe(true);
+  });
+
+  test("another organization never sees or uses the phones", async () => {
+    if (!client) return;
+    const p = await person("host-isolated");
+    const other = await person("host-other");
+    await setAgentCallHostPhones(db(), {
+      accountId: p.scope.accountId,
+      subjectId: p.subjectId,
+      phones: 1,
+      teammates: false,
+    });
+    expect(
+      await getAgentCallHostPhones(db(), {
+        accountId: other.scope.accountId,
+        subjectId: p.subjectId,
+      }),
+    ).toBeNull();
+    const visible = await withRlsContext(
+      db(),
+      { accountId: other.scope.accountId },
+      async (scoped) => await scoped.execute(sql`select subject_id from agent_call_host_phones`),
+    );
+    expect([...(visible as unknown as unknown[])]).toHaveLength(0);
   });
 });
