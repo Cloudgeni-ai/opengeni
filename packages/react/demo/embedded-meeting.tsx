@@ -9,7 +9,7 @@
    dark page). */
 import { createRoot } from "react-dom/client";
 import { MeetingDetailPage } from "@opengeni/react/meetings";
-import { createMeetingsFixture } from "../src/testing/meetings-fixture";
+import { createMeetingsFixture } from "@opengeni/react/testing/meetings";
 import "@opengeni/react/compiled.css";
 
 const params = new URLSearchParams(window.location.search);
