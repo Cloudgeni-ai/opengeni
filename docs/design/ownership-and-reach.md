@@ -56,7 +56,9 @@ stop deciding ownership questions one at a time.
    uses a personal machine only when that machine was picked on it, never
    through a workspace default.
 10. **Approval choices belong to the login** and follow it between
-    workspaces. A workspace administrator's "ask" or "block" stays a ceiling.
+    workspaces; only its owner sets a personal login's choices. A workspace
+    limits a login by whether the connector is on there and which of its
+    tools are enabled, not by choices of its own.
 11. **Money.** The organization is the only wallet. A model line in the
     picker is one kind of payment (subscription, API key or credits). Within
     the kind, the account is chosen: the turn person's own (where turned
@@ -82,6 +84,42 @@ stop deciding ownership questions one at a time.
 | OR-8 | Documents, spreadsheets, presentations and projects can be Only me, like chats. An Only me project holds only its owner's Only me chats and Sites and can be shared with the workspace later, never the other way. | Two visibilities to explain on more kinds. |
 | OR-9 | Three overviews: My things (account menu and Settings under Your account), Available here (workspace settings) and Shared (organization settings), built in that order. | Three more pages to keep consistent with each kind's own page. |
 | OR-10 | Skills and Knowledge shared with selected workspaces separate "use" from "manage", and follow the organization admin permissions (OR-1). Organization-level integrations are designed first and built after the overviews. Only me saved browser logins belong to the browser area and follow rule 5 there. | These wait behind other work. |
+| OR-11 | Organization owners and admins add an MCP connector once and choose which workspaces it reaches. Each person signs in with their own login, or the organization supplies one key. A workspace's own setup of the same connector wins, and its admins can turn the organization's off there but not edit it. See "Organization integrations". | A workspace depends on the organization's setup unless it adds its own; an organization key's calls look the same to the provider whichever workspace made them. |
+
+## Organization integrations (OR-11)
+
+- **Adding.** In Organization settings → Integrations, an organization owner
+  or admin adds a catalog connector or a custom MCP server URL, with the
+  common "Who can use this?" setting: all or selected shared workspaces, plus
+  a Personal workspaces switch that starts off. The organization integration
+  policy still applies, when it is added and whenever it is served.
+- **Logins.** One of two. *Each person signs in*: nothing is shared; each
+  person's own login works where they turned it on (rule 5), and the first
+  use in another reached workspace asks once. *Organization key*: request
+  headers, such as an API key, stored encrypted on the organization's
+  setup, never shown again and sent only to that server; every turn in a
+  reached workspace uses it.
+- **In a workspace.** The connector is listed once, marked as coming from
+  the organization. The workspace's own setup of the same connector, on or
+  off, wins. Turning the organization's connector off there stores a
+  turned-off setup for that workspace; turning it back on removes it.
+  Workspace admins can't edit the organization's settings or see its key.
+- **Limits and choices.** Organization admins choose which tools are on,
+  everywhere it reaches. A personal login's tool choices follow the login
+  (rule 10). With an organization key, each workspace's connector managers
+  set choices for that workspace, starting from the organization's
+  recommendations.
+- **What agents see.** A workspace's enabled connectors include the
+  organization's that reach it, with the same server IDs and name order as
+  if the workspace had added them itself, so the tools look the same either
+  way and nothing earlier in a chat changes. A person's own logins carried
+  into their Personal workspace include connectors that reached the
+  workspace where the login was made.
+- **Not yet.** API Integrations and plugins (their install model is per
+  workspace), one organization-wide OAuth login shared by everyone
+  (connections can't be owned by an organization; a workspace that wants a
+  shared login adds the connector itself), and "workspaces created by this
+  app".
 
 ## Changes from the tree on 2026-10-30
 
