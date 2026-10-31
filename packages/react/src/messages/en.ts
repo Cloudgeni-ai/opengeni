@@ -2501,8 +2501,8 @@ export const englishMessages = {
   "meetings.detailPage.leftUnnamed": "Left unnamed",
   "meetings.detailPage.listeningWhatSSaidShows": "Listening…",
   "meetings.detailPage.loadingMeeting": "Loading meeting",
-  "meetings.detailPage.makesANewVersionFrom":
-    "Makes a new transcript from the audio. Speaker names carry over; corrected words don't.",
+  "meetings.detailPage.makesANewTranscriptNotesToo":
+    "Makes a new transcript from the audio. Speaker names carry over, and notes written automatically that no one has changed are written again. Corrected words don't carry over.",
   "meetings.detailPage.maximumNumberOfSpeakers": "Maximum number of speakers",
   "meetings.detailPage.me": "Me",
   "meetings.detailPage.meetings": "Meetings",
@@ -3406,8 +3406,8 @@ export const englishMessages = {
   "native.presentation.youAnswered": "You answered",
   "native.presentation.youLetTheAgentDecide": "You let the agent decide",
   "native.presentation.yourInputIsNeeded": "Your input is needed",
-  "native.meetings.meetingView.aNewTranscriptIsMadeFromTheFullAudio":
-    "Makes a new transcript from the audio. Speaker names carry over.",
+  "native.meetings.meetingView.aNewTranscriptAndNotesToo":
+    "Makes a new transcript from the audio. Speaker names carry over, and notes written automatically that no one has changed are written again.",
   "native.meetings.meetingView.delete": "Delete",
   "native.meetings.meetingView.makePrivate": "Make private",
   "native.meetings.meetingView.nameSpeaker": "Name speaker",

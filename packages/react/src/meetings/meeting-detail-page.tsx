@@ -326,7 +326,7 @@ function TranscribeAgainDialog({
         if (!next) onClose();
       }}
       title={msg("meetings.detailPage.transcribeAgain")}
-      description={msg("meetings.detailPage.makesANewVersionFrom")}
+      description={msg("meetings.detailPage.makesANewTranscriptNotesToo")}
       submitLabel={msg("meetings.detailPage.transcribe")}
       pendingLabel={msg("meetings.detailPage.starting")}
       submitDisabled={!selected || !selected.available || speakersInvalid}

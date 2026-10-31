@@ -3267,6 +3267,12 @@ export type MeetingSummaryCandidate =
         ownerSubjectId: string;
         visibility: RecordingVisibility;
       };
+      /**
+       * The revision of the notes this summary replaces: notes an earlier
+       * built-in summary wrote that nobody has touched since. Null when the
+       * meeting has no notes yet.
+       */
+      replacesRevision: number | null;
     }
   | {
       start: false;
@@ -3280,6 +3286,13 @@ export type MeetingSummaryCandidate =
  * (`settings.recordings.autoSummary: false`), with no notes saved yet. It
  * does not guess whether an automation will write notes: whatever saves notes
  * first keeps them, because the summary only saves the first notes.
+ *
+ * A re-run also starts it when the notes are an earlier built-in summary's
+ * that nobody has touched: last saved by a summary chat of this meeting in
+ * which no person or other agent ever started a turn. Those notes describe the
+ * transcript the re-run replaced, so the new summary writes them again. Notes
+ * a person edited, an automation wrote, or someone talked to the notes chat
+ * about are kept.
  */
 export async function meetingSummaryCandidate(
   db: Database,
@@ -3321,7 +3334,10 @@ export async function meetingSummaryCandidate(
     const settings = workspace?.settings as { recordings?: { autoSummary?: unknown } } | undefined;
     if (settings?.recordings?.autoSummary === false) return { start: false, reason: "turned_off" };
     const [notes] = await tx
-      .select({ kind: schema.recordingNotes.kind })
+      .select({
+        revision: schema.recordingNotes.revision,
+        sessionId: schema.recordingNotes.updatedBySessionId,
+      })
       .from(schema.recordingNotes)
       .where(
         and(
@@ -3330,8 +3346,10 @@ export async function meetingSummaryCandidate(
           eq(schema.recordingNotes.kind, "notes"),
         ),
       );
-    // Any saved notes, even cleared ones: the summary only ever writes the first.
-    if (notes) return { start: false, reason: "has_notes" };
+    // Any other saved notes, even cleared ones, are kept.
+    if (notes && !(await untouchedSummaryNotes(tx, recording, notes.sessionId))) {
+      return { start: false, reason: "has_notes" };
+    }
     return {
       start: true,
       recording: {
@@ -3340,8 +3358,58 @@ export async function meetingSummaryCandidate(
         ownerSubjectId: recording.ownerSubjectId,
         visibility: fromVisibility(recording.visibility),
       },
+      replacesRevision: notes?.revision ?? null,
     };
   });
+}
+
+/**
+ * Whether notes last saved by this chat are a built-in summary's own, never
+ * touched: the chat is one this meeting's summary created, and every turn in
+ * it was the service's (its first message, or upkeep such as compaction),
+ * none a person's or another agent's.
+ */
+async function untouchedSummaryNotes(
+  tx: Database,
+  recording: RecordingRow,
+  sessionId: string | null,
+): Promise<boolean> {
+  if (!sessionId) return false;
+  const [session] = await tx
+    .select({
+      createdByKind: schema.sessions.createdByKind,
+      createdBySubjectId: schema.sessions.createdBySubjectId,
+      policyRole: schema.sessions.policyRole,
+      metadata: schema.sessions.metadata,
+    })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, recording.workspaceId),
+        eq(schema.sessions.id, sessionId),
+      ),
+    );
+  if (
+    !session ||
+    session.createdByKind !== "service" ||
+    session.createdBySubjectId !== MEETING_SUMMARY_SUBJECT_ID ||
+    session.policyRole !== MEETING_SUMMARY_POLICY_ROLE ||
+    session.metadata[MEETING_SUMMARY_RECORDING_METADATA_KEY] !== recording.id
+  ) {
+    return false;
+  }
+  const [touched] = await tx
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, recording.workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        ne(schema.sessionTurns.initiatorKind, "service"),
+      ),
+    )
+    .limit(1);
+  return !touched;
 }
 
 export type SaveRecordingNoteInput = RecordingActor & {

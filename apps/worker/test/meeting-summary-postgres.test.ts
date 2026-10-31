@@ -16,6 +16,7 @@ import {
   createEventSource,
   createScheduledTask,
   createRecording,
+  createRecordingTranscriptVersion,
   createSession,
   encryptEnvironmentValue,
   ensureManagedAccessForUser,
@@ -243,8 +244,55 @@ async function workspace(options: { subscription: boolean }) {
       where workspace_id = ${workspaceId}::uuid
         and metadata ->> 'meetingSummaryRecordingId' = ${recordingId}`;
   }
+
+  /** Transcribe a meeting again; returns the summary input for the new version. */
+  async function rerun(recordingId: string) {
+    const versionId = crypto.randomUUID();
+    await createRecordingTranscriptVersion(client.db, {
+      ...actor,
+      recordingId,
+      versionId,
+      transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
+    });
+    const processingOwner = crypto.randomUUID();
+    await claimRecordingTranscriptVersion(client.db, {
+      ...actor,
+      versionId,
+      processingOwner,
+      leaseSeconds: 600,
+    });
+    await completeRecordingTranscriptVersion(client.db, {
+      ...actor,
+      versionId,
+      processingOwner,
+      languages: ["en"],
+      diarized: true,
+      diarization: "provider",
+      audioMilliseconds: 60_000,
+      segments: [
+        {
+          startMilliseconds: 0,
+          endMilliseconds: 4_000,
+          trackNumber: 0,
+          speakerLabel: "speaker_1",
+          text: "Tomas will order the roof tiles by Friday.",
+        },
+      ],
+    });
+    return { accountId, workspaceId, recordingId, versionId, ownerSubjectId: owner };
+  }
   const grant = access.workspaceGrants.find((each) => each.workspaceId === workspaceId)!;
-  return { accountId, workspaceId, owner, actor, grant, meeting, someoneElsesMeeting, sessionsFor };
+  return {
+    accountId,
+    workspaceId,
+    owner,
+    actor,
+    grant,
+    meeting,
+    rerun,
+    someoneElsesMeeting,
+    sessionsFor,
+  };
 }
 
 describe("built-in meeting summary", () => {
@@ -417,6 +465,85 @@ describe("built-in meeting summary", () => {
     expect(await automated.sessionsFor(automatedInput.recordingId)).toEqual([
       { id: alongside.sessionId },
     ]);
+  }, 180_000);
+
+  test("a re-run writes again the notes an earlier summary wrote, unless someone touched them", async () => {
+    if (!realDb) return;
+    serveCodex();
+    const scope = await workspace({ subscription: true });
+    const firstPrompt = async (sessionId: string) => {
+      const [turn] = await shared!.admin<{ prompt: string }[]>`
+        select prompt from session_turns where session_id = ${sessionId}::uuid order by position limit 1`;
+      return turn!.prompt;
+    };
+    /** The summary chat saving its notes, as meeting_notes_save does. */
+    const saveAs = async (
+      recordingId: string,
+      sessionId: string | null,
+      expectedRevision?: number,
+    ) =>
+      await saveRecordingNote(client.db, {
+        ...scope.actor,
+        recordingId,
+        kind: "notes",
+        body: `Notes ${crypto.randomUUID()}`,
+        sessionId,
+        ...(expectedRevision === undefined ? {} : { expectedRevision }),
+      });
+
+    // Untouched: the new summary writes them again, over exactly that revision.
+    const input = await scope.meeting();
+    const first = await startMeetingSummary(services(), input);
+    if (!first.started) throw new Error(first.reason);
+    expect(await firstPrompt(first.sessionId)).toContain("expectedRevision 0");
+    await saveAs(input.recordingId, first.sessionId, 0);
+    const again = await startMeetingSummary(services(), await scope.rerun(input.recordingId));
+    if (!again.started) throw new Error(again.reason);
+    expect(again.sessionId).not.toBe(first.sessionId);
+    const prompt = await firstPrompt(again.sessionId);
+    expect(prompt).toContain("Its transcript was made again");
+    expect(prompt).toContain("If that revision is not 1, someone changed the notes since");
+    expect(prompt).toContain("and expectedRevision 1.");
+    // The second summary's own notes are untouched too, for a third run.
+    await saveAs(input.recordingId, again.sessionId, 1);
+    const third = await startMeetingSummary(services(), await scope.rerun(input.recordingId));
+    if (!third.started) throw new Error(third.reason);
+    expect(await firstPrompt(third.sessionId)).toContain("and expectedRevision 2.");
+
+    // A person's edit keeps the notes.
+    const edited = await scope.meeting();
+    const editedSummary = await startMeetingSummary(services(), edited);
+    if (!editedSummary.started) throw new Error(editedSummary.reason);
+    await saveAs(edited.recordingId, editedSummary.sessionId, 0);
+    await saveAs(edited.recordingId, null, 1);
+    expect(await startMeetingSummary(services(), await scope.rerun(edited.recordingId))).toEqual({
+      started: false,
+      reason: "has_notes",
+    });
+
+    // So does anyone talking to the notes chat.
+    const talked = await scope.meeting();
+    const talkedSummary = await startMeetingSummary(services(), talked);
+    if (!talkedSummary.started) throw new Error(talkedSummary.reason);
+    await saveAs(talked.recordingId, talkedSummary.sessionId, 0);
+    await shared!.admin`
+      insert into session_turns
+      select (jsonb_populate_record(null::session_turns, to_jsonb(t) || jsonb_build_object(
+        'id', gen_random_uuid(),
+        'trigger_event_id', gen_random_uuid(),
+        'temporal_workflow_id', 'talked-' || gen_random_uuid(),
+        'position', t.position + 1,
+        'status', 'completed',
+        'active_attempt_id', null,
+        'initiator_kind', 'subject',
+        'initiator_subject_id', ${scope.owner}::text,
+        'initiating_human_subject_id', ${scope.owner}::text
+      ))).*
+      from session_turns t where t.session_id = ${talkedSummary.sessionId}::uuid`;
+    expect(await startMeetingSummary(services(), await scope.rerun(talked.recordingId))).toEqual({
+      started: false,
+      reason: "has_notes",
+    });
   }, 180_000);
 
   test("without a subscription account that can serve it, nothing starts and no credits are spent", async () => {
