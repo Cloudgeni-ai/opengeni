@@ -347,7 +347,7 @@ secret and a subset of:
 
 | Event type | Sent when |
 | --- | --- |
-| `turn.completed` / `turn.failed` / `turn.cancelled` | A turn settles |
+| `turn.completed` / `turn.failed` / `turn.cancelled` / `turn.superseded` | A turn settles. `turn.superseded` means a new message (a Steer) took over the turn before it finished; subscribe to all four to hear about every turn once |
 | `session.status.changed` | The session status changes |
 | `session.requiresAction` | The agent waits for a tool approval |
 | `session.humanInput.requested` | The agent asks the user a structured question |
