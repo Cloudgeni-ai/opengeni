@@ -15,6 +15,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { hasIntegrationAdminPermission } from "../access";
 import {
   createCatalogItem,
   prepareCapabilityEnable,
@@ -117,6 +118,9 @@ export async function prepareMcpConnectionActivation(input: {
         workspaceId: grant.workspaceId,
         settings,
         capabilityId,
+        // A member's setup also needs their organization to let members turn
+        // on integrations. It is create-only either way (onlyIfUninstalled).
+        ...(hasIntegrationAdminPermission(grant) ? {} : { memberSetup: true }),
         payload: {
           onlyIfUninstalled: true,
           config: {},

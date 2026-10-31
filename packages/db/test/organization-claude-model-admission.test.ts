@@ -222,7 +222,7 @@ test("an unhealthy connection does not serve, and a retired model is never admit
   expect(await admitWorkspace(input)).toBe(true);
 });
 
-test("a personal Claude connection does not admit an organization model, even in its owner's Personal workspace", async () => {
+test("a personal Claude connection admits an organization model only in its owner's Personal workspace", async () => {
   const input = await fixture();
   // The same Claude workspace-scope model in the owner's Personal workspace.
   await shared.admin`
@@ -234,8 +234,9 @@ test("a personal Claude connection does not admit an organization model, even in
       'claude-sonnet-5-5', ${crypto.randomUUID()}::uuid, ${"d".repeat(64)}, ${input.grant.subjectId}
     )`;
   // Only the admitting subject's own personal connection exists. Admission
-  // runs under that owner's subject, but asks the core for shared capacity
-  // only, so the personal connection cannot serve the organization prefix.
+  // counts the connections that serve this workspace for that subject, the
+  // same ones placement and funding count, whatever the model's id prefix:
+  // the personal connection serves only its owner's own Personal workspace.
   await addPersonalConnection(input);
   // The connection is serviceable: the core funds its owner's own turn in
   // the Personal workspace with it.
@@ -250,11 +251,11 @@ test("a personal Claude connection does not admit an organization model, even in
   ).toBe(true);
   expect(await admitBoth(input)).toEqual({ organization: false, workspace: true });
   expect(await admitBoth(input, input.personalWorkspaceId)).toEqual({
-    organization: false,
+    organization: true,
     workspace: true,
   });
   // A shared organization connection (personal workspaces allowed) admits
-  // the organization model in both workspaces, unlike personal ownership.
+  // the organization model in both workspaces.
   await addConnection(input);
   expect(await admitBoth(input)).toEqual({ organization: true, workspace: true });
   expect(await admitBoth(input, input.personalWorkspaceId)).toEqual({

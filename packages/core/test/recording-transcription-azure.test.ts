@@ -177,6 +177,13 @@ describe("Azure Speech recordings", () => {
     expect((await attempt(400, '{"error":{"code":"AudioLengthLimitExceeded"}}')).code).toBe(
       "too_large",
     );
+    // The free tier's spent monthly quota, which comes back as 403 like a rejected key.
+    const spent = await attempt(
+      403,
+      '{"error":{"code":"403","message":"Out of call volume quota for SpeechServices F0 pricing tier. Please retry after 2 days. To increase your call volume switch to a paid tier."}}',
+    );
+    expect([spent.code, spent.retryable]).toEqual(["quota_exceeded", false]);
+    expect((await attempt(403, '{"error":{"code":"Forbidden"}}')).code).toBe("unauthorized");
   });
 });
 

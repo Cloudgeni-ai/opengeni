@@ -592,11 +592,11 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
       },
-      // 1103: created without runtime EXECUTE until its follow-up release.
+      // 1103 created it without runtime EXECUTE; 1149 granted it.
       {
         name: "grant_subscription_account_administrator(jsonb)",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
         securityDefiner: true,
         triggerCallable: false,
@@ -900,6 +900,107 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
     );
+  });
+
+  test("removed-feature tables may be absent, without making live tables optional", () => {
+    const posture = safePosture();
+    const retiring = Object.values(runtimePosture.RETIRING_FEATURE_TABLES).flat();
+    const missing = evaluateRuntimeDatabasePosture(posture, {
+      ...options,
+      protectedTables: [...options.protectedTables!, ...retiring, "still_used"],
+      tablePrivileges: {
+        ...options.tablePrivileges,
+        ...Object.fromEntries(retiring.map((name) => [name, ["SELECT"] as const])),
+        still_used: ["SELECT"],
+      },
+      protectedNoDirectDmlTables: [],
+    });
+    expect(missing.filter((violation) => violation.includes("tables are missing"))).toEqual([
+      "runtime privilege tables are missing: still_used",
+      "protected tables are missing: still_used",
+    ]);
+  });
+
+  test("retiring tables retain their exact privileges, ownership and RLS while present", () => {
+    for (const name of Object.values(runtimePosture.RETIRING_FEATURE_TABLES).flat()) {
+      const posture = safePosture();
+      posture.tables = posture.tables.filter((table) => table.name !== name);
+      const table = {
+        ...posture.tables[0]!,
+        name,
+        select: true,
+        insert: false,
+        update: false,
+        delete: false,
+      };
+      posture.tables.push(table);
+      const retiringOptions = {
+        ...options,
+        protectedTables: [...options.protectedTables!, name],
+        tablePrivileges: { ...options.tablePrivileges, [name]: ["SELECT"] as const },
+      };
+      expect(
+        evaluateRuntimeDatabasePosture(posture, retiringOptions).filter((v) => v.includes(name)),
+      ).toEqual([]);
+      Object.assign(table, { owner: "opengeni_app", rlsForced: false, update: true });
+      const violations = evaluateRuntimeDatabasePosture(posture, retiringOptions);
+      expect(violations).toContain(`runtime role owns table ${name}`);
+      expect(violations).toContain(`table ${name} does not FORCE RLS`);
+      expect(violations).toContain(`table ${name} grants excess runtime privileges: UPDATE`);
+    }
+  });
+
+  test("retired receipts may disappear only after all of their feature tables", () => {
+    const posture = safePosture();
+    posture.retiringFeatureTablesPresent = { subscription: false, variableSets: false };
+    const retiring = new Set<string>(Object.values(runtimePosture.RETIRING_FEATURE_TABLES).flat());
+    posture.tables = posture.tables.filter((table) => !retiring.has(table.name));
+    posture.subscriptionCodexCutoverActivationPresent = false;
+    posture.subscriptionProviderCutoverReceipts = [];
+    posture.sessionVariableSetAttachmentsCutoverPresent = false;
+    const receipts = () =>
+      evaluateRuntimeDatabasePosture(posture, options).filter(
+        (v) =>
+          v.includes("cutover receipt") || v.includes("Variable Set attachment runtime receipt"),
+      );
+    expect(receipts()).toEqual([]);
+    // Inconsistent metadata cannot hide even one remaining legacy table.
+    posture.tables.push({ ...posture.tables[0]!, name: "xai_subscription_credentials" });
+    expect(receipts()).toContain(
+      "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
+    );
+    posture.tables.push({ ...posture.tables[0]!, name: "workspace_variable_sets" });
+    expect(receipts()).toContain(
+      "database is missing the 0352 session Variable Set attachment runtime receipt",
+    );
+    // Inspectors without the new catalog witness still fail closed.
+    delete posture.retiringFeatureTablesPresent;
+    expect(receipts()).toContain(
+      "database is missing the 0689 Codex subscription-core cutover receipt; run the drained migration first",
+    );
+  });
+
+  test("old Codex source entry points may disappear only after every subscription table", () => {
+    const posture = safePosture();
+    const signatures = [
+      "resolve_workspace_codex_subscription_source(uuid, uuid)",
+      "capture_legacy_codex_turn_sources(uuid, uuid)",
+    ];
+    posture.targetRoutines = posture.targetRoutines.filter(
+      (routine) => !signatures.includes(routine.name),
+    );
+    const missing = () =>
+      evaluateRuntimeDatabasePosture(posture, {
+        ...options,
+        targetSchemaCapabilityRoutines: signatures,
+      }).filter((violation) => signatures.some((signature) => violation.includes(signature)));
+    expect(missing()).toHaveLength(2);
+    const retired = new Set<string>(runtimePosture.RETIRING_FEATURE_TABLES.subscription);
+    posture.tables = posture.tables.filter((table) => !retired.has(table.name));
+    posture.retiringFeatureTablesPresent = { subscription: false, variableSets: true };
+    expect(missing()).toEqual([]);
+    posture.tables.push({ ...posture.tables[0]!, name: "codex_turn_source_bindings" });
+    expect(missing()).toHaveLength(2);
   });
 
   test("a provider's legacy tables are read-only once its receipt exists", () => {
@@ -1944,6 +2045,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1143_agent_call_host_phones: full DML, FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2011,7 +2118,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 1071 shared Site project placements: full-DML, FORCE-RLS.
         1 + // 1090 personal default machines: full-DML, FORCE-RLS.
         1 + // 1105 workspace activity facts: read and insert, FORCE-RLS.
-        1; // 1107 agent calls: read, insert and update, FORCE-RLS.
+        1 + // 1107 agent calls: read, insert and update, FORCE-RLS.
+        1; // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -3928,7 +4036,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's, 1060's, 1091's and 1107's stay deferred", () => {
+describe("runtime definers: 0947, 0950 and 1149 grant what 0937, 0946 and 1103 withheld; 0978's, 0984's, 0988's, 1002's, 1060's, 1091's and 1107's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4059,7 +4167,6 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
-      "grant_subscription_account_administrator(jsonb)",
       "native_push_device_v2(text)",
       "register_native_push_device_v2(text, text, text, text, text, text[], text)",
       "claim_native_push_deliveries_v2(uuid, integer, integer)",
@@ -4068,6 +4175,9 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "ring_agent_call_v1(uuid, boolean)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
+    expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
+      "runtime role lacks EXECUTE on private routine grant_subscription_account_administrator(jsonb)",
+    );
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
       runtimePosture.RUNTIME_DEFINER_ROUTINES.filter(
         (name) =>

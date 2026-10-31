@@ -233,17 +233,35 @@ export function companionTestFiles(
   siblingsWithSameOrdinal: readonly MigrationName[] = [],
 ): string[] {
   const prefix = `migration-${migration.ordinal}-`;
+  const candidates = readdirSync(join(root, MIGRATION_TESTS_DIR))
+    .filter((file) => file.startsWith(prefix) && file.endsWith(".test.ts"))
+    .map((file) => `${MIGRATION_TESTS_DIR}/${file}`);
+  return selectCompanionTests(
+    candidates.map((path) => [path, readFileSync(join(root, path), "utf8")] as const),
+    migration,
+    siblingsWithSameOrdinal,
+  );
+}
+
+/** {@link companionTestFiles} over files already read: repo-relative path and text. */
+export function selectCompanionTests(
+  files: Iterable<readonly [path: string, text: string]>,
+  migration: MigrationName,
+  siblingsWithSameOrdinal: readonly MigrationName[] = [],
+): string[] {
+  const prefix = `migration-${migration.ordinal}-`;
   const hyphenSlug = migration.slug.replace(/_/g, "-");
   const others = siblingsWithSameOrdinal.filter((sibling) => sibling.file !== migration.file);
-  return readdirSync(join(root, MIGRATION_TESTS_DIR))
-    .filter((file) => file.startsWith(prefix) && file.endsWith(".test.ts"))
-    .filter((file) => {
-      const text = readFileSync(join(root, MIGRATION_TESTS_DIR, file), "utf8");
-      if (others.some((other) => text.includes(other.basename))) return false;
-      return text.includes(migration.basename) || file === `${prefix}${hyphenSlug}.test.ts`;
-    })
-    .sort()
-    .map((file) => `${MIGRATION_TESTS_DIR}/${file}`);
+  const selected: string[] = [];
+  for (const [path, text] of files) {
+    if (!path.startsWith(`${MIGRATION_TESTS_DIR}/`)) continue;
+    const file = path.slice(MIGRATION_TESTS_DIR.length + 1);
+    if (file.includes("/") || !file.startsWith(prefix) || !file.endsWith(".test.ts")) continue;
+    if (others.some((other) => text.includes(other.basename))) continue;
+    if (text.includes(migration.basename) || file === `${prefix}${hyphenSlug}.test.ts`)
+      selected.push(path);
+  }
+  return selected.sort();
 }
 
 function escapeRegExp(value: string): string {

@@ -25,13 +25,17 @@ const access = {
   queuedTurnBlocked: false,
 };
 
-async function render(value = access) {
+async function render(value = access, shared = false) {
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
   await act(async () =>
     root.render(
-      <SessionMachineAccessNotice access={value} action={<button>Choose machine</button>} />,
+      <SessionMachineAccessNotice
+        access={value}
+        shared={shared}
+        action={<button>Choose machine</button>}
+      />,
     ),
   );
 }
@@ -53,9 +57,25 @@ test("pre-send warning identifies owner, machine, draft preservation and both re
   expect(container.querySelectorAll("button")).toHaveLength(2);
 });
 
-test("owner can keep sending without a warning", async () => {
+test("owner can keep sending without a warning in their own private chat", async () => {
   await render({ ...access, isOwner: true });
   expect(container.textContent).toBe("");
+});
+
+test("owner gets a one-line heads-up in a shared chat, with a way to move", async () => {
+  await render({ ...access, isOwner: true }, true);
+  const headsUp = container.querySelector('[data-testid="own-machine-shared-heads-up"]');
+  expect(headsUp?.textContent).toContain(
+    "This chat runs on your personal machine “Build box”. People in this workspace see what the agent does on it.",
+  );
+  expect(container.textContent).not.toContain("Choose a machine before sending");
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+});
+
+test("other members keep the pre-send warning in a shared chat", async () => {
+  await render(access, true);
+  expect(container.textContent).toContain("Choose a machine before sending");
+  expect(container.querySelector('[data-testid="own-machine-shared-heads-up"]')).toBeNull();
 });
 
 test("copy failure displays the request without claiming it was sent", async () => {

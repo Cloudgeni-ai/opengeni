@@ -46,7 +46,6 @@ type ArchivedImportDependencies = {
       reasoningEffort: "low";
       latencyMode: "standard";
       sandboxBackend: "none";
-      variableSetIds: string[];
       firstPartyMcpTools: never[];
       firstPartyMcpPermissions: never[];
       archivedImport: true;
@@ -381,7 +380,6 @@ async function importArchivedSession(
           reasoningEffort: "low",
           latencyMode: "standard",
           sandboxBackend: "none",
-          variableSetIds: [],
           firstPartyMcpTools: [],
           firstPartyMcpPermissions: [],
           archivedImport: true,

@@ -614,8 +614,12 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     const storage = memoryStorage();
     const recording = await capturedRecording(storage);
     const calls: RecordingTranscriptionRequest[] = [];
+    const preparedAtCall: number[] = [];
     const provider = fakeProvider(async (request) => {
       calls.push(request);
+      preparedAtCall.push(
+        [...storage.objects.keys()].filter((key) => key.includes("/prepared/")).length,
+      );
       const microphone = request.audio.fileName === "track-0.webm";
       return {
         languages: ["eng"],
@@ -663,6 +667,8 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       ["track-0.webm", true, "en"],
       ["track-1.webm", true, "en"],
     ]);
+    // The whole meeting can play before the first track is transcribed.
+    expect(preparedAtCall).toEqual([2, 2]);
     const prepared = [...storage.objects.keys()].filter((key) => key.includes("/prepared/"));
     expect(prepared.sort()).toEqual([
       `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-0.timeline.webm`,

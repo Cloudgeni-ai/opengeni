@@ -24,6 +24,23 @@ const validViewport = {
   maxTouchPoints: 0,
 };
 
+test("a failed privacy snapshot withholds pixels before capture and leaves unrelated targets usable", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.calls.length = 0;
+    fixture.setProtectionSnapshot({});
+    await expect(fixture.driver.captureScreenshot("target-1")).rejects.toThrow("page redaction");
+    expect(fixture.calls.some((call) => call.method === "Page.captureScreenshot")).toBe(false);
+    fixture.setProtectionSnapshot({ strings: [], documents: [] });
+    expect(
+      (await fixture.driver.captureScreenshot("target-2", { format: "jpeg" })).data.byteLength,
+    ).toBeGreaterThan(0);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
 test.each([
   { width: 0, height: 0, visualWidth: 0, visualHeight: 0 },
   { width: -1 },
@@ -1152,6 +1169,7 @@ async function captureFixture(
   let raster: { width: number; height: number; density: number } | null = null;
   // Real encoded pixels an unclipped capture returns instead of a sized header.
   let captureData: string | null = null;
+  let protectionSnapshot: unknown = { strings: [], documents: [] };
   // Surfaces Chromium still presents from before a viewport change.
   const staleRasters: Array<{ width: number; height: number; density: number }> = [];
   let viewport: unknown = "complete";
@@ -1249,6 +1267,7 @@ async function captureFixture(
       } else result = { result: { value: "complete" } };
     }
     if (command.method === "Accessibility.getFullAXTree") result = { nodes: [] };
+    if (command.method === "DOMSnapshot.captureSnapshot") result = protectionSnapshot;
     if (command.method === "Page.getLayoutMetrics") {
       result = {
         cssVisualViewport: {
@@ -1351,6 +1370,9 @@ async function captureFixture(
   });
   return {
     driver,
+    setProtectionSnapshot: (value: unknown) => {
+      protectionSnapshot = value;
+    },
     calls,
     setRaster(value: NonNullable<typeof raster>) {
       raster = value;

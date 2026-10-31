@@ -124,3 +124,58 @@ test("the card's answers come from the host's messages", async () => {
   expect(labels).toContain("Tillat");
   expect(labels).toContain("Avbryt");
 });
+
+test("an app action's card drawn from the event alone keeps its question, facts and answers", async () => {
+  const removal = {
+    id: "deleteConnection",
+    pathParameters: { workspaceId: "ws-1", connectionId: "c-gmail" },
+    body: { expectedVersion: 1 },
+  };
+  // The payload as the worker emits it: the facts ride beside the strict display.
+  const approvals = projectPendingApprovals([
+    {
+      type: "session.requiresAction",
+      turnId: "turn-1",
+      payload: {
+        approvals: [
+          {
+            id: "call-gmail",
+            name: "opengeni__admin_action_call",
+            arguments: JSON.stringify(removal),
+            display: {
+              toolName: "admin_action_call",
+              title: "Remove the Gmail connection for bendik@cloudgeni.ai?",
+            },
+            targetFacts: [
+              { label: "Who can use it", value: "Only you" },
+              { label: "Added", value: "14 Oct 2026, 07:41 UTC" },
+            ],
+            rawItem: { callId: "call-gmail" },
+          },
+        ],
+      },
+    },
+  ] as SessionEvent[]);
+  expect(approvals[0]!.display).toEqual({
+    toolName: "admin_action_call",
+    title: "Remove the Gmail connection for bendik@cloudgeni.ai?",
+  });
+  mounted = await renderComponent(
+    createElement(ApprovalSurface, {
+      approvals,
+      onApprove: () => undefined,
+      onReject: () => undefined,
+    }),
+  );
+  await act(async () => undefined);
+  expect(mounted.container.querySelector("h3")?.textContent).toBe(
+    "Remove the Gmail connection for bendik@cloudgeni.ai?",
+  );
+  const text = mounted.container.textContent ?? "";
+  expect(text).toContain("Only you");
+  expect(text).toContain("14 Oct 2026, 07:41 UTC");
+  expect(text).not.toContain("c-gmail");
+  const labels = buttons().map((button) => button.textContent);
+  expect(labels).toContain("Allow");
+  expect(labels).toContain("Cancel");
+});

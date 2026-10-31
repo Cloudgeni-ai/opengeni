@@ -1441,6 +1441,11 @@ computeControl:
     schema: compute
     # Defaults: the chart's Postgres, its database, and sslmode disable.
     # host is required when the chart runs no Postgres.
+    # sslmode is disable, prefer or require. With require the service and
+    # its sweep connect over TLS and check the database's certificate
+    # against the image's system authorities; for a private authority,
+    # mount it (extraVolumes, extraVolumeMounts) and name it in extraEnv as
+    # COMPUTE_CONTROL_DATABASE_CA, which both read.
     host: ""
     port: 5432
     name: ""

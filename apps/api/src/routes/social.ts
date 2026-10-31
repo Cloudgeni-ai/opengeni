@@ -181,8 +181,19 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/social/posts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    // Recording a post on your own account is yours to do; a workspace-owned
+    // account is a workspace setting, as when connecting it.
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const payload = await parseRequestJson(c, CreateSocialPostRequest);
+    const connection = await getSocialConnection(
+      db,
+      workspaceId,
+      payload.connectionId,
+      grant.subjectId,
+    );
+    if (!connection) throw new HTTPException(404, { message: "social connection not found" });
+    if (connection.ownership !== "personal")
+      await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     try {
       return c.json(
         await createSocialPost(db, {

@@ -337,6 +337,22 @@ function authorizationCases(harness: "template" | "owner-migrated") {
       connectionId,
       status: "active",
     });
+    // The obsolete account switch is not designation authority. Scope,
+    // status, ownership and the live designation still fence every read.
+    await shared!.admin`
+      update subscription_provider_cutovers set enabled = false
+      where account_id = ${org.accountId}::uuid and provider = 'codex'`;
+    expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toEqual({
+      connectionId,
+      status: "active",
+    });
+    await shared!.admin`
+      delete from subscription_provider_cutovers
+      where account_id = ${org.accountId}::uuid and provider = 'codex'`;
+    expect(await resolveSubscriptionCoreCodexAppsDesignation(client!.db, scope)).toEqual({
+      connectionId,
+      status: "active",
+    });
     // The designation is per workspace: the Personal workspace has none.
     expect(
       await resolveSubscriptionCoreCodexAppsDesignation(client!.db, {

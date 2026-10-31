@@ -43,13 +43,19 @@ describe("shared OAuth account policy", () => {
   test("a display name or token field alone cannot identify an opaque account", () => {
     expect(decide({ identityKeys: undefined })).toEqual({
       kind: "reject",
+      reason: "account_limit_one",
+    });
+  });
+  test("a failed identity read on a service that identifies accounts says so", () => {
+    expect(decide({ metadata: { ...metadata, subject: undefined } })).toEqual({
+      kind: "reject",
       reason: "account_identity_unavailable",
     });
   });
-  test("an unknown legacy account cannot be assumed distinct from a verified incoming account", () => {
+  test("an unknown legacy account must be reconnected once before another is added", () => {
     expect(decide({ accounts: [account({ metadata: { mcpUrl: metadata.mcpUrl } })] })).toEqual({
       kind: "reject",
-      reason: "account_identity_unavailable",
+      reason: "account_reconnect_required",
     });
   });
   test("verified reconnect cannot lose proof or change issuer", () => {
@@ -103,5 +109,88 @@ describe("shared OAuth account policy", () => {
   test("another owner or exact resource does not collide", () => {
     expect(decide({ ownerSubjectId: "someone-else" }).kind).toBe("write");
     expect(decide({ mcpUrl: "https://service.test/other" }).kind).toBe("write");
+  });
+});
+
+describe("one account per person when the service can't identify accounts", () => {
+  const opaque = { mcpUrl: metadata.mcpUrl };
+  const unidentified = (overrides: Partial<Parameters<typeof decide>[0]> = {}) =>
+    decide({ identityKeys: undefined, metadata: opaque, ...overrides });
+  const personal = (subjectId: string, overrides: Partial<ConnectionMetadata> = {}) =>
+    account({ id: `personal-${subjectId}`, subjectId, metadata: opaque, ...overrides });
+  const shared = (overrides: Partial<ConnectionMetadata> = {}) =>
+    account({ id: "shared", subjectId: null, metadata: opaque, ...overrides });
+  const limit = { kind: "reject", reason: "account_limit_one" };
+
+  test("the first connection in either bucket is written", () => {
+    expect(unidentified({ accounts: [] }).kind).toBe("write");
+    expect(
+      unidentified({ accounts: [], ownerSubjectId: null, requesterSubjectId: "alice" }).kind,
+    ).toBe("write");
+  });
+  test("a second one in the same bucket is refused", () => {
+    expect(unidentified({ accounts: [personal("owner")] })).toEqual(limit);
+    expect(
+      unidentified({ accounts: [shared()], ownerSubjectId: null, requesterSubjectId: "alice" }),
+    ).toEqual(limit);
+  });
+  test("a personal one is refused while a shared one exists", () => {
+    expect(unidentified({ accounts: [shared()] })).toEqual(limit);
+  });
+  test("a shared one is refused while the requester has a personal one", () => {
+    expect(
+      unidentified({
+        accounts: [personal("alice")],
+        ownerSubjectId: null,
+        requesterSubjectId: "alice",
+      }),
+    ).toEqual(limit);
+  });
+  test("other people's personal connections never block, so both can stay", () => {
+    expect(unidentified({ accounts: [personal("bob")] }).kind).toBe("write");
+    expect(
+      unidentified({
+        accounts: [personal("bob"), personal("carol")],
+        ownerSubjectId: null,
+        requesterSubjectId: "alice",
+      }).kind,
+    ).toBe("write");
+  });
+  test("removed connections and other resources don't count", () => {
+    expect(unidentified({ accounts: [shared({ status: "revoked" })] }).kind).toBe("write");
+    expect(
+      unidentified({
+        accounts: [personal("alice", { status: "revoked" })],
+        ownerSubjectId: null,
+        requesterSubjectId: "alice",
+      }).kind,
+    ).toBe("write");
+    expect(
+      unidentified({ accounts: [shared({ metadata: { mcpUrl: "https://service.test/other" } })] })
+        .kind,
+    ).toBe("write");
+  });
+  test("reconnecting the existing connection is unaffected", () => {
+    expect(
+      unidentified({ accounts: [personal("owner")], requestedConnectionId: "personal-owner" }).kind,
+    ).toBe("write");
+    expect(
+      unidentified({
+        accounts: [shared()],
+        ownerSubjectId: null,
+        requesterSubjectId: "alice",
+        requestedConnectionId: "shared",
+      }).kind,
+    ).toBe("write");
+  });
+  test("URL variants of the same server count as one resource", () => {
+    expect(
+      decide({
+        identityKeys: undefined,
+        mcpUrl: "https://mcp.stripe.com",
+        metadata: { mcpUrl: "https://mcp.stripe.com" },
+        accounts: [account({ metadata: { mcpUrl: "https://mcp.stripe.com/" } })],
+      }),
+    ).toEqual(limit);
   });
 });
