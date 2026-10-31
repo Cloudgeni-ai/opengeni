@@ -12,7 +12,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
 
-const migration = "1128_drop_retired_resumable_transcription.sql";
+const migration = "1146_drop_retired_resumable_transcription.sql";
 const tables = [
   "transcription_recording_chunks",
   "transcription_recording_objects",

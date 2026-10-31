@@ -18,7 +18,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
 
-const migration = "1121_drop_retired_provider_waiters.sql";
+const migration = "1143_drop_retired_provider_waiters.sql";
 const providers = ["claude", "codex", "xai"] as const;
 const names = [
   "list_continuable_sessions",
