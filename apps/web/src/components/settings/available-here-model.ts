@@ -1,12 +1,15 @@
 import {
   asVaultClient,
   vaultsApi,
+  type CapabilityCatalogItem,
   type MachineState,
   type ResourceAuthorityScope,
   type VaultSummary,
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { isPermissionDenied, userErrorText } from "@opengeni/react/ui/api-error";
+
+import { personalExtensionOrigin } from "@/components/capabilities/catalog-presentation";
 
 /* ----------------------------------------------------------------------------
    Available here: what agents in one workspace can use, read from the same
@@ -96,16 +99,44 @@ function vaultOwner(vault: VaultSummary): AvailableOwner | null {
   }
 }
 
+/**
+ * How people sign in to an organization connector that reaches this workspace,
+ * or undefined when the item is not the organization's: each person with their
+ * own account, all with the organization's key, or no sign-in at all.
+ */
+function organizationConnectorLogin(
+  item: CapabilityCatalogItem,
+): AvailableThing["login"] | undefined {
+  const connector = item.metadata.organizationConnector;
+  if (item.lifecycle.managedBy !== "organization" || !connector || typeof connector !== "object")
+    return undefined;
+  const login = (connector as { login?: unknown }).login;
+  if (login === "each_person") return "own";
+  if (login === "organization_key") return "shared";
+  return null;
+}
+
+/**
+ * The workspace's own connectors are its installations. Two more kinds have
+ * no installation here and arrive as catalog items: the organization's
+ * connectors that reach this workspace, and, in a Personal workspace, the
+ * owner's Only me connectors carried in from the workspaces they were set up
+ * in. An organization connector the workspace turned off is left out; one
+ * whose organization setup is broken is shown as unavailable, like an offline
+ * machine.
+ */
 async function connectors(client: AvailableHereClient, workspaceId: string) {
   const catalog = await client.listCapabilities(workspaceId);
   const items = new Map(catalog.items.map((item) => [item.id, item]));
   const things: AvailableThing[] = [];
+  const listed = new Set<string>();
   for (const installation of catalog.installations) {
     // Skills are counted from the Skills list, which also holds authored ones.
     if (installation.status !== "active" || installation.kind === "skill") continue;
     const item = items.get(installation.capabilityId);
     if (!item) continue;
     const scope = item.connectionRef?.subjectScope;
+    listed.add(item.id);
     things.push({
       key: `connector:${installation.id}`,
       kind: "connector",
@@ -116,6 +147,35 @@ async function connectors(client: AvailableHereClient, workspaceId: string) {
       count: null,
       open: { page: "plugins" },
     });
+  }
+  for (const item of catalog.items) {
+    if (item.kind !== "mcp" || listed.has(item.id)) continue;
+    const login = organizationConnectorLogin(item);
+    if (login !== undefined) {
+      const unavailable = item.lifecycle.status === "unavailable";
+      if (!item.enabled && !unavailable) continue;
+      things.push({
+        key: `connector:organization:${item.id}`,
+        kind: "connector",
+        owner: "organization",
+        name: item.name,
+        state: unavailable ? "Unavailable" : null,
+        login,
+        count: null,
+        open: { page: "plugins" },
+      });
+    } else if (item.enabled && personalExtensionOrigin(item)) {
+      things.push({
+        key: `connector:carried:${item.id}`,
+        kind: "connector",
+        owner: "you",
+        name: item.name,
+        state: null,
+        login: "own",
+        count: null,
+        open: { page: "plugins" },
+      });
+    }
   }
   return things;
 }
