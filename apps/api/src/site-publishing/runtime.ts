@@ -13,6 +13,7 @@ import {
   hasPermission,
   sessionUsageLimitsProducerEnabled,
   stampSiteViewerSessionAuthorization,
+  stampRequestBillingOrigin,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -898,6 +899,8 @@ export async function siteRuntimeSessionRequest(
     { ...input, label: `${siteRuntimeViewerLabel(viewer)} on ${host.hostname}` },
   );
   bindSiteSessionRequestAuthority(request, input.reauthorize);
+  // A published Site is set up in the app: its visitors' work is app use.
+  stampRequestBillingOrigin(request, "app");
   if (viewer.kind === "member" && viewer.subjectId && viewer.sessionId) {
     // The gateway already verified the host and opaque Site cookie. Native
     // resolution reloads this person's live membership, roles and models.

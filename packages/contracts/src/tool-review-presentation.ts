@@ -265,9 +265,19 @@ export function toolReviewFields(
   context?: ToolReviewContext,
   toolName?: string,
 ): { fields: ToolActionReview["fields"]; moreFields: number } {
-  // An app action's card says what it does in one plain line (its
-  // consequence); its raw arguments (action id, path, body) stay in Details.
-  if (toolName === APP_ACTION_REVIEW_TOOL) return { fields: [], moreFields: 0 };
+  // An app action's card lists what it changes, as the server found it, and
+  // says what it does in one plain line (its consequence); its raw arguments
+  // (action id, path, body) stay in Details.
+  if (toolName === APP_ACTION_REVIEW_TOOL)
+    return {
+      fields: (context?.targetFacts ?? []).map((fact, index) => ({
+        path: `/$target/${index}`,
+        label: fact.label,
+        preview: bound(fact.value, 240),
+        truncated: false,
+      })),
+      moreFields: 0,
+    };
   const args = decodeReviewArguments(argumentsValue);
   if (!args) return { fields: [], moreFields: 0 };
   const entries = Object.entries(args);
@@ -838,6 +848,14 @@ const APP_ACTION_CODED_FIELDS: Readonly<
   },
 };
 
+/** Sent text as one line: no line breaks, controls or invisible format characters (joiners stay). */
+const oneLine = (text: string) =>
+  text
+    .replace(/(?![\u200c\u200d])\p{Cf}/gu, "")
+    .replace(/[\s\p{Cc}\u2028\u2029]+/gu, " ")
+    .trim();
+const sentLabel = (key: string) => oneLine(toolReviewFieldLabel(key));
+
 /**
  * One short readable line of an app action's key values, for example
  * "Email: anna@example.com · Role: admin", taken from its body and query.
@@ -853,7 +871,7 @@ export function appActionReviewSummary(argumentsValue: unknown): string | undefi
   const visit = (key: string, value: unknown, depth: number) => {
     if (parts.length >= 4 || APP_ACTION_UNREADABLE_KEY.test(key)) return;
     if (secretFieldName(key)) {
-      parts.push(`${toolReviewFieldLabel(key)}: [Protected value]`);
+      parts.push(`${sentLabel(key)}: [Protected value]`);
       return;
     }
     const coded = Object.hasOwn(APP_ACTION_CODED_FIELDS, key)
@@ -879,8 +897,8 @@ export function appActionReviewSummary(argumentsValue: unknown): string | undefi
       : scalar(value)
         ? shown(value)
         : "";
-    const line = text.replace(/\s+/g, " ").trim();
-    if (line) parts.push(`${toolReviewFieldLabel(key)}: ${bound(line, 80)}`);
+    const line = oneLine(text);
+    if (line) parts.push(`${sentLabel(key)}: ${bound(line, 80)}`);
   };
   for (const source of [args.body, args.query]) {
     if (source && typeof source === "object" && !Array.isArray(source))
@@ -913,8 +931,12 @@ export function toolReviewAction(
     effects: [] as string[],
   };
   if (toolName === APP_ACTION_REVIEW_TOOL) {
-    const consequence = appActionReviewSummary(argumentsValue);
-    return consequence ? { ...fallback, consequence } : fallback;
+    // Its values are the agent's, so they never read as what the server
+    // found: labelled as sent, and left to Details beside the server's facts.
+    const summary = context?.targetFacts?.length
+      ? undefined
+      : appActionReviewSummary(argumentsValue);
+    return summary ? { ...fallback, consequence: `Sent by the agent: ${summary}` } : fallback;
   }
   if (context?.kind !== "gmail") return fallback;
   const args = decodeReviewArguments(argumentsValue);
@@ -1014,6 +1036,9 @@ export function toolReviewDetails(
   path: string,
   offset: number,
   limit = 25,
+  toolName?: string,
+  /** The app action catalog has this id, so its name is the server's words. */
+  knownAppAction?: (id: string) => boolean,
 ): Omit<ToolReviewDetailsPage, "id" | "actionDigest" | "version"> {
   if (
     !Number.isSafeInteger(offset) ||
@@ -1089,7 +1114,60 @@ export function toolReviewDetails(
   };
   let total: number;
   let items: DetailItem[];
-  if (Array.isArray(value)) {
+  if (toolName === APP_ACTION_REVIEW_TOOL && path === "" && args) {
+    // An app action's Details read as the action and what it changes, as
+    // the server found it, then each value the agent sent under a plain
+    // label, set apart so a sent value never passes for a server fact.
+    const all: DetailItem[] = [];
+    // Only an action the catalog knows is named up here; any other id is
+    // the agent's text and is listed with what it sent.
+    const action =
+      typeof args.id === "string" && knownAppAction?.(args.id) === true ? args.id : undefined;
+    if (action)
+      all.push({
+        label: "Action",
+        value: bound(
+          /^[a-z][A-Za-z0-9]*$/.test(action.trim())
+            ? toolReviewFieldLabel(action.trim())
+            : action.trim().replace(/\s+/g, " "),
+          4000,
+        ),
+        truncated: false,
+      });
+    for (const fact of context?.targetFacts ?? [])
+      all.push({ label: fact.label, value: fact.value, truncated: false });
+    const sentFrom = all.length;
+    Object.entries(args).forEach(([key, entry], index) => {
+      if (key === "id" && action !== undefined) return;
+      const parentPath = fieldPointer(key, index);
+      if (
+        ["pathParameters", "query", "body"].includes(key) &&
+        entry !== null &&
+        typeof entry === "object" &&
+        !Array.isArray(entry)
+      ) {
+        Object.entries(entry).forEach(([name, item], position) =>
+          all.push({
+            label: bound(sentLabel(name), 256),
+            ...preview(item, name, `${parentPath}${fieldPointer(name, position, parentPath)}`),
+          }),
+        );
+        return;
+      }
+      all.push({
+        label: bound(sentLabel(key), 256),
+        ...preview(entry, key, parentPath),
+      });
+    });
+    if (all.length > sentFrom)
+      all.splice(sentFrom, 0, {
+        label: "Sent by the agent",
+        value: "The values below, as written",
+        truncated: false,
+      });
+    total = all.length;
+    items = all.slice(offset, offset + limit);
+  } else if (Array.isArray(value)) {
     total = value.length;
     items = value.slice(offset, offset + limit).map((entry, index) => ({
       label: `${offset + index + 1}`,

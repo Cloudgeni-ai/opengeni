@@ -10,6 +10,7 @@ import {
   getBillingBalance,
   listUsageEvents,
   renewSessionRealtimeInTransaction,
+  withBillingOriginOverride,
   withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
@@ -219,15 +220,24 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       eligibleModelIds: ["gpt-chat-only"],
       idempotencyKey: `promo:${value.accountId}`,
     });
-    const refused = await begin(app, value, AZURE_MODEL);
+    // A person in the app (the app's own sign-in fixes this scope in production).
+    const refused = await withBillingOriginOverride("app", () => begin(app, value, AZURE_MODEL));
     expect(refused.response.status).toBe(402);
     expect(await refused.response.json()).toMatchObject({
       code: "insufficient_credits",
       message: "Promotional credits don't cover live voice. Add credits to use it.",
     });
-    const catalog = await app.request(
-      `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
-      { headers: value.headers },
+    // The fixture's own delegated token is API use: it is told credits pay.
+    const api = await begin(app, value, AZURE_MODEL);
+    expect(api.response.status).toBe(402);
+    expect(await api.response.json()).toMatchObject({
+      code: "insufficient_credits",
+      message: "API usage uses credits, not your plan credit.",
+    });
+    const catalog = await withBillingOriginOverride("app", () =>
+      app.request(`http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`, {
+        headers: value.headers,
+      }),
     );
     const models = ((await catalog.json()) as { models: Array<Record<string, unknown>> }).models;
     expect(models.find((model) => model.provider === "OpenGeni")).toMatchObject({
@@ -237,7 +247,32 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     });
   });
 
+  test("an API caller cannot spend signup credits on live voice", async () => {
+    // The fixture's delegated token is a product on the SDK: API use, which
+    // spends credits only.
+    const app = appFor(pricedSettings);
+    const value = await fixture(0);
+    await applyCreditLedgerEntry(client.db, {
+      accountId: value.accountId,
+      amountMicros: 2 * MINUTE,
+      type: "grant",
+      eligibleModelIds: ["gpt-chat-only"],
+      sourceType: "verified_signup_trial",
+      sourceId: value.subjectId,
+      idempotencyKey: `verified-signup-trial:v1:${value.accountId}`,
+      metadata: { campaign: "verified_signup_trial_v1", creditOfferLabel: "Signup credits" },
+    });
+    const refused = await begin(app, value, AZURE_MODEL);
+    expect(refused.response.status).toBe(402);
+    expect(await costEvents(value)).toHaveLength(0);
+  });
+
   test("signup trial credits make live voice available and pay for its minutes", async () => {
+    // A person in the app (the app's own sign-in fixes this scope in production).
+    await withBillingOriginOverride("app", () => signupTrialVoice());
+  });
+
+  async function signupTrialVoice() {
     const app = appFor(pricedSettings);
     const value = await fixture(0);
     // Signup credits stay scoped to chat models for model usage, yet pay for voice.
@@ -295,7 +330,7 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       expect.objectContaining({ remainingMicros: MINUTE, coversVoice: true }),
     ]);
     expect(await costEvents(value)).toHaveLength(1);
-  });
+  }
 
   test("an enabled provider without pricing is neither offered nor startable", async () => {
     const app = appFor({ ...pricedSettings, azureLivePricingJson: undefined });

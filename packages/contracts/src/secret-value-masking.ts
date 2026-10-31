@@ -308,6 +308,8 @@ function escapeRegExp(text: string): string {
 const TRUNCATION_MARK = /\.\.\.|\u2026/gu;
 
 export type CompiledSecretValueMasks = {
+  /** Known long numeric values, allowing only digit-grouping separators. */
+  readonly formattedNumbers: ReadonlyArray<{ pattern: RegExp; label: string }>;
   readonly empty: boolean;
   readonly minChars: number;
   readonly skipKey: ((key: string) => boolean) | undefined;
@@ -365,6 +367,7 @@ export function compileSecretValueMasks(
     Math.max(0, options.clippedMinShare ?? SECRET_VALUE_CLIPPED_MIN_SHARE),
   );
   const labels = new Map<string, string>();
+  const formattedNumbers: Array<{ pattern: RegExp; label: string }> = [];
   const labelTexts = new Set<string>();
   // Clipped starts are indexed for the forms text usually shows (as written,
   // trimmed, JSON-escaped once), not the encoded variants.
@@ -373,6 +376,19 @@ export function compileSecretValueMasks(
     if (typeof entry?.value !== "string" || typeof entry.label !== "string") continue;
     const forms = secretValueForms(entry.value, { ...options, minChars });
     if (forms.length === 0) continue;
+    // Payment widgets commonly insert grouping spaces (including nonbreaking
+    // spaces) or hyphens. Match only the exact known digits, never arbitrary
+    // numbers, and never apply this equivalence to passwords or other text.
+    if (/^[0-9\s-]+$/u.test(entry.value)) {
+      const digits = entry.value.replace(/[\s-]/gu, "");
+      if (digits.length >= minChars && digits.length <= 19) {
+        const separator = "(?:[\\s-]|%20|%C2%A0|%E2%80%(?:89|8A|AF)){0,4}";
+        formattedNumbers.push({
+          pattern: new RegExp(digits.split("").join(separator), "giu"),
+          label: entry.label,
+        });
+      }
+    }
     labelTexts.add(entry.label);
     for (const form of forms) if (!labels.has(form)) labels.set(form, entry.label);
     clippable.add(entry.value);
@@ -422,6 +438,7 @@ export function compileSecretValueMasks(
           "gu",
         );
   return {
+    formattedNumbers,
     empty: forms.length === 0,
     minChars,
     skipKey: options.skipKey,
@@ -486,6 +503,12 @@ function keptRanges(text: string, pattern: RegExp): Array<[number, number]> {
 /** Mask one text with compiled entries. */
 export function maskSecretValuesInText(text: string, masks: CompiledSecretValueMasks): string {
   if (masks.empty || masks.pattern === null || text.length < masks.minChars) return text;
+  for (const { pattern, label } of masks.formattedNumbers) {
+    const kept = keptRanges(text, masks.pattern);
+    text = text.replace(pattern, (match, at: number) =>
+      overlapsKept(at, at + match.length, kept) ? match : label,
+    );
+  }
   const size = masks.minChars;
   // Existing labels and markers are skipped; where one starts, it wins, and
   // no match may run into one.

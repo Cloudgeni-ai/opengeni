@@ -132,7 +132,7 @@ test("schedule creation discovers readable guidance without optional dependencie
       description: artifact.description!,
     })),
   );
-  expect(catalog).toContain("builtin:schedules");
+  expect(catalog).toContain('{"name":"schedules"');
   expect(catalog).not.toContain("## Discover what the task needs");
   const content = readSkillFiles(selected.artifact.files).files[0]!.content;
   for (const tool of [

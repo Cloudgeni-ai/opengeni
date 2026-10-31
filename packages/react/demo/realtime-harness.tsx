@@ -91,7 +91,7 @@ function ReferenceConsumer() {
               <p className="text-og-xs font-medium uppercase tracking-[0.12em] text-og-fg-subtle">
                 Public reference consumer
               </p>
-              <h1 className="mt-2 text-og-lg font-semibold">@opengeni/react/realtime</h1>
+              <h1 className="mt-2 text-og-md font-semibold">@opengeni/react/realtime</h1>
               <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-og-xs">
                 <dt className="text-og-fg-subtle">Mode</dt>
                 <dd data-testid="demo-mode" className="font-og-mono">
@@ -249,7 +249,7 @@ function LiveConfiguration(props: {
           if (valid) props.onSubmit(workspaceId.trim(), sessionId.trim());
         }}
       >
-        <h1 className="text-og-lg font-semibold">Connect the live realtime demo</h1>
+        <h1 className="text-og-md font-semibold">Connect the live realtime demo</h1>
         <p className="mt-2 text-og-sm leading-6 text-og-fg-subtle">
           The browser uses the public SDK through the same-origin <code>/demo-api</code> proxy.
           Credentials remain on the server.

@@ -2930,7 +2930,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultProviderConnectionSummary",
       "VaultSummary"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/state",
@@ -2938,7 +2938,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/state",
     "request": [],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/usage",
@@ -2990,6 +2990,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentCall"
+    ]
+  },
+  {
+    "id": "getAgentCallHostPhones",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-call-phones",
+    "request": [],
+    "response": [
+      "AgentCallHostPhones"
     ]
   },
   {
@@ -4215,7 +4224,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceAllowance"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "getWorkspaceAllowanceState",
@@ -4225,7 +4234,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceAllowanceState"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "getWorkspaceArtifact",
@@ -6896,7 +6905,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "CreateSocialPostRequest"
     ],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "connections:write"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/approvals",
@@ -8510,6 +8519,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SendTestEventResponse"
+    ]
+  },
+  {
+    "id": "setAgentCallHostPhones",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/agent-call-phones",
+    "request": [
+      "SetAgentCallHostPhonesRequest"
+    ],
+    "response": [
+      "AgentCallHostPhones"
     ]
   },
   {

@@ -1,5 +1,8 @@
 import { expect } from "bun:test";
 import type { BrowserContext, Page } from "playwright";
+import { DESKTOP_MAC_TRAFFIC_LIGHT_SIZE } from "@opengeni/sdk/desktop-bridge";
+
+import { MAC_TRAFFIC_LIGHT_POSITION } from "../../packages/desktop/src/main/window-bar";
 
 /**
  * The desktop window bar: on macOS and Windows a strip across the top of the
@@ -20,6 +23,20 @@ export const MACOS_BAR_CONTROLS_LEFT = 84;
  * the sidebar toggle (84px + 32px) with a small gap.
  */
 export const MACOS_BAR_ROW_LEFT = 120;
+
+/** Where the macOS app puts the traffic lights, in window points. */
+export { MAC_TRAFFIC_LIGHT_POSITION };
+
+/**
+ * Where macOS shells that don't report their window bar's height (the
+ * desktop app 0.1.33 and older) put the traffic lights.
+ */
+export const LEGACY_MAC_TRAFFIC_LIGHT_POSITION = { x: 18, y: 21 };
+
+/** The traffic lights' vertical centre, in window points. */
+export function trafficLightCentre(position: { y: number }): number {
+  return position.y + DESKTOP_MAC_TRAFFIC_LIGHT_SIZE / 2;
+}
 
 /**
  * A plain browser has no Windows window controls overlay, so stand in for the
