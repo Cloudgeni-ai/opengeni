@@ -386,6 +386,15 @@ class FakeGitHub implements GitHub {
     this.log.push(`rerun ${id}`);
   }
 
+  /** Failed job names by run id; a run id missing here makes the lookup fail. */
+  failedJobNames = new Map<number, string[]>();
+
+  async failedJobs(runId: number) {
+    const names = this.failedJobNames.get(runId);
+    if (!names) throw new GitHubError(404, `actions/runs/${runId}/jobs`, "not found");
+    return names;
+  }
+
   async comment(number: number, body: string) {
     if (this.commentFailure) throw this.commentFailure;
     this.comments.push({ number, body });
@@ -435,7 +444,8 @@ class FakeGitHub implements GitHub {
     return { name, sha, manifest: parseManifest(this.commits.get(sha)!.message)! };
   }
 
-  finishCi(sha: string, conclusion: string, attempt = 1) {
+  finishCi(sha: string, conclusion: string, attempt = 1, failedJobs: string[] = []) {
+    this.failedJobNames.set(42, failedJobs);
     this.runsBySha.set(sha, [
       {
         id: 42,
@@ -743,6 +753,63 @@ describe("a batcher pass", () => {
     expect(gh.comments.at(-1)).toMatchObject({ number: 1 });
     expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
     expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+  });
+
+  test("a bisected group failing only in jobs its batch failed after a retry is split at once; one PR is still retried", async () => {
+    const SHARD = "Unit tests (shard 3/12)";
+    const UNIT = "Typecheck and unit tests";
+    const gh = new FakeGitHub();
+    for (const number of [1, 2, 3, 4]) gh.addPull(number);
+    await run(gh, options());
+    const first = gh.batch();
+    expect(first.manifest.blame).toBeUndefined();
+    gh.finishCi(first.sha, "failure", 1, [UNIT, SHARD]);
+    await run(gh, options());
+    gh.finishCi(first.sha, "failure", 2, [UNIT, SHARD]);
+    await run(gh, options());
+    const reruns = () => gh.log.filter((line) => line.startsWith("rerun")).length;
+    expect(reruns()).toBe(1);
+
+    const half = gh.batch();
+    expect(half.manifest.members.map((m) => m.number)).toEqual([1, 2]);
+    expect(half.manifest.blame).toEqual([UNIT, SHARD].sort());
+    gh.finishCi(half.sha, "failure", 1, [UNIT, SHARD]);
+    await run(gh, options());
+    // Split without the retry that would only have failed again.
+    expect(reruns()).toBe(1);
+    const single = gh.batch();
+    expect(single.manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(single.manifest.pending).toEqual([[2], [3, 4]]);
+    expect(single.manifest.blame).toEqual([UNIT, SHARD].sort());
+
+    // A single PR is never ejected without its retry.
+    gh.finishCi(single.sha, "failure", 1, [UNIT, SHARD]);
+    await run(gh, options());
+    expect(reruns()).toBe(2);
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+    gh.finishCi(single.sha, "failure", 2, [UNIT, SHARD]);
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+  });
+
+  test("a bisected group failing in another job, or in jobs GitHub cannot list, is retried", async () => {
+    for (const failure of ["another job", "unlisted"] as const) {
+      const gh = new FakeGitHub();
+      for (const number of [1, 2, 3, 4]) gh.addPull(number);
+      await run(gh, options());
+      const first = gh.batch();
+      gh.finishCi(first.sha, "failure", 1, ["Unit tests (shard 3/12)"]);
+      await run(gh, options());
+      gh.finishCi(first.sha, "failure", 2, ["Unit tests (shard 3/12)"]);
+      await run(gh, options());
+      const half = gh.batch();
+      gh.finishCi(half.sha, "failure", 1, ["Real-service and recovery tests"]);
+      if (failure === "unlisted") gh.failedJobNames.delete(42);
+      await run(gh, options());
+      expect(gh.log.filter((line) => line.startsWith("rerun"))).toHaveLength(2);
+      expect(gh.batch().sha).toBe(half.sha);
+    }
   });
 
   test("defers a PR that conflicts with an earlier one in the same batch", async () => {

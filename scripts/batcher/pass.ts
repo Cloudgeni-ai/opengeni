@@ -23,6 +23,7 @@ import {
   QUEUE_LABEL,
   VERSION_BRANCH,
   decide,
+  failedRun,
   inBatchChanges,
   isControlPlane,
   numberTaken,
@@ -262,12 +263,30 @@ async function observe(ctx: Context): Promise<Observation> {
       tip: branch.sha,
       manifest,
       createdAt: commit.date,
-      runs: await gh.runs(branch.name, branch.sha),
+      runs: await withFailedJobs(ctx, await gh.runs(branch.name, branch.sha)),
     };
     if (manifest.base === mainSha) batch.sameTree = await sameTree(ctx, batch, commit, pulls);
     batches.push(batch);
   }
   return { now, mainSha, pulls, batches };
+}
+
+/**
+ * The failed jobs of each finished run that did not pass, which a bisection
+ * blames (see `Manifest.blame`). Not knowing them only means a retry.
+ */
+async function withFailedJobs(ctx: Context, runs: Batch["runs"]): Promise<Batch["runs"]> {
+  return Promise.all(
+    runs.map(async (summary) => {
+      if (!failedRun(summary)) return summary;
+      try {
+        return { ...summary, failedJobs: await ctx.gh.failedJobs(summary.id, summary.attempt) };
+      } catch (error) {
+        ctx.log(`Could not list the failed jobs of ${summary.url}: ${String(error)}`);
+        return { ...summary, failedJobs: null };
+      }
+    }),
+  );
 }
 
 /**
@@ -734,7 +753,12 @@ async function versionOverlaps(
  * Merge the members onto main on a scratch branch with GitHub's own merge,
  * then publish the tip with its manifest as batch/<id>. That one push starts CI.
  */
-async function build(ctx: Context, members: QueuedPull[], pending: number[][]) {
+async function build(
+  ctx: Context,
+  members: QueuedPull[],
+  pending: number[][],
+  blame: string[] = [],
+) {
   const { gh } = ctx;
   const base = await gh.mainSha();
   const id = ctx.randomId();
@@ -784,7 +808,14 @@ async function build(ctx: Context, members: QueuedPull[], pending: number[][]) {
       });
     }
     if (!built.length) return;
-    const manifest: Manifest = { schemaVersion: 2, id, base, members: built, pending };
+    const manifest: Manifest = {
+      schemaVersion: 2,
+      id,
+      base,
+      members: built,
+      pending,
+      ...(blame.length ? { blame } : {}),
+    };
     const tip = await gh.createCommit(built.at(-1)!.tree, [head], renderManifest(manifest));
     await gh.createBranch(`${BATCH_PREFIX}${id}`, tip);
     ctx.log(
@@ -814,7 +845,7 @@ async function act(ctx: Context, action: Action) {
     case "regenerate":
       return regenerateGenerated(ctx, action.number);
     case "build":
-      return build(ctx, action.members, action.pending);
+      return build(ctx, action.members, action.pending, action.blame);
     case "hold":
       await noteVersionHold(ctx, action);
       return;
@@ -860,7 +891,7 @@ export function describe(action: Action): string {
     case "regenerate":
       return `regenerate #${action.number}'s conflicting generated files, or eject it if other files conflict`;
     case "build":
-      return `build ${action.members.map((m) => `#${m.number}`).join(", ")}${action.pending.length ? ` (then ${JSON.stringify(action.pending)})` : ""}`;
+      return `build ${action.members.map((m) => `#${m.number}`).join(", ")}${action.pending.length ? ` (then ${JSON.stringify(action.pending)})` : ""}${action.blame?.length ? `, bisecting a failure in ${action.blame.join(", ")}` : ""}`;
     case "hold":
       return action.behind
         ? `hold the queue for Version PR #${action.number}: main changed files it also changes, so it waits to be regenerated`
