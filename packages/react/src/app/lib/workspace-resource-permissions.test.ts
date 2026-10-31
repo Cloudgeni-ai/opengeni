@@ -1,6 +1,7 @@
 import { expect, mock, test } from "bun:test";
 
 let permissions: string[] = [];
+let accountPermissions: string[] = [];
 let grantShape: Record<string, unknown> = {};
 let contextShape: Record<string, unknown> = {};
 let machineEnabled: boolean | undefined;
@@ -18,8 +19,10 @@ mock.module("../app-context", () => ({
       mode: "managed",
       subjectId: "user:kari",
       workspaceGrants: [{ workspaceId: "workspace", permissions, ...grantShape }],
+      accountGrants: [{ accountId: "organization", permissions: accountPermissions }],
       ...contextShape,
     },
+    workspaces: [{ id: "workspace", accountId: "organization" }],
   }),
 }));
 mock.module("../../session-context", () => ({
@@ -153,5 +156,20 @@ test("a signed-in Member connects and changes only their own Only me machines", 
   expect(action).toHaveBeenCalledTimes(2);
   grantShape = {};
   contextShape = {};
+  fleetMachines = [machine];
+});
+
+test("an organization machine changes only for organization owners and admins", () => {
+  const organization = { sandboxId: "org", enrollmentId: "org", scope: "organization" };
+  const shared = { sandboxId: "shared", enrollmentId: "shared", scope: "workspace" };
+  fleetMachines = [organization, shared];
+  permissions = ["enrollments:read", "enrollments:manage", "sessions:read"];
+  let machines = useWorkspaceMachines();
+  expect(machines.canManageMachine(shared as never)).toBe(true);
+  expect(machines.canManageMachine(organization as never)).toBe(false);
+  accountPermissions = ["account:admin"];
+  machines = useWorkspaceMachines();
+  expect(machines.canManageMachine(organization as never)).toBe(true);
+  accountPermissions = [];
   fleetMachines = [machine];
 });

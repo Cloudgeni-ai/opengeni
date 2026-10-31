@@ -95,7 +95,7 @@ export function RigDetailRoute({
   const navigate = useNavigate();
   const { client } = useOpenGeni();
   const canView = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
-  const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:manage");
+  const canManageRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:manage");
 
   const rig = useRig(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
   const versions = useRigVersions(rigId, { enabled: canView, pollIntervalMs: POLL_MS });
@@ -112,6 +112,9 @@ export function RigDetailRoute({
   const organizationAdmin = organizationId
     ? hasAccountPermission(context.accessContext, organizationId, "account:admin")
     : false;
+  // Changing an organization rig also needs an organization owner or admin, as
+  // the API asks; without that its edit actions would only be refused.
+  const canManage = canManageRigs && (rig.rig?.scope !== "organization" || organizationAdmin);
   const organizationName =
     useOrganizationName(organizationId, organizationAdmin) ?? "your organization";
 
@@ -275,7 +278,7 @@ export function RigDetailRoute({
       {current.scope === "organization" && current.reach ? (
         <DetailAsideItem label="Available in">
           {organizationComputeReachSummary(current.reach)}
-          {canManage && organizationAdmin ? (
+          {canManage ? (
             <Button
               type="button"
               variant="link"
@@ -513,7 +516,7 @@ export function RigDetailRoute({
           openList();
         }}
       />
-      {current.scope === "organization" && current.reach && canManage && organizationAdmin ? (
+      {current.scope === "organization" && current.reach && canManage ? (
         <OrganizationComputeReachDialog
           open={reachOpen}
           onOpenChange={setReachOpen}
