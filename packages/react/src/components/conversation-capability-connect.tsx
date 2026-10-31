@@ -55,6 +55,7 @@ const UNAVAILABLE_REASONS = new Set([
 const OWN_FLOW_CAPABILITY_IDS = new Set([
   "api:connected-machine",
   "api:github-app",
+  "api:github-personal",
   "mcp:codex_apps",
 ]);
 

@@ -25,6 +25,7 @@ export type {
   AgentPromptContext,
   AgentPromptExperiments,
   AgentPromptModule,
+  AgentPromptRepositoryIdentity,
   AgentPromptResources,
   AgentPromptToolAvailability,
   RigInstructionsContext,

@@ -151,6 +151,37 @@ describe("agent capability catalog search", () => {
       }
     });
 
+    test("'connect my GitHub' finds Your GitHub; 'install the GitHub app' finds the app", () => {
+      const withPersonal = [
+        ...catalog,
+        ...nativeConnectionCapabilityRecommendations({ personalGitHub: true }).filter(
+          (entry) => entry.id === "api:github-personal",
+        ),
+      ];
+      const first = (query: string) =>
+        searchCapabilityCatalogItems(withPersonal, query)[0]?.item.id;
+      for (const query of [
+        "connect my GitHub",
+        "use my GitHub account",
+        "do it as me on GitHub",
+        "my personal GitHub",
+      ]) {
+        expect({ query, first: first(query) }).toEqual({ query, first: "api:github-personal" });
+      }
+      for (const query of [
+        "install the GitHub app",
+        "give Opengeni access to the GitHub org",
+        "GitHub app",
+      ]) {
+        expect({ query, first: first(query) }).toEqual({ query, first: "api:github-app" });
+      }
+      expect(
+        nativeConnectionCapabilityRecommendations({ personalGitHub: true }).find(
+          (entry) => entry.id === "api:github-personal",
+        ),
+      ).toMatchObject({ name: "Your GitHub", kind: "api", source: "built_in" });
+    });
+
     test("entries are agent recommendations for the Connect card", () => {
       const outlook = catalog.find(
         (entry) => entry.id === "api:integration:microsoft-outlook-mail",

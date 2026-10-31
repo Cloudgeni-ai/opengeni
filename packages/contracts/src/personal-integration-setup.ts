@@ -192,6 +192,11 @@ export function inChatCapabilitySetup(
       ? { kind: "default" }
       : { kind: "unavailable" };
   }
+  if (capabilityId === "api:github-personal") {
+    // The person connects their own GitHub account (PERSONAL_GITHUB_CAPABILITY_ID):
+    // the connect route requires connections:write for that exact person.
+    return can("connections:write") ? { kind: "default" } : { kind: "unavailable" };
+  }
   if (!item || item.kind !== "mcp" || item.authKind !== "oauth2") return { kind: "default" };
   if (!can("sessions:control")) return { kind: "unavailable" };
   const usesSharedAccount =

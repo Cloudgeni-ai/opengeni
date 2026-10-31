@@ -173,15 +173,23 @@ describe("native connection readiness", () => {
     expect(nativeIntegrationModel(historical, catalog([]), false, () => {})).toBe(historical);
   });
 
-  test("personal GitHub availability does not enable an unavailable workspace App", () => {
+  test("each GitHub section keeps only an action its own provider can start", () => {
+    const connect = mock(() => {});
+    const install = mock(() => {});
     const fresh = model("github", {
-      footer: { kind: "actions", primary: { label: "Set up workspace App", onClick: () => {} } },
-      options: [
+      footer: { kind: "actions" },
+      sections: [
         {
-          kind: "link",
-          id: "github-personal-identity",
-          label: "Your GitHub identity",
-          action: { label: "Connect", onClick: () => {} },
+          id: "github-personal",
+          title: "Your GitHub",
+          description: "Work appears under your name.",
+          action: { label: "Connect", onClick: connect, connectProviderId: "github-personal" },
+        },
+        {
+          id: "github-app",
+          title: "Opengeni app",
+          description: "Work appears as the Opengeni bot.",
+          action: { label: "Install app", onClick: install, connectProviderId: "github-app" },
         },
       ],
     });
@@ -191,26 +199,32 @@ describe("native connection readiness", () => {
     ]);
     const guarded = nativeIntegrationModel(fresh, personalOnly, false, () => {});
     expect(nativeIntegrationVisible(guarded, personalOnly, false)).toBe(true);
-    expect(guarded.footer.kind).toBe("locked");
-    expect(guarded.options).toHaveLength(1);
-    expect(
-      nativeIntegrationModel(fresh, catalog([["github-app", "available"]]), false, () => {})
-        .options,
-    ).toEqual([]);
-    const connectedPersonal = {
+    expect(guarded.chip).toBe(fresh.chip);
+    expect(guarded.sections?.[0]?.action?.onClick).toBe(connect);
+    expect(guarded.sections?.[1]?.action).toBeUndefined();
+    expect(guarded.sections?.[1]?.note).toBeTruthy();
+    const appOnly = nativeIntegrationModel(
+      fresh,
+      catalog([["github-app", "available"]]),
+      false,
+      () => {},
+    );
+    expect(appOnly.sections?.[0]?.action).toBeUndefined();
+    expect(appOnly.sections?.[1]?.action?.onClick).toBe(install);
+    const loading = nativeIntegrationModel(
+      fresh,
+      { status: "loading", providers: [] },
+      false,
+      () => {},
+    );
+    expect(loading.sections?.every((section) => section.action?.disabled === true)).toBe(true);
+    const chooseRepos = {
       ...fresh,
-      chip: { label: "Connected", tone: "ok" } as const,
-      options: [
-        {
-          ...fresh.options[0]!,
-          kind: "link",
-          action: { label: "Manage", onClick: () => {} },
-        } as const,
-      ],
+      sections: [{ ...fresh.sections![0]!, action: { label: "Choose repos", onClick: connect } }],
     };
-    const managed = nativeIntegrationModel(connectedPersonal, catalog([]), false, () => {});
-    expect(managed.options).toEqual(connectedPersonal.options);
-    expect(managed.footer.kind).toBe("locked");
+    expect(nativeIntegrationModel(chooseRepos, catalog([]), false, () => {}).sections).toEqual(
+      chooseRepos.sections,
+    );
   });
 
   test("Drive write setup is checked separately from its existing read connection", () => {
@@ -289,30 +303,6 @@ describe("native connection readiness", () => {
         nativeIntegrationModel({ ...drive, id }, catalog([]), false, () => {}).access?.onEdit,
       ).toBeUndefined();
     }
-    const github = model("github", {
-      chip: { label: "Connected", tone: "ok" },
-      access: { title: "Repositories", items: [] },
-      footer: {
-        kind: "actions",
-        primary: { label: "Connect another account", onClick: add },
-        secondary: { label: "Disconnect workspace App", onClick: change },
-      },
-    });
-    const blocked = nativeIntegrationModel(github, catalog([]), false, () => {});
-    expect(blocked.footer.kind).toBe("actions");
-    if (blocked.footer.kind === "actions") {
-      expect(blocked.footer.primary).toBeUndefined();
-      expect(blocked.footer.secondary?.onClick).toBe(change);
-    }
-    const repair = {
-      ...github,
-      footer: {
-        ...github.footer,
-        kind: "actions",
-        primary: { label: "Repair workspace App", onClick: change },
-      } as const,
-    };
-    expect(nativeIntegrationModel(repair, catalog([]), false, () => {}).footer).toBe(repair.footer);
   });
 
   test("saved native credentials and disabled social history remain reachable before catalog enablement", () => {
