@@ -272,6 +272,12 @@ describe("the desktop window bar", () => {
             0.5,
           );
           expect((await windowBar(page))!.height, where).toBe(centre * 2);
+          // The row follows the canvas's edge from a ResizeObserver, which
+          // runs before the next paint: let that frame happen first.
+          await page.evaluate(
+            () =>
+              new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+          );
           // The page's title line is the bar's row, as a chat's header is.
           const row = await page.evaluate(() => {
             const rows = [
