@@ -809,6 +809,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// at the last sample; see [`HostAgent::check_oom_kills`].
     oom_kills: Option<u64>,
     sample_every: Duration,
+    /// See [`HostConfig::first_wake_within`].
+    first_wake_within: Duration,
     /// Readings given in place of the agent's own; see
     /// [`HostConfig::disk_reading`].
     disk_gauge: Option<DiskGauge>,
@@ -1068,6 +1070,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             unseen_activity: 0,
             oom_kills: None,
             sample_every: config.sample_every,
+            first_wake_within: config.first_wake_within,
             disk_gauge: config.disk_reading,
             processor_share: ShareCheck::of(config.processor_share, config.policy.cpu_budget),
             guest_ports: config.guest_ports.into(),

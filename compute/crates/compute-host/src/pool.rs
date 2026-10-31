@@ -560,6 +560,20 @@ impl Pool {
         self.entries.insert(shape, entry);
     }
 
+    /// Puts off `shape`'s build, which found no memory, disk or processor
+    /// time to spare: as after a failed build, new sandboxes boot cold and
+    /// a later one tries again, but nothing failed, so it is not warned
+    /// about each time.
+    pub fn put_off(&mut self, shape: Shape, now: Instant) {
+        tracing::debug!(%shape, "template build put off: no room to spare for it");
+        self.entries.insert(
+            shape,
+            Entry::Failed {
+                retry: now + RETRY_AFTER,
+            },
+        );
+    }
+
     /// Forgets `template`, which no longer fits today's inputs, and asks for
     /// a new one as [`Pool::want`] does, unless a newer one is already
     /// ready or being built.

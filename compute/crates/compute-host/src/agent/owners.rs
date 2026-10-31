@@ -38,7 +38,6 @@ use crate::store::{Claimed, Owned, OwnerEpoch, Stamp, Store};
 
 use super::disk::{AfterReading, Room};
 use super::remove::unmake;
-use super::requests::first_wake_by_ms;
 use super::{Command, Event, HostAgent, HostError, Reply};
 use crate::fleet::Admission;
 
@@ -398,7 +397,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         };
         self.preparing.insert(id.0);
-        let by_ms = first_wake_by_ms();
+        let by_ms = self.first_wake_by_ms();
         self.input(self.first_wake(id, unclaimed, true, by_ms));
         let mut record = Record::new(id, ordinal, allocation, config);
         record.first_wake_by_ms = Some(by_ms);
