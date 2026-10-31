@@ -32,11 +32,17 @@
 //! every idle sandbox it could, has the guest of the sandbox in use holding
 //! the most host memory above its request shrunk from inside: it drops its
 //! page cache and ends its largest programs, never below its request. So
-//! does a sandbox that
-//! holds more than its bound and no longer comes down while the host runs
-//! below its low watermark: the kernel could not compress what it borrowed
-//! (its pages do not compress, or zswap's pool or swap slots are full), so
-//! the others would pay for it. Until its guest answers, its high is lifted
+//! does a sandbox that holds more than its bound and no longer comes down
+//! while the host runs below its low watermark: the kernel could not
+//! compress what it borrowed (its pages do not compress, or zswap's pool
+//! or swap slots are full), so the others would pay for it. That is known
+//! only once the engine has brought it down as far as the kernel takes:
+//! before the kernel compresses a VM that has just written gigabytes it
+//! ages its pages, which on a busy host can take many seconds before the
+//! first megabytes compress and the VM comes down hundreds of megabytes a
+//! second. One the engine is still bringing down counts as not held only
+//! once it has not come down for the longer `descent`, and is reported
+//! meanwhile. Until its guest answers, its high is lifted
 //! to what it holds and the least a shrink frees, so that the guest can run
 //! to answer. A guest that cannot be shrunk (it has nothing left to end,
 //! does not answer, or is older than shrinking) has its VM ended. A
@@ -69,8 +75,13 @@ pub(crate) struct Paging {
     pub stall: u16,
     /// Since when it has held more than its bound lets it while the host
     /// was below its low watermark, and not come down a step on any
-    /// reading since: the kernel could not hold it there.
+    /// reading since: the kernel could not hold it there, or is still
+    /// working up to it (see `bringing_down`).
     pub unheld_since: Option<At>,
+    /// Whether the engine was still bringing it down toward its bound on
+    /// the latest reading: the kernel has not yet shown that it can take
+    /// no more.
+    pub bringing_down: bool,
     /// Its resident size on the reading before, to tell a VM the kernel
     /// is bringing down from one it cannot.
     pub before: u64,
@@ -117,6 +128,12 @@ pub struct MemoryLevels {
     /// memory the kernel cannot compress, such as data that is compressed
     /// already, or a full zswap pool or swap device.
     pub over_bound: u64,
+    /// Running sandboxes that hold more than their bound lets them while
+    /// the host is below its low watermark, and have not come down since
+    /// the last reading, while the engine is still bringing them down and
+    /// for less than [`crate::Outgrowth::descent`]: the kernel is slow to
+    /// start compressing them, aging their pages first.
+    pub bringing_down: u64,
 }
 
 /// Whether a sandbox's guest may still be shrunk for host memory.
@@ -142,6 +159,32 @@ pub(crate) enum Shrink {
     },
 }
 
+/// Why the host shrinks a sandbox's guest or ends its VM for memory: the
+/// two cases operators act on differently, the one a host too small or too
+/// full for what it runs, the other a sandbox whose memory the kernel
+/// cannot compress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShrinkCause {
+    /// The host is short of memory even with every running sandbox held to
+    /// its request and what is on its way back counted: it is `shortfall`
+    /// bytes below its low watermark, with `available` bytes available.
+    Short {
+        /// Bytes it is short by.
+        shortfall: u64,
+        /// Bytes of host memory available on the latest reading.
+        available: u64,
+    },
+    /// The sandbox holds `over` bytes more than its bound lets it, and the
+    /// kernel has not brought it down while the host ran below its low
+    /// watermark: what it borrowed does not compress, or zswap has no room.
+    OverBound {
+        /// Bytes it holds above its bound.
+        over: u64,
+        /// Bytes of host memory available on the latest reading.
+        available: u64,
+    },
+}
+
 /// The host's side of bounding running sandboxes.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Outgrown {
@@ -158,6 +201,27 @@ pub(crate) struct Outgrown {
     pub fresh: bool,
     /// The next shrink request's number.
     pub next_request: u64,
+}
+
+impl Paging {
+    /// When, held above its bound since `since`, it counts as one the
+    /// kernel cannot hold: `hold` later once the engine has brought it
+    /// down as far as the kernel takes, `descent` later while it is still
+    /// bringing it down.
+    fn unheld_at(&self, since: At, rule: Outgrowth) -> At {
+        since
+            + if self.bringing_down {
+                rule.descent.max(rule.hold)
+            } else {
+                rule.hold
+            }
+    }
+
+    /// When it counts as one the kernel cannot hold, if it is held above
+    /// its bound.
+    fn unheld_due(&self, rule: Outgrowth) -> Option<At> {
+        self.unheld_since.map(|since| self.unheld_at(since, rule))
+    }
 }
 
 impl Sandbox {
@@ -293,7 +357,18 @@ impl Host {
                 swapped,
                 stall,
                 high,
-            } => self.memory_use(sandbox, compressed, swapped, stall, high),
+                bringing_down,
+            } => self.memory_use(
+                sandbox,
+                Paging {
+                    compressed,
+                    swapped,
+                    stall,
+                    bringing_down,
+                    high,
+                    ..Paging::default()
+                },
+            ),
             crate::Input::Shrunk {
                 sandbox,
                 request,
@@ -307,25 +382,20 @@ impl Host {
         }
     }
 
-    /// Takes in [`crate::Input::MemoryUse`] of `id`.
-    fn memory_use(
-        &mut self,
-        id: SandboxId,
-        compressed: u64,
-        swapped: u64,
-        stall: u16,
-        high: Option<u64>,
-    ) {
+    /// Takes in [`crate::Input::MemoryUse`] of `id`: what `read` says of
+    /// it.
+    fn memory_use(&mut self, id: SandboxId, read: Paging) {
         let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
         };
         if slot.state.level != Level::Running {
             return;
         }
-        slot.paging.compressed = compressed;
-        slot.paging.swapped = swapped;
-        slot.paging.stall = stall;
-        slot.paging.high = high;
+        slot.paging.compressed = read.compressed;
+        slot.paging.swapped = read.swapped;
+        slot.paging.stall = read.stall;
+        slot.paging.high = read.high;
+        slot.paging.bringing_down = read.bringing_down;
         // Back within its request, its guest may be asked again.
         if slot.held_above_request() == 0 && slot.shrink == Shrink::Spent {
             slot.shrink = Shrink::Open;
@@ -445,6 +515,7 @@ impl Host {
                 // A VM starts and resumes with its request and no high.
                 slot.bound = None;
                 slot.paging.unheld_since = None;
+                slot.paging.bringing_down = false;
                 slot.paging.lifted = false;
                 slot.paging.before = 0;
                 continue;
@@ -470,8 +541,12 @@ impl Host {
                     .and_then(|bound| bound.high)
                     .is_some_and(|high| resident > high.saturating_add(rule.step));
             if unheld {
-                slot.paging.unheld_since.get_or_insert(now);
-                levels.over_bound += 1;
+                let since = *slot.paging.unheld_since.get_or_insert(now);
+                if slot.paging.bringing_down && now < slot.paging.unheld_at(since, rule) {
+                    levels.bringing_down += 1;
+                } else {
+                    levels.over_bound += 1;
+                }
             } else {
                 slot.paging.unheld_since = None;
             }
@@ -540,11 +615,7 @@ impl Host {
             .outgrown
             .short_since
             .is_some_and(|since| now.saturating_since(since) >= rule.hold);
-        let unheld = |slot: &Sandbox| {
-            slot.paging
-                .unheld_since
-                .is_some_and(|since| now.saturating_since(since) >= rule.hold)
-        };
+        let unheld = |slot: &Sandbox| slot.paging.unheld_due(rule).is_some_and(|due| now >= due);
         let levels = self.outgrown.levels;
         let grace = self.busy_grace();
         // Only one that costs the others: the host is short, or the kernel
@@ -565,11 +636,22 @@ impl Host {
         // What the host is short of, or what it holds above its bound,
         // which the kernel could not take: never all it borrowed, so its
         // guest ends as little as it can.
-        let wanted = if short {
-            levels.shortfall
+        let available = self.available_memory.unwrap_or(0);
+        let cause = if short {
+            ShrinkCause::Short {
+                shortfall: levels.shortfall,
+                available,
+            }
         } else {
             let high = slot.bound.and_then(|bound| bound.high).unwrap_or(u64::MAX);
-            slot.resident_bytes().saturating_sub(high)
+            ShrinkCause::OverBound {
+                over: slot.resident_bytes().saturating_sub(high),
+                available,
+            }
+        };
+        let wanted = match cause {
+            ShrinkCause::Short { shortfall, .. } => shortfall,
+            ShrinkCause::OverBound { over, .. } => over,
         };
         let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
@@ -581,7 +663,7 @@ impl Host {
                 return;
             }
             slot.shrink = Shrink::Ending { since: now };
-            out.push(Action::EndForMemory { sandbox: id });
+            out.push(Action::EndForMemory { sandbox: id, cause });
         } else {
             let request = ShrinkRequest(self.outgrown.next_request);
             self.outgrown.next_request += 1;
@@ -595,6 +677,7 @@ impl Host {
                 free: wanted.max(rule.least).min(excess),
                 keep: slot.size.request,
                 request,
+                cause,
             });
         }
         self.outgrown.acted = Some(now);
@@ -606,7 +689,7 @@ impl Host {
         let rule = self.policy.memory?.outgrowth?;
         let slots = self.sandboxes.values();
         let answers = slots.clone().filter_map(|slot| slot.shrink_due(rule));
-        let unheld = slots.filter_map(|slot| slot.paging.unheld_since.map(|at| at + rule.hold));
+        let unheld = slots.filter_map(|slot| slot.paging.unheld_due(rule));
         let short = self.outgrown.short_since.map(|since| since + rule.hold);
         answers.chain(unheld).chain(short).min()
     }

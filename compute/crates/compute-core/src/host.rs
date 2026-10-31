@@ -20,7 +20,8 @@ use admission::FirstWake;
 pub(crate) use admission::WakeRoom;
 pub use admission::{Capacity, CpuCapacity, CreateRoom, Size};
 pub use disk::{DiskCapacity, DiskSpace, Resource};
-pub use outgrowth::MemoryLevels;
+pub use outgrowth::{MemoryLevels, ShrinkCause};
+pub use spare::Claims;
 pub(crate) use squeeze::{Balloon, Squeeze};
 
 /// Something that happened, fed to [`Host::handle`].
@@ -329,6 +330,12 @@ pub enum Input {
         /// kernel could not bring the VM down to it; `None` for none or
         /// unknown.
         high: Option<u64>,
+        /// Whether the engine is still bringing the VM down toward that
+        /// bound: the kernel is at work on it and has not shown that it
+        /// can take no more. Before it compresses a VM that has just
+        /// written gigabytes, the kernel may age its pages for many
+        /// seconds of a busy host's time.
+        bringing_down: bool,
     },
     /// The guest of the sandbox answered the [`Action::Shrink`] of
     /// `request`: it freed `freed` bytes, and `spent` says whether it has
@@ -493,14 +500,19 @@ pub enum Action {
         keep: u64,
         /// Which request this is.
         request: ShrinkRequest,
+        /// Why the host asks it.
+        cause: ShrinkCause,
     },
-    /// End the sandbox's running VM: its guest could not be shrunk and the
-    /// host is still short with every running sandbox held to its request.
-    /// Report it with [`Input::Lost`] once it has ended; it is then
-    /// restored from its last copy as any lost VM is.
+    /// End the sandbox's running VM: its guest could not be shrunk, and
+    /// the host is still short with every running sandbox held to its
+    /// request, or the kernel still cannot hold it to its bound. Report it
+    /// with [`Input::Lost`] once it has ended; it is then restored from its
+    /// last copy as any lost VM is.
     EndForMemory {
         /// The sandbox.
         sandbox: SandboxId,
+        /// Why the host ends it.
+        cause: ShrinkCause,
     },
     /// Set the sandbox's running VM's `memory.low` to `low` and its
     /// `memory.high` to `high` (`None` for none). A VM starts, resumes and

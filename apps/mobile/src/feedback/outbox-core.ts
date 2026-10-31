@@ -33,6 +33,29 @@ export interface FeedbackOutboxDependencies {
 
 export type FeedbackFlushResult = Readonly<{ sent: number; pending: number }>;
 
+/** Context a server from before the chat in view and the request, error and step lists refuses. */
+const NEWER_CONTEXT_FIELDS = [
+  "sessionId",
+  "recentRequests",
+  "recentExceptions",
+  "breadcrumbs",
+] as const;
+
+/**
+ * The same report as a server older than this app accepts, or null when it
+ * carries nothing such a server refuses. Its context is strict, so a report
+ * it rejects as invalid is resent this way rather than dropped.
+ */
+export function feedbackForOlderServer(
+  request: CreateFeedbackRequest,
+): CreateFeedbackRequest | null {
+  const context = request.context;
+  if (!context || !NEWER_CONTEXT_FIELDS.some((field) => context[field] !== undefined)) return null;
+  const older = { ...context };
+  for (const field of NEWER_CONTEXT_FIELDS) delete older[field];
+  return { ...request, context: older };
+}
+
 function parse(value: string | null): QueuedFeedback | null {
   if (!value) return null;
   try {

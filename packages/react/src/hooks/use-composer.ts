@@ -1466,6 +1466,15 @@ export function useComposer(
     }
     setAcceptedControl((current) => (current === acceptedControl ? null : current));
   }, [acceptedControl, options.effectiveControl]);
+  // The accepted receipt is newer than the authoritative control only until
+  // that control catches up; derive it per render so a caught-up snapshot wins
+  // in the same frame instead of after the clearing effect.
+  const pendingAcceptedControl =
+    acceptedControl &&
+    (!options.effectiveControl ||
+      options.effectiveControl.controlVersion < acceptedControl.controlVersion)
+      ? acceptedControl
+      : null;
 
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
     if (!durableDrafts || targetKeyRef.current !== targetKey) return null;
@@ -3228,10 +3237,16 @@ export function useComposer(
     removeOptimisticMessage,
     steer,
     steering: visibleSteering,
+    // Receipt-backed: an accepted Steer stops the previous attempt, and an
+    // accepted Pause whose receipt still reports physical settlement stops the
+    // current one. Once the authoritative control catches up, the queue
+    // snapshot owns this projection.
     stoppingAttempt: identityMatches
       ? visibleSteering?.phase === "accepted" && visibleSteering.stoppingPreviousAttempt === true
         ? "previous"
-        : null
+        : pendingAcceptedControl?.state === "paused" && pendingAcceptedControl.settlement !== null
+          ? "current"
+          : null
       : null,
     sending: identityMatches ? sending : false,
     canSend:

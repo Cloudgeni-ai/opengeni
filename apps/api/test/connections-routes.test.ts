@@ -822,68 +822,82 @@ describe("connections routes", () => {
     ).toHaveLength(1);
   });
 
-  test("prepared MCP setup requires installation authority and rechecks revocation after verification", async () => {
+  test("a member finishes prepared MCP setup, and losing connections:write during verification refuses it", async () => {
     if (!available) throw new Error("Prepared MCP setup requires the PostgreSQL test fixture");
     const workspace = await freshWorkspace();
-    const permissions: Permission[] = [
-      "connections:read",
-      "connections:write",
-      "capabilities:manage",
-    ];
+    // A member: connections:write, no capabilities:manage.
+    const permissions: Permission[] = ["connections:read", "connections:write"];
     const headers = {
       authorization: await bearer(workspace, "subject-a", permissions),
       "content-type": "application/json",
     };
     let probes = 0;
+    let revoke = false;
     const api = appWithDeps(
       {},
       {
         mcpCapabilityProbe: async () => {
           probes += 1;
-          await shared!
-            .admin`update workspace_memberships set permissions = ${shared!.admin.json(["connections:read", "connections:write"])}
-          where workspace_id = ${workspace.workspaceId} and subject_id = 'subject-a'`;
+          if (revoke)
+            await shared!
+              .admin`update workspace_memberships set permissions = ${shared!.admin.json(["connections:read"])}
+              where workspace_id = ${workspace.workspaceId} and subject_id = 'subject-a'`;
           return { toolCount: 1 };
         },
       },
     );
     const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
-    const body = {
-      providerId: "mcp-headers",
-      ownership: "workspace",
-      idempotencyKey: randomUUID(),
-      returnUrl: "https://console.example.test/connections",
-      mcpSetup: {
-        name: "Example",
-        endpointUrl: "https://prepared.example.test/mcp",
-        headers: [{ name: "Authorization", secret: "key", prefix: "Bearer " }],
-        secretFields: [{ id: "key", label: "API key" }],
-      },
-    };
-    const begin = () => api.request(base, { method: "POST", headers, body: JSON.stringify(body) });
-    expect((await begin()).status).toBe(403);
-    expect(probes).toBe(0);
-    await shared!
-      .admin`update workspace_memberships set permissions = ${shared!.admin.json(permissions)}
-      where workspace_id = ${workspace.workspaceId} and subject_id = 'subject-a'`;
-    const admitted = await begin();
+    const begin = (endpointUrl: string) =>
+      api.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "mcp-headers",
+          ownership: "workspace",
+          idempotencyKey: randomUUID(),
+          returnUrl: "https://console.example.test/connections",
+          mcpSetup: {
+            name: "Example",
+            endpointUrl,
+            headers: [{ name: "Authorization", secret: "key", prefix: "Bearer " }],
+            secretFields: [{ id: "key", label: "API key" }],
+          },
+        }),
+      });
+    const advance = async (attempt: { id: string; revision: number }) =>
+      api.request(`${base}/${attempt.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          expectedRevision: attempt.revision,
+          idempotencyKey: randomUUID(),
+          action: { type: "credentials", values: { key: "synthetic-key" } },
+        }),
+      });
+
+    const admitted = await begin("https://prepared.example.test/mcp");
     expect(admitted.status).toBe(200);
-    const attempt = await admitted.json();
-    const response = await api.request(`${base}/${attempt.id}/advance`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        expectedRevision: attempt.revision,
-        idempotencyKey: randomUUID(),
-        action: { type: "credentials", values: { key: "synthetic-key" } },
-      }),
-    });
-    expect(response.status).toBe(403);
+    const finished = await advance(await admitted.json());
+    expect(finished.status).toBe(200);
     expect(probes).toBe(1);
-    expect(
-      await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a"),
-    ).toHaveLength(0);
-    expect(await listCapabilityInstallations(client.db, workspace.workspaceId)).toHaveLength(0);
+    const installations = await listCapabilityInstallations(client.db, workspace.workspaceId);
+    expect(installations).toHaveLength(1);
+    // A member's setup never chooses tools that run without asking.
+    const config = installations[0]!.config as Record<string, unknown>;
+    expect([undefined, true]).toContain(config.requireApproval);
+    expect(config.autoApprovedTools ?? []).toEqual([]);
+
+    revoke = true;
+    const second = await begin("https://prepared-two.example.test/mcp");
+    expect(second.status).toBe(200);
+    const refused = await advance(await second.json());
+    expect(refused.status).toBe(403);
+    expect(probes).toBe(2);
+    expect(await listCapabilityInstallations(client.db, workspace.workspaceId)).toHaveLength(1);
+
+    // Without connections:write the setup can't start at all.
+    expect((await begin("https://prepared-three.example.test/mcp")).status).toBe(403);
+    expect(probes).toBe(2);
   });
 
   test.each(["personal", "workspace"] as const)(

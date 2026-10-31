@@ -15,6 +15,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { assertGoalResumeAllowed, MissingPermissionRefusal } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
+import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import {
@@ -273,6 +274,7 @@ import {
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import {
   changeWorkspaceFileVisibility,
+  codemodeCallExecutionMachine,
   publishSandboxFileArtifact,
 } from "../sandbox-file-artifacts";
 import {
@@ -310,6 +312,8 @@ import {
   scheduledTaskViewerForGrant,
   siteViewerForGrant,
   resolveNewSiteAudience,
+  resolveNewProjectAudience,
+  projectSourceSessionId,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -320,6 +324,7 @@ import {
   validateScheduledTaskTarget,
   updateScheduledTaskForApi,
   triggerScheduledTaskForGrant,
+  manualScheduledTaskTriggerBillingOrigin,
   validatedScheduledTaskUpdate,
   withScheduledTaskEvents,
   withScheduledTaskRunEventOccurrences,
@@ -427,6 +432,7 @@ import {
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
 import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
@@ -440,6 +446,7 @@ import {
   requireSiteVersionPublishOpen,
 } from "../site-publishing/service";
 import { sitePlatformBrakeToolRefusal } from "../site-publishing/platform-usage";
+import { withSitePageSizeWarnings } from "../site-publishing/page-size";
 
 import {
   createSessionAdminReach,
@@ -1322,6 +1329,18 @@ export function buildOpenGeniMcpServer(
   // when new, their phones (see notification-tools.ts).
   if (sessionId !== null) {
     registerNotificationTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      attempt: () => exactAgentCommandContext(grant, sessionId),
+      json,
+    });
+    // Calling the person: their phones ring (see agent-call-tools.ts).
+    registerAgentCallTools({
       server,
       deps,
       grant,
@@ -2431,6 +2450,8 @@ export function buildOpenGeniMcpServer(
                 taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null,
               action: "agent_run:create",
               quantity: 1,
+              // The run is API use when the caller or the task is.
+              billingOrigin: await manualScheduledTaskTriggerBillingOrigin(deps.db, grant, task.id),
               model: await resolveScheduledTaskPreflightModel(deps.db, catalogSettings, task),
             },
           );
@@ -2591,7 +2612,7 @@ function registerSandboxFileArtifactTool(
           ),
       },
     },
-    async ({ path, artifactId, visibility }) => {
+    async ({ path, artifactId, visibility }, extra) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       if ((path === undefined) === (artifactId === undefined))
         throw new Error("Pass exactly one of path or artifactId.");
@@ -2601,12 +2622,27 @@ function registerSandboxFileArtifactTool(
         return json(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility }));
       }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
+      // A Codemode call names its operation in the worker's trusted call
+      // metadata; code that a run_on exec runs on another machine publishes
+      // that machine's file (see codemodeCallExecutionMachine).
+      const operationId = extra?._meta?.["opengeniOperationId"];
+      const executionMachine = await codemodeCallExecutionMachine(deps, {
+        grant,
+        sessionId,
+        codemodeOperationId:
+          extra?._meta?.[FIRST_PARTY_MCP_CALLER_META_KEY] === "codemode" &&
+          typeof operationId === "string" &&
+          UUID_TARGET.test(operationId)
+            ? operationId
+            : null,
+      });
       return json(
         await publishSandboxFileArtifact(deps, {
           grant,
           session,
           path: path!,
           visibility,
+          executionMachine,
         }),
       );
     },
@@ -3839,7 +3875,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
+        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation. Keep the HTML small: compress images and link video or large media instead of embedding them; the result lists warnings for a heavy page.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -3901,17 +3937,19 @@ function registerWorkspaceArtifactTools(
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
       return json(
-        await mutation(
-          await createWorkspaceArtifact(deps.db, {
-            artifactId,
-            slug: resolvedSlug,
-            requestedSlug: slug ?? null,
-            title,
-            description: description ?? null,
-            ...audience,
-            ...(await prepare(html, source, requestedTools, uploadId)),
-            ...provenance(idempotencyKey, "artifacts_create"),
-          }),
+        withSitePageSizeWarnings(
+          await mutation(
+            await createWorkspaceArtifact(deps.db, {
+              artifactId,
+              slug: resolvedSlug,
+              requestedSlug: slug ?? null,
+              title,
+              description: description ?? null,
+              ...audience,
+              ...(await prepare(html, source, requestedTools, uploadId)),
+              ...provenance(idempotencyKey, "artifacts_create"),
+            }),
+          ),
         ),
       );
     },
@@ -3921,7 +3959,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_publish",
     {
       description:
-        "Publish a new immutable HTML version. The exact HTML runs in an opaque-origin sandboxed iframe. First read the current source and pass its version id for optimistic concurrency.",
+        "Publish a new immutable HTML version. The exact HTML runs in an opaque-origin sandboxed iframe. First read the current source and pass its version id for optimistic concurrency. The result lists warnings for a heavy page (embedded images or video): compress or link them instead.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         expectedCurrentVersionId: z4.string().uuid(),
@@ -3977,17 +4015,19 @@ function registerWorkspaceArtifactTools(
       );
       if (braked) return braked;
       return json(
-        await siteMutation(
-          await publishWorkspaceArtifactVersion(deps.db, {
-            artifactId,
-            viewer: await siteViewerForGrant(deps.db, grant),
-            expectedCurrentVersionId,
-            ...(title !== undefined ? { title } : {}),
-            ...(description !== undefined ? { description } : {}),
-            ...(await prepare(html, source, requestedTools, uploadId)),
-            ...provenance(idempotencyKey, "artifacts_publish"),
-          }),
-          true,
+        withSitePageSizeWarnings(
+          await siteMutation(
+            await publishWorkspaceArtifactVersion(deps.db, {
+              artifactId,
+              viewer: await siteViewerForGrant(deps.db, grant),
+              expectedCurrentVersionId,
+              ...(title !== undefined ? { title } : {}),
+              ...(description !== undefined ? { description } : {}),
+              ...(await prepare(html, source, requestedTools, uploadId)),
+              ...provenance(idempotencyKey, "artifacts_publish"),
+            }),
+            true,
+          ),
         ),
       );
     },
@@ -4540,14 +4580,21 @@ function registerFleetTools(
 
   const oneOffCodemodeEnvironment = async (
     op: RunOnOp,
+    target: string,
   ): Promise<Readonly<Record<string, string>> | undefined> => {
     if (op.kind !== "exec") return undefined;
     const claims = exactAgentAttemptClaims(grant);
     if (!claims || claims.sessionId !== sessionId) return undefined;
+    // The token names the machine the exec runs on, so a Codemode tool that
+    // takes a workspace path (sandbox_file_publish) resolves it there rather
+    // than on the session's active sandbox. run_on targets are sandbox ids.
     const material = await mintSandboxCodemodeToken(
       deps.settings,
       { accountId: grant.accountId, workspaceId: grant.workspaceId },
-      claims,
+      {
+        ...claims,
+        ...(UUID_TARGET.test(target) ? { executionSandboxId: target.toLowerCase() } : {}),
+      },
     );
     if (!material) return undefined;
     return {
@@ -4673,7 +4720,7 @@ function registerFleetTools(
       const resolvedValues = new SecretValueMemory();
       try {
         const typedOp = op as RunOnOp;
-        const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
+        const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp, target);
         // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
         const claims = exactAgentAttemptClaims(grant);
         const secretResolver =
@@ -7029,6 +7076,14 @@ function registerProjectTools(
       },
       async ({ name, description, avatar }) => {
         const exactAvatar = await projectAvatarFromToolInput(deps, grant, avatar);
+        // A project made in an Only me chat is Only me, so that chat fits it.
+        const audience = await resolveNewProjectAudience({
+          db: deps.db,
+          settings: deps.settings,
+          grant,
+          requested: undefined,
+          sourceSessionId: projectSourceSessionId(grant),
+        });
         return json({
           project: await createChannel(deps.db, {
             accountId: grant.accountId,
@@ -7037,6 +7092,7 @@ function registerProjectTools(
             description: description ?? null,
             avatar: exactAvatar ?? null,
             createdBy: grant.subjectId,
+            audience,
           }),
         });
       },
@@ -7386,8 +7442,17 @@ function registerCapabilityDiscoveryTools(
       // without a membership), else their membership. Without either there is
       // nothing to say beyond the card.
       const person = await connectingPersonGrant(deps.db, grant, sessionId);
+      const memberIntegrationSetup =
+        person === null
+          ? undefined
+          : await withOrganizationIntegrationPolicyFence(
+              deps.db,
+              { accountId: grant.accountId, workspaceId: grant.workspaceId },
+              async (_tx, policy) => policy.personalIntegrationSetup,
+            ).catch(() => undefined);
       const personCannotConnect =
-        person !== null && inChatCapabilitySetup(person, item.id, item).kind === "unavailable";
+        person !== null &&
+        inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
       const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: setup.action ?? "connect",

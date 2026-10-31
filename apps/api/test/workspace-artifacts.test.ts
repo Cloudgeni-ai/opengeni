@@ -1162,7 +1162,10 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!preparedText || preparedText.type !== "text") throw new Error("Missing upload result");
       const upload = JSON.parse(preparedText.text);
       objects.set(new URL(upload.html.putUrl).pathname.slice(1), {
-        bytes: new TextEncoder().encode("<!doctype html><main>Created through MCP</main>"),
+        // A heavy page (media embedded in the HTML): published, with a warning.
+        bytes: new TextEncoder().encode(
+          `<!doctype html><main>Created through MCP</main><!--${"x".repeat(6 * 1024 * 1024)}-->`,
+        ),
         contentType: "text/html",
       });
       const createdResult = await mcp.callTool({
@@ -1177,6 +1180,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!createdText || createdText.type !== "text") throw new Error("missing MCP text result");
       if (createdResult.isError) throw new Error(createdText.text);
       const created = WorkspaceArtifactMutationResponse.parse(JSON.parse(createdText.text));
+      expect(
+        JSON.parse(createdText.text).warnings.map((warning: { code: string }) => warning.code),
+      ).toEqual(["page_heavy"]);
       expect(created.version.sourceSessionId).toBe(attempt.sessionId);
       expect(created.version.sourceTurnId).toBe(attempt.turnId);
       expect(created.version.sourceAttemptId).toBe(attempt.attemptId);
@@ -1225,6 +1231,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!replayText || replayText.type !== "text") throw new Error("missing MCP replay result");
       const replayed = WorkspaceArtifactMutationResponse.parse(JSON.parse(replayText.text));
       expect(replayed.replayed).toBe(true);
+      expect(
+        JSON.parse(replayText.text).warnings.map((warning: { code: string }) => warning.code),
+      ).toEqual(["page_heavy"]);
       expect(replayed.artifact.id).toBe(created.artifact.id);
       expect(objectPutCount).toBe(putsAfterCreate);
 
@@ -1253,6 +1262,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       if (!publishedText || publishedText.type !== "text")
         throw new Error("missing MCP publish result");
       const published = WorkspaceArtifactMutationResponse.parse(JSON.parse(publishedText.text));
+      expect(JSON.parse(publishedText.text)).not.toHaveProperty("warnings");
       expect(published.version.sourceAttemptId).toBe(attempt.attemptId);
       expect(published.version.sourceExecutionGeneration).toBe(attempt.executionGeneration);
 

@@ -350,13 +350,13 @@ export function withCoreRoutedXaiRestriction(
 }
 
 /**
- * Claude readiness and its two model restrictions on the shared core (design 5.3, Claude track C2a,
- * EP-T18/EP-S25/EP-N26): the core eligibility projection for the subject
- * split by the legacy prefixes (`organization-claude-subscription/` from the
- * organization inference pool; `workspace-claude-subscription/` from the
- * workspace pool or the subject's own personal connection in their own
- * Personal workspace). Null when the deployment disables Claude subscriptions
- * (no read). Frozen v1 Claude snapshots are not read.
+ * Claude readiness and its model restrictions on the shared core (design 5.3,
+ * Claude track C2a, EP-T18/EP-S25/EP-N26): the core eligibility projection
+ * for the subject (shared connections reaching the workspace, and the
+ * subject's own personal connection in their own Personal workspace), one
+ * answer for every Claude subscription model id form
+ * (docs/design/ownership-and-reach.md). Null when the deployment disables
+ * Claude subscriptions (no read). Frozen v1 Claude snapshots are not read.
  */
 export async function loadCoreRoutedClaudeCatalogReadiness(
   db: Database,

@@ -117,6 +117,7 @@ import { meetingMentionResolver } from "./meeting-mentions";
 import { MeetingNotepad, MeetingNotesSection, MeetingSummary } from "./meeting-notes";
 import { useMeetingRecorder, type MeetingRecorder } from "./recorder-context";
 import { MeetingsOverlayScope } from "./overlay-scope";
+import { StickyBarEdge, useStuckToTop } from "./sticky-bar-edge";
 
 const defaultText = createOpenGeniText();
 
@@ -128,18 +129,26 @@ function isNotFound(error: Error | null): boolean {
   return Boolean(error && /not found|404/iu.test(error.message));
 }
 
-/** Fresh playback links for every prepared track. Links expire, so a failed one refetches. */
+/**
+ * Fresh playback links for every prepared track. Links expire, so a failed one refetches.
+ * While the meeting is processed, the player waits until every recorded track can
+ * play: the first track alone sounds as if the rest (the call's side) was never recorded.
+ */
 function useTrackSources(
   recording: Recording | null,
   getAudio: (trackNumber: number) => Promise<{ url: string }>,
 ): { sources: MeetingPlayerSource[]; reload: () => void } {
   const [sources, setSources] = useState<MeetingPlayerSource[]>([]);
   const [generation, setGeneration] = useState(0);
-  const playable = useMemo(
-    () =>
-      (recording?.tracks ?? []).filter((track) => track.playable).map((track) => track.trackNumber),
-    [recording?.tracks],
-  );
+  const state = recording?.state;
+  const playable = useMemo(() => {
+    const tracks = recording?.tracks ?? [];
+    const partial =
+      state === "processing" && tracks.some((track) => track.chunkCount > 0 && !track.playable);
+    return partial
+      ? []
+      : tracks.filter((track) => track.playable).map((track) => track.trackNumber);
+  }, [recording?.tracks, state]);
   const key = playable.join(",");
   const getAudioRef = useRef(getAudio);
   getAudioRef.current = getAudio;
@@ -867,6 +876,10 @@ function MeetingDetailPageForRecording({
     enabled: previewing && !recordingHere,
   });
   const player = useRef<MeetingPlayerHandle>(null);
+  // The player's bar pins to the top while the page scrolls; pinned, it covers
+  // the host scroller's top padding too (sticky-bar-edge.tsx).
+  const [playerBar, setPlayerBar] = useState<HTMLDivElement | null>(null);
+  const playerPinned = useStuckToTop(playerBar);
   const [position, setPosition] = useState(0);
   const [renaming, setRenaming] = useState(false);
   const [rerunning, setRerunning] = useState(false);
@@ -874,6 +887,21 @@ function MeetingDetailPageForRecording({
   const [namingFromAside, setNamingFromAside] = useState<string | null>(null);
   const [rememberingVoice, setRememberingVoice] = useState<RecordingPerson | null>(null);
   const notes = useRecordingNotes(recordingId, override);
+  // The notes name a meeting nobody named: show that name once they arrive.
+  // The name is written just after the notes, so it is read again shortly.
+  const notesRevision = notes.notes?.revision ?? 0;
+  const refreshMeeting = meeting.refresh;
+  const awaitingName = Boolean(recording && recording.titleSource !== "person");
+  const seenNotesRevision = useRef<number | null>(null);
+  useEffect(() => {
+    if (notes.loading) return;
+    const seen = seenNotesRevision.current;
+    seenNotesRevision.current = notesRevision;
+    if (seen === null || seen === notesRevision || !awaitingName) return;
+    void refreshMeeting();
+    const again = window.setTimeout(() => void refreshMeeting(), 3_000);
+    return () => window.clearTimeout(again);
+  }, [notes.loading, notesRevision, awaitingName, refreshMeeting]);
   // Summary when the meeting has written notes, else Transcript: decided once
   // the notes load, so notes written later don't move the reader.
   const [openingTab, setOpeningTab] = useState<MeetingTab | null>(null);
@@ -1676,7 +1704,8 @@ function MeetingDetailPageForRecording({
       </div>
       {sources.length > 0 && !recording.audioDeletedAt ? (
         // A direct child of the page, so it stays in view through the whole transcript.
-        <div className="sticky top-0 z-10 -mx-1 mt-4 bg-bg px-1 pt-2 pb-2">
+        <div ref={setPlayerBar} className="sticky top-0 z-10 -mx-1 mt-4 bg-bg px-1 pt-2 pb-2">
+          {playerPinned ? <StickyBarEdge edge="top" /> : null}
           <MeetingPlayer
             ref={player}
             sources={sources}

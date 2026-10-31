@@ -150,7 +150,9 @@ an init system of its own.
   digest. A sandbox's config names its image; a host fetches and caches
   images by digest and keeps templates per image and shape. An image a
   host kept across a restart is checked against its digest and used
-  without asking the store. An E2B
+  without asking the store. A create on a host that has not got its
+  image yet waits for the fetch: the service waits up to nine minutes
+  for the host's answer, inside the ten a create may take. An E2B
   template id names one of these images.
 - **Images that follow releases.** The service can be told the OCI image,
   pinned by digest, that a release's sandboxes of an image name start

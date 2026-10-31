@@ -160,7 +160,7 @@ function ActiveIndicator({
           data-session-admin-access=""
           className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11"
         >
-          <ShieldCheckIcon aria-hidden="true" className="size-3 shrink-0 text-warning" />
+          <ShieldCheckIcon aria-hidden="true" className="size-3 shrink-0 text-status-waiting" />
           <span className="hidden sm:inline">Full access</span>
         </button>
       </DropdownMenuTrigger>
@@ -207,7 +207,7 @@ export function SessionAdminAccessMenuItems({
     <>
       <div className="px-2 py-1.5 text-xs text-fg-muted">
         <p className="flex items-center gap-1.5 font-medium text-fg">
-          <ShieldCheckIcon aria-hidden="true" className="size-3 shrink-0 text-warning" />
+          <ShieldCheckIcon aria-hidden="true" className="size-3 shrink-0 text-status-waiting" />
           Full access is on
         </p>
         <p className="mt-1">{grantedByText(control.state)}</p>

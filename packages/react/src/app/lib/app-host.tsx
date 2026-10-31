@@ -15,6 +15,7 @@ import {
 } from "react";
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 
+import type { SessionStarter } from "../components/new-session-starters";
 import type { AppApiHost } from "./app-api";
 import type { AppSurfaces } from "./app-surfaces";
 import type { MessageContextPill, MessageContextStore } from "./message-context";
@@ -47,6 +48,11 @@ export type AppHost = Readonly<{
    * instructions.
    */
   messageContext?: MessageContextStore | undefined;
+  /**
+   * Suggestions under the new-chat composer in place of Opengeni's own, such
+   * as tasks that fit the app the chat sits in. An empty list shows none.
+   */
+  starters?: readonly SessionStarter[] | undefined;
   /**
    * Receives the open chat's state each time it changes, read from the
    * page's own event stream (no second connection).

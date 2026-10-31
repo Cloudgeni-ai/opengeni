@@ -2170,6 +2170,41 @@ describe("buildTimeline", () => {
     expect((items[0] as AgentMessageItem).text).toBe(visible);
   });
 
+  // Built from escapes so no tool that acts on citation tags rewrites this file.
+  const claudeCite = (index: string, inner: string) =>
+    `\u003ccite index="${index}">${inner}\u003c/cite>`;
+
+  test("shows Claude citation tags as their quoted text, outside code only", () => {
+    reset();
+    const text = [
+      `Vals describes it as ${claudeCite("23-5", '"a fresh set of 66 tasks"')} (tbench.ai).`,
+      "```html",
+      claudeCite("1-1", "kept"),
+      "```",
+      `The board ${claudeCite("15-1", '"added no model since 3 Sep"')}; \`${claudeCite("2-2", "x")}\` too.`,
+    ].join("\n");
+    const items = buildTimeline(englishText, [
+      event("agent.message.completed", { text, phase: "final_answer" }),
+    ]);
+    expect((items[0] as AgentMessageItem).text).toBe(
+      [
+        'Vals describes it as "a fresh set of 66 tasks" (tbench.ai).',
+        "```html",
+        claudeCite("1-1", "kept"),
+        "```",
+        `The board "added no model since 3 Sep"; \`${claudeCite("2-2", "x")}\` too.`,
+      ].join("\n"),
+    );
+  });
+
+  test("hides a Claude citation tag that is still streaming", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("agent.message.delta", { text: 'Done. \u003ccite index="4-2">"half' }),
+    ]);
+    expect((items[0] as AgentMessageItem).text).toBe('Done. "half');
+  });
+
   test("keeps ordinary words that contain cite", () => {
     reset();
     const text = "Please cite turn 3 of the excited recital; citeturn4 stays.";

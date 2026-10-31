@@ -9,9 +9,27 @@ import type {
   SubscriptionQuota,
   SubscriptionSettingValues,
 } from "@opengeni/subscriptions";
-import { quotaAfterRateLimitReset, storedQuotaDocument } from "@opengeni/subscriptions";
+import {
+  quotaAfterRateLimitReset,
+  storedQuotaDocument,
+  withSubscriptionCoreModelIdForms,
+} from "@opengeni/subscriptions";
 import { rawRows, type Database } from "./database";
-import { subscriptionCoreProvider } from "./subscription-core-providers";
+import {
+  subscriptionCoreProvider,
+  subscriptionCoreProviderIds,
+} from "./subscription-core-providers";
+
+/**
+ * A connection's model list read in every id form of its models (the
+ * provider adapter's `modelIdFormsFor`). A provider this binary does not
+ * register keeps its list as stored.
+ */
+function modelIdsInEveryForm(providerId: string, modelIds: readonly string[]): string[] {
+  return subscriptionCoreProviderIds().includes(providerId)
+    ? withSubscriptionCoreModelIdForms(subscriptionCoreProvider(providerId).adapter, modelIds)
+    : [...modelIds];
+}
 
 export type EffectiveSubscriptionSettingsRow = {
   values: SubscriptionSettingValues;
@@ -237,8 +255,13 @@ export async function listSubscriptionConnectionsForPlacement(
       modelCatalogExpiresAt: row.model_catalog_expires_at
         ? new Date(row.model_catalog_expires_at).getTime()
         : null,
-      excludedModelIds: row.excluded_models,
-      allowedModelIds: row.allowed_model_ids,
+      // Read in every id form of their models, so placement and every
+      // catalog reader treat a model listed under one form as listed.
+      excludedModelIds: modelIdsInEveryForm(row.provider, row.excluded_models),
+      allowedModelIds:
+        row.allowed_model_ids === null
+          ? null
+          : modelIdsInEveryForm(row.provider, row.allowed_model_ids),
       refreshGeneration: Number(row.refresh_generation),
       quota: decodeSubscriptionQuota(row),
     };

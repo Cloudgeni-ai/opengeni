@@ -25,6 +25,7 @@ import {
   knowledgeContextForAccess,
   requireAccessGrantAuthorization,
   requireSessionAuthorization,
+  requireWorkspaceContributorGrant,
   requireWorkspaceSettingsGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -417,7 +418,9 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       throw new HTTPException(403, {
         message: "Instruction review requires an authenticated person",
       });
-    await requireWorkspaceSettingsGrant(c, deps, context.workspaceId);
+    // Whoever may edit the workspace's instructions reviews the agent's
+    // proposed changes to them; the learning settings stay with admins.
+    await requireWorkspaceContributorGrant(c, deps, context.workspaceId);
     context.actor.settingsScopes = ["workspace"];
     return context;
   }

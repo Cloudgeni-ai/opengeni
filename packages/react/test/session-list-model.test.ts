@@ -9,6 +9,7 @@ import {
   recentSessionModelPresentation,
   recentSessionStatus,
   recentSessionsForHome,
+  recentSessionsWithOpened,
   relativeTimeLabel,
   sessionAutomationWait,
   sessionHasPendingWake,
@@ -120,6 +121,48 @@ describe("session-list-model", () => {
         (row) => row.id,
       ),
     ).toEqual(["mine"]);
+  });
+
+  test("home leads with the chats opened here, so busy running sessions never hide them", () => {
+    const runningOthers = Array.from({ length: 8 }, (_, index) =>
+      session(`running-${index}`, { status: "running", updatedAt: "2026-10-03T11:50:00Z" }),
+    );
+    const listedOpened = session("opened-listed", { updatedAt: "2026-10-03T09:00:00Z" });
+    const pinned = session("p", { pinned: true });
+    const entries = recentSessionsWithOpened(
+      englishText,
+      [...runningOthers, listedOpened, pinned],
+      [pinned],
+      [
+        {
+          id: "opened-unlisted",
+          title: "Ledger audit",
+          openedAt: Date.parse("2026-10-03T11:00:00Z"),
+        },
+        { id: "opened-listed", title: "Old title", openedAt: Date.parse("2026-10-03T10:00:00Z") },
+        { id: "opened-unlisted", title: "Ledger audit", openedAt: 1 },
+      ],
+      6,
+      now,
+    );
+    const ids = entries.map((entry) =>
+      entry.kind === "session" ? entry.session.id : `~${entry.chat.id}`,
+    );
+    expect(ids.slice(0, 3)).toEqual(["~opened-unlisted", "opened-listed", "p"]);
+    expect(ids.slice(3).every((id) => id.startsWith("running-"))).toBe(true);
+    expect(ids).toHaveLength(6);
+    // A listed chat shows as its row, with its live status.
+    expect(entries[1]).toEqual({ kind: "session", session: listedOpened });
+    // Nothing opened here: the list is the plain home order.
+    expect(
+      recentSessionsWithOpened(englishText, [...runningOthers, pinned], [pinned], [], 3, now).map(
+        (entry) => (entry.kind === "session" ? entry.session.id : entry.chat.id),
+      ),
+    ).toEqual(
+      recentSessionsForHome(englishText, [...runningOthers, pinned], [pinned], 3, now).map(
+        (row) => row.id,
+      ),
+    );
   });
 
   test("phone home sections: every pin, then recent work that pins never crowd out", () => {

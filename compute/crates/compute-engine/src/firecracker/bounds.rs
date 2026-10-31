@@ -28,6 +28,16 @@
 //! is the writer's to meter only on a VM launched with it open: one that
 //! may be compressed while it runs.
 //!
+//! Once a step showed that the VM's memory compresses, one step that
+//! refused is not enough: the kernel walks a VM's pages coldest first, a
+//! few of them may not compress among many that do, and the counters a
+//! step reads lag what it did by a little. Closing the swap there would
+//! leave the kernel nothing to take of a VM whose memory compresses, and
+//! the host would end the program that borrowed it. So the swap of a VM
+//! shown to compress closes only when two steps in a row refused, bounds
+//! apart or not, or when one refused and brought it no lower; what does
+//! not compress then costs it at most one step more.
+//!
 //! It never sets a high below what the VM holds before a step showed that
 //! its memory compresses. Past its high every page the VM takes waits, the
 //! longer the further past, up to two seconds for each few hundred
@@ -51,6 +61,14 @@
 //! host read it: while bringing it down, the writer raises the high by
 //! what the VM compressed since, so that it ends uncompressed where the
 //! bound put it, never below, however well its pages compress.
+//!
+//! A descent can be slow to start: before the kernel compresses any of a
+//! VM's pages it ages them, clearing what marks each as recently used,
+//! and a VM that has just written gigabytes may take it many seconds of a
+//! busy or nested host's time to age before the first megabytes compress,
+//! then come down hundreds of megabytes a second. The host asks whether a
+//! descent is under way ([`Bounds::descending`]), so that it does not take
+//! a VM the kernel is still bringing down for one it cannot hold.
 //!
 //! One thread at a time works for a VM, and only on the latest bound asked:
 //! one asked while it works replaces any not yet applied. A resume, a pause
@@ -152,12 +170,28 @@ struct State {
     wanted: Option<(u64, Option<u64>)>,
     /// Whether a writer thread is at work.
     working: bool,
+    /// Whether it is bringing the VM down toward a bound's high: a descent
+    /// began and has not ended, or ended with a newer bound to apply.
+    descending: bool,
     /// What the writer did with the VM's swap since the latest reset.
     meter: Meter,
     /// The high the latest bound settled at, `None` for none: where a
     /// descent holds the VM, never the lead below what it holds that a
     /// descent overtaken by a newer bound leaves behind.
     settled: Option<u64>,
+    /// What the steps since the latest reset showed of the VM's memory.
+    shown: Shown,
+}
+
+/// What a descent's steps showed of a VM's memory since the latest reset.
+#[derive(Clone, Copy, Debug, Default)]
+struct Shown {
+    /// Whether a step showed that it compresses: zswap kept most of what it
+    /// was handed.
+    compresses: bool,
+    /// Whether the latest step spent most of its swap on pages zswap
+    /// refused.
+    refused: bool,
 }
 
 /// What the writer did with a VM's swap (`memory.swap.max`).
@@ -199,11 +233,19 @@ impl Bounds {
         state.wanted = None;
         state.meter = Meter::Untouched;
         state.settled = None;
+        state.shown = Shown::default();
         apply()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether the writer is still bringing the VM down toward the high of
+    /// the latest bound: a descent began and has not ended, so the kernel
+    /// has not yet shown that it can take no more.
+    pub(super) fn descending(&self) -> bool {
+        self.lock().descending
     }
 
     /// Applies the latest bound asked, then reclaims down to its high,
@@ -215,6 +257,7 @@ impl Bounds {
                 let mut state = self.lock();
                 let Some((low, high)) = state.wanted.take() else {
                     state.working = false;
+                    state.descending = false;
                     return;
                 };
                 // Under the lock, so a reset cannot run between the check
@@ -225,6 +268,7 @@ impl Bounds {
                     Ok(None) => {
                         // Lifted, so its swap opens again too.
                         state.settled = None;
+                        state.descending = false;
                         if state.meter != Meter::Untouched && group.set_swap_max(None).is_ok() {
                             state.meter = Meter::Untouched;
                         }
@@ -232,13 +276,16 @@ impl Bounds {
                     }
                     Ok(Some(at)) => {
                         state.settled = Some(at);
-                        (state.epoch, high.unwrap_or(at), at)
+                        let high = high.unwrap_or(at);
+                        state.descending = at > high;
+                        (state.epoch, high, at)
                     }
                     Err(_) => {
                         // The VM is gone, and its group with it: nothing
                         // is left to bound.
                         state.wanted = None;
                         state.working = false;
+                        state.descending = false;
                         return;
                     }
                 }
@@ -303,7 +350,10 @@ impl Bounds {
             // By this reclaim or any other, the VM's own included.
             let kept = group.stored().map_or(0, |now| now.saturating_sub(stored));
             let refused = swap_used(group).saturating_sub(slots).saturating_sub(kept);
-            if meters && !closed && refused >= RECLAIM_STEP / 2 {
+            let compressing = took || kept >= asked / 2;
+            let refusing = meters && !closed && refused >= RECLAIM_STEP / 2;
+            let progressed = before.saturating_sub(after) >= PROGRESS;
+            if self.shows_refusal(epoch, refusing, compressing, progressed) {
                 // Most of the step's swap went to pages zswap refused: what
                 // is left of the VM's memory does not compress, or zswap
                 // has no room. Nothing scans it again.
@@ -312,8 +362,7 @@ impl Bounds {
                 }
                 closed = true;
             }
-            let compressing = took || kept >= asked / 2;
-            if before.saturating_sub(after) < PROGRESS && (proven || !compressing) {
+            if !progressed && (proven || !compressing) {
                 // What is left does not compress, zswap has no room, or the
                 // VM takes as fast as it is compressed: below what it holds
                 // it would only wait.
@@ -335,6 +384,30 @@ impl Bounds {
             Meter::Untouched => matches!(group.swap(), Ok(Some(Swap { max: None, .. }))),
             Meter::Metered | Meter::Closed => true,
         }
+    }
+
+    /// Records what a step of the bound of `epoch` showed of the VM's
+    /// memory, and whether that shows its swap should close: it spent most
+    /// of its swap on pages zswap refused (`refusing`), and no step before
+    /// it showed that the VM's memory compresses, the step before it
+    /// refused too, or it brought the VM down by less than [`PROGRESS`].
+    /// Nothing is recorded after a reset.
+    fn shows_refusal(
+        &self,
+        epoch: u64,
+        refusing: bool,
+        compressing: bool,
+        progressed: bool,
+    ) -> bool {
+        let mut state = self.lock();
+        if state.epoch != epoch {
+            return false;
+        }
+        let shown = &mut state.shown;
+        let close = refusing && (!shown.compresses || shown.refused || !progressed);
+        shown.refused = refusing;
+        shown.compresses |= compressing && !refusing;
+        close
     }
 
     /// Sets `group`'s swap to `meter` unless the bound of `epoch` was
@@ -530,6 +603,10 @@ mod tests {
         refused: u64,
         /// Bytes the VM takes again after each reclaim.
         grows: u64,
+        /// The reclaims, counted from 0, in which zswap refuses five
+        /// eighths of what it is handed of memory that otherwise
+        /// compresses: a run of pages that do not, among many that do.
+        hiccups: Vec<usize>,
         /// Each high written, and what the VM held then.
         highs: Vec<(Option<u64>, u64)>,
         /// The swap each reclaim could take: `None` for no limit.
@@ -605,8 +682,14 @@ mod tests {
             });
             kernel.budgets.push(budget);
             let room = budget.unwrap_or(u64::MAX);
-            let took = bytes.min(kernel.takeable).min(room);
-            let refused = (bytes - took).min(room - took).min(kernel.refusing);
+            let hiccup = kernel.hiccups.contains(&(kernel.budgets.len() - 1));
+            let (took, refused) = if hiccup {
+                let handed = bytes.min(kernel.takeable).min(room);
+                (handed - handed * 5 / 8, handed * 5 / 8)
+            } else {
+                let took = bytes.min(kernel.takeable).min(room);
+                (took, (bytes - took).min(room - took).min(kernel.refusing))
+            };
             let dropped = (bytes - took).min(kernel.cache);
             kernel.takeable -= took;
             kernel.cache -= dropped;
@@ -733,6 +816,74 @@ mod tests {
         assert_eq!(kernel.swap.unwrap().max, None);
         drop(kernel);
         never_far_below_what_it_held(&vm);
+    }
+
+    #[test]
+    fn one_step_that_meets_memory_that_does_not_compress_leaves_the_swap_of_a_vm_that_does() {
+        // Its third step meets a run of pages that do not compress.
+        let vm = Vm::new(3 * GIB, 2 * GIB);
+        vm.kernel().hiccups = vec![2];
+        let bounds = Bounds::default();
+        apply(&bounds, &vm, GIB, Some(2 * GIB));
+        let kernel = vm.kernel();
+        // It is brought down all the way, and its swap is open again.
+        assert_eq!((kernel.current, kernel.high), (2 * GIB, Some(2 * GIB)));
+        assert_eq!(kernel.swap.unwrap().max, None);
+        assert!(
+            kernel
+                .budgets
+                .iter()
+                .all(|&budget| budget == Some(RECLAIM_STEP))
+        );
+        drop(kernel);
+        never_far_below_what_it_held(&vm);
+    }
+
+    #[test]
+    fn what_compressed_under_an_earlier_bound_still_counts_under_a_later_one() {
+        // Bounds come a second apart, and each brings a descent: the first
+        // step of a later one meeting pages that do not compress does not
+        // close the swap of a VM an earlier one compressed.
+        let vm = Vm::new(3 * GIB, 2 * GIB);
+        let bounds = Bounds::default();
+        apply(&bounds, &vm, GIB, Some(3 * GIB - 2 * RECLAIM_STEP));
+        let steps = vm.kernel().budgets.len();
+        vm.kernel().hiccups = vec![steps];
+        apply(&bounds, &vm, GIB, Some(2 * GIB));
+        let kernel = vm.kernel();
+        assert_eq!((kernel.current, kernel.high), (2 * GIB, Some(2 * GIB)));
+        assert_eq!(kernel.swap.unwrap().max, None);
+    }
+
+    #[test]
+    fn two_steps_in_a_row_that_refuse_close_the_swap_of_a_vm_that_compressed() {
+        // Two gigabytes compress; then two steps in a row meet memory that
+        // does not, as when what compresses was all taken.
+        let vm = Vm::new(4 * GIB, 2 * GIB);
+        vm.kernel().hiccups = vec![2, 3];
+        let bounds = Bounds::default();
+        apply(&bounds, &vm, GIB, Some(2 * GIB));
+        let kernel = vm.kernel();
+        assert_eq!(kernel.swap.unwrap().max, Some(0), "closed");
+        // The second step closed it, and nothing scanned it after.
+        assert_eq!(kernel.budgets.len(), 5, "{:?}", kernel.budgets);
+        assert_eq!(kernel.high, Some(kernel.current));
+        drop(kernel);
+        never_far_below_what_it_held(&vm);
+    }
+
+    #[test]
+    fn a_reset_forgets_that_the_memory_of_a_vm_compressed() {
+        let vm = Vm::new(3 * GIB, 2 * GIB);
+        let bounds = Bounds::default();
+        apply(&bounds, &vm, GIB, Some(3 * GIB - 2 * RECLAIM_STEP));
+        // A pause and a resume: what its memory held then says nothing of
+        // what it holds now.
+        bounds.reset(|| Ok(())).unwrap();
+        let steps = vm.kernel().budgets.len();
+        vm.kernel().hiccups = vec![steps];
+        apply(&bounds, &vm, GIB, Some(2 * GIB));
+        assert_eq!(vm.swap_max(), Some(0), "closed by its first step");
     }
 
     #[test]
@@ -879,5 +1030,84 @@ mod tests {
         bounds.reset(|| vm.set_high(None)).unwrap();
         bounds.descend(&vm, epoch, high, at);
         assert_eq!(vm.kernel().high, None, "the reset's high stays");
+    }
+
+    /// A VM's group that records, at each reclaim, whether its writer says
+    /// it is bringing the VM down.
+    struct Watched<'a> {
+        vm: Vm,
+        bounds: &'a Bounds,
+        seen: Mutex<Vec<bool>>,
+    }
+
+    impl Group for Watched<'_> {
+        fn current(&self) -> io::Result<u64> {
+            self.vm.current()
+        }
+
+        fn compressed(&self) -> io::Result<u64> {
+            self.vm.compressed()
+        }
+
+        fn set_low(&self, bytes: u64) -> io::Result<()> {
+            self.vm.set_low(bytes)
+        }
+
+        fn set_high(&self, bytes: Option<u64>) -> io::Result<()> {
+            self.vm.set_high(bytes)
+        }
+
+        fn swap(&self) -> io::Result<Option<Swap>> {
+            self.vm.swap()
+        }
+
+        fn set_swap_max(&self, bytes: Option<u64>) -> io::Result<()> {
+            self.vm.set_swap_max(bytes)
+        }
+
+        fn stored(&self) -> io::Result<u64> {
+            self.vm.stored()
+        }
+
+        fn reclaim(&self, bytes: u64) -> io::Result<bool> {
+            self.seen.lock().unwrap().push(self.bounds.descending());
+            self.vm.reclaim(bytes)
+        }
+    }
+
+    /// Has `bounds` apply `low` and `high` to `watched` before returning.
+    fn apply_watched(bounds: &Bounds, watched: &Watched<'_>, low: u64, high: Option<u64>) {
+        {
+            let mut state = bounds.lock();
+            state.wanted = Some((low, high));
+            state.working = true;
+        }
+        bounds.work(watched);
+        assert!(!bounds.lock().working);
+    }
+
+    #[test]
+    fn a_descent_says_it_is_under_way_until_it_ends() {
+        let bounds = Bounds::default();
+        let watched = Watched {
+            vm: Vm::compressing(3 * GIB, 2 * GIB, 3),
+            bounds: &bounds,
+            seen: Mutex::default(),
+        };
+        assert!(!bounds.descending());
+        // A bound above what the VM holds asks no descent.
+        apply_watched(&bounds, &watched, GIB, Some(4 * GIB));
+        assert!(watched.seen.lock().unwrap().is_empty());
+        assert!(!bounds.descending());
+        // A bound below: every step of the way it says so, and no longer
+        // once the VM is there.
+        apply_watched(&bounds, &watched, GIB, Some(2 * GIB));
+        let seen = watched.seen.lock().unwrap().clone();
+        assert!(
+            !seen.is_empty() && seen.iter().all(|&under_way| under_way),
+            "{seen:?}"
+        );
+        assert!(watched.vm.current().unwrap() <= 2 * GIB + watched.vm.compressed().unwrap());
+        assert!(!bounds.descending());
     }
 }
