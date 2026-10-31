@@ -145,6 +145,8 @@ export type AppContextValue = {
   workspaceMcpCatalogLoadedSuccessfully: boolean;
   /** The authoritative workspace catalog, shared by tool policy and timeline presentation. */
   workspaceCapabilityCatalog: CapabilityCatalogItem[];
+  /** Who the organization lets turn integrations on (undefined: members, or not loaded). */
+  workspaceMemberIntegrationSetup?: "members" | "admins" | undefined;
   currentResources: ResourceRef[];
   repositoryValidationError: string | null;
   /**

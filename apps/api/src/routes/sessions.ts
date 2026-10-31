@@ -236,6 +236,7 @@ import {
   requestSessionCompaction,
   setSessionChannel,
   ChannelNotFoundError,
+  ChannelAudienceMismatchError,
   setSessionAttention,
   setSessionPin,
   SessionAttentionVersionConflictError,
@@ -2731,7 +2732,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(404, { message: "session not found" });
       }
     } catch (error) {
-      if (error instanceof ChannelNotFoundError) {
+      if (error instanceof ChannelNotFoundError || error instanceof ChannelAudienceMismatchError) {
         throw new HTTPException(422, { message: error.message });
       }
       throw error;

@@ -47,6 +47,10 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { artifactCatalogCursorCodec } from "../artifact-catalog-cursor";
 import {
+  editableArtifactAudienceViewer,
+  projectEditableArtifactAudience,
+} from "../editable-artifact-audience";
+import {
   editableArtifactActorForGrant,
   editableArtifactHttpError,
   isInvisibleListCandidate,
@@ -299,7 +303,8 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
       let lastReturned: ArtifactCatalogPosition | undefined;
       let nextCursor: string | null = null;
       const fileSubject = includesFiles ? await fileAuthoritySubjectIdForGrant(deps, grant) : null;
-      const siteViewer = kinds.includes("site")
+      // Sites and documents list the workspace's and this person's own Only me ones.
+      const siteViewer = kinds.some((kind) => kind === "site" || editableKinds.has(kind))
         ? await siteViewerForGrant(deps.db, grant)
         : { subjectId: null };
       for (let batch = 0; batch < MAX_BATCHES; batch++) {
@@ -482,7 +487,7 @@ async function projectCandidate(
   };
   if (row.version_id) item.versionId = row.version_id;
   if (row.kind === "site")
-    item.visibility = row.site_visibility === "user_private" ? "private" : "workspace";
+    item.visibility = row.visibility === "user_private" ? "private" : "workspace";
   if (editableKinds.has(row.kind)) {
     const scope = editableArtifactScope({
       accountId: grant.accountId,
@@ -516,6 +521,14 @@ async function projectCandidate(
         status: artifact.lifecycle,
         createdAt: artifact.createdAt,
         updatedAt: artifact.updatedAt,
+        // Who can open it, and whether this viewer may change that.
+        ...projectEditableArtifactAudience(
+          {
+            visibility: row.visibility === "user_private" ? "user_private" : "workspace_shared",
+            ownerSubjectId: row.owner_subject_id ?? null,
+          },
+          editableArtifactAudienceViewer(grant),
+        ),
       };
     } catch (error) {
       if (isInvisibleListCandidate(error)) return null;

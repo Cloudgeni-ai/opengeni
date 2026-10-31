@@ -67,6 +67,7 @@ const common = {
   socialConnections: [],
   canManageSocial: true,
   canManageSkills: true,
+  canTurnOff: true,
   onBack: () => {},
 };
 
@@ -187,6 +188,37 @@ describe("connector page account management", () => {
       ownership: "personal",
       connectionWorkspaceId: "personal-ws",
     });
+    await view.unmount();
+  });
+
+  test("someone who can't turn the connector off for everyone isn't offered it", async () => {
+    const enabled = item({
+      enabled: true,
+      actions: ["connect", "disconnect"],
+    } as Partial<CapabilityCatalogItem>);
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        canTurnOff={false}
+        item={enabled}
+        health={{ state: "connected", connection: null } as never}
+        onAction={mock(() => {})}
+      />,
+    );
+    const trigger = view.container.querySelector(
+      'button[aria-label^="More actions"]',
+    ) as HTMLButtonElement | null;
+    if (trigger)
+      await act(async () => {
+        trigger.dispatchEvent(
+          new PointerEvent("pointerdown", { button: 0, ctrlKey: false, bubbles: true }),
+        );
+      });
+    const menu = [...document.querySelectorAll('[role="menuitem"]')].map((node) =>
+      node.textContent?.trim(),
+    );
+    expect(menu).not.toContain("Turn off for this workspace");
+    expect(view.container.textContent).not.toContain("Turn off for this workspace");
     await view.unmount();
   });
 });

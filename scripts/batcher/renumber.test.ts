@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { planMigrationMoves, type RepoFile } from "./renumber";
+import { planMigrationMoves, type MovePlan, type RepoFile } from "./renumber";
 
 const text = (value: string, oid = `oid-${value.length}`): RepoFile => ({
   text: value,
@@ -23,6 +23,108 @@ describe("planMigrationMoves", () => {
       ]),
     });
     expect(plan.kind).toBe("manual");
+  });
+
+  /** Main took 1143 after the PR branched; the PR mentions its own 1143 bare. */
+  const ownMentions = (
+    overrides: Partial<Parameters<typeof planMigrationMoves>[0]> = {},
+  ): Parameters<typeof planMigrationMoves>[0] => ({
+    paths: [`${DIR}/1143_own.sql`],
+    added: [`${DIR}/1143_own.sql`],
+    ledger: ["1142_x.sql", "1143_main.sql", "1143_own.sql"],
+    branchLedger: ["1142_x.sql", "README.md"],
+    changed: [`${DIR}/1143_own.sql`, "packages/db/src/audience.ts", ".changeset/own.md"],
+    files: new Map([
+      [`${DIR}/1143_own.sql`, text("select 1;\n", "sql")],
+      [
+        "packages/db/src/audience.ts",
+        text(
+          "// Unused since migration 1143\nexport const a = 1;\n// Since 1143 owners keep schedules.\n",
+        ),
+      ],
+      [".changeset/own.md", text("Rolling migration 1143 keeps a.\n")],
+    ]),
+    mainFiles: new Map([
+      [
+        "packages/db/src/audience.ts",
+        text("export const a = 1;\n// Since 1143 owners keep schedules.\n", "main"),
+      ],
+    ]),
+    ...overrides,
+  });
+
+  test("rewrites the PR's own bare mentions on lines main lacks, never main's lines", () => {
+    expect(planMigrationMoves(ownMentions())).toEqual({
+      kind: "moved",
+      moves: [{ from: `${DIR}/1143_own.sql`, to: `${DIR}/1144_own.sql` }],
+      entries: [
+        { path: ".changeset/own.md", mode: "100644", content: "Rolling migration 1144 keeps a.\n" },
+        { path: `${DIR}/1143_own.sql`, mode: "100644", sha: null },
+        { path: `${DIR}/1144_own.sql`, mode: "100644", sha: "sql" },
+        {
+          path: "packages/db/src/audience.ts",
+          mode: "100644",
+          // The last line was on main and names main's 1143.
+          content:
+            "// Unused since migration 1144\nexport const a = 1;\n// Since 1143 owners keep schedules.\n",
+        },
+      ],
+    });
+  });
+
+  test("a PR's later migration naming its earlier one bare follows the move", () => {
+    const plan = planMigrationMoves(
+      ownMentions({
+        added: [`${DIR}/1143_own.sql`, `${DIR}/1144_more.sql`],
+        ledger: ["1142_x.sql", "1143_main.sql", "1143_own.sql", "1144_more.sql"],
+        changed: [`${DIR}/1143_own.sql`, `${DIR}/1144_more.sql`],
+        files: new Map([
+          [`${DIR}/1143_own.sql`, text("create table own ();\n", "own")],
+          [`${DIR}/1144_more.sql`, text("-- after 1143\nalter table own add b int;\n", "more")],
+        ]),
+        mainFiles: new Map(),
+      }),
+    );
+    expect(plan.kind === "moved" && plan.moves).toEqual([
+      { from: `${DIR}/1143_own.sql`, to: `${DIR}/1145_own.sql` },
+      { from: `${DIR}/1144_more.sql`, to: `${DIR}/1146_more.sql` },
+    ]);
+    expect(plan.kind === "moved" && plan.entries).toContainEqual({
+      path: `${DIR}/1146_more.sql`,
+      mode: "100644",
+      content: "-- after 1145\nalter table own add b int;\n",
+    });
+  });
+
+  test("leaves a bare number to a person when it could name another migration", () => {
+    const manual: MovePlan = {
+      kind: "manual",
+      reason:
+        "`.changeset/own.md`, `packages/db/src/audience.ts` mentions 1143 without naming `1143_own`, so the batcher cannot tell which migration it means.",
+    };
+    // Main already had a 1143 when the PR branched, so the author may mean it.
+    expect(
+      planMigrationMoves(ownMentions({ branchLedger: ["1142_x.sql", "1143_main.sql"] })),
+    ).toEqual(manual);
+    // The PR adds two migrations numbered 1143.
+    expect(
+      planMigrationMoves(ownMentions({ added: [`${DIR}/1143_own.sql`, `${DIR}/1143_twin.sql`] })),
+    ).toEqual(manual);
+    // Main's copy could not be read, so the PR's lines are unknown.
+    expect(
+      planMigrationMoves(
+        ownMentions({
+          mainFiles: new Map([
+            ["packages/db/src/audience.ts", { text: null, mode: "100644", oid: "big" }],
+          ]),
+        }),
+      ),
+    ).toEqual(manual);
+    // Without main's copies or the branch point nothing can be attributed.
+    const { mainFiles: _mainFiles, ...withoutMainFiles } = ownMentions();
+    expect(planMigrationMoves(withoutMainFiles)).toEqual(manual);
+    const { branchLedger: _branchLedger, ...withoutBranchLedger } = ownMentions();
+    expect(planMigrationMoves(withoutBranchLedger)).toEqual(manual);
   });
 
   test("moves above main and every number other queued PRs add", () => {
