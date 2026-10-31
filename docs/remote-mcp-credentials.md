@@ -140,6 +140,22 @@ frozen at acceptance. Personal GitHub keeps its own per-chat repository choice.
 Logins that existed before this rule start on in every shared workspace their
 owner belonged to, so nothing that worked stops working.
 
+One account is one login. Before connecting reused an existing login, turning a
+connector on in a second workspace could save a second login to the same
+account, with its tool choices split between the two. Migration
+`1226_merge_duplicate_personal_logins.sql` merges those: logins of the same
+person to the same server (exact MCP URL, provider, authorization server and
+client) whose service verified the same account identity (Slack, Gmail, Google
+Calendar, Google Drive and Atlassian) keep one login. The kept login is a working
+one with the most scopes; another merges into it only when the kept login has
+every scope it has. Its tool choices join the kept login's (strictest wins),
+the kept login is turned on wherever it was, schedule pins and connector
+references move to the kept login, and it is revoked with
+`metadata.mergedIntoConnectionId`. A login whose identity is unknown, or that an
+event trigger, vault, Knowledge sync, Site tool allowance or API Integration
+depends on, is left for its owner to remove. Accepted turns and their audit
+records keep the login they ran with.
+
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
 `accountSelection: "all_eligible"` mode cannot be combined with a connection ID,
