@@ -294,10 +294,12 @@ export function readyAt(pull: QueuedPull): number {
  * Choose the next batch. A queued Version PR holds the queue: it builds alone
  * once it is green and current with main, and nothing else builds before it
  * lands, so a release operator gets a stable main. Then priority PRs go
- * first; a failed batch's remaining halves come next; then ready PRs in queue
- * order. CI and batcher changes run alone. A priority PR already in a failed
- * batch's halves keeps its place there: building every priority PR again
- * would retest the batch that just failed, unsplit, on every pass.
+ * first, and ready PRs in queue order fill the rest of their batch, so
+ * priority PRs that arrive one at a time do not each take a round alone. A
+ * failed batch's remaining halves come next; then ready PRs in queue order.
+ * CI and batcher changes run alone. A PR already in a failed batch's halves,
+ * priority or not, keeps its place there: building it again would retest the
+ * batch that just failed, unsplit, on every pass.
  */
 export function nextBatch(
   pulls: QueuedPull[],
@@ -329,12 +331,14 @@ export function nextBatch(
   const urgent = ready.filter((p) => p.priority && !bisecting.has(p.number));
   if (urgent.length) {
     const first = urgent[0]!;
-    const members = alone(first)
-      ? [first]
-      : compatible(
-          urgent.filter((p) => !alone(p)),
-          settings,
-        );
+    if (alone(first)) return { kind: "build", members: [first], pending };
+    // Priority PRs first, so a split keeps them in the first half; the oldest
+    // ready PRs fill the rest without waiting for the batching window.
+    const fill = ready.filter((p) => !p.priority && !bisecting.has(p.number));
+    const members = compatible(
+      [...urgent, ...fill].filter((p) => !alone(p)),
+      settings,
+    );
     return { kind: "build", members, pending };
   }
 
