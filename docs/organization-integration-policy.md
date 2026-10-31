@@ -46,9 +46,12 @@ request key.
 ## Server administration
 
 Use the full-access organization API key on the product backend, or a verified
-native organization-administrator session. Workspace keys, delegated users and
-agent identities cannot administer this policy. Browser writes also require the
-existing same-origin mutation checks.
+native organization-administrator session. Workspace keys, host-delegated
+users (`asUser()`) and an agent turn's own credentials cannot administer this
+policy. A person's agent acting as them (a connected agent, or a chat they gave
+full access) counts as that person when its access includes `account:admin`;
+the database still checks their live owner or admin role. Browser writes also
+require the existing same-origin mutation checks.
 
 The SDK subpath `@opengeni/sdk/organization-integration-policy` exports:
 
