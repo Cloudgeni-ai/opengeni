@@ -202,6 +202,14 @@ export interface SubscriptionCoreAdapter<Credential = unknown> {
    */
   readonly modelPolicyProviderIdsFor?: (modelId: ModelId) => readonly string[] | null;
   /**
+   * Every product model id that names the same model as `modelId`, for a
+   * provider whose models carry more than one id form (absent, null or
+   * empty: the id alone). Connection allowlists and exclusions are read in
+   * every form, so a model listed under one form is the same model under
+   * all of them. Read through `subscriptionCoreModelIdForms`.
+   */
+  readonly modelIdFormsFor?: (modelId: ModelId) => readonly ModelId[] | null;
+  /**
    * The prompt-cache lifetime placement keeps a session's account for
    * (SUB-STICK-04): an exact TTL Opengeni sends, or a documented idle cut-off.
    */
@@ -384,6 +392,25 @@ export function subscriptionCoreModelPolicyProviderIds(
 ): readonly string[] {
   const ids = adapter.modelPolicyProviderIdsFor?.(modelId);
   return ids && ids.length > 0 ? ids : [adapter.modelPolicyProviderId];
+}
+
+/** Every id form of one of the adapter's models (never empty; the id itself first when it has no others). */
+export function subscriptionCoreModelIdForms(
+  adapter: Pick<SubscriptionCoreAdapter, "modelIdFormsFor">,
+  modelId: ModelId,
+): readonly ModelId[] {
+  const forms = adapter.modelIdFormsFor?.(modelId);
+  return forms && forms.length > 0 ? forms : [modelId];
+}
+
+/** A model id list read in every id form of its models, without duplicates, in first-seen order. */
+export function withSubscriptionCoreModelIdForms(
+  adapter: Pick<SubscriptionCoreAdapter, "modelIdFormsFor">,
+  modelIds: readonly ModelId[],
+): ModelId[] {
+  return [
+    ...new Set(modelIds.flatMap((modelId) => subscriptionCoreModelIdForms(adapter, modelId))),
+  ];
 }
 
 /**

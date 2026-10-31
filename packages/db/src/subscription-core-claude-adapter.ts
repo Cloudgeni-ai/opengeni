@@ -28,6 +28,11 @@
  * the `claude` cutover receipt.
  */
 import { ClaudeSubscriptionCredential, type ClaudeUsageObservation } from "@opengeni/config";
+import {
+  CLAUDE_SUBSCRIPTION_PROVIDER_IDS,
+  claudeSubscriptionModelIdForms,
+  isClaudeSubscriptionModelId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
 import type { z } from "zod";
 import type {
   QuotaBlockClaim,
@@ -76,7 +81,12 @@ export const SUBSCRIPTION_CORE_CLAUDE_UNKNOWN_RESET_MS = 60 * 1000;
  * content is used (https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
  */
 export const SUBSCRIPTION_CORE_CLAUDE_CACHE_TTL_MS = 5 * 60 * 1000;
-/** The product model id prefixes of Claude subscription models (`claudeProviderId`). */
+/**
+ * The legacy product model id prefixes of Claude subscription models
+ * (`claudeProviderId`), which the catalog still emits. Every Claude
+ * subscription model is also named `claude/<upstream>`; all forms are one
+ * model (`claudeSubscriptionModelIdForms`).
+ */
 export const SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES = [
   "organization-claude-subscription",
   "workspace-claude-subscription",
@@ -150,11 +160,13 @@ export function subscriptionCoreClaudeAdapter(
       format === SUBSCRIPTION_CORE_CLAUDE_OAUTH_FORMAT ? capabilities : setupTokenCapabilities,
     credentialKind: "oauth",
     quotaKind: "usage_windows",
-    // Workspace model policy names Claude models by their scope-specific
-    // provider id; on the core a workspace-scoped model runs on organization
-    // connections, so it must be allowed under both identities.
+    // Workspace model policy treats every Claude subscription provider id as
+    // one provider (`evaluateWorkspaceModelPolicy`), whichever form a model
+    // or a stored policy uses.
     modelPolicyProviderId: SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0],
     modelPolicyProviderIdsFor: subscriptionCoreClaudeModelPolicyProviderIds,
+    modelIdFormsFor: (modelId) =>
+      isClaudeSubscriptionModelId(modelId) ? claudeSubscriptionModelIdForms(modelId) : null,
     cacheFacts: { kind: "exact_ttl", ttlMs: SUBSCRIPTION_CORE_CLAUDE_CACHE_TTL_MS },
     health: {
       forbiddenQuarantineMs: SUBSCRIPTION_CORE_CLAUDE_FORBIDDEN_QUARANTINE_MS,
@@ -208,24 +220,25 @@ export function subscriptionCoreClaudeAdapter(
   };
 }
 
-/** The product model ids a Claude upstream model id is served as. */
+/**
+ * The product model ids a Claude upstream model id is served as: the
+ * canonical `claude/` id and both legacy forms, so a cooldown or allowlist
+ * written under them holds for whichever form a reader names.
+ */
 export function subscriptionCoreClaudeProductModelIds(upstreamModelId: string): string[] {
-  return SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES.map((prefix) => `${prefix}/${upstreamModelId}`);
+  return claudeSubscriptionModelIdForms(`claude/${upstreamModelId}`);
 }
 
 /**
- * The workspace-policy provider ids a Claude product model must all be
- * allowed under: its own prefix plus the organization id its connections
- * carry (`workspace-claude-subscription` models need both), the
- * organization id alone otherwise.
+ * The workspace-policy provider ids of a Claude product model: every Claude
+ * subscription provider id, which workspace model policy evaluates as one
+ * provider, so the answer is the same for every id form and any form of
+ * accepted policy matches. Other ids get the organization id alone.
  */
 export function subscriptionCoreClaudeModelPolicyProviderIds(modelId: string): readonly string[] {
-  const prefix = modelId.slice(0, Math.max(0, modelId.indexOf("/")));
-  const organization = SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0];
-  return prefix !== organization &&
-    (SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES as readonly string[]).includes(prefix)
-    ? [prefix, organization]
-    : [organization];
+  return isClaudeSubscriptionModelId(modelId)
+    ? CLAUDE_SUBSCRIPTION_PROVIDER_IDS
+    : [SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES[0]];
 }
 
 const ACCOUNT_WINDOWS = new Set(["five_hour", "seven_day"]);

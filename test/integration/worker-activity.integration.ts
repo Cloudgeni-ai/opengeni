@@ -2671,7 +2671,7 @@ describe("worker activities integration", () => {
       });
     }) as typeof fetch;
     try {
-      const { environment, gitToken } = await sandboxEnvironmentForRun(
+      const { environment, gitToken, gitCredentialBindings } = await sandboxEnvironmentForRun(
         testSettings({
           sandboxBackend: "modal",
           githubAppId: "99",
@@ -2697,10 +2697,15 @@ describe("worker activities integration", () => {
       expect(environment.GITHUB_TOKEN).toBeUndefined();
       expect(environment.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
       expect(environment.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
-      expect(environment.GIT_AUTHOR_NAME).toBe("opengeni[bot]");
-      expect(environment.GIT_AUTHOR_EMAIL).toBe("99+opengeni[bot]@users.noreply.github.com");
-      expect(environment.GIT_COMMITTER_NAME).toBe("opengeni[bot]");
-      expect(environment.GIT_COMMITTER_EMAIL).toBe("99+opengeni[bot]@users.noreply.github.com");
+      // Commit identity is per repository (written into its local git config),
+      // never sandbox-wide env, so App and personal repositories can share a box.
+      expect(environment.GIT_AUTHOR_NAME).toBeUndefined();
+      expect(environment.GIT_AUTHOR_EMAIL).toBeUndefined();
+      expect(environment.GIT_COMMITTER_NAME).toBeUndefined();
+      expect(environment.GIT_COMMITTER_EMAIL).toBeUndefined();
+      expect(gitCredentialBindings?.map((binding) => binding.identity)).toEqual([
+        { name: "opengeni[bot]", email: "99+opengeni[bot]@users.noreply.github.com" },
+      ]);
     } finally {
       globalThis.fetch = originalFetch;
     }

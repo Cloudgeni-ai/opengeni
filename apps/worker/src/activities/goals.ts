@@ -15,6 +15,7 @@ import {
   isSessionDefinitivelyDeleted,
   getSessionTurn,
   materializeGoalContinuation,
+  readSessionBillingOrigin,
   requireSession,
   requireWorkspace,
 } from "@opengeni/db";
@@ -164,6 +165,13 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
                 workspaceId: input.workspaceId,
                 model: continuationModel,
                 initiatingHumanSubjectId: causalTurn?.initiatingHumanSubjectId ?? null,
+                // The continuation inherits the chat's origin: fund it the same way.
+                billingOrigin: () =>
+                  readSessionBillingOrigin(tx, {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                  }),
               },
             )));
         const pausedReason = modelPolicyBlocked

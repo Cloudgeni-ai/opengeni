@@ -2549,6 +2549,71 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "file upload reaper preserves activity order and replays both sides of patch retirement",
+    async () => {
+      const legacyPath = new URL(
+        "../../apps/worker/test/fixtures/legacy-file-upload-reaper-workflow.ts",
+        import.meta.url,
+      ).pathname;
+      const expected = [
+        "reapExpiredFileUploads",
+        "maintainRetainedScreenshots",
+        "maintainBrowserStateArtifacts",
+        "recoverVideoGenerationWorkflows",
+        "recoverSessionTitleWorkflows",
+        "recoverRecordingWorkflows",
+        "applyRecordingRetention",
+        "reconcileRecentModelCallFacts",
+      ];
+      const execute = async (workflowsPath: string) => {
+        const taskQueue = `reaper-retirement-${crypto.randomUUID()}`;
+        const calls: string[] = [];
+        const worker = await Worker.create({
+          connection: nativeConnection,
+          taskQueue,
+          workflowsPath,
+          activities: Object.fromEntries(
+            expected.map((name) => [
+              name,
+              async () => {
+                calls.push(name);
+              },
+            ]),
+          ),
+        });
+        const run = worker.run();
+        try {
+          const client = new Client({ connection });
+          const workflowId = `reaper-retirement-${crypto.randomUUID()}`;
+          const handle = await client.workflow.start("fileUploadReaperWorkflow", {
+            taskQueue,
+            workflowId,
+          });
+          await handle.result();
+          expect(calls).toEqual(expected);
+          return { history: await handle.fetchHistory(), workflowId };
+        } finally {
+          worker.shutdown();
+          await run;
+        }
+      };
+      const legacy = await execute(legacyPath);
+      await Worker.runReplayHistory(
+        { workflowsPath: workflowDefinitionsPath },
+        legacy.history,
+        legacy.workflowId,
+      );
+      const current = await execute(workflowDefinitionsPath);
+      await Worker.runReplayHistory(
+        { workflowsPath: legacyPath },
+        current.history,
+        current.workflowId,
+      );
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "scheduled task fire workflow delegates one durable dispatch activity",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;

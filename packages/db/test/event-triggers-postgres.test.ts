@@ -539,6 +539,111 @@ describe("deliveries and matching", () => {
     expect(events.events.map((entry) => entry.id)).toEqual(first.eventIds);
   });
 
+  test("a test event or replay an API caller starts makes the automations it fires API use", async () => {
+    const space = await workspace();
+    const source = await webhookSource(space);
+    const fired = await task(space);
+    const quiet = await task(space);
+    await setScheduledTaskEvents(client.db, {
+      ...space,
+      taskId: fired.id,
+      triggers: [{ sourceId: source.id, ...everything, eventTypes: ["deploy.finished"] }],
+    });
+    await setScheduledTaskEvents(client.db, {
+      ...space,
+      taskId: quiet.id,
+      triggers: [{ sourceId: source.id, ...everything, eventTypes: ["deploy.started"] }],
+    });
+    const origins = async () =>
+      withWorkspaceRls(client.db, space.workspaceId, async (scoped) =>
+        Object.fromEntries(
+          (
+            await rawRows<{ id: string; billing_origin: string | null }>(
+              scoped,
+              sql`select id, billing_origin from scheduled_tasks
+                where workspace_id = ${space.workspaceId}::uuid
+                  and id in (${fired.id}::uuid, ${quiet.id}::uuid)`,
+            )
+          ).map((row) => [row.id, row.billing_origin]),
+        ),
+      );
+    const send = (billingOrigin?: "app" | "api") =>
+      recordEventDelivery(client.db, {
+        accountId: space.accountId,
+        workspaceId: space.workspaceId,
+        sourceId: source.id,
+        status: "accepted",
+        reason: "Test event sent from Opengeni",
+        dedupeKey: `test:${crypto.randomUUID()}`,
+        body: null,
+        bodyBytes: 2,
+        bodySha256: createHash("sha256").update("{}").digest("hex"),
+        headers: {},
+        events: [event("deploy.finished")],
+        match,
+        settleMs: 0,
+        ...(billingOrigin ? { billingOrigin } : {}),
+      });
+    // An inbound delivery, or a person's test, leaves who set it up paying.
+    expect((await send()).matchedTaskIds).toEqual([fired.id]);
+    expect((await send("app")).matchedTaskIds).toEqual([fired.id]);
+    expect(await origins()).toEqual({ [fired.id]: null, [quiet.id]: null });
+    // An API caller's: only the automation it fired becomes API use.
+    expect((await send("api")).matchedTaskIds).toEqual([fired.id]);
+    expect(await origins()).toEqual({ [fired.id]: "api", [quiet.id]: null });
+  });
+
+  test("a source remembers an API caller held its secret, with the secret, and never forgets", async () => {
+    const space = await workspace();
+    const stored = async (sourceId: string) =>
+      (await getEventSource(client.db, space.workspaceId, sourceId))?.secretBillingOrigin;
+    // A person's source: nobody outside the app holds its secret.
+    const source = await webhookSource(space);
+    expect(source.secretBillingOrigin).toBeNull();
+    expect(await stored(source.id)).toBeNull();
+    // A person's new secret leaves it so.
+    await updateEventSource(client.db, space.workspaceId, source.id, {
+      secretEncrypted: "person-secret",
+    });
+    expect(await stored(source.id)).toBeNull();
+    // An API caller's new secret marks it in the same write.
+    const marked = await updateEventSource(client.db, space.workspaceId, source.id, {
+      secretEncrypted: "api-secret",
+      secretBillingOrigin: "api",
+    });
+    expect(marked).toMatchObject({ secretEncrypted: "api-secret", secretBillingOrigin: "api" });
+    // A later person's secret or any other change never turns it back.
+    await updateEventSource(client.db, space.workspaceId, source.id, {
+      secretEncrypted: "person-again",
+      name: "Renamed",
+      status: "active",
+    });
+    expect(await stored(source.id)).toBe("api");
+    // A source created by an API caller with its secret starts marked.
+    const { source: created } = await createEventSource(client.db, {
+      accountId: space.accountId,
+      workspaceId: space.workspaceId,
+      createdBySubjectId: space.subjectId,
+      kind: "webhook",
+      adapter: "standard",
+      name: "Product deploys",
+      ownerSubjectId: space.subjectId,
+      visibility: "workspace",
+      secretEncrypted: "generated",
+      secretBillingOrigin: "api",
+    });
+    expect(created.secretBillingOrigin).toBe("api");
+    expect(await stored(created.id)).toBe("api");
+    // Only the two origins are stored.
+    await expect(
+      withWorkspaceRls(client.db, space.workspaceId, (scoped) =>
+        scoped.execute(
+          sql`update event_sources set secret_billing_origin = 'plan' where id = ${source.id}::uuid`,
+        ),
+      ),
+    ).rejects.toThrow();
+  });
+
   test("matching queues events for active automations whose owner can see the source", async () => {
     const space = await workspace();
     const source = await webhookSource(space, "private");

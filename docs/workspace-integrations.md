@@ -49,9 +49,16 @@ Opengeni `workspaceId` to their own tenant. Never authorize from `externalId`
 or the filter alone; neither proves that the workspace belongs to your customer.
 Use separate organizations for stronger environment separation.
 
-Organization providers and webhooks never cover Personal workspaces, even
-when the filter is `null`. A Personal workspace owner may still configure a
-workspace-level provider or webhook through the existing owner-only authority.
+The filter only ever selects shared workspaces. Organization webhooks never
+cover Personal workspaces, because they would send a member's private chat
+activity to the organization's endpoint. The organization credential provider
+covers members' Personal workspaces only when `allowPersonalWorkspaces` is
+`true` (default `false`), whatever the filter says. Its requests from a
+Personal workspace carry that workspace's id and, for turns, the member as
+`initiatingHuman`; map them to that person, not to a customer tenant. A
+Personal workspace owner may still configure a workspace-level provider or
+webhook through the existing owner-only authority; their own provider wins
+over the organization's.
 
 Four integration primitives let a product run agents on a standalone
 Opengeni deployment the same way an in-process host could: supply
@@ -119,7 +126,8 @@ One optional endpoint per organization, plus one optional override per workspace
 Any workspace provider row overrides inheritance: enabled uses that provider;
 disabled pauses credentials for the workspace and means **none**, not fallback.
 Only the absence of a workspace row inherits a matching enabled organization
-provider, and never for a Personal workspace. A selected provider returning `not_applicable` or failing does not
+provider; a Personal workspace inherits it only when its
+`allowPersonalWorkspaces` is on. A selected provider returning `not_applicable` or failing does not
 switch to another provider. When a provider is selected, Opengeni calls it
 before a turn's sandbox work and again before the returned material expires.
 It replaces the deployment's injected `runCredentials` port for the turn
@@ -440,7 +448,9 @@ pinned outbound policy (10-second limit), and never queued or retried:
 registrations that reach their workspace: the enabled organization provider
 whose filter matches (shown even while the workspace overrides it) and the
 enabled organization webhooks that also receive its events. It returns URLs and
-event types only, never secrets, and is empty for Personal workspaces.
+event types only, never secrets. In a Personal workspace it lists the
+organization provider only when its `allowPersonalWorkspaces` is on, and never
+webhooks.
 
 ### Signing-secret rotation
 

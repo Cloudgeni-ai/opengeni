@@ -65,9 +65,8 @@ async function organization(): Promise<Org> {
     name: "Core Codex consumers fixture",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
-  // Migration 0680 seeds every organization enabled on the shared core. These
-  // dormant-gate fixtures start from the pre-cutover world (no Codex row) and
-  // enable or disable the gate explicitly.
+  // The retired per-account row is not reset authority. Start without one so
+  // the live owner, membership, workspace and connection fences stand alone.
   await shared!.admin`
     delete from subscription_provider_cutovers
     where account_id = ${accountId}::uuid and provider = 'codex'`;
@@ -239,12 +238,19 @@ describe.skipIf(!realDb)("Codex reset credits on the shared core (M3 PR 2c)", ()
     const manager = await workspaceAdmin(org, org.sharedWorkspaceId);
     const plain = await member(org, org.sharedWorkspaceId);
 
-    // Gate off and disabled: nothing is authorized.
-    expect(await authorityOf(org, org.ownerSubjectId, connectionId)).toBeNull();
+    // Neither an absent nor a disabled obsolete switch changes current
+    // authority. Unauthorized callers remain denied by the actual fences.
+    expect(await authorityOf(org, org.ownerSubjectId, connectionId)).toEqual({
+      status: "active",
+      owned: true,
+    });
     await setCutover(org.accountId, false);
-    expect(await authorityOf(org, org.ownerSubjectId, connectionId)).toBeNull();
-    expect(await claim(org, org.ownerSubjectId, connectionId, crypto.randomUUID())).toEqual({
-      kind: "not_found",
+    expect(await authorityOf(org, org.ownerSubjectId, connectionId)).toEqual({
+      status: "active",
+      owned: true,
+    });
+    expect(await claim(org, plain, connectionId, crypto.randomUUID())).toEqual({
+      kind: "forbidden",
     });
     await setCutover(org.accountId, true);
     await setCutover(other.accountId, true);

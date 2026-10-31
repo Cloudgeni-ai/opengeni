@@ -197,6 +197,14 @@ the HTTP API, send the same names as `modelContextTools` next to
 with the browser's own context.
 With the dock off, entries that only open a dock panel hide with it.
 
+`starters` replaces Opengeni's suggestions under the new-chat composer with
+the host's own, such as tasks that fit the app the chat sits in (the Excel
+add-in suggests explaining a sheet or writing a formula). Each one has an
+`id`, a `title`, an optional `description` and `icon`, and the `prompt` it puts
+in the composer for the person to edit and send. An empty list shows none, and
+the `starters` feature still turns them off. The new-chat page's recent chats
+lead with the ones the person opened there most recently.
+
 Links in agent messages to Opengeni objects (files, Sites, editable
 artifacts) open in the dock when it is on, and otherwise open the object's
 page in the web app through `openUrl`. `resolveLink` lets the host open them

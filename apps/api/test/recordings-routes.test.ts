@@ -48,6 +48,8 @@ async function fixture(
     settings?: Parameters<typeof testSettings>[0];
     /** What the deployment's speech providers call, such as Azure sign-in. */
     speechFetch?: typeof fetch;
+    /** What the owner's calendar answers when a meeting starts unnamed. */
+    meetingCalendarFetch?: typeof fetch;
   } = {},
 ) {
   const [account] =
@@ -111,6 +113,7 @@ async function fixture(
         }
       : {}),
     objectStorage,
+    ...(options.meetingCalendarFetch ? { meetingCalendarFetch: options.meetingCalendarFetch } : {}),
     ...(options.transcription ? { transcription: options.transcription } : {}),
     workflowClient: {
       signalUserMessage: noop,
@@ -564,6 +567,111 @@ describe("recording routes", () => {
     expect((await scope.owner.call("DELETE", `/recordings/${recordingId}`)).status).toBe(204);
     expect(scope.started.at(-1)).toMatchObject({ kind: "deletion", recordingId, versionId: null });
     expect((await scope.owner.call("GET", `/recordings/${recordingId}`)).status).toBe(404);
+  });
+
+  test("an unnamed meeting takes its name from the owner's calendar event; a typed name never asks", async () => {
+    const asked: string[] = [];
+    const scope = await fixture({
+      settings: { googleCalendarEnabled: true },
+      meetingCalendarFetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        asked.push(`${url.origin}${url.pathname}`);
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer calendar-token");
+        return Response.json({
+          items: [
+            {
+              summary: "Lunch",
+              start: { dateTime: "2026-10-30T11:00:00Z" },
+              end: { dateTime: "2026-10-30T12:00:00Z" },
+            },
+            {
+              summary: "Quarterly planning with Acme",
+              start: { dateTime: "2026-10-30T13:30:00Z" },
+              end: { dateTime: "2026-10-30T14:30:00Z" },
+            },
+          ],
+        });
+      }) as typeof fetch,
+    });
+    await createConnection(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: scope.owner.subjectId,
+      providerDomain: "calendarmcp.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ access_token: "calendar-token", token_type: "Bearer" }),
+      ),
+      metadata: { mcpUrl: "https://calendarmcp.googleapis.com/mcp/v1" },
+      createdBySubjectId: scope.owner.subjectId,
+    });
+    const create = async (naming: Record<string, unknown>) => {
+      const recordingId = crypto.randomUUID();
+      const created = await scope.owner.call("POST", "/recordings", {
+        recordingId,
+        startedAt: "2026-10-30T13:51:00Z",
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+        ...naming,
+      });
+      expect(created.status).toBe(201);
+      return created.body.recording ?? created.body;
+    };
+    expect(await create({})).toMatchObject({
+      title: "Quarterly planning with Acme",
+      titleSource: "calendar",
+    });
+    expect(asked).toEqual(["https://www.googleapis.com/calendar/v3/calendars/primary/events"]);
+    // A guess by the recording app is improved on too.
+    expect(await create({ title: "Zoom meeting", titleSource: "app" })).toMatchObject({
+      title: "Quarterly planning with Acme",
+      titleSource: "calendar",
+    });
+    expect(await create({ title: "Board prep" })).toMatchObject({
+      title: "Board prep",
+      titleSource: "person",
+    });
+    expect(asked).toHaveLength(2);
+    // Someone else's calendar never names the owner's meeting.
+    const theirs = await scope.other.call("POST", "/recordings", {
+      recordingId: crypto.randomUUID(),
+      startedAt: "2026-10-30T13:51:00Z",
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(theirs.status).toBe(201);
+    expect(theirs.body.recording ?? theirs.body).toMatchObject({ titleSource: "default" });
+    expect(asked).toHaveLength(2);
+  });
+
+  test("a meeting whose calendar can't be read still starts, named for when it began", async () => {
+    const scope = await fixture({
+      settings: { googleCalendarEnabled: true },
+      meetingCalendarFetch: (async () => {
+        throw new Error("calendar down");
+      }) as typeof fetch,
+    });
+    await createConnection(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: scope.owner.subjectId,
+      providerDomain: "calendarmcp.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ access_token: "calendar-token", token_type: "Bearer" }),
+      ),
+      createdBySubjectId: scope.owner.subjectId,
+    });
+    const created = await scope.owner.call("POST", "/recordings", {
+      recordingId: crypto.randomUUID(),
+      startedAt: "2026-10-30T13:51:00Z",
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.recording ?? created.body).toMatchObject({
+      title: "Recording 2026-10-30 13:51 UTC",
+      titleSource: "default",
+    });
   });
 
   test("notes: anyone who can see the meeting saves them; a stale revision is a 409", async () => {
