@@ -35,16 +35,18 @@ export async function slackFixtureResponse(request: Request, state: SlackFixture
         allowedReasoningEfforts: ["low"],
         mcpServers: [],
         fileUploads: { enabled: false, maxSizeBytes: 1_048_576 },
-        productAccessMode: "configured",
+        // A local single-person deployment, whose person owns the
+        // organization: sharing the Slack bot needs an organization admin.
+        productAccessMode: "local",
         auth: { mode: "none" },
         structuredServices: { fileSystem: false, git: false, terminalEvents: false },
       });
     if (path === "/v1/access/me")
       return json({
-        mode: "configured",
+        mode: "local",
         subjectId: "slack-test",
         subjectLabel: "Slack test",
-        accountGrants: [{ accountId, permissions: ["account:admin", "account:read"] }],
+        accountGrants: [{ accountId, role: "owner", permissions: ["account:admin", "account:read"] }],
         workspaceGrants: [workspaceId, siblingId].map((id) => ({
           workspaceId: id,
           accountId,
@@ -54,6 +56,7 @@ export async function slackFixtureResponse(request: Request, state: SlackFixture
             "connections:read",
             "connections:write",
             "capabilities:read",
+            "capabilities:manage",
             "sessions:create", "sessions:read", "scheduled_tasks:manage", "scheduled_tasks:run",
           ],
         })),

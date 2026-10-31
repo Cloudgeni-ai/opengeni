@@ -61,6 +61,7 @@ import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
+  defaultConnectCommandScope,
   requireMachineAccessGrant,
   requireMachineScopeAuthority,
 } from "../sandbox/machine-authority";
@@ -439,7 +440,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // verified person may ask for it: someone signed in, or a credential acting as
   // them (a personal API key, or an organization key or organization MCP client
   // acting as that person). A key, service or agent acting as itself gets 422.
-  // The owner is always the caller, never a request field.
+  // The owner is always the caller, never a request field. Omitted scope is
+  // Only me for a signed-in teammate without enrollments:manage, and the
+  // original workspace token for everyone else.
   app.post("/v1/workspaces/:workspaceId/enrollments/token", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     // The read permission is part of the authorization, so a request that lacks
@@ -453,7 +456,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       status: 400,
       message: "invalid mint-enroll-token request",
     });
-    const personal = parsed.scope === "user";
+    // Omitted: a signed-in teammate gets Only me; machine managers, keys and
+    // services keep the original workspace token.
+    const personal = (parsed.scope ?? defaultConnectCommandScope(authorization)) === "user";
     requireMachineScopeAuthority(authorization, personal ? "user" : "workspace", "connect");
     if (personal && !isPersonalConnectionOwnerPrincipal(authorization)) {
       throw new HTTPException(422, {

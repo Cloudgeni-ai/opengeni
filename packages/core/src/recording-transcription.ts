@@ -482,41 +482,44 @@ export type RecordingTrackWords = {
   echoSpeakers?: readonly string[];
 };
 
+const LETTER = /[\p{L}\p{N}]/gu;
+
 /**
  * Find the person recording among the voices on their own microphone. One
  * voice (or none told apart) makes the whole track theirs. With several, it
  * is the voice that matched their remembered voice, else the one that spoke
- * the most, since the microphone is closest to them; the others are people
- * in the room with them. A voice that was almost all the call heard from the
- * speakers is not a person: it is never picked over a real voice, and what
- * the echo left of it is dropped.
+ * the most (by letters said, which a misplaced word's timing can't inflate),
+ * since the microphone is closest to them; the others are people in the room
+ * with them. A voice that was almost all the call heard from the speakers is
+ * not a person: it is never picked over a real voice, and what the echo left
+ * of it is dropped.
  */
 export function withRecorderVoice(
   track: RecordingTrackWords,
   matchedSpeaker: string | null,
 ): RecordingTrackWords {
   if (!track.recorder) return track;
-  const speech = new Map<string, number>();
+  const said = new Map<string, number>();
   for (const word of track.words) {
     if (!word.text.trim() || word.speaker === null) continue;
-    const length = Math.max(0, word.endMilliseconds - word.startMilliseconds);
-    speech.set(word.speaker, (speech.get(word.speaker) ?? 0) + length);
+    const letters = word.text.match(LETTER)?.length ?? 0;
+    said.set(word.speaker, (said.get(word.speaker) ?? 0) + letters);
   }
   const echoes = new Set(track.echoSpeakers ?? []);
   // When every voice is an echo, the person recording may still be one of
   // them (told apart badly, or silent), so they are all candidates then.
-  const people = [...speech.keys()].filter((candidate) => !echoes.has(candidate));
-  const candidates = people.length > 0 ? people : [...speech.keys()];
+  const people = [...said.keys()].filter((candidate) => !echoes.has(candidate));
+  const candidates = people.length > 0 ? people : [...said.keys()];
   let speaker: string | null = null;
-  if (speech.size > 1) {
-    if (matchedSpeaker !== null && speech.has(matchedSpeaker)) {
+  if (said.size > 1) {
+    if (matchedSpeaker !== null && said.has(matchedSpeaker)) {
       speaker = matchedSpeaker;
     } else {
       let most = -1;
       for (const candidate of candidates) {
-        const length = speech.get(candidate)!;
-        if (length > most) {
-          most = length;
+        const letters = said.get(candidate)!;
+        if (letters > most) {
+          most = letters;
           speaker = candidate;
         }
       }

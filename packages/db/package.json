@@ -19,6 +19,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./app-action-targets": {
+      "types": "./src/app-action-targets.ts",
+      "default": "./src/app-action-targets.ts"
+    },
     "./connect-attempts": {
       "types": "./src/connect-attempts.ts",
       "default": "./src/connect-attempts.ts"

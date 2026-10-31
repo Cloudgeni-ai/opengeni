@@ -1,3 +1,4 @@
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import {
   AI_GATEWAY_REALTIME_MODELS,
   AZURE_LIVE_REALTIME_MODEL_ID,
@@ -18,6 +19,7 @@ import {
 } from "@opengeni/config";
 import type { SessionRealtimeModel } from "@opengeni/contracts";
 import {
+  chargeBillingOrigin,
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
   creditDebitAttributionMetadata,
@@ -280,11 +282,25 @@ export function createRealtimeVoiceBilling(deps: {
         WORKSPACE_CREDITS_DISABLED_VOICE_MESSAGE,
       );
     }
-    const balance = await getSpendableCreditBalance(deps.db, input.accountId, VOICE_CREDIT_USAGE);
+    // API callers spend credits only, as their debit will.
+    const origin = chargeBillingOrigin(
+      input.attribution.kind === "unknown" ? undefined : input.attribution.billingOrigin,
+    );
+    const balance = await getSpendableCreditBalance(
+      deps.db,
+      input.accountId,
+      VOICE_CREDIT_USAGE,
+      undefined,
+      undefined,
+      origin,
+    );
     if (balance.balanceMicros <= 0) {
       return new TranscriptionBillingRefusedError({
         code: "insufficient_credits",
-        message: voiceInsufficientCreditsMessage("Live voice", voiceCreditStanding(balance)),
+        message:
+          origin === "api"
+            ? API_CREDITS_REQUIRED_MESSAGE
+            : voiceInsufficientCreditsMessage("Live voice", voiceCreditStanding(balance)),
       });
     }
     const allowance = await checkWorkspaceAllowance(deps.db, {

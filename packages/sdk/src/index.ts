@@ -1135,6 +1135,7 @@ export type {
   NativePushDevice,
   NativePushRule,
   AgentCall,
+  AgentCallHostPhones,
   AgentCallState,
   InboxItem,
   InboxItemChoice,
@@ -1776,6 +1777,9 @@ export type {
   FeedbackSubmissionResponse,
   FeedbackContext,
   FeedbackRecentError,
+  FeedbackRecentRequest,
+  FeedbackRecentException,
+  FeedbackBreadcrumb,
   FeedbackScreenshot,
   FeedbackScreenshotUpload,
 } from "./feedback";

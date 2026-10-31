@@ -378,6 +378,33 @@ describe("stated membership", () => {
     );
   });
 
+  test("a custom policy key names the canonical permission for a stated deprecated alias", async () => {
+    const org = await organization([...KEY, "secrets:list", "secrets:use"], { custom: true });
+    const member = crypto.randomUUID();
+    const deprecated = await errorOf(
+      org.service
+        .asUser(member, {
+          source: "product",
+          membership: { permissions: [...CHAT, "variable-sets:use"] },
+        })
+        .getWorkspace(org.workspace.id),
+    );
+    expect(deprecated).toEqual({
+      status: 403,
+      message: "variable-sets:use is a deprecated permission name; state secrets:use instead",
+    });
+    expect(
+      (
+        await org.service
+          .asUser(member, {
+            source: "product",
+            membership: { permissions: [...CHAT, "secrets:use"] },
+          })
+          .getWorkspace(org.workspace.id)
+      ).id,
+    ).toBe(org.workspace.id);
+  });
+
   test("a key that cannot manage members cannot state a membership", async () => {
     const org = await organization([...CHAT]);
     const response = await org.request(crypto.randomUUID(), [...CHAT]);

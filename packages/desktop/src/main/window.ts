@@ -23,6 +23,7 @@ import { routeNewWindow, routePopupNavigation } from "./popup-routing";
 import { MainFrameLoad } from "./reachability";
 import { systemAudioUsable } from "./system-audio";
 import { grantsPermissionCheck, grantsPermissionRequest } from "./web-permissions";
+import { MAC_TRAFFIC_LIGHT_POSITION, WINDOW_BAR_HEIGHT } from "./window-bar";
 import { MIN_SIZE, placeWindow, type Placement, type SavedWindow } from "./window-placement";
 
 export interface AccountTarget {
@@ -52,15 +53,6 @@ export interface WindowEvents {
    */
   microphoneAllowed?(): boolean;
 }
-
-/**
- * The height of the bar across the top of the window that holds the window
- * controls (the web app draws it, in the app's colour). On macOS the traffic
- * lights, and the wider sharing badge macOS swaps in while the window is
- * shared or recorded, are centred on it; on Windows the caption buttons fill
- * it.
- */
-const WINDOW_BAR_HEIGHT = 44;
 
 /**
  * Windows' own minimize, maximize and close buttons, drawn over the page's
@@ -139,8 +131,7 @@ export class MainWindow {
       ...(mac
         ? {
             titleBarStyle: "hiddenInset" as const,
-            // Centred on the window bar (the buttons are about 14px tall).
-            trafficLightPosition: { x: 18, y: (WINDOW_BAR_HEIGHT - 14) / 2 },
+            trafficLightPosition: MAC_TRAFFIC_LIGHT_POSITION,
             vibrancy: "sidebar" as const,
             visualEffectState: "followWindow" as const,
           }
@@ -359,6 +350,9 @@ export class MainWindow {
           `--opengeni-origin=${new URL(target.baseUrl).origin}`,
           `--opengeni-product=${this.config.productName}`,
           `--opengeni-app-version=${app.getVersion()}`,
+          ...(process.platform === "darwin"
+            ? [`--opengeni-window-bar-height=${WINDOW_BAR_HEIGHT}`]
+            : []),
           ...(systemAudioUsable(this.config.systemAudioHelperPath)
             ? ["--opengeni-system-audio"]
             : []),

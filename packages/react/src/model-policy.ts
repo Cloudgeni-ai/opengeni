@@ -286,6 +286,8 @@ function workspaceProviderPayerSummary(t: OpenGeniText, model: ClientModel): str
     return t("modelPolicy.billedToTheWorkspaceAnthropic");
   if (model.provider === "workspace-claude-subscription")
     return t("modelPolicy.usesTheWorkspaceClaudeSubscription");
+  if (model.provider === "claude-subscription")
+    return t("modelPolicy.usesTheConnectedClaudeSubscription");
   if (model.provider === "workspace-openrouter") {
     return t("modelPolicy.billedToTheWorkspaceOpenrouter");
   }
@@ -301,7 +303,10 @@ function workspaceProviderPayerSummary(t: OpenGeniText, model: ClientModel): str
 function organizationProviderPayerSummary(t: OpenGeniText, model: ClientModel): string {
   if (model.provider === "organization-anthropic")
     return t("modelPolicy.billedToTheOrganizationAnthropic");
-  if (model.provider === "organization-claude-subscription")
+  if (
+    model.provider === "organization-claude-subscription" ||
+    model.provider === "claude-subscription"
+  )
     return t("modelPolicy.usesTheConnectedClaudeSubscription");
   if (model.provider === "organization-openrouter") {
     return t("modelPolicy.billedToTheOrganizationOpenrouter");
