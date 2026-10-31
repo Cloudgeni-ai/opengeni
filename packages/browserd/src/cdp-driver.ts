@@ -9171,8 +9171,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * Row actions and toolbar buttons are often hidden and pointer-transparent
    * until the pointer is over their row or card (CSS :hover). The hit test
    * then lands on the target's own ancestor. A person moves the pointer onto
-   * the spot first, so do the same and test again. The move is real input, so
-   * a refusal after it is an unknown outcome. Returns the action point; null
+   * the spot first, so do the same and test again. The frame applies the
+   * hover only once the move reaches it, which for a frame rendered in its
+   * own process comes after the move's command has returned, and a row that
+   * waits for the pointer to rest applies it later still; so the hit is
+   * tested again on the frame's next drawn frames until it lands, for as
+   * long as the page is watched for a reaction. The move is real input, so a
+   * refusal after it is an unknown outcome. Returns the action point; null
    * when the target is not hover-revealed; or, when it stays unreachable,
    * null, or `unreactedSince`, the effect count from before the move, when
    * the page provably did not react to it (see watchPageReaction).
@@ -9195,12 +9200,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const watch = await this.watchPageReaction(state);
     const effectsBeforeMove = state.actionEffectCount;
     try {
+      const movedAt = performance.now();
       await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
         type: "mouseMoved",
         x: point.x,
         y: point.y,
       });
-      if (await this.hitsAtCenter(state, backendDOMNodeId))
+      const remainingMs = Math.max(0, PAGE_REACTION_WINDOW_MS - (performance.now() - movedAt));
+      if (
+        (await this.callOnNode(
+          state,
+          backendDOMNodeId,
+          HOVER_HIT_TEST_FUNCTION,
+          [{ value: remainingMs }],
+          { isolatedFrameId: frameId },
+        )) === true
+      )
         return await this.centerPoint(state, backendDOMNodeId);
       return watch && (await watch.unchanged()) ? { unreactedSince: effectsBeforeMove } : null;
     } finally {
@@ -12390,6 +12405,33 @@ const HIT_TEST_FUNCTION = `function() {
   ${HIT_HELPERS}
   const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
   return Boolean(hit && owns(element, hit));
+}`;
+
+/** The hit test after a hover's move (see revealByHover): true as soon as
+ * the target's centre reaches it; false once the frame has drawn two frames
+ * and `windowMs` has passed without it. A frame that does not draw (a hidden
+ * tab, or an engine without animation frames) is tested every 50 ms. Runs
+ * in an isolated world, so the page's own timers cannot hold it. */
+const HOVER_HIT_TEST_FUNCTION = `async function(windowMs) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element)) return false;
+  ${HIT_HELPERS}
+  const hits = () => {
+    if (!element.isConnected) return false;
+    const rect = element.getBoundingClientRect();
+    const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return Boolean(hit && owns(element, hit));
+  };
+  const deadline = performance.now() + windowMs;
+  const draws = typeof requestAnimationFrame === "function" && document.visibilityState !== "hidden";
+  for (let frames = 0; ; frames += 1) {
+    if (hits()) return true;
+    if (!element.isConnected || ((frames >= 2 || !draws) && performance.now() >= deadline)) return false;
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+      if (draws) requestAnimationFrame(() => setTimeout(resolve, 0));
+    });
+  }
 }`;
 
 // Describes an element by its nearest labelled ancestor: role (or tag) and
