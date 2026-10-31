@@ -1,14 +1,30 @@
 import type {
+  ApiIntegrationAuthPreview,
+  ApiIntegrationPreview,
   CreateOrganizationConnectorRequest,
+  IntegrationSourceInput,
+  OrganizationApiKeyPlacement,
   OrganizationConnector,
   OrganizationConnectorAvailability,
   OrganizationConnectorLogin,
+  PreviewOrganizationApiIntegrationRequest,
   UpdateOrganizationConnectorRequest,
 } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { PlugIcon, TrashIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
+import {
+  ApiKeyFields,
+  apiKeyDestination,
+  apiKeyPlacements,
+  EMPTY_API_KEY,
+  type ApiKeyValues,
+} from "@/components/capabilities/api-key-fields";
+import {
+  customApiAuthenticationMayBeRequired,
+  normalizeCustomApiUrl,
+} from "@/components/capabilities/custom-api-flow";
 import { useOrganizationWorkspaces } from "@/components/models/connect-audience";
 import type { ConnectorLocation } from "@/lib/organization-route";
 import {
@@ -21,6 +37,7 @@ import { capabilityLogoSource } from "@opengeni/react/app/components/capabilitie
 import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import { userErrorText } from "@opengeni/react/ui/api-error";
+import { errorMessage } from "@opengeni/contracts/values";
 import { Button } from "@opengeni/react/ui/button";
 import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
 import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
@@ -42,8 +59,9 @@ import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
 
 /* ----------------------------------------------------------------------------
    Organization connectors (Organization settings > Integrations). An owner or
-   admin adds an MCP connector once and chooses which workspaces get it,
-   instead of every workspace setting it up:
+   admin adds a connector (an MCP server, or an OpenAPI or GraphQL API) once
+   and chooses which workspaces get it, instead of every workspace setting it
+   up:
 
      Connectors                                         [Add connector]
      [logo] Linear       Each person signs in · All workspaces + Personal
@@ -52,7 +70,8 @@ import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
    A connector's page says how people sign in and where it works, turns it
    off everywhere at once, replaces its organization key and removes it. A
    workspace can still turn it off for itself, and its own setup of the same
-   connector wins there; both happen on that workspace's Connectors page.
+   connector wins there; both happen on that workspace's Connectors page (an
+   API shows under its Custom APIs).
    -------------------------------------------------------------------------- */
 
 type Client = OpenGeniBrowserClient;
@@ -98,6 +117,16 @@ function hostOf(url: string): string {
   } catch {
     return url;
   }
+}
+
+function protocolLabel(protocol: "openapi" | "graphql"): string {
+  return protocol === "graphql" ? "GraphQL" : "OpenAPI";
+}
+
+/** "OpenAPI · 12 tools · api.example.com" */
+export function apiPreviewSummary(preview: ApiIntegrationPreview): string {
+  const tools = preview.tools.filter((tool) => !tool.deprecated).length;
+  return `${protocolLabel(preview.protocol)} · ${tools} ${tools === 1 ? "tool" : "tools"} · ${hostOf(preview.baseUrl)}`;
 }
 
 /** The organization's connectors, read once and kept current by this page's own changes. */
@@ -212,6 +241,9 @@ export function OrganizationConnectors({
         existing={state.connectors}
         workspaces={workspaces}
         onClose={toList}
+        onPreviewApi={(request) =>
+          client.previewOrganizationApiIntegration(organizationId, request)
+        }
         onCreate={async (request) => {
           const created = await client.createOrganizationConnector(organizationId, request);
           state.accept(created);
@@ -269,6 +301,23 @@ export function OrganizationConnectors({
         onClose={toPage}
         onSave={async (availability) => {
           await update({ availability });
+          toPage();
+        }}
+      />
+    );
+
+  if (
+    location.view === "replace-key" &&
+    connector.login === "organization_key" &&
+    connector.apiIntegration
+  )
+    return (
+      <ReplaceApiKeyPage
+        connector={connector}
+        auth={connector.apiIntegration.auth}
+        onClose={toPage}
+        onSave={async (apiKey) => {
+          await update({ apiKey });
           toPage();
         }}
       />
@@ -359,7 +408,13 @@ function ConnectorList({
               key={connector.id}
               leading={<LogoTile name={connector.name} src={logoFor(connector)} />}
               title={connector.name}
-              description={`${CONNECTOR_LOGIN_LABEL[connector.login]} · ${connectorReachSummary(connector.availability)}`}
+              description={[
+                ...(connector.apiIntegration
+                  ? [protocolLabel(connector.apiIntegration.protocol)]
+                  : []),
+                CONNECTOR_LOGIN_LABEL[connector.login],
+                connectorReachSummary(connector.availability),
+              ].join(" · ")}
               status={
                 !connector.available ? (
                   <StatusBadge status="unavailable" variant="outline" />
@@ -409,6 +464,45 @@ export function catalogLoginChoices(item: Pick<CapabilityCatalogItem, "authKind"
       };
     default:
       return { allowed: { each_person: null, organization_key: null, none: null }, initial: null };
+  }
+}
+
+/**
+ * Which sign-in modes an API integration can use, from how the API itself
+ * authenticates, and the one to start with. The server checks the same.
+ */
+export function apiLoginChoices(preview: Pick<ApiIntegrationPreview, "name" | "auth">): {
+  allowed: Record<OrganizationConnectorLogin, string | null>;
+  initial: OrganizationConnectorLogin;
+} {
+  switch (preview.auth.kind) {
+    case "none":
+      return {
+        allowed: {
+          each_person: `${preview.name} has no sign-in of its own.`,
+          organization_key: `${preview.name} needs no key.`,
+          none: null,
+        },
+        initial: "none",
+      };
+    case "oauth2":
+      return {
+        allowed: {
+          each_person: null,
+          organization_key: `${preview.name} signs in with OAuth, so each person connects their own account.`,
+          none: `${preview.name} needs people to sign in.`,
+        },
+        initial: "each_person",
+      };
+    default:
+      return {
+        allowed: {
+          each_person: null,
+          organization_key: null,
+          none: `${preview.name} needs a key.`,
+        },
+        initial: "organization_key",
+      };
   }
 }
 
@@ -525,6 +619,7 @@ function NewConnectorPage({
   existing,
   workspaces,
   onClose,
+  onPreviewApi,
   onCreate,
 }: {
   catalog: Catalog;
@@ -532,15 +627,28 @@ function NewConnectorPage({
   existing: OrganizationConnector[] | null;
   workspaces: Workspaces;
   onClose: () => void;
+  onPreviewApi: (
+    request: PreviewOrganizationApiIntegrationRequest,
+  ) => Promise<ApiIntegrationPreview>;
   onCreate: (request: CreateOrganizationConnectorRequest) => Promise<void>;
 }) {
-  const [source, setSource] = useState<"catalog" | "custom">("catalog");
+  const [source, setSource] = useState<"catalog" | "custom" | "api">("catalog");
   const [search, setSearch] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [endpointUrl, setEndpointUrl] = useState("");
   const [login, setLogin] = useState<OrganizationConnectorLogin | null>(null);
   const [header, setHeader] = useState<Header>({ name: "Authorization", value: "" });
+  const [apiUrl, setApiUrl] = useState("");
+  const [checked, setChecked] = useState<{
+    source: IntegrationSourceInput;
+    preview: ApiIntegrationPreview;
+  } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  // Null until an API turns out to need a key just to read it.
+  const [readKey, setReadKey] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState<ApiKeyValues>(EMPTY_API_KEY);
   const [reach, setReach] = useState<WorkspaceReach>({
     workspaceIds: null,
     personalWorkspaces: true,
@@ -556,7 +664,9 @@ function NewConnectorPage({
   const choices =
     source === "catalog" && item
       ? catalogLoginChoices(item)
-      : { allowed: { each_person: null, organization_key: null, none: null }, initial: null };
+      : source === "api" && checked
+        ? apiLoginChoices(checked.preview)
+        : { allowed: { each_person: null, organization_key: null, none: null }, initial: null };
   const query = search.trim().toLowerCase();
   const shown = (catalog ?? []).filter((each) =>
     `${each.name} ${each.description ?? ""}`.toLowerCase().includes(query),
@@ -574,6 +684,46 @@ function NewConnectorPage({
     clear("login");
   };
 
+  const checkApi = async () => {
+    let requested: IntegrationSourceInput;
+    try {
+      requested = { kind: "auto", url: normalizeCustomApiUrl(apiUrl) };
+    } catch (caught) {
+      setErrors((current) => ({ ...current, api: errorMessage(caught) }));
+      return;
+    }
+    setChecking(true);
+    setCheckError(null);
+    clear("api");
+    try {
+      const preview = await onPreviewApi({
+        source: requested,
+        ...(readKey?.trim()
+          ? {
+              apiKey: [
+                {
+                  carrier: "header",
+                  name: "Authorization",
+                  prefix: "Bearer ",
+                  value: readKey.trim(),
+                },
+              ],
+            }
+          : {}),
+      });
+      setChecked({ source: requested, preview });
+      setLogin(apiLoginChoices(preview).initial);
+      setApiKey(EMPTY_API_KEY);
+      clear("login");
+    } catch (caught) {
+      setCheckError(userErrorText(caught));
+      if (readKey === null && customApiAuthenticationMayBeRequired(requested, caught))
+        setReadKey("");
+    } finally {
+      setChecking(false);
+    }
+  };
+
   return (
     <FlushFormPage
       backLabel="Integrations"
@@ -588,14 +738,27 @@ function NewConnectorPage({
         setFormError(null);
         const next: Partial<Record<string, string>> = {};
         if (source === "catalog" && !item) next.connector = "Choose a connector.";
+        if (source === "api" && !checked) next.api = "Check the API first.";
         if (source === "custom") {
           if (!name.trim()) next.name = "Give the server a name.";
           if (!/^https:\/\/\S+$/u.test(endpointUrl.trim()))
             next.endpointUrl = "Enter the server's https:// address.";
         }
-        if (!login) next.login = "Choose how people sign in.";
+        if (source === "api" && !checked) {
+          // How people sign in is chosen once the API is checked.
+        } else if (!login) next.login = "Choose how people sign in.";
         else if (choices.allowed[login]) next.login = choices.allowed[login] ?? undefined;
-        const keyIssue = login === "organization_key" ? headerIssue(header) : undefined;
+        const keyed =
+          login === "organization_key" && source === "api" && checked
+            ? apiKeyPlacements(checked.preview.auth, apiKey)
+            : null;
+        const keyIssue = keyed
+          ? "issue" in keyed
+            ? keyed.issue
+            : undefined
+          : login === "organization_key" && source !== "api"
+            ? headerIssue(header)
+            : undefined;
         if (keyIssue) next.header = keyIssue;
         if (reachIsEmpty(reach)) next.reach = EMPTY_REACH;
         setErrors(next);
@@ -604,11 +767,21 @@ function NewConnectorPage({
           await onCreate({
             ...(source === "catalog" && item
               ? { capabilityId: item.id }
-              : { custom: { name: name.trim(), endpointUrl: endpointUrl.trim() } }),
+              : source === "api" && checked
+                ? {
+                    apiIntegration: {
+                      source: checked.source,
+                      expectedRevisionId: checked.preview.revisionId,
+                      expectedContentSha256: checked.preview.contentSha256,
+                    },
+                  }
+                : { custom: { name: name.trim(), endpointUrl: endpointUrl.trim() } }),
             login,
-            ...(login === "organization_key"
-              ? { headers: { [header.name.trim()]: header.value.trim() } }
-              : {}),
+            ...(keyed && "placements" in keyed
+              ? { apiKey: keyed.placements }
+              : login === "organization_key"
+                ? { headers: { [header.name.trim()]: header.value.trim() } }
+                : {}),
             availability: availabilityOf(reach),
           });
           return true;
@@ -623,11 +796,17 @@ function NewConnectorPage({
           label="Connector"
           value={source}
           onValueChange={(value) => {
-            setSource(value as "catalog" | "custom");
-            setLogin(value === "catalog" && item ? catalogLoginChoices(item).initial : null);
+            const next = value as "catalog" | "custom" | "api";
+            setSource(next);
+            setLogin(
+              next === "catalog" && item
+                ? catalogLoginChoices(item).initial
+                : next === "api" && checked
+                  ? apiLoginChoices(checked.preview).initial
+                  : null,
+            );
             setErrors({});
           }}
-          layout="grid"
         >
           <ChoiceCard
             value="catalog"
@@ -638,6 +817,11 @@ function NewConnectorPage({
             value="custom"
             title="Custom server"
             description="Any remote MCP server, by its address."
+          />
+          <ChoiceCard
+            value="api"
+            title="Custom API"
+            description="Any OpenAPI or GraphQL API, by its address."
           />
         </ChoiceCards>
         {source === "catalog" && item ? (
@@ -719,6 +903,26 @@ function NewConnectorPage({
               </p>
             ) : null}
           </div>
+        ) : source === "api" ? (
+          <ApiSourceFields
+            url={apiUrl}
+            onUrlChange={(next) => {
+              setApiUrl(next);
+              setCheckError(null);
+              clear("api");
+            }}
+            checked={checked?.preview ?? null}
+            checking={checking}
+            checkError={checkError}
+            readKey={readKey}
+            onReadKeyChange={setReadKey}
+            onCheck={() => void checkApi()}
+            onChange={() => {
+              setChecked(null);
+              setLogin(null);
+            }}
+            error={errors.api}
+          />
         ) : (
           <>
             <Field label="Name" error={errors.name}>
@@ -752,38 +956,58 @@ function NewConnectorPage({
             </Field>
           </>
         )}
-        <ChoiceCards
-          label="How people sign in"
-          value={login ?? ""}
-          onValueChange={(value) => {
-            setLogin(value as OrganizationConnectorLogin);
-            clear("login");
-          }}
-          error={errors.login}
-        >
-          <ChoiceCard
-            value="each_person"
-            title="Each person signs in"
-            description="Everyone connects their own account. Nothing is shared."
-            disabled={Boolean(choices.allowed.each_person)}
-            disabledReason={choices.allowed.each_person ?? undefined}
+        {source === "api" && !checked ? null : (
+          <ChoiceCards
+            label="How people sign in"
+            value={login ?? ""}
+            onValueChange={(value) => {
+              setLogin(value as OrganizationConnectorLogin);
+              clear("login");
+            }}
+            error={errors.login}
+          >
+            <ChoiceCard
+              value="each_person"
+              title="Each person signs in"
+              description={
+                source === "api"
+                  ? "Everyone adds their own key or account. Nothing is shared."
+                  : "Everyone connects their own account. Nothing is shared."
+              }
+              disabled={Boolean(choices.allowed.each_person)}
+              disabledReason={choices.allowed.each_person ?? undefined}
+            />
+            <ChoiceCard
+              value="organization_key"
+              title="Organization key"
+              description="One key for everyone. Every chat in the workspaces it reaches uses it."
+              disabled={Boolean(choices.allowed.organization_key)}
+              disabledReason={choices.allowed.organization_key ?? undefined}
+            />
+            <ChoiceCard
+              value="none"
+              title="No sign-in"
+              description={
+                source === "api"
+                  ? "For an API that needs no account or key."
+                  : "For a server that needs no account or key."
+              }
+              disabled={Boolean(choices.allowed.none)}
+              disabledReason={choices.allowed.none ?? undefined}
+            />
+          </ChoiceCards>
+        )}
+        {login === "organization_key" && source === "api" && checked ? (
+          <ApiKeyFields
+            auth={checked.preview.auth}
+            values={apiKey}
+            onChange={(next) => {
+              setApiKey(next);
+              clear("header");
+            }}
+            error={errors.header}
           />
-          <ChoiceCard
-            value="organization_key"
-            title="Organization key"
-            description="One key for everyone. Every chat in the workspaces it reaches uses it."
-            disabled={Boolean(choices.allowed.organization_key)}
-            disabledReason={choices.allowed.organization_key ?? undefined}
-          />
-          <ChoiceCard
-            value="none"
-            title="No sign-in"
-            description="For a server that needs no account or key."
-            disabled={Boolean(choices.allowed.none)}
-            disabledReason={choices.allowed.none ?? undefined}
-          />
-        </ChoiceCards>
-        {login === "organization_key" ? (
+        ) : login === "organization_key" ? (
           <HeaderFields
             header={header}
             onChange={(next) => {
@@ -831,11 +1055,16 @@ function ConnectorPage({
   const [statusPending, setStatusPending] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const on = connector.status === "active";
+  const api = connector.apiIntegration;
   const signIn =
     connector.login === "each_person"
-      ? "Each person connects their own account from a workspace's Connectors page."
+      ? api
+        ? "Each person adds their own key or account, under a workspace's Custom APIs."
+        : "Each person connects their own account from a workspace's Connectors page."
       : connector.login === "organization_key"
-        ? `The organization's key, sent as ${connector.headerNames.join(", ") || "a header"}.`
+        ? api
+          ? `The organization's key. ${apiKeyDestination(api.auth)}`
+          : `The organization's key, sent as ${connector.headerNames.join(", ") || "a header"}.`
         : "Needs no account or key.";
   return (
     <DetailPage
@@ -853,7 +1082,12 @@ function ConnectorPage({
           ) : null
         }
         meta={[
-          connector.source === "catalog" ? "From the catalog" : "Custom server",
+          connector.source === "catalog"
+            ? "From the catalog"
+            : api
+              ? "Custom API"
+              : "Custom server",
+          ...(api ? [protocolLabel(api.protocol)] : []),
           hostOf(connector.endpointUrl),
           `Belongs to ${organizationName}`,
         ]}
@@ -917,24 +1151,16 @@ function ConnectorPage({
                 ) : undefined
               }
             />
-            {connector.allowedTools ? (
-              <SettingRow
-                label="Tools"
-                description={
-                  connector.allowedTools.length === 0
-                    ? "No tools are on."
-                    : `Only ${connector.allowedTools.join(", ")}.`
-                }
-              />
+            {connector.allowedTools || api ? (
+              <SettingRow label="Tools" description={connectorToolsSummary(connector)} />
             ) : null}
           </SettingRowGroup>
         </DetailSection>
         <DetailSection title="In each workspace">
           <p className="m-0 max-w-prose text-sm leading-5 text-fg-muted">
-            It shows on each workspace's Connectors page as added by your organization. A workspace
-            admin can turn it off there, and a workspace that sets up the same connector itself uses
-            its own setup instead. To change how people sign in, remove the connector and add it
-            again.
+            {api
+              ? "It shows under each workspace's Custom APIs as added by your organization. A workspace admin can turn it off there, and a workspace that sets up the same API itself uses its own setup instead. To change how people sign in, remove it and add it again."
+              : "It shows on each workspace's Connectors page as added by your organization. A workspace admin can turn it off there, and a workspace that sets up the same connector itself uses its own setup instead. To change how people sign in, remove the connector and add it again."}
           </p>
         </DetailSection>
       </DetailPageBody>
@@ -945,7 +1171,11 @@ function ConnectorPage({
         consequences={[
           "Every workspace stops getting it at once.",
           ...(connector.login === "each_person"
-            ? ["People's own sign-ins stay, and work again if it's added back."]
+            ? [
+                api
+                  ? "People's own keys and accounts stay, and work again if it's added back."
+                  : "People's own sign-ins stay, and work again if it's added back.",
+              ]
             : connector.login === "organization_key"
               ? ["The stored organization key is deleted."]
               : []),
@@ -1068,6 +1298,177 @@ function ReplaceKeyPage({
           header={header}
           onChange={(next) => {
             setHeader(next);
+            setError(undefined);
+          }}
+          error={error}
+        />
+      </FieldStack>
+    </FlushFormPage>
+  );
+}
+
+/** "Only list_entries.", "All 12 tools." */
+export function connectorToolsSummary(
+  connector: Pick<OrganizationConnector, "allowedTools" | "apiIntegration">,
+): string {
+  if (connector.allowedTools)
+    return connector.allowedTools.length === 0
+      ? "No tools are on."
+      : `Only ${connector.allowedTools.join(", ")}.`;
+  const tools = connector.apiIntegration?.tools ?? [];
+  if (tools.length === 1) return `Its one tool, ${tools[0]!.name}.`;
+  return `All ${tools.length} tools.`;
+}
+
+/** The address of an API to add, then what reading it found. */
+function ApiSourceFields({
+  url,
+  onUrlChange,
+  checked,
+  checking,
+  checkError,
+  readKey,
+  onReadKeyChange,
+  onCheck,
+  onChange,
+  error,
+}: {
+  url: string;
+  onUrlChange: (next: string) => void;
+  checked: ApiIntegrationPreview | null;
+  checking: boolean;
+  checkError: string | null;
+  /** Null until the API turns out to need a key just to read it. */
+  readKey: string | null;
+  onReadKeyChange: (next: string) => void;
+  onCheck: () => void;
+  onChange: () => void;
+  error?: string | undefined;
+}) {
+  if (checked)
+    return (
+      <div className="flex min-w-0 flex-col gap-2">
+        <span className="text-sm leading-5 font-medium text-fg">API</span>
+        <RowList label="Checked API" flush>
+          <ListRow
+            leading={<LogoTile name={checked.name} src={null} />}
+            title={checked.name}
+            description={apiPreviewSummary(checked)}
+            control={<RowButton onClick={onChange}>Change</RowButton>}
+          />
+        </RowList>
+        {checked.warnings.length > 0 ? (
+          <Notice tone="waiting" title="Worth knowing before you add it">
+            {checked.warnings.join(" ")}
+          </Notice>
+        ) : null}
+      </div>
+    );
+  return (
+    <div className="flex min-w-0 flex-col gap-3">
+      <Field
+        label="API address"
+        hint="An OpenAPI document or GraphQL endpoint. It's read to list its tools before anything is added."
+        error={error}
+      >
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+          <TextInput
+            value={url}
+            onChange={(event) => onUrlChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                if (!checking) onCheck();
+              }
+            }}
+            placeholder="https://api.example.com/openapi.json"
+            inputMode="url"
+            mono
+            suppressAutofill
+            className="min-w-0 sm:flex-1"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onCheck}
+            disabled={checking || !url.trim()}
+            className="shrink-0 pointer-coarse:h-11"
+          >
+            {checking ? "Checking…" : "Check API"}
+          </Button>
+        </div>
+      </Field>
+      {checkError ? (
+        <ErrorMessage variant="inline" title="Couldn't read this API." announce>
+          {checkError}
+        </ErrorMessage>
+      ) : null}
+      {readKey !== null ? (
+        <Field
+          label="Key to read it"
+          optional
+          hint="Some APIs need a key even to say what they do. It's used only to read it now and isn't stored."
+        >
+          <TextInput
+            type="password"
+            value={readKey}
+            onChange={(event) => onReadKeyChange(event.target.value)}
+            placeholder="Bearer token"
+            autoComplete="off"
+            suppressAutofill
+          />
+        </Field>
+      ) : null}
+    </div>
+  );
+}
+
+function ReplaceApiKeyPage({
+  connector,
+  auth,
+  onClose,
+  onSave,
+}: {
+  connector: OrganizationConnector;
+  auth: ApiIntegrationAuthPreview;
+  onClose: () => void;
+  onSave: (apiKey: OrganizationApiKeyPlacement[]) => Promise<void>;
+}) {
+  const [values, setValues] = useState<ApiKeyValues>(EMPTY_API_KEY);
+  const [error, setError] = useState<string | undefined>();
+  const [formError, setFormError] = useState<ReactNode>(null);
+  return (
+    <FlushFormPage
+      backLabel={connector.name}
+      onClose={onClose}
+      title="Replace key"
+      description={`The new key replaces the stored one for ${connector.name}. Every workspace it reaches uses it from the next request.`}
+      submitLabel="Replace key"
+      pendingLabel="Replacing…"
+      error={formError}
+      onSubmit={async (event) => {
+        event.preventDefault();
+        setFormError(null);
+        const keyed = apiKeyPlacements(auth, values);
+        if ("issue" in keyed) {
+          setError(keyed.issue);
+          return false;
+        }
+        try {
+          await onSave(keyed.placements);
+          return true;
+        } catch (caught) {
+          setFormError(userErrorText(caught));
+          return false;
+        }
+      }}
+    >
+      <FieldStack>
+        <ApiKeyFields
+          auth={auth}
+          values={values}
+          onChange={(next) => {
+            setValues(next);
             setError(undefined);
           }}
           error={error}

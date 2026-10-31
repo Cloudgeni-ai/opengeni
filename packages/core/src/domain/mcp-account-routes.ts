@@ -158,8 +158,14 @@ export function expandApiIntegrationAccountRoutes(input: {
   tools: readonly ToolRef[];
 }): ApiIntegrationRuntime[] {
   const selected = new Set(input.tools.map((tool) => tool.id));
+  // An organization's "each person signs in" integration is a per-person
+  // selector with no account of its own: it runs only through an accepted
+  // account route below, never as it is.
   if (input.bindings == null)
-    return input.integrations.filter((item) => selected.has(item.serverId));
+    return input.integrations.filter(
+      (item) =>
+        selected.has(item.serverId) && (!item.connectionRef || !!item.connectionRef.connectionId),
+    );
   const acceptedBindings = input.bindings;
   return input.integrations.flatMap((integration) => {
     const bindings = acceptedBindings.filter(
