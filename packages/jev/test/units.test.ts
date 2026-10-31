@@ -197,6 +197,7 @@ describe("config", () => {
       leadsNotFollowed: 8,
       minTrimLines: 15,
       filePenalty: 0.1,
+      filePenaltyFree: 1,
       maxPassageChars: 3200,
       changelogPrior: 0.5,
       docPrior: 0.85,
