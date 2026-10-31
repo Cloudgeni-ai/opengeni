@@ -2351,13 +2351,30 @@ function markRepeatedMachineRequests(items: TimelineItem[]): void {
  * as `turn0search3`, then U+E201. It also reaches the timeline without its
  * delimiters (`citeturn0search3turn1view0`, when a model writes it as plain
  * text), cut short, or still streaming at the end of the text.
+ *
+ * Claude can likewise write web search citations into its prose as literal
+ * `<cite index="3-5">quoted claim</cite>` tags (result 3, sentence 5), which
+ * Markdown shows as raw tags. The cited words stay; only the tags go, also
+ * while the closing tag has not streamed in yet. The sources remain visible
+ * as the turn's web search items.
  */
 export function stripOpaqueCitationTokens(text: string): string {
-  return text
+  return stripClaudeCitationTags(text)
     .replace(PROVIDER_CITATION_HANDLE, "")
     .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
     .replace(PROVIDER_CITATION_DELIMITER, "")
     .replace(BARE_PROVIDER_CITATION_HANDLE, "");
+}
+
+function stripClaudeCitationTags(text: string): string {
+  // Only text that holds a citation opening tag loses any `</cite>`.
+  if (!text.includes("<cite")) return text;
+  const stripped = text.replace(UNFINISHED_CLAUDE_CITATION_OPEN, "");
+  if (!CLAUDE_CITATION_OPEN_PROBE.test(stripped)) return stripped;
+  return stripped
+    .replace(CLAUDE_CITATION_SPAN, "$1")
+    .replace(CLAUDE_CITATION_OPEN, "")
+    .replace(UNFINISHED_CLAUDE_CITATION_CLOSE, "");
 }
 
 const PROVIDER_CITATION_HANDLE =
@@ -2367,6 +2384,16 @@ const UNFINISHED_PROVIDER_CITATION_HANDLE = /\s*\u{E200}[^\u{E201}\s]*$/u;
 const PROVIDER_CITATION_DELIMITER = /[\u{E200}-\u{E202}]/gu;
 /** `cite` or `filecite` glued to one or more references, which no prose writes. */
 const BARE_PROVIDER_CITATION_HANDLE = /[ \t]*(?:file)?cite(?:turn\d+[a-z_]+\d+)+/gu;
+/** Claude's opening tag: `index` is one or more `result-sentence` references or ranges. */
+const CLAUDE_CITATION_OPEN_SOURCE = String.raw`<cite index="\d+-\d+(?::\d+)?(?:,\s*\d+-\d+(?::\d+)?)*">`;
+const CLAUDE_CITATION_OPEN_PROBE = new RegExp(CLAUDE_CITATION_OPEN_SOURCE, "u");
+const CLAUDE_CITATION_OPEN = new RegExp(CLAUDE_CITATION_OPEN_SOURCE, "gu");
+const CLAUDE_CITATION_SPAN = new RegExp(`${CLAUDE_CITATION_OPEN_SOURCE}([\\s\\S]*?)</cite>`, "gu");
+/** An opening tag still streaming at the end of the text. */
+const UNFINISHED_CLAUDE_CITATION_OPEN =
+  /<cite(?: (?:i(?:n(?:d(?:e(?:x(?:="[\d:,\s-]*)?)?)?)?)?)?)?$/u;
+/** A closing tag still streaming at the end, after a citation opened. */
+const UNFINISHED_CLAUDE_CITATION_CLOSE = /<\/(?:c(?:i(?:t(?:e)?)?)?)?$/u;
 
 /**
  * The turn summary's short outcome for a usage ceiling. The adjacent notice row

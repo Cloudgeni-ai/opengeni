@@ -2178,6 +2178,59 @@ describe("buildTimeline", () => {
     expect((items[0] as AgentMessageItem).text).toBe(text);
   });
 
+  test.each([
+    [
+      "Claude citation tags around quoted claims",
+      'Phone calls: <cite index="3-5">everyone hears an announcement</cite>, and <cite index="3-13">it saves to Notes</cite>.',
+      "Phone calls: everyone hears an announcement, and it saves to Notes.",
+    ],
+    [
+      "a tag citing several sentences and a range",
+      'Only <cite index="12-4, 13-10">media audio</cite> and <cite index="1-2:4">no calls</cite>.',
+      "Only media audio and no calls.",
+    ],
+    [
+      "a citation that spans lines",
+      '<cite index="24-2">first line\nsecond line</cite> done',
+      "first line\nsecond line done",
+    ],
+    [
+      "a citation whose closing tag is still streaming",
+      'It works <cite index="9-17">without screen recording</ci',
+      "It works without screen recording",
+    ],
+    ["an opening tag still streaming", 'It works <cite index="9-', "It works "],
+  ] as const)("shows %s as plain words", (_label, text, visible) => {
+    reset();
+    const items = buildTimeline(englishText, [event("agent.message.completed", { text })]);
+
+    expect((items[0] as AgentMessageItem).text).toBe(visible);
+  });
+
+  test("keeps cite elements that are not Claude citations", () => {
+    reset();
+    const text =
+      'Wrap titles in <cite>Dune</cite>; <cite index="first">x</cite> is not a citation.';
+    const items = buildTimeline(englishText, [event("agent.message.completed", { text })]);
+
+    expect((items[0] as AgentMessageItem).text).toBe(text);
+  });
+
+  test("a final answer with Claude citation tags is shown without them", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("agent.message.completed", {
+        text: 'Twilio says <cite index="24-2">no voice numbers here</cite>.',
+      }),
+      event("turn.completed", {
+        output: 'Twilio says <cite index="24-2">no voice numbers here</cite>.',
+      }),
+    ]);
+
+    const messages = items.filter((item) => item.kind === "agent-message") as AgentMessageItem[];
+    expect(messages.map((item) => item.text)).toEqual(["Twilio says no voice numbers here."]);
+  });
+
   test("session_create becomes a worker item with prompt and spawned session id from MCP output", () => {
     reset();
     const workerId = "0b3ba745-1111-4222-8333-9c76ad9e0000";
