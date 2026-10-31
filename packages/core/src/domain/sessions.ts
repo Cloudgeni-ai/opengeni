@@ -1389,10 +1389,10 @@ export async function createAndStartSessionWithOutcome(input: {
           allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
           subjectId: input.subjectId ?? null,
           ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
-        }).catch((error: unknown) => {
-          throw repositoryRemovedHttpError(error);
         }),
-    );
+    ).catch((error: unknown) => {
+      throw repositoryRemovedHttpError(error);
+    });
     if (keyedResult.denied) {
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(keyedResult.denial));
     }
