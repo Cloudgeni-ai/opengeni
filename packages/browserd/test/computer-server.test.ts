@@ -987,6 +987,12 @@ async function withServer(
       throw new Error("browser driver must not be used by computer routes");
     },
   });
+  // open() starts these sweeps without joining them. A fresh, empty fixture
+  // must settle its startup work before runtimeEmpty() can report it empty.
+  await Promise.all([
+    browserSupervisor.releaseDetachedBrowsers(),
+    browserSupervisor.releaseAttachedLeftovers(),
+  ]);
   let driver: FixtureComputerDriver | null = null;
   const computerSupervisor = await ComputerSupervisor.open({
     rootDirectory: join(directory, "computer-state"),
