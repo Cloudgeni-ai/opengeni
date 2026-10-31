@@ -735,3 +735,110 @@ describe("repository catalog reconciliation across GitHub accounts", () => {
     expect(next?.selectedRepoRefs[77]).toBe("main");
   });
 });
+
+describe("a personal-only repository in a retained new-session draft", () => {
+  // Staging: grocery-bot and test-repo-5 through the App, opengeni-identity-test
+  // only through the person's GitHub. After Send the next draft keeps all three.
+  const identityTest = {
+    repositoryId: "1093247711",
+    fullName: "Cloudgeni-ai/opengeni-identity-test",
+    canonicalUrl: "https://github.com/Cloudgeni-ai/opengeni-identity-test",
+    defaultBranch: "main",
+    visibility: "private",
+    private: true,
+    archived: false,
+    disabled: false,
+    permissions: { pull: true, push: true, admin: false, maintain: false, triage: false },
+    selectedAccess: "write",
+  } satisfies PersonalGitHubRepositoryCatalogItem;
+  const selectedIds = new Set([identityTest.repositoryId]);
+  const selectedRefs = { [identityTest.repositoryId]: "main" };
+  const personalResource = () =>
+    buildResources(
+      [],
+      [],
+      new Set(),
+      {},
+      [identityTest],
+      selectedIds,
+      selectedRefs,
+      personalBindingId,
+    )[0]!;
+
+  test("comes back as the As-you selection, never as a manual URL", () => {
+    // The shape the server seeds into the next draft after a create.
+    const seeded: ResourceRef = {
+      kind: "repository",
+      uri: identityTest.canonicalUrl,
+      ref: "main",
+      mountPath: "repos/github.com/Cloudgeni-ai/opengeni-identity-test",
+      provider: "github",
+      connectionType: "github_personal",
+      credentialBindingId: personalBindingId,
+      repositoryId: identityTest.repositoryId,
+      access: "write",
+    };
+    expect(personalResource()).toEqual(seeded);
+    const restored = repositorySelectionFromResources(
+      rehydrateRepositoryResources([savedDraftResources[0]!, seeded], [benchmarks], {
+        catalogReady: true,
+        personalRepositories: [identityTest],
+        personalCatalogReady: true,
+      }),
+      [benchmarks],
+    );
+    expect(restored.manualRepos).toEqual([]);
+    expect([...restored.selectedRepoIds]).toEqual([benchmarks.id]);
+    expect([...restored.selectedPersonalRepoIds]).toEqual([identityTest.repositoryId]);
+    expect(restored.selectedPersonalRepoRefs).toEqual(selectedRefs);
+  });
+
+  test("a bare row left by an older draft folds into the As-you selection", async () => {
+    let resources: ResourceRef[] = [];
+    let error: string | null = null;
+    const rendered = await renderComponent(
+      createElement(ComposerRepositories, {
+        catalogReady: true,
+        repositories: [benchmarks],
+        initialManualRepos: [
+          { id: 1, url: identityTest.canonicalUrl, ref: "main", attached: true },
+        ],
+        initialSelectedRepoIds: new Set([benchmarks.id]),
+        initialSelectedRepoRefs: { [benchmarks.id]: "main" },
+        personalRepositories: [identityTest],
+        selectedPersonalRepoIds: selectedIds,
+        selectedPersonalRepoRefs: selectedRefs,
+        onResources: (next) => {
+          resources = next;
+        },
+        onResourceError: (next) => {
+          error = next;
+        },
+      }),
+    );
+    await flush();
+
+    // No "Duplicate repository mount path" and one attachment per repository.
+    expect(error).toBeNull();
+    expect(resources).toEqual([savedDraftResources[0]!, personalResource()]);
+    await rendered.unmount();
+  });
+
+  test("a bare row at another ref stays next to the As-you selection", () => {
+    const next = reconcileManualRepositoriesWithCatalog(
+      {
+        manualRepos: [{ id: 1, url: identityTest.canonicalUrl, ref: "release", attached: true }],
+        selectedRepoIds: new Set(),
+        selectedRepoRefs: {},
+      },
+      [benchmarks],
+      true,
+      {
+        repositories: [identityTest],
+        selectedRepoIds: selectedIds,
+        selectedRepoRefs: selectedRefs,
+      },
+    );
+    expect(next).toBeNull();
+  });
+});
