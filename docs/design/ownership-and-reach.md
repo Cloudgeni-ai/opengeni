@@ -92,7 +92,7 @@ stop deciding ownership questions one at a time.
   or admin adds a catalog connector or a custom MCP server URL, with the
   common "Who can use this?" setting: all or selected shared workspaces, plus
   a Personal workspaces switch that starts off. The organization integration
-  policy still applies, when it is added and whenever it is served.
+  policy still applies when it is added, as for a workspace's own setup.
 - **Logins.** One of two. *Each person signs in*: nothing is shared; each
   person's own login works where they turned it on (rule 5), and the first
   use in another reached workspace asks once. *Organization key*: request
