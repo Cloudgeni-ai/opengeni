@@ -1895,8 +1895,12 @@ fleet. Tokens minted before 0696 carry no `jti` and stay multi-use until they
 expire an hour later. Expired redemptions are pruned per workspace during later
 exchanges.
 
-`scope` chooses who can use the machine: `"workspace"` (the default, shared with
-the workspace) or `"user"` (only the person who minted the token). A personal
+`scope` chooses who can use the machine: `"workspace"` (shared with the
+workspace) or `"user"` (only the person who minted the token). Omitted, it is
+`"workspace"` for callers that may connect workspace machines
+(`enrollments:manage`), keys and services, and `"user"` for a signed-in
+teammate without `enrollments:manage`, who can only connect their own machine.
+A personal
 token can be minted only for a verified person: a signed-in human session, or a
 credential acting as that person (a personal API key, or an organization key or
 organization MCP client acting as them), the same canonical-actor rule as
@@ -1925,7 +1929,7 @@ is **secret**: anyone holding it can connect one machine until it expires.
 const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
   workspaceId,
   {
-    scope: "user", // only me; "workspace" (the default) shares it
+    scope: "user", // only me; "workspace" shares it with the workspace
     allowScreenControl: false, // bake screen-control consent into the token
   },
 );

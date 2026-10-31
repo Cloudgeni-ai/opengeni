@@ -13,6 +13,12 @@ export * from "./session-target";
 export * from "./turn-serving-policy";
 import { AzureOpenAIEndpoint } from "./direct-model-provider";
 import { modelLogoUrl } from "./model-display";
+import {
+  isClaudeSubscriptionProviderId,
+  LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  modelIdListIncludes,
+} from "./claude-subscription-model-ids";
 import { CustomMcpSetupRequest } from "./prepared-mcp-setup";
 import {
   ClaudeProviderAccountAuthoritySnapshotV1,
@@ -3062,7 +3068,8 @@ export type WorkspaceRealtimeVoicePatch = z.infer<typeof WorkspaceRealtimeVoiceP
 /**
  * Model defaults an organization owner or admin sets once for every workspace
  * in the organization. Each workspace follows them until it sets its own
- * value; a workspace value always wins, field by field and model by model.
+ * value; a workspace value always wins, field by field and model by model,
+ * except the allowlists: those are a ceiling a workspace can only narrow.
  * Subscriptions and keys are not defaults: they stay organization resources
  * that are shared with workspaces.
  */
@@ -3070,9 +3077,15 @@ export const OrganizationModelDefaults = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /** Model and reasoning for new chats and schedules; null leaves it automatic. */
     sessionDefaults: WorkspaceSessionDefaults.nullable(),
-    /** Provider allowlist for workspaces without their own policy; null allows every provider. */
+    /**
+     * Provider allowlist for every workspace; a workspace's own policy can
+     * only narrow it. Null allows every provider.
+     */
     allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable(),
-    /** Exact model allowlist for workspaces without their own policy; null allows every model. */
+    /**
+     * Exact model allowlist for every workspace; a workspace's own policy can
+     * only narrow it. Null allows every model.
+     */
     allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable(),
     /** Automatic compaction trigger by exact model id. */
     modelCompactionThresholds: z.record(z.string().min(1).max(512), ModelCompactionTokenThreshold),
@@ -3534,10 +3547,12 @@ export const UpdateWorkspaceModelPolicyRequest = /* @__PURE__ */ defineSchema(()
 export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceModelPolicyRequest>;
 
 /**
- * The model policy a workspace runs with (`allowedProviders`/`allowedModels`)
- * and where it comes from: its own saved policy, the organization's default it
- * follows, or no restriction at all. `organization` is what the workspace would
- * follow after removing its own policy.
+ * A workspace's model allowlists (`allowedProviders`/`allowedModels`) and
+ * where they come from: its own saved policy, the organization's list it uses
+ * as is, or no restriction at all. `organization` is the organization's list,
+ * a ceiling for every workspace: a workspace's own policy only narrows it, so
+ * a model runs only when both allow it. The workspace's catalog reports the
+ * combined verdict per model (`policyAllowed`, `organizationAllowed`).
  */
 export const WorkspaceModelPolicyResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -21336,7 +21351,8 @@ export type DeviceEnrollmentDenyResponse = z.infer<typeof DeviceEnrollmentDenyRe
 // person: someone signed in, or a credential acting as them (a personal API
 // key, or an organization key or organization MCP client acting as that
 // person). A key, service or agent acting as itself gets 422. Omitted keeps the
-// original workspace-shared token for existing integrations.
+// original workspace-shared token for existing integrations, except that a
+// signed-in teammate without enrollments:manage gets their own (`user`) token.
 export const MintEnrollTokenRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     allowScreenControl: primitives.boolean.default(false),
@@ -22495,8 +22511,18 @@ export const WorkspaceModelCatalogModel =
       credentialReadiness: ModelCredentialReadinessV1,
       /** Current funding status, without exposing the organization's balance. */
       creditFunding: z.enum(["promotional", "general", "unavailable"]).optional(),
-      /** Exact workspace-policy verdict without exposing provider identity. */
+      /**
+       * Exact verdict of the policy the workspace runs with (its own lists
+       * within its organization's, and its credit switch), without exposing
+       * provider identity.
+       */
       policyAllowed: primitives.optionalBoolean,
+      /**
+       * False when the organization's allowlist, the ceiling a workspace's own
+       * list can't widen, excludes the model. Omitted when the organization
+       * allows every model. Ignores the workspace's credit switch.
+       */
+      organizationAllowed: primitives.optionalBoolean,
       /** Workspace preference, separate from immutable model execution limits. */
       compactionPolicy: ModelCompactionPolicy.optional(),
       availability: ModelAvailabilityV1,
@@ -22839,15 +22865,39 @@ export function evaluateWorkspaceModelPolicy(
   if (policy.allowCreditModels === false && candidate.chargesCredits) {
     return { allowed: false, reason: "credits" };
   }
-  if (policy.allowedProviders !== null && !policy.allowedProviders.includes(candidate.providerId)) {
+  if (
+    policy.allowedProviders !== null &&
+    !policyAllowsProvider(policy.allowedProviders, candidate)
+  ) {
     return { allowed: false, reason: "provider" };
   }
-  if (policy.allowedModels !== null && !policy.allowedModels.includes(candidate.modelId)) {
+  if (
+    policy.allowedModels !== null &&
+    !modelIdListIncludes(policy.allowedModels, candidate.modelId)
+  ) {
     return { allowed: false, reason: "model" };
   }
   return { allowed: true };
 }
 
+/**
+ * One provider rule for Claude subscription models, whichever id form the
+ * model or the stored policy uses: the canonical provider, or the
+ * organization provider every older form already required, admits them all.
+ */
+function policyAllowsProvider(
+  allowedProviders: readonly string[],
+  candidate: { providerId: string },
+): boolean {
+  if (!isClaudeSubscriptionProviderId(candidate.providerId))
+    return allowedProviders.includes(candidate.providerId);
+  return (
+    allowedProviders.includes(CLAUDE_SUBSCRIPTION_PROVIDER_ID) ||
+    allowedProviders.includes(LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID)
+  );
+}
+
+export * from "./claude-subscription-model-ids";
 export * from "./codex-fleet-policy";
 export * from "./xai-provider-account-authority";
 export * from "./claude-provider-account-authority";

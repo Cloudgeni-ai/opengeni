@@ -111,6 +111,32 @@ describe("verdict", () => {
     const again = run({ conclusion: "failure", attempt: 2 });
     expect(verdict(batch([1], { runs: [again] }), NOW, DEFAULT_SETTINGS).kind).toBe("failed");
   });
+
+  test("a bisected group failing only in blamed jobs is judged without a retry; nothing else is", () => {
+    const blamed = (numbers: number[], failedJobs: string[] | null) => {
+      const b = batch(numbers, {
+        runs: [run({ conclusion: "failure", failedJobs })],
+      });
+      b.manifest.blame = ["Typecheck and unit tests", "Unit tests (shard 3/12)"];
+      return verdict(b, NOW, DEFAULT_SETTINGS);
+    };
+    expect(blamed([1, 2], ["Unit tests (shard 3/12)"])).toMatchObject({
+      kind: "failed",
+      repeated: true,
+    });
+    // One PR, a job not blamed, a run whose jobs are unknown or none failed: retried.
+    expect(blamed([1], ["Unit tests (shard 3/12)"]).kind).toBe("retry");
+    expect(
+      blamed([1, 2], ["Unit tests (shard 3/12)", "Real-service and recovery tests"]).kind,
+    ).toBe("retry");
+    expect(blamed([1, 2], null).kind).toBe("retry");
+    expect(blamed([1, 2], []).kind).toBe("retry");
+    // Without a bisection's blame every failure is retried, as before.
+    const plain = batch([1, 2], {
+      runs: [run({ conclusion: "failure", failedJobs: ["Unit tests (shard 3/12)"] })],
+    });
+    expect(verdict(plain, NOW, DEFAULT_SETTINGS).kind).toBe("retry");
+  });
 });
 
 describe("nextBatch", () => {
@@ -313,6 +339,54 @@ describe("decide", () => {
     expect(actions[2]?.kind === "build" && actions[2].members.map((p) => p.number)).toEqual([4]);
   });
 
+  test("a bisection carries what it blamed to its own groups only, and drops it when it ends", () => {
+    const failure = (jobs: string[]) =>
+      run({ conclusion: "failure", attempt: 2, failedJobs: jobs });
+    const failed = batch([1, 2, 3, 4], { runs: [failure(["B", "A"])] });
+    const split = decide(
+      observe(
+        [1, 2, 3, 4].map((n) => pull(n)),
+        [failed],
+      ),
+    );
+    expect(split.at(-1)).toMatchObject({ kind: "build", pending: [[3, 4]], blame: ["A", "B"] });
+
+    // A later group adds what it failed in after its retry.
+    const half = batch([1, 2], { runs: [failure(["C"])] }, [[3, 4]]);
+    half.manifest.blame = ["A", "B"];
+    const deeper = decide(
+      observe(
+        [1, 2, 3, 4].map((n) => pull(n)),
+        [half],
+      ),
+    );
+    expect(deeper.at(-1)).toMatchObject({ kind: "build", blame: ["A", "B", "C"] });
+
+    // A passing group hands it to the next group; a priority PR in between drops it.
+    const passed = batch([1, 2], {}, [[3, 4]]);
+    passed.manifest.blame = ["A"];
+    const next = decide(
+      observe(
+        [1, 2, 3, 4].map((n) => pull(n)),
+        [passed],
+      ),
+    );
+    expect(next.at(-1)).toMatchObject({ kind: "build", blame: ["A"] });
+    const urgent = decide(
+      observe([1, 2, 3, 4].map((n) => pull(n)).concat(pull(5, { priority: true })), [passed]),
+    );
+    expect(urgent.map((a) => a.kind)).toEqual(["land", "build"]);
+    expect(urgent.at(-1)).toMatchObject({ kind: "build", pending: [[3, 4]] });
+    expect(urgent.at(-1)).not.toHaveProperty("blame");
+
+    // Once the bisection is done, the next batch starts with nothing blamed.
+    const last = batch([4], {}, []);
+    last.manifest.blame = ["A"];
+    const fresh = decide(observe([pull(4), pull(5)], [last]));
+    expect(fresh.at(-1)).toMatchObject({ kind: "build" });
+    expect(fresh.at(-1)).not.toHaveProperty("blame");
+  });
+
   test("retries failed jobs instead of judging", () => {
     const flaky = batch([1], { runs: [run({ conclusion: "failure" })] });
     expect(decide(observe([pull(1)], [flaky])).map((a) => a.kind)).toEqual(["retry"]);
@@ -373,6 +447,14 @@ describe("manifest and titles", () => {
       manifest,
     );
     expect(parseManifest(renderManifest({ ...manifest, base: "main" }))).toBeNull();
+    const blamed = { ...manifest, blame: ["Typecheck and unit tests"] };
+    expect(parseManifest(renderManifest(blamed))).toEqual(blamed);
+    expect(
+      parseManifest(renderManifest({ ...manifest, blame: [1] as unknown as string[] })),
+    ).toBeNull();
+    expect(
+      parseManifest(renderManifest({ ...manifest, blame: "A" as unknown as string[] })),
+    ).toBeNull();
     expect(parseManifest("Batch-Manifest: {")).toBeNull();
     expect(parseManifest("no trailer")).toBeNull();
   });

@@ -163,6 +163,13 @@ export interface Manifest {
   members: Member[];
   /** Groups still to test, in order, while a failed batch is being bisected. */
   pending: number[][];
+  /**
+   * While a failed batch is being bisected: the CI jobs that failed in it, and
+   * in the groups bisected before, also after a retry. A group of several PRs
+   * failing only in these is split at once instead of being retried, since a
+   * retry there almost never passes. Absent outside a bisection.
+   */
+  blame?: string[];
 }
 
 export interface BatchRun {
@@ -172,6 +179,12 @@ export interface BatchRun {
   conclusion: string | null;
   attempt: number;
   url: string;
+  /**
+   * For a finished run that did not pass: the jobs that failed or timed out in
+   * its latest attempt (not the ones cancelled after them); null when GitHub
+   * could not list them.
+   */
+  failedJobs?: string[] | null;
 }
 
 export interface Batch {
@@ -207,7 +220,7 @@ export type Action =
   | { kind: "eject"; number: number; reason: string }
   | { kind: "renumber"; number: number; paths: string[] }
   | { kind: "regenerate"; number: number }
-  | { kind: "build"; members: QueuedPull[]; pending: number[][] }
+  | { kind: "build"; members: QueuedPull[]; pending: number[][]; blame?: string[] }
   /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
   | { kind: "hold"; number: number; headSha: string; headAt: number; behind: boolean }
   | { kind: "wait"; until: number };
@@ -217,9 +230,15 @@ export type Verdict =
   | { kind: "missing" }
   | { kind: "passed" }
   | { kind: "retry"; runs: BatchRun[] }
-  | { kind: "failed"; runs: BatchRun[] };
+  /** `repeated`: it failed only in jobs its bisection already blamed, so it was not retried. */
+  | { kind: "failed"; runs: BatchRun[]; repeated?: true };
 
 const PASSING = new Set(["success", "skipped", "neutral"]);
+
+/** A finished run that did not pass. */
+export function failedRun(run: Pick<BatchRun, "status" | "conclusion">): boolean {
+  return run.status === "completed" && !PASSING.has(run.conclusion ?? "");
+}
 
 export function isControlPlane(files: string[]): boolean {
   return files.some((file) => CONTROL_PLANE.some((pattern) => pattern.test(file)));
@@ -236,8 +255,30 @@ export function verdict(batch: Batch, now: number, settings: Settings): Verdict 
   const failed = batch.runs.filter((run) => !PASSING.has(run.conclusion ?? ""));
   if (!failed.length) return { kind: "passed" };
   // One cheap retry of only the failed jobs absorbs flaky tests before blame.
-  if (failed.every((run) => run.attempt < 2)) return { kind: "retry", runs: failed };
+  if (failed.every((run) => run.attempt < 2))
+    return repeatsBlame(batch, failed)
+      ? { kind: "failed", runs: failed, repeated: true }
+      : { kind: "retry", runs: failed };
   return { kind: "failed", runs: failed };
+}
+
+/**
+ * A group of several PRs bisected from a failed batch fails only in jobs that
+ * batch already failed also after a retry: retrying it would almost surely
+ * fail again. A single PR is always retried before it is ejected, so a flaky
+ * job here costs at most one more split, never an innocent PR's place.
+ */
+function repeatsBlame(batch: Batch, failed: BatchRun[]): boolean {
+  const blame = new Set(batch.manifest.blame ?? []);
+  if (!blame.size || batch.manifest.members.length < 2) return false;
+  return failed.every(
+    (run) => !!run.failedJobs?.length && run.failedJobs.every((job) => blame.has(job)),
+  );
+}
+
+/** The jobs a failed verdict confirms, added to what the bisection blamed before. */
+function blamed(before: string[], runs: BatchRun[]): string[] {
+  return [...new Set([...before, ...runs.flatMap((run) => run.failedJobs ?? [])])].sort();
 }
 
 function fifo(a: QueuedPull, b: QueuedPull) {
@@ -263,6 +304,7 @@ export function nextBatch(
   pending: number[][],
   now: number,
   settings: Settings,
+  blame: string[] = [],
 ): Action | null {
   const version = pulls.filter((p) => p.version && p.conflict === null).sort(fifo)[0];
   // The batcher never renumbers a Version PR, so green and current is enough.
@@ -302,6 +344,9 @@ export function nextBatch(
     );
     if (!group.length) continue;
     const rest = pending.slice(index + 1);
+    // Only a group of the bisection is judged against what it blamed; a
+    // priority or Version PR in between drops it, which costs only retries.
+    const carried = blame.length ? { blame } : {};
     // A member that runs alone goes first; the others stay together, so the
     // group is not tested one member at a time.
     const single = group.find(alone);
@@ -311,9 +356,10 @@ export function nextBatch(
         kind: "build",
         members: [single],
         pending: others.length ? [others, ...rest] : rest,
+        ...carried,
       };
     }
-    return { kind: "build", members: group.slice(0, settings.maxBatch), pending: rest };
+    return { kind: "build", members: group.slice(0, settings.maxBatch), pending: rest, ...carried };
   }
 
   if (alone(ready[0]!)) return { kind: "build", members: [ready[0]!], pending: [] };
@@ -374,6 +420,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
   const actions: Action[] = [];
   let pulls = observation.pulls;
   let pending: number[][] = [];
+  let blame: string[] = [];
   const byNumber = new Map(pulls.map((p) => [p.number, p]));
 
   for (const pull of pulls)
@@ -392,6 +439,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     const numbers = manifest.members.map((m) => m.number);
     // An interrupted batch is tested again first, keeping any bisection.
     pending = [numbers, ...manifest.pending];
+    blame = manifest.blame ?? [];
     // A new head that tests to the same tree (main merged in again, a rebase)
     // changes nothing this batch tests, so it does not restart it.
     const left = manifest.members.find(
@@ -428,7 +476,14 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         pulls = pulls.filter((p) => !landed.has(p.number));
         pending = manifest.pending;
       } else {
-        actions.push({ kind: "abandon", batch, reason: "its CI failed" });
+        actions.push({
+          kind: "abandon",
+          batch,
+          reason: result.repeated
+            ? "its CI failed only in jobs the batch it was split from failed also after a retry, so it is split without another retry"
+            : "its CI failed",
+        });
+        blame = blamed(blame, result.runs);
         if (numbers.length === 1) {
           const run = result.runs.find((r) => r.workflow === CI_WORKFLOW) ?? result.runs[0]!;
           actions.push({
@@ -452,6 +507,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     pending,
     now,
     settings,
+    blame,
   );
   if (next) actions.push(next);
   return actions;
@@ -485,7 +541,9 @@ export function parseManifest(message: string): Manifest | null {
           !sha.test(m.tree),
       ) ||
       !Array.isArray(value.pending) ||
-      value.pending.some((g) => !Array.isArray(g) || g.some((n) => !Number.isSafeInteger(n)))
+      value.pending.some((g) => !Array.isArray(g) || g.some((n) => !Number.isSafeInteger(n))) ||
+      (value.blame !== undefined &&
+        (!Array.isArray(value.blame) || value.blame.some((job) => typeof job !== "string")))
     )
       return null;
     return value;

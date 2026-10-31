@@ -143,7 +143,13 @@ and members of the running batch are never regenerated.
 5. **Failures.** A failed batch is split in half and each half is tested in
    turn until the failing PR is found and removed from the queue. Priority PRs
    in those halves keep their place in them, so a failed batch of priority PRs
-   is split too; a priority PR queued since goes first.
+   is split too; a priority PR queued since goes first. A half of several PRs
+   that fails only in jobs (by name, ignoring jobs cancelled after a failure)
+   that the bisection already saw fail also after a retry is split at once,
+   without its own retry, which would almost surely fail again. The manifest's
+   `blame` lists those jobs; a priority or Version PR built in between drops
+   it. A single PR always gets its retry before it is ejected, so a flaky job
+   in a half costs at most one more split, never an innocent PR's place.
 
 A batch is rebuilt from scratch whenever `main` moves under it, a member leaves
 the queue, or a member gets a new head that changes what the batch tests. The

@@ -22,6 +22,7 @@ const testFiles =
         "./test/e2e/developer-settings.browser.e2e.ts",
         "./test/e2e/knowledge-surfaces.browser.e2e.ts",
         "./test/e2e/lossless-message.browser.e2e.ts",
+        "./test/e2e/machine-card.browser.e2e.ts",
         "./test/e2e/organization-workspace-administration.browser.e2e.ts",
         "./test/e2e/organization-recovery.browser.e2e.ts",
         "./test/e2e/personal-workspace-accessibility.browser.e2e.ts",

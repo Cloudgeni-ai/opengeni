@@ -304,8 +304,15 @@ not a second seat during acceptance. `external_user:` and service subjects do
 not count. Triggers cover inserts, reactivations and invitation creation/renewal
 under the existing `organization-membership:<account>` advisory lock. Existing
 over-limit people remain; new additions fail. Previously reserved invitations
-may still be accepted without increasing seat usage. Unlimited and no-row
-organizations are uncapped.
+may still be accepted without increasing seat usage. Writes that take no new
+seat are never refused, even over the limit: binding or re-targeting a pending
+invitation that already holds a seat, and an `ON CONFLICT DO NOTHING` insert
+for someone with an active or provisioning row (migration 1125). Sign-in
+binding isolates each organization: if one organization's binding fails for
+any reason, its invitations stay pending and unbound (the next sign-in retries),
+the database logs the WARNING "organization invitation binding skipped" with
+the organization and SQLSTATE, and the person keeps every other organization.
+Unlimited and no-row organizations are uncapped.
 
 SQLSTATE `P0S01` maps through `rethrowMembershipError` and the common error
 middleware to HTTP 402 using `ErrorEnvelope`:

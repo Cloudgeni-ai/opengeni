@@ -40,6 +40,7 @@ import {
   type SubscriptionQuota,
 } from "@opengeni/subscriptions";
 import { checkPlacementDecision } from "@opengeni/subscriptions/reference";
+import { evaluateWorkspaceModelPolicy } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
   appendSessionEventsForTurnAttempt,
@@ -5659,16 +5660,28 @@ export function describeSubscriptionCoreConformance<Credential>(
           async (_tx, input) => input.workspace.allowedModelIds,
         );
       };
+      // Allowed exactly when workspace model policy allows every identity the
+      // model carries. Policy may treat several identities as one provider
+      // (all Claude subscription ids), so this asks the policy itself.
+      const allowedBy = (allowedProviders: readonly string[], model: { productModelId: string }) =>
+        policyIds(model).every(
+          (identity) =>
+            evaluateWorkspaceModelPolicy(
+              { allowedProviders: [...allowedProviders], allowedModels: null },
+              { providerId: identity, modelId: model.productModelId, chargesCredits: false },
+            ).allowed,
+        );
       const expected = (allowedProviders: readonly string[]) => ({
         status: "completed" as const,
         value: [m0, m1, m2]
-          .filter((model) => policyIds(model).every((id) => allowedProviders.includes(id)))
+          .filter((model) => allowedBy(allowedProviders, model))
           .map((model) => model.productModelId),
       });
-      // A model's first identity alone never admits a model that also carries another.
+      // A model's first identity alone admits it only when the policy allows
+      // every identity it carries under that one entry; otherwise it is never placed.
       const first = [policyIds(m2)[0]!];
       expect(await allowedUnder(first)).toEqual(expected(first));
-      if (policyIds(m2).length > 1) {
+      if (!allowedBy(first, m2)) {
         expect(expected(first).value).not.toContain(m2.productModelId);
         expect(await place(turn, { now: new Date() })).not.toMatchObject({ kind: "run" });
       }
