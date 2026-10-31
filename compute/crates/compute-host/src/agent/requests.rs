@@ -655,7 +655,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Creates sandbox `id` from its shape's template, or cold, once the
-    /// host has its image, and books its first wake meanwhile.
+    /// host has its image, and books its first wake meanwhile. A build of
+    /// the template the create wanted and found missing starts only once
+    /// that wake is booked, so it takes only room the create leaves: the
+    /// sandbox boots cold rather than give its place to the build.
     pub(super) fn create_fresh(
         &mut self,
         id: Id,
@@ -668,7 +671,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         }
         let shape = Shape::of(&config);
-        let template = self.template_for(shape);
+        let (template, build) = self.template_for(shape);
         // Its first files are written before the core knows it: they are
         // booked from before the copy until a reading shows them, and must
         // fit together with its first wake.
@@ -677,10 +680,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         match self.room_for(id, self.size(&config, None), false, disk) {
             Ok(Room::Now) => {}
             Ok(Room::AfterReading) => {
+                self.unwant_template(shape, build);
+                self.hold_room(id, &config);
                 self.after_reading(AfterReading::Create(id, Box::new(config), owner, reply));
                 return;
             }
             Err(error) => {
+                self.unwant_template(shape, build);
+                self.first_wake_unbooked(id);
                 let _ = reply.send(Err(error));
                 return;
             }
@@ -688,6 +695,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
             Err(problem) => {
+                self.unwant_template(shape, build);
+                self.first_wake_unbooked(id);
                 let _ = reply.send(Err(HostError::Io(problem)));
                 return;
             }
@@ -698,6 +707,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Err(problem) => {
                 self.preparing.remove(&id.0);
                 self.ordinals.remove(&ordinal);
+                self.unwant_template(shape, build);
+                self.first_wake_unbooked(id);
                 let _ = reply.send(Err(HostError::Invalid(problem)));
                 return;
             }
@@ -707,10 +718,32 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Input::Writes { key: id.0, disk },
             self.first_wake(id, self.size(&config, None), false, by_ms),
         ]);
+        if build {
+            self.build_template(shape);
+        }
         let mut record = Record::new(id, ordinal, allocation, config);
         record.owner_epoch = owner.0;
         record.first_wake_by_ms = Some(by_ms);
         self.prepare(record, template, reply);
+    }
+
+    /// Books what new sandbox `id`'s first wake takes of memory and
+    /// processor time while its create waits, for its image or for a disk
+    /// reading, before anything of it is made: a create the host took
+    /// keeps its room meanwhile, and nothing taken after it, a template
+    /// build, a ready clone's fill or another create, takes that room. Its
+    /// disk is booked with its first files once they can be written (see
+    /// [`Self::create_fresh`]); a fetch books its image's write itself.
+    /// Like any first wake, the booking lapses at [`first_wake_by_ms`],
+    /// and the create is checked again when it goes on.
+    pub(super) fn hold_room(&mut self, id: Id, config: &SandboxConfig) {
+        let size = Size {
+            save: 0,
+            disk: 0,
+            fetch: 0,
+            ..self.size(config, None)
+        };
+        self.input(self.first_wake(id, size, false, first_wake_by_ms()));
     }
 
     /// Makes the files of the new sandbox `record` describes in the
