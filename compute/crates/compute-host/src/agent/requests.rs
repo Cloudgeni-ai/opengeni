@@ -134,12 +134,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 generation,
                 level,
                 reply,
-            } => {
-                let result = self
-                    .check(id, generation)
-                    .and_then(|()| self.request_sleep(id, level));
-                let _ = reply.send(result);
-            }
+            } => self.sleep(id, generation, level, reply),
             Command::Capture {
                 id,
                 generation,
@@ -360,7 +355,37 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    pub(super) fn request_sleep(&mut self, id: Id, level: Level) -> Result<(), HostError> {
+    /// Answers a request that sandbox `id`, under `generation` if one is
+    /// named, sleep to `level` or deeper, once the next disk reading has
+    /// decided it if only that can; see [`Self::request_sleep`].
+    pub(super) fn sleep(
+        &mut self,
+        id: Id,
+        generation: Option<u64>,
+        level: Level,
+        reply: Reply<()>,
+    ) {
+        match self
+            .check(id, generation)
+            .and_then(|()| self.request_sleep(id, level))
+        {
+            Ok(Room::Now) => {
+                let _ = reply.send(Ok(()));
+            }
+            Ok(Room::AfterReading) => {
+                self.after_reading(AfterReading::Sleep(id, generation, level, reply));
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
+
+    /// Asks sandbox `id` to sleep to `level` or deeper, unless only the
+    /// next disk reading can tell whether its save fits
+    /// ([`Room::AfterReading`]): then nothing is asked yet, and the caller
+    /// asks again after that reading.
+    pub(super) fn request_sleep(&mut self, id: Id, level: Level) -> Result<Room, HostError> {
         if !self.slots.contains_key(&id.0) {
             return Err(HostError::NotFound(id));
         }
@@ -385,15 +410,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // One the host never saves on its own books its save only from
         // now on: a save the disk cannot take is refused before its VM is
         // paused for it, as a hand-off would pause it and then wait.
-        if level >= Level::Saved
-            && let CreateRoom::Short(resource, needed, free) = self.core.save_room(id.0)
-        {
-            return Err(HostError::HostFull {
-                id,
-                resource,
-                needed,
-                free,
-            });
+        if level >= Level::Saved {
+            match self.core.save_room(id.0) {
+                CreateRoom::Fits => {}
+                CreateRoom::AwaitsReading(..) => return Ok(Room::AfterReading),
+                CreateRoom::Short(resource, needed, free) => {
+                    return Err(HostError::HostFull {
+                        id,
+                        resource,
+                        needed,
+                        free,
+                    });
+                }
+            }
         }
         let trace = self.trace;
         if let Some(slot) = self.slots.get_mut(&id.0) {
@@ -407,7 +436,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sandbox: id.0,
             level,
         });
-        Ok(())
+        Ok(Room::Now)
     }
 
     /// Holds sandbox `id` awake for `name`, returning the write that makes

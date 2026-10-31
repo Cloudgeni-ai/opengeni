@@ -356,6 +356,46 @@ fn a_vm_the_host_never_saves_books_its_save_only_from_a_request_on() {
     assert_eq!(rig.booked(), 0);
 }
 
+/// A save asked of a VM the host never saves on its own, short by no more
+/// than what a booking that ended since the last reading stood for, awaits
+/// the next reading, which decides it, as a create does; short by more, it
+/// is short whatever that reading shows.
+#[test]
+fn a_save_short_only_of_what_ended_since_the_last_reading_awaits_the_next() {
+    let mut rig = Rig::new();
+    rig.add_with(1, State::RUNNING, Size::whole(2 * GIB), SleepPolicy::NEVER);
+    // 4 GiB available, 1 GiB of it reserved; a spare VM's copy of 2 GiB
+    // just ended.
+    rig.disk(4 * GIB, 10_000);
+    let copy = DiskSpace {
+        bytes: 2 * GIB,
+        inodes: 4,
+    };
+    for disk in [copy, DiskSpace::default()] {
+        rig.send(Input::Spare {
+            sandbox: SandboxId(9),
+            bytes: GIB,
+            disk,
+            filling: disk == copy,
+            cpu: 0,
+        });
+    }
+    assert_eq!(
+        rig.host.save_room(SandboxId(1)),
+        CreateRoom::AwaitsReading(Resource::Disk, 2 * GIB, GIB)
+    );
+    // A reading that shows the copy wrote nothing has room for it.
+    rig.disk(4 * GIB, 10_000);
+    assert_eq!(rig.host.save_room(SandboxId(1)), CreateRoom::Fits);
+    // One that shows it wrote all of it leaves too little, and with
+    // nothing ended since, the save is short.
+    rig.disk(2 * GIB, 10_000);
+    assert_eq!(
+        rig.host.save_room(SandboxId(1)),
+        CreateRoom::Short(Resource::Disk, 2 * GIB, GIB)
+    );
+}
+
 /// A failed save asked of a VM the host never saves on its own keeps its
 /// booking for its retry, beside what it wrote, as any save does.
 #[test]

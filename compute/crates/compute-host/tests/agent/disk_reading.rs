@@ -183,6 +183,51 @@ async fn a_save_the_disk_cannot_book_is_refused_before_anything_pauses() {
     assert_eq!(host.disk().await.inodes_free, 0);
 }
 
+/// Such a save short by no more than what a create's files booked since
+/// the last reading waits for the next reading, as the create would, with
+/// its VM running meanwhile: one that shows no room refuses it, one that
+/// shows room takes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_that_may_fit_waits_for_the_reading_that_decides_it() {
+    let host = Host::start(None).await;
+    let (first, save) = host.measure(id(9)).await;
+    host.create_as(id(1), None, NEVER).await.unwrap().unwrap();
+    host.run(id(1)).await;
+    let asked = || {
+        let handle = host.handle.clone();
+        tokio::spawn(async move { handle.sleep(id(1), None, Level::Saved).await })
+    };
+
+    // Beside sandbox 9's save, room for one save and half a create's
+    // files, until a reading shows what another create's files wrote.
+    host.read(2 * save + first / 2).await;
+    host.create_as(id(2), None, NEVER).await.unwrap().unwrap();
+    let refused = asked();
+    sleep(WAITS).await;
+    assert!(!refused.is_finished(), "it waits for a reading");
+    assert_eq!(host.level(id(1)).await, LevelName::Running);
+
+    // This reading shows one inode too few: it is refused, and its VM
+    // goes on running.
+    host.read(2 * save - 1).await;
+    let refused = refused.await.unwrap();
+    assert!(
+        matches!(refused, Err(HostError::HostFull { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(host.level(id(1)).await, LevelName::Running);
+
+    // Again, and this reading shows room: it is taken, and books its save.
+    host.read(2 * save + first / 2).await;
+    host.create_as(id(3), None, NEVER).await.unwrap().unwrap();
+    let taken = asked();
+    sleep(WAITS).await;
+    assert!(!taken.is_finished(), "it waits for a reading");
+    host.read(2 * save).await;
+    taken.await.unwrap().unwrap();
+    assert_eq!(host.disk().await.inodes_free, 0);
+}
+
 /// A create short of inodes by no more than what an earlier create's
 /// files booked waits for the next reading: one that shows room lets it
 /// in, one that shows none refuses it and frees its id.

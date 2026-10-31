@@ -434,7 +434,10 @@ impl Host {
     /// request this finds short at once rather than pause its VM for a
     /// save that would wait for room, as a hand-off would. Fits for a
     /// sandbox that books its save already or has nothing to save, and on
-    /// a host that books no disk.
+    /// a host that books no disk. Short by no more than what bookings that
+    /// ended since the last reading stood for, it awaits the next reading
+    /// (see [`Self::disk_awaits_reading`]), which decides it, as a create
+    /// does.
     #[must_use]
     pub fn save_room(&self, sandbox: SandboxId) -> CreateRoom {
         let Some(slot) = self.sandboxes.get(&sandbox) else {
@@ -446,8 +449,12 @@ impl Host {
         let Some(mut room) = self.disk_room() else {
             return CreateRoom::Fits;
         };
-        match room.take(slot.save_space()) {
+        let save = slot.save_space();
+        match room.take(save) {
             Ok(()) => CreateRoom::Fits,
+            Err(short) if room.may_take(save, self.disk_spent) => {
+                CreateRoom::AwaitsReading(short.resource, short.needed, short.free)
+            }
             Err(short) => CreateRoom::Short(short.resource, short.needed, short.free),
         }
     }

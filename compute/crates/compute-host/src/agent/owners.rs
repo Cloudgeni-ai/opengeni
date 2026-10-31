@@ -599,9 +599,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;
         }
-        if let Err(error) = self.request_sleep(id, Level::Archived) {
-            let _ = reply.send(Err(error));
-            return;
+        match self.request_sleep(id, Level::Archived) {
+            Ok(Room::Now) => {}
+            Ok(Room::AfterReading) => {
+                // Only the next disk reading can tell whether its save
+                // fits: nothing of it has changed, and the hand-off is
+                // asked again then.
+                self.after_reading(AfterReading::HandOff(id, owner, awake, reply));
+                return;
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
         }
         if wanted {
             // Whoever waits for it to wake here asks again and finds it on
