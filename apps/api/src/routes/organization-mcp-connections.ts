@@ -7,7 +7,11 @@ import {
   updateOrganizationMcpConnectionAccess,
   type OrganizationMcpConnection,
 } from "@opengeni/db";
-import { hasPermission, requireAccessContext, type ApiRouteDeps } from "@opengeni/core";
+import {
+  holdsOrganizationAdministration,
+  requireAccessContext,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
@@ -101,7 +105,9 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
 
 /**
  * A member of the organization, signed in in this browser, or an agent with
- * their full access. Keys and limited agents are refused.
+ * their full access. Keys and limited agents are refused. `admin` is the
+ * organization's owner or one of its admins, who see and can disconnect
+ * everyone's agents.
  */
 async function requireOrganizationPerson(
   c: Context,
@@ -124,7 +130,11 @@ async function requireOrganizationPerson(
   if (context.mode !== "managed" || !context.subjectId.startsWith("user:") || !grant) {
     throw new HTTPException(404, { message: "organization not found" });
   }
-  return { context, organizationId, admin: hasPermission(grant.permissions, "account:admin") };
+  return {
+    context,
+    organizationId,
+    admin: holdsOrganizationAdministration(context, organizationId),
+  };
 }
 
 async function requireConnection(
