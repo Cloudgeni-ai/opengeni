@@ -2094,4 +2094,79 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
     expect(revoked.grant.status).toBe("revoked");
     expect(revoked.grant.revokedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/u);
   }, 180_000);
+
+  test("Where it works lists your workspaces for your own login and switches one", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const other = await provisionManagedHuman();
+    const app = buildApp(undefined, true);
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+    // Your own login, added in the shared workspace: it starts on there.
+    const loginId = await shared.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${human.accountId}, true),
+        set_config('opengeni.workspace_id', ${human.legacyWorkspaceId}, true),
+        set_config('opengeni.subject_id', ${human.subjectId}, true)`;
+      const [row] = await tx<Array<{ id: string }>>`
+        insert into connections (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+        values (${human.accountId}, ${human.legacyWorkspaceId}, ${human.subjectId}, 'linear.app', 'oauth2', 'ciphertext')
+        returning id`;
+      return row!.id;
+    });
+    const reach = async (workspaceId: string, resourceId = loginId) =>
+      await app.request(
+        `http://x/v1/workspaces/${workspaceId}/own-resources/reach?resourceKind=connection&resourceId=${resourceId}`,
+        { headers },
+      );
+
+    const listed = await reach(human.personalWorkspaceId);
+    expect(listed.status).toBe(200);
+    const body = (await listed.json()) as {
+      workspaces: Array<{ workspaceId: string; personal: boolean; current: boolean; on: boolean }>;
+    };
+    expect(
+      body.workspaces.map(({ workspaceId, personal, current, on }) => ({
+        workspaceId,
+        personal,
+        current,
+        on,
+      })),
+    ).toEqual([
+      { workspaceId: human.personalWorkspaceId, personal: true, current: true, on: true },
+      { workspaceId: human.legacyWorkspaceId, personal: false, current: false, on: true },
+    ]);
+    expect(body.workspaces[0]).toMatchObject({ alwaysOn: true, canChange: false });
+
+    const off = await app.request(
+      `http://x/v1/workspaces/${human.legacyWorkspaceId}/own-resources/reach`,
+      {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ resourceKind: "connection", resourceId: loginId, on: false }),
+      },
+    );
+    expect(off.status).toBe(200);
+    expect(await off.json()).toMatchObject({
+      workspace: { workspaceId: human.legacyWorkspaceId, current: true, on: false },
+    });
+    const personalOff = await app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/own-resources/reach`,
+      {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ resourceKind: "connection", resourceId: loginId, on: false }),
+      },
+    );
+    expect(personalOff.status).toBe(422);
+
+    // Not yours, or not a thing at all: not found where you asked.
+    expect((await reach(human.legacyWorkspaceId, crypto.randomUUID())).status).toBe(404);
+    expect(
+      (
+        await app.request(
+          `http://x/v1/workspaces/${other.personalWorkspaceId}/own-resources/reach?resourceKind=connection&resourceId=${loginId}`,
+          { headers: { cookie: other.cookie } },
+        )
+      ).status,
+    ).toBe(404);
+  }, 180_000);
 });

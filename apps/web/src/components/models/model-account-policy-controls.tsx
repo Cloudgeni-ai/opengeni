@@ -1,20 +1,10 @@
 import { ArrowDownIcon, ArrowUpIcon, XIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
+import { useEffect, useState } from "react";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { Button } from "@opengeni/react/ui/button";
-import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { ModelPicker } from "@opengeni/react/app/components/pickers";
-import { Section } from "@opengeni/react/ui/section";
-import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
-import { Switch } from "@opengeni/react/ui/switch";
-import {
-  invalidateSharedQueries,
-  sharedQueryWriter,
-  useSharedQuery,
-} from "@opengeni/react/app/lib/shared-query";
 
 /** Edit one exact preferred-model mapping. Never infer model equivalence. */
 export function FallbackOrderControl({
@@ -160,112 +150,5 @@ export function FallbackOrderControl({
         </RowButton>
       </div>
     </div>
-  );
-}
-
-/** A person's opt-in is separate from organization permission and account choice. */
-export function PersonalFallbackPreference(props: {
-  organizationId: string | undefined;
-  allowed: boolean;
-}) {
-  const subject = useAppContext().authSession?.user.id;
-  // Organization service credentials never stand in for a person's preference.
-  return subject ? (
-    <HumanPersonalFallbackPreference
-      key={`${subject}:${props.organizationId}`}
-      subject={subject}
-      {...props}
-    />
-  ) : null;
-}
-
-function HumanPersonalFallbackPreference({
-  subject,
-  organizationId,
-  allowed,
-}: {
-  subject: string;
-  organizationId: string | undefined;
-  allowed: boolean;
-}) {
-  const { client } = useAppContext();
-  const key = ["model-settings", "personal-fallback-preference", subject, organizationId ?? null];
-  const {
-    data: value,
-    error,
-    refresh,
-  } = useSharedQuery(client, key, () => client.getModelAccountPreferences(organizationId!), {
-    enabled: Boolean(organizationId),
-    staleTimeMs: 300_000,
-  });
-  const [saving, setSaving] = useState(false);
-  const generation = useRef(0);
-  const savingRef = useRef(false);
-  useEffect(() => {
-    generation.current += 1;
-    savingRef.current = false;
-    setSaving(false);
-    return () => {
-      generation.current += 1;
-    };
-  }, [client, organizationId, subject]);
-  if (!organizationId) return null;
-  const save = async (personalFallbackOptIn: boolean) => {
-    if (!value || (personalFallbackOptIn && !allowed) || savingRef.current) return;
-    const current = generation.current;
-    const write = sharedQueryWriter(client);
-    savingRef.current = true;
-    setSaving(true);
-    try {
-      const saved = await client.updateModelAccountPreferences(organizationId, {
-        personalFallbackOptIn,
-        expectedVersion: value.version,
-      });
-      // Record only in the originating human/organization key. The writer
-      // also rejects results from before the client cache was cleared.
-      write(key, saved);
-    } catch {
-      void invalidateSharedQueries(client, key);
-      if (current !== generation.current) return;
-      toast.error("Couldn’t save your account preference. Reload and try again.");
-    } finally {
-      if (current === generation.current) {
-        savingRef.current = false;
-        setSaving(false);
-      }
-    }
-  };
-  return (
-    <Section title="Your account preference">
-      {error ? (
-        <ErrorMessage
-          title="Couldn’t load your account preference."
-          action={<RowButton onClick={() => void refresh()}>Try again</RowButton>}
-        />
-      ) : (
-        <SettingRowGroup>
-          <SettingRow
-            label="Fall back to my account"
-            description="Use an eligible account of yours when shared accounts run out. Applies wherever this organization allows personal fallback."
-            controlWidth="compact"
-            control={
-              <Switch
-                checked={value?.personalFallbackOptIn ?? false}
-                pending={saving}
-                disabled={!value || (!allowed && !value.personalFallbackOptIn) || saving}
-                disabledReason={
-                  !allowed && !value?.personalFallbackOptIn
-                    ? "Personal fallback is not allowed here."
-                    : !value
-                      ? "Loading your preference."
-                      : undefined
-                }
-                onCheckedChange={(checked) => void save(checked)}
-              />
-            }
-          />
-        </SettingRowGroup>
-      )}
-    </Section>
   );
 }

@@ -129,6 +129,7 @@ const client = {
   getModelConnectionAccess: mock(async (): Promise<unknown> => {
     throw new Error("must not read access for this account");
   }),
+  removeModelConnectionFromWorkspace: mock(async (_target: unknown): Promise<void> => undefined),
   listSuperGrokAccounts: mock(
     async (): Promise<unknown> => ({
       accounts: [],
@@ -243,6 +244,42 @@ const client = {
     ],
   })),
   updateModelConnectionAccess: mock(async (_target: unknown, policy: unknown) => policy),
+  getOwnResourceReach: mock(
+    async (_workspaceId: string, resource: { resourceKind: string; resourceId: string }) => ({
+      ...resource,
+      workspaces: [
+        {
+          workspaceId: "workspace-personal",
+          name: "Personal",
+          personal: true,
+          current: false,
+          on: true,
+          alwaysOn: true,
+          canChange: false,
+        },
+        {
+          workspaceId: "workspace-a",
+          name: "Design preview",
+          personal: false,
+          current: true,
+          on: true,
+          alwaysOn: false,
+          canChange: true,
+        },
+      ],
+    }),
+  ),
+  setOwnResourceReach: mock(async (workspaceId: string, request: { on: boolean }) => ({
+    workspace: {
+      workspaceId,
+      name: "Design preview",
+      personal: false,
+      current: true,
+      on: request.on,
+      alwaysOn: false,
+      canChange: true,
+    },
+  })),
   listOrganizationProviderCustomModels: mock(async (): Promise<unknown> => ({ models: [] })),
   createOrganizationProviderCustomModel: mock(
     async (...args: unknown[]): Promise<unknown> => ({
@@ -1326,6 +1363,80 @@ describe("Codex account page", () => {
       await cleanup(view);
     }
   });
+
+  test("D-52: another workspace's own account says who shared it, and this workspace's admins can stop using it", async () => {
+    accounts = {
+      ...accounts,
+      source: { ...source, effectiveSource: "organization", workspaceAvailable: false },
+      accounts: [codexAccount({ source: "organization", ownerWorkspaceId: "workspace-b" })],
+    };
+    organizationWorkspaces = [
+      {
+        id: "workspace-a",
+        name: "Design preview",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+      {
+        id: "workspace-b",
+        name: "Research",
+        personal: false,
+        canManage: false,
+        savedDefaultModel: null,
+      },
+    ];
+    const view = await render();
+    try {
+      expect(rowsNamed(view.container, "Team plan")[0]!.textContent).toContain(
+        "Shared by Research",
+      );
+      expect(view.container.textContent).not.toContain("Shared by Acme");
+      await act(async () =>
+        view.container.querySelector<HTMLElement>("[data-row-action]")!.click(),
+      );
+      await flush();
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "Shared with Design preview by Research. That workspace's admins manage it.",
+      );
+      expect(text).not.toContain("Managed by the owners and admins of Acme.");
+      expect(button(view.container, /Disconnect/)).toBeUndefined();
+      expect(button(view.container, /Rename/)).toBeUndefined();
+      // Its access belongs to Research: never read from here.
+      expect(client.getModelConnectionAccess).not.toHaveBeenCalled();
+      await act(async () => button(view.container, /Remove from this workspace/)!.click());
+      expect(client.removeModelConnectionFromWorkspace).not.toHaveBeenCalled();
+      expect(view.container.textContent).toContain("Stop using Team plan in Design preview?");
+      expect(view.container.textContent).toContain(
+        "Only the admins of Research or the organization can share it here again.",
+      );
+      await act(async () =>
+        view.container.querySelector<HTMLButtonElement>("[data-confirm]")!.click(),
+      );
+      await flush();
+      expect(client.removeModelConnectionFromWorkspace).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        kind: "codex",
+        connectionId: "acct-1",
+      });
+      expect(view.container.textContent).toContain(ACCOUNTS_SECTION);
+    } finally {
+      await cleanup(view);
+    }
+    // Someone who can't change this workspace's settings can't remove it.
+    const readOnly = await render(false);
+    try {
+      await act(async () =>
+        readOnly.container.querySelector<HTMLElement>("[data-row-action]")!.click(),
+      );
+      await flush();
+      expect(readOnly.container.textContent).toContain("Shared by Research");
+      expect(button(readOnly.container, /Remove from this workspace/)).toBeUndefined();
+    } finally {
+      await cleanup(readOnly);
+    }
+  });
 });
 
 describe("Connect Codex", () => {
@@ -2379,7 +2490,7 @@ describe("One Models page for the organization and the workspace", () => {
     },
   ];
   const OWN_NOTE =
-    "It will be yours: it pays for your work in your Personal workspace and in chats you keep to yourself. Nobody else can use it.";
+    "It will be yours. It pays for your Personal workspace and for the messages you send in Design preview, where it starts turned on. Nobody else can use it.";
 
   test("a shared workspace's member connects their own subscriptions right here", async () => {
     workspaceSettingsAdmin = false;
@@ -2552,6 +2663,17 @@ describe("One Models page for the organization and the workspace", () => {
         account: `claude:${ownClaudeId}`,
       });
       expect(view.container.querySelector("h1")?.textContent).toBe("My Claude");
+      // Its page lists where it works for their own messages, asked from this workspace.
+      expect(client.getOwnResourceReach).toHaveBeenCalledWith("workspace-a", {
+        resourceKind: "subscription_connection",
+        resourceId: ownClaudeId,
+      });
+      expect(view.container.textContent).toContain("Where it works");
+      expect(
+        view.container
+          .querySelector('[aria-label="Use My Claude in Design preview"]')
+          ?.getAttribute("aria-checked"),
+      ).toBe("true");
       await act(async () => navigateTo({ account: "codex:own-codex" }));
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("My ChatGPT");
@@ -2776,7 +2898,9 @@ describe("One Models page for the organization and the workspace", () => {
       await act(async () => navigateTo({ view: "connect:codex" }));
       await flush();
       const text = view.container.textContent ?? "";
-      expect(text).toContain("This account will belong to Design preview only.");
+      expect(text).toContain(
+        "This account will belong to Design preview. Use it for Codex Apps or to redeem usage limit resets. Design preview's admins can also share it with other workspaces they manage.",
+      );
       expect(text).toContain("Codex Apps");
       expect(text).not.toContain("Which workspaces can use it");
     } finally {

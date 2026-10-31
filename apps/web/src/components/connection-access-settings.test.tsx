@@ -976,7 +976,7 @@ test("a workspace's own copy no workspace manages is an organization account: it
       ).length,
     ).toBe(0);
 
-    // A workspace manages it: no people choice (the server refuses one).
+    // A workspace manages it and people aren't offered: no people choice.
     policy = { ...policy, allowedPeople: null };
     peopleReadable = true;
     managedBy = "workspace-a";
@@ -999,6 +999,197 @@ test("a workspace's own copy no workspace manages is an organization account: it
         (paragraph) => !paragraph.textContent,
       ).length,
     ).toBe(0);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("SUB-OWN-04, D-52: a workspace's own account keeps its owner when shared; going wider is an explicit move", async () => {
+  type Policy = {
+    allowedModels: string[] | null;
+    allowedWorkspaces: string[] | null;
+    allowPersonalWorkspaces: boolean;
+    allowedPeople?: string[] | null;
+    moveToOrganization?: true;
+    version: number;
+  };
+  // Connected in Engineering, which manages it; today only Engineering uses it.
+  let policy: Policy = {
+    allowedModels: null,
+    allowedWorkspaces: ["workspace-a"],
+    allowPersonalWorkspaces: false,
+    version: 1,
+  };
+  const writes: Policy[] = [];
+  // The workspaces the workspace route offers: the ones this person administers.
+  let offered = [
+    { id: "workspace-a", name: "Engineering" },
+    { id: "workspace-b", name: "Finance" },
+  ];
+  let organization = false;
+  const response = () => ({
+    policy,
+    models: [{ id: "model-a", label: "Model A" }],
+    workspaces: organization
+      ? [
+          { id: "workspace-a", name: "Engineering" },
+          { id: "workspace-b", name: "Finance" },
+          { id: "workspace-c", name: "Legal" },
+        ]
+      : offered,
+    personalWorkspacesSupported: organization,
+    peopleSupported: organization,
+    ...(organization
+      ? { people: [{ id: "person-a", name: "Alex Morgan", email: "alex@example.com" }] }
+      : {}),
+    localWorkspaceIds: ["workspace-a"],
+    managedByWorkspaceId: "workspace-a",
+  });
+  const client = Object.assign(new OpenGeniBrowserClient({ baseUrl: "http://localhost" }), {
+    requestJson: async (method: string, _path: string, body: Policy) => {
+      if (method === "PUT") {
+        writes.push(structuredClone(body));
+        policy = {
+          allowedModels: body.allowedModels,
+          allowedWorkspaces: body.allowedWorkspaces,
+          allowPersonalWorkspaces: body.allowPersonalWorkspaces,
+          version: policy.version + 1,
+        };
+        return policy;
+      }
+      return response();
+    },
+  });
+  function Page() {
+    const access = useConnectionAccess(
+      organization
+        ? { client, organizationId: "org", kind: "claude_subscription", connectionId: "account" }
+        : {
+            client,
+            workspaceId: "workspace-a",
+            kind: "claude_subscription",
+            connectionId: "account",
+          },
+    );
+    return (
+      <>
+        <ConnectionAccessRows
+          access={access}
+          organization={organization}
+          canManage
+          onEdit={() => undefined}
+        />
+        <ConnectionAccessFormPage
+          access={access}
+          organization={organization}
+          canManage
+          name="Team plan"
+          onClose={() => undefined}
+        />
+      </>
+    );
+  }
+  const container = document.createElement("div");
+  document.body.append(container);
+  let root = createRoot(container);
+  const flush = () => act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+  const remount = async () => {
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Page />));
+    await flush();
+  };
+  const control = (text: string) => {
+    const radio = [...container.querySelectorAll<HTMLElement>('[role="radio"]')].find((candidate) =>
+      candidate.textContent?.includes(text),
+    );
+    if (radio) return radio;
+    const label = [...container.querySelectorAll("label")].find(
+      (candidate) => candidate.textContent === text,
+    );
+    return label ? (document.getElementById(label.htmlFor) ?? undefined) : undefined;
+  };
+  const choose = async (text: string) =>
+    act(async () => {
+      const target = control(text);
+      expect(target).toBeDefined();
+      target!.click();
+    });
+  const submit = () =>
+    [...container.querySelectorAll<HTMLButtonElement>('button[type="submit"]')].at(-1)!;
+  const save = async () => {
+    await act(async () => submit().closest("form")!.requestSubmit());
+    await flush();
+  };
+  try {
+    await act(async () => root.render(<Page />));
+    await flush();
+    // At its workspace: where it can be used, its own workspace always included.
+    expect(container.textContent).toContain("Available in");
+    expect(container.textContent).toContain("Only this workspace");
+    expect(container.textContent).toContain("Where Team plan can be used");
+    expect(container.textContent).toContain("Workspaces that can use it");
+    const own = control("Engineering") as HTMLInputElement;
+    expect(own.disabled).toBe(true);
+    expect(own.checked).toBe(true);
+    expect(container.textContent).toContain(
+      "Connected in this workspace, so it's always included.",
+    );
+    // No move from here: sharing with a workspace this person administers keeps the owner.
+    expect(container.textContent).not.toContain("This moves it to the organization");
+    expect(container.textContent).not.toContain("Only selected people");
+    await choose("Finance");
+    expect(submit().textContent).toBe("Save");
+    await save();
+    expect(writes.at(-1)).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: ["workspace-a", "workspace-b"],
+      allowPersonalWorkspaces: false,
+      version: 1,
+    });
+    await remount();
+    expect(container.textContent).toContain("This workspace + 1 more");
+
+    // Even with nothing else to offer, it says where sharing comes from.
+    offered = [{ id: "workspace-a", name: "Engineering" }];
+    policy = { ...policy, allowedWorkspaces: ["workspace-a"] };
+    await remount();
+    expect(container.textContent).toContain("You can add workspaces you're an admin of.");
+
+    // The organization's owners and admins: chosen shared workspaces keep the owner.
+    organization = true;
+    await remount();
+    await choose("Legal");
+    expect(container.textContent).not.toContain("This moves it to the organization");
+    expect(submit().textContent).toBe("Save");
+    await save();
+    expect(writes.at(-1)).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: ["workspace-a", "workspace-c"],
+      allowPersonalWorkspaces: false,
+      version: 2,
+    });
+
+    // Every workspace, Personal workspaces or people move it, said before saving.
+    for (const wider of [
+      ["All shared workspaces, including new ones"],
+      ["Personal workspaces"],
+      ["Only selected people", "Alex Morgan"],
+    ]) {
+      await remount();
+      for (const choice of wider) await choose(choice);
+      expect(container.textContent).toContain("This moves it to the organization");
+      expect(container.textContent).toContain(
+        "The admins of Engineering will no longer manage it. Only the organization's owners and admins will.",
+      );
+      expect(submit().textContent).toBe("Move and save");
+    }
+    await save();
+    expect(writes.at(-1)).toMatchObject({
+      allowedPeople: ["person-a"],
+      moveToOrganization: true,
+    });
   } finally {
     await act(async () => root.unmount());
     container.remove();

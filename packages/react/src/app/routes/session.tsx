@@ -10,6 +10,11 @@ import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { LazyPart } from "../../components/lazy-part";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
+import { stopOwnLoginHere } from "../components/capabilities/own-login-turned-on";
+import {
+  OwnLoginsSharedHeadsUp,
+  ownLoginsInUse,
+} from "../components/capabilities/own-logins-shared-heads-up";
 import { sessionAuthRecommendation } from "../../session-auth-recommendation";
 import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
 import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
@@ -2971,7 +2976,8 @@ function SessionChatPane(props: {
             : null,
     awaitingHuman:
       props.session.status === "requires_action" && !sessionAdmissionBlocked(props.session),
-    personalMachineIntent: personalMachineUseIntent(props.session.tenancy),
+    // Moving the chat onto the person's own machine turns it on in this workspace.
+    personalMachineIntent: personalMachineUseIntent(props.session.tenancy, "always"),
     extras: {
       ...(composer.sendPolicy ?? {}),
       ...((props.queue.effectiveControl ?? props.session.effectiveControl)?.controlEtag
@@ -3555,6 +3561,29 @@ function SessionChatPane(props: {
   const modelSwitchHeadsUp = chosenModelHeadsUp ? (
     <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
   ) : null;
+  // Your own logins in a chat shared with the workspace (D-54): a one-line
+  // heads-up for you only, never a gate. A Personal workspace has nobody else.
+  const ownLoginsHere =
+    !terminal &&
+    props.session.tenancy?.visibility === "workspace" &&
+    !isPersonalWorkspace(workspace, context.managedSelfContext)
+      ? ownLoginsInUse(
+          connectionAccounts.availableAccountGroups,
+          connectionAccounts.accountChoices,
+          context.accessContext.subjectId,
+        )
+      : [];
+  const ownLoginsHeadsUp =
+    ownLoginsHere.length > 0 ? (
+      <OwnLoginsSharedHeadsUp
+        logins={ownLoginsHere}
+        className="px-3.5 pt-2.5 md:px-4"
+        onStop={async (account) => {
+          await stopOwnLoginHere(context.client, props.session.workspaceId, account);
+          await connectionAccounts.refresh();
+        }}
+      />
+    ) : null;
   const workspaceAccountId = context.workspaces.find(
     (candidate) => candidate.id === props.session.workspaceId,
   )?.accountId;
@@ -4330,6 +4359,7 @@ function SessionChatPane(props: {
                 }}
                 disabled={terminal}
                 header={
+                  ownLoginsHeadsUp ||
                   unavailableModelNotice ||
                   codexUsageNotice ||
                   modelSwitchHeadsUp ||
@@ -4363,6 +4393,7 @@ function SessionChatPane(props: {
                       {creditRefusalNotice ? (
                         <div className="px-2 pt-2">{creditRefusalNotice}</div>
                       ) : null}
+                      {ownLoginsHeadsUp}
                     </>
                   ) : null
                 }

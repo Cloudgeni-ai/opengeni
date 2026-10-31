@@ -106,6 +106,7 @@ function referenceConnection(
                     personalWorkspaces: connection.ownership.scope.allowPersonalWorkspaces,
                   }
                 : { kind: "people", personIds: connection.ownership.scope.membershipIds },
+          managedByWorkspaceId: connection.ownership.managedByWorkspaceId,
         };
   return {
     id: connection.id,
@@ -184,7 +185,6 @@ export function toReferenceWorld(input: PlacementInput): {
       people: input.people.map((person) => ({
         id: person.membershipId,
         active: person.active,
-        personalFallbackOptIn: person.personalFallbackOptIn,
       })),
       models: input.models.map((model) => ({
         id: model.id,

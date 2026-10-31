@@ -1097,6 +1097,18 @@ export type ConnectionMetadata = {
   updatedBySubjectId: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Your own login only: whether it works for your messages in the workspace
+   * this list was read from. It does in your Personal workspace and in each
+   * shared workspace where it is turned on; it starts on where it was added.
+   */
+  turnedOnHere?: boolean | undefined;
+  /**
+   * The standing grant that turns your own login on here; revoke it with
+   * `revokeUserResourceGrant` to stop using the login here. Null in your
+   * Personal workspace, which needs none.
+   */
+  turnedOnHereGrantId?: string | null | undefined;
 };
 
 /** Where a brokered credential is written on each outbound provider request. */
@@ -5371,6 +5383,12 @@ export type CodexAccount = {
   ownInWorkspaceIds?: string[];
   /** The organization's list only: who the account reaches. */
   reach?: SubscriptionAccountReach;
+  /**
+   * The workspace whose own account this is, or null for the organization's
+   * and personal accounts. In another workspace's list it was shared there by
+   * its owner, and that workspace can only remove it. Absent from older servers.
+   */
+  ownerWorkspaceId?: string | null;
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -6008,13 +6026,15 @@ export type UserResourceKind =
   | "document"
   | "variable_set"
   | "rig"
-  | "connected_machine";
+  | "connected_machine"
+  | "subscription_connection";
 export type UserResourceGrantAction =
   | "connection.use"
   | "document.read"
   | "variable_set.use"
   | "rig.use"
-  | "connected_machine.use";
+  | "connected_machine.use"
+  | "subscription_connection.use";
 export type UserResourceAuthorityGrant = {
   grantId: string;
   targetWorkspaceId: string;
@@ -6059,7 +6079,9 @@ export type IssueUserResourceGrantRequest =
     }
   | {
       scope: "user";
-      resourceKind: Exclude<UserResourceKind, "connection">;
+      /** `connection` turns your own login on for your messages in this
+       * workspace (its `authorityId` from `listOwnConnectionAccounts`). */
+      resourceKind: UserResourceKind;
       mode: "always";
       context: "user_private" | "workspace_shared";
       sessionId?: null | undefined;
@@ -6079,6 +6101,35 @@ export type RevokeUserResourceGrantResponse = {
     revokedAt: string;
   };
 };
+/** Your own things that you turn on workspace by workspace. */
+export type OwnResourceReachKind = "connection" | "subscription_connection" | "connected_machine";
+/** One of your workspaces in "Where it works" for your own login, plan or machine. */
+export type OwnResourceReachWorkspace = {
+  workspaceId: string;
+  name: string;
+  /** Your Personal workspace. */
+  personal: boolean;
+  /** The workspace this was asked from. */
+  current: boolean;
+  /** It works here for your own messages. Nobody else's messages ever use it. */
+  on: boolean;
+  /** Always on here: logins and plans in your Personal workspace. */
+  alwaysOn: boolean;
+  /** You may turn it on or off here. */
+  canChange: boolean;
+};
+export type OwnResourceReachResponse = {
+  resourceKind: OwnResourceReachKind;
+  resourceId: string;
+  /** Your Personal workspace first, then by name. */
+  workspaces: OwnResourceReachWorkspace[];
+};
+export type SetOwnResourceReachRequest = {
+  resourceKind: OwnResourceReachKind;
+  resourceId: string;
+  on: boolean;
+};
+export type SetOwnResourceReachResponse = { workspace: OwnResourceReachWorkspace };
 
 export type OrganizationMembershipRole = "owner" | "admin" | "member";
 export type WorkspaceMemberRole = "viewer" | "member" | "admin" | "custom";
@@ -10724,8 +10775,10 @@ export type ChangeMachineAudienceRequest = MachineAudiencePreviewRequest & {
 
 /** What the change does to one thing on the machine. `move_off`: the chat
  * leaves the machine (its history and files stay). `keep`: the owner's chat
- * stays. `make_only_me` / `pause`: a schedule that runs on the machine.
- * `remove_first`: the same computer is connected a second time. */
+ * stays. `pause`: another person's schedule that runs on the machine; the new
+ * owner's own schedules keep running and are not listed. `make_only_me` is no
+ * longer produced. `remove_first`: the same computer is connected a second
+ * time. */
 export type MachineAudienceAction = "move_off" | "keep" | "make_only_me" | "pause" | "remove_first";
 
 /** One thing an audience change affects. Another member's private chat or
@@ -10752,6 +10805,7 @@ export type MachineAudienceSummary = {
   keptChats: number;
   keptSharedChats: number;
   movedOffChats: number;
+  /** No longer produced: always 0. */
   schedulesMadeOnlyMe: number;
   schedulesPaused: number;
   stoppedTurns: number;
@@ -11094,7 +11148,13 @@ export type EnrollTokenExchangeResponse = {
 
 export type ModelConnectionAccessPolicy = {
   allowedModels: string[] | null;
-  /** Organization-pool grants; null for every shared workspace, including new ones. */
+  /**
+   * The shared workspaces that may use the account; null for every shared
+   * workspace, including new ones. A workspace's own account always keeps
+   * serving its workspace. On a workspace's own route this is the list of
+   * workspaces it serves, and only workspaces the caller also administers
+   * can be added.
+   */
   allowedWorkspaces: string[] | null;
   allowPersonalWorkspaces: boolean;
   /**
@@ -11105,6 +11165,13 @@ export type ModelConnectionAccessPolicy = {
   allowedPeople?: string[] | null;
   /** Explicit owner consent to share a personal subscription with the organization. */
   sharePersonal?: true;
+  /**
+   * Explicit consent to make a workspace's own account the organization's, so
+   * that workspace's admins no longer manage it. Required on the organization
+   * route before it can serve every shared workspace, Personal workspaces or
+   * chosen people.
+   */
+  moveToOrganization?: true;
   version: number;
 };
 export type ModelConnectionAccessResponse = {

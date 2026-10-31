@@ -552,8 +552,14 @@ import type {
   ListManagedOrganizationMembershipsResponse,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
+  IssueUserResourceGrantRequest,
+  UserResourceGrantMutationResponse,
   UpdateGitHubActionPolicyRequest,
   RevokeUserResourceGrantResponse,
+  OwnResourceReachKind,
+  OwnResourceReachResponse,
+  SetOwnResourceReachRequest,
+  SetOwnResourceReachResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationAdministrationMembersResponse,
   AcceptOrganizationInvitationRequest,
@@ -6455,6 +6461,23 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Issue an exact-session or standing personal-resource grant. A person's
+   * own subscription is turned on for their own turns in a workspace with a
+   * standing `subscription_connection` grant there.
+   */
+  async issueUserResourceGrant(
+    workspaceId: string,
+    authorityId: string,
+    request: IssueUserResourceGrantRequest,
+  ): Promise<UserResourceGrantMutationResponse> {
+    return await this.requestJson<UserResourceGrantMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
+      request,
+    );
+  }
+
   /** Revoke an owner grant through the exact workspace it targets. */
   async revokeUserResourceGrant(
     workspaceId: string,
@@ -6463,6 +6486,37 @@ export class OpenGeniClient {
     return await this.requestJson<RevokeUserResourceGrantResponse>(
       "DELETE",
       `/v1/workspaces/${workspaceId}/user-resource-authorities/grants/${grantId}?scope=user`,
+    );
+  }
+
+  /**
+   * "Where it works" for your own login, plan or machine: each workspace you
+   * belong to in its organization, and whether it works there for your own
+   * messages. Ask from any workspace where you can see it.
+   */
+  async getOwnResourceReach(
+    workspaceId: string,
+    resource: { resourceKind: OwnResourceReachKind; resourceId: string },
+  ): Promise<OwnResourceReachResponse> {
+    const query = new URLSearchParams({
+      resourceKind: resource.resourceKind,
+      resourceId: resource.resourceId,
+    });
+    return await this.requestJson<OwnResourceReachResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/own-resources/reach?${query.toString()}`,
+    );
+  }
+
+  /** Turn your own login, plan or machine on or off for your own messages in one workspace. */
+  async setOwnResourceReach(
+    workspaceId: string,
+    request: SetOwnResourceReachRequest,
+  ): Promise<SetOwnResourceReachResponse> {
+    return await this.requestJson<SetOwnResourceReachResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/own-resources/reach`,
+      request,
     );
   }
 
@@ -11852,6 +11906,22 @@ export class OpenGeniClient {
       "PUT",
       `/v1/${target.scope}/${encodeURIComponent(target.scopeId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
       policy,
+    );
+  }
+
+  /**
+   * Stops a workspace from using another workspace's own subscription account
+   * that was shared with it. Only the owning workspace or the organization
+   * changes the account otherwise. Requires workspace admin.
+   */
+  async removeModelConnectionFromWorkspace(target: {
+    workspaceId: string;
+    kind: "codex" | "supergrok" | "claude_subscription";
+    connectionId: string;
+  }): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${encodeURIComponent(target.workspaceId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
     );
   }
 

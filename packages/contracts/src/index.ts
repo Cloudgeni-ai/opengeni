@@ -1509,7 +1509,14 @@ export const SessionTenancyVisibility = /* @__PURE__ */ defineSchema(() =>
 
 export const UserResourceAuthorityScope = /* @__PURE__ */ defineSchema(() => z.literal("user"));
 export const UserResourceKind = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["connection", "document", "variable_set", "rig", "connected_machine"]),
+  z.enum([
+    "connection",
+    "document",
+    "variable_set",
+    "rig",
+    "connected_machine",
+    "subscription_connection",
+  ]),
 );
 export type UserResourceKind = z.infer<typeof UserResourceKind>;
 
@@ -1519,6 +1526,9 @@ export const USER_RESOURCE_ACTION_BY_KIND = {
   variable_set: "variable_set.use",
   rig: "rig.use",
   connected_machine: "connected_machine.use",
+  // An `always` grant in a workspace turns a person's own Codex, Claude or
+  // SuperGrok subscription on for their own turns there.
+  subscription_connection: "subscription_connection.use",
 } as const satisfies Record<UserResourceKind, string>;
 
 export const UserResourceLifecycleGrantMode = /* @__PURE__ */ defineSchema(() =>
@@ -1594,6 +1604,7 @@ export const UserResourceAuthorityGrant = /* @__PURE__ */ defineSchema(() =>
       "variable_set.use",
       "rig.use",
       "connected_machine.use",
+      "subscription_connection.use",
     ]),
     mode: UserResourceLifecycleGrantMode,
     context: SessionTenancyVisibility,
@@ -1634,7 +1645,9 @@ export const IssueUserResourceGrantRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       scope: UserResourceAuthorityScope,
-      resourceKind: UserResourceKind.exclude(["connection"]),
+      /** `connection` turns your own login on for your messages in this
+       * workspace; it takes only `always` (D-54). */
+      resourceKind: UserResourceKind,
       mode: ManagedUserResourceGrantMode,
       context: SessionTenancyVisibility,
       sessionId: z.string().uuid().nullable().optional(),
@@ -1642,6 +1655,13 @@ export const IssueUserResourceGrantRequest = /* @__PURE__ */ defineSchema(() =>
       workspaceSharedAcknowledged: primitives.boolean.default(false),
     })
     .superRefine((value, context) => {
+      if (value.resourceKind === "connection" && value.mode !== "always") {
+        context.addIssue({
+          code: "custom",
+          path: ["mode"],
+          message: "an own login is turned on for a workspace with always",
+        });
+      }
       if (value.context === "workspace_shared" && !value.workspaceSharedAcknowledged) {
         context.addIssue({
           code: "custom",
@@ -1687,6 +1707,66 @@ export const RevokeUserResourceGrantQuery = /* @__PURE__ */ defineSchema(() =>
     scope: UserResourceAuthorityScope,
   }),
 );
+/**
+ * Your own things that you turn on workspace by workspace: your logins
+ * (`connection`), model plans (`subscription_connection`) and machines
+ * (`connected_machine`). "Where it works" lists each workspace you belong to
+ * in the organization and whether the thing works there for your own
+ * messages. Nobody else's messages ever use it.
+ */
+export const OwnResourceReachKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["connection", "subscription_connection", "connected_machine"]),
+);
+export const OwnResourceReachQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    resourceKind: OwnResourceReachKind,
+    resourceId: primitives.uuid,
+  }),
+);
+export const OwnResourceReachWorkspace = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: primitives.uuid,
+    name: z.string(),
+    /** Your Personal workspace. */
+    personal: primitives.boolean,
+    /** The workspace this was asked from. */
+    current: primitives.boolean,
+    /** It works here for your own messages. */
+    on: primitives.boolean,
+    /** Always on here and can't be turned off: logins and plans in your Personal workspace. */
+    alwaysOn: primitives.boolean,
+    /** You may turn it on or off here. Turning off is always allowed when it is on. */
+    canChange: primitives.boolean,
+  }),
+);
+export const OwnResourceReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    resourceKind: OwnResourceReachKind,
+    resourceId: primitives.uuid,
+    /** Personal first, then by name. */
+    workspaces: z.array(OwnResourceReachWorkspace),
+  }),
+);
+export const SetOwnResourceReachRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      resourceKind: OwnResourceReachKind,
+      resourceId: primitives.uuid,
+      on: primitives.boolean,
+    })
+    .strict(),
+);
+export const SetOwnResourceReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspace: OwnResourceReachWorkspace,
+  }),
+);
+export type OwnResourceReachKind = z.infer<typeof OwnResourceReachKind>;
+export type OwnResourceReachQuery = z.infer<typeof OwnResourceReachQuery>;
+export type OwnResourceReachWorkspace = z.infer<typeof OwnResourceReachWorkspace>;
+export type OwnResourceReachResponse = z.infer<typeof OwnResourceReachResponse>;
+export type SetOwnResourceReachRequest = z.infer<typeof SetOwnResourceReachRequest>;
+export type SetOwnResourceReachResponse = z.infer<typeof SetOwnResourceReachResponse>;
 export type UserResourceAuthorityGrant = z.infer<typeof UserResourceAuthorityGrant>;
 export type UserResourceAuthoritySummary = z.infer<typeof UserResourceAuthoritySummary>;
 export type ListUserResourceAuthoritiesQuery = z.infer<typeof ListUserResourceAuthoritiesQuery>;
@@ -4456,9 +4536,9 @@ export const USER_SETUP_BLOCKERS: readonly UserSetupBlocker[] = [
     code: "personal_machine_permission_required",
     capabilityId: "api:connected-machine",
     problem:
-      "This is a personal (Only me) machine, and its owner has not allowed this chat to use it yet.",
-    rationale: "Allow this chat to use your computer.",
-    nextStep: "open this chat in Opengeni and allow it to use their machine",
+      "This is a personal (Only me) machine, and its owner has not turned it on for agents in this workspace yet.",
+    rationale: "Let your agents use your computer in this workspace.",
+    nextStep: "open this chat in Opengeni and allow their machine in this workspace",
   },
 ];
 
@@ -14265,6 +14345,17 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
     updatedBySubjectId: primitives.nullableString,
     createdAt: primitives.string,
     updatedAt: primitives.string,
+    /**
+     * Your own login only: whether it works for your messages in the workspace
+     * this list was read from. It does in your Personal workspace and in each
+     * shared workspace where it is turned on; it starts on where it was added.
+     */
+    turnedOnHere: z.boolean().optional(),
+    /**
+     * The standing grant that turns your own login on here; revoke it to stop
+     * using the login here. Null in your Personal workspace, which needs none.
+     */
+    turnedOnHereGrantId: primitives.uuid.nullable().optional(),
   }),
 );
 export type ConnectionMetadata = z.infer<typeof ConnectionMetadata>;
@@ -21683,9 +21774,10 @@ export type ChangeMachineAudienceRequest = z.infer<typeof ChangeMachineAudienceR
 /**
  * What the change does to one thing on the machine. `move_off`: the chat
  * leaves the machine (its history and files stay). `keep`: the owner's chat
- * stays and keeps its audience. `make_only_me` / `pause`: a schedule that runs
- * on the machine. `remove_first`: the same computer is connected a second
- * time; remove that copy before switching.
+ * stays and keeps its audience. `pause`: another person's schedule that runs
+ * on the machine; the new owner's own schedules keep running with no change
+ * and are not listed. `make_only_me` is no longer produced. `remove_first`: the
+ * same computer is connected a second time; remove that copy before switching.
  */
 export const MachineAudienceAction = /* @__PURE__ */ defineSchema(() =>
   z.enum(["move_off", "keep", "make_only_me", "pause", "remove_first"]),
@@ -21727,6 +21819,7 @@ export const MachineAudienceSummary = /* @__PURE__ */ defineSchema(() =>
     /** The owner's shared chats that stay on the machine and stay shared. */
     keptSharedChats: primitives.nonnegativeInteger,
     movedOffChats: primitives.nonnegativeInteger,
+    /** No longer produced: always 0. A schedule runs as its owner, so the new owner's schedules keep running unchanged. */
     schedulesMadeOnlyMe: primitives.nonnegativeInteger,
     schedulesPaused: primitives.nonnegativeInteger,
     stoppedTurns: primitives.nonnegativeInteger,

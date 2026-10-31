@@ -51,7 +51,14 @@ export type Quota =
 export type Connection = {
   id: string;
   provider: ProviderId;
-  ownership: { kind: "shared"; scope: ConnectionScope } | { kind: "personal"; ownerId: string };
+  ownership:
+    | {
+        kind: "shared";
+        scope: ConnectionScope;
+        /** The workspace that owns it; absent or null for the organization's. */
+        managedByWorkspaceId?: string | null;
+      }
+    | { kind: "personal"; ownerId: string };
   healthy: boolean;
   allocatorEnabled: boolean;
   entitledModels: readonly ModelId[];
@@ -75,7 +82,7 @@ export type Workspace = {
   allowedModels: readonly ModelId[] | null;
 };
 
-export type Person = { id: string; active: boolean; personalFallbackOptIn: boolean };
+export type Person = { id: string; active: boolean };
 
 /** The contract's closed set of model tiers (D-35). Tiers compare by equality only. */
 export type Tier = "frontier" | "standard" | "fast";
@@ -97,7 +104,11 @@ export type Session = {
   visibility: "private" | "shared";
   /** Null only for a deliberately ownerless service session; it can use shared pools only. */
   ownerId: string | null;
-  /** Exact accepted shared-chat consent; not a new account pool. */
+  /**
+   * Exact accepted consent for one personal account in this session: an
+   * explicit choice, or the turn person's own subscription turned on in this
+   * workspace (D-53). Not a new account pool.
+   */
   sharedPersonalChoices?: readonly { connectionId: string; ownerId: string }[];
   /** The model the session asked for. */
   preferredModelId: ModelId;
@@ -348,23 +359,65 @@ export function spreadHash(sessionId: string, connectionId: string): number {
 }
 
 /**
- * Rank servable connections for one model. In Primary first the primary takes
- * new work whenever it can serve it, and unknown quota counts as able to serve
- * (D-13, D-14, D-15). Every other choice ranks known capacity before unknown
- * quota (D-14), then a deterministic per-session hash spreads sessions (D-21),
- * then the connection id breaks ties.
+ * D-53: the turn person's own subscription, turned on where the turn runs:
+ * their own Personal workspace, or the exact account the turn accepted for
+ * this session.
+ */
+export function ownSubscriptionTurnedOn(
+  world: World,
+  session: Session,
+  connection: Connection,
+): boolean {
+  if (connection.ownership.kind !== "personal") return false;
+  const ownerId = connection.ownership.ownerId;
+  const workspace = byId(world.workspaces, session.workspaceId);
+  if (workspace?.kind === "personal" && workspace.ownerId === ownerId) return true;
+  return !!session.sharedPersonalChoices?.some(
+    (choice) => choice.connectionId === connection.id && choice.ownerId === ownerId,
+  );
+}
+
+/**
+ * SUB-SEL-01, SUB-SEL-02: automatic selection may use shared accounts and the
+ * turn person's own subscription turned on here; any other personal account
+ * serves only an explicit choice.
+ */
+function automatic(world: World, session: Session, connection: Connection): boolean {
+  return (
+    connection.ownership.kind === "shared" || ownSubscriptionTurnedOn(world, session, connection)
+  );
+}
+
+function managedHere(session: Session, connection: Connection): boolean {
+  return (
+    connection.ownership.kind === "shared" &&
+    connection.ownership.managedByWorkspaceId === session.workspaceId
+  );
+}
+
+/**
+ * Rank servable connections for one model (D-53). The turn person's own
+ * subscription turned on here comes first. Then, in Primary first, the
+ * primary takes new work whenever it can serve it, and unknown quota counts
+ * as able to serve (D-13, D-14, D-15). Then this workspace's own accounts
+ * before the organization's. A deterministic per-session hash spreads
+ * sessions within a group (D-21), then the connection id breaks ties.
  */
 function pick(world: World, session: Session, candidates: Connection[]): Connection | null {
   if (candidates.length === 0) return null;
+  const own = candidates.filter((candidate) => ownSubscriptionTurnedOn(world, session, candidate));
+  const first = own.length ? own : candidates;
   const provider = candidates[0]!.provider;
   const rotation =
     effectiveSettings(world.settings, session.workspaceId).values.rotation[provider] ??
     ({ mode: "spread" } as Rotation);
   if (rotation.mode === "primary_first") {
-    const primary = candidates.find((candidate) => candidate.id === rotation.primaryConnectionId);
+    const primary = first.find((candidate) => candidate.id === rotation.primaryConnectionId);
     if (primary) return primary;
   }
-  const ranked = [...candidates].sort((left, right) => {
+  const workspaces = first.filter((candidate) => managedHere(session, candidate));
+  const group = workspaces.length ? workspaces : first;
+  const ranked = [...group].sort((left, right) => {
     const spread = spreadHash(session.id, left.id) - spreadHash(session.id, right.id);
     if (spread !== 0) return spread;
     return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
@@ -519,26 +572,11 @@ export function earliestRunnableAt(
   return futureResetTimes(world, now).find(runnableAt) ?? null;
 }
 
-function personalFallbackFor(world: World, session: Session): boolean {
-  if (session.ownerId === null) return false;
-  if (
-    session.visibility === "shared" &&
-    byId(world.workspaces, session.workspaceId)?.kind === "shared"
-  )
-    return false;
-  const settings = effectiveSettings(world.settings, session.workspaceId).values;
-  return (
-    (byId(world.workspaces, session.workspaceId)?.kind === "personal" &&
-      byId(world.workspaces, session.workspaceId)?.ownerId === session.ownerId) ||
-    (settings.personalFallbackAllowed &&
-      !!byId(world.people, session.ownerId)?.personalFallbackOptIn)
-  );
-}
-
 /**
  * The contract's decision for a session that wants to run a turn now. The
- * sender is deliberately not an input: the account belongs to the session
- * (SUB-STICK-01).
+ * sender reaches it only through the turn's accepted consent: their own
+ * subscription turned on here ranks first, and another person's never serves
+ * their turn (SUB-STICK-01, D-53).
  */
 export function decide(world: World, sessionId: string, now: number): Decision {
   const session = byId(world.sessions, sessionId);
@@ -588,7 +626,7 @@ export function decide(world: World, sessionId: string, now: number): Decision {
 
   const binding = session.binding;
   const bound = binding ? byId(world.connections, binding.connectionId) : undefined;
-  const personalFallback = personalFallbackFor(world, session);
+  const usable = (connection: Connection) => automatic(world, session, connection);
   const bindingServable =
     !!binding &&
     !!bound &&
@@ -599,7 +637,7 @@ export function decide(world: World, sessionId: string, now: number): Decision {
   const includedAlternative = (modelId: string) =>
     world.connections.some(
       (connection) =>
-        (connection.ownership.kind === "shared" || personalFallback) &&
+        usable(connection) &&
         !spendsCredits(connection, now) &&
         canServe(world, session, connection, modelId, now),
     );
@@ -614,20 +652,15 @@ export function decide(world: World, sessionId: string, now: number): Decision {
     return run(binding.connectionId, binding.modelId, "sticky");
   }
 
-  // Order: each candidate model on shared accounts, then (opt-in) on the
-  // owner's personal accounts, before moving to the next model (D-12).
+  // Order: each candidate model on every account automatic selection may use,
+  // the turn person's own first, before moving to the next model (D-12, D-53).
   for (const [index, modelId] of models.entries()) {
     const eligible = world.connections.filter(
-      (connection) =>
-        (connection.ownership.kind === "shared" || personalFallback) &&
-        canServe(world, session, connection, modelId, now),
+      (connection) => usable(connection) && canServe(world, session, connection, modelId, now),
     );
     const included = eligible.filter((connection) => !spendsCredits(connection, now));
     const servable = included.length ? included : eligible;
-    const shared = servable.filter((connection) => connection.ownership.kind === "shared");
-    const personal = servable.filter((connection) => connection.ownership.kind === "personal");
-    const chosen =
-      pick(world, session, shared) ?? (personalFallback ? pick(world, session, personal) : null);
+    const chosen = pick(world, session, servable);
     if (!chosen) continue;
     let kind: SwitchKind;
     if (!binding) kind = "initial";
@@ -649,9 +682,7 @@ export function decide(world: World, sessionId: string, now: number): Decision {
     earliestResetAt: earliestRunnableAt(world, now, (at) =>
       allowedModels.some((modelId) =>
         world.connections.some(
-          (connection) =>
-            (connection.ownership.kind === "shared" || personalFallback) &&
-            canServe(world, session, connection, modelId, at),
+          (connection) => usable(connection) && canServe(world, session, connection, modelId, at),
         ),
       ),
     ),
@@ -704,19 +735,10 @@ export function checkDecision(
   const models = candidateModels(world, session);
   const fail = (requirement: string, message: string) => violations.push({ requirement, message });
 
-  const personalFallback = personalFallbackFor(world, session);
-  const servableShared = (modelId: ModelId, credits: boolean) =>
-    world.connections.some(
-      (connection) =>
-        connection.ownership.kind === "shared" &&
-        (credits || !spendsCredits(connection, now)) &&
-        canServe(world, session, connection, modelId, now),
-    );
+  const usable = (connection: Connection) => automatic(world, session, connection);
   const servableAutomatically = (modelId: ModelId) =>
     world.connections.some(
-      (connection) =>
-        canServe(world, session, connection, modelId, now) &&
-        (connection.ownership.kind === "shared" || personalFallback),
+      (connection) => usable(connection) && canServe(world, session, connection, modelId, now),
     );
   const anyServable = models.some(servableAutomatically);
   const binding = session.binding;
@@ -765,17 +787,47 @@ export function checkDecision(
       if (models.slice(0, Math.max(index, 0)).some(servableAutomatically)) {
         fail("SUB-FAIL-02", "skipped an earlier failover candidate that could still run");
       }
+      const own = ownSubscriptionTurnedOn(world, session, connection);
+      if (connection.ownership.kind === "personal" && !own) {
+        fail(
+          "SUB-SEL-02",
+          "used a personal account that is not the turn person's own turned on here",
+        );
+      }
+      // A candidate ranks above the chosen account unless it would spend
+      // credits where the chosen one does not (SUB-CREDITS-01).
+      const credits = spendsCredits(connection, now);
+      const preferable = (candidate: Connection) =>
+        candidate.id !== connection.id &&
+        usable(candidate) &&
+        (credits || !spendsCredits(candidate, now)) &&
+        canServe(world, session, candidate, decision.modelId, now);
+      const ownAvailable = world.connections.some(
+        (candidate) => ownSubscriptionTurnedOn(world, session, candidate) && preferable(candidate),
+      );
+      if (!own && ownAvailable) {
+        fail("SUB-SEL-01", "passed over the turn person's own subscription turned on here");
+      }
+      const rotation = settings.rotation[connection.provider];
+      const primaryId = rotation?.mode === "primary_first" ? rotation.primaryConnectionId : null;
+      const primary = primaryId ? byId(world.connections, primaryId) : undefined;
       if (
-        connection.ownership.kind === "personal" &&
-        (!personalFallback || servableShared(decision.modelId, spendsCredits(connection, now)))
+        !own &&
+        !ownAvailable &&
+        connection.id !== primaryId &&
+        !(primary && preferable(primary)) &&
+        !managedHere(session, connection) &&
+        world.connections.some(
+          (candidate) => managedHere(session, candidate) && preferable(candidate),
+        )
       ) {
-        fail("SUB-SEL-02", "used a personal account without an explicit choice or opt-in fallback");
+        fail("SUB-SEL-01", "used another account while this workspace's own could serve");
       }
     }
     const includedAlternative = (modelId: string) =>
       world.connections.some(
         (candidate) =>
-          (candidate.ownership.kind === "shared" || personalFallback) &&
+          usable(candidate) &&
           !spendsCredits(candidate, now) &&
           canServe(world, session, candidate, modelId, now),
       );
@@ -850,8 +902,7 @@ export function checkDecision(
               allowedModels.some((modelId) =>
                 world.connections.some(
                   (connection) =>
-                    (connection.ownership.kind === "shared" || personalFallback) &&
-                    canServe(world, session, connection, modelId, at),
+                    usable(connection) && canServe(world, session, connection, modelId, at),
                 ),
               ),
             )

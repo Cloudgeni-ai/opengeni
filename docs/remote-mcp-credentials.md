@@ -113,6 +113,45 @@ is disabled.
 The chat account list only controls attachments. Adding or connecting accounts
 uses the connector's Capabilities page or a prepared inline Connect card.
 
+### Where your own logins work
+
+A personal (Only me) login belongs to its owner across the organization, but it
+works for their messages only where they turned it on:
+
+- Always in their Personal workspace.
+- In a shared workspace when they turned it on there. A login starts on in the
+  workspace it was added from. Connecting the same account again, or
+  reconnecting it, from another shared workspace turns it on there too.
+- Under each of the viewer's own logins, a connector's Capabilities page lists
+  **Where it works**: every workspace they belong to in the organization, with
+  a switch for each. The Personal workspace is always on. A workspace where
+  they may not add their own things shows the switch off with the reason; a
+  login that is on can always be turned off.
+- When a chat asks for a connector whose login the person added elsewhere, the
+  Connect card offers it with one click ("Use it here") instead of a new sign-in.
+- In a chat shared with the workspace, the owner sees a one-line note that their
+  logins work for their messages there and that people in the workspace see what
+  the agent does with them, with "Stop using it here". It never blocks a turn.
+
+Turning a login on is the owner's standing `connection.use` grant for that
+workspace (`always`, `workspace_shared`); it is not a per-chat approval. Other
+people's messages never use someone's own login. Logins that are off in a
+workspace are not attached to turns there, so the agent sees the connector as
+not connected and offers the Connect card. Accepted turns keep the accounts
+frozen at acceptance. Personal GitHub keeps its own per-chat repository choice.
+
+The same list serves a person's own logins, model subscriptions and machines:
+`GET /v1/workspaces/:workspaceId/own-resources/reach?resourceKind=&resourceId=`
+returns each workspace with `on`, `alwaysOn` and `canChange`, Personal first,
+and `PUT` on the same path with `{ resourceKind, resourceId, on }` turns it on
+or off in the path's workspace. `resourceKind` is `connection`,
+`subscription_connection` or `connected_machine` (the machine's enrollment id).
+Anything that isn't the caller's own answers `404`; turning a login or plan off
+in its owner's Personal workspace answers `422`.
+
+Logins that existed before this rule start on in every shared workspace their
+owner belonged to, so nothing that worked stops working.
+
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
 `accountSelection: "all_eligible"` mode cannot be combined with a connection ID,

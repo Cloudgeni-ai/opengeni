@@ -3806,6 +3806,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getOwnResourceReach",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/own-resources/reach",
+    "request": [
+      "OwnResourceReachQuery"
+    ],
+    "query": [
+      "resourceId",
+      "resourceKind"
+    ],
+    "response": [
+      "OwnResourceReachResponse"
+    ],
+    "permission": "workspace:read"
+  },
+  {
     "id": "getPreferenceRegistry",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/preferences/:preferenceId",
@@ -7871,6 +7887,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "capabilities:manage"
   },
   {
+    "id": "removeModelConnectionFromWorkspace",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "removeWorkspaceMember",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/members/:subjectId",
@@ -8648,6 +8671,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SubscriptionRotationSettingsRequest"
     ],
     "response": []
+  },
+  {
+    "id": "setOwnResourceReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/own-resources/reach",
+    "request": [
+      "SetOwnResourceReachRequest"
+    ],
+    "response": [
+      "SetOwnResourceReachResponse"
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "setSessionInboxMute",

@@ -49,7 +49,16 @@ export interface SuperGrokPlaces {
   openConnect: (reconnectAccountId?: string) => void;
   openAccess: (accountId: string) => void;
   sharePersonal?: ((accountId: string) => void) | undefined;
+  /** A workspace's name in the organization, where the viewer can read it. */
+  workspaceName?: ((workspaceId: string) => string | undefined) | undefined;
+  /**
+   * Workspace admins: stop using another workspace's own account that was
+   * shared with this one. Absent for everyone else.
+   */
+  removeFromWorkspace?: ((accountId: string) => Promise<void>) | undefined;
   backToList: () => void;
+  /** Your own accounts: choose where each works for your own messages, asked from this workspace. */
+  ownReach?: { workspaceId: string } | undefined;
 }
 
 function needsReconnect(account: SuperGrokAccount): boolean {

@@ -89,5 +89,7 @@ export function useCatalogConnectionAccounts(
     onRetry: () => {
       void refresh();
     },
+    /** Your own logins: where each works for your own messages, asked from this workspace. */
+    ownReach: { client, workspaceId },
   };
 }

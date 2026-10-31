@@ -2887,11 +2887,13 @@ describe("who can use a machine: Workspace or Only me, changed in place", () => 
       generation: before.generation,
       summary: {
         movedOffChats: 1,
-        schedulesMadeOnlyMe: 1,
+        schedulesMadeOnlyMe: 0,
         schedulesPaused: 0,
         notifiedPeople: 1,
       },
     });
+    // The owner's shared schedule runs as the owner, so it keeps running
+    // unchanged and is not listed.
     expect(listed.body.items).toEqual([
       expect.objectContaining({
         kind: "chat",
@@ -2901,12 +2903,6 @@ describe("who can use a machine: Workspace or Only me, changed in place", () => 
         title: "Member release",
         stopsTurn: false,
         stopsCommands: 0,
-      }),
-      expect.objectContaining({
-        kind: "schedule",
-        action: "make_only_me",
-        scheduledTaskId: schedule.id,
-        title: "Nightly build",
       }),
     ]);
 
@@ -2934,7 +2930,7 @@ describe("who can use a machine: Workspace or Only me, changed in place", () => 
     });
     const [scheduleRow] = await admin<Array<{ visibility: string; status: string }>>`
       select visibility, status from scheduled_tasks where id = ${schedule.id}`;
-    expect(scheduleRow).toEqual({ visibility: "user_private", status: "active" });
+    expect(scheduleRow).toEqual({ visibility: "workspace_shared", status: "active" });
 
     // The Machines list shows it as the owner's, and hides it from the member.
     const listFor = async (subjectId: string) => {

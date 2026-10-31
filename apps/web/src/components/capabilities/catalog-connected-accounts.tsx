@@ -15,6 +15,14 @@ import {
   connectionAccountRows,
   type AccountOriginWorkspace,
 } from "@opengeni/react/app/components/capabilities/connection-account-rows";
+import {
+  OWN_WHERE_IT_WORKS_DESCRIPTION,
+  OWN_WHERE_IT_WORKS_TITLE,
+  OwnWhereItWorks,
+  ownReachHasNothingToChoose,
+  useOwnResourceReach,
+  type OwnReachClient,
+} from "@opengeni/react/app/components/own-where-it-works";
 
 const ACCOUNT_STATUS = {
   active: "connected",
@@ -58,7 +66,36 @@ export type CatalogConnectedAccountsProps = {
    * where they came from. */
   workspaceId?: string | undefined;
   workspaces?: readonly AccountOriginWorkspace[] | undefined;
+  /** Your own logins: choose where each works for your own messages, asked from this workspace. */
+  ownReach?: { client: OwnReachClient; workspaceId: string } | undefined;
 };
+
+/** Under your own login: the workspaces where it works for your own messages. */
+function OwnLoginWhereItWorks({
+  ownReach,
+  account,
+  label,
+}: {
+  ownReach: { client: OwnReachClient; workspaceId: string };
+  account: ConnectionMetadata;
+  label: string;
+}) {
+  const reach = useOwnResourceReach({
+    ...ownReach,
+    resourceKind: "connection",
+    resourceId: account.id,
+  });
+  if (reach.state.status === "absent") return null;
+  if (reach.state.status === "ready" && ownReachHasNothingToChoose(reach.state.workspaces))
+    return null;
+  return (
+    <div className="min-w-0 basis-full">
+      <p className="m-0 text-xs leading-4.5 font-medium text-fg">{OWN_WHERE_IT_WORKS_TITLE}</p>
+      <p className="m-0 text-xs leading-4.5 text-fg-muted">{OWN_WHERE_IT_WORKS_DESCRIPTION}</p>
+      <OwnWhereItWorks name={label} reach={reach} />
+    </div>
+  );
+}
 
 /** Whether the viewer may disconnect this account: their own personal
  * account, wherever it was added, when they may remove their own accounts in
@@ -131,6 +168,7 @@ export function CatalogConnectedAccounts({
   management,
   workspaceId,
   workspaces,
+  ownReach,
 }: CatalogConnectedAccountsProps) {
   const [removeTarget, setRemoveTarget] = useState<{
     account: ConnectionMetadata;
@@ -289,6 +327,11 @@ export function CatalogConnectedAccounts({
                       </Button>
                     ) : null}
                   </div>
+                ) : null}
+                {ownReach &&
+                account.subjectId !== null &&
+                account.subjectId === management?.viewerSubjectId ? (
+                  <OwnLoginWhereItWorks ownReach={ownReach} account={account} label={label} />
                 ) : null}
               </li>
             );
