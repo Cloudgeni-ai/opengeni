@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   TranscriptionBillingRefusedError,
+  TranscriptionServiceError,
   type SessionWorkflowClient,
   type TranscriptionService,
 } from "@opengeni/core";
@@ -12,6 +13,7 @@ import {
   createWorkspace,
   encryptEnvironmentValue,
   ensureExternalIdentity,
+  getWorkspaceUsage,
   setWorkspaceAllowance,
   type DbClient,
 } from "@opengeni/db";
@@ -19,6 +21,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createSpeechToTextDeployment } from "@opengeni/core/transcription-service";
+import { createVoiceInputBilling } from "@opengeni/core";
 import { createApp, type AppDependencies } from "../src/app";
 import { meetingLanguage } from "../src/routes/recordings";
 
@@ -1291,6 +1294,498 @@ describe("recording routes", () => {
         })
       ).status,
     ).toBe(400);
+  });
+
+  test("a live transcript the deployment pays for is admitted against credits and charged for the audio it streamed, once", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    const real = createVoiceInputBilling({
+      db: db.db,
+      settings: testSettings({ usageLimitsMode: "managed" }),
+    });
+    let credits = false;
+    /** Where the next charge fails: its receipt (in the save), or its debit after. */
+    let failNext: "receipt" | "debit" | null = null;
+    let holdDebit: Promise<void> | null = null;
+    let debitEntered: (() => void) | null = null;
+    const admitted: unknown[] = [];
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      transcribe: async () => {
+        throw new Error("the live transcript never transcribes through the API");
+      },
+      billing: {
+        admit: async (input) => {
+          admitted.push(input.feature);
+          if (credits) return;
+          throw new TranscriptionBillingRefusedError({
+            code: "insufficient_credits",
+            message: "No credits.",
+          });
+        },
+        recordReceipt: async (tx, input) => {
+          if (failNext === "receipt") {
+            failNext = null;
+            throw new Error("the ledger is unavailable");
+          }
+          return await real.recordReceipt!(tx, input);
+        },
+        settle: async (input) => {
+          debitEntered?.();
+          if (holdDebit) await holdDebit;
+          if (failNext === "debit") {
+            failNext = null;
+            throw new Error("the ledger is unavailable");
+          }
+          return await real.settle(input);
+        },
+        reconcile: async (input) => await real.reconcile!(input),
+      },
+    };
+    const minted: string[] = [];
+    const scope = await fixture({
+      transcription,
+      settings: {
+        usageLimitsMode: "managed",
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: AI,
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        voiceInputAzureApiKey: "az-key",
+      },
+      speechFetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        minted.push(new Request(input, init).url);
+        return Response.json({ value: "ek_live", expires_at: Date.now() / 1_000 + 600 });
+      }) as typeof fetch,
+    });
+    // A usage allowance that prices unbilled use at list price.
+    await setWorkspaceAllowance(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      actorSubjectId: scope.serviceSubjectId,
+      includedCredits: 1_000_000_000,
+      period: "monthly",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const start = async () =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+        trackNumber: 0,
+      });
+    // Without credits no secret is minted, so no audio reaches the model.
+    expect(await start()).toMatchObject({
+      status: 402,
+      body: { error: { code: "payment_required", details: { code: "insufficient_credits" } } },
+    });
+    expect(minted).toEqual([]);
+    // The refusal is worded for the live transcript.
+    expect(admitted).toEqual(["live_transcript"]);
+    credits = true;
+    expect(await start()).toMatchObject({ status: 201, body: { providerId: "azure-openai" } });
+    const append = async (streamedMilliseconds: number, segments: unknown[] = []) =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/live-segments`, {
+        trackNumber: 0,
+        streamedMilliseconds,
+        segments,
+      });
+    const range = (source: string) => source.slice(`${recordingId}:live:0:`.length);
+    const receipts = async () =>
+      (
+        await shared.admin<{ source: string }[]>`
+          select source_resource_id as source from usage_events
+          where workspace_id = ${scope.workspaceId} and source_resource_type = 'voice_transcription'
+          order by occurred_at, source_resource_id`
+      ).map((row) => range(row.source));
+    const debits = async () =>
+      await shared.admin<{ source: string; amount: string; basis: string }[]>`
+        select source_id as source, amount_micros::text as amount, metadata->>'basis' as basis
+        from credit_ledger_entries
+        where workspace_id = ${scope.workspaceId} and type = 'voice_transcription_debit'
+        order by created_at, source_id`;
+    expect(await append(30_000)).toMatchObject({ status: 200, body: { saved: 0, ended: false } });
+    // A retry and an older total add no audio; only what is new is charged, once.
+    expect((await append(30_000)).status).toBe(200);
+    expect((await append(20_000)).status).toBe(200);
+    // Overlapping saves (a retry after a lost response): the second save
+    // waits for nothing but the first's transaction, and charges only the
+    // audio after it, even while the first's debit is still in flight.
+    let release: () => void = () => undefined;
+    holdDebit = new Promise((done) => (release = done));
+    const inDebit = new Promise<void>((done) => (debitEntered = done));
+    const first = append(45_000);
+    await inDebit;
+    debitEntered = null;
+    holdDebit = null;
+    expect((await append(50_000)).status).toBe(200);
+    release();
+    expect((await first).status).toBe(200);
+    expect(await receipts()).toEqual(["0-30000", "30000-45000", "45000-50000"]);
+    // A debit that fails leaves its receipt, so the audio isn't charged again;
+    // finalizing the meeting applies the debit from it.
+    failNext = "debit";
+    expect((await append(60_000)).status).toBe(200);
+    expect((await append(70_000)).status).toBe(200);
+    // A receipt that fails fails the save: nothing of it is kept, and the
+    // recorder's retry charges the audio once.
+    failNext = "receipt";
+    const line = { segmentNumber: 0, startMilliseconds: 0, endMilliseconds: 900, text: "Hi." };
+    expect((await append(80_000, [line])).status).toBe(500);
+    expect(
+      (await scope.owner.call("GET", `/recordings/${recordingId}`)).body.tracks[0].live,
+    ).toMatchObject({ streamedMilliseconds: 70_000 });
+    expect(await append(80_000, [line])).toMatchObject({ status: 200, body: { saved: 1 } });
+    const charged = [
+      "0-30000",
+      "30000-45000",
+      "45000-50000",
+      "50000-60000",
+      "60000-70000",
+      "70000-80000",
+    ];
+    expect([...(await receipts())].sort()).toEqual([...charged].sort());
+    expect((await debits()).map((row) => range(row.source)).sort()).toEqual(
+      charged.filter((source) => source !== "50000-60000").sort(),
+    );
+    const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1]);
+    const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+      trackNumber: 0,
+      chunks: [
+        {
+          chunkNumber: 0,
+          byteLength: bytes.byteLength,
+          sha256: sha(bytes),
+          startMilliseconds: 0,
+          durationMilliseconds: 1_000,
+        },
+      ],
+    });
+    scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+    await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+      trackNumber: 0,
+      chunkNumbers: [0],
+    });
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+          tracks: [{ trackNumber: 0, chunkCount: 1 }],
+        })
+      ).status,
+    ).toBe(200);
+    const settled = await debits();
+    expect(settled.map((row) => range(row.source)).sort()).toEqual([...charged].sort());
+    // The duration is the recorder's, and the ledger says so.
+    expect(settled.find((row) => range(row.source) === "0-30000")?.basis).toBe(
+      "client_reported_duration",
+    );
+    // The allowance counts the credits once, never the list price as well.
+    const usage = await getWorkspaceUsage(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+    });
+    expect(usage.workspace.used).toBe(
+      settled.reduce((total, row) => total - Number(row.amount), 0),
+    );
+    expect(usage.workspace.used).toBeGreaterThan(0);
+  });
+
+  test("an unpriced meeting model the deployment pays for isn't served while credits are billed, except on legacy billing", async () => {
+    const legacy: string[] = [];
+    const scope = await fixture({
+      settings: {
+        usageLimitsMode: "managed",
+        billingLegacyAccountIds: legacy,
+        recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+        recordingAzureSpeechApiKey: "deployment-key",
+        speechToTextPinned: "azure-speech/MAI-Transcribe-2",
+      },
+    });
+    const finalize = async (recordingId: string) =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+    // No voice input MAI price: the meeting would be transcribed free, so it
+    // fails saying the model isn't available (which the app words and offers
+    // another model for) and nothing reaches the worker.
+    const refused = await finalize(await capturedRecording(scope));
+    expect(refused.body.transcript).toMatchObject({
+      providerId: "azure-speech",
+      state: "failed",
+      errorCode: "model_unavailable",
+    });
+    expect(scope.started).toEqual([]);
+    // CloudGeni's legacy account keeps today's behaviour.
+    legacy.push(scope.accountId);
+    const kept = await capturedRecording(scope);
+    const ran = await finalize(kept);
+    expect(ran.body.transcript).toMatchObject({ providerId: "azure-speech", state: "queued" });
+    expect(scope.started.map((started) => started.recordingId)).toEqual([kept]);
+  });
+
+  test("a legacy billing account's live transcript is neither admitted against credits nor charged", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    const calls: string[] = [];
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      transcribe: async () => {
+        throw new Error("the live transcript never transcribes through the API");
+      },
+      billing: {
+        admit: async () => {
+          calls.push("admit");
+          throw new TranscriptionBillingRefusedError({
+            code: "insufficient_credits",
+            message: "No credits.",
+          });
+        },
+        settle: async () => {
+          calls.push("settle");
+          return { creditCostMicros: 1 };
+        },
+      },
+    };
+    const legacy: string[] = [];
+    const scope = await fixture({
+      transcription,
+      settings: {
+        usageLimitsMode: "managed",
+        billingLegacyAccountIds: legacy,
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: AI,
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        voiceInputAzureApiKey: "az-key",
+      },
+      speechFetch: (async () =>
+        Response.json({ value: "ek_live", expires_at: Date.now() / 1_000 + 600 })) as typeof fetch,
+    });
+    legacy.push(scope.accountId);
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(
+      await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, { trackNumber: 0 }),
+    ).toMatchObject({ status: 201, body: { providerId: "azure-openai" } });
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/live-segments`, {
+          trackNumber: 0,
+          streamedMilliseconds: 30_000,
+          segments: [],
+        })
+      ).status,
+    ).toBe(200);
+    expect(calls).toEqual([]);
+  });
+
+  test("a live transcript charged in credits gets no more sessions while its recorder doesn't report the audio they stream", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    let mintFails = false;
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      transcribe: async () => {
+        throw new Error("the live transcript never transcribes through the API");
+      },
+      billing: {
+        admit: async () => undefined,
+        settle: async () => ({ creditCostMicros: 1 }),
+        recordReceipt: async () => ({ creditCostMicros: 1 }),
+      },
+    };
+    const scope = await fixture({
+      transcription,
+      settings: {
+        usageLimitsMode: "managed",
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: AI,
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        voiceInputAzureApiKey: "az-key",
+      },
+      speechFetch: (async () =>
+        mintFails
+          ? new Response("busy", { status: 503 })
+          : Response.json({
+              value: "ek_live",
+              expires_at: Date.now() / 1_000 + 600,
+            })) as typeof fetch,
+    });
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const start = async () =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+        trackNumber: 0,
+      });
+    for (let session = 0; session < 3; session++) expect((await start()).status).toBe(201);
+    // A session the provider never started doesn't count.
+    mintFails = true;
+    expect((await start()).status).toBeGreaterThanOrEqual(500);
+    mintFails = false;
+    expect((await start()).status).toBe(201);
+    // Four sessions and no audio reported: the recorder gets no more, and
+    // treats the 409 as final. The recording itself carries on.
+    expect(await start()).toMatchObject({
+      status: 409,
+      body: {
+        error: {
+          code: "conflict",
+          message:
+            "The live transcript stopped for this track. The recording continues and is transcribed when it ends.",
+          retryable: false,
+          details: { code: "live_grant_limit" },
+        },
+      },
+    });
+  });
+
+  test("credits turned off, or a payer that can't be identified, is a final 403 policy refusal, not a retryable 500", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    const policyBlocked = () =>
+      new TranscriptionServiceError({
+        code: "policy_blocked",
+        status: 403,
+        fallbackSafe: true,
+        message: "Credits are turned off in this workspace.",
+      });
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      transcribe: async () => {
+        throw new Error("the worker transcribes meetings");
+      },
+      admit: async () => {
+        throw policyBlocked();
+      },
+      billing: {
+        admit: async () => {
+          throw policyBlocked();
+        },
+        settle: async () => ({ creditCostMicros: 1 }),
+        recordReceipt: async () => ({ creditCostMicros: 1 }),
+      },
+    };
+    const scope = await fixture({
+      transcription,
+      settings: {
+        usageLimitsMode: "managed",
+        recordingWordAlignment: true,
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: AI,
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        voiceInputAzureApiKey: "az-key",
+      },
+      speechFetch: (async () =>
+        Response.json({ value: "ek_live", expires_at: Date.now() / 1_000 + 600 })) as typeof fetch,
+    });
+    const blocked = {
+      status: 403,
+      body: {
+        error: {
+          code: "forbidden",
+          message: "Credits are turned off in this workspace.",
+          retryable: false,
+          details: { code: "policy_blocked" },
+        },
+      },
+    };
+    // The live transcript: the recorder treats a 403 as final and stops asking.
+    const live = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId: live,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(
+      await scope.owner.call("POST", `/recordings/${live}/live-session`, { trackNumber: 0 }),
+    ).toMatchObject(blocked);
+    // A meeting on a chosen deployment model: capture still ends, and the
+    // failed transcript says why; transcribing again is refused the same way.
+    const chosen = await capturedRecording(scope, {
+      providerId: "azure-openai",
+      model: "gpt-4o-transcribe",
+    });
+    const finalized = await scope.owner.call("POST", `/recordings/${chosen}/finalize`, {
+      tracks: [{ trackNumber: 0, chunkCount: 1 }],
+    });
+    expect(finalized.status).toBe(200);
+    expect(finalized.body.transcript).toMatchObject({
+      providerId: "azure-openai",
+      state: "failed",
+      errorCode: "policy_blocked",
+    });
+    expect(scope.started).toEqual([]);
+    expect(await scope.owner.call("POST", `/recordings/${chosen}/transcripts`, {})).toMatchObject(
+      blocked,
+    );
+  });
+
+  test("an unpriced deployment model is listed unavailable and the default moves to one that can run", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    const legacy: string[] = [];
+    const settings = (wordAlignment: boolean) => ({
+      usageLimitsMode: "managed" as const,
+      billingLegacyAccountIds: legacy,
+      recordingWordAlignment: wordAlignment,
+      // The deployment's Azure Speech account has no voice input MAI price.
+      recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+      recordingAzureSpeechApiKey: "deployment-key",
+      recordingTranscriptionDefault: "azure-speech/MAI-Transcribe-2",
+      voiceInputProviderOrder: "azure-openai",
+      recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+      voiceInputAzureEndpoint: AI,
+      voiceInputAzureDeployment: "gpt-4o-transcribe",
+      voiceInputAzureApiKey: "az-key",
+    });
+    const scope = await fixture({ settings: settings(true) });
+    // Without word alignment the Realtime model only streams the live transcript.
+    const liveOnlyScope = await fixture({ settings: settings(false) });
+    const listed = async (on = scope) => (await on.owner.call("GET", "/recording-models")).body;
+    const entry = (body: { models: { providerId: string; model: string }[] }, id: string) =>
+      body.models.find((model) => `${model.providerId}/${model.model}` === id);
+    let models = await listed();
+    // The default is the deployment model with a price, not the unpriced one.
+    expect(models.default).toEqual({ providerId: "azure-openai", model: "gpt-4o-transcribe" });
+    expect(entry(models, "azure-openai/gpt-4o-transcribe")).toMatchObject({
+      funding: "deployment",
+      available: true,
+      chargedInCredits: true,
+    });
+    expect(entry(models, "azure-speech/MAI-Transcribe-2")).toMatchObject({
+      available: false,
+      unavailableReason: "unpriced",
+      chargedInCredits: false,
+    });
+    // A live-only model is charged in credits, with its price.
+    const liveOnly = entry(await listed(liveOnlyScope), "azure-openai/gpt-4o-transcribe");
+    expect(liveOnly).toMatchObject({
+      capabilities: { batch: false, live: true },
+      available: true,
+      chargedInCredits: true,
+    });
+    expect(typeof (liveOnly as { usdPerHour: unknown }).usdPerHour).toBe("number");
+
+    // CloudGeni's legacy account keeps today's behaviour: the default runs,
+    // and its live transcript is neither charged nor priced.
+    legacy.push(scope.accountId, liveOnlyScope.accountId);
+    models = await listed();
+    expect(models.default).toEqual({ providerId: "azure-speech", model: "MAI-Transcribe-2" });
+    expect(entry(models, "azure-speech/MAI-Transcribe-2")).toMatchObject({ available: true });
+    expect(entry(models, "azure-speech/MAI-Transcribe-2")).not.toHaveProperty("unavailableReason");
+    expect(entry(await listed(liveOnlyScope), "azure-openai/gpt-4o-transcribe")).toMatchObject({
+      chargedInCredits: false,
+      usdPerHour: null,
+    });
   });
 
   test("EU-only: a live secret is minted only for a Realtime endpoint declared EU", async () => {

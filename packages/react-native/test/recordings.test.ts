@@ -597,6 +597,63 @@ describe("native recorder", () => {
     ]);
   });
 
+  test("the live transcript reports pauses, resumes and interruptions, so their time isn't counted as streamed", async () => {
+    FakeLiveSocket.opened = [];
+    const { store } = await storeIn();
+    const fake = fakeNative((id) => store.directory(id));
+    const server = fakeServer();
+    const saved: AppendRecordingLiveSegmentsRequest[] = [];
+    const recorder = createNativeRecorder({
+      client: {
+        ...server.client,
+        createRecordingLiveSession: async () => liveGrant,
+        appendRecordingLiveSegments: async (_workspace, _recording, request) => {
+          saved.push(request);
+          return { saved: request.segments.length, ended: false };
+        },
+      },
+      workspaceId: WORKSPACE,
+      native: fake.native,
+      store,
+      fs: nodeFs,
+      randomUUID: () => RECORDING,
+      requestPermission: async () => true,
+      notification: { title: "t", text: "t" },
+      fetch: server.fetch,
+      liveTranscript: true,
+      liveWebSocket: FakeLiveSocket,
+    });
+    const tick = () => new Promise((done) => setTimeout(done, 0));
+    await recorder.start();
+    fake.emitPcm(0);
+    await tick();
+    FakeLiveSocket.opened[0]!.open();
+    expect(saved).toHaveLength(0);
+    // Each change is one report of the audio streamed so far, with no text.
+    recorder.pause();
+    await tick();
+    expect(saved).toHaveLength(1);
+    recorder.resume();
+    await tick();
+    await tick();
+    expect(saved).toHaveLength(2);
+    fake.emitState({ recordingId: RECORDING, state: "interrupted" });
+    await tick();
+    expect(saved).toHaveLength(3);
+    fake.emitState({ recordingId: RECORDING, state: "recording" });
+    await tick();
+    expect(saved).toHaveLength(4);
+    expect(saved.map((request) => [request.streamedMilliseconds, request.segments.length])).toEqual(
+      [
+        [100, 0],
+        [100, 0],
+        [100, 0],
+        [100, 0],
+      ],
+    );
+    await recorder.discard();
+  });
+
   test("without the live calls or a native tap, recording goes on with no live transcript", async () => {
     const { store } = await storeIn();
     const fake = fakeNative((id) => store.directory(id));
