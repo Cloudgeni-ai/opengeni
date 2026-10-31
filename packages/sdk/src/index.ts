@@ -1773,6 +1773,9 @@ export type {
   FeedbackSubmissionResponse,
   FeedbackContext,
   FeedbackRecentError,
+  FeedbackRecentRequest,
+  FeedbackRecentException,
+  FeedbackBreadcrumb,
   FeedbackScreenshot,
   FeedbackScreenshotUpload,
 } from "./feedback";

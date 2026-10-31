@@ -3,6 +3,7 @@ import { Directory, File, Paths } from "expo-file-system";
 import { useCallback, useSyncExternalStore } from "react";
 import {
   createFeedbackOutbox,
+  feedbackForOlderServer,
   type FeedbackOutboxStorage,
   type FeedbackSendFailure,
 } from "./outbox-core";
@@ -63,7 +64,17 @@ export const feedbackOutbox = createFeedbackOutbox({
   storage: fileStorage,
   async send(accountId, report) {
     if (!sender || sender.accountId !== accountId) throw new Error("That account is not in use");
-    await sender.client.createFeedback(report.workspaceId, report.request);
+    try {
+      await sender.client.createFeedback(report.workspaceId, report.request);
+    } catch (error) {
+      // A server older than this app refuses the context it doesn't know yet.
+      const older =
+        error instanceof OpenGeniApiError && error.status === 400
+          ? feedbackForOlderServer(report.request)
+          : null;
+      if (!older) throw error;
+      await sender.client.createFeedback(report.workspaceId, older);
+    }
   },
   classify: classifyFeedbackFailure,
 });
