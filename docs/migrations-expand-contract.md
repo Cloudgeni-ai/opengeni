@@ -332,6 +332,38 @@ steps (drain, roles, image pinning) in `docs/deployment.md` or a note under
 
 ## The CI guard
 
+### Retiring removed-feature schema
+
+`RETIRING_FEATURE_TABLES` in `packages/db/src/runtime-posture.ts` is the explicit
+release-N inventory for the removed Variable Sets, subscription pools, first
+automation API, PR Review and resumable-transcription features. Readiness permits
+those tables to be absent but retains their exact ownership, grants and RLS
+checks while present. No prefix rule makes other tables optional. Modern
+subscription-core tables, vaults, automation templates, event sources and meeting
+recordings are not retired.
+
+The inspector checks the data schema in `pg_catalog`, not tenant-filtered rows.
+Cutover receipts remain required while any table of the corresponding legacy
+feature exists. Their absence is accepted only after its entire table group is
+gone, including in scoped/embedded mode. Surviving routines keep their existing
+execution, ownership and search-path contracts.
+
+This is not a drop migration or permission-snapshot rewrite. Before release N+1:
+
+- Deploy this compatibility binary everywhere; record exact source ancestry and
+  advance the previous-production readiness pin in a separate change.
+- Replace every surviving SQL lifecycle/retention caller, remove unused ORM
+  fields from live projections, and preserve outstanding blob-deletion work.
+- Migrate mutable legacy permission grants without rewriting model history or
+  invalidating frozen execution identities; reconcile old tokens and workflows.
+- Use an explicit `contract-step` migration with reviewed dependency removals,
+  not blanket `DROP ... CASCADE`, and test it as the non-superuser migration owner.
+
+`retiring-feature-posture-postgres.test.ts` physically removes the named objects
+in a disposable database to prove readiness compatibility. Its test-only cascade
+is deliberately not a production migration or proof that remaining SQL callers
+can already run without those objects.
+
 ### Pinned previous-binary readiness
 
 `scripts/runtime-posture-baseline.json` pins a full immutable source commit,

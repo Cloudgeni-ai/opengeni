@@ -48,6 +48,7 @@ export * from "./knowledge-entries-schema";
 export * from "./subscription-core-schema";
 import type { ResolvedAgentConfig, SessionAvatar, SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
+import type { SessionEventPayloadTruncation } from "@opengeni/contracts";
 import {
   bigint,
   boolean,
@@ -108,6 +109,16 @@ const opengeniPrivateSchema = pgSchema("opengeni_private");
 
 /** Who asked for a pending context compaction (`sessions.compact_request_trigger`). */
 export type CompactRequestTrigger = "operator" | "proactive";
+
+/**
+ * A pending tool call's output as its agent.toolCall.output event carries it,
+ * bounded on write like the event itself; `truncation` is present only when
+ * the bound omitted part of the value.
+ */
+export type PendingToolCallEventOutput = {
+  value: unknown;
+  truncation?: SessionEventPayloadTruncation;
+};
 
 export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
 
@@ -10461,7 +10472,7 @@ export const sessionPendingToolCalls = pgTable(
     modelToolOutputTruncationTokens: integer("model_tool_output_truncation_tokens"),
     resultItem: losslessOrderedJson("result_item_ordered").$type<Record<string, unknown>>(),
     resultItemCodecVersion: losslessCodecVersion("result_item_codec_version"),
-    eventOutput: losslessJsonb("event_output").$type<{ value: unknown }>(),
+    eventOutput: losslessJsonb("event_output").$type<PendingToolCallEventOutput>(),
     eventOutputCodecVersion: losslessCodecVersion("event_output_codec_version"),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
     /** Private state of an MCP server question that paused this call; never in events. */
@@ -15308,6 +15319,8 @@ export const feedbackSubmissions = pgTable(
     context: jsonb("context").$type<Record<string, unknown>>(),
     /** Screenshot metadata in send order (FeedbackScreenshot); bytes are in object storage. */
     screenshots: jsonb("screenshots").$type<unknown[]>().notNull().default([]),
+    /** What the server knew when the report arrived (FeedbackDiagnostics); never sent to clients. */
+    diagnostics: jsonb("diagnostics").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -15339,6 +15352,50 @@ export const feedbackSubmissions = pgTable(
       table.sessionId,
       table.createdAt,
       table.id,
+    ),
+  }),
+);
+
+/**
+ * An agent ringing a person's phones (1107): one row per call, from ringing
+ * to its outcome. Answering opens the chat's voice call.
+ */
+export const agentCalls = pgTable(
+  "agent_calls",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    calleeSubjectId: text("callee_subject_id").notNull(),
+    callerSubjectId: text("caller_subject_id"),
+    callerLabel: text("caller_label"),
+    reason: text("reason").notNull(),
+    state: text("state").notNull().default("ringing"),
+    devices: integer("devices").notNull().default(0),
+    ringUntil: timestamp("ring_until", { withTimezone: true }).notNull(),
+    answeredBy: text("answered_by"),
+    realtimeId: uuid("realtime_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (table) => ({
+    session: index("agent_calls_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt.desc(),
+    ),
+    ringingCallee: index("agent_calls_ringing_callee_idx")
+      .on(table.calleeSubjectId)
+      .where(sql`${table.state} = 'ringing'`),
+    ringingDeadline: index("agent_calls_ringing_deadline_idx")
+      .on(table.ringUntil)
+      .where(sql`${table.state} = 'ringing'`),
+    stateCheck: check(
+      "agent_calls_state_chk",
+      sql`${table.state} in ('ringing', 'answered', 'declined', 'missed', 'cancelled')`,
     ),
   }),
 );

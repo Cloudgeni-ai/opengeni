@@ -218,6 +218,7 @@ export class CuaComputerBackend implements ComputerBackend {
     private readonly frontWindow: WindowFronting | null,
     private readonly personInput: PersonInputReader | null,
     private readonly agentInput: AgentInput,
+    private readonly cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity,
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -246,6 +247,7 @@ export class CuaComputerBackend implements ComputerBackend {
     runtime: CuaDesktopRuntime,
     platform: "macos" | "windows" | "linux" = "macos",
     options: {
+      cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity;
       /** A process's parent, to tie a Linux launcher's app to its window.
        * CUA runs in this process, so it sees the same processes. */
       parentPid?: (pid: number) => number | null;
@@ -280,6 +282,7 @@ export class CuaComputerBackend implements ComputerBackend {
         platform === "windows" ? (options.frontWindow ?? null) : null,
         platform === "macos" ? (options.personInput ?? null) : null,
         options.agentInput ?? processAgentInput,
+        options.cursorIdentity,
       );
       await backend.startSession(backend.session);
       return backend;
@@ -1016,7 +1019,13 @@ export class CuaComputerBackend implements ComputerBackend {
   /** Start or reassert a CUA session, setting its cursor motion once per
    * session and again whenever CUA revives it with defaults. */
   private async startSession(session: string): Promise<Record<string, unknown>> {
-    const { data } = await callDesktop(this.runtime, "start_session", { session });
+    const { data } = await callDesktop(this.runtime, "start_session", {
+      session,
+      cursor_identity: {
+        label: this.cursorIdentity?.label ?? "Agent",
+        ...(this.cursorIdentity?.avatarPng ? { avatar_png: this.cursorIdentity.avatarPng } : {}),
+      },
+    });
     if (data.revived === true || !this.cursorMotionSet.has(session)) {
       this.cursorMotionSet.add(session);
       // Cosmetic: a host without a cursor overlay must still act.

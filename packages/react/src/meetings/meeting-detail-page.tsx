@@ -128,18 +128,26 @@ function isNotFound(error: Error | null): boolean {
   return Boolean(error && /not found|404/iu.test(error.message));
 }
 
-/** Fresh playback links for every prepared track. Links expire, so a failed one refetches. */
+/**
+ * Fresh playback links for every prepared track. Links expire, so a failed one refetches.
+ * While the meeting is processed, the player waits until every recorded track can
+ * play: the first track alone sounds as if the rest (the call's side) was never recorded.
+ */
 function useTrackSources(
   recording: Recording | null,
   getAudio: (trackNumber: number) => Promise<{ url: string }>,
 ): { sources: MeetingPlayerSource[]; reload: () => void } {
   const [sources, setSources] = useState<MeetingPlayerSource[]>([]);
   const [generation, setGeneration] = useState(0);
-  const playable = useMemo(
-    () =>
-      (recording?.tracks ?? []).filter((track) => track.playable).map((track) => track.trackNumber),
-    [recording?.tracks],
-  );
+  const state = recording?.state;
+  const playable = useMemo(() => {
+    const tracks = recording?.tracks ?? [];
+    const partial =
+      state === "processing" && tracks.some((track) => track.chunkCount > 0 && !track.playable);
+    return partial
+      ? []
+      : tracks.filter((track) => track.playable).map((track) => track.trackNumber);
+  }, [recording?.tracks, state]);
   const key = playable.join(",");
   const getAudioRef = useRef(getAudio);
   getAudioRef.current = getAudio;

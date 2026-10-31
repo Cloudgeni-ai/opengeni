@@ -33,6 +33,29 @@ export const PR_INVENTORY_TESTS: readonly { test: string; areas: readonly string
     test: "scripts/check-migration-immutability.test.ts",
     areas: ["packages/db/drizzle/", "scripts/check-migration-immutability"],
   },
+  // The expected test inventory: a new root e2e file must be registered.
+  {
+    test: "scripts/ci/impact.test.ts",
+    areas: ["test/", "scripts/ci/impact", "scripts/run-browser-e2e.ts"],
+  },
+  // Byte locks of the composed system prompt, which most runtime sources feed.
+  {
+    test: "packages/runtime/test/agent-instructions/legacy-prompt-lock.test.ts",
+    areas: ["packages/runtime/src/", "packages/contracts/src/"],
+  },
+  {
+    test: "scripts/catalog-curation.test.ts",
+    areas: ["data/catalog/", "scripts/catalog-curation", "scripts/import-integrations-catalog"],
+  },
+  // These execute or inspect one production source file by its path.
+  {
+    test: "apps/worker/test/text-verbosity.test.ts",
+    areas: ["apps/worker/src/activities/agent-turn/claim.ts"],
+  },
+  {
+    test: "apps/api/test/channel-a-routes.test.ts",
+    areas: ["apps/api/src/sandbox/channel-a.ts"],
+  },
 ];
 
 /** Workspaces whose change can break the production web bundle Batch builds. */

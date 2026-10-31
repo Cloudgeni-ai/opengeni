@@ -52,6 +52,14 @@
 //! what the VM compressed since, so that it ends uncompressed where the
 //! bound put it, never below, however well its pages compress.
 //!
+//! A descent can be slow to start: before the kernel compresses any of a
+//! VM's pages it ages them, clearing what marks each as recently used,
+//! and a VM that has just written gigabytes may take it many seconds of a
+//! busy or nested host's time to age before the first megabytes compress,
+//! then come down hundreds of megabytes a second. The host asks whether a
+//! descent is under way ([`Bounds::descending`]), so that it does not take
+//! a VM the kernel is still bringing down for one it cannot hold.
+//!
 //! One thread at a time works for a VM, and only on the latest bound asked:
 //! one asked while it works replaces any not yet applied. A resume, a pause
 //! or an adoption sets the VM's bounds back with [`Bounds::reset`], which
@@ -152,6 +160,9 @@ struct State {
     wanted: Option<(u64, Option<u64>)>,
     /// Whether a writer thread is at work.
     working: bool,
+    /// Whether it is bringing the VM down toward a bound's high: a descent
+    /// began and has not ended, or ended with a newer bound to apply.
+    descending: bool,
     /// What the writer did with the VM's swap since the latest reset.
     meter: Meter,
     /// The high the latest bound settled at, `None` for none: where a
@@ -206,6 +217,13 @@ impl Bounds {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Whether the writer is still bringing the VM down toward the high of
+    /// the latest bound: a descent began and has not ended, so the kernel
+    /// has not yet shown that it can take no more.
+    pub(super) fn descending(&self) -> bool {
+        self.lock().descending
+    }
+
     /// Applies the latest bound asked, then reclaims down to its high,
     /// until none is left to apply. A bound still wanted was asked after
     /// the latest reset, which drops all asked before it.
@@ -215,6 +233,7 @@ impl Bounds {
                 let mut state = self.lock();
                 let Some((low, high)) = state.wanted.take() else {
                     state.working = false;
+                    state.descending = false;
                     return;
                 };
                 // Under the lock, so a reset cannot run between the check
@@ -225,6 +244,7 @@ impl Bounds {
                     Ok(None) => {
                         // Lifted, so its swap opens again too.
                         state.settled = None;
+                        state.descending = false;
                         if state.meter != Meter::Untouched && group.set_swap_max(None).is_ok() {
                             state.meter = Meter::Untouched;
                         }
@@ -232,13 +252,16 @@ impl Bounds {
                     }
                     Ok(Some(at)) => {
                         state.settled = Some(at);
-                        (state.epoch, high.unwrap_or(at), at)
+                        let high = high.unwrap_or(at);
+                        state.descending = at > high;
+                        (state.epoch, high, at)
                     }
                     Err(_) => {
                         // The VM is gone, and its group with it: nothing
                         // is left to bound.
                         state.wanted = None;
                         state.working = false;
+                        state.descending = false;
                         return;
                     }
                 }
@@ -879,5 +902,84 @@ mod tests {
         bounds.reset(|| vm.set_high(None)).unwrap();
         bounds.descend(&vm, epoch, high, at);
         assert_eq!(vm.kernel().high, None, "the reset's high stays");
+    }
+
+    /// A VM's group that records, at each reclaim, whether its writer says
+    /// it is bringing the VM down.
+    struct Watched<'a> {
+        vm: Vm,
+        bounds: &'a Bounds,
+        seen: Mutex<Vec<bool>>,
+    }
+
+    impl Group for Watched<'_> {
+        fn current(&self) -> io::Result<u64> {
+            self.vm.current()
+        }
+
+        fn compressed(&self) -> io::Result<u64> {
+            self.vm.compressed()
+        }
+
+        fn set_low(&self, bytes: u64) -> io::Result<()> {
+            self.vm.set_low(bytes)
+        }
+
+        fn set_high(&self, bytes: Option<u64>) -> io::Result<()> {
+            self.vm.set_high(bytes)
+        }
+
+        fn swap(&self) -> io::Result<Option<Swap>> {
+            self.vm.swap()
+        }
+
+        fn set_swap_max(&self, bytes: Option<u64>) -> io::Result<()> {
+            self.vm.set_swap_max(bytes)
+        }
+
+        fn stored(&self) -> io::Result<u64> {
+            self.vm.stored()
+        }
+
+        fn reclaim(&self, bytes: u64) -> io::Result<bool> {
+            self.seen.lock().unwrap().push(self.bounds.descending());
+            self.vm.reclaim(bytes)
+        }
+    }
+
+    /// Has `bounds` apply `low` and `high` to `watched` before returning.
+    fn apply_watched(bounds: &Bounds, watched: &Watched<'_>, low: u64, high: Option<u64>) {
+        {
+            let mut state = bounds.lock();
+            state.wanted = Some((low, high));
+            state.working = true;
+        }
+        bounds.work(watched);
+        assert!(!bounds.lock().working);
+    }
+
+    #[test]
+    fn a_descent_says_it_is_under_way_until_it_ends() {
+        let bounds = Bounds::default();
+        let watched = Watched {
+            vm: Vm::compressing(3 * GIB, 2 * GIB, 3),
+            bounds: &bounds,
+            seen: Mutex::default(),
+        };
+        assert!(!bounds.descending());
+        // A bound above what the VM holds asks no descent.
+        apply_watched(&bounds, &watched, GIB, Some(4 * GIB));
+        assert!(watched.seen.lock().unwrap().is_empty());
+        assert!(!bounds.descending());
+        // A bound below: every step of the way it says so, and no longer
+        // once the VM is there.
+        apply_watched(&bounds, &watched, GIB, Some(2 * GIB));
+        let seen = watched.seen.lock().unwrap().clone();
+        assert!(
+            !seen.is_empty() && seen.iter().all(|&under_way| under_way),
+            "{seen:?}"
+        );
+        assert!(watched.vm.current().unwrap() <= 2 * GIB + watched.vm.compressed().unwrap());
+        assert!(!bounds.descending());
     }
 }
