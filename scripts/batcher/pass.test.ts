@@ -60,8 +60,10 @@ class FakeGitHub implements GitHub {
   landedExtra: string[] = [];
   /** A head that applies exactly what another head applies, like main merged in again. */
   sameContent = new Map<string, string>();
-  /** File texts, the same at every commit. */
+  /** File texts, the same at every commit unless `textsAt` has that commit. */
   texts = new Map<string, string>();
+  /** File texts at one commit, replacing `texts` there. */
+  textsAt = new Map<string, Map<string, string>>();
   trees = new Map<string, { base: string; entries: TreeEntry[] }>();
   branchUpdates: { name: string; sha: string }[] = [];
   /** Commits that files and directory listings were read at, after observing. */
@@ -199,9 +201,10 @@ class FakeGitHub implements GitHub {
   async readFiles(ref: string, paths: string[]) {
     this.reads.push(ref);
     if (this.readFailure) throw this.readFailure;
+    const texts = this.textsAt.get(ref) ?? this.texts;
     const files = new Map<string, RepoFile>();
     for (const path of paths) {
-      const text = this.texts.get(path);
+      const text = texts.get(path);
       if (text !== undefined) files.set(path, { text, mode: "100644", oid: hash(`blob:${text}`) });
     }
     return files;
@@ -881,7 +884,7 @@ describe("a batcher pass", () => {
     expect(gh.pulls.get(4)!.labels).toContain(QUEUE_LABEL);
   });
 
-  test("ejects with the manual command when a moved migration's number is named ambiguously", async () => {
+  test("rewrites the PR's own bare mention of a moved migration's number, never main's", async () => {
     const gh = new FakeGitHub();
     gh.addPull(1, { files: ["packages/db/drizzle/0007_a.sql"], labels: [] });
     const landed = gh.store([gh.pulls.get(1)!.head], [await gh.mainSha()], "Change 1 (#1)");
@@ -890,7 +893,40 @@ describe("a batcher pass", () => {
     gh.addPull(2, { files: ["packages/db/drizzle/0007_b.sql", "docs/b.md"] });
     gh.headCommit(2);
     gh.texts.set("packages/db/drizzle/0007_b.sql", "create table b ();\n");
+    gh.texts.set("docs/b.md", "Migration 0007 adds a.\nMigration 0007 adds b.\n");
+    // Main's docs/b.md has only its own line, naming main's 0007.
+    gh.textsAt.set(landed, new Map([["docs/b.md", "Migration 0007 adds a.\n"]]));
+
+    await run(gh, options());
+    expect(gh.branchUpdates).toHaveLength(1);
+    expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
+    expect([...gh.trees.values()][0]!.entries).toContainEqual({
+      path: "docs/b.md",
+      mode: "100644",
+      content: "Migration 0007 adds a.\nMigration 0008 adds b.\n",
+    });
+  });
+
+  test("ejects with the manual command when a moved migration's number is named ambiguously", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: ["packages/db/drizzle/0007_a.sql"], labels: [] });
+    const landed = gh.store([gh.pulls.get(1)!.head], [await gh.mainSha()], "Change 1 (#1)");
+    gh.refs.set("main", landed);
+    gh.pulls.get(1)!.merged = landed;
+    gh.addPull(2, { files: ["packages/db/drizzle/0007_b.sql", "docs/b.md"] });
+    // The PR merged main after main took 0007, so its 0007 may mean either.
+    const head = gh.pulls.get(2)!.head;
+    gh.commits.set(head, {
+      sha: head,
+      tree: hash(`tree:${head}`),
+      message: "head 2",
+      date: NOW,
+      applied: [gh.pulls.get(1)!.head, head],
+      parents: [landed],
+    });
+    gh.texts.set("packages/db/drizzle/0007_b.sql", "create table b ();\n");
     gh.texts.set("docs/b.md", "Migration 0007 adds b.\n");
+    gh.textsAt.set(landed, new Map());
 
     await run(gh, options());
     expect(gh.branchUpdates).toEqual([]);
@@ -925,13 +961,17 @@ describe("a batcher pass", () => {
     await mainTakes0007(gh);
     addsMigration0007(gh, 2, "b");
     addsMigration0007(gh, 3, "c");
+    const main = await gh.mainSha();
+    const heads = [gh.pulls.get(2)!.head, gh.pulls.get(3)!.head];
     await run(gh, options());
     expect(gh.branchUpdates).toHaveLength(2);
     expect(gh.comments.map((c) => /to `(\d+)_/.exec(c.body)?.[1])).toEqual(["0008", "0009"]);
-    // Files and the migration list are read where main is merged in, never at the PR head.
+    // Files and the migration list are read where main is merged in, main's
+    // copies on main and the list where the PR branched; never at the PR head.
     const merges = gh.branchUpdates.map((update) => gh.commits.get(update.sha)!.parents[0]!);
     expect(gh.reads.length).toBeGreaterThan(0);
-    for (const ref of gh.reads) expect(merges).toContain(ref);
+    for (const ref of gh.reads) expect([...merges, main, gh.root]).toContain(ref);
+    for (const head of heads) expect(gh.reads).not.toContain(head);
   });
 
   test("a branch GitHub will not update ejects the PR; one that just moved waits", async () => {
