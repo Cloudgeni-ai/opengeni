@@ -18,6 +18,7 @@ import {
   parseManifest,
 } from "./model";
 import { LandingMismatch, PR_WORKFLOW, run } from "./pass";
+import type { Regeneration } from "./regenerate";
 import type { RepoFile, TreeEntry } from "./renumber";
 
 const NOW = 1_800_000_000_000;
@@ -254,6 +255,52 @@ class FakeGitHub implements GitHub {
     return this.runsBySha.get(sha) ?? [];
   }
 
+  /** Regeneration runs by PR head, newest first, with the result each uploaded. */
+  regenerationRuns = new Map<string, (RunSummary & { result: string | null })[]>();
+  dispatches: { pull: number; head: string; main: string }[] = [];
+  /** How a dispatched regeneration run ends; unset leaves it running. */
+  regenerateWith:
+    | ((input: { pull: number; head: string; main: string }) => {
+        conclusion: string;
+        result: Regeneration | null;
+      })
+    | null = null;
+  blobs = new Map<string, string>();
+
+  async regenerations(_pull: number, head: string) {
+    return (this.regenerationRuns.get(head) ?? []).map(({ result: _, ...summary }) => summary);
+  }
+
+  async dispatchRegeneration(pull: number, head: string, main: string) {
+    this.dispatches.push({ pull, head, main });
+    const ended = this.regenerateWith?.({ pull, head, main });
+    const id = 9_000 + this.dispatches.length;
+    this.regenerationRuns.set(head, [
+      {
+        id,
+        workflow: ".github/workflows/regenerate-generated.yml",
+        status: ended ? "completed" : "in_progress",
+        conclusion: ended?.conclusion ?? null,
+        attempt: 1,
+        url: `https://github.com/o/r/actions/runs/${id}`,
+        result: ended?.result ? JSON.stringify(ended.result) : null,
+      },
+      ...(this.regenerationRuns.get(head) ?? []),
+    ]);
+  }
+
+  async artifactText(runId: number) {
+    for (const runs of this.regenerationRuns.values())
+      for (const entry of runs) if (entry.id === runId) return entry.result;
+    return null;
+  }
+
+  async createBlob(content: string) {
+    const sha = hash(`blob:${Buffer.from(content, "base64").toString()}`);
+    this.blobs.set(sha, content);
+    return sha;
+  }
+
   async createBranch(name: string, sha: string) {
     if (this.refs.has(name)) throw new Error(`${name} exists`);
     this.refs.set(name, sha);
@@ -339,6 +386,15 @@ class FakeGitHub implements GitHub {
     this.log.push(`rerun ${id}`);
   }
 
+  /** Failed job names by run id; a run id missing here makes the lookup fail. */
+  failedJobNames = new Map<number, string[]>();
+
+  async failedJobs(runId: number) {
+    const names = this.failedJobNames.get(runId);
+    if (!names) throw new GitHubError(404, `actions/runs/${runId}/jobs`, "not found");
+    return names;
+  }
+
   async comment(number: number, body: string) {
     if (this.commentFailure) throw this.commentFailure;
     this.comments.push({ number, body });
@@ -388,7 +444,8 @@ class FakeGitHub implements GitHub {
     return { name, sha, manifest: parseManifest(this.commits.get(sha)!.message)! };
   }
 
-  finishCi(sha: string, conclusion: string, attempt = 1) {
+  finishCi(sha: string, conclusion: string, attempt = 1, failedJobs: string[] = []) {
+    this.failedJobNames.set(42, failedJobs);
     this.runsBySha.set(sha, [
       {
         id: 42,
@@ -698,6 +755,63 @@ describe("a batcher pass", () => {
     expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
   });
 
+  test("a bisected group failing only in jobs its batch failed after a retry is split at once; one PR is still retried", async () => {
+    const SHARD = "Unit tests (shard 3/12)";
+    const UNIT = "Typecheck and unit tests";
+    const gh = new FakeGitHub();
+    for (const number of [1, 2, 3, 4]) gh.addPull(number);
+    await run(gh, options());
+    const first = gh.batch();
+    expect(first.manifest.blame).toBeUndefined();
+    gh.finishCi(first.sha, "failure", 1, [UNIT, SHARD]);
+    await run(gh, options());
+    gh.finishCi(first.sha, "failure", 2, [UNIT, SHARD]);
+    await run(gh, options());
+    const reruns = () => gh.log.filter((line) => line.startsWith("rerun")).length;
+    expect(reruns()).toBe(1);
+
+    const half = gh.batch();
+    expect(half.manifest.members.map((m) => m.number)).toEqual([1, 2]);
+    expect(half.manifest.blame).toEqual([UNIT, SHARD].sort());
+    gh.finishCi(half.sha, "failure", 1, [UNIT, SHARD]);
+    await run(gh, options());
+    // Split without the retry that would only have failed again.
+    expect(reruns()).toBe(1);
+    const single = gh.batch();
+    expect(single.manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(single.manifest.pending).toEqual([[2], [3, 4]]);
+    expect(single.manifest.blame).toEqual([UNIT, SHARD].sort());
+
+    // A single PR is never ejected without its retry.
+    gh.finishCi(single.sha, "failure", 1, [UNIT, SHARD]);
+    await run(gh, options());
+    expect(reruns()).toBe(2);
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+    gh.finishCi(single.sha, "failure", 2, [UNIT, SHARD]);
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+  });
+
+  test("a bisected group failing in another job, or in jobs GitHub cannot list, is retried", async () => {
+    for (const failure of ["another job", "unlisted"] as const) {
+      const gh = new FakeGitHub();
+      for (const number of [1, 2, 3, 4]) gh.addPull(number);
+      await run(gh, options());
+      const first = gh.batch();
+      gh.finishCi(first.sha, "failure", 1, ["Unit tests (shard 3/12)"]);
+      await run(gh, options());
+      gh.finishCi(first.sha, "failure", 2, ["Unit tests (shard 3/12)"]);
+      await run(gh, options());
+      const half = gh.batch();
+      gh.finishCi(half.sha, "failure", 1, ["Real-service and recovery tests"]);
+      if (failure === "unlisted") gh.failedJobNames.delete(42);
+      await run(gh, options());
+      expect(gh.log.filter((line) => line.startsWith("rerun"))).toHaveLength(2);
+      expect(gh.batch().sha).toBe(half.sha);
+    }
+  });
+
   test("defers a PR that conflicts with an earlier one in the same batch", async () => {
     const gh = new FakeGitHub();
     gh.addPull(1);
@@ -907,11 +1021,21 @@ describe("a batcher pass", () => {
     gh.refs.set("main", landed);
     gh.pulls.get(1)!.merged = landed;
     gh.addPull(2, { files: ["packages/db/drizzle/0007_b.sql"], mergeable: "CONFLICTING" });
+    gh.regenerateWith = (input) => ({
+      conclusion: "success",
+      result: {
+        version: 1,
+        ...input,
+        outcome: "conflict",
+        conflicted: ["packages/db/src/schema.ts"],
+      },
+    });
 
+    await run(gh, options());
     await run(gh, options());
     expect(gh.branchUpdates).toEqual([]);
     expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
-    expect(gh.comments[0]!.body).toContain("it conflicts with main");
+    expect(gh.comments[0]!.body).toContain("it conflicts with main in `packages/db/src/schema.ts`");
   });
 
   test("stops when a landed tree differs from the tested tree", async () => {
@@ -1026,6 +1150,208 @@ describe("a batcher pass", () => {
     expect(actions.map((a) => a.kind)).toEqual(["build"]);
     expect(gh.log).toEqual([]);
     expect(gh.marked()).toEqual([]);
+  });
+});
+
+describe("regenerating generated files a PR conflicts with main in", () => {
+  const GENERATED = "packages/sdk/src/site-browser-runtime.gen.ts";
+  const COMMAND = "bun scripts/generate-site-browser-runtime.ts";
+  const base64 = (text: string) => Buffer.from(text).toString("base64");
+
+  /** The tree the fake's merge of main gives once the PR takes main's version of these files. */
+  function mergedTree(gh: FakeGitHub, number: number, conflicted: string[]) {
+    const head = gh.pulls.get(number)!.head;
+    const entries = conflicted.map((path) => {
+      const text = gh.texts.get(path);
+      return text === undefined
+        ? { path, mode: "100644", sha: null }
+        : { path, mode: "100644", sha: hash(`blob:${text}`) };
+    });
+    const taken = hash(`tree:${hash(`tree:${head}`)}:${JSON.stringify(entries)}`);
+    const main = gh.commits.get(gh.refs.get("main")!)!;
+    return hash(`tree:${[...new Set([head, `tree:${taken}`, ...main.applied])].sort().join(",")}`);
+  }
+
+  function conflicting(gh: FakeGitHub, number: number, extra: Partial<FakePull> = {}) {
+    gh.addPull(number, { conflicting: true, ...extra });
+    gh.headCommit(number);
+    gh.texts.set(GENERATED, "main's runtime");
+  }
+
+  const regenerated = (gh: FakeGitHub, number: number, tree?: string) => {
+    gh.regenerateWith = (input) => ({
+      conclusion: "success",
+      result: {
+        version: 1,
+        ...input,
+        outcome: "regenerated",
+        conflicted: [GENERATED],
+        mergedTree: tree ?? mergedTree(gh, number, [GENERATED]),
+        commands: [COMMAND],
+        files: [{ path: GENERATED, mode: "100644", content: base64("regenerated runtime") }],
+      },
+    });
+  };
+
+  test("merges main, takes main's version and writes the regenerated file; the PR stays queued", async () => {
+    const gh = new FakeGitHub();
+    conflicting(gh, 1);
+    gh.addPull(2);
+    regenerated(gh, 1);
+    const head = gh.pulls.get(1)!.head;
+    const expectedTree = mergedTree(gh, 1, [GENERATED]);
+
+    await run(gh, options());
+    expect(gh.dispatches).toEqual([{ pull: 1, head, main: gh.root }]);
+    // Never tested while it conflicts; the rest of the queue goes on.
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+    expect(gh.branchUpdates).toEqual([]);
+
+    await run(gh, options());
+    const [update] = gh.branchUpdates;
+    expect(update?.name).toBe("branch-1");
+    const tip = gh.commits.get(update!.sha)!;
+    const merge = gh.commits.get(tip.parents[0]!)!;
+    const taken = gh.commits.get(merge.parents[0]!)!;
+    expect(merge.parents[1]).toBe(gh.root);
+    expect(merge.tree).toBe(expectedTree);
+    expect(taken.parents).toEqual([head]);
+    expect(
+      gh.trees.get(taken.applied.find((a) => a.startsWith("tree:"))!.slice(5))!.entries,
+    ).toEqual([{ path: GENERATED, mode: "100644", sha: hash("blob:main's runtime") }]);
+    const written = [...gh.trees.values()].find((tree) => tree.base === merge.tree);
+    expect(written).toEqual({
+      base: merge.tree,
+      entries: [{ path: GENERATED, mode: "100644", sha: hash("blob:regenerated runtime") }],
+    });
+    expect(gh.blobs.get(hash("blob:regenerated runtime"))).toBe(base64("regenerated runtime"));
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.comments).toEqual([
+      { number: 1, body: expect.stringContaining(`regenerated them with \`${COMMAND}\``) },
+    ]);
+    expect([...gh.refs.keys()].some((name) => name.startsWith("batch-build/"))).toBe(false);
+  });
+
+  test("a conflict in a file that is not generated ejects the PR, naming every conflicting file", async () => {
+    const gh = new FakeGitHub();
+    conflicting(gh, 1);
+    gh.regenerateWith = (input) => ({
+      conclusion: "success",
+      result: {
+        version: 1,
+        ...input,
+        outcome: "conflict",
+        conflicted: ["apps/api/src/app.ts", GENERATED],
+      },
+    });
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.comments[0]!.body).toContain(
+      `it conflicts with main in \`apps/api/src/app.ts\`, \`${GENERATED}\`. Merge main into the branch`,
+    );
+    expect(gh.branchUpdates).toEqual([]);
+  });
+
+  test("waits while the run is going, and ejects when it fails or leaves no valid result", async () => {
+    for (const ending of ["failure", "invalid", "missing"] as const) {
+      const gh = new FakeGitHub();
+      conflicting(gh, 1);
+      await run(gh, options());
+      await run(gh, options());
+      expect(gh.dispatches).toHaveLength(1);
+      expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+      const [running] = gh.regenerationRuns.get(gh.pulls.get(1)!.head)!;
+      running!.status = "completed";
+      running!.conclusion = ending === "failure" ? "failure" : "success";
+      // A result may only write generated files.
+      if (ending === "invalid")
+        running!.result = JSON.stringify({
+          version: 1,
+          pull: 1,
+          head: gh.pulls.get(1)!.head,
+          main: gh.root,
+          outcome: "regenerated",
+          conflicted: [GENERATED],
+          mergedTree: mergedTree(gh, 1, [GENERATED]),
+          commands: [COMMAND],
+          files: [{ path: ".github/workflows/ci.yml", mode: "100644", content: base64("x") }],
+        });
+      await run(gh, options());
+      expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+      expect(gh.comments[0]!.body).toContain(
+        ending === "failure"
+          ? `could not regenerate its generated files: ${running!.url} did not succeed`
+          : `could not regenerate its generated files: ${running!.url} left no valid result`,
+      );
+      expect(gh.branchUpdates).toEqual([]);
+    }
+  });
+
+  test("never writes a result whose merge of main differs from GitHub's", async () => {
+    const gh = new FakeGitHub();
+    conflicting(gh, 1);
+    regenerated(gh, 1, hash("another tree"));
+    await run(gh, options());
+    await run(gh, options());
+    expect(gh.branchUpdates).toEqual([]);
+    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.comments[0]!.body).toContain("GitHub's merge of main differs from the one");
+  });
+
+  test("never merges a commit that is not on main, whatever the result says", async () => {
+    const gh = new FakeGitHub();
+    conflicting(gh, 1);
+    const side = gh.store(["side"], [gh.root], "Not on main");
+    regenerated(gh, 1);
+    const honest = gh.regenerateWith!;
+    gh.regenerateWith = (input) => {
+      const ended = honest(input);
+      return { ...ended, result: { ...ended.result!, main: side } };
+    };
+    await run(gh, options());
+    await run(gh, options());
+    expect(gh.branchUpdates).toEqual([]);
+    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.comments[0]!.body).toContain(`merged ${side.slice(0, 10)}, which is not on main`);
+  });
+
+  test("a clean merge on an older main asks again on the current one; on the same main it ejects", async () => {
+    const gh = new FakeGitHub();
+    conflicting(gh, 1);
+    gh.regenerateWith = (input) => ({
+      conclusion: "success",
+      result: { version: 1, ...input, outcome: "clean" },
+    });
+    await run(gh, options());
+    const moved = gh.store(["elsewhere"], [gh.root], "Another change");
+    gh.refs.set("main", moved);
+    await run(gh, options());
+    expect(gh.dispatches.map((d) => d.main)).toEqual([gh.root, moved]);
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.comments[0]!.body).toContain("it conflicts with main. Merge main into the branch");
+  });
+
+  test("GitHub failing postpones it; a production branch is ejected as before", async () => {
+    const gh = new FakeGitHub();
+    conflicting(gh, 1);
+    conflicting(gh, 2, { headRef: "production" });
+    const regenerations = gh.regenerations.bind(gh);
+    gh.regenerations = async () => {
+      throw new GitHubError(502, "actions/workflows", "bad gateway");
+    };
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.comments).toEqual([
+      { number: 2, body: expect.stringContaining("it conflicts with main. Merge main") },
+    ]);
+    gh.regenerations = regenerations;
+    await run(gh, options());
+    expect(gh.dispatches.map((d) => d.pull)).toEqual([1]);
   });
 });
 

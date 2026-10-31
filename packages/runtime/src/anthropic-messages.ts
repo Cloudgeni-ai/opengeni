@@ -616,7 +616,8 @@ export function buildAnthropicRequest(
     provider.kind === "anthropic-workspace" ||
     provider.kind === "anthropic-organization" ||
     provider.kind === "claude-subscription-workspace" ||
-    provider.kind === "claude-subscription-organization";
+    provider.kind === "claude-subscription-organization" ||
+    provider.kind === "claude-subscription";
   const outputLimit = profile?.maxOutputTokens ?? (managed ? 32_000 : undefined);
   const names = toolNames(request);
   const forcedName = (name: string): string => {

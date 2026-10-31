@@ -10,6 +10,10 @@ import {
   SUBSCRIPTION_CORE_SERVING_FAILOVER_LIMIT,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import {
+  isClaudeSubscriptionProviderId,
+  sameModelId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
 import { servingTurnProviders } from "./subscription-serving-providers";
 import {
   noServingModelMapping,
@@ -100,9 +104,15 @@ export async function selectServingTurnCapacity(
       if (!baseline.accepted) throw new Error(`Serving baseline refused: ${baseline.reason}`);
       context.revision = baseline.revision;
     }
+    // Two id forms of one Claude subscription model are the same model on
+    // the same provider: never a serving change.
+    const sameProvider =
+      targetPolicy.providerId === deps.turnExecutionPolicy.providerId ||
+      (isClaudeSubscriptionProviderId(targetPolicy.providerId) &&
+        isClaudeSubscriptionProviderId(deps.turnExecutionPolicy.providerId));
     if (
-      targetPolicy.productModelId !== deps.turnExecutionPolicy.productModelId ||
-      targetPolicy.providerId !== deps.turnExecutionPolicy.providerId
+      !sameModelId(targetPolicy.productModelId, deps.turnExecutionPolicy.productModelId) ||
+      !sameProvider
     ) {
       const released = await withSubscriptionCoreAcceptedTurn(deps.db, context.identity, (tx) =>
         releaseSubscriptionTurnLease(tx, {

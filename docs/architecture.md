@@ -2336,6 +2336,28 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
+`packages/browserd/src/page-protection.ts` owns the shared protected-field
+policy for DOM reads, editable-value confirmation and accessibility reads.
+Chromium DOM snapshots find protected nodes in child documents and flattened
+shadow roots; out-of-process frames are read through their own sessions.
+Snapshots stay inside the controller. Known values are masked before semantic
+normalization and on result delivery, including digit-grouped numeric secrets
+and three-digit CVCs. Protection discovery or masking failure withholds output.
+Only primary password/card-field values are remembered; hidden metadata and
+expiry options are protected in place. Card values do not age out of memory.
+After a browser tab encounters payment fields or known card data, its screenshots,
+live frames and recordings are refused (semantic controls and unrelated tabs
+remain usable). This state is shared across controllers for that tab in the
+browserd process; it is not
+a claim of pixel-level redaction or arbitrary canvas/OCR protection.
+Transient pixels between DOM checks and desktop captures of the browser are
+outside that per-tab guarantee. Attached Chrome admits the read-only snapshot
+through the matching extension method allowlist.
+The extension advertises that read-only capability in its existing handshake;
+an agent needing it refuses an older extension as `extension_outdated`, which
+starts Chrome's existing update check. Older agents ignore the additive field,
+so extension-first rollout remains compatible.
+
 Computer cursor badges carry the source chat's display title and a bounded PNG
 of its existing sidebar avatar. The API resolves image access as the caller and
 sends pixels, never a signed storage URL, through the internal controller-create

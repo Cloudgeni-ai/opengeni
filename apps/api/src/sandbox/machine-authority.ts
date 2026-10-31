@@ -99,6 +99,20 @@ function holds(authorization: AccessGrantAuthorization, permission: "enrollments
   return hasPermission(grant.permissions, permission, grant.permissionMode);
 }
 
+/**
+ * The scope of a connect command minted without one. Callers that may connect
+ * workspace machines keep the original workspace default; a signed-in teammate
+ * without enrollments:manage can connect only their own machine, so theirs is
+ * Only me (`user`) instead of a refusal.
+ */
+export function defaultConnectCommandScope(
+  authorization: AccessGrantAuthorization,
+): "user" | "workspace" {
+  return !holds(authorization, "enrollments:manage") && isSignedInMachineOwner(authorization)
+    ? "user"
+    : "workspace";
+}
+
 /** Why this caller may not connect or change a machine of this scope, or null. */
 export function machineScopeRefusal(
   authorization: AccessGrantAuthorization,

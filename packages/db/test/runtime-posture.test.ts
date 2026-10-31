@@ -2051,6 +2051,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1143_agent_call_host_phones: full DML, FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2119,7 +2125,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 1090 personal default machines: full-DML, FORCE-RLS.
         1 + // 1105 workspace activity facts: read and insert, FORCE-RLS.
         1 + // 1107 agent calls: read, insert and update, FORCE-RLS.
-        1; // 1131 hourly live transcript time per person: full-DML, FORCE-RLS.
+        1 + // 1131 hourly live transcript time per person: full-DML, FORCE-RLS.
+        1; // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
