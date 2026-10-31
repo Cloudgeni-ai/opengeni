@@ -69,6 +69,34 @@ describe("RestGitHub file and branch writes", () => {
     await expect(gh.readFiles("main", ["db/0007_b.sql"])).rejects.toThrow("Not a commit SHA");
   });
 
+  test("readFiles reads a text blob GraphQL truncated through the blob API", async () => {
+    const whole = "export * from './a';\n".repeat(40_000);
+    const { gh, requests } = client(({ url, body }) => {
+      if (url.endsWith("/git/blobs/big"))
+        return { content: Buffer.from(whole).toString("base64"), encoding: "base64" };
+      if (url.endsWith("/git/blobs/bad"))
+        return { content: Buffer.from([0xff, 0xfe, 0x00]).toString("base64"), encoding: "base64" };
+      const data: Record<string, unknown> = {};
+      for (const key of Object.keys(body.variables)) {
+        if (key === "f0")
+          data.f0 = { oid: "big", text: whole.slice(0, 100), isBinary: false, isTruncated: true };
+        if (key === "f1") data.f1 = { oid: "bad", text: "x", isBinary: false, isTruncated: true };
+        if (key.startsWith("d"))
+          data[key] = {
+            entries: [
+              { name: "index.ts", mode: 33188, type: "blob" },
+              { name: "odd.ts", mode: 33188, type: "blob" },
+            ],
+          };
+      }
+      return { data: { repository: data } };
+    });
+    const files = await gh.readFiles(SHA, ["src/index.ts", "src/odd.ts"]);
+    expect(files.get("src/index.ts")).toEqual({ oid: "big", mode: "100644", text: whole });
+    expect(files.get("src/odd.ts")).toEqual({ oid: "bad", mode: "100644", text: null });
+    expect(requests.map((r) => r.method)).toEqual(["POST", "GET", "GET"]);
+  });
+
   test("createTree adds blobs on a base tree, and updateBranch never forces", async () => {
     const { gh, requests } = client(() => ({ sha: "t".repeat(40) }));
     expect(

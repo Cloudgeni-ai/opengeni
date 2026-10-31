@@ -425,18 +425,31 @@ export class RestGitHub implements GitHub {
           if (entry.type === "blob")
             modes.set(path ? `${path}/${entry.name}` : entry.name, gitFileMode(entry.mode));
       });
-      chunk.forEach((path, index) => {
+      for (const [index, path] of chunk.entries()) {
         const blob = data.repository[`f${index}`] as Blob | null;
         const mode = modes.get(path);
-        if (!blob?.oid || mode === undefined) return;
-        files.set(path, {
-          oid: blob.oid,
-          mode,
-          text: blob.isBinary || blob.isTruncated ? null : blob.text,
-        });
-      });
+        if (!blob?.oid || mode === undefined) continue;
+        // GraphQL cuts a large text blob short; the blob API returns all of it.
+        const text = blob.isBinary
+          ? null
+          : blob.isTruncated
+            ? await this.blobText(blob.oid)
+            : blob.text;
+        files.set(path, { oid: blob.oid, mode, text });
+      }
     }
     return files;
+  }
+
+  /** A blob's whole content as UTF-8 text, or null when it is not valid UTF-8. */
+  private async blobText(oid: string): Promise<string | null> {
+    const blob = await this.get<{ content: string; encoding: string }>(`git/blobs/${oid}`);
+    if (blob.encoding !== "base64") return blob.encoding === "utf-8" ? blob.content : null;
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(blob.content, "base64"));
+    } catch {
+      return null;
+    }
   }
 
   async branches(prefix: string) {
