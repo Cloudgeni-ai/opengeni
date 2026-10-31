@@ -12,6 +12,7 @@ import {
   filterBundleRows,
   importedSkillBundleRow,
   pluginBundleRow,
+  pluginRemovable,
   pluginUpdateUnavailable,
   sortBundleRows,
   type BundleRow,
@@ -414,6 +415,7 @@ export function BundlesSection({
                 busy: source.busyKey === `plugin:${plugin.pluginKey}`,
                 onUpdate: () => source.updatePlugin(plugin),
                 onRemove: () => source.removePlugin(plugin),
+                canRemove: pluginRemovable(plugin, canManagePlugins),
                 ...pluginUpdateUnavailable(plugin, canUpdatePlugins),
               })}
               onManageInstalled={(plugin, element) => {
@@ -442,6 +444,7 @@ export function BundlesSection({
             busy: source.busyKey === `plugin:${plugin.pluginKey}`,
             onUpdate: () => source.updatePlugin(plugin),
             onRemove: () => source.removePlugin(plugin),
+            canRemove: pluginRemovable(plugin, canManagePlugins),
             ...pluginUpdateUnavailable(plugin, canUpdatePlugins),
           })}
           onOpenConnection={onOpenCatalogItem}

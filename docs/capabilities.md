@@ -18,7 +18,20 @@ session-MCP tool permissions (Allow/Ask/Block), `autoApprovedTools` and any
 explicit MCP `requireApproval` other than `true`, changing an integration that
 is already set up (updating a plugin or a custom API to a new revision,
 reconnecting or rebinding a shared account, or turning a server back on), and
-turning one off for everyone. Members can remove what an admin added. Shared-workspace admins
+turning one off for everyone.
+A member removes only what they added themselves: a plugin
+(`capability_plugin_installations.installed_by_subject_id`, which an update
+hands to whoever updated it), an API integration account, or a source or
+setting (`integration_facet_bindings.created_by_subject_id`, which adding a
+removed one back hands to whoever adds it). Anything an admin, another person
+or no recorded installer added is removed only by integration admins, who
+remove anything (`canRemoveIntegration` in `packages/core/src/access`); a
+member's other removal gets the usual `capabilities:manage` 403. The plugin,
+API integration and facet lists return `canRemove` for the caller, and the UI
+offers Remove from it; an API integration the organization serves here is
+`canRemove: false`, since it is managed in the organization's settings. Custom
+MCP servers are turned off with `POST …/capabilities/:id/disable`, which stays
+with admins. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
 member-management or API-key-delegation powers of `workspace:admin`.

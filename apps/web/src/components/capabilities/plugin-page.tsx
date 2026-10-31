@@ -62,6 +62,12 @@ export type PluginManageActions = {
   busy: boolean;
   /** Why an update can't be reviewed (no retained source URL). */
   updateUnavailableReason?: string;
+  /**
+   * Whether the viewer may remove this plugin: the server's flag (admins
+   * remove any plugin, a member only one they added). Omitted, `canManage`
+   * stands in.
+   */
+  canRemove?: boolean;
 };
 
 export function PluginPage({
@@ -134,7 +140,9 @@ export function PluginPage({
         {busy ? "Installing…" : "Install plugin"}
       </Button>
     ) : null;
-  const managed = installed && installation && manage && canManage;
+  const canRemove = manage ? (manage.canRemove ?? canManage) : false;
+  const managed = installed && installation && manage && (canManage || canRemove);
+  const askAdmin = installed ? !(manage ? canRemove : canManage) : !canManage;
 
   return (
     <CapabilityPage
@@ -166,16 +174,18 @@ export function PluginPage({
                   )}
                   Check for update
                 </RowButton>
-                <MoreMenu label={`More actions for ${title}`}>
-                  <DropdownMenuItem
-                    variant="destructive"
-                    disabled={manage.busy}
-                    onSelect={manage.onRemove}
-                  >
-                    <TrashIcon />
-                    Remove plugin
-                  </DropdownMenuItem>
-                </MoreMenu>
+                {canRemove ? (
+                  <MoreMenu label={`More actions for ${title}`}>
+                    <DropdownMenuItem
+                      variant="destructive"
+                      disabled={manage.busy}
+                      onSelect={manage.onRemove}
+                    >
+                      <TrashIcon />
+                      Remove plugin
+                    </DropdownMenuItem>
+                  </MoreMenu>
+                ) : null}
               </>
             ) : null}
           </>
@@ -239,7 +249,7 @@ export function PluginPage({
             {`Includes ${joinList(others)}, which Opengeni doesn't run yet.`}
           </p>
         ) : null}
-        {!canManage ? (
+        {askAdmin ? (
           <p className="mt-2 mb-0 text-xs leading-4.5 text-fg-muted">
             {installed
               ? "Ask a workspace admin to update or remove this plugin."

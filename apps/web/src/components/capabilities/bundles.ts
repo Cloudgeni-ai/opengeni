@@ -207,10 +207,22 @@ export function pluginUpdateUnavailable(
     : { updateUnavailableReason: "This plugin didn't keep its source link." };
 }
 
+/**
+ * Whether the viewer may remove this plugin. The server decides it (admins
+ * remove any plugin, a member only one they added); an older server omits
+ * it, so the viewer's removal permission stands in.
+ */
+export function pluginRemovable(
+  plugin: Pick<PluginInstallationSummary, "canRemove">,
+  canRemovePlugins: boolean,
+): boolean {
+  return plugin.canRemove ?? canRemovePlugins;
+}
+
 export function pluginBundleRow(
   plugin: PluginInstallationSummary,
   options: {
-    /** Remove it (members, connections:write). */
+    /** Remove plugins (members, connections:write); the plugin's own `canRemove` wins. */
     canManage: boolean;
     /** Update it (integration admins); defaults to canManage. */
     canUpdate?: boolean;
@@ -220,6 +232,7 @@ export function pluginBundleRow(
   },
 ): BundleRow {
   const active = plugin.status === "active";
+  const canRemove = pluginRemovable(plugin, options.canManage);
   const chip: IntegrationChip = active
     ? { label: "Installed", tone: "ok" }
     : { label: "Needs attention", tone: "warn" };
@@ -264,7 +277,7 @@ export function pluginBundleRow(
           { label: "Installation version", value: String(plugin.installationVersion) },
         ],
         options: [],
-        footer: options.canManage
+        footer: canRemove
           ? {
               kind: "actions",
               primary: {

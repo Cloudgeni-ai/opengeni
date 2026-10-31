@@ -32,6 +32,7 @@ import {
 import {
   portableSkillCapabilityId,
   portableSkillPluginKey,
+  canRemoveIntegration,
   hasIntegrationAdminPermission,
   MissingPermissionRefusal,
   requireAccessGrant,
@@ -113,10 +114,11 @@ export function registerPluginRoutes(
 
   app.get("/v1/workspaces/:workspaceId/plugins", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     return c.json(
       ListInstalledPluginsResponse.parse({
-        plugins: (await listInstalledPluginPackages(deps.db, workspaceId)).map((plugin) => {
+        plugins: (await listInstalledPluginPackages(deps.db, workspaceId)).map((installed) => {
+          const { installedBySubjectId, ...plugin } = installed;
           const source = pluginSnapshot.sources.find((candidate) =>
             plugin.pluginKey.startsWith("marketplace/" + candidate.provider + "/"),
           );
@@ -124,7 +126,11 @@ export function registerPluginRoutes(
             (candidate) =>
               plugin.pluginKey === "marketplace/" + source!.provider + "/" + candidate.name,
           );
-          return { ...plugin, logoUrl: plugin.logoUrl ?? entry?.logoUrl ?? null };
+          return {
+            ...plugin,
+            logoUrl: plugin.logoUrl ?? entry?.logoUrl ?? null,
+            canRemove: canRemoveIntegration(grant, installedBySubjectId),
+          };
         }),
       }),
     );
@@ -399,10 +405,14 @@ export function registerPluginRoutes(
               ? { expectedPreviewToken: payload.expectedPreviewToken }
               : {}),
             idempotencyKey: payload.idempotencyKey,
+            // Members remove only plugins they added (decided in the transaction).
+            ...(hasIntegrationAdminPermission(grant) ? {} : { memberRemoval: true }),
           })),
         }),
       );
     } catch (error) {
+      if (error instanceof IntegrationChangeRequiresAdminError)
+        throw new MissingPermissionRefusal("capabilities:manage", { message: error.message });
       if (error instanceof PluginUninstallPreviewChangedError) {
         const preview = error.preview ?? {
           pluginKey,

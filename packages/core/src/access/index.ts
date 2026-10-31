@@ -1228,6 +1228,24 @@ export function hasIntegrationAdminPermission(
 }
 
 /**
+ * Whether this grant may remove an integration, plugin or integration source
+ * that `installerSubjectId` added. Integration admins remove anything; a
+ * member (`connections:write`) removes only what they added themselves. An
+ * unknown installer counts as an admin's.
+ */
+export function canRemoveIntegration(
+  grant: Pick<AccessGrant, "permissions" | "permissionMode" | "subjectId">,
+  installerSubjectId: string | null | undefined,
+): boolean {
+  if (hasIntegrationAdminPermission(grant)) return true;
+  return (
+    hasIntegrationSetupPermission(grant) &&
+    typeof installerSubjectId === "string" &&
+    installerSubjectId === grant.subjectId
+  );
+}
+
+/**
  * The access check of every route that adds or removes an integration
  * (plugins, API integrations, custom MCP servers, integration sources):
  * `connections:write` or `capabilities:manage`. The route still keeps what
