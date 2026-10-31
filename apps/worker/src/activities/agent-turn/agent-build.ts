@@ -13,6 +13,7 @@ import {
 } from "@opengeni/db";
 import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
+import { openSuffixApprovedCallIds } from "../open-suffix-resume";
 import {
   formatSkillCatalog,
   skillCatalogEntryIds,
@@ -671,7 +672,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   );
   const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
   const reasoningSummary = reasoningSummaryForTurn(resolvedModel);
-  const approvedToolCallId = approvedConnectorActionCallId(trigger);
+  // The calls this resume runs as approved: its trigger's and every sibling
+  // approval of the same pause decided before it began.
+  const approvedToolCallIds = await openSuffixApprovedCallIds({
+    db,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    trigger,
+  });
   const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -906,7 +915,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,
         connectorActionPolicy,
         attemptConnectorActionBindings,
-        ...(approvedToolCallId ? { approvedToolCallId } : {}),
+        ...(approvedToolCallIds.length > 0 ? { approvedToolCallIds } : {}),
         // Legacy connector metadata remains available to non-progressive paths.
         // Progressive discovery reads the authorized pool, never a changing
         // source directory in its first-request control schemas.
@@ -1080,20 +1089,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     modelVisibleSkillCatalogText,
     postAgentPreparationStartedAt,
   };
-}
-
-function approvedConnectorActionCallId(trigger: ClaimTurnOk["trigger"]): string | null {
-  if (trigger.type !== "user.approvalDecision") {
-    return null;
-  }
-
-  const payload = trigger.payload as {
-    approvalId?: unknown;
-    decision?: unknown;
-  };
-  return payload.decision === "approve" && typeof payload.approvalId === "string"
-    ? payload.approvalId
-    : null;
 }
 
 export type BuildTurnAgentOk = Awaited<ReturnType<typeof buildTurnAgent>>;

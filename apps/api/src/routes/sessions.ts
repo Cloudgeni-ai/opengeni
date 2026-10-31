@@ -4583,9 +4583,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw error;
       }
       if (accepted.action === "conflict") {
-        throw new HTTPException(409, {
-          message: `session is ${accepted.sessionStatus}; no unhandled approval is pending`,
-        });
+        // A still-undecided approval is never refused while the session
+        // resumes; what is left is a decision that cannot change anything.
+        throw new HTTPException(409, { message: accepted.message });
       }
       await publishDurableSessionEvents(bus, workspaceId, sessionId, accepted.events);
       const workflowId = workflowIdForSession(sessionId);

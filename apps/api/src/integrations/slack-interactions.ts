@@ -4769,7 +4769,7 @@ async function executeSlackAction(
       return {
         result: "stale",
         stale: true,
-        text: `${mention}This approval is no longer pending.`,
+        text: `${mention}${accepted.message}`,
       };
     }
     await publishDurableSessionEvents(
