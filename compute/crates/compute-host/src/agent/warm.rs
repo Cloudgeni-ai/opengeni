@@ -378,15 +378,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .spare_fits(shape.bytes(), *disk, shape.cpu_millis(), Claims::default())
         }) {
             if let Some(warm) = &mut self.warm {
-                let problem = match &disk {
-                    Ok(_) => {
-                        "the host has no memory, disk or processor time to spare for a template \
-                         build"
-                            .into()
+                match &disk {
+                    // Nothing failed: creates the host took come first,
+                    // and the build is tried again once one may fit.
+                    Ok(_) => warm.pool.put_off(shape, Instant::now()),
+                    Err(error) => {
+                        let problem = format!("reading the base image or kernel: {error}");
+                        warm.pool.built(shape, Err(problem), Instant::now());
                     }
-                    Err(error) => format!("reading the base image or kernel: {error}"),
-                };
-                warm.pool.built(shape, Err(problem), Instant::now());
+                }
             }
             return;
         }

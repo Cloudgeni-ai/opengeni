@@ -42,6 +42,11 @@ impl Fetch {
     pub(super) fn key(&self) -> Id {
         self.key
     }
+
+    /// The creates waiting for the fetch, each with what it asks for.
+    pub(super) fn waiting(&self) -> impl Iterator<Item = (Id, &SandboxConfig)> {
+        self.waiting.iter().map(|(id, config, ..)| (*id, config))
+    }
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {

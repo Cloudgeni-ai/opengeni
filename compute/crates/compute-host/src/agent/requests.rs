@@ -28,19 +28,6 @@ use super::observe::{By, Why};
 use super::remove::unmake;
 use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, unix_ms_now};
 
-/// How long a new sandbox's first wake stays booked if it is not woken:
-/// long enough for its creator to make it and ask for it, short enough
-/// that room a create never used comes back soon.
-const FIRST_WAKE_WITHIN: Duration = Duration::from_secs(120);
-
-/// When the first wake of a sandbox created, claimed or adopted now stops
-/// being booked, in milliseconds since the Unix epoch; see
-/// [`HostAgent::first_wake`].
-pub(super) fn first_wake_by_ms() -> u64 {
-    let within = u64::try_from(FIRST_WAKE_WITHIN.as_millis()).unwrap_or(u64::MAX);
-    unix_ms_now().saturating_add(within)
-}
-
 /// Replies to `reply` once the write in `outcome` has made a change
 /// durable, or with why the change was refused or could not be kept.
 fn answer_once_written<T: Send + 'static>(outcome: Result<(Write, T), HostError>, reply: Reply<T>) {
@@ -551,9 +538,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
+    /// When the first wake of a sandbox created, claimed or adopted now
+    /// stops being booked, in milliseconds since the Unix epoch, after
+    /// [`super::HostConfig::first_wake_within`]; see [`Self::first_wake`].
+    pub(super) fn first_wake_by_ms(&self) -> u64 {
+        let within = u64::try_from(self.first_wake_within.as_millis()).unwrap_or(u64::MAX);
+        unix_ms_now().saturating_add(within)
+    }
+
     /// What books the first wake of new sandbox `id` of `size`, checked
     /// with [`Self::room_for`], until it runs or until `by_ms` (from
-    /// [`first_wake_by_ms`]), which its record keeps so an agent that
+    /// [`Self::first_wake_by_ms`]), which its record keeps so an agent that
     /// starts before then books it again; see [`Input::Creating`].
     pub(super) fn first_wake(&self, id: Id, size: Size, remote: bool, by_ms: u64) -> Input {
         let left = Duration::from_millis(by_ms.saturating_sub(unix_ms_now()));
@@ -578,7 +573,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let (CreateRoom::AwaitsReading(resource, needed, free)
         | CreateRoom::Short(resource, needed, free)) = room
         else {
-            let by_ms = record.first_wake_by_ms.unwrap_or_else(first_wake_by_ms);
+            let by_ms = record
+                .first_wake_by_ms
+                .unwrap_or_else(|| self.first_wake_by_ms());
             self.input(self.first_wake(id, size, true, by_ms));
             return Ok(());
         };
@@ -667,6 +664,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         reply: Reply<()>,
     ) {
         if let Some(image) = config.image.filter(|image| !self.rootfs.has(*image)) {
+            // Back from a disk reading, the image may have gone meanwhile:
+            // the room is checked again, its own hold given back, before
+            // it is held for the fetch.
+            if let Err(error) =
+                self.room_for(id, self.size(&config, None), false, DiskSpace::default())
+            {
+                self.first_wake_unbooked(id);
+                let _ = reply.send(Err(error));
+                return;
+            }
             self.create_after_fetch(image, id, config, owner, reply);
             return;
         }
@@ -713,7 +720,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
-        let by_ms = first_wake_by_ms();
+        let by_ms = self.first_wake_by_ms();
         self.inputs([
             Input::Writes { key: id.0, disk },
             self.first_wake(id, self.size(&config, None), false, by_ms),
@@ -734,16 +741,47 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// build, a ready clone's fill or another create, takes that room. Its
     /// disk is booked with its first files once they can be written (see
     /// [`Self::create_fresh`]); a fetch books its image's write itself.
-    /// Like any first wake, the booking lapses at [`first_wake_by_ms`],
-    /// and the create is checked again when it goes on.
+    /// Like any first wake, the booking lapses at [`Self::first_wake_by_ms`];
+    /// [`Self::held_rooms`] renews it while the create still waits, so
+    /// only a create the agent lost track of gives its room back that way.
+    /// The create is checked again when it goes on.
     pub(super) fn hold_room(&mut self, id: Id, config: &SandboxConfig) {
-        let size = Size {
+        self.input(self.first_wake(id, self.held_size(config), false, self.first_wake_by_ms()));
+    }
+
+    /// What [`Self::hold_room`] books for a create of `config`: its first
+    /// wake's memory and processor time, without disk.
+    fn held_size(&self, config: &SandboxConfig) -> Size {
+        Size {
             save: 0,
             disk: 0,
             fetch: 0,
             ..self.size(config, None)
-        };
-        self.input(self.first_wake(id, size, false, first_wake_by_ms()));
+        }
+    }
+
+    /// Renews the holds of the creates still waiting for their image or a
+    /// disk reading, each only while it still fits: a hold that lapsed
+    /// meanwhile, its room taken, is not booked again unchecked, and the
+    /// create is refused when it goes on.
+    pub(super) fn held_rooms(&self) -> Vec<Input> {
+        let fetching = self
+            .fetching
+            .values()
+            .flat_map(super::fetch::Fetch::waiting);
+        let reading = self.after_reading.iter().filter_map(|work| match work {
+            AfterReading::Create(id, config, ..) => Some((*id, &**config)),
+            AfterReading::Adopt(..) | AfterReading::Fetch(..) => None,
+        });
+        fetching
+            .chain(reading)
+            .filter_map(|(id, config)| {
+                let size = self.held_size(config);
+                self.room_for(id, size, false, DiskSpace::default())
+                    .is_ok()
+                    .then(|| self.first_wake(id, size, false, self.first_wake_by_ms()))
+            })
+            .collect()
     }
 
     /// Makes the files of the new sandbox `record` describes in the

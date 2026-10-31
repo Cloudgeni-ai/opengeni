@@ -243,3 +243,66 @@ async fn a_create_waiting_for_its_image_keeps_its_room() {
     lab.handle.create(id(4), sandbox).await.unwrap();
     lab.assert_clean();
 }
+
+/// A create keeps its room however long its image takes: the hold of its
+/// first wake is renewed while it waits, well past when an unwoken first
+/// wake stops being booked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_create_keeps_its_room_however_long_its_image_takes() {
+    let root = Lab::root();
+    let store = Directory::new(root.join("store"));
+    let file = root.join("image.ext4");
+    std::fs::write(&file, b"an image").unwrap();
+    let image = store.put_rootfs(&file).await.unwrap();
+    let sizes = Arc::new(Semaphore::new(0));
+    let gated = Gated {
+        inner: store,
+        sizes: Arc::clone(&sizes),
+    };
+    let within = Duration::from_millis(300);
+    // Room for one sandbox of 256 MiB.
+    let lab = Lab::start_stored_configured(root, Arc::default(), gated, |config| {
+        config.first_wake_within = within;
+        config.policy = HostPolicy {
+            admission: Some(Admission {
+                budget: 384 * MIB,
+                buffer: 0,
+                busy_grace: Duration::from_millis(100),
+            }),
+            ..HostPolicy::default()
+        };
+    })
+    .await;
+    let sandbox = SandboxConfig::new(1, 256, NEVER);
+    let waiting = tokio::spawn({
+        let (handle, config) = (lab.handle.clone(), sandbox.clone().with_image(image));
+        async move { handle.create(id(1), config).await }
+    });
+    lab.wait_until("the waiting create's room held", |status| {
+        status
+            .capacity
+            .is_some_and(|capacity| capacity.occupied == 256 * MIB)
+    })
+    .await;
+    tokio::time::sleep(within * 4).await;
+    let occupied = lab
+        .status()
+        .await
+        .capacity
+        .map(|capacity| capacity.occupied);
+    assert_eq!(
+        occupied,
+        Some(256 * MIB),
+        "the hold lapsed while its create waited"
+    );
+    let refused = lab.handle.create(id(2), sandbox.clone()).await;
+    assert!(
+        matches!(refused, Err(HostError::HostFull { .. })),
+        "{refused:?}"
+    );
+
+    sizes.add_permits(1 << 20);
+    waiting.await.unwrap().unwrap();
+    lab.remove(id(1)).await;
+    lab.assert_clean();
+}

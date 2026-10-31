@@ -100,8 +100,14 @@ sandboxes created at once all pay it at the same time.
   boots cold and the build waits, as after a failed one. A create waiting
   for its image or for a disk reading keeps its first wake's memory and
   processor time booked meanwhile, so no build, fill or later create takes
-  them. (Booked ahead of the create that asked for it, a build once had
-  that create refused on an otherwise empty host.)
+  them. The hold is renewed while the create still waits, however long its
+  image takes, and only while it still fits; it lapses on its own only for
+  a create the agent lost track of. It counts as taken memory, like any
+  booked first wake: ready sandboxes make way for it and a wake of an
+  existing sandbox that would not fit beside it waits, from the moment the
+  host takes the create rather than once its VM starts. (Booked ahead of
+  the create that asked for it, a build once had that create refused on an
+  otherwise empty host.)
 - A create claims a ready clone whenever it asks for the clone's processors
   and memory, whatever its request: before the claim is recorded, the
   clone's VM is given the request's guarantees (`cpu.weight` at once,

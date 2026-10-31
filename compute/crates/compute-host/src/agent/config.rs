@@ -31,6 +31,11 @@ pub struct HostConfig {
     pub policy: HostPolicy,
     /// How often to sample host and VM memory.
     pub sample_every: Duration,
+    /// How long a new sandbox's first wake stays booked if it is not woken:
+    /// long enough for its creator to make it and ask for it, short enough
+    /// that room a create never used comes back soon. A create still
+    /// waiting for its image or a disk reading renews it.
+    pub first_wake_within: Duration,
     /// Readings of the local disk given to the agent instead of its own of
     /// the state root's filesystem, as tests give (see [`DiskGauge`]).
     /// `None` reads the filesystem every sample.
@@ -114,6 +119,8 @@ pub struct HostConfig {
 }
 
 impl HostConfig {
+    /// The default for [`HostConfig::first_wake_within`].
+    pub const FIRST_WAKE_WITHIN: Duration = Duration::from_secs(120);
     /// The default for [`HostConfig::stream_idle`].
     pub const STREAM_IDLE: Duration = Duration::from_secs(10 * 60);
     /// The default for [`HostConfig::summary_every`].
