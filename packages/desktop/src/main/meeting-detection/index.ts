@@ -2,9 +2,12 @@
 // starts using the microphone, offer to record the meeting; when the call the
 // app is recording ends, offer to stop. The bundled audio helper reports
 // which processes use a microphone (`--watch-microphone`, no permission
-// needed); this module decides which of them is a call and when to ask. It
-// never starts or stops a recording itself: the person chooses on the
-// card in the corner of the screen, and the page carries it out.
+// needed); this module decides which of them is a call and when to ask. The
+// person chooses on the card in the corner of the screen, and the page
+// carries it out. With "record without asking" on, a call app's call starts
+// recording by itself (the card says so, with a Stop button) and stops when
+// the call ends; a browser using the microphone may be no call, so it still
+// asks.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -304,7 +307,11 @@ export const PROMPT_AFTER_MS = 3_000;
 /** A call app that lets go of the microphone this long has ended its call. */
 export const ENDED_AFTER_MS = 8_000;
 
-export type MeetingPrompt = { kind: "record"; app: CallApp } | { kind: "stop"; app: CallApp };
+export type MeetingPrompt =
+  | { kind: "record"; app: CallApp }
+  | { kind: "stop"; app: CallApp }
+  /** Not a question: a call started recording without asking. Its button stops it. */
+  | { kind: "recording"; app: CallApp };
 
 export interface ShownPrompt {
   close(): void;
@@ -330,11 +337,23 @@ interface TrackedCall {
   asked: boolean;
 }
 
+/** Recording a call without asking: whether it's on, and how to start and stop. */
+export interface AutoRecording {
+  enabled(): boolean;
+  start(app: CallApp): void;
+  stop(app: CallApp): void;
+}
+
+/** A start without asking that the page hasn't confirmed by now never happened. */
+export const AUTO_START_WAIT_MS = 60_000;
+
 /**
  * When to ask. Pure: fed microphone users and the time, it shows and closes
  * prompts through `show`. A call is asked about once, after it has held the
  * microphone for a few seconds, and never while the page records; a recording
- * made during calls offers to stop once all of them have ended.
+ * made during calls offers to stop once all of them have ended. With `auto`
+ * on, a call app's call is recorded instead of asked about, and a recording
+ * started that way is stopped instead of asked about.
  */
 export class MeetingPrompter {
   private readonly calls = new Map<string, TrackedCall>();
@@ -343,10 +362,15 @@ export class MeetingPrompter {
   private recorded = new Set<string>();
   private shown: { prompt: MeetingPrompt; handle: ShownPrompt } | null = null;
   private enabled = true;
+  /** When a start without asking went out, and for which call, until the page records. */
+  private autoStarted: { at: number; app: CallApp } | null = null;
+  /** The recording going on was started without asking. */
+  private automatic = false;
 
   constructor(
     private readonly own: OwnApp,
     private readonly show: (prompt: MeetingPrompt) => ShownPrompt,
+    private readonly auto: AutoRecording | null = null,
   ) {}
 
   setEnabled(enabled: boolean, now: number): void {
@@ -394,11 +418,16 @@ export class MeetingPrompter {
   setRecording(recording: boolean, now: number): void {
     if (recording === this.recording) return;
     this.recording = recording;
+    const started = this.autoStarted;
+    this.autoStarted = null;
+    this.automatic = recording && started !== null && now - started.at < AUTO_START_WAIT_MS;
     this.recorded = new Set(
       recording ? [...this.calls].filter(([, call]) => call.active).map(([id]) => id) : [],
     );
     // Whichever prompt is up no longer applies.
     this.close();
+    // Only now that the page records does the card say the call is being recorded.
+    if (this.automatic && started) this.present({ kind: "recording", app: started.app });
     // Calls that were going on are this recording's; don't offer them again after it.
     for (const call of this.calls.values()) call.asked = true;
     this.evaluate(now);
@@ -411,13 +440,26 @@ export class MeetingPrompter {
       this.calls.delete(id);
       if (this.shown?.prompt.kind === "record" && this.shown.prompt.app.id === id) this.close();
       if (this.recording && this.recorded.delete(id) && this.recorded.size === 0) {
-        this.present({ kind: "stop", app: call.app });
+        if (this.automatic && this.auto) {
+          this.close();
+          this.auto.stop(call.app);
+        } else {
+          this.present({ kind: "stop", app: call.app });
+        }
       }
     }
     if (!this.enabled || this.recording) return;
     for (const call of this.calls.values()) {
       if (call.asked || !call.active || now - call.since < PROMPT_AFTER_MS) continue;
       call.asked = true;
+      // A start without asking is on its way: calls meanwhile join that recording.
+      if (this.autoStarted !== null && now - this.autoStarted.at < AUTO_START_WAIT_MS) continue;
+      if (!call.app.browser && this.auto?.enabled()) {
+        this.close();
+        this.autoStarted = { at: now, app: call.app };
+        this.auto.start(call.app);
+        continue;
+      }
       // A call app's question isn't replaced by a browser's.
       if (this.shown?.prompt.kind === "record" && !this.shown.prompt.app.browser) continue;
       this.present({ kind: "record", app: call.app });
@@ -473,6 +515,14 @@ export function promptText(
       dismiss: words.notNow,
     };
   }
+  if (prompt.kind === "recording") {
+    return {
+      question: words.recordingStarted ?? ENGLISH_MEETING_WORDS.recordingStarted,
+      reason: fillMeetingWords(words.callRecording ?? ENGLISH_MEETING_WORDS.callRecording, values),
+      action: words.stop,
+      dismiss: words.ok ?? ENGLISH_MEETING_WORDS.ok,
+    };
+  }
   return {
     question: words.stopQuestion,
     reason: fillMeetingWords(words.callEnded, values),
@@ -481,7 +531,7 @@ export function promptText(
   };
 }
 
-/** The request the page gets when the person acts on a prompt. */
+/** The request the page gets when the person acts on a prompt: a recording's card stops it. */
 export function promptRequest(prompt: MeetingPrompt): DesktopMeetingRequest {
   return prompt.kind === "record"
     ? { kind: "record", app: prompt.app.name, title: prompt.app.title }
@@ -489,8 +539,9 @@ export function promptRequest(prompt: MeetingPrompt): DesktopMeetingRequest {
 }
 
 /**
- * The switch, in the app's data folder (`meetings.json`). On unless turned
- * off. Beside it, whether a page here last said it can record, so after a
+ * The switches, in the app's data folder (`meetings.json`): detection, on
+ * unless turned off, and recording without asking, off unless turned on.
+ * Beside them, whether a page here last said it can record, so after a
  * restart the app asks again before any window has loaded.
  */
 export class MeetingDetectionStore {
@@ -506,6 +557,14 @@ export class MeetingDetectionStore {
 
   setEnabled(enabled: boolean): void {
     this.write({ ...this.file(), detectCalls: enabled });
+  }
+
+  autoRecord(): boolean {
+    return this.file().recordCallsWithoutAsking === true;
+  }
+
+  setAutoRecord(autoRecord: boolean): void {
+    this.write({ ...this.file(), recordCallsWithoutAsking: autoRecord });
   }
 
   canRecord(): boolean {
@@ -558,6 +617,9 @@ export interface MeetingDetectionOptions {
   store: {
     enabled(): boolean;
     setEnabled(enabled: boolean): void;
+    /** Recording a call app's calls without asking; off when the store doesn't keep it. */
+    autoRecord?(): boolean;
+    setAutoRecord?(autoRecord: boolean): void;
     canRecord(): boolean;
     setCanRecord(canRecord: boolean): void;
   };
@@ -610,24 +672,48 @@ export class MeetingDetection {
   private cannotRecord: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: MeetingDetectionOptions) {
-    this.prompter = new MeetingPrompter(options.own, (prompt) => this.present(prompt));
+    this.prompter = new MeetingPrompter(options.own, (prompt) => this.present(prompt), {
+      enabled: () => this.autoRecord(),
+      start: (app) => {
+        this.options.log(`Meeting detection: recording a call without asking (${app.id}).`);
+        this.deliver(promptRequest({ kind: "record", app }), { quiet: true });
+      },
+      stop: (app) => {
+        this.options.log(`Meeting detection: the call ended; stopping its recording (${app.id}).`);
+        this.deliver(promptRequest({ kind: "stop", app }), { quiet: true });
+      },
+    });
   }
 
   status(): DesktopMeetingDetectionStatus {
     return {
       enabled: this.options.store.enabled(),
+      autoRecord: this.autoRecord(),
       available: this.usable(),
       ...(this.problem ? { problem: this.problem } : {}),
     };
   }
 
   update(change: unknown): DesktopMeetingDetectionStatus {
-    const enabled =
-      change && typeof change === "object" ? (change as { enabled?: unknown }).enabled : undefined;
+    const { enabled, autoRecord } =
+      change && typeof change === "object"
+        ? (change as { enabled?: unknown; autoRecord?: unknown })
+        : {};
     if (typeof enabled === "boolean" && enabled !== this.options.store.enabled()) {
       this.options.store.setEnabled(enabled);
       this.options.log(`Meeting detection: turned ${enabled ? "on" : "off"}.`);
       this.apply();
+      this.changed();
+    }
+    if (
+      typeof autoRecord === "boolean" &&
+      autoRecord !== this.autoRecord() &&
+      this.options.store.setAutoRecord
+    ) {
+      this.options.store.setAutoRecord(autoRecord);
+      this.options.log(
+        `Meeting detection: recording without asking turned ${autoRecord ? "on" : "off"}.`,
+      );
       this.changed();
     }
     return this.status();
@@ -697,16 +783,17 @@ export class MeetingDetection {
 
   private present(prompt: MeetingPrompt): ShownPrompt {
     const app = prompt.app.id;
-    this.options.log(
-      `Meeting detection: asked ${prompt.kind === "record" ? "to record a call" : "to stop recording"} (${app}).`,
-    );
+    this.options.log(`Meeting detection: ${PRESENTED[prompt.kind]} (${app}).`);
     let open = true;
     const shown = this.options.view.show(prompt, (outcome) => {
       if (!open) return;
       open = false;
       this.prompter.dismissed(prompt);
       this.options.log(`Meeting detection: ${OUTCOMES[outcome]} (${app}).`);
-      if (outcome === "chosen") this.deliver(promptRequest(prompt));
+      // Stopping a recording that started without asking stays in the background.
+      if (outcome === "chosen") {
+        this.deliver(promptRequest(prompt), { quiet: prompt.kind === "recording" });
+      }
     });
     return {
       close: () => {
@@ -718,9 +805,14 @@ export class MeetingDetection {
     };
   }
 
-  /** Bring the window up and give the choice to a page, waiting briefly for one if none listens. */
-  private deliver(request: DesktopMeetingRequest): void {
+  /**
+   * Bring the window up and give the choice to a page, waiting briefly for
+   * one if none listens. Quietly, the window stays where it is unless no page
+   * listens, since one has to be open to record.
+   */
+  private deliver(request: DesktopMeetingRequest, { quiet = false } = {}): void {
     this.clearPending();
+    if (quiet && this.send(request)) return;
     try {
       this.options.reveal();
     } catch (error) {
@@ -798,6 +890,10 @@ export class MeetingDetection {
 
   private usable(): boolean {
     return Boolean(this.options.helperPath) && this.options.available;
+  }
+
+  private autoRecord(): boolean {
+    return this.options.store.autoRecord?.() === true;
   }
 
   private apply(): void {
@@ -884,4 +980,10 @@ const OUTCOMES: Record<MeetingPromptOutcome, string> = {
   chosen: "the person chose it",
   dismissed: "the person closed the question",
   expired: "the question timed out",
+};
+
+const PRESENTED: Record<MeetingPrompt["kind"], string> = {
+  record: "asked to record a call",
+  stop: "asked to stop recording",
+  recording: "said a call is being recorded",
 };
