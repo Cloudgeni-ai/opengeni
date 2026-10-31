@@ -556,7 +556,8 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   billingState.isXaiTurn = billingIdentity.xaiSubscription;
   billingState.isClaudeTurn =
     verifiedExecutionPolicy.provider.kind === "claude-subscription-workspace" ||
-    verifiedExecutionPolicy.provider.kind === "claude-subscription-organization";
+    verifiedExecutionPolicy.provider.kind === "claude-subscription-organization" ||
+    verifiedExecutionPolicy.provider.kind === "claude-subscription";
   if (!trigger) {
     throw new Error(`Trigger event not found: ${attempt.triggerEventId}`);
   }

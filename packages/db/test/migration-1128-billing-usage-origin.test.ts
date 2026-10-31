@@ -48,20 +48,22 @@ beforeAll(async () => {
     if (requireRealDatabase) throw new Error("PostgreSQL fixture is unavailable");
     return;
   }
-  // A database that already ran every shipped migration before ours, main's
-  // 1115 included, then upgrades to the release that adds ours (and any later
-  // migration that builds on it).
+  // A database that already ran every migration shipped before ours, main's
+  // 1115 included, then upgrades to the release that adds ours. Migrations
+  // shipped after ours may build on it (1142 indexes billing_origin), so
+  // they follow it, as on any database.
   directory = await mkdtemp(join(tmpdir(), "og-migration-1128-"));
   const files = (await readdir(SHIPPED)).filter((file) => file.endsWith(".sql")).sort();
   ours = files.find((file) => file.endsWith("_billing_usage_origin.sql")) ?? "";
   if (!ours) throw new Error("the billing-origin migration is missing");
-  for (const file of files) {
-    if (file < ours) await symlink(join(SHIPPED, file), join(directory, file));
+  const position = files.indexOf(ours);
+  for (const file of files.slice(0, position)) {
+    await symlink(join(SHIPPED, file), join(directory, file));
   }
   await migrate(owned.ownerUrl, undefined, { migrationsDirectory: directory });
   beforeOurs = await definitions();
-  for (const file of files) {
-    if (file >= ours) await symlink(join(SHIPPED, file), join(directory, file));
+  for (const file of files.slice(position)) {
+    await symlink(join(SHIPPED, file), join(directory, file));
   }
   await migrate(owned.ownerUrl, undefined, { migrationsDirectory: directory });
   await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword, rlsStrategy: "force" });

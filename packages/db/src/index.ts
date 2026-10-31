@@ -1051,6 +1051,7 @@ import {
 } from "@opengeni/config";
 import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
+import { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import {
   canonicalizePersistedHistoryItem,
   CodexAppsCredentialUnavailable,
@@ -2281,15 +2282,10 @@ export const allWorkspacePermissions: Permission[] = [
   "connections:write",
   "connections:personal",
   "capabilities:manage",
-  "variable-sets:list",
-  "variable-sets:read",
-  "variable-sets:write",
-  "variable-sets:manage",
-  "variable-sets:attach",
-  "variable-sets:use",
   "secrets:list",
   "secrets:read",
   "secrets:write",
+  "secrets:use",
   "mcp_servers:attach",
   "goals:manage",
   "enrollments:read",
@@ -4790,25 +4786,29 @@ export async function deleteWorkspaceIfQuiescent(
           // deleting the parent. Finalize the gate inside this transaction: the
           // workspace activity counter disappears with the parent cascade.
           const variableSetDetachStartedAt = performance.now();
-          await withRestoredSessionActivityRlsContext(
+          // Release-N compatibility only: ordinary ORM reads no longer name
+          // retired columns. The contract release removes this table and its
+          // attachment guards atomically, after which detachment is unnecessary.
+          const [retiredVariableSetSchema] = await rawRows<{ present: boolean }>(
             tx,
-            { accountId: input.accountId, workspaceId: input.workspaceId },
-            async (activityDb) => {
-              await activityDb
-                .update(schema.sessions)
-                .set({
-                  variableSetIds: [],
-                  variableSetId: null,
-                  updatedAt: new Date(),
-                })
-                .where(
-                  and(
-                    eq(schema.sessions.workspaceId, input.workspaceId),
-                    isNotNull(schema.sessions.variableSetId),
-                  ),
-                );
-            },
+            sql`select pg_catalog.to_regclass('workspace_variable_sets') is not null as present`,
           );
+          if (retiredVariableSetSchema?.present) {
+            await withRestoredSessionActivityRlsContext(
+              tx,
+              { accountId: input.accountId, workspaceId: input.workspaceId },
+              async (activityDb) => {
+                await activityDb.execute(sql`
+                  update sessions
+                  set variable_set_ids = '[]'::jsonb, variable_set_id = null,
+                    updated_at = ${new Date().toISOString()}::timestamptz
+                  where workspace_id = ${input.workspaceId}::uuid
+                    and account_id = ${input.accountId}::uuid
+                    and variable_set_id is not null
+                `);
+              },
+            );
+          }
           observeWorkspaceDeletePhase(input.observer, {
             phase: "variable_set_detach",
             outcome: "ok",
@@ -19537,7 +19537,9 @@ export async function createScheduledTask(
             input.claudeProviderAccountAuthoritySnapshot ?? sharedTaskPool!.claude,
           subscriptionAuthority: taskSubscriptionAuthority,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
-          creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
+          creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions
+            ? canonicalSecretPermissions(input.creatorPolicy.firstPartyMcpPermissions)
+            : null,
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
           reusableSessionId: input.targetSessionId ?? null,
           // The column default is { mode: "all" }; omit it so rows written
@@ -19873,9 +19875,9 @@ export async function updateScheduledTask(
         ...(input.creatorFirstPartyPolicy
           ? {
               creatorFirstPartyMcpTools: [...input.creatorFirstPartyPolicy.firstPartyMcpTools],
-              creatorFirstPartyMcpPermissions: [
-                ...input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
-              ],
+              creatorFirstPartyMcpPermissions: canonicalSecretPermissions(
+                input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
+              ),
             }
           : {}),
         ...(input.refreshPersonalResourceAuthority ||
@@ -27966,9 +27968,10 @@ export async function readSubscriptionCoreCodexResetAuthority(
  * post-resolution gate (a blocked provider never reaches a model call and
  * never silently remaps).
  *
- * A workspace row is the workspace's own choice. Without one, the workspace
- * follows its organization's default allowlist (organization_model_defaults);
- * with neither, every model is allowed.
+ * The organization's allowlist (organization_model_defaults) is a ceiling for
+ * every workspace in it. A workspace row only narrows it: a model must pass
+ * both. Without a row the workspace uses the organization's list as is; with
+ * neither, every model is allowed.
  */
 export type WorkspaceModelPolicy = {
   allowedProviders: string[] | null;
@@ -27990,10 +27993,33 @@ function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boo
   return Boolean(policy && (policy.allowedProviders !== null || policy.allowedModels !== null));
 }
 
+/** One allowlist narrowed by another; null allows everything. */
+function narrowAllowlist(ceiling: string[] | null, own: string[] | null): string[] | null {
+  if (ceiling === null) return own;
+  if (own === null) return ceiling;
+  const allowed = new Set(ceiling);
+  return own.filter((id) => allowed.has(id));
+}
+
 /**
- * The workspace's own policy row and the organization default it would
- * follow without one. `organization` is null when the organization allows
- * every model.
+ * What a workspace may use: its own allowlists within the organization's. A
+ * model passes only when both allow its provider and both allow the model.
+ */
+function narrowWorkspaceModelPolicy(
+  organization: WorkspaceModelPolicy | null,
+  workspace: WorkspaceModelPolicy | null,
+): WorkspaceModelPolicy | null {
+  if (!organization) return workspace;
+  if (!workspace) return organization;
+  return {
+    allowedProviders: narrowAllowlist(organization.allowedProviders, workspace.allowedProviders),
+    allowedModels: narrowAllowlist(organization.allowedModels, workspace.allowedModels),
+  };
+}
+
+/**
+ * The workspace's own policy row and the organization's ceiling above it.
+ * `organization` is null when the organization allows every model.
  */
 export async function getWorkspaceModelPolicyLayers(
   db: Database,
@@ -28044,17 +28070,23 @@ export async function getWorkspaceModelPolicyLayers(
 }
 
 /**
- * The policy this workspace runs with: the allowlists of its own row, else of
- * its organization's default, plus its credit switch. Null only when nothing
- * is restricted (every model allowed and credits on).
+ * The policy this workspace runs with: its own allowlists narrowed within its
+ * organization's, plus its credit switch. Null only when nothing is
+ * restricted (every model allowed and credits on).
  */
 export async function getWorkspaceModelPolicy(
   db: Database,
   workspaceId: string,
 ): Promise<EffectiveWorkspaceModelPolicy | null> {
-  const layers = await getWorkspaceModelPolicyLayers(db, workspaceId);
-  const allowlists = layers.workspace ?? layers.organization;
-  if (!allowlists && layers.allowCreditModels) return null;
+  return effectiveWorkspaceModelPolicy(await getWorkspaceModelPolicyLayers(db, workspaceId));
+}
+
+/** The policy a workspace runs with, from its already-read layers. */
+function effectiveWorkspaceModelPolicy(
+  layers: Awaited<ReturnType<typeof getWorkspaceModelPolicyLayers>>,
+): EffectiveWorkspaceModelPolicy | null {
+  const allowlists = narrowWorkspaceModelPolicy(layers.organization, layers.workspace);
+  if (!restrictsAnything(allowlists) && layers.allowCreditModels) return null;
   return {
     allowedProviders: allowlists?.allowedProviders ?? null,
     allowedModels: allowlists?.allowedModels ?? null,
@@ -28062,7 +28094,7 @@ export async function getWorkspaceModelPolicy(
   };
 }
 
-/** Remove the workspace's own policy so it follows its organization's default. */
+/** Remove the workspace's own policy so it uses its organization's list as is. */
 export async function deleteWorkspaceModelPolicy(
   db: Database,
   input: { accountId: string; workspaceId: string },
@@ -28080,8 +28112,8 @@ export async function deleteWorkspaceModelPolicy(
 
 /**
  * Create or replace the workspace's own model policy. Passing null for a field
- * clears that restriction; a policy of {null, null} is kept as the workspace's
- * explicit choice to allow every model even when its organization restricts.
+ * clears that restriction. It only ever narrows the organization's list, so
+ * {null, null} allows exactly what the organization allows.
  */
 export async function upsertWorkspaceModelPolicy(
   db: Database,
@@ -31642,7 +31674,9 @@ async function createSessionInTransaction(
         rigId: input.rigId ?? null,
         rigVersionId: input.rigVersionId ?? null,
         channelId,
-        firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+        firstPartyMcpPermissions: input.firstPartyMcpPermissions
+          ? canonicalSecretPermissions(input.firstPartyMcpPermissions)
+          : null,
         firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
         initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
         initialMcpAccountBindings: acceptedMcpAccountBindings,
@@ -92507,7 +92541,11 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               ? { firstPartyMcpTools: update.firstPartyMcpTools }
               : {}),
             ...(update.firstPartyMcpPermissions !== undefined
-              ? { firstPartyMcpPermissions: update.firstPartyMcpPermissions }
+              ? {
+                  firstPartyMcpPermissions: canonicalSecretPermissions(
+                    update.firstPartyMcpPermissions,
+                  ),
+                }
               : {}),
             ...(update.sandboxBackend !== undefined
               ? { sandboxBackend: update.sandboxBackend }
@@ -92788,8 +92826,10 @@ function mapSession(
     effectiveControl,
     inputWait: effectiveControl.state === "active" ? (row.currentInputWait ?? null) : null,
     lastSequence: row.lastSequence,
-    codexPinnedCredentialId: row.codexPinnedCredentialId ?? null,
-    codexLastCredentialId: row.codexLastCredentialId ?? null,
+    // Public adapters project these from subscription-core bindings and leases,
+    // never the frozen columns of the retired allocator.
+    codexPinnedCredentialId: null,
+    codexLastCredentialId: null,
     codexCompactionMode:
       row.codexCompactionMode === "remote_v2" || row.codexCompactionMode === "portable"
         ? row.codexCompactionMode
