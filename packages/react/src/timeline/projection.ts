@@ -21,6 +21,7 @@ import {
   prescanTurnAnchors,
 } from "@opengeni/sdk/timeline-order";
 import fleetDecisionItem from "./fleet-decision-projection";
+import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 import { isAgentWorkHumanInput } from "./agent-work-human-input";
 import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";
 import { learningRefusalText } from "./learning-refusal-copy";
@@ -2351,13 +2352,20 @@ function markRepeatedMachineRequests(items: TimelineItem[]): void {
  * as `turn0search3`, then U+E201. It also reaches the timeline without its
  * delimiters (`citeturn0search3turn1view0`, when a model writes it as plain
  * text), cut short, or still streaming at the end of the text.
+ *
+ * Claude's web-search citation tags (a `cite` tag with an `index="N-M"`
+ * attribute) become their quoted text. The Claude transport already links them to their
+ * search results where it can; any tag left over, for example in an answer
+ * stored before that, would otherwise show as raw markup. Code keeps them.
  */
 export function stripOpaqueCitationTokens(text: string): string {
-  return text
-    .replace(PROVIDER_CITATION_HANDLE, "")
-    .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
-    .replace(PROVIDER_CITATION_DELIMITER, "")
-    .replace(BARE_PROVIDER_CITATION_HANDLE, "");
+  return rewriteClaudeCiteTags(
+    text
+      .replace(PROVIDER_CITATION_HANDLE, "")
+      .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
+      .replace(PROVIDER_CITATION_DELIMITER, "")
+      .replace(BARE_PROVIDER_CITATION_HANDLE, ""),
+  );
 }
 
 const PROVIDER_CITATION_HANDLE =

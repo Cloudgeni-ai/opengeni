@@ -5,6 +5,7 @@ import {
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
 export * from "./secret-value";
+export * from "./claude-cite-tags";
 export * from "./integration-capability-id";
 import { defineSchema } from "./define-schema";
 import { SessionAvatar, SessionDescription } from "./bots";

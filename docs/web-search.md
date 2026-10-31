@@ -83,6 +83,14 @@ results also count as input tokens on later requests.
   `web_search_tool_result` blocks, including the encrypted page content, and
   cited text keeps its citations in `providerData.anthropic.citations`. Claude
   receives all of them back exactly as returned, which Anthropic requires.
+- Anthropic tells Claude to mark quotes with `cite` tags (`index="N-M"` names
+  search result N, sentence M) and turns them into citations only in ordinary
+  answer text. In a `wait_for_input` reply, which is shown verbatim, the
+  transport rewrites each tag into its quoted text, linked to result N counted
+  from 1 across the request's and response's results in order, or plain text
+  when there is no such result. Other tool arguments keep their exact text.
+  Chat timelines, copied text, Slack and Teams show any remaining tag as its
+  text, outside code.
 - A search Claude defers behind Opengeni tool calls resumes on the next
   request. A paused turn (`pause_turn`) is continued inside the transport with
   its content unchanged, up to eight requests in total, and reported as one response.
