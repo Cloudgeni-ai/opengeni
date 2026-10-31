@@ -49,6 +49,7 @@ mod fetch;
 mod handle;
 mod holds;
 mod link;
+mod lost;
 mod observe;
 mod owners;
 mod ready;
@@ -664,6 +665,9 @@ struct Exit {
     id: Id,
     incarnation: u64,
     end: End,
+    /// When the agent took the VM process on, on the boot clock the guard
+    /// records its kills by: a kill before then was of an earlier VM.
+    owned: compute_core::At,
 }
 
 /// How a sandbox's VM was lost: it went without the agent ending it, or
@@ -683,6 +687,9 @@ enum End {
     Stopped,
     /// The host ended it for memory (ADR 24).
     ForMemory,
+    /// The host's guard ended it: the host's lease with the control
+    /// service ran out before the VM froze (ADR 18).
+    Fenced,
 }
 
 impl End {
@@ -693,6 +700,7 @@ impl End {
             Self::MemoryLost => "memory_lost",
             Self::Stopped => "guest_stopped",
             Self::ForMemory => "ended_for_memory",
+            Self::Fenced => "fenced",
         }
     }
 }

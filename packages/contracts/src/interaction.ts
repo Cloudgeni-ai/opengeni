@@ -11,6 +11,18 @@ import {
 import { maskSecretValues, type SecretValueMaskOptions } from "./secret-value-masking";
 
 export const INTERACTION_PROTOCOL_VERSION = 1 as const;
+/** Controller-only display metadata. Never a routing or authorization identity. */
+export const ComputerCursorIdentity = /* @__PURE__ */ defineSchema(() =>
+  z.strictObject({
+    label: z.string().min(1).max(200),
+    avatarPng: z
+      .string()
+      .max(48 * 1024)
+      .regex(/^[A-Za-z0-9+/]*={0,2}$/u)
+      .optional(),
+  }),
+);
+export type ComputerCursorIdentity = z.infer<typeof ComputerCursorIdentity>;
 export const BROWSER_CONTROL_PROTOCOL_VERSION = INTERACTION_PROTOCOL_VERSION;
 export const BROWSER_CONTROL_WEBSOCKET_PROTOCOL = "opengeni.browser.v1" as const;
 export const COMPUTER_CONTROL_WEBSOCKET_PROTOCOL = "opengeni.computer.v1" as const;
