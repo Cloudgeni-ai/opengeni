@@ -4779,25 +4779,29 @@ export async function deleteWorkspaceIfQuiescent(
           // deleting the parent. Finalize the gate inside this transaction: the
           // workspace activity counter disappears with the parent cascade.
           const variableSetDetachStartedAt = performance.now();
-          await withRestoredSessionActivityRlsContext(
+          // Release-N compatibility only: ordinary ORM reads no longer name
+          // retired columns. The contract release removes this table and its
+          // attachment guards atomically, after which detachment is unnecessary.
+          const [retiredVariableSetSchema] = await rawRows<{ present: boolean }>(
             tx,
-            { accountId: input.accountId, workspaceId: input.workspaceId },
-            async (activityDb) => {
-              await activityDb
-                .update(schema.sessions)
-                .set({
-                  variableSetIds: [],
-                  variableSetId: null,
-                  updatedAt: new Date(),
-                })
-                .where(
-                  and(
-                    eq(schema.sessions.workspaceId, input.workspaceId),
-                    isNotNull(schema.sessions.variableSetId),
-                  ),
-                );
-            },
+            sql`select pg_catalog.to_regclass('workspace_variable_sets') is not null as present`,
           );
+          if (retiredVariableSetSchema?.present) {
+            await withRestoredSessionActivityRlsContext(
+              tx,
+              { accountId: input.accountId, workspaceId: input.workspaceId },
+              async (activityDb) => {
+                await activityDb.execute(sql`
+                  update sessions
+                  set variable_set_ids = '[]'::jsonb, variable_set_id = null,
+                    updated_at = ${new Date().toISOString()}::timestamptz
+                  where workspace_id = ${input.workspaceId}::uuid
+                    and account_id = ${input.accountId}::uuid
+                    and variable_set_id is not null
+                `);
+              },
+            );
+          }
           observeWorkspaceDeletePhase(input.observer, {
             phase: "variable_set_detach",
             outcome: "ok",
@@ -92669,8 +92673,10 @@ function mapSession(
     effectiveControl,
     inputWait: effectiveControl.state === "active" ? (row.currentInputWait ?? null) : null,
     lastSequence: row.lastSequence,
-    codexPinnedCredentialId: row.codexPinnedCredentialId ?? null,
-    codexLastCredentialId: row.codexLastCredentialId ?? null,
+    // Public adapters project these from subscription-core bindings and leases,
+    // never the frozen columns of the retired allocator.
+    codexPinnedCredentialId: null,
+    codexLastCredentialId: null,
     codexCompactionMode:
       row.codexCompactionMode === "remote_v2" || row.codexCompactionMode === "portable"
         ? row.codexCompactionMode
