@@ -275,7 +275,7 @@ export function useTurnQueue(
               cancelTransientRetry();
               transientRetryTimerRef.current = setTimeout(() => {
                 transientRetryTimerRef.current = null;
-                if (targetKeyRef.current === ownedTargetKey) void loadRef.current();
+                if (targetKeyRef.current === ownedTargetKey) void loadRef.current(false, fresh);
               }, step.delayMs);
             }
           } else {
@@ -325,15 +325,19 @@ export function useTurnQueue(
     };
   }, [cancelTransientRetry, load, enabled, pageLive, options.pollIntervalMs]);
 
+  // Every read that follows an observed change (a control event, a reconnect)
+  // is fresh. If one of them joined an older in-flight read, that stale result
+  // could become the newest accepted read and discard the fresh one.
+  const loadFresh = useCallback(() => load(false, true), [load]);
   useEffect(() => {
-    if (enabled && workspaceControlEvent) void load();
-  }, [enabled, load, workspaceControlEvent]);
+    if (enabled && workspaceControlEvent) void loadFresh();
+  }, [enabled, loadFresh, workspaceControlEvent]);
   useEffect(() => {
     if (!sessionId || !enabled) return;
-    return registerSessionReconciler(sessionId, "queue", load);
-  }, [enabled, load, registerSessionReconciler, sessionId]);
+    return registerSessionReconciler(sessionId, "queue", loadFresh);
+  }, [enabled, loadFresh, registerSessionReconciler, sessionId]);
 
-  const scheduleRefresh = useDebouncedCallback(() => void load(false, true));
+  const scheduleRefresh = useDebouncedCallback(() => void loadFresh());
   const freshSnapshot = stateTargetKey === targetKey ? snapshot : null;
   const freshLoading = stateTargetKey === targetKey ? loading : enabled;
   useSessionEventTrigger(
