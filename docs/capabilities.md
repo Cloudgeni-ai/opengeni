@@ -39,8 +39,9 @@ or changing it hands to whoever did so); one an admin or another person turned
 on, one with no recorded installer and one an admin turned off stay with
 admins. `GET …/capabilities` returns `canRemove` on each item for the caller.
 Turning a server off for everyone (`POST …/capabilities/:id/disable`) stays
-with admins; servers a plugin brings go with their plugin, and servers
-configured in settings aren't removable. Shared-workspace admins
+with admins; servers a plugin brings go with their plugin, a server the
+organization serves here is turned off here instead (`canRemove: false`), and
+servers configured in settings aren't removable. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
 member-management or API-key-delegation powers of `workspace:admin`.

@@ -1601,7 +1601,8 @@ export async function disableCapability(input: {
 /**
  * A custom MCP server added in this workspace (`POST …/capabilities`): its
  * own catalog entry, not a reviewed, registry, built-in or configured one,
- * and not a server a plugin brings (removed with its plugin).
+ * not a server a plugin brings (removed with its plugin), and not one the
+ * organization serves here (managed in its settings, turned off here instead).
  */
 export function isWorkspaceCustomMcpServer(
   item: Pick<CapabilityCatalogItem, "kind" | "workspaceId" | "source" | "provenance" | "metadata">,
@@ -1613,7 +1614,8 @@ export function isWorkspaceCustomMcpServer(
     item.source !== "built_in" &&
     item.source !== "configured" &&
     item.provenance !== "plugin_configured_mcp" &&
-    item.metadata.pluginInstallationId === undefined
+    item.metadata.pluginInstallationId === undefined &&
+    item.metadata.organizationConnector === undefined
   );
 }
 

@@ -250,4 +250,35 @@ describe("members remove only the custom MCP servers they added", () => {
     await expectRefused(await call(member, "DELETE", removePath(id)));
     expect((await call(otherMember, "DELETE", removePath(id))).status).toBe(200);
   });
+
+  test("an organization's server turned off here isn't removable, even by an admin", async () => {
+    const id = `mcp:removal-organization-${crypto.randomUUID()}`;
+    const host = `org-${crypto.randomUUID()}.example`;
+    await shared!.admin`insert into organization_connectors (
+        account_id, capability_id, custom_definition, config, metadata,
+        created_by_subject_id, updated_by_subject_id
+      ) values (
+        ${accountId}, ${id},
+        ${shared!.admin.json({ name: "Organization docs", description: null, endpointUrl: `https://${host}/mcp` })},
+        ${shared!.admin.json({ connectionRef: { providerDomain: host, kind: "oauth2", subjectScope: "subject" } })},
+        ${shared!.admin.json({ mcpConnectivity: { status: "auth_deferred" } })},
+        ${admin}, ${admin}
+      )`;
+    try {
+      expect((await removableBy(admin)).get(id)).toBe(false);
+      const off = await call(admin, "POST", `/capabilities/${encodeURIComponent(id)}/disable`, {});
+      expect(off.status).toBe(200);
+      expect((await installation(id))?.status).toBe("disabled");
+      // Turned off here, it is still the organization's, not a custom server.
+      expect((await removableBy(admin)).get(id)).toBe(false);
+      expect((await removableBy(member)).get(id)).toBe(false);
+      const refused = await call(admin, "DELETE", removePath(id));
+      expect(refused.status).toBe(409);
+      expect(await refused.text()).toContain("Only a custom MCP server added in this workspace");
+      expect((await installation(id))?.status).toBe("disabled");
+    } finally {
+      await shared!.admin`delete from organization_connectors
+        where account_id = ${accountId} and capability_id = ${id}`;
+    }
+  });
 });
