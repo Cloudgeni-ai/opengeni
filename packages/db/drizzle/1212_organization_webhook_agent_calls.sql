@@ -15,7 +15,7 @@
 -- registrations are unchanged until they subscribe. The previous release
 -- never subscribes an organization endpoint to these types, and the check is
 -- added NOT VALID because every existing row already satisfies the narrower
--- list (1172_organization_webhook_agent_calls).
+-- list (1212_organization_webhook_agent_calls).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 

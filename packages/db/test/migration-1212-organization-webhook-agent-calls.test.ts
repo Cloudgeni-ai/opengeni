@@ -17,7 +17,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
-const MIGRATION = "1172_organization_webhook_agent_calls.sql";
+const MIGRATION = "1212_organization_webhook_agent_calls.sql";
 const migration = readFileSync(new URL(`../drizzle/${MIGRATION}`, import.meta.url), "utf8");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -25,7 +25,7 @@ setDefaultTimeout(60_000);
 
 // Organization endpoints take every session and recording type the contract
 // offers; only the usage types stay workspace-only (the API answers 422).
-test("1172 lists every non-usage webhook type for organization endpoints", () => {
+test("1212 lists every non-usage webhook type for organization endpoints", () => {
   const check = /organization_webhooks_event_types_chk CHECK \(([\s\S]*?)\) NOT VALID/u.exec(
     migration,
   )?.[1];
