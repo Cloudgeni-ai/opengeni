@@ -78,6 +78,12 @@ export interface DesktopSystemAudioError {
 export interface DesktopMeetingDetectionStatus {
   /** The person's switch: offer to record when a call starts. */
   enabled: boolean;
+  /**
+   * The person's second switch: when a call app's call starts, record it
+   * without asking, and stop when it ends. A meeting in a browser still asks.
+   * Absent from apps built before it existed.
+   */
+  autoRecord?: boolean;
   /** This computer, its OS version and this app build can tell when a call starts. */
   available: boolean;
   /** Why detection isn't working right now, in a sentence for its row. */
@@ -103,7 +109,10 @@ export type DesktopMeetingRequest =
  */
 export interface DesktopMeetingDetection {
   status(): Promise<DesktopMeetingDetectionStatus>;
-  update(change: { enabled?: boolean }): Promise<DesktopMeetingDetectionStatus>;
+  update(change: {
+    enabled?: boolean;
+    autoRecord?: boolean;
+  }): Promise<DesktopMeetingDetectionStatus>;
   /**
    * Tell the app whether this page is recording a meeting, so it doesn't
    * offer to record another and can offer to stop when the call ends.

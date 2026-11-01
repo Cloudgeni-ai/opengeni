@@ -790,13 +790,18 @@ describe("worker activities integration", () => {
         });
 
         // The test driver acts as the human; the scripted agent never decides.
-        const decide = (approvalId: string, clientEventId: string) =>
+        const opposite = decision === "approve" ? "reject" : "approve";
+        const decide = (
+          approvalId: string,
+          clientEventId: string,
+          choice: "approve" | "reject" = decision,
+        ) =>
           acceptSessionApprovalDecision(dbClient.db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId,
             sessionId: session.id,
             subjectId: grant.subjectId,
-            payload: { approvalId, decision },
+            payload: { approvalId, decision: choice },
             clientEventId,
           });
         expect(await decide("stale-call-id", crypto.randomUUID())).toMatchObject({
@@ -842,7 +847,13 @@ describe("worker activities integration", () => {
         if (replay.action !== "accepted") throw new Error("decision replay was not accepted");
         expect(replay.event.id).toBe(accepted.event.id);
         expect(replay.events).toEqual([]);
-        expect(await decide("call-appr-1", crypto.randomUUID())).toMatchObject({
+        // The same decision under a new key (a second click, another device)
+        // is the decision already recorded; the opposite one is refused.
+        const repeat = await decide("call-appr-1", crypto.randomUUID());
+        if (repeat.action !== "accepted") throw new Error("repeated decision was not accepted");
+        expect(repeat.event.id).toBe(accepted.event.id);
+        expect(repeat.events).toEqual([]);
+        expect(await decide("call-appr-1", crypto.randomUUID(), opposite)).toMatchObject({
           action: "conflict",
         });
         expect(
@@ -918,7 +929,11 @@ describe("worker activities integration", () => {
         expect(afterSecond.filter((event) => event.type === "user.approvalDecision")).toHaveLength(
           1,
         );
-        expect(await decide("call-appr-1", crypto.randomUUID())).toMatchObject({
+        const settledRepeat = await decide("call-appr-1", crypto.randomUUID());
+        if (settledRepeat.action !== "accepted") throw new Error("settled repeat was not accepted");
+        expect(settledRepeat.event.id).toBe(accepted.event.id);
+        expect(settledRepeat.events).toEqual([]);
+        expect(await decide("call-appr-1", crypto.randomUUID(), opposite)).toMatchObject({
           action: "conflict",
         });
         const settledReplay = await decide("call-appr-1", decisionKey);

@@ -59,6 +59,7 @@ import {
 } from "@opengeni/react/app/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
 import type { DeveloperLocation } from "@/lib/developer-route";
+import type { AvailableHereDestination } from "@/components/settings/available-here";
 import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
 
@@ -238,6 +239,21 @@ function OperationalWorkspaceSettingsRoute({
 
       {section === "api-keys" ? (
         <WorkspaceApiKeysPage key={workspaceId} workspaceId={workspaceId} keyParam={apiKey} />
+      ) : null}
+
+      {section === "available" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading what's available here" />}>
+          <LazyAvailableHere
+            key={workspaceId}
+            client={context.client}
+            workspaceId={workspaceId}
+            workspaceName={activeWorkspace?.name ?? "this workspace"}
+            organizationName={organizationLabel}
+            personal={personal}
+            canOpenModels={personal || canAdministerWorkspace || administersOrganization}
+            onOpen={(destination) => openAvailable(navigate, workspaceId, destination)}
+          />
+        </Suspense>
       ) : null}
 
       {section === "developer" ? (
@@ -1025,6 +1041,56 @@ const LazyWorkspaceUsagePage = lazy(async () => {
   const module = await import("@/components/usage/workspace-usage-page");
   return { default: module.WorkspaceUsagePage };
 });
+
+const LazyAvailableHere = lazy(async () => {
+  const module = await import("@/components/settings/available-here");
+  return { default: module.AvailableHere };
+});
+
+/** Opens a row of Available here: the thing's own page, or this workspace's Models page. */
+function openAvailable(
+  navigate: ReturnType<typeof useNavigate>,
+  workspaceId: string,
+  destination: AvailableHereDestination,
+) {
+  switch (destination.page) {
+    case "models":
+      void navigate({
+        to: "/workspaces/$workspaceId/organization",
+        params: { workspaceId },
+        search: { section: "models", workspace: workspaceId },
+      });
+      return;
+    case "plugins":
+      void navigate({
+        to: "/workspaces/$workspaceId/plugins",
+        params: { workspaceId },
+        search: destination.section ? { section: destination.section } : {},
+      });
+      return;
+    case "machines":
+      void navigate({ to: "/workspaces/$workspaceId/machines", params: { workspaceId } });
+      return;
+    case "rig":
+      void navigate({
+        to: "/workspaces/$workspaceId/rigs/$rigId",
+        params: { workspaceId, rigId: destination.rigId },
+      });
+      return;
+    case "vault":
+      void navigate({
+        to: "/workspaces/$workspaceId/secrets/$vaultId",
+        params: { workspaceId, vaultId: destination.vaultId },
+      });
+      return;
+    case "knowledge":
+      void navigate({
+        to: "/workspaces/$workspaceId/state",
+        params: { workspaceId },
+        search: destination.scope ? { scope: destination.scope } : {},
+      });
+  }
+}
 
 const LazyWorkspaceDeveloperSettings = lazy(async () => {
   const module = await import("@/components/workspace-developer-settings");

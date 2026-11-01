@@ -66,7 +66,16 @@ enabling it changes no session's backend.
 
    The password reaches the service in a variable of its own, so it needs
    no quoting. The service creates its tables at start and upgrades them
-   in place, recording their version. It also takes two Postgres advisory
+   in place, recording their version. For a managed database set
+   `database.sslmode: require` (the service takes `disable`, `prefer` and
+   `require`): the service, its sweep and every other `compute-control`
+   command then connect over TLS and check the database's certificate
+   against the image's system authorities, as `verify-full` would. For a
+   private authority, mount it and name it as `COMPUTE_CONTROL_DATABASE_CA`
+   in `extraEnv`, which reaches the sweep too (`--database-ca` on the
+   command line). Without `require` and without an authority the
+   connection is unencrypted, for a database beside the service. It also
+   takes two Postgres advisory
    locks (7231401 for its schema, and its leader lock); keep them free in
    a shared database.
    Its connections give up on a database the network stops answering:
@@ -335,7 +344,8 @@ installs three units:
   the software watchdog (3 s, `nowayout`) where the machine has no
   hardware one, and no suspend;
 - `compute-guard.service`, never restarted on failure: it stops every VM
-  when the host's lease runs out, and the watchdog resets the machine if
+  that is not its sandbox's only copy when the host's lease runs out
+  (ADR 18), and the watchdog resets the machine if
   the guard itself ends or stalls. So that a host short of processors or
   memory (guests holding more than it has, the swap file busy) does not
   stall it into that reset, it runs at real-time priority, locks its own
@@ -980,7 +990,8 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     control service go unanswered`: a host whose renewals went
     unanswered for most of its lease term (30 s) freezes its VMs three
     seconds before the term runs out, and kills those that do not freeze
-    in time. The service's histogram
+    in time, all but those that are their sandbox's only copy (never
+    archived, such as a CI runner's), which run on. The service's histogram
     `compute_fleet_host_renewal_gap_seconds`, by host, records how long
     each host went unheard; gaps of more than 15 s say the link or the
     host is close to that.
@@ -1030,7 +1041,13 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   (`compute.memory.shortfall`), and the guest shrinks by answer,
   what they freed and the programs they ended (`compute.memory.shrink.*`,
   `compute.memory.processes.ended`). Each shrink is a `compute.memory.shrink`
-  event naming its sandbox and the programs ended, and each running
+  event naming its sandbox, the programs ended and its cause
+  (`compute.memory.cause`): `short`, the host short of memory with every
+  sandbox held to its request, which says the host is too full for what it
+  runs, or `over_bound`, a sandbox the kernel could not hold to its bound,
+  which says that sandbox's memory does not compress. The log line asking
+  the guest names the same cause, with the shortfall or what it holds over
+  its bound. Each running
   sandbox's summary carries its peak use, request, compressed and swapped
   memory and its stall: a kind of job that keeps peaking far above its
   request, or stalling, wants a larger request. A sandbox that only stalls

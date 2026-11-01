@@ -202,6 +202,26 @@ pub(super) async fn remove_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Removes what one launch leaves in the jail: the jailer's copy of the
+/// binary, its pid file and device nodes, and the VMM's sockets. Listener
+/// sockets the host serves in the jail stay.
+pub(super) fn tidy(jail: &Jail) -> io::Result<()> {
+    let sockets = [API_SOCKET.trim_start_matches('/'), "vsock.sock"];
+    for name in LAUNCH_LEFTOVERS.iter().chain(&sockets) {
+        let path = jail.root().join(name);
+        let removed = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&path),
+            Ok(_) => std::fs::remove_file(&path),
+            Err(error) => Err(error),
+        };
+        match removed {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -20,7 +20,11 @@ import {
   type AccessGrant,
 } from "@opengeni/contracts";
 import {
+  hasIntegrationAdminPermission,
+  MissingPermissionRefusal,
   requireAccessGrant,
+  requireIntegrationSetupAuthorization,
+  requireMemberIntegrationSetupAllowed,
   integrationSourceForOrganizationPolicy,
   listApiIntegrationsWithPersonalExtension,
   type ApiRouteDeps,
@@ -34,6 +38,7 @@ import {
   getConnectionMetadata,
   getApiIntegrationReconciliationSnapshot,
   installApiIntegration,
+  IntegrationChangeRequiresAdminError,
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
   IntegrationFacetBindingVersionRequiredError,
@@ -92,6 +97,13 @@ export function validatedIntegrationInstallInput(
   if (payload.ownership === "personal" && !resolved.preview.connectionOwnership)
     throw new HTTPException(422, {
       message: "Choose a Personal Connection before installing for yourself.",
+    });
+  // Members install and update integrations; which tools run without asking
+  // is approval policy and stays with integration admins. Omitting the list
+  // keeps the current choice (never widening it), so members simply omit it.
+  if (payload.autoApprovedTools !== undefined && !hasIntegrationAdminPermission(grant))
+    throw new MissingPermissionRefusal("capabilities:manage", {
+      message: "Only an admin can choose which tools run without asking.",
     });
   if (payload.autoApprovedTools?.length) {
     const selected = new Set(payload.allowedTools ?? resolved.preview.tools.map((tool) => tool.id));
@@ -321,8 +333,13 @@ export function registerApiIntegrationRoutes(
 
   app.post("/v1/workspaces/:workspaceId/integrations/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
     const payload = await parseRequestJson(c, InstallApiIntegrationRequest);
+    if (!hasIntegrationAdminPermission(grant))
+      await requireMemberIntegrationSetupAllowed(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+      });
     const resolved = await resolveForRoute({
       deps,
       transport,
@@ -331,13 +348,19 @@ export function registerApiIntegrationRoutes(
       subjectId: grant.subjectId,
       payload,
     });
-    const installation = validatedIntegrationInstallInput(grant, workspaceId, payload, resolved);
+    const installation = {
+      ...validatedIntegrationInstallInput(grant, workspaceId, payload, resolved),
+      // Members only add: an instance already set up stays with admins.
+      ...(hasIntegrationAdminPermission(grant) ? {} : { memberCreate: true }),
+    };
     try {
       return c.json(
         InstalledApiIntegration.parse(await installApiIntegration(deps.db, installation)),
         payload.expectedInstanceVersion === undefined ? 201 : 200,
       );
     } catch (error) {
+      if (error instanceof IntegrationChangeRequiresAdminError)
+        throw new MissingPermissionRefusal("capabilities:manage", { message: error.message });
       if (error instanceof ApiIntegrationConnectionReferenceError) {
         throw new HTTPException(error.reason === "not_found" ? 404 : 422, {
           message: error.reason === "not_found" ? "connection not found" : error.message,
@@ -380,7 +403,7 @@ export function registerApiIntegrationRoutes(
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+      const { grant } = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
       const capabilityId = decodeURIComponent(c.req.param("capabilityId"));
       const instanceKey = decodeURIComponent(c.req.param("instanceKey"));
       const payload = await parseRequestJson(c, UninstallApiIntegrationRequest);

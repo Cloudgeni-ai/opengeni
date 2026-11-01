@@ -1,7 +1,7 @@
 import type { BillingPlanBalance } from "@opengeni/sdk";
 import { Notice } from "@opengeni/react/ui/notice";
 import { RowButton } from "@opengeni/react/ui/page-actions";
-import { planSeats } from "@opengeni/react/app/lib/subscription-plans";
+import { planSeats, type SeatUpgrade } from "@opengeni/react/app/lib/subscription-plans";
 
 export function PlanSeats({ plan }: { plan: BillingPlanBalance | null }) {
   return plan ? (
@@ -11,13 +11,25 @@ export function PlanSeats({ plan }: { plan: BillingPlanBalance | null }) {
   ) : null;
 }
 
+/**
+ * A seat refusal names its one fix once: on the one button for people who
+ * manage billing ("Upgrade to Pro"). Everyone else is told to ask an owner.
+ */
 export function SeatLimitNotice({
   canManage,
+  upgrade,
   onUpgrade,
 }: {
   canManage: boolean;
+  upgrade: SeatUpgrade | null;
   onUpgrade: () => void;
 }) {
+  const enterprise = upgrade?.key === "enterprise";
+  const fix = !upgrade
+    ? null
+    : enterprise
+      ? `Talk to us about ${upgrade.label}`
+      : `Upgrade to ${upgrade.label}`;
   return (
     <Notice
       tone="waiting"
@@ -27,14 +39,20 @@ export function SeatLimitNotice({
       action={
         canManage ? (
           <RowButton variant="default" onClick={onUpgrade}>
-            View upgrade options
+            {fix ?? "View upgrade options"}
           </RowButton>
         ) : undefined
       }
     >
       {canManage
-        ? "Upgrade your plan to invite more people."
-        : "Ask an organization owner to upgrade the plan before inviting more people."}
+        ? !upgrade
+          ? "Upgrade your plan to invite more people."
+          : null
+        : !upgrade
+          ? "Ask an organization owner to upgrade the plan before inviting more people."
+          : enterprise
+            ? `Ask an organization owner about ${upgrade.label}.`
+            : `Ask an organization owner to upgrade to ${upgrade.label}.`}
     </Notice>
   );
 }

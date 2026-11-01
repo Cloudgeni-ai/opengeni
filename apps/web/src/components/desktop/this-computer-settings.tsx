@@ -135,7 +135,7 @@ const UPDATE_THE_APP = "Update the Opengeni app to change this.";
 function Allowed() {
   return (
     <span className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
-      <CheckIcon className="size-4 text-success" aria-hidden />
+      <CheckIcon className="size-4 text-status-success" aria-hidden />
       Allowed
     </span>
   );
@@ -476,12 +476,12 @@ function useMeetingDetection() {
     return bridge.onChange(refresh);
   }, [bridge, refresh]);
   const update = useCallback(
-    async (enabled: boolean) => {
+    async (change: { enabled?: boolean; autoRecord?: boolean }) => {
       if (!bridge) return;
       setSaving(true);
       setFailed(null);
       try {
-        setStatus(await bridge.update({ enabled }));
+        setStatus(await bridge.update(change));
       } catch {
         setFailed("Couldn't save the change. Try again.");
       } finally {
@@ -555,10 +555,28 @@ export function ThisComputerMicrophoneSettings({ className }: { className?: stri
             <Switch
               checked={detection.enabled}
               pending={meetings.saving}
-              onCheckedChange={(next) => void meetings.update(next)}
+              onCheckedChange={(next) => void meetings.update({ enabled: next })}
             />
           }
-        />
+        >
+          {detection.enabled && detection.autoRecord !== undefined ? (
+            <SettingRow
+              label="Record without asking"
+              description={
+                detection.autoRecord
+                  ? "Calls in Zoom, Teams, Slack and other call apps are recorded from the start and stop when the call ends. A card says so, with a button to stop. Meetings in your browser still ask."
+                  : "Ask each time before recording a call."
+              }
+              control={
+                <Switch
+                  checked={detection.autoRecord}
+                  pending={meetings.saving}
+                  onCheckedChange={(next) => void meetings.update({ autoRecord: next })}
+                />
+              }
+            />
+          ) : null}
+        </SettingRow>
       ) : null}
     </Section>
   );

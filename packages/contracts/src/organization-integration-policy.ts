@@ -17,9 +17,10 @@ const keys = /* @__PURE__ */ defineSchema(() =>
     .refine((values) => new Set(values).size === values.length, "Duplicate integration identities"),
 );
 /**
- * Who may turn on a reviewed OAuth integration for personal accounts (each
- * person then connects their own account): any member holding the personal
- * setup permission, or only integration admins. Admins are unaffected.
+ * Who may turn on integrations: members (turning on a reviewed OAuth
+ * integration for personal accounts with the personal setup permission, and
+ * adding any integration with `connections:write`), or only integration
+ * admins. Admins are unaffected.
  */
 export const PersonalIntegrationSetupPolicy = /* @__PURE__ */ defineSchema(() =>
   z.enum(["members", "admins"]),

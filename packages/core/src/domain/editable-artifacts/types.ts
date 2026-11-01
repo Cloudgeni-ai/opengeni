@@ -435,6 +435,19 @@ export type CreateEditableArtifactRequest = Readonly<{
   idempotencyKey: EditableArtifactClientTransactionId;
   modality: EditableArtifactModality;
   title: string;
+  /** Who can open it; absent means the whole workspace with no owner. */
+  audience?: EditableArtifactAudience;
+}>;
+
+/**
+ * Who can open an artifact: the whole workspace, or only its owner ("Only
+ * me"), like a chat or a Site. The owner is the person who may change it.
+ * Production stores enforce it in the same authorization decision as every
+ * read and write.
+ */
+export type EditableArtifactAudience = Readonly<{
+  visibility: "workspace_shared" | "user_private";
+  ownerSubjectId: string | null;
 }>;
 
 export type EditableArtifactOriginOperation = "create" | "import";
@@ -471,6 +484,8 @@ export type ImportEditableArtifactRequest = Readonly<{
   originalImport: EditableArtifactOriginalImport;
   /** Snapshot identity and verification/publication timestamps remain server-owned. */
   snapshot: ImportedEditableArtifactSnapshotRequest;
+  /** Who can open it; absent means the whole workspace with no owner. */
+  audience?: EditableArtifactAudience;
 }>;
 
 export type EditableArtifactCreationReceipt = Readonly<{

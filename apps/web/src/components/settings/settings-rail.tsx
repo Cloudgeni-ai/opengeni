@@ -15,6 +15,7 @@ import {
   GraduationCapIcon,
   KeyRoundIcon,
   LaptopIcon,
+  LayersIcon,
   LockKeyholeIcon,
   MonitorIcon,
   ShieldCheckIcon,
@@ -71,6 +72,11 @@ export const WORKSPACE_SETTINGS_COPY: Record<
     description: ({ workspace, organization }) =>
       `People from ${organization} who can use ${workspace}.`,
   },
+  available: {
+    title: "Available here",
+    description: ({ workspace }) =>
+      `What agents in ${workspace} can use, who it belongs to and who manages it.`,
+  },
   // No subtitle: the Default model row says what a new chat uses and who pays.
   models: {
     title: "Models",
@@ -97,6 +103,7 @@ export const WORKSPACE_SETTINGS_COPY: Record<
 const SECTION_ICONS = {
   general: SlidersHorizontalIcon,
   access: UsersIcon,
+  available: LayersIcon,
   models: SparklesIcon,
   usage: GaugeIcon,
   learning: GraduationCapIcon,
@@ -111,6 +118,7 @@ const SECTION_ICONS = {
 const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
   "general",
   "access",
+  "available",
   "learning",
   "usage",
   "api-keys",
