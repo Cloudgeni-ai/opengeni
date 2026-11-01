@@ -412,13 +412,13 @@ function useRepositoryChooser({
     const states = new Map(
       repositories.map((repository) => [
         repository.id,
-        gitHubRepositoryChatState(repository, mounted, accountLabel, repositories),
+        gitHubRepositoryChatState(repository, mounted),
       ]),
     );
     return orderRepositoriesForChat(repositories, (repository) =>
       leading.has(`${repository.installationId}:${repository.id}`),
     ).map((repository) => ({ repository, state: states.get(repository.id)! }));
-  }, [accountLabel, leading, mounted, repositories]);
+  }, [leading, mounted, repositories]);
   // A catalog mid-refresh is unknown, never proof that access was removed.
   const catalogSettled = context.githubCatalogReady && !context.repoBusy;
   const revoked = useMemo(
@@ -729,9 +729,6 @@ function GitHubRepositoryPanel({
                     {group.label}
                   </h5>
                 ) : null}
-                {group.note ? (
-                  <p className="m-0 mt-0.5 text-xs leading-[1.6] text-fg-muted">{group.note}</p>
-                ) : null}
                 <RowList
                   label={group.label ? `${group.label} repositories` : "GitHub repositories"}
                   flush
@@ -741,7 +738,6 @@ function GitHubRepositoryPanel({
                       key={`${repository.installationId}:${repository.id}`}
                       repository={repository}
                       state={state}
-                      explained={Boolean(group.note)}
                       canMessage={canMessage}
                       primary={single}
                       busy={chooser.attaching === repository.id}
@@ -817,7 +813,6 @@ const LOCKED = "aria-disabled:cursor-not-allowed aria-disabled:opacity-50";
 function RepositoryListRow({
   repository,
   state,
-  explained,
   canMessage,
   primary,
   busy,
@@ -826,8 +821,6 @@ function RepositoryListRow({
 }: {
   repository: GitHubRepository;
   state: GitHubRepositoryChatState;
-  /** The group already says why these rows can't be used here. */
-  explained: boolean;
   canMessage: boolean;
   primary: boolean;
   busy: boolean;
@@ -845,13 +838,7 @@ function RepositoryListRow({
     meta,
   };
   if (state.kind === "blocked") {
-    return (
-      <ListRow
-        {...common}
-        disabled
-        disabledReason={explained && state.cause === "other_account" ? undefined : state.reason}
-      />
-    );
+    return <ListRow {...common} disabled disabledReason={state.reason} />;
   }
   if (state.kind === "attached") {
     return (
@@ -910,14 +897,12 @@ function RepositoryListRow({
 type RepositoryGroup = {
   installationId: number;
   label: string | null;
-  note: string | null;
   rows: RepositoryRow[];
 };
 
 /**
- * One section per GitHub account once repositories come from more than one.
- * A chat holds one App token, so an account whose every row is blocked says so
- * once instead of on each row.
+ * One section per GitHub account once repositories come from more than one;
+ * repositories from every account can be used together in one chat.
  */
 function repositoryGroups(
   rows: readonly RepositoryRow[],
@@ -934,25 +919,13 @@ function repositoryGroups(
       {
         installationId: rows[0]?.repository.installationId ?? 0,
         label: null,
-        note: null,
         rows: [...rows],
       },
     ];
   }
-  return [...byInstallation.entries()].map(([installationId, groupRows]) => {
-    const label = accountLabel(installationId);
-    const first = groupRows[0]?.state;
-    const blocked = groupRows.every(
-      (row) => row.state.kind === "blocked" && row.state.cause === "other_account",
-    );
-    const using = first?.kind === "blocked" ? first.usingAccount : undefined;
-    return {
-      installationId,
-      label,
-      note: blocked
-        ? `This chat already uses ${using ?? "another account"}'s repositories. Start a new chat to use ${label}'s.`
-        : null,
-      rows: groupRows,
-    };
-  });
+  return [...byInstallation.entries()].map(([installationId, groupRows]) => ({
+    installationId,
+    label: accountLabel(installationId),
+    rows: groupRows,
+  }));
 }

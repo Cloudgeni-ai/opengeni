@@ -31,12 +31,10 @@ const mounted = (repository: GitHubRepository, ref = "main"): ResourceRef => ({
   githubRepositoryId: repository.id,
   githubInstallationId: repository.installationId,
 });
-const account = (installationId: number) => (installationId === 42 ? "acme" : "northwind");
-
 describe("GitHub card repository rules", () => {
   test("an available repository yields exactly the composer picker's resource", () => {
     const api = repo(101, "acme/api");
-    expect(gitHubRepositoryChatState(api, [], account, [api])).toEqual({
+    expect(gitHubRepositoryChatState(api, [])).toEqual({
       kind: "available",
       resource: {
         kind: "repository",
@@ -52,20 +50,18 @@ describe("GitHub card repository rules", () => {
 
   test("a mounted repository is attached even on another branch", () => {
     const api = repo(101, "acme/api");
-    expect(gitHubRepositoryChatState(api, [mounted(api, "release")], account, [api])).toEqual({
+    expect(gitHubRepositoryChatState(api, [mounted(api, "release")])).toEqual({
       kind: "attached",
     });
   });
 
-  test("one App token per chat: another account's repository is blocked with its reason", () => {
+  test("repositories from another App installation can join a chat", () => {
     const api = repo(101, "acme/api");
     const notes = repo(201, "northwind/notes", 77);
-    const state = gitHubRepositoryChatState(notes, [mounted(api)], account, [api, notes]);
-    expect(state).toMatchObject({ kind: "blocked", cause: "other_account", usingAccount: "acme" });
-    // A mount GitHub no longer shares holds no token, so it blocks nothing.
-    expect(gitHubRepositoryChatState(notes, [mounted(api)], account, [notes]).kind).toBe(
-      "available",
-    );
+    expect(gitHubRepositoryChatState(notes, [mounted(api)])).toMatchObject({
+      kind: "available",
+      resource: { githubRepositoryId: 201, githubInstallationId: 77 },
+    });
   });
 
   test("a mount-path collision with a manual repository is refused before Send", () => {
@@ -75,7 +71,7 @@ describe("GitHub card repository rules", () => {
       ref: "main",
       mountPath: "repos/github.com/acme/api",
     };
-    expect(gitHubRepositoryChatState(repo(101, "acme/api"), [manual], account, [])).toMatchObject({
+    expect(gitHubRepositoryChatState(repo(101, "acme/api"), [manual])).toMatchObject({
       kind: "blocked",
       cause: "mount_conflict",
     });
@@ -83,9 +79,7 @@ describe("GitHub card repository rules", () => {
 
   test("files and other resources never block a repository", () => {
     const file = { kind: "file", fileId: "00000000-0000-4000-8000-000000000001" } as ResourceRef;
-    expect(gitHubRepositoryChatState(repo(101, "acme/api"), [file], account, []).kind).toBe(
-      "available",
-    );
+    expect(gitHubRepositoryChatState(repo(101, "acme/api"), [file]).kind).toBe("available");
   });
 
   test("revocation needs a loaded catalog and App identity", () => {

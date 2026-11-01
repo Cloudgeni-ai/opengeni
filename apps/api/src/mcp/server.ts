@@ -283,6 +283,8 @@ import {
 } from "../integrations/personal-github";
 import {
   GITHUB_IDENTITIES_GUIDANCE,
+  GITHUB_APP_SETTINGS_GUIDANCE,
+  githubSettingsUrl,
   personalGitHubConsoleBaseUrl,
   personalGitHubIdentityStatus,
   personalGitHubSetupProjection,
@@ -8137,8 +8139,8 @@ function registerGitHubConnectTool(
     "github_connect_link",
     {
       description: deps.settings.githubPersonalOauthEnabled
-        ? `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the Opengeni app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. When unclear, explain the difference in one or two sentences. On personal repositories, use github_personal__* tools and plain git; gh and raw GitHub API calls do not act as the person. Never returns tokens.`
-        : "Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. Server App configuration alone is never reported as a usable binding. Personal GitHub sign-in is not enabled on this deployment (personal.status is disabled).",
+        ? `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the Opengeni app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. ${GITHUB_APP_SETTINGS_GUIDANCE} When unclear, explain the difference in one or two sentences. On personal repositories, use github_personal__* tools and plain git; gh and raw GitHub API calls do not act as the person. Never returns tokens.`
+        : `Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. ${GITHUB_APP_SETTINGS_GUIDANCE} Server App configuration alone is never reported as a usable binding. Personal GitHub sign-in is not enabled on this deployment (personal.status is disabled).`,
       inputSchema: {},
     },
     async () => {
@@ -8164,6 +8166,14 @@ function registerGitHubConnectTool(
       const missing = githubAppMissingSettings(settings);
       const slug = settings.githubAppSlug?.trim() || null;
       const setupMode = settings.productAccessMode === "managed" ? "platform" : "operator";
+      const settingsUrl = githubSettingsUrl(
+        personalGitHubConsoleBaseUrl({
+          webBaseUrl: settings.webBaseUrl,
+          publicOrigin: canonicalPublicOrigin(settings.publicBaseUrl),
+          requestOrigin: options.requestOrigin,
+        }),
+        grant.workspaceId,
+      );
       if (missing.length > 0 || !slug) {
         return json({
           configured: false,
@@ -8172,6 +8182,7 @@ function registerGitHubConnectTool(
           appSlug: setupMode === "operator" ? slug : null,
           installUrl: null,
           linkUrl: null,
+          settingsUrl: null,
           missing: setupMode === "operator" ? missing : [],
           personal,
         });
@@ -8205,6 +8216,7 @@ function registerGitHubConnectTool(
         appSlug: setupMode === "operator" ? slug : null,
         installUrl: connectUrl,
         linkUrl: connectUrl,
+        settingsUrl,
         installations: installationViews,
         missing: [],
         personal,

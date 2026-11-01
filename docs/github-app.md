@@ -29,6 +29,9 @@ without an authority receipt is `unverified`, never healthy.
 Chat setup uses the provider-neutral capability discovery and human authorization
 card flow described in [MCP surfaces](mcp-surfaces.md). `github_connect_link`
 remains a status/manager-link tool; reading status never posts a setup card.
+It always returns `settingsUrl` when GitHub is configured: the console link to
+the workspace's GitHub settings, where an admin chooses **Install on another
+account**. The agent gives it when its own grant cannot mint `installUrl`.
 
 `github_connect_link` also reports the caller's personal identity ("Your GitHub",
 see [Personal GitHub connections](personal-github.md)) in a `personal` field:
