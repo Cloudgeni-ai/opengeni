@@ -367,6 +367,33 @@ for (const kind of FRAMES) {
     },
     90_000,
   );
+
+  // Chromium can route a move meant for a frame to the page holding it (a
+  // frame in its own process gets moves only once Chromium knows where it
+  // draws), and then nothing in the frame is under the pointer. A shield
+  // the page lays over the frame until the pointer first moves makes that
+  // happen on every run.
+  e2e(
+    `in a ${kind} frame, a control that takes the pointer only on hover is hovered and clicked when the first move stops at the page holding the frame`,
+    async () => {
+      await withFramedPage(
+        kind,
+        HOVER_ENABLED,
+        async ({ act, log, evaluate }) => {
+          const clicked = await act({
+            type: "click",
+            locator: { kind: "role", role: "button", name: "Go", exact: true },
+          });
+          expect(await evaluate("shieldMoves")).toBe(1);
+          expect(clicked.error ?? null).toBeNull();
+          expect(clicked.state).toBe("completed");
+          expect(await log()).toEqual(["click Go"]);
+        },
+        'globalThis.shieldMoves=0;const frameBox=document.querySelector("iframe").getBoundingClientRect();const shield=document.createElement("div");shield.style.cssText=`position:absolute;left:${frameBox.left}px;top:${frameBox.top}px;width:${frameBox.width}px;height:${frameBox.height}px`;shield.addEventListener("pointermove",()=>{shieldMoves+=1;shield.remove()});document.body.append(shield);',
+      );
+    },
+    90_000,
+  );
 }
 
 // Chromium does not tell a page that the pointer left it for a cross-origin

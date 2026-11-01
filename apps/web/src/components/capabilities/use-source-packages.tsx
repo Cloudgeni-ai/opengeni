@@ -96,7 +96,7 @@ export function useSourcePackages({
   connections: ConnectionMetadata[] | null;
   /** Skill authority: install, update and remove imported Skills (documents:manage). */
   canManage: boolean;
-  /** Plugin authority: plugins can add connections and MCP servers (capabilities:manage). */
+  /** Plugin authority: plugins add connections and MCP servers, which members may add (connections:write). */
   canManagePlugins?: boolean;
   onChanged: () => void | Promise<void>;
   restoreFocusRef?: RefObject<HTMLElement | null>;

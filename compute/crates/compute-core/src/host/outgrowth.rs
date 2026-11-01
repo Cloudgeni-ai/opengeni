@@ -159,6 +159,32 @@ pub(crate) enum Shrink {
     },
 }
 
+/// Why the host shrinks a sandbox's guest or ends its VM for memory: the
+/// two cases operators act on differently, the one a host too small or too
+/// full for what it runs, the other a sandbox whose memory the kernel
+/// cannot compress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShrinkCause {
+    /// The host is short of memory even with every running sandbox held to
+    /// its request and what is on its way back counted: it is `shortfall`
+    /// bytes below its low watermark, with `available` bytes available.
+    Short {
+        /// Bytes it is short by.
+        shortfall: u64,
+        /// Bytes of host memory available on the latest reading.
+        available: u64,
+    },
+    /// The sandbox holds `over` bytes more than its bound lets it, and the
+    /// kernel has not brought it down while the host ran below its low
+    /// watermark: what it borrowed does not compress, or zswap has no room.
+    OverBound {
+        /// Bytes it holds above its bound.
+        over: u64,
+        /// Bytes of host memory available on the latest reading.
+        available: u64,
+    },
+}
+
 /// The host's side of bounding running sandboxes.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Outgrown {
@@ -610,11 +636,22 @@ impl Host {
         // What the host is short of, or what it holds above its bound,
         // which the kernel could not take: never all it borrowed, so its
         // guest ends as little as it can.
-        let wanted = if short {
-            levels.shortfall
+        let available = self.available_memory.unwrap_or(0);
+        let cause = if short {
+            ShrinkCause::Short {
+                shortfall: levels.shortfall,
+                available,
+            }
         } else {
             let high = slot.bound.and_then(|bound| bound.high).unwrap_or(u64::MAX);
-            slot.resident_bytes().saturating_sub(high)
+            ShrinkCause::OverBound {
+                over: slot.resident_bytes().saturating_sub(high),
+                available,
+            }
+        };
+        let wanted = match cause {
+            ShrinkCause::Short { shortfall, .. } => shortfall,
+            ShrinkCause::OverBound { over, .. } => over,
         };
         let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
@@ -626,7 +663,7 @@ impl Host {
                 return;
             }
             slot.shrink = Shrink::Ending { since: now };
-            out.push(Action::EndForMemory { sandbox: id });
+            out.push(Action::EndForMemory { sandbox: id, cause });
         } else {
             let request = ShrinkRequest(self.outgrown.next_request);
             self.outgrown.next_request += 1;
@@ -640,6 +677,7 @@ impl Host {
                 free: wanted.max(rule.least).min(excess),
                 keep: slot.size.request,
                 request,
+                cause,
             });
         }
         self.outgrown.acted = Some(now);

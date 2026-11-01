@@ -149,10 +149,10 @@ export function SourceImportDialog({
         {state.error ? (
           <div
             role="alert"
-            className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs leading-5 text-fg-muted"
+            className="rounded-lg border border-status-waiting/40 bg-status-waiting/10 p-3 text-xs leading-5 text-fg-muted"
           >
             <div className="flex items-start gap-2">
-              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-warning" />
+              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-waiting" />
               <span>{state.error}</span>
             </div>
           </div>
@@ -407,7 +407,7 @@ export function PluginReview({
       </div>
 
       {validationError ? (
-        <p className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs leading-5 text-fg-muted">
+        <p className="rounded-lg border border-status-waiting/30 bg-status-waiting/10 p-3 text-xs leading-5 text-fg-muted">
           {validationError}
         </p>
       ) : null}
@@ -474,7 +474,7 @@ function PluginComponentCard({
             Exact Connection
           </Label>
           {connections === null ? (
-            <p className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-2xs leading-4 text-fg-muted">
+            <p className="rounded-lg border border-status-waiting/30 bg-status-waiting/10 p-3 text-2xs leading-4 text-fg-muted">
               Connection data is unavailable. Refresh Plugins before choosing the exact account for
               this component.
             </p>
@@ -494,7 +494,7 @@ function PluginComponentCard({
               ))}
             </select>
           ) : (
-            <p className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-2xs leading-4 text-fg-muted">
+            <p className="rounded-lg border border-status-waiting/30 bg-status-waiting/10 p-3 text-2xs leading-4 text-fg-muted">
               No active exact-domain Connection exists. Connect that account from its integration
               row (or its Custom API) on Plugins first, then retry this preview.
             </p>
@@ -515,10 +515,14 @@ function PluginDiff({ preview }: { preview: NonNullable<SourceImportState["plugi
         components.
       </p>
       {preview.diff.added.length > 0 ? (
-        <p className="mt-2 break-words text-success">Added: {preview.diff.added.join(", ")}</p>
+        <p className="mt-2 break-words text-status-success">
+          Added: {preview.diff.added.join(", ")}
+        </p>
       ) : null}
       {preview.diff.changed.length > 0 ? (
-        <p className="mt-1 break-words text-warning">Changed: {preview.diff.changed.join(", ")}</p>
+        <p className="mt-1 break-words text-status-waiting">
+          Changed: {preview.diff.changed.join(", ")}
+        </p>
       ) : null}
       {preview.diff.removed.length > 0 ? (
         <p className="mt-1 break-words text-destructive">
@@ -533,7 +537,7 @@ function PreviewReady({ title }: { title: string }) {
   return (
     <div className="rounded-xl border border-brand/30 bg-brand/5 p-4">
       <div className="flex items-start gap-3">
-        <CheckCircle2Icon className="mt-0.5 size-5 shrink-0 text-success" />
+        <CheckCircle2Icon className="mt-0.5 size-5 shrink-0 text-status-success" />
         <div>
           <h3 className="text-sm font-semibold text-fg">{title}</h3>
           <p className="mt-1 text-xs leading-5 text-fg-muted">

@@ -10,6 +10,7 @@ import { toast } from "sonner";
 
 import { Button } from "../ui/button";
 import { TextInput } from "../ui/field";
+import { StickyBarEdge } from "./sticky-bar-edge";
 
 /** False when the host couldn't take the question and has already said why. */
 export type MeetingAskResult = void | boolean;
@@ -42,7 +43,8 @@ export function MeetingAsk({
     }
   };
   return (
-    // Stays in reach at the bottom of the window while the tab scrolls.
+    // Stays in reach at the bottom of the window while the tab scrolls. It ends
+    // its column, so the page under it is covered all the way to the window's edge.
     <form
       aria-label={msg("meetings.ask.placeholder")}
       className="sticky bottom-0 z-10 -mx-1 bg-bg px-1 pt-3 pb-4"
@@ -51,6 +53,7 @@ export function MeetingAsk({
         void submit();
       }}
     >
+      <StickyBarEdge edge="bottom" />
       <div className="relative">
         <label htmlFor={id} className="sr-only">
           {msg("meetings.ask.placeholder")}

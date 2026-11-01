@@ -326,10 +326,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let paths = Paths::of(&self.root, record);
                 let spec = vm_spec(record, &paths, &self.images);
                 let found = match record.disk {
-                    Disk::Local => self
-                        .adopt_local(record.id, &spec, &paths)
-                        .await
-                        .map_err(|error| HostError::Io(error.to_string())),
+                    Disk::Local => {
+                        let found = self.adopt_local(record.id, &spec, &paths).await;
+                        // Marked by this agent as its record says: the mark
+                        // the agent before set holds no more, and an agent
+                        // of an earlier release, which knew no marks, may
+                        // have archived it since (its record, rewritten
+                        // before the store saw anything, then says so).
+                        if let Ok(Some((vm, _, _))) = &found
+                            && let Err(error) = self.engine.set_only_copy(vm, record.only_copy)
+                        {
+                            tracing::error!(id = %record.id, %error, only_copy = record.only_copy, "the VM's mark as its sandbox's only copy could not be set as its record says");
+                        }
+                        found.map_err(|error| HostError::Io(error.to_string()))
+                    }
                     // An eviction that could not delete everything left
                     // files nothing relies on.
                     Disk::Remote => match self.engine.clean_up(&spec).await {
