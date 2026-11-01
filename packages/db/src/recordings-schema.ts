@@ -286,7 +286,7 @@ export const recordingTranscriptSegments = pgTable(
 export type RecordingWordTiming = { text: string; startMs: number; endMs: number };
 
 /**
- * Migration 1213. One transcribed piece of one track, kept with its version
+ * Migration 1227. One transcribed piece of one track, kept with its version
  * while the version is processing so a retry reuses it instead of asking
  * (and paying) the provider again. Removed when the version completes or fails.
  */
