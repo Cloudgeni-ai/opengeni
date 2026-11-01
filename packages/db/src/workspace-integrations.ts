@@ -26,6 +26,14 @@ export class WorkspaceWebhookLimitError extends Error {
   }
 }
 
+/** Someone picked a workspace that isn't one of the organization's shared workspaces. */
+export class OrganizationIntegrationWorkspaceError extends Error {
+  constructor(readonly workspaceIds: readonly string[]) {
+    super(`These aren't shared workspaces of this organization: ${workspaceIds.join(", ")}`);
+    this.name = "OrganizationIntegrationWorkspaceError";
+  }
+}
+
 export type WorkspaceCredentialProviderRow = typeof workspaceCredentialProviders.$inferSelect;
 export type WorkspaceWebhookRow = typeof workspaceWebhooks.$inferSelect;
 export type WorkspaceWebhookDeliveryRow = typeof workspaceWebhookDeliveries.$inferSelect;
@@ -60,6 +68,7 @@ export function selectWorkspaceCredentialProvider<
     enabled: boolean;
     workspaceFilter: IntegrationWorkspaceFilter | null;
     allowPersonalWorkspaces: boolean;
+    allowedWorkspaceIds: string[] | null;
   },
 >(
   scope: WorkspaceIntegrationScope,
@@ -89,19 +98,71 @@ export function selectWorkspaceCredentialProvider<
 }
 
 /**
- * Whether an organization's credential provider covers a workspace: its filter
- * picks shared workspaces, its Personal switch picks members' Personal ones.
+ * Whether an organization's credential provider covers a workspace: its list
+ * and filter pick shared workspaces, its Personal switch picks members'
+ * Personal ones.
  */
 export function organizationCredentialProviderReaches(
   provider: {
     workspaceFilter: IntegrationWorkspaceFilter | null;
     allowPersonalWorkspaces: boolean;
+    allowedWorkspaceIds: string[] | null;
   },
-  workspace: { externalSource: string | null; kind: "personal" | "shared" },
+  workspace: { id: string; externalSource: string | null; kind: "personal" | "shared" },
 ): boolean {
   return workspace.kind === "personal"
     ? provider.allowPersonalWorkspaces
-    : integrationWorkspaceFilterMatches(provider.workspaceFilter, workspace);
+    : organizationIntegrationReachesSharedWorkspace(provider, workspace);
+}
+
+/** Whether an organization webhook receives a workspace's events: never a Personal one. */
+export function organizationWebhookReaches(
+  webhook: {
+    workspaceFilter: IntegrationWorkspaceFilter | null;
+    allowedWorkspaceIds: string[] | null;
+  },
+  workspace: { id: string; externalSource: string | null; kind: "personal" | "shared" },
+): boolean {
+  return (
+    workspace.kind === "shared" && organizationIntegrationReachesSharedWorkspace(webhook, workspace)
+  );
+}
+
+function organizationIntegrationReachesSharedWorkspace(
+  registration: {
+    workspaceFilter: IntegrationWorkspaceFilter | null;
+    allowedWorkspaceIds: string[] | null;
+  },
+  workspace: { id: string; externalSource: string | null },
+): boolean {
+  return (
+    integrationWorkspaceFilterMatches(registration.workspaceFilter, workspace) &&
+    (registration.allowedWorkspaceIds === null ||
+      registration.allowedWorkspaceIds.includes(workspace.id))
+  );
+}
+
+/**
+ * The picked shared workspaces, deduplicated and sorted, after checking each
+ * is one of the organization's shared workspaces. null (every one) and
+ * undefined (unchanged) pass through.
+ */
+async function organizationIntegrationWorkspaceIds(
+  tx: Database,
+  accountId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<string[] | null | undefined> {
+  if (ids === null || ids === undefined) return ids;
+  const picked = [...new Set(ids.map((id) => id.toLowerCase()))].sort();
+  if (picked.length === 0) return picked;
+  const rows = await rawRows<{ workspace_id: string }>(
+    tx,
+    sql`select workspace_id from list_organization_workspace_ids(${accountId}::uuid)`,
+  );
+  const shared = new Set(rows.map((row) => row.workspace_id));
+  const unknown = picked.filter((id) => !shared.has(id));
+  if (unknown.length > 0) throw new OrganizationIntegrationWorkspaceError(unknown);
+  return picked;
 }
 
 /** Hold through read + create/update so only the winning create returns a secret. */
@@ -189,6 +250,7 @@ export async function resolveWorkspaceCredentialProvider(
       sql`select id, account_id as "accountId", url, secret_encrypted as "secretEncrypted",
         enabled, timeout_ms as "timeoutMs", workspace_filter as "workspaceFilter",
         allow_personal_workspaces as "allowPersonalWorkspaces",
+        allowed_workspace_ids as "allowedWorkspaceIds",
         created_by_subject_id as "createdBySubjectId", created_at as "createdAt", updated_at as "updatedAt"
         from opengeni_private.resolve_organization_credential_provider_v1(
           ${scope.accountId}::uuid, ${scope.workspaceId}::uuid
@@ -225,16 +287,27 @@ export async function upsertOrganizationCredentialProvider(
     workspaceFilter: IntegrationWorkspaceFilter | null;
     /** Replaced on every write, like the rest; omitted means off. */
     allowPersonalWorkspaces?: boolean;
+    /**
+     * Shared workspaces it serves; null is every one. Omitted keeps the
+     * stored list, so a client that doesn't know it never widens the reach.
+     */
+    allowedWorkspaceIds?: readonly string[] | null;
     createdBySubjectId: string | null;
   },
 ): Promise<OrganizationCredentialProviderRow> {
   return withCredentialProviderConfigurationLock(db, input, async (scopedDb) => {
+    const allowedWorkspaceIds = await organizationIntegrationWorkspaceIds(
+      scopedDb,
+      input.accountId,
+      input.allowedWorkspaceIds,
+    );
     const values = {
       url: input.url,
       enabled: input.enabled,
       timeoutMs: input.timeoutMs,
       workspaceFilter: input.workspaceFilter,
       allowPersonalWorkspaces: input.allowPersonalWorkspaces ?? false,
+      ...(allowedWorkspaceIds !== undefined ? { allowedWorkspaceIds } : {}),
       updatedAt: sql`now()`,
     };
     if (input.secretEncrypted === undefined) {
@@ -359,6 +432,8 @@ export async function createOrganizationWebhook(
     enabled: boolean;
     description: string | null;
     workspaceFilter: IntegrationWorkspaceFilter | null;
+    /** Shared workspaces whose events it receives; null or omitted is every one. */
+    allowedWorkspaceIds?: readonly string[] | null;
     createdBySubjectId: string | null;
   },
 ): Promise<OrganizationWebhookRow> {
@@ -372,7 +447,16 @@ export async function createOrganizationWebhook(
     );
     if ((counted?.count ?? 0) >= ORGANIZATION_WEBHOOK_LIMIT)
       throw new OrganizationWebhookLimitError();
-    const [row] = await scopedDb.insert(organizationWebhooks).values(input).returning();
+    const allowedWorkspaceIds =
+      (await organizationIntegrationWorkspaceIds(
+        scopedDb,
+        input.accountId,
+        input.allowedWorkspaceIds,
+      )) ?? null;
+    const [row] = await scopedDb
+      .insert(organizationWebhooks)
+      .values({ ...input, allowedWorkspaceIds })
+      .returning();
     return row!;
   });
 }
@@ -386,9 +470,15 @@ export async function updateOrganizationWebhook(
     enabled?: boolean;
     description?: string | null;
     workspaceFilter?: IntegrationWorkspaceFilter | null;
+    allowedWorkspaceIds?: readonly string[] | null;
   },
 ): Promise<OrganizationWebhookRow | null> {
   return withAccountRls(db, input.accountId, async (scopedDb) => {
+    const allowedWorkspaceIds = await organizationIntegrationWorkspaceIds(
+      scopedDb,
+      input.accountId,
+      input.allowedWorkspaceIds,
+    );
     const [row] = await scopedDb
       .update(organizationWebhooks)
       .set({
@@ -397,6 +487,7 @@ export async function updateOrganizationWebhook(
         ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
         ...(input.description !== undefined ? { description: input.description } : {}),
         ...(input.workspaceFilter !== undefined ? { workspaceFilter: input.workspaceFilter } : {}),
+        ...(allowedWorkspaceIds !== undefined ? { allowedWorkspaceIds } : {}),
         updatedAt: sql`now()`,
       })
       .where(

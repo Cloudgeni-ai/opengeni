@@ -448,16 +448,46 @@
       ]
     },
     {
-      "mcpUrl": "https://mcp.atlassian.com/v1/mcp/authv2",
+      "mcpUrl": "https://mcp.atlassian.com/v2/mcp?tools=all",
       "name": "Atlassian",
-      "description": "Jira issues and Confluence pages through Atlassian's hosted Rovo MCP server, scoped to what you can already see.",
+      "description": "Jira, Confluence, Jira Service Management, Bitbucket, Loom and Compass through Atlassian's hosted MCP server, scoped to what you can already see.",
       "category": "project-management",
       "featured": true,
+      "tier": "verified",
+      "provenance": "vendor-hosted:developer.atlassian.com/cloud/rovo-mcp/guides/getting-started",
+      "presentation": {
+        "providerName": "Atlassian",
+        "introduction": "Let agents work with the Atlassian sites and apps you can already access.",
+        "capabilities": [
+          {
+            "title": "Find and understand work",
+            "description": "Search Jira, Confluence, Jira Service Management, Bitbucket, Loom and Compass, and use what you find as context."
+          },
+          {
+            "title": "Update your work",
+            "description": "Create and update issues, add comments, and create or edit pages. You choose which actions need approval."
+          }
+        ],
+        "permissionSummary": "Atlassian asks you to approve access to the sites you choose. Agents only see what your Atlassian account can see. If connecting fails with a domain or policy error, an Atlassian organization admin must allow the Opengeni domain for the Rovo MCP server in Atlassian Administration."
+      },
+      "documentationUrl": "https://developer.atlassian.com/cloud/rovo-mcp/guides/getting-started/",
+      "notes": [
+        "Atlassian's recommended v2 endpoint. ?tools=all is Atlassian's documented, non-secret switch to a flat tool list instead of discover and execute gateway tools, so every tool keeps its own approval policy; it is the one reviewed query string in REVIEWED_QUERY_MCP_URLS.",
+        "Same authorization server as v1. A v1 token can't call v2, so v1 and v2 connections stay separate resources; the v1 row stays for existing connections.",
+        "Keyed to jira.com like the v1 row. Not marked official for the same reason: mcp.atlassian.com is not mechanically checkable against the snapshot domain jira.com."
+      ]
+    },
+    {
+      "mcpUrl": "https://mcp.atlassian.com/v1/mcp/authv2",
+      "name": "Atlassian (v1)",
+      "description": "Atlassian's earlier MCP endpoint, kept so existing connections keep working. Connect Atlassian to use the current endpoint.",
+      "category": "project-management",
+      "featured": false,
       "tier": "verified",
       "provenance": "vendor-hosted:support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server",
       "presentation": {
         "providerName": "Atlassian",
-        "introduction": "Let agents work with the Jira and Confluence sites you can already access.",
+        "introduction": "Atlassian's earlier endpoint, for connections made before the current one. New connections should use Atlassian.",
         "capabilities": [
           {
             "title": "Find and understand work",
@@ -472,6 +502,7 @@
       },
       "documentationUrl": "https://support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server/",
       "notes": [
+        "Superseded by https://mcp.atlassian.com/v2/mcp?tools=all. Kept enabled because catalog rows are keyed by MCP URL and connections are bound to their URL: dropping it would disable existing installations. Atlassian switches v1 connections to v2 tools on 1 March 2027.",
         "Snapshot name was the bare domain 'jira.com'. Upstream discovery for atlassian.com no longer lists an MCP surface, so the Rovo server row is keyed to jira.com; the earlier atlassian.net row for the same endpoint is superseded by this one.",
         "Not marked official: the server is Atlassian's own but lives on mcp.atlassian.com, which is not mechanically checkable against the snapshot domain jira.com. official must stay a checkable claim."
       ]

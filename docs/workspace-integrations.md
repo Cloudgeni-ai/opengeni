@@ -60,6 +60,19 @@ Personal workspace owner may still configure a workspace-level provider or
 webhook through the existing owner-only authority; their own provider wins
 over the organization's.
 
+An organization provider or webhook can also be limited to chosen shared
+workspaces with `allowedWorkspaceIds`: `null` (the default) is every shared
+workspace, including ones added later, and a list is only those. Each listed id
+must be one of the organization's shared workspaces, or the request fails with
+422 naming the unknown ids. The list and the filter both apply, so a workspace
+must be on the list and match the filter; the Personal switch alone still
+decides Personal workspaces. Unlike the other provider fields, a PUT that
+leaves `allowedWorkspaceIds` out keeps the stored list (every shared workspace
+on create), so a client that doesn't know it never widens where the provider
+works. A webhook PATCH that leaves it out also keeps it. In organization
+settings the choice reads "Every shared workspace", "Selected workspaces" or
+"Workspaces your product created"; the API can combine a list with a filter.
+
 Four integration primitives let a product run agents on a standalone
 Opengeni deployment the same way an in-process host could: supply
 short-lived credentials to the sandbox and remote MCP servers, learn when work finishes, recognize
@@ -449,8 +462,8 @@ pinned outbound policy (10-second limit), and never queued or retried:
 
 `inherited-integrations` lets workspace administrators see organization
 registrations that reach their workspace: the enabled organization provider
-whose filter matches (shown even while the workspace overrides it) and the
-enabled organization webhooks that also receive its events. It returns URLs and
+whose list and filter include it (shown even while the workspace overrides it)
+and the enabled organization webhooks that also receive its events. It returns URLs and
 event types only, never secrets. In a Personal workspace it lists the
 organization provider only when its `allowPersonalWorkspaces` is on, and never
 webhooks.

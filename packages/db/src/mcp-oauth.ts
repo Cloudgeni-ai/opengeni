@@ -7,6 +7,7 @@ import {
 import { sql } from "drizzle-orm";
 import { canonicalSecretPermissions } from "./canonical-secret-permissions";
 import { rawRows, type Database, withRlsContext, withWorkspaceSubjectRls } from "./database";
+import { rawMembershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
 import {
   CONNECTION_DISCONNECTED_AUDIT_ACTION,
   insertDisconnectAuditEventInScope,
@@ -485,6 +486,7 @@ export async function resolveLiveMcpOAuthGrant(
           join workspaces workspace on workspace.id = membership.workspace_id
           where membership.workspace_id = ${workspaceId}
             and membership.subject_id = ${access.subjectId}
+            and ${rawMembershipOutsidePersonalWorkspace("membership")}
           limit 1`,
     );
     if (membership && membership.account_id !== access.accountId) return null;

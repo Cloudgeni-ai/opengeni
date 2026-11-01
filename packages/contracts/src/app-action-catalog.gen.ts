@@ -1196,6 +1196,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createOrganizationConnector",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/connectors",
+    "request": [
+      "CreateOrganizationConnectorRequest"
+    ],
+    "response": [
+      "OrganizationConnector"
+    ],
+    "secretFields": [
+      "request.headers"
+    ]
+  },
+  {
     "id": "createOrganizationInvitation",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/invitations",
@@ -1736,6 +1750,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ApiKey"
     ]
+  },
+  {
+    "id": "deleteOrganizationConnector",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/connectors/:connectorId",
+    "request": [],
+    "response": []
   },
   {
     "id": "deleteOrganizationCredentialProvider",
@@ -5478,6 +5499,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ClaudeSubscriptionAccountsResponse"
+    ]
+  },
+  {
+    "id": "listOrganizationConnectors",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/connectors",
+    "request": [],
+    "response": [
+      "ListOrganizationConnectorsResponse",
+      "OrganizationConnector"
     ]
   },
   {
@@ -9503,6 +9534,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ApiKey"
+    ]
+  },
+  {
+    "id": "updateOrganizationConnector",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/connectors/:connectorId",
+    "request": [
+      "UpdateOrganizationConnectorRequest"
+    ],
+    "response": [
+      "OrganizationConnector"
+    ],
+    "secretFields": [
+      "request.headers"
     ]
   },
   {

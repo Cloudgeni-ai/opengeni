@@ -10,6 +10,7 @@ import {
 } from "@opengeni/contracts";
 import { stableJson } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
+import { membershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
 import type { Database } from "./database";
 import * as schema from "./schema";
 import {
@@ -291,6 +292,7 @@ export async function saveNewSessionDraftInTransaction(
         and(
           eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
           eq(schema.workspaceMemberships.subjectId, input.subjectId),
+          membershipOutsidePersonalWorkspace(),
         ),
       )
       .for("key share")
