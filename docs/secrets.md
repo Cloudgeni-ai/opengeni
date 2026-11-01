@@ -1003,6 +1003,7 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | Route | Purpose |
 |---|---|
 | `GET, POST /vaults`; `GET, PATCH, DELETE /vaults/:vaultId` | Vaults |
+| `GET /organization-vaults` | Every organization vault, wherever it works, for account administrators (`account:admin` and `secrets:list`). `complete: false` while the server can list only the ones that work in this workspace |
 | `GET, POST /vaults/:vaultId/items`; `GET, PATCH, DELETE /vaults/:vaultId/items/:itemId` | Items |
 | `POST /vaults/:vaultId/items/:itemId/restore`, `/move` | Restore an archived item; move or copy |
 | `POST …/fields/:fieldId/reveal`; `GET …/fields/:fieldId/versions`; `POST …/fields/:fieldId/restore` | Plaintext, history, version restore |

@@ -62,6 +62,10 @@
       "types": "./src/timeline-order.ts",
       "default": "./src/timeline-order.ts"
     },
+    "./knowledge-source-sync-retirement": {
+      "types": "./src/knowledge-source-sync-retirement.ts",
+      "default": "./src/knowledge-source-sync-retirement.ts"
+    },
     "./learning-refusal": {
       "types": "./src/learning-refusal.ts",
       "default": "./src/learning-refusal.ts"

@@ -100,6 +100,7 @@ export function organizationSettingsAccess(input: {
     visible.add("general");
     if (managedHumanSession && !singleUser) visible.add("people");
     visible.add("workspaces");
+    visible.add("shared");
     visible.add("integrations");
   }
   // Every signed-in member sees who is in the organization, by name only;

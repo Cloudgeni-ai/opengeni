@@ -58,7 +58,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * account-administrator grant (1103), which records a request's verified
  * account:admin proof for one transaction, agent calls' device lookup,
  * register, claim, device count, busy check and ring (1107), the lock-free
- * read of a known external identity (1172), and the organization's
+ * read of a known external identity (1172), the list of every
+ * organization vault wherever it works (1218), and the organization's
  * names-only member list (1211). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
@@ -86,6 +87,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "agent_call_ringing_v1(text)",
   "ring_agent_call_v1(uuid, boolean)",
   "read_external_identity_v1(uuid, text, text)",
+  "list_organization_vaults_v1(uuid, jsonb)",
   "list_organization_member_names_v1(uuid)",
 ] as const;
 
@@ -113,6 +115,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1172 withholds the lock-free external identity read; until it is granted,
  * authenticating an external user takes the organization membership fence
  * exclusively, as before.
+ * 1218 withholds the organization vault list; until it is granted, the API
+ * lists the organization vaults that work in the current workspace and says
+ * the list is incomplete.
  * 1211 withholds the names-only member list; until it is granted, members
  * get no names (as before).
  */
@@ -128,6 +133,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "agent_call_ringing_v1(text)",
   "ring_agent_call_v1(uuid, boolean)",
   "read_external_identity_v1(uuid, text, text)",
+  "list_organization_vaults_v1(uuid, jsonb)",
   "list_organization_member_names_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
@@ -218,6 +224,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "external_identities",
     "organization_memberships",
   ],
+  "list_organization_vaults_v1(uuid, jsonb)": ["vaults", "vault_items"],
   "list_organization_member_names_v1(uuid)": ["organization_memberships", "auth_users"],
 };
 

@@ -66,6 +66,7 @@ describe("organization settings access", () => {
         "models",
         "people",
         "security",
+        "shared",
         "workspaces",
       ].sort(),
     );

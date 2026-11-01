@@ -54,6 +54,15 @@ function useFixtureClient(fixture: Fixture): AvailableHereClient {
                 subjectScope: "workspace",
               },
             },
+            {
+              id: "drive",
+              name: "Google Drive",
+              kind: "mcp",
+              enabled: true,
+              connectionRef: null,
+              lifecycle: { status: "ready", managedBy: "organization" },
+              metadata: { organizationConnector: { id: "oc1", login: "each_person" } },
+            },
           ],
           installations: [
             { id: "i1", capabilityId: "gmail", kind: "mcp", status: "active" },

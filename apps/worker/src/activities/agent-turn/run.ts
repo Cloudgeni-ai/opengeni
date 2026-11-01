@@ -9,9 +9,9 @@ import {
   markSessionTurnModelTransportHttpOnly,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
+import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
 import { createAttemptVaultAccess } from "./secret-resolver";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
-import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
   freezeAgentLearningPolicy,
   recoverLegacyKnowledgeConfirmations,
@@ -260,13 +260,6 @@ export function sessionTitleXaiRequestContext(
 
 /** Lifecycle orchestrator: claim → capacity → governance → sandbox → tools → stream. */
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
-  let documents: Promise<import("@opengeni/documents").DocumentServices> | undefined;
-  const sourceActivities = createKnowledgeSourceSyncActivities(services, async () => {
-    documents ??= import("@opengeni/documents").then(async ({ createDocumentServices }) =>
-      createDocumentServices((await services()).settings),
-    );
-    return documents;
-  });
   const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
   // Keep a distinct cooldown for terminal collection. A collection at the
   // final model checkpoint happens while the activity still owns its complete
@@ -1440,6 +1433,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const {
             turnResources: claimedTurnResources,
             runtimeResources: claimedRuntimeResources,
+            repositoryRemoval,
             mcpAvailabilityNote,
             turnTools,
             connectionScope,
@@ -1748,7 +1742,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const toolRuntime = await prepareTurnToolRuntime({
             independentSessionTitles: !!startSessionTitleWorkflow,
             vaultAccess,
-            fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
             runMcpCredentials,
             input,
@@ -1846,6 +1839,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             buildCompanyBrainContributionReceiptFor,
             promptCacheKey,
             runtimeResources,
+            // Revoke a removed repository's dedicated token only when
+            // Opengeni's own GitHub App minted it, never a token a host
+            // credential callback supplied.
+            repositoryRemoval: repositoryRemoval
+              ? {
+                  ...repositoryRemoval,
+                  revokeDedicatedGitHubAppTokens: gitTokensMintedByOpengeni(connectionCredentials),
+                }
+              : null,
             sandboxEnvironment,
             sandboxArtifactRuntime,
             sandboxGitToken,

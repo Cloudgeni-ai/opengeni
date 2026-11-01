@@ -127,6 +127,7 @@ import {
   resolveSessionAdminAuthority,
   sessionStartedByPerson,
   rlsContextForWorkspace,
+  SessionRepositoryRemovedError,
   withSubscriptionAccountAdministrators,
   ambientBillingOrigin,
   withBillingOriginOverride,
@@ -2617,7 +2618,8 @@ export function createAppComposition(deps: AppDependencies): {
     // One central mapping for every Send/Steer/control route: a bounded
     // control-prefix wait that expired is a known, retryable, not-applied 503.
     const error =
-      rawError instanceof OrganizationIntegrationDeniedError
+      rawError instanceof OrganizationIntegrationDeniedError ||
+      rawError instanceof SessionRepositoryRemovedError
         ? new HTTPException(403, { message: rawError.message })
         : rawError instanceof PersonalWorkspacesOffError
           ? new ApiHttpError(403, {

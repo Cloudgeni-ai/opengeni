@@ -238,6 +238,14 @@ headers also follow the EU-only content-flow rules. Storage is
 `organization_connectors` (migration `1175_organization_connectors.sql`), with
 row security serving each workspace exactly the connectors that reach it.
 
+In the app, owners and admins manage them under **Organization settings >
+Integrations > Connectors**: add one from the catalog or by server address,
+choose how people sign in and where it works, turn it off everywhere, change
+where it works, replace its organization key or remove it. In a workspace, the
+connector's page shows **Turn on for this workspace** when a workspace manager
+turned it off there; members without `capabilities:manage` are told to ask a
+workspace admin.
+
 ### Credential headers
 
 MCP servers that require request headers (for example an `Authorization` bearer token) are enabled by passing the headers in the enable request:
@@ -411,10 +419,11 @@ exact instance; the underlying Connection and shared definition survive unless
 separately removed.
 
 Provider adapters may also publish immutable generic facet definitions for
-Knowledge Sources, Inbound Triggers, Delivery Destinations, and Identity Links.
-OneDrive exposes a drive-content Knowledge Source; Gmail and
+Inbound Triggers, Delivery Destinations, and Identity Links. Gmail and
 Outlook expose mail or calendar trigger/delivery facets and connected-account
-identity. In the web app these live in
+identity. Integrations give agents tools and access; they never import provider
+content into Knowledge. Recurring work is an ordinary agent schedule that uses
+the integration's tools. In the web app these live in
 `apps/web/src/components/capabilities/integration-facets-panel.tsx`, mounted
 per account entry inside the integration page's **Connected accounts** section
 through the lazy `integration-account-facets.tsx` boundary. The panel is
@@ -435,13 +444,18 @@ The projection reports only whether a provider cursor exists; page tokens,
 delta links, and other cursor contents remain private durable state.
 Integration definition upgrades migrate same-key facets without losing
 configuration, cursor, lifecycle status, evidence timestamps, or owner edges,
-and reject an upgrade that would silently remove a configured facet.
+and reject an upgrade that would silently remove a configured facet. The one
+exception is a retired Knowledge Source facet: a configured binding keeps its
+historical definition when a new revision no longer publishes it.
 
-Google Drive's previous `drive-content` facet is historical only. Native source
-browse, configuration and resume are retired; stored selections, imported
-records and run history remain available as evidence. New recurring Drive work
-uses an ordinary agent schedule with the personal Drive MCP connection. See
-[Google Drive](google-drive.md) for the replacement and its access limits.
+The Knowledge Source facet kind (`knowledge_source`, for example the former
+Drive and OneDrive `drive-content` facets) is retired. No integration publishes
+it, configuring one returns 410, and its browse and source routes return 410.
+Existing bindings stay listed as retired with Remove only; unconfigured ones are
+hidden. Stored selections, imported records and run history remain available
+as evidence. New recurring Drive or OneDrive work uses an ordinary agent
+schedule with the account's tools. See [Google Drive](google-drive.md) for the
+Drive MCP connection and its access limits.
 Generic browser editing refuses required object or array fields unless a
 provider-specific flow owns them, so OneDrive and future rich schemas cannot be
 submitted as silently incomplete primitive config.

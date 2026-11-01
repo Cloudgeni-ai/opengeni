@@ -4071,7 +4071,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 1103 and 1060 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1107's, 1172's and 1211's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 1103 and 1060 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1107's, 1172's, 1218's and 1211's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4130,6 +4130,8 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
     "auth_sessions",
     "auth_users",
     "agent_calls",
+    "vaults",
+    "vault_items",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = ["native_push_devices", "native_push_deliveries"];
@@ -4197,6 +4199,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
       "read_external_identity_v1(uuid, text, text)",
+      "list_organization_vaults_v1(uuid, jsonb)",
       "list_organization_member_names_v1(uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
@@ -4211,6 +4214,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
       "read_external_identity_v1(uuid, text, text)",
+      "list_organization_vaults_v1(uuid, jsonb)",
       "list_organization_member_names_v1(uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
@@ -4276,6 +4280,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "claim_native_push_deliveries_v2(uuid, integer, integer)",
       "ring_agent_call_v1(uuid, boolean)",
       "read_external_identity_v1(uuid, text, text)",
+      "list_organization_vaults_v1(uuid, jsonb)",
       "list_organization_member_names_v1(uuid)",
     ]) {
       const posture = eventPosture(false);
