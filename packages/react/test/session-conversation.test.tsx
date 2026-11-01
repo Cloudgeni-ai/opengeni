@@ -5,6 +5,7 @@ import { Markdown } from "../src/components/markdown";
 import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
 import { conversationTimeline } from "../src/conversation-timeline";
 import type { ComposerOptimisticMessage } from "../src/hooks/use-composer";
+import type { TimelineItem } from "../src/timeline/types";
 import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 import { latestQuestionClient } from "./fixtures/latest-question-client";
@@ -432,6 +433,87 @@ test("queued delivery failures remain visible and retryable; acknowledged queue 
       },
     ),
   ).toHaveLength(0);
+});
+
+test("a failed send stays above anything newer the person sent", () => {
+  const failedSend = {
+    clientEventId: "failed-at-17",
+    text: "shorten it",
+    annotations: [],
+    resources: [],
+    occurredAt: "2026-11-01T17:45:33Z",
+    state: "failed" as const,
+    delivery: "send" as const,
+    destination: "chat" as const,
+    error: "Service unavailable",
+  };
+  const earlier = {
+    kind: "user-message" as const,
+    id: "earlier",
+    reconciliationKey: "user-message:earlier",
+    text: "first",
+    resources: [],
+    tools: [],
+    occurredAt: "2026-10-30T12:09:27Z",
+  };
+  const answer = {
+    kind: "system" as const,
+    id: "answer",
+    text: "done",
+    occurredAt: "2026-10-30T12:40:00Z",
+  } as unknown as TimelineItem;
+  const newer = {
+    ...earlier,
+    id: "newer",
+    reconciliationKey: "user-message:newer",
+    text: "shorten it",
+    occurredAt: "2026-11-01T18:53:38Z",
+  };
+  const work = {
+    kind: "system" as const,
+    id: "work",
+    text: "working",
+    occurredAt: "2026-11-01T18:54:00Z",
+  } as unknown as TimelineItem;
+  const pending = { queue: [], snapshot: null };
+  const ids = (items: TimelineItem[]) => items.map((item) => item.id);
+
+  // Something newer was sent: the failure keeps its place before that message.
+  expect(
+    ids(
+      conversationTimeline([earlier, answer, newer, work], pending, {
+        optimisticMessages: [failedSend],
+      }),
+    ),
+  ).toEqual(["earlier", "answer", "optimistic:failed-at-17", "newer", "work"]);
+
+  // Nothing newer was sent, even with the agent still working: it stays last,
+  // next to the composer, where its recovery actions are seen.
+  expect(
+    ids(
+      conversationTimeline([earlier, answer, work], pending, {
+        optimisticMessages: [failedSend],
+      }),
+    ),
+  ).toEqual(["earlier", "answer", "work", "optimistic:failed-at-17"]);
+
+  // A send still on its way stays last; only the failure moves.
+  expect(
+    ids(
+      conversationTimeline([earlier, newer], pending, {
+        optimisticMessages: [
+          failedSend,
+          {
+            ...failedSend,
+            clientEventId: "sending-now",
+            state: "sending" as const,
+            occurredAt: "2026-11-01T19:00:00Z",
+            error: undefined,
+          },
+        ],
+      }),
+    ),
+  ).toEqual(["earlier", "optimistic:failed-at-17", "newer", "optimistic:sending-now"]);
 });
 
 test("definitively refused messages offer editing, not an unchanged retry", () => {
