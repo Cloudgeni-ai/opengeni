@@ -190,6 +190,19 @@ export function personalGitHubConsoleBaseUrl(input: {
   return web || input.publicOrigin || input.requestOrigin || "";
 }
 
+/** Agent guidance for the console link to the workspace's GitHub settings. */
+export const GITHUB_APP_SETTINGS_GUIDANCE =
+  "settingsUrl opens this workspace's GitHub settings, where a workspace admin chooses Install on another account; give it when installUrl is null.";
+
+/** Console link to the workspace's GitHub settings sheet; null without a console origin. */
+export function githubSettingsUrl(baseUrl: string, workspaceId: string): string | null {
+  const base = baseUrl.replace(/\/+$/u, "");
+  if (!base) return null;
+  return `${base}/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=${encodeURIComponent(
+    "integration:github",
+  )}`;
+}
+
 export type PersonalGitHubSetupProjection =
   | { status: "ready"; action: null; detail: string }
   | { status: "authorization_required"; action: "connect"; detail: string }
