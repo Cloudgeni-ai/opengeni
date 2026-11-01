@@ -150,7 +150,7 @@ describe("Opengeni's own storage claims in the table", () => {
 
 describe("the store:false line follows the runtime's routes", () => {
   const kept =
-    "- Opengeni's requests: Opengeni does not turn off Responses API storage on this route.";
+    "- Opengeni's requests: Responses API storage is not turned off for every request on this route.";
   const builtin = (baseUrl: string | null, wireProfile = "openai"): PrivacyFactsRoute => {
     const value = route({ baseUrl, wireProfile });
     return { ...value, provider: { ...value.provider!, builtin: true } };

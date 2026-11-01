@@ -272,7 +272,8 @@ function policyLines(
   ];
 }
 
-const RESPONSES_STORAGE_KEPT = "Opengeni does not turn off Responses API storage on this route.";
+const RESPONSES_STORAGE_KEPT =
+  "Responses API storage is not turned off for every request on this route.";
 
 /**
  * Whether this route's chat turns send `store: false`, mirroring the runtime:

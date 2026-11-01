@@ -70,12 +70,12 @@ sentence against its source:
 
 | Row | Trains on data | Keeps data | Where |
 | --- | --- | --- | --- |
-| Azure OpenAI (sold by Azure) | No | Flagged content for abuse review, period not stated; Responses data 30 days by default (Opengeni sends `store: false` on chat turns) | Resource geography at rest; Global may process wherever the model is deployed; Data Zone EU in the EU |
+| Azure OpenAI (sold by Azure) | No | Flagged content for abuse review, period not stated; Responses data 30 days by default (Opengeni sends `store: false` on chat turns unless provider item ids are preserved) | Resource geography at rest; Global may process wherever the model is deployed; Data Zone EU in the EU |
 | Fireworks on Azure Foundry | Not stated | Not stated | Fireworks GPUs outside Microsoft facilities; excluded from the EU Data Boundary; pay-per-token Data Zone in US regions |
 | Amazon Bedrock | No | Models on AWS's abuse-detection list, up to 30 days (Claude Opus and Sonnet 5.5 were not on it); CSAM detection may keep content | `global.*` any commercial region; `eu.*` EU regions |
 | Anthropic API | No | Within 30 days; flagged up to 2 years | Any geography by default; the Anthropic workspace default applies |
 | Claude subscription | Personal plans: with the setting on, plus flagged chats and feedback; Team and Enterprise: only on opt-in or feedback | Personal: 30 days, or up to 5 years with the setting on; Team and Enterprise: 30 days | Not stated |
-| OpenAI API | No, unless opted in | Abuse logs up to 30 days; Responses data 30 days by default (Opengeni sends `store: false` on chat turns with workspace, organization or built-in keys) | Not stated for default projects |
+| OpenAI API | No, unless opted in | Abuse logs up to 30 days; Responses data 30 days by default (Opengeni sends `store: false` on chat turns with workspace or organization keys, or built-in keys on api.openai.com, unless provider item ids are preserved) | Not stated for default projects |
 | Codex (ChatGPT) subscription | Personal plans: unless "Improve the model for everyone" is off | The account's terms; Opengeni sends `store: false` | Not stated |
 | xAI API | No | 30 days; zero retention self-serve for team admins | Not guaranteed on the default endpoint |
 | SuperGrok subscription | May train | No fixed period stated | Not stated |
