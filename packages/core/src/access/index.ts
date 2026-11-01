@@ -975,6 +975,11 @@ export function requireAccountAdminAuthorizationStamp(
  * ceiling an owner's agent needs. The role comes from this organization's own
  * grant, so being an admin in one organization grants nothing in another.
  * Agent turns, services and keys never qualify through a role.
+ *
+ * Organization integrations (webhooks, the credential provider, other people's
+ * personal keys and connected agents, except the owner's) and member-level
+ * organization API keys and service accounts use it too; owner-level keys and
+ * admin service accounts stay with `account:admin`.
  */
 export function holdsOrganizationAdministration(
   context: AccessContext,

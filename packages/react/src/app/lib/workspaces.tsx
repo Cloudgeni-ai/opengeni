@@ -62,6 +62,10 @@ export function administersOrganization(input: {
  * user always holds the literal grant, so the local-mode role branch in
  * `administersOrganization` never widens anything here. Billing, roles and
  * ownership stay with `account:admin` alone.
+ *
+ * Organization integrations and member-level organization API keys and
+ * service accounts follow it too; owner-level keys and admin service accounts
+ * stay with `account:admin`.
  */
 export function canAdministerOrganization(input: {
   accessContext: AccessContext;
