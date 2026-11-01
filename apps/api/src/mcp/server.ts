@@ -312,6 +312,8 @@ import {
   scheduledTaskViewerForGrant,
   siteViewerForGrant,
   resolveNewSiteAudience,
+  resolveNewProjectAudience,
+  projectSourceSessionId,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -430,6 +432,7 @@ import {
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
 import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
@@ -443,6 +446,7 @@ import {
   requireSiteVersionPublishOpen,
 } from "../site-publishing/service";
 import { sitePlatformBrakeToolRefusal } from "../site-publishing/platform-usage";
+import { withSitePageSizeWarnings } from "../site-publishing/page-size";
 
 import {
   createSessionAdminReach,
@@ -2428,7 +2432,6 @@ export function buildOpenGeniMcpServer(
             runMode: task.runMode,
             reusableSessionId: task.reusableSessionId,
             agentConfig: task.agentConfig,
-            audience: task.visibility === "private" ? "user_private" : "workspace_shared",
             requireOnline: true,
           });
           const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(deps.db, {
@@ -3871,7 +3874,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
+        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation. Keep the HTML small: compress images and link video or large media instead of embedding them; the result lists warnings for a heavy page.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -3933,17 +3936,19 @@ function registerWorkspaceArtifactTools(
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
       return json(
-        await mutation(
-          await createWorkspaceArtifact(deps.db, {
-            artifactId,
-            slug: resolvedSlug,
-            requestedSlug: slug ?? null,
-            title,
-            description: description ?? null,
-            ...audience,
-            ...(await prepare(html, source, requestedTools, uploadId)),
-            ...provenance(idempotencyKey, "artifacts_create"),
-          }),
+        withSitePageSizeWarnings(
+          await mutation(
+            await createWorkspaceArtifact(deps.db, {
+              artifactId,
+              slug: resolvedSlug,
+              requestedSlug: slug ?? null,
+              title,
+              description: description ?? null,
+              ...audience,
+              ...(await prepare(html, source, requestedTools, uploadId)),
+              ...provenance(idempotencyKey, "artifacts_create"),
+            }),
+          ),
         ),
       );
     },
@@ -3953,7 +3958,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_publish",
     {
       description:
-        "Publish a new immutable HTML version. The exact HTML runs in an opaque-origin sandboxed iframe. First read the current source and pass its version id for optimistic concurrency.",
+        "Publish a new immutable HTML version. The exact HTML runs in an opaque-origin sandboxed iframe. First read the current source and pass its version id for optimistic concurrency. The result lists warnings for a heavy page (embedded images or video): compress or link them instead.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         expectedCurrentVersionId: z4.string().uuid(),
@@ -4009,17 +4014,19 @@ function registerWorkspaceArtifactTools(
       );
       if (braked) return braked;
       return json(
-        await siteMutation(
-          await publishWorkspaceArtifactVersion(deps.db, {
-            artifactId,
-            viewer: await siteViewerForGrant(deps.db, grant),
-            expectedCurrentVersionId,
-            ...(title !== undefined ? { title } : {}),
-            ...(description !== undefined ? { description } : {}),
-            ...(await prepare(html, source, requestedTools, uploadId)),
-            ...provenance(idempotencyKey, "artifacts_publish"),
-          }),
-          true,
+        withSitePageSizeWarnings(
+          await siteMutation(
+            await publishWorkspaceArtifactVersion(deps.db, {
+              artifactId,
+              viewer: await siteViewerForGrant(deps.db, grant),
+              expectedCurrentVersionId,
+              ...(title !== undefined ? { title } : {}),
+              ...(description !== undefined ? { description } : {}),
+              ...(await prepare(html, source, requestedTools, uploadId)),
+              ...provenance(idempotencyKey, "artifacts_publish"),
+            }),
+            true,
+          ),
         ),
       );
     },
@@ -7068,6 +7075,14 @@ function registerProjectTools(
       },
       async ({ name, description, avatar }) => {
         const exactAvatar = await projectAvatarFromToolInput(deps, grant, avatar);
+        // A project made in an Only me chat is Only me, so that chat fits it.
+        const audience = await resolveNewProjectAudience({
+          db: deps.db,
+          settings: deps.settings,
+          grant,
+          requested: undefined,
+          sourceSessionId: projectSourceSessionId(grant),
+        });
         return json({
           project: await createChannel(deps.db, {
             accountId: grant.accountId,
@@ -7076,6 +7091,7 @@ function registerProjectTools(
             description: description ?? null,
             avatar: exactAvatar ?? null,
             createdBy: grant.subjectId,
+            audience,
           }),
         });
       },
@@ -7425,8 +7441,17 @@ function registerCapabilityDiscoveryTools(
       // without a membership), else their membership. Without either there is
       // nothing to say beyond the card.
       const person = await connectingPersonGrant(deps.db, grant, sessionId);
+      const memberIntegrationSetup =
+        person === null
+          ? undefined
+          : await withOrganizationIntegrationPolicyFence(
+              deps.db,
+              { accountId: grant.accountId, workspaceId: grant.workspaceId },
+              async (_tx, policy) => policy.personalIntegrationSetup,
+            ).catch(() => undefined);
       const personCannotConnect =
-        person !== null && inChatCapabilitySetup(person, item.id, item).kind === "unavailable";
+        person !== null &&
+        inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
       const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: setup.action ?? "connect",

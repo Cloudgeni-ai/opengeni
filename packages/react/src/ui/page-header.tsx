@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { cn } from "../lib/cn";
+import { useWindowBarTitle } from "./window-bar-title";
 
 /**
  * One header for every page: title, one-line description, primary action and
@@ -107,15 +108,20 @@ export const PageHeader = /* @__PURE__ */ forwardRef<HTMLElement, PageHeaderProp
     const large = variant === "large";
     const iconVisible = Boolean(icon) && !large && (showIcon ?? style.icon !== "hide");
     const ruled = divider && !tabs;
+    // In the macOS app the window bar shows the page's title instead.
+    const titleInWindowBar = useWindowBarTitle(title);
+    // With only a title, nothing of it is left to show here.
+    const titleOnly = titleInWindowBar && !description && !context && !meta && !actions && !tabs;
 
     return (
       <header
         data-slot="page-header"
         data-variant={variant}
+        data-title-in-window-bar={titleInWindowBar ? "" : undefined}
         // In the desktop app a page's title area moves the window, like a
         // native title bar; its controls stay clickable.
         data-window-drag
-        className={cn("@container/page-header min-w-0", className)}
+        className={cn("@container/page-header min-w-0", className, titleOnly && "sr-only")}
         ref={ref}
         {...props}
       >
@@ -138,8 +144,14 @@ export const PageHeader = /* @__PURE__ */ forwardRef<HTMLElement, PageHeaderProp
                 {context}
               </div>
             ) : null}
-            <div className="flex min-w-0 items-start gap-2">
-              {iconVisible ? (
+            <div
+              className={cn(
+                "flex min-w-0 items-start gap-2",
+                // Kept for assistive tech; the bar shows it. Its meta stays.
+                titleInWindowBar && !meta && "sr-only",
+              )}
+            >
+              {iconVisible && !titleInWindowBar ? (
                 <span
                   aria-hidden="true"
                   className="flex h-7 shrink-0 items-center text-brand [&_svg]:size-4 [&_svg]:shrink-0"
@@ -151,6 +163,7 @@ export const PageHeader = /* @__PURE__ */ forwardRef<HTMLElement, PageHeaderProp
                 className={cn(
                   "min-w-0 font-semibold tracking-[-0.5px] break-words text-fg",
                   large ? "text-2xl leading-8" : "text-xl leading-7",
+                  titleInWindowBar && "sr-only",
                 )}
               >
                 {title}

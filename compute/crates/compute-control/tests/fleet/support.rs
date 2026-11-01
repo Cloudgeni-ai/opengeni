@@ -567,6 +567,7 @@ pub fn roomy() -> Capacity {
         awake: 0,
         sandboxes: 0,
         pointers_in_service: true,
+        info: None,
     }
 }
 
@@ -958,6 +959,17 @@ impl FakeHost {
         *self.inner.capacity.lock().unwrap() = capacity;
     }
 
+    /// Has its agent restart in place as what `change` makes of what it
+    /// registered as, keeping its registration, telling what it is now
+    /// with what it can take on from its next renewal, as an agent of
+    /// this release does.
+    pub fn restarts_in_place_as(&self, change: impl FnOnce(&mut HostInfo)) {
+        let mut info = described(&self.inner);
+        info.boot = None;
+        change(&mut info);
+        self.inner.capacity.lock().unwrap().info = Some(info);
+    }
+
     /// The requests it received.
     #[must_use]
     pub fn seen(&self) -> Vec<Seen> {
@@ -1055,6 +1067,22 @@ async fn register(inner: &HostInner) -> Registered {
     send_register(inner, attempt).await
 }
 
+/// What a fake host registers as.
+fn described(inner: &HostInner) -> HostInfo {
+    HostInfo {
+        name: inner.name.clone(),
+        address: inner.address.to_string(),
+        zone: "zone-a".into(),
+        profile: "nested".into(),
+        cpu_template: "none".into(),
+        memory_mib: 64 * 1024,
+        cpu_millis: 64_000,
+        disk_mib: 1 << 20,
+        offers: inner.offers.clone(),
+        boot: Some(inner.boot.lock().unwrap().clone()),
+    }
+}
+
 async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
     let held: Vec<Held> = inner
         .held
@@ -1067,18 +1095,7 @@ async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
     let body = Register {
         host: (id != 0).then_some(id),
         attempt,
-        info: HostInfo {
-            name: inner.name.clone(),
-            address: inner.address.to_string(),
-            zone: "zone-a".into(),
-            profile: "nested".into(),
-            cpu_template: "none".into(),
-            memory_mib: 64 * 1024,
-            cpu_millis: 64_000,
-            disk_mib: 1 << 20,
-            offers: inner.offers.clone(),
-            boot: Some(inner.boot.lock().unwrap().clone()),
-        },
+        info: described(inner),
         capacity: inner.capacity.lock().unwrap().clone(),
         held,
     };

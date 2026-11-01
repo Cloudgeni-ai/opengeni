@@ -19,6 +19,7 @@ const announced: string[] = [];
 
 class AnimatedValue {
   setValue() {}
+  stopAnimation() {}
   interpolate() {
     return this;
   }
@@ -82,6 +83,7 @@ mock.module("react-native", () => ({
     isReduceMotionEnabled: async () => true,
     announceForAccessibility: (text: string) => void announced.push(text),
   },
+  AppState: { addEventListener: () => ({ remove: () => {} }), currentState: "active" },
   useWindowDimensions: () => ({ width: 390, height: 844 }),
 }));
 mock.module("react-native-safe-area-context", () => ({

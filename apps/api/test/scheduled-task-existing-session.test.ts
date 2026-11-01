@@ -219,7 +219,6 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
-        audience: "workspace_shared",
         agentConfig: baseConfig,
       }),
     ).rejects.toMatchObject({ status: 422 });
@@ -235,7 +234,6 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
-        audience: "workspace_shared",
         agentConfig: {
           ...baseConfig,
           machineTarget: { targetSandboxId: machineSandboxId, workingDir: "repos/app" },
@@ -249,25 +247,9 @@ describe("scheduled Connected Machine targeting", () => {
     });
   });
 
-  test("a personal machine runs only Only me schedules; offline machines never run", async () => {
+  test("a picked personal machine runs its owner's schedule whoever can see it; offline machines never run", async () => {
     const sandboxLookup = spyOn(db, "getSandbox");
     sandboxLookup.mockResolvedValue({ ...sandbox, scope: "user" });
-    await expect(
-      validateScheduledTaskMachineTarget({
-        settings,
-        db: {} as never,
-        grant: manageOnly,
-        runMode: "new_session_per_run",
-        audience: "workspace_shared",
-        agentConfig: {
-          ...baseConfig,
-          machineTarget: { targetSandboxId: machineSandboxId },
-        },
-      }),
-    ).rejects.toMatchObject({
-      status: 422,
-      message: expect.stringContaining("Only me"),
-    });
     spyOn(db, "getEnrollment").mockResolvedValue(enrollment);
     await expect(
       validateScheduledTaskMachineTarget({
@@ -275,13 +257,25 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
-        audience: "user_private",
         agentConfig: {
           ...baseConfig,
           machineTarget: { targetSandboxId: machineSandboxId },
         },
       }),
     ).resolves.toEqual({ sandboxId: machineSandboxId, enrollmentId, sandboxOs: "linux" });
+    // Following a workspace default that is a personal machine never counts.
+    spyOn(db, "requireWorkspace").mockResolvedValue({
+      settings: { defaultExecutionTarget: { kind: "machine", targetSandboxId: machineSandboxId } },
+    } as never);
+    await expect(
+      validateScheduledTaskMachineTarget({
+        settings,
+        db: {} as never,
+        grant: manageOnly,
+        runMode: "new_session_per_run",
+        agentConfig: { ...baseConfig, executionTarget: "workspace_default" },
+      }),
+    ).rejects.toMatchObject({ status: 422 });
 
     sandboxLookup.mockResolvedValue(sandbox);
     spyOn(db, "getLiveEnrollmentConnection").mockResolvedValue(null);
@@ -291,7 +285,6 @@ describe("scheduled Connected Machine targeting", () => {
         db: {} as never,
         grant: manageOnly,
         runMode: "new_session_per_run",
-        audience: "workspace_shared",
         agentConfig: {
           ...baseConfig,
           machineTarget: { targetSandboxId: machineSandboxId },

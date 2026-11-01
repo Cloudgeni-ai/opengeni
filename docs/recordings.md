@@ -784,7 +784,8 @@ version never starts two (the chat is keyed by the version).
   has to ask.
 - **What it may do.** Only read that one meeting and save that meeting's
   notes. The chat has no sandbox, resources, Skills or other servers, and
-  its only tools are `meeting_read` and `meeting_notes_save`. Session
+  its only meeting tools are `meeting_read` and `meeting_notes_save`, plus
+  the runtime's `wait_for_input` and `privacy_facts`. Session
   creation refuses any other chat that claims to be a meeting summary, and
   the database's private-chat guard (migration 1005) accepts an Only me one
   only for the owner of that Only me meeting. It keeps that shape for its

@@ -48,6 +48,8 @@ export type CapabilitiesCatalog = {
   apiIntegrationInstances: ApiIntegrationInstallationSummary[];
   socialConnections: SocialConnection[];
   slackInstallationBindings: SlackInstallationBinding[];
+  /** Who the organization lets turn integrations on (undefined: members, or not loaded). */
+  memberIntegrationSetup: "members" | "admins" | undefined;
   loading: boolean;
   loadError: Error | null;
   /** Bumped after every accepted load, so per-instance surfaces can reload themselves. */
@@ -68,6 +70,7 @@ type CatalogState = {
   apiIntegrationInstances: ApiIntegrationInstallationSummary[];
   socialConnections: SocialConnection[];
   slackInstallationBindings: SlackInstallationBinding[];
+  memberIntegrationSetup: "members" | "admins" | undefined;
   loading: boolean;
   loadError: Error | null;
   revision: number;
@@ -94,6 +97,7 @@ function emptyCatalogState(
     apiIntegrationInstances: [],
     socialConnections: [],
     slackInstallationBindings: [],
+    memberIntegrationSetup: undefined,
     loading: true,
     loadError: null,
     revision: 0,
@@ -266,6 +270,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
       update((current) => ({
         ...current,
         items: catalog.items,
+        memberIntegrationSetup: catalog.memberIntegrationSetup,
         socialConnections: socials ?? current.socialConnections,
         slackInstallationBindings: slackBindings ?? current.slackInstallationBindings,
         apiIntegrationDefinitions: apiDefinitions?.definitions ?? current.apiIntegrationDefinitions,
@@ -316,6 +321,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     apiIntegrationInstances: visible.apiIntegrationInstances,
     socialConnections: visible.socialConnections,
     slackInstallationBindings: visible.slackInstallationBindings,
+    memberIntegrationSetup: visible.memberIntegrationSetup,
     loading: visible.loading,
     loadError: visible.loadError,
     revision: visible.revision,

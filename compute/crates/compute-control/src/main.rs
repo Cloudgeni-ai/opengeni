@@ -128,9 +128,13 @@ struct StoreArgs {
         hide_env_values = true
     )]
     database_password: Option<String>,
-    /// Trust this authority for TLS to the database; without it the
-    /// connection is unencrypted, for a database on the same machine.
-    #[arg(long)]
+    /// Trust this authority, rather than the system's, for TLS to the
+    /// database. A connection string with `sslmode=require` is always
+    /// encrypted and its server checked, by this authority or else the
+    /// system's; with `disable` or `prefer` and no authority the connection
+    /// is unencrypted, for a database on the same machine. Every command
+    /// that opens the store reads it, the sweep as much as the service.
+    #[arg(long, env = "COMPUTE_CONTROL_DATABASE_CA")]
     database_ca: Option<PathBuf>,
     /// Connections to keep to the database.
     #[arg(long, default_value_t = 32)]
@@ -668,12 +672,35 @@ async fn shutdown() {
 }
 
 async fn postgres(database: &StoreArgs) -> anyhow::Result<PostgresStore> {
-    let tls = database
-        .database_ca
-        .as_deref()
-        .map(database_client)
-        .transpose()?;
-    Ok(PostgresStore::connect_with(database_config(database)?, tls, database.connections).await?)
+    let config = database_config(database)?;
+    let tls = match database_trust(database.database_ca.as_deref(), config.get_ssl_mode()) {
+        DatabaseTrust::None => None,
+        DatabaseTrust::Authority(ca) => Some(database_client(Some(ca))?),
+        DatabaseTrust::System => Some(database_client(None)?),
+    };
+    Ok(PostgresStore::connect_with(config, tls, database.connections).await?)
+}
+
+/// What TLS to the database trusts.
+#[derive(Debug, PartialEq, Eq)]
+enum DatabaseTrust<'a> {
+    /// No TLS.
+    None,
+    /// The authorities in this file.
+    Authority(&'a Path),
+    /// The system's authorities.
+    System,
+}
+
+/// The given authority whenever there is one; the system's when the
+/// connection string requires TLS without naming one, rather than no TLS,
+/// which such a database always refuses; and otherwise none.
+fn database_trust(ca: Option<&Path>, mode: tokio_postgres::config::SslMode) -> DatabaseTrust<'_> {
+    match (ca, mode) {
+        (Some(ca), _) => DatabaseTrust::Authority(ca),
+        (None, tokio_postgres::config::SslMode::Require) => DatabaseTrust::System,
+        (None, _) => DatabaseTrust::None,
+    }
 }
 
 /// The store's connection settings: the connection string, and the
@@ -1032,6 +1059,69 @@ mod tests {
             config.get_password(),
             Some(&b"two words \\ and ' quote"[..])
         );
+    }
+
+    #[test]
+    fn a_database_that_requires_tls_gets_it_without_an_authority_named() {
+        // As the chart writes the settings for a managed database. Without
+        // TLS such a database refuses every connection, as staging's did
+        // the nightly sweep, which was given no authority.
+        let mode = |sslmode: &str| {
+            database_config(&StoreArgs {
+                database: format!(
+                    "host='db.example.com' port='5432' dbname='opengeni' user='compute' sslmode='{sslmode}'"
+                ),
+                database_password: None,
+                database_ca: None,
+                connections: 1,
+            })
+            .unwrap()
+            .get_ssl_mode()
+        };
+        let ca = Path::new("/etc/compute/database-ca.crt");
+        assert_eq!(database_trust(None, mode("require")), DatabaseTrust::System);
+        assert_eq!(
+            database_trust(Some(ca), mode("require")),
+            DatabaseTrust::Authority(ca)
+        );
+        // A database on the same machine: no TLS unless an authority is
+        // named, as before.
+        assert_eq!(database_trust(None, mode("disable")), DatabaseTrust::None);
+        assert_eq!(database_trust(None, mode("prefer")), DatabaseTrust::None);
+        assert_eq!(
+            database_trust(Some(ca), mode("prefer")),
+            DatabaseTrust::Authority(ca)
+        );
+    }
+
+    #[test]
+    fn every_command_that_opens_the_store_reads_how_to_reach_it_from_the_environment() {
+        // A deployment sets these once, for the service and its jobs alike,
+        // so no command may take one only as a flag (the sweep was given
+        // the connection string but not the authority).
+        use clap::CommandFactory as _;
+        let cli = Cli::command();
+        let mut opening = Vec::new();
+        for command in cli.get_subcommands() {
+            let argument = |id: &str| command.get_arguments().find(|a| a.get_id() == id);
+            if argument("database").is_none() {
+                continue;
+            }
+            opening.push(command.get_name().to_owned());
+            for (id, env) in [
+                ("database", "COMPUTE_CONTROL_DATABASE"),
+                ("database_password", "COMPUTE_CONTROL_DATABASE_PASSWORD"),
+                ("database_ca", "COMPUTE_CONTROL_DATABASE_CA"),
+            ] {
+                assert_eq!(
+                    argument(id).and_then(clap::Arg::get_env),
+                    Some(std::ffi::OsStr::new(env)),
+                    "{} {id}",
+                    command.get_name()
+                );
+            }
+        }
+        assert_eq!(opening, ["serve", "add-key", "sweep", "copy-archive"]);
     }
 
     #[test]

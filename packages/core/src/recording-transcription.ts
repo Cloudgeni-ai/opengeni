@@ -389,6 +389,47 @@ export function planRecordingTranscriptionPieces(
   return pieces;
 }
 
+/** A stretch of a track with sound in it, on the track's timeline. */
+export type RecordingSoundRange = { startMilliseconds: number; endMilliseconds: number };
+
+/**
+ * Plan the pieces of a track over only its stretches with sound, so long
+ * quiet stretches (a microphone while its person listens, the computer's
+ * audio in a room meeting) are never sent or billed. Each stretch is split
+ * like a whole track when it is longer than the model takes. No stretches
+ * means nothing to send.
+ */
+export function planRecordingSoundPieces(
+  durationMilliseconds: number,
+  maxPieceMilliseconds: number | null,
+  sound: ReadonlyArray<RecordingSoundRange>,
+): RecordingTranscriptionPiece[] {
+  const duration = Math.max(0, Math.ceil(durationMilliseconds));
+  const ranges = sound
+    .map((range) => ({
+      startMilliseconds: Math.max(0, Math.floor(range.startMilliseconds)),
+      endMilliseconds: Math.min(duration, Math.ceil(range.endMilliseconds)),
+    }))
+    .filter((range) => range.endMilliseconds > range.startMilliseconds);
+  return ranges.flatMap((range, index) => {
+    const last = index === ranges.length - 1;
+    return planRecordingTranscriptionPieces(
+      range.endMilliseconds - range.startMilliseconds,
+      maxPieceMilliseconds,
+    ).map((piece) => ({
+      startMilliseconds: range.startMilliseconds + piece.startMilliseconds,
+      endMilliseconds: range.startMilliseconds + piece.endMilliseconds,
+      keepFromMilliseconds: range.startMilliseconds + piece.keepFromMilliseconds,
+      keepUntilMilliseconds:
+        piece.keepUntilMilliseconds === Number.POSITIVE_INFINITY
+          ? last
+            ? Number.POSITIVE_INFINITY
+            : range.endMilliseconds
+          : range.startMilliseconds + piece.keepUntilMilliseconds,
+    }));
+  });
+}
+
 /**
  * Join the pieces' results into one track result. Speaker ids are only
  * meaningful inside one call, so a track sent in several pieces has none.
@@ -950,10 +991,15 @@ export function parseElevenLabsTranscript(body: unknown): RecordingTranscription
 
 function elevenLabsError(
   status: number,
-  detail: string,
+  failure: { detail: string; outOfCredit: boolean },
   action = "transcribe this audio",
 ): RecordingTranscriptionError {
+  const { detail } = failure;
   const message = `ElevenLabs could not ${action} (HTTP ${status}${detail ? `: ${detail}` : ""})`;
+  // An empty balance comes back as 401, like a wrong key; only its body tells them apart.
+  if (status === 402 || failure.outOfCredit) {
+    return new RecordingTranscriptionError(message, "quota_exceeded", false);
+  }
   if (status === 401 || status === 403) {
     return new RecordingTranscriptionError(message, "unauthorized", false);
   }
@@ -961,7 +1007,6 @@ function elevenLabsError(
   if (status === 400 || status === 415 || status === 422) {
     return new RecordingTranscriptionError(message, "invalid_audio", false);
   }
-  if (status === 402) return new RecordingTranscriptionError(message, "quota_exceeded", false);
   if (status === 429) return new RecordingTranscriptionError(message, "rate_limited", true);
   if (status >= 500) return new RecordingTranscriptionError(message, "unavailable", true);
   return new RecordingTranscriptionError(message, "provider", false);
@@ -973,14 +1018,54 @@ function elevenLabsApiKey(credentials: RecordingTranscriptionCredentials | null)
   throw new RecordingTranscriptionError("ElevenLabs needs an API key", "unauthorized", false);
 }
 
-async function errorDetail(response: Response): Promise<string> {
-  try {
-    const body = (await response.json()) as { detail?: { message?: unknown; status?: unknown } };
-    const message = body.detail?.message ?? body.detail?.status;
-    return typeof message === "string" ? message.slice(0, 300) : "";
-  } catch {
-    return "";
+async function elevenLabsFailure(
+  response: Response,
+): Promise<{ detail: string; outOfCredit: boolean }> {
+  const body: unknown = await response.json().catch(() => null);
+  const detail =
+    body && typeof body === "object" ? (body as { detail?: unknown }).detail : undefined;
+  const fields =
+    detail && typeof detail === "object" ? (detail as { message?: unknown; status?: unknown }) : {};
+  const message = typeof detail === "string" ? detail : (fields.message ?? fields.status);
+  return {
+    detail: typeof message === "string" ? message.slice(0, 300) : "",
+    outOfCredit: transcriptionProviderOutOfCredit(body),
+  };
+}
+
+/** Codes providers put in an error body when the account has run out of credit or quota. */
+const OUT_OF_CREDIT_CODES = new Set([
+  "quota_exceeded",
+  "insufficient_credits",
+  "insufficient_quota",
+  "payment_required",
+]);
+/** How providers say it where their error code is generic. */
+const OUT_OF_CREDIT_TEXT =
+  /out of call volume quota|exceeded your current quota|exceeds your quota|insufficient (?:credits|quota)/iu;
+
+/**
+ * Whether a provider's error body says its account has run out of credit or
+ * quota, rather than that its key is wrong or it is busy. Providers don't
+ * agree on a status for it: ElevenLabs answers an empty balance with 401 and
+ * `quota_exceeded`, OpenAI with 429 and `insufficient_quota`, Azure's free
+ * tier with 403 and "Out of call volume quota". Reads a JSON body, its
+ * `detail` or `error` object or string, or plain text.
+ */
+export function transcriptionProviderOutOfCredit(body: unknown): boolean {
+  if (typeof body === "string") return OUT_OF_CREDIT_TEXT.test(body);
+  if (!body || typeof body !== "object") return false;
+  for (const part of [(body as { detail?: unknown }).detail, (body as { error?: unknown }).error]) {
+    if (typeof part === "string" && OUT_OF_CREDIT_TEXT.test(part)) return true;
+    if (!part || typeof part !== "object") continue;
+    const fields = part as Record<string, unknown>;
+    for (const key of ["status", "code", "type"]) {
+      const value = fields[key];
+      if (typeof value === "string" && OUT_OF_CREDIT_CODES.has(value.toLowerCase())) return true;
+    }
+    if (typeof fields.message === "string" && OUT_OF_CREDIT_TEXT.test(fields.message)) return true;
   }
+  return false;
 }
 
 /** ElevenLabs Scribe, using the workspace's or organization's own ElevenLabs key. */
@@ -1030,7 +1115,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
       if (!response.ok) {
         throw elevenLabsError(
           response.status,
-          await errorDetail(response),
+          await elevenLabsFailure(response),
           "start a live transcript",
         );
       }
@@ -1091,7 +1176,7 @@ export function createElevenLabsRecordingTranscriptionProvider(
         if (input.signal?.aborted) throw error;
         throw new RecordingTranscriptionError("Could not reach ElevenLabs", "network", true);
       }
-      if (!response.ok) throw elevenLabsError(response.status, await errorDetail(response));
+      if (!response.ok) throw elevenLabsError(response.status, await elevenLabsFailure(response));
       return parseElevenLabsTranscript(await response.json());
     },
   };
