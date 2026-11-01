@@ -4834,6 +4834,14 @@ export const sessions = pgTable(
     /** Archive plan while archiving; verified manifest once archived. */
     contentArchive: jsonb("content_archive").$type<Record<string, unknown>>(),
     contentArchivePurgedAt: timestamp("content_archive_purged_at", { withTimezone: true }),
+    /**
+     * When the chat was archived for everyone (migration 1213). Its content
+     * moves to long-term storage once nothing runs in it; null while live, and
+     * on chats the idle archiver stored before this column existed.
+     */
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    /** Who archived the chat; null when the idle archiver did. */
+    archiveRequestedBy: text("archive_requested_by"),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),

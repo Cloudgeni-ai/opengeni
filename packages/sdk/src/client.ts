@@ -930,7 +930,7 @@ export type SessionListPageOptions = {
   /**
    * Only these sessions, at most 200 ids. Narrows the caller's ordinary list
    * (other filters, archive status and Site scope still apply); never widens it.
-   * Pass `archiveStatus: "all"` to include personally archived sessions.
+   * Pass `archiveStatus: "all"` to include archived sessions.
    */
   sessionIds?: readonly string[];
   /** Return only the complete personal pinned projection. */
@@ -939,7 +939,8 @@ export type SessionListPageOptions = {
   includePinned?: boolean;
   /** Return archived root chats instead of the active session list. */
   archivedOnly?: boolean;
-  sortBy?: "updatedAt" | "createdAt" | "name";
+  /** `archivedAt` orders archived chats by when they were archived. */
+  sortBy?: "updatedAt" | "createdAt" | "name" | "archivedAt";
   archiveStatus?: "active" | "archived" | "all";
   /** Stop this caller's finite page read when its owning route is abandoned. */
   signal?: AbortSignal | undefined;

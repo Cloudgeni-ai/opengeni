@@ -3811,18 +3811,10 @@ async function cancelSessionSubtreeInTransaction(
   };
 }
 
-/** Archive must never silently interrupt work that started after the UI's idle snapshot. */
-export class SessionArchiveConfirmationRequiredError extends Error {
-  readonly code = "session_archive_confirmation_required";
-  constructor() {
-    super("This chat has active work. Confirm Pause and archive to stop it for everyone.");
-  }
-}
-
 /**
  * Whether a chat or anything it started still has work: a turn, a wait for
- * input, an active goal or a running background command. Archive asks before
- * pausing such a chat.
+ * input, an active goal or a running background command. Archive cancels such
+ * work when its undo window ends.
  */
 export async function sessionWorkstreamHasActiveWork(
   db: Database | SessionActivityDatabase,
@@ -3863,8 +3855,6 @@ export async function mutateSessionControlInTransaction(
     expectedControlEtag?: string | null;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
-    /** Personal archive only: verify idle under the same control fence as Pause. */
-    requireIdleForArchive?: boolean;
   },
 ): Promise<SessionControlMutationResult> {
   const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
@@ -3980,11 +3970,6 @@ export async function mutateSessionControlInTransaction(
       outcome: "replayed",
       replay: true,
     };
-  }
-  if (input.requireIdleForArchive && input.action === "pause") {
-    if (await sessionWorkstreamHasActiveWork(db, input.workspaceId, input.sessionId)) {
-      throw new SessionArchiveConfirmationRequiredError();
-    }
   }
   if (input.actor.type === "agent_attempt") {
     await assertAgentCommandAuthorityInTransaction(db, {

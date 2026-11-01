@@ -1,4 +1,4 @@
-import { requestSessionArchive, useArchiveConfirmation } from "../../lib/archive-session";
+import { requestSessionArchive } from "../../lib/archive-session";
 // The session shell every session surface renders: the left rail (fixed and
 // resizable on desktop, an overlay drawer on phones), the canvas top strip with
 // the session header on session routes, and the canvas itself. Surface-owned
@@ -563,8 +563,8 @@ function SessionRouteHeader({
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;
   const dock = useSessionUiFeature("dock");
-  const confirmArchive = useArchiveConfirmation();
   const archiveInFlight = useRef(false);
+  const onArchiveRef = useRef<((target: Session, archived: boolean) => Promise<void>) | null>(null);
   const onArchive = useCallback(
     async (target: Session, archived: boolean) => {
       if (archiveInFlight.current) return;
@@ -576,8 +576,8 @@ function SessionRouteHeader({
           context,
           target,
           archived,
-          confirmArchive,
           sessionDisplayTitle(target),
+          () => void onArchiveRef.current?.(target, false),
         );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
@@ -591,18 +591,18 @@ function SessionRouteHeader({
           sessionId: target.id,
           archived: updated.archived,
         });
-        toast.success(updated.archived ? "Chat archived." : "Chat restored.");
       } catch (error) {
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
-        toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
+        toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
           description: errorMessage(error),
         });
       } finally {
         archiveInFlight.current = false;
       }
     },
-    [context, confirmArchive],
+    [context],
   );
+  onArchiveRef.current = onArchive;
 
   return (
     <SessionHeader

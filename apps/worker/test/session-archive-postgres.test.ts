@@ -215,4 +215,39 @@ describe("idle-session archive worker", () => {
       expect(session?.retention?.archive?.state).toBe("archived");
     }
   }, 120_000);
+
+  test("an archived chat whose goal is still active is stopped, then stored", async () => {
+    const scope = await idleSession();
+    // Archived (for example by the backfill of personally hidden chats) with
+    // a goal no stop step paused: the pass pauses it, the next one stores it.
+    await shared.admin`update sessions set archived_at = now() - interval '1 minute',
+        archive_requested_by = 'subject-archiver'
+      where workspace_id = ${scope.workspaceId} and id = ${scope.sessionId}`;
+    await shared.admin`insert into session_goals (account_id, workspace_id, session_id, text, status)
+      values (${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, 'keep going', 'active')`;
+    const activities = createSessionArchiveActivities(
+      async () =>
+        ({
+          db: client.db,
+          bus: { publish: async () => undefined },
+          objectStorage: { deleteObject: async () => undefined } as never,
+          observability: { info: () => undefined, warn: () => undefined } as never,
+          settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: 30 }),
+        }) as unknown as ActivityServices,
+      { upload: async () => undefined },
+    );
+    const first = await activities.archiveIdleSessions();
+    expect(first.failed).toBe(0);
+    const [goal] = await shared.admin`select status from session_goals
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
+    expect(goal!.status).toBe("paused");
+    expect(
+      (await getSession(client.db, scope.workspaceId, scope.sessionId))?.retention?.archive,
+    ).toBeNull();
+
+    const second = await activities.archiveIdleSessions();
+    expect(second.failed).toBe(0);
+    const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
+    expect(session?.retention?.archive?.state).toBe("archived");
+  }, 120_000);
 });

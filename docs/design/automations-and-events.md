@@ -518,12 +518,12 @@ and `_list` show the triggers with their status, and `scheduled_task_runs_list`
 shows how many events each event run carried.
 
 While a "wake me when" is active, the chat shows what it is waiting for. Such
-a wait belongs to the chat: archiving the chat with Pause removes the one-time
-waits that continue it or its sub-chats (a run-once event automation that has
-not run, a one-time run still ahead) in the same transaction, and Restore does
-not bring them back. Repeating automations stay; a run of theirs that meets the
-paused chat is blocked and the owner is told. Hide for me changes nothing for
-the chat's waits.
+a wait belongs to the chat: when a chat's Archive becomes final (its Undo
+window ends), the one-time automations that continue it or its sub-chats (a
+run-once event automation, a one-time run, whether still ahead or already run)
+are removed. A repeating automation in the chat keeps Archive from starting at
+all, and the refusal says so; a run of one that meets a paused chat is blocked
+and the owner is told.
 
 Two read tools are added, both deferred (loaded through tool search):
 

@@ -240,9 +240,10 @@ import {
   setSessionAttention,
   setSessionPin,
   SessionAttentionVersionConflictError,
-  SessionArchiveVersionConflictError,
-  SessionArchiveConfirmationRequiredError,
+  SessionArchiveBlockedError,
+  SessionArchiveFinalError,
   SessionPinVersionConflictError,
+  SessionArchivedPinError,
   SessionPinAccessError,
   SessionListAccessError,
   SessionListCursorError,
@@ -2450,6 +2451,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           409,
         );
       }
+      if (error instanceof SessionArchivedPinError) {
+        return c.json({ message: error.message, code: error.code }, 409);
+      }
       throw error;
     }
   });
@@ -2510,15 +2514,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
-  // Personal chat organization: archived roots leave the ordinary rail only
-  // for this member and remain recoverable through the archived list view.
+  // Archive a chat for everyone (one-way once its short undo window ends), or
+  // undo that within the window with archived: false. mode, confirmPause,
+  // expectedVersion and clientEventId are accepted for older clients and
+  // ignored: every Archive is the same, and repeating one changes nothing.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/archive", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
       workspaceId,
-      "sessions:read",
+      "sessions:control",
     );
     const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
@@ -2528,14 +2534,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       { status: 400, message: "invalid session archive request" },
     );
     try {
-      const pause = parsed.archived && parsed.mode !== "hide_for_me";
-      if (pause && !hasPermission(grant.permissions, "sessions:control")) {
-        throw new HTTPException(403, {
-          message:
-            "Pausing a chat requires sessions:control. Use Hide for me to change only personal visibility.",
-        });
-      }
-      const session = await archiveHumanSessionWorkstream(
+      const result = await archiveHumanSessionWorkstream(
         deps,
         {
           accountId: grant.accountId,
@@ -2545,10 +2544,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           authorizationSurface: "http",
         },
         {
-          ...parsed,
-          pause,
+          archived: parsed.archived,
           personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
         },
+      );
+      if (!result) throw new HTTPException(404, { message: "session not found" });
+      const session = await getSessionForSubject(
+        db,
+        workspaceId,
+        sessionId,
+        grant.subjectId,
+        relatedSessionAccessFor(c),
       );
       if (!session) throw new HTTPException(404, { message: "session not found" });
       return c.json(
@@ -2563,11 +2569,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (error instanceof SessionPinAccessError) {
         throw new HTTPException(403, { message: error.message });
       }
-      if (error instanceof SessionArchiveVersionConflictError) {
-        return c.json(
-          { message: "session archive changed in another client", current: error.current },
-          409,
-        );
+      if (error instanceof SessionArchiveBlockedError) {
+        return c.json({ code: error.code, message: error.message, blockers: error.blockers }, 409);
+      }
+      if (error instanceof SessionArchiveFinalError) {
+        return c.json({ code: error.code, message: error.message }, 409);
       }
       return commandConflictResponse(c, error);
     }
@@ -7111,9 +7117,6 @@ function zodErrorFields(error: ZodError): string {
 }
 
 function commandConflictResponse(c: Context, error: unknown): Response {
-  if (error instanceof SessionArchiveConfirmationRequiredError) {
-    return c.json({ code: error.code, message: error.message }, 409);
-  }
   if (error instanceof QueueCommandConflictError) {
     return c.json({ code: error.code, message: error.message, current: error.current }, 409);
   }

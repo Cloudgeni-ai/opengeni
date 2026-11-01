@@ -123,6 +123,7 @@ import { useBrowserAccountBridgeBlocker } from "../lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
   composerLaunchSearchKey,
+  continueArchivedChatMessage,
   modelProvidedAfterLaunch,
   type ComposerLaunchSearch,
 } from "../lib/composer-launch";
@@ -1580,6 +1581,33 @@ function SessionsIndexRouteContent({
       setMessage("");
     }
   }, [launchBotTemplateId, message, newSessionDraft.loading, workspaceBotTemplates.templates]);
+  // ?continueSessionId= (an archived chat's "Continue in a new chat") starts
+  // the composer with a link to that chat once the saved draft has loaded,
+  // ahead of anything the person already typed, then leaves the URL.
+  const launchContinueSessionId = launch.continueSessionId;
+  const continuedSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!launchContinueSessionId || newSessionDraft.loading) return;
+    if (continuedSessionRef.current === launchContinueSessionId) return;
+    continuedSessionRef.current = launchContinueSessionId;
+    const pointer = continueArchivedChatMessage(
+      page.origin(),
+      workspaceId,
+      launchContinueSessionId,
+    );
+    setMessage((current) =>
+      current.includes(pointer.trim()) ? current : `${pointer}${current.trimStart()}`,
+    );
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions",
+      params: { workspaceId },
+      search: (previous: Record<string, unknown>) => {
+        const { continueSessionId: _dropped, ...rest } = previous;
+        return rest;
+      },
+      replace: true,
+    });
+  }, [launchContinueSessionId, navigate, newSessionDraft.loading, page, workspaceId]);
   const dismissBotLaunch = useCallback(() => {
     void navigate({
       to: "/workspaces/$workspaceId/sessions",

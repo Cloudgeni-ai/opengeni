@@ -2350,7 +2350,9 @@ export async function submitHumanPromptInTransaction(
   if (promptTarget?.importedArchiveImportId) {
     throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
   }
-  if (promptTarget?.contentArchiveState) throw new SessionArchivedError();
+  // Archived chats are read-only, including during the undo window.
+  if (promptTarget?.contentArchiveState || promptTarget?.archivedAt)
+    throw new SessionArchivedError();
   const requestHash = canonicalSessionCommandHash({
     delivery: input.delivery,
     controlEtag: input.controlEtag ?? null,
@@ -3465,7 +3467,7 @@ export async function sendAgentMessageInTransaction(
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.importedArchiveImportId)
     throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
-  if (session.contentArchiveState) throw new SessionArchivedError();
+  if (session.contentArchiveState || session.archivedAt) throw new SessionArchivedError();
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -3795,7 +3797,7 @@ export async function steerAgentSessionInTransaction(
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.importedArchiveImportId)
     throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
-  if (session.contentArchiveState) throw new SessionArchivedError();
+  if (session.contentArchiveState || session.archivedAt) throw new SessionArchivedError();
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",

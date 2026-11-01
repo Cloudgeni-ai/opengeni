@@ -366,6 +366,28 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
+    scheduleSessionArchive: async (input) => {
+      try {
+        await temporal.workflow.start("sessionArchiveRequestWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          // One Archive, one run: an undone and repeated Archive has a new time.
+          workflowId: `session-archive-request-${input.workspaceId}-${input.sessionId}-${Date.parse(input.archivedAt)}`,
+          startDelay: Math.max(0, input.runAt.getTime() - Date.now()),
+          args: [
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              subjectId: input.subjectId,
+              archivedAt: input.archivedAt,
+            },
+          ],
+        });
+      } catch (error) {
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
+    },
     scheduleTransientObjectDeletion: async ({ workspaceId, objectKeys, deleteAfter }) => {
       const keys = [...new Set(objectKeys)].sort();
       if (keys.length === 0) return;

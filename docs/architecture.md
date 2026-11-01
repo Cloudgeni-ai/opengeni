@@ -3364,13 +3364,14 @@ Teams reply discovery uses a content-free sequence wake on relevant durable sess
 An invoker-rights trigger updates the reserved route in the event transaction; delivery still
 checks the exact linked human and current session audience before reading reply content.
 Idle routes are excluded from pump claims, and pending output keeps its durable delivery state.
-Personal sidebar Archive is an atomic composition of native Pause and personal
-visibility in `archiveHumanSessionWorkstream` (`packages/core/src/application/session-commands.ts`).
-Its personal-state fence precedes the normal control/workspace/session locks;
-post-commit fanout uses the existing durable control outboxes. Shared-chat control
-authority is independent of creator identity. Restore never resumes, and explicit
-Hide for me does not pause. See [run lifecycle](run-lifecycle.md) for schedule and
-background-command semantics.
+The chat Archive action (`archiveHumanSessionWorkstream` in
+`packages/core/src/application/session-commands.ts`) is the one archive, for
+everyone, and needs session control regardless of who started the chat. It marks
+the chat tree archived (`sessions.archived_at`) and schedules a delayed workflow
+for the end of a ten-second Undo window; that workflow retires the chat's
+one-time automations, pauses its goals, cancels its running work and stores it
+through the idle-session archive. See [session storage
+lifecycle](session-storage-lifecycle.md#archiving-a-chat).
 
 Teams group chats use a separate native workspace-visible session namespace.
 The Connector roster freezes exact Teams actor-to-Opengeni human mappings in
