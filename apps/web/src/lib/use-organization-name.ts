@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { useOptionalAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { useAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { orgName } from "@opengeni/react/app/lib/org";
 
 /**
@@ -8,17 +8,17 @@ import { orgName } from "@opengeni/react/app/lib/org";
  * organization admin reads it from the organization overview; everyone else
  * gets null and the caller words the sentence without it ("your
  * organization"), never with an id.
- *
- * A component handed its app context as a prop passes it as `source`.
  */
-export function useOrganizationName(
+export function useOrganizationName(accountId: string, canReadOverview: boolean): string | null {
+  return useOrganizationNameFrom(useAppContext(), accountId, canReadOverview);
+}
+
+/** The same name, for a component handed its app context as a prop. */
+export function useOrganizationNameFrom(
+  context: Pick<AppContextValue, "client" | "accessContext">,
   accountId: string,
   canReadOverview: boolean,
-  source?: Pick<AppContextValue, "client" | "accessContext">,
 ): string | null {
-  const provided = useOptionalAppContext();
-  const context = source ?? provided;
-  if (!context) throw new Error("Opengeni app context is not ready");
   const fromGrant = accountId ? orgName(accountId, context.accessContext.accountGrants) : null;
   const [fetched, setFetched] = useState<{ accountId: string; name: string } | null>(null);
   const client = context.client;

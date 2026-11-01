@@ -20,7 +20,7 @@ import {
   OrganizationReachDialog,
   organizationReachSummary,
 } from "@/components/organization-reach-dialog";
-import { useOrganizationName } from "@/lib/use-organization-name";
+import { useOrganizationNameFrom } from "@/lib/use-organization-name";
 import { Button } from "@opengeni/react/ui/button";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { DetailPage } from "@opengeni/react/ui/detail-page";
@@ -126,7 +126,7 @@ export function SkillsPanelContent({
   const canManageOrganization = canManage("organization");
   const organizationId = grant?.accountId ?? "";
   const organizationName =
-    useOrganizationName(organizationId, canManageOrganization, context) ?? "your organization";
+    useOrganizationNameFrom(context, organizationId, canManageOrganization) ?? "your organization";
   const [reachOpen, setReachOpen] = useState(false);
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
