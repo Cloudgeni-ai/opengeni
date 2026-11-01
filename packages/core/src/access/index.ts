@@ -1279,9 +1279,9 @@ export const WORKSPACE_CONTRIBUTOR_REFUSAL =
 /**
  * Ordinary shared content of a workspace that anyone who works there may
  * change for everyone, like a shared Skill or Knowledge entry: its
- * instructions and the review of the agent's proposed changes to them.
- * Whoever may change the workspace's settings may (see
- * {@link workspaceSettingsAuthorized});
+ * instructions and the review of the agent's proposed changes to them, a
+ * shared workspace's name and its custom model entries. Whoever may change
+ * the workspace's settings may (see {@link workspaceSettingsAuthorized});
  * otherwise a person of the organization who can start chats here
  * (`sessions:create`), acting as themselves: signed in, or their own chat or
  * connected agent or personal API key acting for them within what they
@@ -1320,7 +1320,16 @@ export async function requireWorkspaceContributorGrant(
   deps: AccessDeps,
   workspaceId: string,
 ): Promise<AccessGrant> {
-  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  // A first-use external membership holds only the defaults, which never pass
+  // this rule (people from another product aren't contributors, and the
+  // defaults lack workspace:admin), so a refused request creates nothing.
+  const authorization = await accessGrantAuthorization(
+    await requireAccessContext(c, deps),
+    deps,
+    workspaceId,
+    undefined,
+    { firstUseMembership: true, firstUseRequires: "workspace:admin" },
+  );
   const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
   if (await workspaceContributionAuthorized(deps, authorization, workspaceId)) return grant;
   throw new MissingPermissionRefusal("sessions:create", {
@@ -1600,7 +1609,15 @@ async function accessGrantAuthorization(
   deps: AccessDeps,
   workspaceId: string,
   permission?: Permission,
-  options: { firstUseMembership?: boolean } = {},
+  options: {
+    firstUseMembership?: boolean;
+    /**
+     * What a first-use membership would need for the request to succeed when
+     * the route decides after resolving (no `permission`). First use creates
+     * nothing unless the defaults include it.
+     */
+    firstUseRequires?: Permission;
+  } = {},
 ): Promise<AccessGrantAuthorization> {
   // No named-subject or organization-key fallback may widen verified OAuth
   // bounds. These grants came from this resolution's live native access only.
@@ -1655,7 +1672,13 @@ async function accessGrantAuthorization(
       !grant &&
       !personal &&
       options.firstUseMembership === true &&
-      (await provisionExternalMemberOnFirstUse(deps, context, external, workspaceId, permission))
+      (await provisionExternalMemberOnFirstUse(
+        deps,
+        context,
+        external,
+        workspaceId,
+        permission ?? options.firstUseRequires,
+      ))
     ) {
       grant = await membershipGrant();
     }
