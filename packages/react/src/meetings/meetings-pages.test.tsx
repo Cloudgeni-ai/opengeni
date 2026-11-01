@@ -272,7 +272,10 @@ describe("Meetings list", () => {
       await waitForText(bare.container, "recorded in Sales");
       const items = await openMenu(bare.container);
       expect(items.map((item) => item.textContent?.trim())).not.toContain("Available in…");
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+      await settle(50);
     } finally {
       await bare.unmount();
     }
