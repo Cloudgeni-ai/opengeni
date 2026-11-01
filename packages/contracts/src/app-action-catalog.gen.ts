@@ -3896,8 +3896,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OwnResourceReachResponse"
-    ],
-    "permission": "workspace:read"
+    ]
   },
   {
     "id": "getPreferenceRegistry",
@@ -5760,6 +5759,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "Feedback"
     ],
     "permission": "workspace:read"
+  },
+  {
+    "id": "listOwnResources",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/own-resources",
+    "request": [],
+    "response": [
+      "OwnResourcesResponse"
+    ]
   },
   {
     "id": "listPendingConnectAttempts",

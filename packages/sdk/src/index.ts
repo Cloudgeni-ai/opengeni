@@ -1659,6 +1659,8 @@ export type {
   OwnResourceReachKind,
   OwnResourceReachResponse,
   OwnResourceReachWorkspace,
+  OwnResource,
+  OwnResourcesResponse,
   SetOwnResourceReachRequest,
   SetOwnResourceReachResponse,
   Workspace,

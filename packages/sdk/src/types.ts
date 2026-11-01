@@ -6176,6 +6176,23 @@ export type SetOwnResourceReachRequest = {
   on: boolean;
 };
 export type SetOwnResourceReachResponse = { workspace: OwnResourceReachWorkspace };
+/** One of your own logins, model plans or machines, with where it works. */
+export type OwnResource = {
+  resourceKind: OwnResourceReachKind;
+  resourceId: string;
+  /** A login's or plan's account (its email when known), or a machine's name. */
+  name: string;
+  /** Login: the service it signs in to. Plan: the provider (`codex`, `claude`, `xai`). Machine: null. */
+  provider: string | null;
+  /** Plan only: the plan the provider reports, when known. */
+  plan: string | null;
+  /** Your Personal workspace first, then by name. */
+  workspaces: OwnResourceReachWorkspace[];
+};
+export type OwnResourcesResponse = {
+  /** Logins, then plans, then machines, each by name. */
+  resources: OwnResource[];
+};
 
 export type OrganizationMembershipRole = "owner" | "admin" | "member";
 export type WorkspaceMemberRole = "viewer" | "member" | "admin" | "custom";
