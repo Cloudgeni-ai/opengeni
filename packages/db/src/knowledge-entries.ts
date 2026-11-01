@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   FileAsset,
   KnowledgeFilePreparationResult,
@@ -15,6 +15,8 @@ import {
   KnowledgeEntryBatchReviewRequest,
   KnowledgeTaskNotePromotionRequest,
   KnowledgeEntryRecord,
+  KnowledgeEntryReach,
+  KnowledgeEntryReachRecord,
   KnowledgeEntryReviewRequest,
   KnowledgeEntryRestoreRequest,
   KnowledgeEntrySaveRequest,
@@ -319,6 +321,84 @@ export async function archiveKnowledgeEntry(
     .strict()
     .parse(input);
   return apply(db, context, { ...request, operation: "archive" });
+}
+
+/**
+ * Where an entry this workspace has works, and whether the person asking may
+ * change it (migration 1196). Null when this workspace doesn't have the entry.
+ * People and services only: agents use the entries their workspace has.
+ */
+export async function getKnowledgeEntryReach(
+  db: Database,
+  context: KnowledgeContext,
+  entryId: string,
+): Promise<KnowledgeEntryReachRecord | null> {
+  const request = { operation: "reach", entryId: z.uuid().parse(entryId) };
+  return inKnowledgeContext(db, context, async (tx) => {
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`
+      SELECT knowledge_entry_read(${context.accountId}::uuid,${context.workspaceId}::uuid,
+        ${JSON.stringify(context.actor)}::jsonb,${JSON.stringify(request)}::jsonb) AS result`,
+    );
+    return row?.result == null ? null : KnowledgeEntryReachRecord.parse(row.result);
+  });
+}
+
+const KnowledgeEntryReachChange = z
+  .object({
+    entryId: z.uuid(),
+    scope: z.enum(["organization", "personal"]),
+    originWorkspaceId: z.uuid(),
+    reach: KnowledgeEntryReach,
+    previous: KnowledgeEntryReach,
+  })
+  .strict();
+
+/**
+ * Change where an organization or personal entry works. The caller has
+ * checked the listed workspaces: shared workspaces of the organization for an
+ * organization entry, the owner's own workspaces for a personal one. The
+ * workspace it was added in always has it and is never stored. It is not a
+ * revision, so the entry keeps its version; the change is audited in the same
+ * transaction. People and services with write access to the entry's scope.
+ */
+export async function setKnowledgeEntryReach(
+  db: Database,
+  context: KnowledgeContext,
+  input: { entryId: string; reach: KnowledgeEntryReach },
+): Promise<KnowledgeEntryReachRecord> {
+  const request = {
+    operation: "reach",
+    operationId: randomUUID(),
+    entryId: z.uuid().parse(input.entryId),
+    reach: KnowledgeEntryReach.parse(input.reach),
+  };
+  return inKnowledgeContext(db, context, async (tx) => {
+    const [row] = await rawRows<{ receipt: unknown }>(
+      tx,
+      sql`
+      SELECT knowledge_entry_apply(${context.accountId}::uuid,${context.workspaceId}::uuid,
+        ${JSON.stringify(context.actor)}::jsonb,${JSON.stringify(request)}::jsonb) AS receipt`,
+    );
+    const change = KnowledgeEntryReachChange.parse(row?.receipt);
+    await rawRows(
+      tx,
+      sql`INSERT INTO audit_events(account_id, workspace_id, subject_id, action, target_type,
+          target_id, metadata)
+        VALUES (${context.accountId}::uuid, ${context.workspaceId}::uuid,
+          ${context.actor.kind === "agent" ? null : context.actor.subjectId},
+          'knowledge.reach.changed', 'knowledge_entry', ${change.entryId},
+          ${JSON.stringify({ scope: change.scope, from: change.previous, to: change.reach })}::jsonb)`,
+    );
+    return {
+      entryId: change.entryId,
+      scope: change.scope,
+      originWorkspaceId: change.originWorkspaceId,
+      reach: change.reach,
+      canChange: true,
+    };
+  });
 }
 
 const StoredProjection = z
