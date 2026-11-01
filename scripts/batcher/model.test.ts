@@ -92,11 +92,19 @@ describe("verdict", () => {
   });
 
   test("needs every workflow on the tip to finish and pass", () => {
-    const other = run({ id: 2, workflow: ".github/workflows/other.yml", status: "in_progress" });
+    const other = run({
+      id: 2,
+      workflow: ".github/workflows/other.yml",
+      status: "in_progress",
+    });
     expect(verdict(batch([1], { runs: [run(), other] }), NOW, DEFAULT_SETTINGS).kind).toBe(
       "running",
     );
-    const skipped = run({ id: 2, workflow: ".github/workflows/other.yml", conclusion: "skipped" });
+    const skipped = run({
+      id: 2,
+      workflow: ".github/workflows/other.yml",
+      conclusion: "skipped",
+    });
     expect(verdict(batch([1], { runs: [run(), skipped] }), NOW, DEFAULT_SETTINGS).kind).toBe(
       "passed",
     );
@@ -110,6 +118,30 @@ describe("verdict", () => {
     });
     const again = run({ conclusion: "failure", attempt: 2 });
     expect(verdict(batch([1], { runs: [again] }), NOW, DEFAULT_SETTINGS).kind).toBe("failed");
+  });
+
+  test("a run GitHub cancelled is retried instead of bisected, up to three attempts", () => {
+    // A job past its time limit during a GitHub outage cancels the run after
+    // its one ordinary retry; the PRs in the batch did nothing wrong.
+    const cancelled = run({
+      conclusion: "cancelled",
+      attempt: 2,
+      failedJobs: ["Workload image builds"],
+    });
+    const group = batch([1, 2, 3, 4], { runs: [cancelled] });
+    group.manifest.blame = ["Workload image builds"];
+    expect(verdict(group, NOW, DEFAULT_SETTINGS)).toEqual({
+      kind: "retry",
+      runs: [cancelled],
+    });
+    // A run that is cancelled every time is judged, so a hanging test still fails.
+    const third = run({ conclusion: "cancelled", attempt: 3 });
+    expect(verdict(batch([1, 2], { runs: [third] }), NOW, DEFAULT_SETTINGS).kind).toBe("failed");
+    // A real failure next to the cancelled run is evidence against the batch.
+    const failure = run({ id: 2, conclusion: "failure", attempt: 2 });
+    expect(verdict(batch([1, 2], { runs: [cancelled, failure] }), NOW, DEFAULT_SETTINGS).kind).toBe(
+      "failed",
+    );
   });
 
   test("a bisected group failing only in blamed jobs is judged without a retry; nothing else is", () => {
@@ -157,7 +189,10 @@ describe("nextBatch", () => {
 
   test("does not wait once the batch is full", () => {
     const pulls = [1, 2, 3].map((n) => pull(n, { greenAt: NOW }));
-    const action = nextBatch(pulls, [], NOW, { ...DEFAULT_SETTINGS, maxBatch: 2 });
+    const action = nextBatch(pulls, [], NOW, {
+      ...DEFAULT_SETTINGS,
+      maxBatch: 2,
+    });
     expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([1, 2]);
   });
 
@@ -184,7 +219,11 @@ describe("nextBatch", () => {
 
   test("a queued Version PR holds everything else until it is green and current", () => {
     const others = [pull(1), pull(2, { priority: true }), pull(3, { controlPlane: true })];
-    const waiting = pull(5, { version: true, greenAt: null, headAt: NOW - 60_000 });
+    const waiting = pull(5, {
+      version: true,
+      greenAt: null,
+      headAt: NOW - 60_000,
+    });
     expect(nextBatch([...others, waiting], [[1], [2]], NOW, DEFAULT_SETTINGS)).toEqual({
       kind: "hold",
       number: 5,
@@ -209,12 +248,20 @@ describe("nextBatch", () => {
 
   test("a running batch finishes while a Version PR holds the queue", () => {
     const waiting = pull(5, { version: true, greenAt: null });
-    const running = batch([1, 2], { runs: [run({ status: "in_progress", conclusion: null })] });
+    const running = batch([1, 2], {
+      runs: [run({ status: "in_progress", conclusion: null })],
+    });
     expect(decide(observe([pull(1), pull(2), waiting], [running]))).toEqual([]);
     const passed = batch([1, 2], { runs: [run()] });
     expect(decide(observe([pull(1), pull(2), pull(3), waiting], [passed]))).toEqual([
       { kind: "land", batch: passed },
-      { kind: "hold", number: 5, headSha: waiting.headSha, headAt: 0, behind: false },
+      {
+        kind: "hold",
+        number: 5,
+        headSha: waiting.headSha,
+        headAt: 0,
+        behind: false,
+      },
     ]);
   });
 
@@ -250,7 +297,10 @@ describe("nextBatch", () => {
       pull(3),
       pull(4, { priority: true, slots: [slot] }),
     ];
-    const action = nextBatch(pulls, [], NOW, { ...DEFAULT_SETTINGS, maxBatch: 2 });
+    const action = nextBatch(pulls, [], NOW, {
+      ...DEFAULT_SETTINGS,
+      maxBatch: 2,
+    });
     expect(action?.kind === "build" && action.members.map((p) => p.number)).toEqual([4, 2]);
   });
 
@@ -275,7 +325,10 @@ describe("nextBatch", () => {
     const failure = { runs: [run({ conclusion: "failure", attempt: 2 })] };
     const pulls = [pull(1), pull(2), pull(3), pull(5, { priority: true })];
     const actions = decide(observe(pulls, [batch([5, 1, 2, 3], failure)]));
-    expect(actions[0]).toMatchObject({ kind: "abandon", reason: "its CI failed" });
+    expect(actions[0]).toMatchObject({
+      kind: "abandon",
+      reason: "its CI failed",
+    });
     expect(actions[1]).toMatchObject({ kind: "build", pending: [[1, 2, 3]] });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([5]);
     // The priority PR lands one round after the failure; the fill is split next.
@@ -288,7 +341,9 @@ describe("nextBatch", () => {
 
   test("more priority PRs than half a failed batch are still tested together first", () => {
     const urgent = { priority: true };
-    const failed = batch([5, 6, 7, 1], { runs: [run({ conclusion: "failure", attempt: 2 })] });
+    const failed = batch([5, 6, 7, 1], {
+      runs: [run({ conclusion: "failure", attempt: 2 })],
+    });
     const pulls = [pull(1), pull(5, urgent), pull(6, urgent), pull(7, urgent)];
     const actions = decide(observe(pulls, [failed]));
     expect(actions[1]).toMatchObject({ kind: "build", pending: [[1]] });
@@ -375,31 +430,45 @@ describe("decide", () => {
   });
 
   test("leaves a running batch alone", () => {
-    const running = batch([1], { runs: [run({ status: "in_progress", conclusion: null })] });
+    const running = batch([1], {
+      runs: [run({ status: "in_progress", conclusion: null })],
+    });
     expect(decide(observe([pull(1), pull(2)], [running]))).toEqual([]);
   });
 
   test("splits a failed batch and tests the first half next", () => {
-    const failed = batch([1, 2, 3], { runs: [run({ conclusion: "failure", attempt: 2 })] });
+    const failed = batch([1, 2, 3], {
+      runs: [run({ conclusion: "failure", attempt: 2 })],
+    });
     const actions = decide(observe([pull(1), pull(2), pull(3)], [failed]));
-    expect(actions[0]).toMatchObject({ kind: "abandon", reason: "its CI failed" });
+    expect(actions[0]).toMatchObject({
+      kind: "abandon",
+      reason: "its CI failed",
+    });
     expect(actions[1]).toMatchObject({ kind: "build", pending: [[3]] });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([1, 2]);
   });
 
   test("splits a failed batch of priority PRs instead of building it again whole", () => {
     const urgent = { priority: true };
-    const failed = batch([1, 2, 3, 4], { runs: [run({ conclusion: "failure", attempt: 2 })] });
+    const failed = batch([1, 2, 3, 4], {
+      runs: [run({ conclusion: "failure", attempt: 2 })],
+    });
     const pulls = [pull(1, urgent), pull(2, urgent), pull(3, urgent), pull(4, urgent)];
     const actions = decide(observe(pulls, [failed]));
-    expect(actions[0]).toMatchObject({ kind: "abandon", reason: "its CI failed" });
+    expect(actions[0]).toMatchObject({
+      kind: "abandon",
+      reason: "its CI failed",
+    });
     expect(actions[1]).toMatchObject({ kind: "build", pending: [[3, 4]] });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([1, 2]);
   });
 
   test("a new priority PR goes before the halves of a failed priority batch", () => {
     const urgent = { priority: true };
-    const failed = batch([1, 2, 3, 4], { runs: [run({ conclusion: "failure", attempt: 2 })] });
+    const failed = batch([1, 2, 3, 4], {
+      runs: [run({ conclusion: "failure", attempt: 2 })],
+    });
     // Queued after the batch's members, and a CI change, so it runs alone.
     const fix = pull(5, { priority: true, controlPlane: true, queuedAt: NOW });
     const pulls = [pull(1, urgent), pull(2, urgent), pull(3, urgent), pull(4, urgent), fix];
@@ -432,7 +501,11 @@ describe("decide", () => {
         [failed],
       ),
     );
-    expect(split.at(-1)).toMatchObject({ kind: "build", pending: [[3, 4]], blame: ["A", "B"] });
+    expect(split.at(-1)).toMatchObject({
+      kind: "build",
+      pending: [[3, 4]],
+      blame: ["A", "B"],
+    });
 
     // A later group adds what it failed in after its retry.
     const half = batch([1, 2], { runs: [failure(["C"])] }, [[3, 4]]);
@@ -443,7 +516,10 @@ describe("decide", () => {
         [half],
       ),
     );
-    expect(deeper.at(-1)).toMatchObject({ kind: "build", blame: ["A", "B", "C"] });
+    expect(deeper.at(-1)).toMatchObject({
+      kind: "build",
+      blame: ["A", "B", "C"],
+    });
 
     // A passing group hands it to the next group; a priority PR in between drops it.
     const passed = batch([1, 2], {}, [[3, 4]]);
@@ -476,7 +552,10 @@ describe("decide", () => {
   });
 
   test("rebuilds when main moved or a member changed", () => {
-    const moved = decide({ ...observe([pull(1)], [batch([1])]), mainSha: sha(0xb) });
+    const moved = decide({
+      ...observe([pull(1)], [batch([1])]),
+      mainSha: sha(0xb),
+    });
     expect(moved[0]).toMatchObject({
       kind: "abandon",
       reason: "main moved since the batch was built",
@@ -484,40 +563,64 @@ describe("decide", () => {
     expect(moved[1]?.kind).toBe("build");
     expect(moved[0]).not.toHaveProperty("changed");
     const changed = decide(observe([pull(1, { headSha: sha(77) })], [batch([1])]));
-    expect(changed[0]).toMatchObject({ kind: "abandon", reason: "#1 has a new head", changed: 1 });
+    expect(changed[0]).toMatchObject({
+      kind: "abandon",
+      reason: "#1 has a new head",
+      changed: 1,
+    });
     const sameTree = decide(
       observe([pull(1, { headSha: sha(77) })], [batch([1], { sameTree: { 1: sha(77) } })]),
     );
     expect(sameTree.some((a) => a.kind === "abandon")).toBe(false);
     const left = decide(observe([pull(2)], [batch([1, 2])]));
-    expect(left[0]).toMatchObject({ kind: "abandon", reason: "#1 left the queue", changed: 1 });
+    expect(left[0]).toMatchObject({
+      kind: "abandon",
+      reason: "#1 left the queue",
+      changed: 1,
+    });
     // The rest is rebuilt at once, without waiting for the batching window.
     expect(left[1]?.kind === "build" && left[1].members.map((p) => p.number)).toEqual([2]);
   });
 
   test("a ready priority PR waits for the running batch, then goes next, filled", () => {
-    const running = batch([1], { runs: [run({ status: "in_progress", conclusion: null })] });
+    const running = batch([1], {
+      runs: [run({ status: "in_progress", conclusion: null })],
+    });
     const waiting = decide(observe([pull(1), pull(2, { priority: true })], [running]));
     expect(waiting).toEqual([]);
-    const passed = batch([1], { runs: [run({ status: "completed", conclusion: "success" })] });
+    const passed = batch([1], {
+      runs: [run({ status: "completed", conclusion: "success" })],
+    });
     const actions = decide(observe([pull(1), pull(2, { priority: true }), pull(3)], [passed]));
     expect(actions[0]).toMatchObject({ kind: "land" });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([2, 3]);
   });
 
   test("keeps only the newest batch", () => {
-    const older = batch([1], { createdAt: NOW - 20 * MINUTE, branch: "batch/old" });
-    const newer = batch([1], { runs: [run({ status: "in_progress", conclusion: null })] });
+    const older = batch([1], {
+      createdAt: NOW - 20 * MINUTE,
+      branch: "batch/old",
+    });
+    const newer = batch([1], {
+      runs: [run({ status: "in_progress", conclusion: null })],
+    });
     const actions = decide(observe([pull(1)], [older, newer]));
     expect(actions).toEqual([
-      { kind: "abandon", batch: older, reason: "only one batch runs at a time" },
+      {
+        kind: "abandon",
+        batch: older,
+        reason: "only one batch runs at a time",
+      },
     ]);
   });
 });
 
 describe("inBatchChanges", () => {
   test("adds missing members and removes everyone else", () => {
-    expect(inBatchChanges([1, 2, 3], [2, 4, 5])).toEqual({ add: [1, 3], remove: [4, 5] });
+    expect(inBatchChanges([1, 2, 3], [2, 4, 5])).toEqual({
+      add: [1, 3],
+      remove: [4, 5],
+    });
     expect(inBatchChanges([], [7])).toEqual({ add: [], remove: [7] });
     expect(inBatchChanges([7], [7])).toEqual({ add: [], remove: [] });
   });

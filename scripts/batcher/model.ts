@@ -58,7 +58,12 @@ export function numberedFiles(paths: string[]): NumberedFile[] {
     for (const { directory, pattern } of NUMBERED_FILES) {
       if (!path.startsWith(directory)) continue;
       const match = pattern.exec(path.slice(directory.length));
-      if (match) found.push({ slot: `${directory}${Number(match[1])}`, number: match[1]!, path });
+      if (match)
+        found.push({
+          slot: `${directory}${Number(match[1])}`,
+          number: match[1]!,
+          path,
+        });
     }
   return found;
 }
@@ -220,9 +225,20 @@ export type Action =
   | { kind: "eject"; number: number; reason: string }
   | { kind: "renumber"; number: number; paths: string[] }
   | { kind: "regenerate"; number: number }
-  | { kind: "build"; members: QueuedPull[]; pending: number[][]; blame?: string[] }
+  | {
+      kind: "build";
+      members: QueuedPull[];
+      pending: number[][];
+      blame?: string[];
+    }
   /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
-  | { kind: "hold"; number: number; headSha: string; headAt: number; behind: boolean }
+  | {
+      kind: "hold";
+      number: number;
+      headSha: string;
+      headAt: number;
+      behind: boolean;
+    }
   | { kind: "wait"; until: number };
 
 export type Verdict =
@@ -234,6 +250,15 @@ export type Verdict =
   | { kind: "failed"; runs: BatchRun[]; repeated?: true };
 
 const PASSING = new Set(["success", "skipped", "neutral"]);
+
+/**
+ * Attempts a batch run GitHub cancelled may use. A cancelled run (a job past
+ * its time limit, or a GitHub outage) says nothing about the batch: the
+ * batcher abandons a batch before it cancels its runs, so it never judges one
+ * it cancelled itself. Such a run is retried instead of bisected, up to this
+ * many attempts, so a test that hangs every time is still judged.
+ */
+export const CANCELLED_RUN_ATTEMPTS = 3;
 
 /** A finished run that did not pass. */
 export function failedRun(run: Pick<BatchRun, "status" | "conclusion">): boolean {
@@ -254,6 +279,10 @@ export function verdict(batch: Batch, now: number, settings: Settings): Verdict 
   if (batch.runs.some((run) => run.status !== "completed")) return { kind: "running" };
   const failed = batch.runs.filter((run) => !PASSING.has(run.conclusion ?? ""));
   if (!failed.length) return { kind: "passed" };
+  // Bisecting a batch GitHub cancelled would test every half again for a
+  // failure none of its PRs caused.
+  if (failed.every((run) => run.conclusion === "cancelled" && run.attempt < CANCELLED_RUN_ATTEMPTS))
+    return { kind: "retry", runs: failed };
   // One cheap retry of only the failed jobs absorbs flaky tests before blame.
   if (failed.every((run) => run.attempt < 2))
     return repeatsBlame(batch, failed)
@@ -364,7 +393,12 @@ export function nextBatch(
         ...carried,
       };
     }
-    return { kind: "build", members: group.slice(0, settings.maxBatch), pending: rest, ...carried };
+    return {
+      kind: "build",
+      members: group.slice(0, settings.maxBatch),
+      pending: rest,
+      ...carried,
+    };
   }
 
   if (alone(ready[0]!)) return { kind: "build", members: [ready[0]!], pending: [] };
@@ -430,14 +464,26 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
 
   for (const pull of pulls)
     if (pull.conflict !== null)
-      actions.push({ kind: "eject", number: pull.number, reason: pull.conflict });
+      actions.push({
+        kind: "eject",
+        number: pull.number,
+        reason: pull.conflict,
+      });
     else if (pull.regenerate) actions.push({ kind: "regenerate", number: pull.number });
     else if (pull.renumber.length)
-      actions.push({ kind: "renumber", number: pull.number, paths: pull.renumber });
+      actions.push({
+        kind: "renumber",
+        number: pull.number,
+        paths: pull.renumber,
+      });
 
   const batch = runningBatch(observation.batches);
   for (const extra of observation.batches.filter((b) => b !== batch))
-    actions.push({ kind: "abandon", batch: extra, reason: "only one batch runs at a time" });
+    actions.push({
+      kind: "abandon",
+      batch: extra,
+      reason: "only one batch runs at a time",
+    });
 
   if (batch) {
     const { manifest } = batch;
@@ -471,7 +517,11 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
       const result = verdict(batch, now, settings);
       if (result.kind === "running") return actions;
       if (result.kind === "missing") {
-        actions.push({ kind: "abandon", batch, reason: "its CI never started" });
+        actions.push({
+          kind: "abandon",
+          batch,
+          reason: "its CI never started",
+        });
       } else if (result.kind === "retry") {
         actions.push({ kind: "retry", batch, runs: result.runs });
         return actions;
