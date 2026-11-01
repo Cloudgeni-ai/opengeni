@@ -1117,6 +1117,80 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("typing right after a click goes to the clicked point when accessibility shows no focused field", async () => {
+    // A Simulator device (or a sign-in sheet in one) is drawn outside the
+    // window's accessibility tree: the field a click focused is not seen as
+    // focused, and CUA refuses typing at the window without a point.
+    class OpaqueFieldFixture extends Fixture {
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "type_text" && args.x === undefined) {
+          this.calls.push({ name, args });
+          return result(
+            { effect: "refused", code: "no_focused_text_input", reason: "CUA's own reason" },
+            true,
+          );
+        }
+        return await super.callTool(name, argumentsJson);
+      }
+    }
+    const fixture = new OpaqueFieldFixture();
+    fixture.mutation = result({ effect: "unverifiable", route: "synthetic_events" });
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const click = async () => {
+        const frame = await backend.capture(target.id);
+        await backend.dispatch({
+          ...command(await backend.observe(target.id)),
+          expectedFrameId: frame.frameId,
+          action: { type: "pointer", action: "click", frameId: frame.frameId, x: 30, y: 40 },
+        });
+      };
+      const type = async (value: string) =>
+        await backend.dispatch({
+          ...command(await backend.observe(target.id)),
+          action: { type: "keyboard", action: "type", value },
+        });
+      const typed = () => fixture.calls.filter((call) => call.name === "type_text");
+
+      await click();
+      await type("person@example.test");
+      expect(typed().map((call) => [call.args.text, call.args.x, call.args.y])).toEqual([
+        ["person@example.test", undefined, undefined],
+        ["person@example.test", 30, 40],
+      ]);
+      expect(typed()[1]!.args).not.toHaveProperty("element_token");
+      expect(typed()[1]!.args).toMatchObject({ window_id: 1, delivery_mode: "background" });
+
+      // The click is used once: typing again has no point to go to.
+      const before = typed().length;
+      const refusal = {
+        code: "invalid_action",
+        dispatched: false,
+        message: expect.stringContaining(
+          "click it with a pointer action and then type as the next action in this window",
+        ),
+      };
+      await expect(type("again")).rejects.toMatchObject(refusal);
+      expect(typed().length).toBe(before + 1);
+
+      // Another action after the click: its point no longer says where the
+      // focus is, so nothing is typed there.
+      await click();
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        action: { type: "keyboard", action: "press", value: "Tab" },
+      });
+      await expect(type("later")).rejects.toMatchObject(refusal);
+      expect(typed().every((call) => call.args.text !== "later" || call.args.x === undefined)).toBe(
+        true,
+      );
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("keys fenced on a reading another read has since replaced go where that reading showed the focus", async () => {
     const fixture = new Fixture();
     fixture.applyFocused = true;

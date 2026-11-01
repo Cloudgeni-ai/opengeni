@@ -127,6 +127,9 @@ const UNTITLED_STRIP_MAX_SIDE = 100;
 /** How long a field check waits before reading a window again, when the
  * reading straight after the input does not show it yet. */
 const INPUT_REREAD_MS = 150;
+/** CUA's refusal of background typing when the window's focused element is
+ * not a text input (see typeAtClick). */
+const NO_FOCUSED_TEXT_INPUT = "no_focused_text_input";
 
 /** How long the reading after an action waits for work the action started,
  * such as a save or a load the page shows as "Saving..." or a busy element,
@@ -190,6 +193,14 @@ export class CuaComputerBackend implements ComputerBackend {
   private readonly ownLabels = new Map<string, Map<string, string>>();
   private lastRef = 0;
   private readonly frames = new Map<string, Frame>();
+  /** Per window, the point of a click that was its latest action, in the
+   * screenshot pixels of the frame the click used (with that frame's size):
+   * where typing goes next when the window's content is not in its
+   * accessibility tree (see typeAtClick). Any other action forgets it. */
+  private readonly clickedPoints = new Map<
+    string,
+    { x: number; y: number; width: number; height: number }
+  >();
   private tail: Promise<unknown> = Promise.resolve();
   private closing = false;
   private closePromise: Promise<void> | null = null;
@@ -446,6 +457,9 @@ export class CuaComputerBackend implements ComputerBackend {
     if (command.action.type === "launch")
       return this.dispatchLaunch(command, command.action.applicationId);
     return this.run(async () => {
+      // Only a click that is the window's latest action says where typing goes.
+      const clickedAt = this.clickedPoints.get(command.targetId);
+      this.clickedPoints.delete(command.targetId);
       if (command.action.type === "batch")
         return await this.dispatchBatch(command, false, standIn, unconfirmed);
       if (command.action.type === "focus") return await this.dispatchFocus(command);
@@ -469,6 +483,12 @@ export class CuaComputerBackend implements ComputerBackend {
           );
       }
       const operations = await this.operations(command);
+      const clickFrame =
+        command.action.type === "pointer" &&
+        command.action.action === "click" &&
+        (command.action.button ?? "left") === "left"
+          ? this.latestFrame(command.targetId)
+          : undefined;
       // Filling a date field takes several steps, and a checkbox found by
       // name reads its state as its step runs: run them as one batch.
       if (
@@ -516,6 +536,14 @@ export class CuaComputerBackend implements ComputerBackend {
                 false,
                 true,
               );
+            const atClick = this.typeAtClick(command, operation, error, clickedAt);
+            if (atClick) {
+              const call = await callDesktop(this.runtime, atClick.name, atClick.args, true);
+              report += openedWindowsReport(call.result.text);
+              if (deliveredUnconfirmed(call)) unconfirmedInput = true;
+              operations[index] = atClick;
+              continue;
+            }
             if (error instanceof CuaFailure && error.cuaCode === WINDOWS_SET_VALUE_REFUSED) {
               // CUA resolved the token and refused before writing. It does
               // not expose that element's native control identity. Matching
@@ -571,6 +599,19 @@ export class CuaComputerBackend implements ComputerBackend {
       }
       if (unconfirmedInput) unconfirmed?.();
       const after = await this.observeAfter(command.targetId, acted, known, report, observed);
+      const click = operations[0];
+      if (
+        clickFrame &&
+        operations.length === 1 &&
+        click?.name === "click" &&
+        after?.target.id === command.targetId
+      )
+        this.clickedPoints.set(command.targetId, {
+          x: Number(click.args.x),
+          y: Number(click.args.y),
+          width: clickFrame.width,
+          height: clickFrame.height,
+        });
       if (after?.target.id !== command.targetId) return after;
       const confirmed = await this.confirmInput(after, operations);
       if (confirmed.failures.length)
@@ -582,6 +623,51 @@ export class CuaComputerBackend implements ComputerBackend {
         );
       return confirmed.after;
     });
+  }
+
+  /** The window's most recent frame: the pixels pointer input uses now. */
+  private latestFrame(targetId: string): Frame | undefined {
+    return [...this.frames.values()].reverse().find((entry) => entry.targetId === targetId);
+  }
+
+  /**
+   * Typing in a background Mac window is refused when no text input has the
+   * keyboard focus as far as the window's accessibility tree shows. Where
+   * the content is not in that tree (a Simulator device, a sign-in sheet in
+   * one, a remote screen), the field the agent clicked just before has the
+   * focus all the same. The typing then goes to that click's point: CUA
+   * clicks the field again to focus it and makes this window its app's key
+   * window before sending any key, so the keys reach this window only. The
+   * refused attempt sent nothing. Only a click that was this window's latest
+   * action counts.
+   */
+  private typeAtClick(
+    command: ComputerBackendActionCommand,
+    operation: Operation,
+    error: unknown,
+    clickedAt: { x: number; y: number; width: number; height: number } | undefined,
+  ): Operation | null {
+    if (
+      !clickedAt ||
+      command.action.type !== "keyboard" ||
+      command.action.action !== "type" ||
+      operation.name !== "type_text" ||
+      !(error instanceof CuaFailure) ||
+      error.dispatched ||
+      error.cuaCode !== NO_FOCUSED_TEXT_INPUT
+    )
+      return null;
+    const latest = this.latestFrame(command.targetId);
+    if (!latest) return null;
+    const { element_token: _focused, ...args } = operation.args;
+    return {
+      ...operation,
+      args: {
+        ...args,
+        x: (clickedAt.x * latest.width) / clickedAt.width,
+        y: (clickedAt.y * latest.height) / clickedAt.height,
+      },
+    };
   }
 
   /** The checks of `steps` a reading after their input fails, read once more
@@ -1401,6 +1487,15 @@ export class CuaComputerBackend implements ComputerBackend {
     observed: ComputerBackendObservation | undefined,
   ): ComputerBackendError | null {
     const target = this.targetsById.get(targetId);
+    // Typing right after a click on the field is retried at that click's
+    // point (see typeAtClick); this refusal is for typing without one.
+    if (target && cuaCode === NO_FOCUSED_TEXT_INPUT)
+      return new ComputerBackendError(
+        code,
+        "No text field in this window has the keyboard focus as far as its accessibility tree shows, so nothing was typed (keys sent anyway could act on the window instead). If the field is on screen but not in the tree, as in a Simulator device, click it with a pointer action and then type as the next action in this window; otherwise focus the field or set its value",
+        false,
+        false,
+      );
     if (
       !target ||
       this.identity.platform !== "macos" ||
