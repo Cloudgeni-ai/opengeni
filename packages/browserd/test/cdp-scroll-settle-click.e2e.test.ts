@@ -311,17 +311,17 @@ for (const [change, script, refusal] of [
   [
     "removes the link",
     'document.getElementById("builder").remove()',
-    "(locator_not_found: browser element is no longer present)",
+    "browser element is no longer present",
   ],
   [
     "replaces the link with a look-alike",
     'const old=document.getElementById("builder");old.replaceWith(old.cloneNode(true))',
-    "(locator_not_found: browser element is no longer present)",
+    "browser element is no longer present",
   ],
   [
     "hides the link",
     'document.getElementById("builder").style.display="none"',
-    "(invalid_action: browser element has no box on the page to act on; it is hidden or not rendered)",
+    "browser element has no box on the page to act on; it is hidden or not rendered",
   ],
 ] as const) {
   e2e(
@@ -340,9 +340,11 @@ for (const [change, script, refusal] of [
       ]);
       await withSession(page, async ({ evaluate, act, settles }) => {
         const result = await act({ type: "click", locator: link("Builder") });
-        // The driver's scroll ran the page's scroll listeners, so the outcome
-        // stays unknown, but the receipt says plainly why nothing was pressed.
-        expect(result.state).toBe("outcome_unknown");
+        // Only the driver's own scroll ran before the refusal, which is not
+        // input: the refusal is definite and says plainly why nothing was
+        // pressed.
+        expect(result.state).toBe("failed");
+        expect(result.error?.message).not.toContain("sent input");
         expect(result.error?.message).toContain(refusal);
         expect(result.error?.message).not.toContain("box model");
         expect(settles()).toBe(1);

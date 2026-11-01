@@ -1102,9 +1102,10 @@ e2e(
         ],
       });
       const receipt = await controller.run(operation);
-      expect(receipt.state).toBe("outcome_unknown");
-      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
-      expect(receipt.error?.message).toContain("invalid_action");
+      // Only the driver's own scroll ran before the refusal. That scroll is
+      // not input, so the refusal is definite, though the page saw it scroll.
+      expect(receipt.state).toBe("failed");
+      expect(receipt.error?.code).toBe("invalid_action");
       await waitForScroll(0);
       expect(effects.pointer).toBe(0);
       expect(effects.later).toBe(0);

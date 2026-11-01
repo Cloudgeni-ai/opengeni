@@ -10,7 +10,7 @@ import { CdpConnection } from "../src/cdp";
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
 e2e(
-  "a covered target already in view is a definite refusal; one that needed scrolling stays unknown",
+  "a covered target is a definite refusal, whether or not it needed scrolling",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-covered-click-");
     const browserSessionId = randomUUID();
@@ -82,10 +82,10 @@ e2e(
       }
       expect(await evaluate("[clicks, scrollY]")).toEqual([0, 0]);
 
-      // Reaching "Far" scrolls the page and runs its scroll listeners, so the
-      // refusal after it cannot claim that nothing happened.
+      // Reaching "Far" scrolls the page first. Scrolling a target into view
+      // is not input, so the refusal after it is definite too.
       const scrolled = await controller.run(command(initial, { type: "click", locator: far }));
-      expect(scrolled.state).toBe("outcome_unknown");
+      expect(scrolled.state).toBe("failed");
       expect(scrolled.error?.message).toContain("covered");
       expect(await evaluate("clicks")).toBe(0);
       expect(await evaluate("scrollY")).toBeGreaterThan(0);
