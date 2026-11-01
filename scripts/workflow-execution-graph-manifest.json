@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "a66b7b96e093fff96afaf1d13cebc991a4c71d8083ac7cc04c456f130ddeade7"
+      "sha256": "5d445e9690dbfdf180c422ca398dd38326343af472a31c61e7dcb97d84c9c39e"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -337,7 +337,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
       "step": "Verify publication receipts across blocked writes and reconnects",
-      "sha256": "16e2d4636e4172a359c9a8850663457545e0be1d583f06be18d66dde579b7d0d"
+      "sha256": "b2ccc4739e262a45a32f6e11b3f427ac2075b8094f4ddfde37b96d9d2592c44d"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
