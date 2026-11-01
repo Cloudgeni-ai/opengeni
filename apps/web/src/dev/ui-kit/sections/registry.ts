@@ -89,6 +89,7 @@ export const SECTION_KEYS = [
   "detail-sheet",
   "empty-state",
   "available-here",
+  "shared-overview",
   // Selection
   "setting-row",
   "switch",
@@ -140,7 +141,9 @@ export const SECTION_KEYS = [
   "page-dictation",
   "page-knowledge",
   "page-org-people",
+  "page-org-connectors",
   "page-eu-only",
+  "page-github-integration",
 ] as const;
 
 export type SectionKey = (typeof SECTION_KEYS)[number];
@@ -369,6 +372,16 @@ export const SECTIONS: readonly SectionMeta[] = [
       "What agents in one workspace can use, grouped by who it belongs to, with who manages each.",
     usedOn: "Workspace settings › Available here",
     load: () => import("./available-here"),
+  },
+
+  {
+    key: "shared-overview",
+    group: "Lists",
+    title: "Shared",
+    purpose:
+      "Everything an organization shares with its workspaces, and where each works, with who manages it.",
+    usedOn: "Organization settings › Shared",
+    load: () => import("./shared-overview"),
   },
 
   // ---------------------------------------------------------------- Selection
@@ -1043,6 +1056,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     load: () => import("./page-org-people"),
   },
   {
+    key: "page-org-connectors",
+    group: "Pages",
+    title: "Organization connectors",
+    purpose:
+      "Connectors an organization adds once for the workspaces it chooses: how people sign in, where each works, turning it off and replacing its key.",
+    usedOn: "Organization settings > Integrations",
+    load: () => import("./page-org-connectors"),
+  },
+  {
     key: "page-eu-only",
     group: "Pages",
     title: "EU-only inference",
@@ -1050,6 +1072,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       "The organization setting and what an EU-only workspace switches off, in production components.",
     usedOn: "Organization settings > Security & data, model pickers, feature settings",
     load: () => import("./page-eu-only"),
+  },
+  {
+    key: "page-github-integration",
+    group: "Pages",
+    title: "GitHub integration",
+    purpose:
+      "GitHub's two identities, Your GitHub and the Opengeni app, each with one action, in production components.",
+    usedOn: "Capabilities > GitHub",
+    load: () => import("./page-github-integration"),
   },
 ];
 

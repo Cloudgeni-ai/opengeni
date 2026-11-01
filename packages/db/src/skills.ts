@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { readSkillMetadata } from "@opengeni/contracts";
 import type {
+  OrganizationSkillReach,
   SkillFile,
   SkillRecord,
   SkillWriteContext,
@@ -10,6 +11,7 @@ import type {
   SkillReviewReference,
 } from "@opengeni/contracts";
 import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
+import { listSharedWorkspaceIdsForAccount } from "./organization-shared-workspaces";
 
 /** The existing portable artifact framing; never substitutes for a historical content hash. */
 export function skillFilesContentHash(files: readonly SkillFile[]): string {
@@ -248,11 +250,34 @@ function activeSkillDescriptorSource(context: SkillReadContext) {
       AND b.workspace_id=${context.workspaceId}::uuid
     LEFT JOIN capability_plugin_installations pi ON pi.plugin_id=b.plugin_id
       AND pi.account_id=h.account_id AND pi.workspace_id=b.workspace_id AND pi.status='active'
+    ${organizationSkillReachJoin()}
     WHERE h.account_id=${context.accountId}::uuid AND h.status='active'
       AND (r.expires_at IS NULL OR r.expires_at > transaction_timestamp())
       AND (h.scope='organization' OR (h.scope='workspace' AND h.scope_workspace_id=${context.workspaceId}::uuid)
         OR (h.scope='user' AND h.scope_subject_id=${context.subjectId ?? null}))
+      AND ${organizationSkillWorksHere(context)}
   `;
+}
+
+/** The reach row of an organization Skill (migration 1195), aliased `reach`. */
+function organizationSkillReachJoin() {
+  return sql`LEFT JOIN organization_skill_reach reach ON h.scope='organization'
+    AND reach.account_id=h.account_id AND reach.preference_id=h.id`;
+}
+
+/**
+ * Whether this workspace's agents use the Skill. Workspace and personal Skills
+ * already passed their scope test. An organization Skill works everywhere
+ * without a reach row; with one, a Personal workspace needs the Personal
+ * switch and a shared workspace needs "all" or its own id in the list. The
+ * workspace's kind is read once, and only when a narrowed Skill asks.
+ */
+function organizationSkillWorksHere(context: SkillReadContext) {
+  return sql`(h.scope<>'organization' OR reach.preference_id IS NULL
+    OR CASE WHEN (SELECT get_workspace_kind(${context.accountId}::uuid, ${context.workspaceId}::uuid))='personal'
+      THEN reach.allow_personal_workspaces
+      ELSE reach.allowed_workspace_ids IS NULL
+        OR ${context.workspaceId}::uuid=ANY(reach.allowed_workspace_ids) END)`;
 }
 
 /** Active metadata only: building an index must not transfer every Skill folder. */
@@ -326,6 +351,12 @@ export async function listSkillRecords(
     /** Pending revisions authored by this exact session, independent of event retention. */
     sessionId?: string;
     after?: { stableKey: string; id: string };
+    /**
+     * People's Skills pages list organization Skills that don't work in this
+     * workspace too, marked `availableHere: false`, so their managers can change
+     * that from anywhere. Agents' reads leave this off and never see them.
+     */
+    includeOrganizationElsewhere?: boolean;
   } = {},
 ): Promise<SkillRecord[]> {
   const run = async (tx: Database) => {
@@ -356,7 +387,13 @@ export async function listSkillRecords(
         'files',CASE WHEN ${options.metadataOnly === true} THEN '[]'::jsonb ELSE coalesce(r.skill_files,CASE WHEN r.id IS NULL THEN '[]'::jsonb ELSE
           jsonb_build_array(jsonb_build_object('path','SKILL.md','content',r.content)) END) END,
         'source',CASE WHEN b.preference_id IS NULL THEN NULL ELSE jsonb_build_object(
-          'pluginId',b.plugin_id,'facetKey',b.facet_key,'skillFacetId',b.skill_facet_id) END
+          'pluginId',b.plugin_id,'facetKey',b.facet_key,'skillFacetId',b.skill_facet_id) END,
+        'reach',CASE WHEN h.scope<>'organization' THEN NULL
+          WHEN reach.preference_id IS NULL THEN jsonb_build_object(
+            'allowedWorkspaceIds',NULL,'allowPersonalWorkspaces',true)
+          ELSE jsonb_build_object('allowedWorkspaceIds',to_jsonb(reach.allowed_workspace_ids),
+            'allowPersonalWorkspaces',reach.allow_personal_workspaces) END,
+        'availableHere',${organizationSkillWorksHere(context)}
       ) AS skill
       FROM preference_registry_preferences h
       LEFT JOIN LATERAL (
@@ -367,9 +404,11 @@ export async function listSkillRecords(
       ) r ON true
       LEFT JOIN skill_source_bindings b ON b.preference_id=h.id AND b.account_id=h.account_id
         AND b.workspace_id=${context.workspaceId}::uuid
+      ${organizationSkillReachJoin()}
       WHERE h.account_id=${context.accountId}::uuid
         AND (h.scope='organization' OR (h.scope='workspace' AND h.scope_workspace_id=${context.workspaceId}::uuid)
           OR (h.scope='user' AND h.scope_subject_id=${context.subjectId ?? null}))
+        AND (${options.includeOrganizationElsewhere === true} OR ${organizationSkillWorksHere(context)})
         AND (${options.skillId ?? null}::uuid IS NULL OR h.id=${options.skillId ?? null}::uuid)
         AND (${options.revisionId ?? null}::uuid IS NULL OR r.id IS NOT NULL)
         AND (${options.sessionId ?? null}::uuid IS NULL OR EXISTS (
@@ -393,6 +432,97 @@ export async function listSkillRecords(
   return context.subjectId
     ? withWorkspaceSubjectRls(db, context.workspaceId, context.subjectId, run)
     : withWorkspaceRls(db, context.workspaceId, run);
+}
+
+export type OrganizationSkillReachUpdate =
+  | { status: "updated"; reach: OrganizationSkillReach }
+  | { status: "not_found" }
+  | { status: "not_organization" }
+  | { status: "unknown_workspaces"; workspaceIds: string[] };
+
+/**
+ * Change where an organization Skill works. The caller has checked that the
+ * person may manage organization Skills. Agents in a workspace it no longer
+ * works in stop seeing it from their next turn's Skill index.
+ */
+export async function updateOrganizationSkillReach(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    skillId: string;
+    allowedWorkspaceIds: readonly string[] | null;
+    allowPersonalWorkspaces: boolean;
+  },
+): Promise<OrganizationSkillReachUpdate> {
+  let allowedWorkspaceIds: string[] | null = null;
+  if (input.allowedWorkspaceIds !== null) {
+    const listed = [...new Set(input.allowedWorkspaceIds)].sort();
+    if (listed.length > 0) {
+      const sharedIds = new Set(await listSharedWorkspaceIdsForAccount(db, input.accountId));
+      const unknown = listed.filter((workspaceId) => !sharedIds.has(workspaceId));
+      if (unknown.length > 0) return { status: "unknown_workspaces", workspaceIds: unknown };
+    }
+    allowedWorkspaceIds = listed;
+  }
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const scope = async () =>
+      (
+        await rawRows<{ scope: string }>(
+          tx,
+          sql`SELECT scope FROM preference_registry_preferences
+            WHERE account_id=${input.accountId}::uuid AND id=${input.skillId}::uuid`,
+        )
+      )[0]?.scope;
+    const seen = await scope();
+    if (!seen) return { status: "not_found" };
+    if (seen !== "organization") return { status: "not_organization" };
+    // A scope move holds the same head lock and drops the reach row, so taking
+    // it and reading the scope again keeps a reach row off a Skill that just
+    // stopped being the organization's.
+    await rawRows(
+      tx,
+      sql`SELECT preference_id FROM preference_registry_lock_heads(ARRAY[${input.skillId}::uuid])`,
+    );
+    if ((await scope()) !== "organization") return { status: "not_organization" };
+    const [before] = await rawRows<OrganizationSkillReach>(
+      tx,
+      sql`SELECT to_jsonb(allowed_workspace_ids) AS "allowedWorkspaceIds",
+          allow_personal_workspaces AS "allowPersonalWorkspaces"
+        FROM organization_skill_reach
+        WHERE account_id=${input.accountId}::uuid AND preference_id=${input.skillId}::uuid`,
+    );
+    const ids =
+      allowedWorkspaceIds === null
+        ? sql`NULL`
+        : sql`ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(allowedWorkspaceIds)}::jsonb)::uuid)`;
+    const [reach] = await rawRows<OrganizationSkillReach>(
+      tx,
+      sql`INSERT INTO organization_skill_reach(account_id, preference_id, allowed_workspace_ids,
+          allow_personal_workspaces, updated_by_subject_id)
+        VALUES (${input.accountId}::uuid, ${input.skillId}::uuid, ${ids},
+          ${input.allowPersonalWorkspaces}, ${input.subjectId})
+        ON CONFLICT (account_id, preference_id) DO UPDATE SET
+          allowed_workspace_ids=excluded.allowed_workspace_ids,
+          allow_personal_workspaces=excluded.allow_personal_workspaces,
+          updated_by_subject_id=excluded.updated_by_subject_id, updated_at=now()
+        RETURNING to_jsonb(allowed_workspace_ids) AS "allowedWorkspaceIds",
+          allow_personal_workspaces AS "allowPersonalWorkspaces"`,
+    );
+    await rawRows(
+      tx,
+      sql`INSERT INTO audit_events(account_id, workspace_id, subject_id, action, target_type,
+          target_id, metadata)
+        VALUES (${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId},
+          'skill.reach.changed', 'skill', ${input.skillId},
+          ${JSON.stringify({
+            from: before ?? { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
+            to: reach,
+          })}::jsonb)`,
+    );
+    return { status: "updated", reach: reach! };
+  });
 }
 
 export class SkillHumanResponseError extends Error {

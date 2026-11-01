@@ -17,7 +17,21 @@ import {
   type RecordingVisibility,
   type Permission,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, ne, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  ne,
+  or,
+  sql,
+} from "drizzle-orm";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
 import { managedPersonalWorkspacePermissions } from "./personal-workspace-permissions";
 import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
@@ -139,6 +153,7 @@ function recordingView(
     workspaceId: row.workspaceId,
     ownerSubjectId: row.ownerSubjectId,
     visibility: fromVisibility(row.visibility),
+    reachWorkspaceIds: row.reachWorkspaceIds ?? null,
     title: row.title,
     titleSource: row.titleSource,
     purpose: row.purpose,
@@ -464,6 +479,15 @@ export type ListRecordingsInput = RecordingActor & {
    * another workspace shows of this one. Never anyone else's, nor shared ones.
    */
   ownPrivateOnly?: boolean | undefined;
+  /**
+   * With `ownPrivateOnly`: only the Only me meetings that work in this other
+   * workspace, the one the person is looking from. Such a meeting works in
+   * the workspace that stores it, in its owner's Personal workspace, and in
+   * the workspaces on its reach list (all of them when the list is null).
+   * Null when looking from the owner's Personal workspace, where all of them
+   * work.
+   */
+  reachingWorkspaceId?: string | null | undefined;
   /** Only recordings started before this instant (the previous page's last `startedAt`). */
   before?: { startedAt: Date; id: string } | undefined;
   limit?: number | undefined;
@@ -487,6 +511,7 @@ export async function listRecordings(
         eq(schema.recordings.ownerSubjectId, input.subjectId),
         eq(schema.recordings.visibility, "user_private"),
       );
+      if (input.reachingWorkspaceId) conditions.push(reaches(input.reachingWorkspaceId));
     }
     if (input.startedFrom) conditions.push(gte(schema.recordings.startedAt, input.startedFrom));
     if (input.startedTo) conditions.push(lt(schema.recordings.startedAt, input.startedTo));
@@ -610,6 +635,7 @@ export async function ownRecordingWorkspaces(
     id: row.id,
     name: row.name,
     permissions: normalizeWorkspaceMembershipPermissions(row.permissions),
+    ...(row.id === personalId ? { personal: true } : {}),
   }));
   if (
     personalId &&
@@ -623,12 +649,47 @@ export async function ownRecordingWorkspaces(
         and(eq(schema.workspaces.id, personalId), eq(schema.workspaces.accountId, input.accountId)),
       )
       .limit(1);
-    if (personal) found.push({ ...personal, permissions: managedPersonalWorkspacePermissions });
+    if (personal) {
+      found.push({ ...personal, permissions: managedPersonalWorkspacePermissions, personal: true });
+    }
   }
   return found;
 }
 
-export type OwnRecordingWorkspace = { id: string; name: string; permissions: Permission[] };
+export type OwnRecordingWorkspace = {
+  id: string;
+  name: string;
+  permissions: Permission[];
+  /** The person's own Personal workspace, where all their Only me meetings work. */
+  personal?: true;
+};
+
+/**
+ * Which workspace the person's Only me meetings from their other workspaces
+ * must reach to show in this one: this workspace, or null when it is their
+ * own Personal workspace, where all of them work (docs/design/
+ * ownership-and-reach.md: an Only me thing works where its owner turned it
+ * on, always in their Personal workspace).
+ */
+export async function ownMeetingsReaching(
+  db: Database,
+  input: RecordingActor & { accountId: string },
+): Promise<string | null> {
+  if (!input.subjectId.startsWith("user:") || !input.accountId) return input.workspaceId;
+  const personalId = await namedSubjectPersonalWorkspaceId(db, {
+    accountId: input.accountId,
+    subjectId: input.subjectId,
+  });
+  return personalId === input.workspaceId ? null : input.workspaceId;
+}
+
+/** An Only me meeting works in this other workspace: listed, or all of them (null). */
+function reaches(workspaceId: string) {
+  return or(
+    isNull(schema.recordings.reachWorkspaceIds),
+    sql`${workspaceId}::uuid = ANY(${schema.recordings.reachWorkspaceIds})`,
+  )!;
+}
 
 /** Whether this workspace has the recording and the person may see it. */
 export async function recordingVisible(
@@ -653,12 +714,19 @@ export async function recordingVisible(
 /**
  * Which of these workspaces stores the person's own Only me meeting with this
  * id, so it opens in place elsewhere in the organization; null when none does
- * (not theirs, shared, a dictation, being deleted, or in another workspace).
- * Each workspace is read as the person, under its row-level security.
+ * (not theirs, shared, a dictation, being deleted, in another workspace, or
+ * not turned on where they look from: `reachingWorkspaceId`, null in their
+ * Personal workspace). Each workspace is read as the person, under its
+ * row-level security.
  */
 export async function ownRecordingHome(
   db: Database,
-  input: { subjectId: string; recordingId: string; workspaces: readonly OwnRecordingWorkspace[] },
+  input: {
+    subjectId: string;
+    recordingId: string;
+    workspaces: readonly OwnRecordingWorkspace[];
+    reachingWorkspaceId: string | null;
+  },
 ): Promise<OwnRecordingWorkspace | null> {
   for (let start = 0; start < input.workspaces.length; start += OWN_ELSEWHERE_CONCURRENCY) {
     const found = await Promise.all(
@@ -676,6 +744,7 @@ export async function ownRecordingHome(
                   eq(schema.recordings.visibility, "user_private"),
                   eq(schema.recordings.purpose, "meeting"),
                   ne(schema.recordings.state, "deleting"),
+                  ...(input.reachingWorkspaceId ? [reaches(input.reachingWorkspaceId)] : []),
                 ),
               )
               .limit(1);
@@ -695,19 +764,23 @@ const OWN_ELSEWHERE_CONCURRENCY = 8;
 /**
  * The meetings this workspace lists for the person: its own, plus the
  * person's own Only me meetings stored in `elsewhere`, the other workspaces of
- * the same organization the caller checked they may read now, newest first
+ * the same organization the caller checked they may read now, that work in
+ * this one (`reachingWorkspaceId`, from `ownMeetingsReaching`), newest first
  * across them. `sourceWorkspaces` names the other workspaces the page's
  * meetings come from.
  */
 export async function listRecordingsWithOwnElsewhere(
   db: Database,
-  input: ListRecordingsInput & { elsewhere: readonly { id: string; name: string }[] },
+  input: Omit<ListRecordingsInput, "reachingWorkspaceId"> & {
+    elsewhere: readonly { id: string; name: string }[];
+    reachingWorkspaceId: string | null;
+  },
 ): Promise<{
   recordings: Recording[];
   nextBefore: { startedAt: string; id: string } | null;
   sourceWorkspaces: Map<string, string>;
 }> {
-  const { elsewhere: candidates, ...request } = input;
+  const { elsewhere: candidates, reachingWorkspaceId, ...request } = input;
   const limit = Math.min(Math.max(request.limit ?? 50, 1), 200);
   const meetings = (request.purpose ?? "meeting") === "meeting" && !request.ownPrivateOnly;
   // A product's reference names something of this workspace's.
@@ -725,6 +798,7 @@ export async function listRecordingsWithOwnElsewhere(
               ...request,
               workspaceId: workspace.id,
               ownPrivateOnly: true,
+              reachingWorkspaceId,
               limit,
             }),
         ),
@@ -882,9 +956,19 @@ export type UpdateRecordingInput = RecordingActor & {
   visibility?: RecordingVisibility | undefined;
   externalRef?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /**
+   * The owner's Only me meeting: the other workspaces where it also works,
+   * besides the one that stores it and their Personal workspace; null for
+   * every workspace they belong to. The caller resolves the list to the
+   * owner's own workspaces of this organization first.
+   */
+  reachWorkspaceIds?: readonly string[] | null | undefined;
 };
 
-/** Anyone who can see a recording may rename it; only its owner may share or unshare it. */
+/**
+ * Anyone who can see a recording may rename it; only its owner may share or
+ * unshare it, or change where their Only me meeting works.
+ */
 export async function updateRecording(
   db: Database,
   input: UpdateRecordingInput,
@@ -898,6 +982,15 @@ export async function updateRecording(
         throw new RecordingConflictError("A dictation can't be shared", "dictation_private");
       }
     }
+    const reach =
+      input.reachWorkspaceIds === undefined
+        ? undefined
+        : input.reachWorkspaceIds === null
+          ? null
+          : [...new Set(input.reachWorkspaceIds)].filter((id) => id !== row.workspaceId).sort();
+    if (reach !== undefined && row.ownerSubjectId !== input.subjectId) {
+      throw new RecordingForbiddenError();
+    }
     const [updated] = await tx
       .update(schema.recordings)
       .set({
@@ -908,6 +1001,7 @@ export async function updateRecording(
         ...(visibility === undefined ? {} : { visibility }),
         ...(input.externalRef === undefined ? {} : { externalRef: input.externalRef }),
         ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+        ...(reach === undefined ? {} : { reachWorkspaceIds: reach }),
         updatedAt: sql`clock_timestamp()`,
       })
       .where(

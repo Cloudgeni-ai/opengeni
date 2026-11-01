@@ -7,6 +7,14 @@ export * from "./workspace-control-event";
 export * from "./secret-value";
 export * from "./claude-cite-tags";
 export * from "./integration-capability-id";
+import {
+  ApiIntegrationAuthPreview,
+  ApiIntegrationProtocol,
+  InlineOpenApiDocumentSource,
+  IntegrationSource,
+  IntegrationSourceInput,
+} from "./integration-sources";
+export * from "./integration-sources";
 import { defineSchema } from "./define-schema";
 import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
@@ -185,6 +193,7 @@ export * from "./desktop-app";
 export * from "./event-triggers";
 export * from "./automation-templates";
 export * from "./bots";
+export * from "./slack-agents";
 export * from "./mcp-elicitation";
 import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
 import {
@@ -1192,6 +1201,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_delete_message",
   "slack_bot_prepare_message",
   "slack_bot_send_prepared_message",
+  "slack_agent_handoff",
+  "slack_agent_chats",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",
@@ -1450,6 +1461,8 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
       name === "slack_bot_list_channels" ||
       name === "slack_bot_prepare_message" ||
       name === "slack_bot_send_prepared_message") &&
+    // Only chats started from Slack in an installation with Slack agents get these.
+    !name.startsWith("slack_agent_") &&
     !name.startsWith("fiken_") &&
     !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
@@ -2700,6 +2713,9 @@ export const SlackChannelRoute = /* @__PURE__ */ defineSchema(() =>
     // Unbounded like `Workspace.name` itself: a cap here would reject a row the
     // database happily holds.
     targetWorkspaceName: z.string().min(1).nullable(),
+    /** Set when a Slack agent answers in this channel. */
+    slackAgentId: primitives.nullableUuid.default(null),
+    slackAgentName: z.string().min(1).nullable().default(null),
     source: z.enum(["picker", "admin"]),
     updatedAt: primitives.string,
   }),
@@ -2728,6 +2744,11 @@ export const UpdateSlackChannelRoutesRequest = /* @__PURE__ */ defineSchema(() =
           slackChannelId: z.string().min(1).max(64),
           /** Null clears the route, so the channel asks once again. */
           targetWorkspaceId: primitives.nullableUuid,
+          /**
+           * A Slack agent that answers in this channel. Its own workspace must
+           * equal `targetWorkspaceId`. Omitted or null: plain Opengeni.
+           */
+          slackAgentId: primitives.nullableUuid.optional(),
         }),
       )
       .max(200),
@@ -6878,6 +6899,115 @@ export function gitRemoteIdentity(
     : normalizedUri;
 }
 
+/**
+ * Comparison key for "the same repository" across stored session resources,
+ * provider-bound turn resources and provider repository identities. It
+ * ignores letter case and a trailing `.git`, so a bare stored URI and its
+ * bound form compare equal. An unparsable URI has no key.
+ */
+export function repositoryMembershipKey(uri: string): string | null {
+  try {
+    return normalizeRepositoryTransportUri(uri)
+      .replace(/\.git$/i, "")
+      .toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** Whether `resources` currently attach the repository at `uri`. */
+export function resourcesIncludeRepository(
+  resources: readonly ResourceRef[],
+  uri: string,
+): boolean {
+  const key = repositoryMembershipKey(uri);
+  return (
+    key !== null &&
+    resources.some(
+      (resource) => resource.kind === "repository" && repositoryMembershipKey(resource.uri) === key,
+    )
+  );
+}
+
+/**
+ * A repository a person (or an API caller) removed from a session. The record
+ * lasts until a person attaches the repository again: until then an agent
+ * cannot re-attach it (through a message, a child session or a goal
+ * continuation), queued turns and older resource snapshots leave it out, and
+ * child sessions created later inherit the record. `sandboxCleanupPending`
+ * is true until a managed-sandbox turn has removed the repository folder and
+ * credential binding from the sandbox.
+ */
+export const SessionRemovedRepository = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Identifies this removal; cleanup settles exactly this entry. */
+      id: primitives.uuid,
+      resource: RepositoryResourceRef,
+      removedAt: primitives.string,
+      sandboxCleanupPending: z.boolean(),
+    })
+    .strict(),
+);
+export type SessionRemovedRepository = z.infer<typeof SessionRemovedRepository>;
+
+/**
+ * Most removal records one session keeps, one per repository. Past the bound
+ * the oldest records whose cleanup already ran are dropped first; an agent
+ * could then attach a repository whose record was dropped.
+ */
+export const SESSION_REMOVED_REPOSITORIES_MAX = 500;
+
+/** Stored removal records, skipping unreadable entries (an unreadable value is empty). */
+export function parseSessionRemovedRepositories(value: unknown): SessionRemovedRepository[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const parsed = SessionRemovedRepository.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+/** The removal record for the repository at `uri`, if it was removed. */
+export function findSessionRemovedRepository(
+  removed: readonly SessionRemovedRepository[],
+  uri: string,
+): SessionRemovedRepository | undefined {
+  const key = repositoryMembershipKey(uri);
+  if (key === null) return undefined;
+  return removed.find((entry) => repositoryMembershipKey(entry.resource.uri) === key);
+}
+
+/**
+ * Keep the newest record per repository and stay within
+ * `SESSION_REMOVED_REPOSITORIES_MAX`, dropping settled records before
+ * records whose sandbox cleanup is still pending.
+ */
+export function boundSessionRemovedRepositories(
+  removed: readonly SessionRemovedRepository[],
+): SessionRemovedRepository[] {
+  const newest = new Map<string, SessionRemovedRepository>();
+  for (const entry of removed) {
+    const key = repositoryMembershipKey(entry.resource.uri);
+    if (key === null) continue;
+    newest.delete(key);
+    newest.set(key, entry);
+  }
+  const entries = [...newest.values()];
+  let excess = entries.length - SESSION_REMOVED_REPOSITORIES_MAX;
+  if (excess <= 0) return entries;
+  const dropped = new Set<SessionRemovedRepository>();
+  for (const pending of [false, true]) {
+    for (const entry of entries) {
+      if (excess <= 0) break;
+      if (entry.sandboxCleanupPending === pending) {
+        dropped.add(entry);
+        excess -= 1;
+      }
+    }
+  }
+  return entries.filter((entry) => !dropped.has(entry));
+}
+
 /** Provider-aware Git credential-helper path aliases, without a leading slash. */
 export function gitRemotePathAliases(
   uri: string,
@@ -7087,6 +7217,14 @@ export const FileAsset = /* @__PURE__ */ defineSchema(() =>
      * themselves. Null for older shared files and output made without a person.
      */
     ownerSubjectId: z.string().min(1).max(1024).nullable().optional(),
+    /**
+     * An Only me file's other workspaces of the organization where it also
+     * works, besides the one that stores it and its owner's Personal
+     * workspace; null for every workspace (files from before this list
+     * existed). Absent for workspace files, which work only in their
+     * workspace.
+     */
+    reachWorkspaceIds: z.array(primitives.uuid).nullable().optional(),
     id: primitives.uuid,
     workspaceId: primitives.uuid,
     status: FileStatus,
@@ -7181,6 +7319,13 @@ export const UpdateFileVisibilityResponse = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type UpdateFileVisibilityResponse = z.infer<typeof UpdateFileVisibilityResponse>;
+
+export const UpdateFileReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    file: FileAsset,
+  }),
+);
+export type UpdateFileReachResponse = z.infer<typeof UpdateFileReachResponse>;
 
 export const FileDownloadUrlResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -9497,6 +9642,8 @@ export const SessionAuthorizationOperation = /* @__PURE__ */ defineSchema(() =>
     "session.personal_resource.grant",
     /** Create, refresh or stop a read-only share link anyone holding it can open. */
     "session.share_link.write",
+    /** Remove repositories attached to the session (and its child sessions). */
+    "session.resources.write",
   ]),
 );
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
@@ -14137,6 +14284,32 @@ export const UpdateSessionSkillsRequest = /* @__PURE__ */ /* @__PURE__ */ define
 );
 export type UpdateSessionSkillsRequest = z.infer<typeof UpdateSessionSkillsRequest>;
 
+/**
+ * `POST /v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove`:
+ * remove attached repositories from a session and its child sessions. Each
+ * entry names a repository by its URI; matching ignores letter case and a
+ * trailing `.git`. Access ends on the next Git or GitHub call and the next
+ * turn removes the repository folder from the sandbox.
+ */
+export const RemoveSessionResourcesRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      resources: z
+        .array(
+          z
+            .object({
+              kind: z.literal("repository"),
+              uri: primitives.nonEmptyString,
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(32),
+    })
+    .strict(),
+);
+export type RemoveSessionResourcesRequest = z.infer<typeof RemoveSessionResourcesRequest>;
+
 function projectStoredSkillMetadata(value: unknown): unknown {
   if (!Array.isArray(value)) return value;
   return value.map((skill: unknown) => {
@@ -15081,11 +15254,6 @@ export const UninstallSkillResult = /* @__PURE__ */ defineSchema(() =>
 );
 export type UninstallSkillResult = z.infer<typeof UninstallSkillResult>;
 
-export const ApiIntegrationProtocol = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["openapi", "graphql"]),
-);
-export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
-
 export const IntegrationDefinitionProvenance = /* @__PURE__ */ defineSchema(() =>
   z.enum(["curated", "workspace"]),
 );
@@ -15314,76 +15482,6 @@ export const IntegrationFacetRemovalResult = /* @__PURE__ */ defineSchema(() =>
 );
 export type IntegrationFacetRemovalResult = z.infer<typeof IntegrationFacetRemovalResult>;
 
-export const IntegrationSource = /* @__PURE__ */ defineSchema(() =>
-  z.discriminatedUnion("kind", [
-    z
-      .object({
-        kind: z.literal("definition"),
-        definitionId: z.string().min(1).max(128),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("openapi"),
-        url: z.string().url().max(2048),
-        baseUrl: z.string().url().max(2048).optional(),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("graphql"),
-        endpoint: z.string().url().max(2048),
-        name: z.string().min(1).max(200).optional(),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("auto"),
-        url: z.string().url().max(2048),
-        baseUrl: z.string().url().max(2048).optional(),
-      })
-      .strict(),
-  ]),
-);
-export type IntegrationSource = z.infer<typeof IntegrationSource>;
-
-/** Custom OpenAPI documents must fit the same 8 MiB bound as fetched specs. */
-export const INLINE_OPENAPI_DOCUMENT_MAX_BYTES = 8 * 1024 * 1024;
-
-/**
- * An OpenAPI 3.x document supplied in the request body (JSON or YAML text)
- * instead of fetched from a URL. `sourceKey` is the caller's stable identity
- * for the Integration: the same key updates the same installation across
- * document revisions. Server URLs must be absolute (or `baseUrl` given), and
- * every call still goes through the deployment network policy, so a product
- * on a private or loopback address stays unreachable unless the operator
- * enables private targets; a local product still needs a public tunnel.
- */
-export const InlineOpenApiDocumentSource = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      kind: z.literal("openapi_document"),
-      sourceKey: z
-        .string()
-        .min(1)
-        .max(128)
-        .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
-      document: primitives.nonEmptyString.refine(
-        (value) => new TextEncoder().encode(value).byteLength <= INLINE_OPENAPI_DOCUMENT_MAX_BYTES,
-        `OpenAPI document must be at most ${INLINE_OPENAPI_DOCUMENT_MAX_BYTES} bytes`,
-      ),
-      baseUrl: z.string().url().max(2048).optional(),
-    })
-    .strict(),
-);
-export type InlineOpenApiDocumentSource = z.infer<typeof InlineOpenApiDocumentSource>;
-
-/** Preview/install input: every stored source kind plus an inline document. */
-export const IntegrationSourceInput = /* @__PURE__ */ defineSchema(() =>
-  z.discriminatedUnion("kind", [...IntegrationSource.options, InlineOpenApiDocumentSource]),
-);
-export type IntegrationSourceInput = z.infer<typeof IntegrationSourceInput>;
-
 /** Responses echo an inline document only by its digest, never its text. */
 export const InlineOpenApiDocumentSourceEcho = /* @__PURE__ */ defineSchema(() =>
   z
@@ -15441,35 +15539,6 @@ export const ApiIntegrationOAuthConnectionMetadata = /* @__PURE__ */ defineSchem
 export type ApiIntegrationOAuthConnectionMetadata = z.infer<
   typeof ApiIntegrationOAuthConnectionMetadata
 >;
-
-export const ApiIntegrationAuthPreview = /* @__PURE__ */ defineSchema(() =>
-  z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("none") }).strict(),
-    z
-      .object({
-        kind: z.literal("oauth2"),
-        providerDomain: z.string().min(1).max(253),
-        scopes: z.array(z.string().min(1).max(1024)).max(256),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("api_key"),
-        providerDomain: z.string().min(1).max(253),
-        carrier: z.enum(["header", "query", "cookie"]),
-        name: z.string().min(1).max(256),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("http"),
-        providerDomain: z.string().min(1).max(253),
-        scheme: z.string().min(1).max(64),
-      })
-      .strict(),
-  ]),
-);
-export type ApiIntegrationAuthPreview = z.infer<typeof ApiIntegrationAuthPreview>;
 
 export const ApiIntegrationToolPreview = /* @__PURE__ */ defineSchema(() =>
   z
@@ -15603,6 +15672,22 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
         .object({
           originWorkspaceId: primitives.uuid,
           originWorkspaceName: primitives.nonEmptyString,
+        })
+        .strict()
+        .optional(),
+      /**
+       * Set when the organization serves it here (an organization connector of
+       * kind "api"): managed in the organization's settings, not here. A
+       * workspace manager can turn it off here and back on; `enabledHere` is
+       * false while it is off here.
+       */
+      organizationConnector: z
+        .object({
+          connectorId: primitives.uuid,
+          login: z.enum(["each_person", "organization_key", "none"]),
+          /** How the API authenticates: what a person adds when each person signs in. */
+          auth: ApiIntegrationAuthPreview,
+          enabledHere: primitives.boolean,
         })
         .strict()
         .optional(),
@@ -16077,13 +16162,66 @@ export const CommandReadResult = /* @__PURE__ */ (() =>
         completeness: z.literal("unknown"),
         gaps: z.array(primitives.string),
       }),
+      // Output larger than the budget: `chunks` is its start, `tail` its end,
+      // and `omitted` the middle between them. `nextCursor` then points at the
+      // omitted middle, so paging from it still returns every byte.
+      omitted: z
+        .object({ bytes: primitives.nonnegativeInteger, cursor: primitives.string })
+        .strict()
+        .optional(),
+      tail: z
+        .object({
+          chunks: z
+            .array(
+              z.object({
+                sequence: primitives.nonnegativeInteger,
+                stream: z.enum(["stdout", "stderr"]),
+                streamFidelity: z.enum(["separate", "merged", "unknown"]),
+                chunk: primitives.string,
+              }),
+            )
+            .max(64),
+          cursor: primitives.string,
+        })
+        .strict()
+        .optional(),
+      /** Cursor after the newest retained output: read from it for new output only. */
+      endCursor: primitives.string.optional(),
+      notice: primitives.string.optional(),
       waitedMs: z.number().nonnegative(),
       timedOut: primitives.boolean,
       aborted: primitives.boolean,
       liveFanout: primitives.boolean,
+      /** The wait ended early so the caller's turn can take a pending Steer. */
+      yielded: z.literal(true).optional(),
     })
     .strict())();
 export type CommandReadResult = z.infer<typeof CommandReadResult>;
+
+/** command_wait over several commands (`commandIds`). */
+export const CommandWaitManyResult = /* @__PURE__ */ (() =>
+  z
+    .object({
+      commands: z
+        .array(
+          CommandReadResult.omit({
+            waitedMs: true,
+            timedOut: true,
+            aborted: true,
+            liveFanout: true,
+            yielded: true,
+          }),
+        )
+        .max(8),
+      waitFor: z.enum(["all", "any"]),
+      waitedMs: z.number().nonnegative(),
+      timedOut: primitives.boolean,
+      aborted: primitives.boolean,
+      liveFanout: primitives.boolean,
+      yielded: z.literal(true).optional(),
+    })
+    .strict())();
+export type CommandWaitManyResult = z.infer<typeof CommandWaitManyResult>;
 
 export const SessionBackgroundCommandListResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ commands: z.array(SessionBackgroundCommand).max(1000) }).strict(),
@@ -16189,6 +16327,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     /** Typed Memory selector frozen at create; see {@link SessionMemoryScope}. */
     memoryScope: SessionMemoryScope.default("workspace"),
     resources: z.array(ResourceRef),
+    /**
+     * Repositories removed from the session and not attached again by a
+     * person since; see {@link SessionRemovedRepository}. Omitted by legacy
+     * readers.
+     */
+    removedRepositories: z.array(SessionRemovedRepository).optional(),
     skills: SessionSkills.default([]),
     tools: z.array(ToolRef),
     // Origin and optimistic-concurrency fence for the durable session policy.
@@ -16813,6 +16957,9 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "session.agent.updated",
     // The Skills a session carries itself were replaced (names only).
     "session.skills.updated",
+    // A person removed repositories from the chat; access ends on the next
+    // Git or GitHub call and the next turn removes their sandbox folders.
+    "session.resources.removed",
     // Multi-account Codex (P1): the account a session's turn runs on changed
     // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
     // the in-session "Running on:" indicator's live flip.
@@ -17071,6 +17218,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.tool_policy.updated",
     "session.agent.updated",
     "session.skills.updated",
+    "session.resources.removed",
     "session.model_settings.updated",
     "session.usage_limit.updated",
   ],
@@ -22093,6 +22241,13 @@ export const MachinesResponse = /* @__PURE__ */ defineSchema(() =>
     activeEpoch: z.number().int(),
     machines: z.array(MachineView),
     sessionMachineAccess: SessionMachineAccess.nullable().optional(),
+    /**
+     * False when the organization lets only its owners and admins connect
+     * new machines of their own: an Only me machine, or any machine in a
+     * Personal workspace. Omitted for an agent listing its own chat, and by
+     * older servers.
+     */
+    canConnectOwnMachine: z.boolean().optional(),
   }),
 );
 export type MachinesResponse = z.infer<typeof MachinesResponse>;

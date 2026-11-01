@@ -9,8 +9,6 @@ import {
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import {
-  authorizationHoldsOrganizationAdministration,
-  hasIntegrationSetupPermission,
   requireAccessGrant,
   requireIntegrationSetupAuthorization,
   type ApiRouteDeps,
@@ -33,66 +31,27 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE } from "@opengeni/contracts/knowledge-source-sync-retirement";
 
-import {
-  browseGoogleDriveFacetSource,
-  saveGoogleDriveFacetSource,
-} from "../integrations/google-drive";
 import { parseRequestJson } from "../http/request-body";
 
 export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get(
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/browse",
     async (c) => {
-      const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
-      try {
-        return c.json(
-          await browseGoogleDriveFacetSource(deps, {
-            workspaceId,
-            subjectId: grant.subjectId,
-            capabilityId: decoded(c.req.param("capabilityId")),
-            instanceKey: decoded(c.req.param("instanceKey")),
-            facetKey: decoded(c.req.param("facetKey")),
-            parentId: c.req.query("parentId") ?? "root",
-            ...(c.req.query("pageToken") ? { pageToken: c.req.query("pageToken") } : {}),
-          }),
-        );
-      } catch (error) {
-        throw facetHttpError(error);
-      }
+      // Knowledge-source facets are retired: integrations give agents tools,
+      // and recurring work is an ordinary agent schedule. The routes stay so
+      // older clients get a clear answer.
+      await requireAccessGrant(c, deps, c.req.param("workspaceId"), "connections:read");
+      throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
     },
   );
 
   app.put(
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/source",
     async (c) => {
-      const workspaceId = c.req.param("workspaceId");
-      const authorization = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
-      const { grant } = authorization;
-      try {
-        return c.json(
-          IntegrationFacetMutationResult.parse(
-            await saveGoogleDriveFacetSource(deps, {
-              accountId: grant.accountId,
-              workspaceId,
-              subjectId: grant.subjectId,
-              capabilityId: decoded(c.req.param("capabilityId")),
-              instanceKey: decoded(c.req.param("instanceKey")),
-              facetKey: decoded(c.req.param("facetKey")),
-              payload: await c.req.json(),
-              canManageOrganizationDestination:
-                authorizationHoldsOrganizationAdministration(authorization),
-              canManageWorkspaceDestination: hasIntegrationSetupPermission(grant),
-              canManagePersonalDestination:
-                authorization.contextIntegrity &&
-                authorization.authenticatedSubjectId === grant.subjectId,
-            }),
-          ),
-        );
-      } catch (error) {
-        throw facetHttpError(error);
-      }
+      await requireIntegrationSetupAuthorization(c, deps, c.req.param("workspaceId"));
+      throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
     },
   );
 
@@ -166,14 +125,10 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
         const definition = instance.facets.find(
           (facet) => facet.definition.facetKey === facetKey,
         )?.definition;
-        if (
-          definition?.kind === "knowledge_source" &&
-          definition.capabilities.provider === "google-drive"
-        ) {
-          throw new HTTPException(422, {
-            message:
-              "Google Drive source configuration requires the provider-specific source route",
-          });
+        // Stored Knowledge-source facets stay readable, pausable and
+        // removable, but can no longer be configured.
+        if (definition?.kind === "knowledge_source") {
+          throw new HTTPException(410, { message: KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE });
         }
         return c.json(
           IntegrationFacetMutationResult.parse(

@@ -88,6 +88,7 @@ import {
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { isPersonalIntegrationSetupCandidate } from "@opengeni/contracts/personal-integration-setup";
+import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
@@ -2697,6 +2698,8 @@ export function integrationDefinitionCapabilityRecommendations(
 export function nativeConnectionCapabilityRecommendations(
   options: {
     connectedMachines?: boolean;
+    /** Personal GitHub OAuth is enabled: offer the person's own GitHub identity. */
+    personalGitHub?: boolean;
     browserExtension?: BrowserExtension;
     /** Reviewed API integration definitions this deployment can connect here. */
     integrationDefinitions?: readonly IntegrationDefinition[];
@@ -2709,9 +2712,10 @@ export function nativeConnectionCapabilityRecommendations(
       kind: "api",
       source: "built_in",
       name: "GitHub App",
-      description: "Connect repositories through Opengeni's GitHub resource picker.",
+      description:
+        "The Opengeni GitHub App: work appears as the Opengeni bot, shared with the workspace, installed per organization or account. Use for 'install the GitHub app' or giving Opengeni access to an org's repositories.",
       category: "source-control",
-      tags: ["github", "repositories", "source-control"],
+      tags: ["github", "repositories", "source-control", "github app", "install", "bot"],
       homepageUrl: "https://github.com",
       providerDomain: "github.com",
       authModel: "github_app_owner_consent",
@@ -2737,6 +2741,51 @@ export function nativeConnectionCapabilityRecommendations(
       },
     }),
   ];
+  if (options.personalGitHub) {
+    items.push(
+      CapabilityCatalogItem.parse({
+        id: PERSONAL_GITHUB_CAPABILITY_ID,
+        kind: "api",
+        source: "built_in",
+        name: "Your GitHub",
+        description:
+          "The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose. Use for 'connect my GitHub', 'use my account' or 'do it as me'.",
+        category: "source-control",
+        tags: [
+          "github",
+          "repositories",
+          "source-control",
+          "my github",
+          "personal",
+          "my account",
+          "as me",
+          "identity",
+        ],
+        homepageUrl: "https://github.com",
+        providerDomain: "github.com",
+        authModel: "github_personal_oauth",
+        authKind: "oauth2",
+        surfaceType: "first_party_github_personal",
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        runtime: {
+          available: true,
+          notes:
+            "Only the person can connect their own GitHub account; the token never reaches the sandbox.",
+        },
+        lifecycle: {
+          status: "available",
+          readiness: "setup_required",
+          detail: "The person connects their GitHub account from the chat card.",
+          managedBy: "platform",
+        },
+        actions: ["connect", "inspect"],
+        metadata: {
+          firstPartyMcpTools: ["github_connect_link"],
+          recommendationOnly: true,
+        },
+      }),
+    );
+  }
   if (options.connectedMachines) {
     items.push(
       CapabilityCatalogItem.parse({

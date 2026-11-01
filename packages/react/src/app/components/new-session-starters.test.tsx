@@ -80,17 +80,25 @@ test("route keeps suggestions below recent sessions and uses the ordinary draft/
   expect(route).toContain("setMessage(prompt)");
   expect(route).toContain("value: message");
   expect(route).toContain("setValue: setMessage");
-  // Visibility and where it runs are "+" drill-ins, not controls under the composer.
+  // Visibility and where it runs are setup chips above the message, not "+"
+  // drill-ins or controls under the composer.
   expect(route).toContain("<VisibilityMenuBody");
   expect(route).toContain("<RunsOnMenuBody");
   expect(route).toContain("<ComputeTargetControl");
+  expect(route).toContain("runsOn={runsOnSetup}");
+  expect(route).toContain("visibility={visibilitySetup}");
+  expect(route).not.toMatch(/\n\s+runsOn: \{\n\s+summary: runsOnSummary/);
 });
 
 test("without the chat list, the new-chat page shows no recent chats or project picker", () => {
   const route = readFileSync(new URL("../routes/sessions-index.tsx", import.meta.url), "utf8");
   expect(route).toContain('const chatList = useSessionUiFeature("chatList");');
   expect(route).toContain("{chatList ? <RecentSessions workspaceId={workspaceId} /> : null}");
-  expect(route).toMatch(/chatList \? \(\s*<SessionSetupStrip/);
+  // The strip still shows Runs on and Visibility; only the project chip goes.
+  expect(route).toMatch(
+    /chatList \|\| runsOnSetup \|\| visibilitySetup \? \(\s*<SessionSetupStrip/,
+  );
+  expect(route).toMatch(/project=\{\s*chatList\s*\?/);
 });
 
 test("the new-chat page's Add credits button follows the addCredits switch", () => {

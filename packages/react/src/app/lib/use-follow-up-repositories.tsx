@@ -1,25 +1,101 @@
 import {
+  findSessionRemovedRepository,
   mergeResourceRefs,
   normalizeRepositoryTransportUri,
+  repositoryMembershipKey,
+  resourceMountPath,
   stableJson,
 } from "@opengeni/contracts";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "./toast";
 
 import { openGitHubInstallationSettings } from "./github-app-connect";
-import type { RepositoryContextPickerProps } from "../components/repository-picker";
+import type {
+  MountedRepositoryTarget,
+  RepositoryContextPickerProps,
+} from "../components/repository-picker";
 import { useAppContext } from "../app-context";
 import { hasWorkspacePermission } from "./permissions";
 import {
   buildAdditionalRepositoryResources,
+  isRepositoryResourceForGitHubRepo,
   repositorySelectionFromResources,
   type RepoDraft,
 } from "./session-tools";
+import type { GitStatusResponse } from "@opengeni/contracts";
 import type { GitHubRepository, ResourceRef, Session } from "../types";
 import { usePage } from "./navigation";
 import { errorMessage } from "@opengeni/contracts/values";
+import { ConfirmDialog } from "../../ui/confirm-dialog";
+import { userErrorText } from "../../ui/api-error";
 
 type RepositoryResource = Extract<ResourceRef, { kind: "repository" }>;
+
+/**
+ * What the confirmation knows about the folder: `checking` while Git status
+ * runs, `unknown` when the check failed or timed out, `kept` on a Connected
+ * Machine, whose files Opengeni never deletes.
+ */
+export type RepositoryRemovalFolderState = "checking" | "clean" | "unsaved" | "unknown" | "kept";
+
+type RepositoryRemoval = {
+  open: boolean;
+  resource: RepositoryResource;
+  name: string;
+  folder: RepositoryRemovalFolderState;
+};
+
+const REMOVAL_FOLDER_COPY: Record<RepositoryRemovalFolderState, string> = {
+  checking: "The agent loses access and its folder is removed.",
+  clean: "The agent loses access and its folder is removed.",
+  unsaved: "The agent loses access and its folder is removed. It has unsaved changes.",
+  unknown:
+    "The agent loses access and its folder is removed. Couldn't check it for unsaved changes.",
+  kept: "The agent loses access. Files on your computer are left alone.",
+};
+
+const REMOVAL_STATUS_TIMEOUT_MS = 10_000;
+
+/** Uncommitted files, unpushed commits, or a local branch that was never pushed. */
+export function gitStatusHasUnsavedChanges(status: GitStatusResponse): boolean {
+  if (!status.isRepo) return false;
+  return (
+    status.files.length > 0 ||
+    status.ahead > 0 ||
+    (!status.detached && status.head !== null && status.upstream === null)
+  );
+}
+
+function repositoryDisplayName(uri: string): string {
+  const path = uri.replace(/[?#].*$/, "").replace(/\/+$/, "");
+  const name = path.slice(path.lastIndexOf("/") + 1).replace(/\.git$/i, "");
+  return name || uri;
+}
+
+/** Confirms removing one mounted repository from a chat. */
+export function RepositoryRemovalDialog(props: {
+  open: boolean;
+  name: string;
+  /** Remove waits while the folder is `checking`. */
+  folder: RepositoryRemovalFolderState;
+  onClose: () => void;
+  onConfirm: () => Promise<boolean>;
+}) {
+  return (
+    <ConfirmDialog
+      open={props.open}
+      onOpenChange={(open) => {
+        if (!open) props.onClose();
+      }}
+      title={`Remove ${props.name} from this chat?`}
+      description={REMOVAL_FOLDER_COPY[props.folder]}
+      confirmLabel="Remove"
+      pendingLabel="Removing…"
+      confirmDisabled={props.folder === "checking"}
+      onConfirm={props.onConfirm}
+    />
+  );
+}
 
 type RepositoryRefreshContext = Pick<
   ReturnType<typeof useAppContext>,
@@ -124,8 +200,10 @@ function manualResourceSignature(resource: RepositoryResource): string {
 
 /**
  * Session-scoped repository additions for the follow-up composer. Session
- * resources are additive, so accepted resources become locked while only the
- * not-yet-sent selection remains editable.
+ * resources are additive: accepted resources cannot be retargeted, but a person
+ * can remove one from the chat after a confirmation (`removalDialog`). Only
+ * explicit additions are ever sent, so a stale composer never re-attaches a
+ * repository someone removed elsewhere.
  */
 export function useFollowUpRepositories(
   session: Session,
@@ -137,6 +215,8 @@ export function useFollowUpRepositories(
   selectionCount: number;
   pickerProps: (disabled: boolean) => RepositoryContextPickerProps;
   commitSent: (resources: ResourceRef[]) => void;
+  /** Render next to the composer; it confirms removing a mounted repository. */
+  removalDialog: ReactNode;
 } {
   const context = useAppContext();
   const catalogRefresh = useRepositoryCatalogRefresh(session.workspaceId, context);
@@ -152,14 +232,48 @@ export function useFollowUpRepositories(
   const [pendingManualRepos, setPendingManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [optimisticMountedRepos, setOptimisticMountedRepos] = useState<ResourceRef[]>([]);
+  // Repositories this tab removed, hidden until the session read catches up.
+  const [locallyRemovedKeys, setLocallyRemovedKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [removal, setRemoval] = useState<RepositoryRemoval | null>(null);
+  const removalCheck = useRef<AbortController | null>(null);
+  // Per optimistic mount, the removal record its send superseded (if any).
+  const [supersededRemovalIds, setSupersededRemovalIds] = useState<
+    Readonly<Record<string, string | null>>
+  >({});
+  const removedRecordsRef = useRef(session.removedRepositories ?? []);
+  removedRecordsRef.current = session.removedRepositories ?? [];
   const nextManualRepoId = useRef(1);
   const currentSessionId = useRef(session.id);
   currentSessionId.current = session.id;
-
-  const mountedResources = useMemo(
-    () => mergeResourceRefs(session.resources, optimisticMountedRepos),
-    [optimisticMountedRepos, session.resources],
+  const canRemoveRepositories = hasWorkspacePermission(
+    context.accessContext,
+    session.workspaceId,
+    "sessions:control",
   );
+
+  const mountedResources = useMemo(() => {
+    const removedRecords = session.removedRepositories ?? [];
+    // An optimistic mount someone has since removed must not linger.
+    const optimistic = optimisticMountedRepos.filter((resource) => {
+      if (resource.kind !== "repository") return true;
+      const record = findSessionRemovedRepository(removedRecords, resource.uri);
+      const key = repositoryMembershipKey(resource.uri) ?? resource.uri;
+      return record === undefined || record.id === supersededRemovalIds[key];
+    });
+    return mergeResourceRefs(session.resources, optimistic).filter(
+      (resource) =>
+        resource.kind !== "repository" ||
+        !locallyRemovedKeys.has(repositoryMembershipKey(resource.uri) ?? resource.uri),
+    );
+  }, [
+    locallyRemovedKeys,
+    optimisticMountedRepos,
+    session.removedRepositories,
+    session.resources,
+    supersededRemovalIds,
+  ]);
   const mountedRepositoryResources = useMemo(
     () => mountedResources.filter((resource) => resource.kind === "repository"),
     [mountedResources],
@@ -373,6 +487,147 @@ export function useFollowUpRepositories(
     ],
   );
 
+  const requestRepositoryRemoval = useCallback(
+    (target: MountedRepositoryTarget) => {
+      const resource = mountedRepositoryResources.find((candidate) => {
+        if (target.kind === "app")
+          return isRepositoryResourceForGitHubRepo(candidate, target.repository);
+        if (target.kind === "personal") {
+          return (
+            candidate.connectionType === "github_personal" &&
+            candidate.repositoryId === target.repository.repositoryId
+          );
+        }
+        const key = repositoryMembershipKey(target.uri);
+        return key !== null && repositoryMembershipKey(candidate.uri) === key;
+      });
+      if (!resource) return;
+      removalCheck.current?.abort();
+      removalCheck.current = null;
+      const name =
+        target.kind === "uri"
+          ? repositoryDisplayName(target.uri)
+          : (target.repository.fullName.split("/").at(-1) ?? target.repository.fullName);
+      // Opengeni never deletes files on a Connected Machine; nothing to check.
+      if (session.sandboxBackend === "selfhosted") {
+        setRemoval({ open: true, resource, name, folder: "kept" });
+        return;
+      }
+      const check = new AbortController();
+      removalCheck.current = check;
+      const timeout = setTimeout(() => check.abort(), REMOVAL_STATUS_TIMEOUT_MS);
+      setRemoval({ open: true, resource, name, folder: "checking" });
+      const settle = (folder: RepositoryRemovalFolderState) => {
+        clearTimeout(timeout);
+        if (removalCheck.current !== check) return;
+        removalCheck.current = null;
+        setRemoval((current) =>
+          current?.resource === resource ? { ...current, folder } : current,
+        );
+      };
+      // A failed or slow check says so; Remove stays available.
+      context.client
+        .gitStatus(
+          session.workspaceId,
+          session.id,
+          { path: resourceMountPath(resource) },
+          { signal: check.signal },
+        )
+        .then(
+          (status) => settle(gitStatusHasUnsavedChanges(status) ? "unsaved" : "clean"),
+          () => settle("unknown"),
+        );
+    },
+    [
+      context.client,
+      mountedRepositoryResources,
+      session.id,
+      session.sandboxBackend,
+      session.workspaceId,
+    ],
+  );
+
+  const closeRepositoryRemoval = useCallback(() => {
+    removalCheck.current?.abort();
+    removalCheck.current = null;
+    setRemoval((current) => (current ? { ...current, open: false } : current));
+  }, []);
+
+  const confirmRepositoryRemoval = useCallback(async (): Promise<boolean> => {
+    if (!removal) return false;
+    const { resource } = removal;
+    const acceptedSessionId = session.id;
+    const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
+    if (!acceptedTransition) return false;
+    let updated: Session;
+    try {
+      updated = await context.client.removeSessionResources(session.workspaceId, session.id, {
+        resources: [{ kind: "repository", uri: resource.uri }],
+      });
+    } catch (error) {
+      toast.error(`Couldn't remove ${removal.name}`, { description: userErrorText(error) });
+      return false;
+    }
+    if (
+      currentSessionId.current !== acceptedSessionId ||
+      !context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
+    ) {
+      return true;
+    }
+    const key = repositoryMembershipKey(resource.uri) ?? resource.uri;
+    const sameRepository = (candidate: ResourceRef) =>
+      candidate.kind === "repository" &&
+      (repositoryMembershipKey(candidate.uri) ?? candidate.uri) === key;
+    setLocallyRemovedKeys((current) => new Set(current).add(key));
+    setOptimisticMountedRepos((current) =>
+      current.filter((candidate) => !sameRepository(candidate)),
+    );
+    // Switching the row off must not leave it queued to be re-attached.
+    if (resource.githubRepositoryId !== undefined) {
+      const repositoryId = resource.githubRepositoryId;
+      setPendingRepoIds((current) => {
+        if (!current.has(repositoryId)) return current;
+        const next = new Set(current);
+        next.delete(repositoryId);
+        return next;
+      });
+    }
+    if (
+      resource.connectionType === "github_personal" &&
+      typeof resource.repositoryId === "string"
+    ) {
+      const repositoryId = resource.repositoryId;
+      setPendingPersonalRepoIds((current) => {
+        if (!current.has(repositoryId)) return current;
+        const next = new Set(current);
+        next.delete(repositoryId);
+        return next;
+      });
+    }
+    context.setSession((current) => {
+      if (!current || current.id !== updated.id) return current;
+      const { removedRepositories: _previous, ...rest } = current;
+      return {
+        ...rest,
+        resources: updated.resources,
+        ...(updated.removedRepositories
+          ? { removedRepositories: updated.removedRepositories }
+          : {}),
+      };
+    });
+    return true;
+  }, [context, removal, session.id, session.workspaceId]);
+
+  const removalDialog = (
+    <RepositoryRemovalDialog
+      open={removal?.open === true}
+      name={removal?.name ?? ""}
+      folder={removal?.folder ?? "clean"}
+      onClose={closeRepositoryRemoval}
+      onConfirm={confirmRepositoryRemoval}
+    />
+  );
+
   const pickerProps = useCallback(
     (disabled: boolean): RepositoryContextPickerProps => ({
       setupMode:
@@ -413,6 +668,7 @@ export function useFollowUpRepositories(
             )),
       ),
       validationError: pendingBuild.error,
+      ...(canRemoveRepositories ? { onRemoveMountedRepository: requestRepositoryRemoval } : {}),
       ...catalogRefresh,
       onConnectPersonalGitHub: () => void context.connectPersonalGitHub(session.workspaceId),
       onTogglePersonalGitHubRepo: (repo) => void togglePendingPersonalRepository(repo),
@@ -592,6 +848,7 @@ export function useFollowUpRepositories(
     [
       page,
       catalogRefresh,
+      canRemoveRepositories,
       context,
       disconnectRepositoryInstallation,
       onConnectWorkspaceApp,
@@ -603,6 +860,7 @@ export function useFollowUpRepositories(
       mountedRepositorySelection.selectedRepoIds,
       pendingBuild.error,
       pendingManualRepos,
+      requestRepositoryRemoval,
       selectedPersonalRepoIds,
       selectedPersonalRepoRefs,
       selectedRepoIds,
@@ -621,6 +879,22 @@ export function useFollowUpRepositories(
     );
     if (repositories.length === 0) return;
     setOptimisticMountedRepos((current) => mergeResourceRefs(current, repositories));
+    // This send ends the removal records it saw; only a later removal hides it.
+    const supersededRemovals = Object.fromEntries(
+      repositories.map((resource) => [
+        repositoryMembershipKey(resource.uri) ?? resource.uri,
+        findSessionRemovedRepository(removedRecordsRef.current, resource.uri)?.id ?? null,
+      ]),
+    );
+    setSupersededRemovalIds((current) => ({ ...current, ...supersededRemovals }));
+    // Re-attaching a repository this tab removed shows it as mounted again.
+    const sentKeys = new Set(
+      repositories.map((resource) => repositoryMembershipKey(resource.uri) ?? resource.uri),
+    );
+    setLocallyRemovedKeys((current) => {
+      if (![...current].some((key) => sentKeys.has(key))) return current;
+      return new Set([...current].filter((key) => !sentKeys.has(key)));
+    });
 
     // An optimistic Send can be accepted after the picker becomes editable
     // again. Remove only pending selections represented by this immutable wire
@@ -694,5 +968,6 @@ export function useFollowUpRepositories(
     selectionCount,
     pickerProps,
     commitSent,
+    removalDialog,
   };
 }

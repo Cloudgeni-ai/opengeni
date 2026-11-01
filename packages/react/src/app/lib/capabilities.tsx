@@ -230,6 +230,24 @@ export type CapabilityConnectPlan =
     }
   | { mode: "api_key"; providerDomain: string; fields: RequiredHeaderField[] };
 
+/**
+ * A connector the organization provides that a workspace manager turned off
+ * in this workspace. Turning it back on is an enable with nothing in it: it
+ * uses the organization's setup again, never a sign-in or key of its own.
+ */
+export function organizationConnectorTurnedOff(
+  item: Pick<CapabilityCatalogItem, "kind" | "enabled" | "actions" | "lifecycle" | "metadata">,
+): boolean {
+  return (
+    item.kind === "mcp" &&
+    !item.enabled &&
+    item.lifecycle?.managedBy === "organization" &&
+    item.actions.includes("connect") &&
+    typeof item.metadata.organizationConnector === "object" &&
+    item.metadata.organizationConnector !== null
+  );
+}
+
 export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityConnectPlan {
   if (
     item.surfaceType === "first_party_social" ||
@@ -249,6 +267,9 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
   // plan is only allowed to connect or enable MCP servers.
   if (item.kind !== "mcp") {
     return { mode: "dedicated" };
+  }
+  if (organizationConnectorTurnedOff(item)) {
+    return { mode: "enable" };
   }
   const providerDomain =
     item.providerDomain ?? domainFromUrl(item.mcpUrl ?? item.endpointUrl) ?? "";

@@ -1,5 +1,38 @@
 # @opengeni/desktop
 
+## 6.4.0
+
+### Minor Changes
+
+- 0d409a7: Desktop meeting detection can record calls without asking. With the new "Record without asking" switch on (off by default), a call in a call app starts recording by itself, a card in the corner says so with a Stop recording button, and the recording stops when the call ends. A meeting in a browser still asks first. `DesktopMeetingDetectionStatus` gains `autoRecord`, `update` accepts it, and `MeetingWords` gains the optional `recordingStarted`, `callRecording` and `ok`, which fall back to English.
+
+### Patch Changes
+
+- Updated dependencies [92f419c]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [b4e780e]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a853c7a]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [237329e]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [d55f740]
+- Updated dependencies [0d409a7]
+- Updated dependencies [cf9415d]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [af8a173]
+  - @opengeni/sdk@6.4.0
+  - @opengeni/agent-host@6.4.0
+
 ## 6.3.1
 
 ### Patch Changes

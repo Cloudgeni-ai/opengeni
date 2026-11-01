@@ -27,7 +27,7 @@ import { providerVaultFreshness } from "./provider-sync";
 export type VaultCallerAuthority = {
   /** `secrets:write` */
   write: boolean;
-  /** `account:admin` on the organization */
+  /** Organization administration (owner or admin) on the organization */
   accountAdmin: boolean;
 };
 

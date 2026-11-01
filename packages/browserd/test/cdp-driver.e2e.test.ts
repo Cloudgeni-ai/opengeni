@@ -1530,10 +1530,10 @@ e2e(
         expectedDocumentGeneration: authState.documentGeneration!,
         expectedFrameId: authState.frameId!,
       });
+      // A container is read around what it protects, never through it.
       expect(privateContainer).toMatchObject({
-        text: null,
+        text: "Public intro",
         value: null,
-        attributes: {},
         redacted: "private",
       });
       expect(JSON.stringify(privateContainer)).not.toContain("fixture-private-secret");
@@ -1544,7 +1544,7 @@ e2e(
         expectedDocumentGeneration: authState.documentGeneration!,
         expectedFrameId: authState.frameId!,
       });
-      expect(paymentContainer).toMatchObject({ text: null, redacted: "payment" });
+      expect(paymentContainer).toMatchObject({ text: "Public intro", redacted: "payment" });
       expect(JSON.stringify(paymentContainer)).not.toContain("fixture-card-text-secret");
       const paymentChild = await driver.readDom(authPage.target.id, {
         kind: "element",
@@ -1584,7 +1584,7 @@ e2e(
         locator: { kind: "css", selector: "#spoofed-container" },
         ...spoofedFences,
       });
-      expect(spoofedContainer).toMatchObject({ text: null, redacted: "private" });
+      expect(spoofedContainer).toMatchObject({ text: "", redacted: "private" });
       expect(JSON.stringify(spoofedContainer)).not.toContain("fixture-spoofed-private");
       await driver.closeTarget(spoofedPage.target.id);
       await expect(
@@ -1830,8 +1830,23 @@ async function popupCloseTest(closeDuringFrameInspection: boolean) {
     closingInput = true;
     const receipt = await controller.run(close);
     if (closeDuringFrameInspection) expect(nativeInvalidSession).toBe(true);
-    expect(receipt.state).toBe("outcome_unknown");
-    expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+    if (closeDuringFrameInspection) {
+      // The input was delivered and the page then closed its own tab: the
+      // click completed, and only the closed tab's outline is missing.
+      expect(receipt.state).toBe("completed");
+      expect(receipt.error).toBeNull();
+      expect(receipt.observation).toBeNull();
+      expect(receipt.notes).toEqual([
+        {
+          actionIndex: 0,
+          kind: "observation_unavailable",
+          message: expect.stringContaining("this tab closed"),
+        },
+      ]);
+    } else {
+      expect(receipt.state).toBe("outcome_unknown");
+      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+    }
     expect(await controller.run(close)).toEqual(receipt);
     expect((await driver.listTargets()).map((target) => target.id)).toEqual([parent.target.id]);
     const retained = await driver.observe(parent.target.id);
@@ -1921,7 +1936,7 @@ function authFixture(): string {
     </form>
     <input id="card" name="card-number" autocomplete="cc-number" value="fixture-card-secret">
     <section id="private-container">Public intro <span data-private>fixture-private-secret</span></section>
-    <section id="payment-container">Public intro <span id="card-number"><span id="card-child">fixture-card-text-secret</span></span></section>`;
+    <section id="payment-container">Public intro <span id="card-number" contenteditable><span id="card-child">fixture-card-text-secret</span></span></section>`;
 }
 
 function dataUrl(html: string): string {

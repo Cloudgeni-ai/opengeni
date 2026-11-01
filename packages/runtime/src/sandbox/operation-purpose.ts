@@ -17,6 +17,7 @@ export const SANDBOX_OPERATION_PURPOSES = [
   "hook.codemode-token-renewal-registration",
   "hook.git-credential-renewal-registration",
   "hook.repository-clone",
+  "hook.repository-removal",
   "hook.rig-setup",
   "hook.other",
   "run_credentials",

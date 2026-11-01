@@ -40,6 +40,8 @@ const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "slack_bot_upload_file",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "slack_agent_handoff",
+  "slack_agent_chats",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",

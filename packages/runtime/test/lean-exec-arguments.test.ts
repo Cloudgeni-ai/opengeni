@@ -5,7 +5,9 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   LEAN_EXEC_COMMAND_DEFAULTS,
   LEAN_EXEC_COMMAND_PARAMETERS,
+  LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_FINISH_FLOOR,
   LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN,
+  LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN_OR_FINISH_FLOOR,
   canonicalizeLeanExecCommandInput,
   withLeanExecCommandArguments,
 } from "../src/sandbox/lean-exec-arguments";
@@ -143,6 +145,39 @@ describe("withLeanExecCommandArguments", () => {
 });
 
 describe("composed shell capability", () => {
+  test("the finish-floor variant describes the floor and offers background; the other keeps today's schema", () => {
+    expect(LEAN_EXEC_COMMAND_PARAMETERS.properties.yield_time_ms.description).toContain(
+      "Omit for 10000. Unless `tty` or `background` is true, it waits at least 60000 (at most 30000 on a Connected Machine).",
+    );
+    expect(LEAN_EXEC_COMMAND_PARAMETERS.properties).toHaveProperty("background");
+    expect(LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN.properties).toHaveProperty(
+      "background",
+    );
+    for (const parameters of [
+      LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_FINISH_FLOOR,
+      LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN_OR_FINISH_FLOOR,
+    ]) {
+      expect(parameters.properties).not.toHaveProperty("background");
+      expect(parameters.properties.yield_time_ms.description).toBe(
+        "How long to wait (in milliseconds) for output before yielding. Omit for the default of 10000.",
+      );
+    }
+    const exec = {
+      type: "function",
+      name: "exec_command",
+      description: "original",
+      parameters: { type: "object", properties: {}, required: [] },
+      strict: true,
+      invoke: async () => "ok",
+    } as unknown as Tool<unknown>;
+    const [withoutFloor] = withLeanExecCommandArguments([exec], {
+      finishFloor: false,
+    }) as FunctionTool[];
+    expect(withoutFloor!.parameters as unknown).toBe(
+      LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN_OR_FINISH_FLOOR,
+    );
+  });
+
   async function shellTools(
     lean: boolean,
     options: Parameters<typeof buildAgentCapabilities>[2] = {},
@@ -245,6 +280,43 @@ describe("composed shell capability", () => {
     expect(explicit).toContain("LOGIN-SHELL");
     expect(explicit).not.toContain("NON-LOGIN-SHELL");
   });
+
+  test("the finish floor applies exactly where the schema offers background", async () => {
+    const command = "sleep 3; echo floor-done";
+    // Lean schema and cut polling: a 1 s yield still returns the finished command.
+    const abort = new AbortController();
+    const lean = await execTool(true, { turnCancellationSignal: abort.signal });
+    const floored = String(
+      await lean.invoke(
+        {} as never,
+        JSON.stringify({ cmd: command, yield_time_ms: 1_000, max_output_tokens: 200 }),
+      ),
+    );
+    expect(floored).toContain("floor-done");
+    expect(floored).toContain("Process exited with code 0");
+    // Strict SDK schema (no `background` to opt out): the requested wait is kept.
+    const strict = await execTool(false, { turnCancellationSignal: abort.signal });
+    expect(strict.parameters as unknown as { properties: object }).not.toHaveProperty(
+      "properties.background",
+    );
+    const kept = String(
+      await strict.invoke(
+        {} as never,
+        JSON.stringify({
+          cmd: command,
+          login: false,
+          max_output_tokens: 200,
+          shell: "bash",
+          tty: false,
+          workdir: null,
+          yield_time_ms: 1_000,
+        }),
+      ),
+    );
+    expect(kept).not.toContain("floor-done");
+    expect(kept).toContain("Process running with session ID");
+    abort.abort(new Error("test done"));
+  }, 30_000);
 
   test("with the turn cancellation fence an omitted tty still runs without a TTY", async () => {
     const abort = new AbortController();

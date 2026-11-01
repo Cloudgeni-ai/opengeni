@@ -132,6 +132,7 @@ function settingsResponse(
 ): OrganizationPrivacySettings {
   return {
     organizationId,
+    membersConnectOwnMachines: preferences.membersConnectOwnMachines,
     ...effectiveOrganizationPrivacy(preferences, limits),
     personalWorkspaces: preferences.personalWorkspacesEnabled,
     personalWorkspaceMonthlyCredits: preferences.personalWorkspaceMonthlyCredits,
@@ -190,6 +191,9 @@ export async function updateOrganizationPrivacySettings(
   const preferences = await updateOrganizationPrivacyPreferences(deps.db, {
     organizationId: input.organizationId,
     actorSubjectId: input.actorSubjectId,
+    ...(input.request.membersConnectOwnMachines !== undefined
+      ? { membersConnectOwnMachines: input.request.membersConnectOwnMachines }
+      : {}),
     ...(input.request.defaultVisibility
       ? {
           defaultVisibility:

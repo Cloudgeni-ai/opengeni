@@ -57,8 +57,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * scrub's reader and cell writer (1091), the subscription
  * account-administrator grant (1103), which records a request's verified
  * account:admin proof for one transaction, agent calls' device lookup,
- * register, claim, device count, busy check and ring (1107), and the lock-free
- * read of a known external identity (1172). Each is
+ * register, claim, device count, busy check and ring (1107), the lock-free
+ * read of a known external identity (1172) and the list of every
+ * organization vault wherever it works (1218). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -85,6 +86,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "agent_call_ringing_v1(text)",
   "ring_agent_call_v1(uuid, boolean)",
   "read_external_identity_v1(uuid, text, text)",
+  "list_organization_vaults_v1(uuid, jsonb)",
 ] as const;
 
 /**
@@ -111,6 +113,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1172 withholds the lock-free external identity read; until it is granted,
  * authenticating an external user takes the organization membership fence
  * exclusively, as before.
+ * 1218 withholds the organization vault list; until it is granted, the API
+ * lists the organization vaults that work in the current workspace and says
+ * the list is incomplete.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -124,6 +129,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "agent_call_ringing_v1(text)",
   "ring_agent_call_v1(uuid, boolean)",
   "read_external_identity_v1(uuid, text, text)",
+  "list_organization_vaults_v1(uuid, jsonb)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -213,6 +219,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "external_identities",
     "organization_memberships",
   ],
+  "list_organization_vaults_v1(uuid, jsonb)": ["vaults", "vault_items"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -2133,6 +2140,7 @@ export const FORCE_RLS_TABLES = [
   "organization_recovery_policy_heads",
   "organization_service_accounts",
   "organization_shared_workspace_administration_capabilities",
+  "organization_skill_reach",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -2299,6 +2307,8 @@ export const FORCE_RLS_TABLES = [
   "skill_config_conversion_receipts",
   "skill_source_bindings",
   "skill_write_receipts",
+  "slack_agent_user_states",
+  "slack_agents",
   "slack_app_home_refreshes",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
@@ -2550,6 +2560,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_model_provider_custom_models",
   "organization_privacy_preferences",
   "organization_service_accounts",
+  "organization_skill_reach",
   "organization_webhook_deliveries",
   "organization_webhooks",
   "pr_review_app_registrations",
@@ -2647,6 +2658,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_sql_usage",
   "site_tool_allowances",
   "site_viewer_sessions",
+  "slack_agent_user_states",
+  "slack_agents",
   "slack_api_rate_limits",
   "slack_app_home_refreshes",
   "slack_bot_delete_operations",

@@ -5011,6 +5011,54 @@ describe("useComposer durable draft and control binding", () => {
     });
   }
 
+  test("a member's own-key refused send says to ask an organization owner", async () => {
+    const client = fakeClient({
+      sendMessage: async () => {
+        throw new OpenGeniApiError(
+          402,
+          JSON.stringify({
+            error: {
+              status: 402,
+              code: "payment_required",
+              message: "Add credits to use your own key.",
+              retryable: false,
+              details: {
+                code: "byok_paid_credit_required",
+                action: { type: "add_credits", href: "/billing" },
+              },
+            },
+          }),
+          { mutation: true },
+        );
+      },
+    });
+    // Its own session, so the refused operation it keeps doesn't reach other tests.
+    const hook = await renderHook(
+      () =>
+        useComposer("66666666-6666-4666-8666-666666666666", {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          canBuyCredits: false,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.canBuyCredits).toBe(false);
+    await flushing(async () => {
+      await hook.result.current.send("use my key");
+    });
+    await flush();
+    const failed = hook.result.current.optimisticMessages?.find(
+      (message) => message.state === "failed",
+    );
+    expect(failed?.error).toBe(
+      "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
+    );
+    await hook.unmount();
+  });
+
   for (const delivery of ["send", "steer"] as const) {
     test(`${delivery} retries an outcome-unknown gateway failure with one idempotency key`, async () => {
       const resource = {

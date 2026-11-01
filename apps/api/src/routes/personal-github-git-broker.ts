@@ -5,13 +5,17 @@ import {
   isPersonalGitHubConnection,
   type PersonalGitHubRepositoryPermissions,
 } from "@opengeni/contracts/personal-github";
-import type { McpPersonalConnectionDelegation } from "@opengeni/contracts";
+import {
+  resourcesIncludeRepository,
+  type McpPersonalConnectionDelegation,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
   getConnectionMetadata,
   getPersonalGitHubRepositorySelectionState,
   getSessionAuthorityProjection,
+  getSessionResourcesForAuthority,
   getSessionTurnForAttempt,
   resolveAcceptedConnectionUse,
 } from "@opengeni/db";
@@ -127,8 +131,8 @@ export async function handlePersonalGitHubGitBrokerRequest(
   let authority: BrokerAuthority;
   try {
     authority = await services.resolveAuthority(claims, routeId);
-  } catch {
-    return brokerError(401, "Git broker authorization is no longer current.");
+  } catch (error) {
+    return brokerAuthorityError(error);
   }
   if (authority.repository.access !== "write" && requestsReceivePack(request, operation)) {
     return brokerError(403, "This repository is not authorized for Git pushes.");
@@ -142,8 +146,8 @@ export async function handlePersonalGitHubGitBrokerRequest(
       userApiUrl.toString(),
       "identity_verify",
     );
-  } catch {
-    return brokerError(401, "Git broker authorization is no longer current.");
+  } catch (error) {
+    return brokerAuthorityError(error);
   }
   if (
     !(await fetchLiveProviderUser(
@@ -167,8 +171,8 @@ export async function handlePersonalGitHubGitBrokerRequest(
       repositoryApiUrl.toString(),
       "repository_verify",
     );
-  } catch {
-    return brokerError(401, "Git broker authorization is no longer current.");
+  } catch (error) {
+    return brokerAuthorityError(error);
   }
   const repositoryLive = await fetchLiveRepository(
     services.fetch,
@@ -188,8 +192,8 @@ export async function handlePersonalGitHubGitBrokerRequest(
       upstreamUrl.toString(),
       operation,
     );
-  } catch {
-    return brokerError(401, "Git broker authorization is no longer current.");
+  } catch (error) {
+    return brokerAuthorityError(error);
   }
   const providerToken = bearerToken(gitAuthorization);
   if (!providerToken) {
@@ -265,6 +269,18 @@ function personalGitHubGitBrokerServices(deps: ApiRouteDeps): PersonalGitHubGitB
       await authorizeBrokerProviderRequest(deps, authority, destinationUrl, operation),
     fetch: deps.githubPersonalFetch ?? fetch,
   };
+}
+
+class BrokerRepositoryRemovedError extends Error {
+  constructor() {
+    super("personal GitHub repository was removed from the session");
+  }
+}
+
+function brokerAuthorityError(error: unknown): Response {
+  return error instanceof BrokerRepositoryRemovedError
+    ? brokerError(403, "This repository was removed from this chat.")
+    : brokerError(401, "Git broker authorization is no longer current.");
 }
 
 async function resolveBrokerAuthority(
@@ -438,6 +454,17 @@ async function assertCurrentConnectionAndSelection(
   claims: PersonalGitHubGitBrokerClaims,
   repository: BrokerRepository,
 ): Promise<{ providerPrincipalId: string }> {
+  // Session membership is live authority: a repository removed from the chat
+  // (or from the parent chat of this child) stops on its next Git request,
+  // even for a turn or goal continuation that captured an older snapshot.
+  const sessionResources = await getSessionResourcesForAuthority(
+    deps.db,
+    claims.workspaceId,
+    claims.sessionId,
+  );
+  if (!sessionResources || !resourcesIncludeRepository(sessionResources, repository.canonicalUrl)) {
+    throw new BrokerRepositoryRemovedError();
+  }
   const connection = await getConnectionMetadata(
     deps.db,
     claims.originWorkspaceId,

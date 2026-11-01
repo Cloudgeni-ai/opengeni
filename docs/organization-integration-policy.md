@@ -21,7 +21,9 @@ allowlist.
 
 Organization connectors, which an owner or admin adds once for many
 workspaces, are acquisitions under this policy too: adding one, or saving one
-that stays on, checks `custom:mcp` like a workspace's own MCP setup. See
+that stays on, checks `custom:mcp` like a workspace's own MCP setup, and an
+organization API integration checks its definition's key or
+`custom:openapi` / `custom:graphql` like a workspace's own API integration. See
 [Organization connectors](capabilities.md#organization-connectors).
 
 ## Members turning integrations on

@@ -35,6 +35,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["DELETE", "/share-link", "session.share_link.write"],
   ["PUT", "/channel", "session.channel.write"],
   ["PUT", "/tool-policy", "session.tool_policy.write"],
+  ["POST", "/resources/remove", "session.resources.write"],
   ["POST", "/mcp-credentials/rotate", "session.mcp.credentials.rotate"],
   ["GET", "/lineage", "session.lineage.read"],
   ["GET", "/background-commands", "session.read"],

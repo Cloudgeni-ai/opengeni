@@ -220,13 +220,52 @@ Administration is organization-level and needs no workspace:
 | `POST /v1/organizations/:organizationId/connectors` | `createOrganizationConnector` |
 | `PATCH /v1/organizations/:organizationId/connectors/:connectorId` | `updateOrganizationConnector` |
 | `DELETE /v1/organizations/:organizationId/connectors/:connectorId` | `deleteOrganizationConnector` |
+| `POST /v1/organizations/:organizationId/connectors/api-integrations/preview` | `previewOrganizationApiIntegration` |
+| `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/organization` | `setOrganizationApiIntegrationHere` |
 
-A create request names `capabilityId` (catalog) or `custom`, plus `login`,
-`headers` (only with `organization_key`), optional `allowedTools` and
-`availability`. A change sends `expectedGeneration` with any of
-`availability`, `allowedTools`, `status` (`active` or `disabled`) and `headers`
-(organization key only, probed again); a stale generation returns `409`.
-Removing a connector stops it in every workspace at once.
+A create request names exactly one of `capabilityId` (catalog), `custom` or
+`apiIntegration` (below), plus `login`, `headers` (only with an MCP
+`organization_key`), optional `allowedTools` and `availability`. A change sends
+`expectedGeneration` with any of `availability`, `allowedTools`, `status`
+(`active` or `disabled`), `headers` (MCP organization key only, probed again)
+and `apiKey` (API integration organization key only); a stale generation
+returns `409`. Removing a connector stops it in every workspace at once.
+
+#### Organization API integrations
+
+An organization connector can also be an
+[API integration](#protocol-neutral-api-integrations) (`kind: "api"`): a custom OpenAPI or
+GraphQL API, or a reviewed definition the organization's policy allows. The
+admin previews it first with the same sources a workspace previews
+(`previewOrganizationApiIntegration`, which may take an `apiKey` used only to
+read an API that needs one to describe itself), then adds it with
+`apiIntegration: { source, expectedRevisionId, expectedContentSha256 }`. The
+source is compiled again and must still be the previewed revision (`409`
+otherwise); the compiled revision is stored, so every workspace it reaches runs
+exactly what was reviewed. How turns sign in must fit how the API
+authenticates: an API with no authentication takes `none`, an OAuth API takes
+`each_person`, and a key or HTTP API takes `each_person` or `organization_key`
+(`422` otherwise). An organization key is `apiKey`: placements (header, query
+parameter or cookie, with an optional prefix such as `Bearer `) stored
+encrypted, decrypted per request and sent only to that API, never refreshed or
+retried when rejected. With `each_person`, a turn runs it through the
+person's own active Only me connection to the API's provider, of the kind its
+authentication takes; without one, the person's turns don't get its tools.
+The connector's `apiIntegration` summary returns the protocol, how the API
+authenticates and its tools; keys are never returned.
+
+In a workspace it reaches, it lists among the workspace's API integrations
+under the instance key `organization` (reserved: a workspace install,
+uninstall or uninstall preview with that key returns `409`), marked with
+`organizationConnector` (`connectorId`, `login`, `auth`, `enabledHere`). A
+workspace manager turns it off for that workspace, or back on, with
+`setOrganizationApiIntegrationHere`; one turned off still lists, with
+`enabledHere: false`. A workspace's own instance of the same capability wins
+there. Adding one checks the organization integration policy with the
+definition's key for a reviewed definition, or `custom:openapi` /
+`custom:graphql`; a restricted policy narrows an `auto` source to the custom
+protocols it allows. Storage is the same `organization_connectors` table
+(migration `1199_organization_api_integrations.sql` adds `kind`, and `1200_validate_organization_connector_kind.sql` validates its check).
 
 Only signed-in organization owners and admins, and agents acting for one,
 manage organization connectors; the database checks the person's live
@@ -237,6 +276,14 @@ the `custom:mcp` key, as for a workspace's own MCP setup; an organization key's
 headers also follow the EU-only content-flow rules. Storage is
 `organization_connectors` (migration `1175_organization_connectors.sql`), with
 row security serving each workspace exactly the connectors that reach it.
+
+In the app, owners and admins manage them under **Organization settings >
+Integrations > Connectors**: add one from the catalog or by server address,
+choose how people sign in and where it works, turn it off everywhere, change
+where it works, replace its organization key or remove it. In a workspace, the
+connector's page shows **Turn on for this workspace** when a workspace manager
+turned it off there; members without `capabilities:manage` are told to ask a
+workspace admin.
 
 ### Credential headers
 
@@ -411,10 +458,11 @@ exact instance; the underlying Connection and shared definition survive unless
 separately removed.
 
 Provider adapters may also publish immutable generic facet definitions for
-Knowledge Sources, Inbound Triggers, Delivery Destinations, and Identity Links.
-OneDrive exposes a drive-content Knowledge Source; Gmail and
+Inbound Triggers, Delivery Destinations, and Identity Links. Gmail and
 Outlook expose mail or calendar trigger/delivery facets and connected-account
-identity. In the web app these live in
+identity. Integrations give agents tools and access; they never import provider
+content into Knowledge. Recurring work is an ordinary agent schedule that uses
+the integration's tools. In the web app these live in
 `apps/web/src/components/capabilities/integration-facets-panel.tsx`, mounted
 per account entry inside the integration page's **Connected accounts** section
 through the lazy `integration-account-facets.tsx` boundary. The panel is
@@ -435,13 +483,18 @@ The projection reports only whether a provider cursor exists; page tokens,
 delta links, and other cursor contents remain private durable state.
 Integration definition upgrades migrate same-key facets without losing
 configuration, cursor, lifecycle status, evidence timestamps, or owner edges,
-and reject an upgrade that would silently remove a configured facet.
+and reject an upgrade that would silently remove a configured facet. The one
+exception is a retired Knowledge Source facet: a configured binding keeps its
+historical definition when a new revision no longer publishes it.
 
-Google Drive's previous `drive-content` facet is historical only. Native source
-browse, configuration and resume are retired; stored selections, imported
-records and run history remain available as evidence. New recurring Drive work
-uses an ordinary agent schedule with the personal Drive MCP connection. See
-[Google Drive](google-drive.md) for the replacement and its access limits.
+The Knowledge Source facet kind (`knowledge_source`, for example the former
+Drive and OneDrive `drive-content` facets) is retired. No integration publishes
+it, configuring one returns 410, and its browse and source routes return 410.
+Existing bindings stay listed as retired with Remove only; unconfigured ones are
+hidden. Stored selections, imported records and run history remain available
+as evidence. New recurring Drive or OneDrive work uses an ordinary agent
+schedule with the account's tools. See [Google Drive](google-drive.md) for the
+Drive MCP connection and its access limits.
 Generic browser editing refuses required object or array fields unless a
 provider-specific flow owns them, so OneDrive and future rich schemas cannot be
 submitted as silently incomplete primitive config.

@@ -9,6 +9,7 @@ import type { SlashCommand } from "../src/commands/types";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../src/hooks/use-file-attachments";
 import type { SlashCommandContext } from "../src/hooks/use-slash-commands";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
@@ -759,5 +760,39 @@ describe("compound composer framework", () => {
       await act(async () => root.unmount());
       container.remove();
     }
+  });
+
+  test("a refused send's notice tells a member to ask an owner, and the owner to add credits", async () => {
+    const refused = new OpenGeniApiError(
+      402,
+      JSON.stringify({
+        error: {
+          status: 402,
+          code: "payment_required",
+          message: "Add credits to use your own key.",
+          retryable: false,
+          details: {
+            code: "byok_paid_credit_required",
+            action: { type: "add_credits", href: "/billing" },
+          },
+        },
+      }),
+    );
+    const seen: Array<string | undefined> = [];
+    function Harness({ canBuyCredits }: { canBuyCredits: boolean | undefined }) {
+      const controller = Composer.useChatComposerController({
+        delivery: delivery("ready", () => {}, { error: refused, canBuyCredits }),
+      });
+      seen.push(controller.activeNotice?.message);
+      return null;
+    }
+    mounted = await renderComponent(<Harness canBuyCredits={false} />);
+    expect(seen.at(-1)).toBe(
+      "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
+    );
+    await mounted.unmount();
+    mounted = await renderComponent(<Harness canBuyCredits={undefined} />);
+    expect(seen.at(-1)).toContain("Add credits to use your own key");
+    expect(seen.at(-1)).not.toContain("Ask an organization owner");
   });
 });

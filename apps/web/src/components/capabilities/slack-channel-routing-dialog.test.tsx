@@ -10,10 +10,15 @@ const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
 const SHARED_ID = "44444444-4444-4444-8444-444444444444";
 const PERSONAL_ID = "55555555-5555-4555-8555-555555555555";
 const CONNECTION_ID = "66666666-6666-4666-8666-666666666666";
+const AGENT_ID = "77777777-7777-4777-8777-777777777777";
+const OTHER_CONNECTION_ID = "88888888-8888-4888-8888-888888888888";
 
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
 mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => mutableContext.current,
+}));
+mock.module("sonner", () => ({
+  toast: Object.assign(() => undefined, { success: () => undefined, error: () => undefined }),
 }));
 
 // Radix portals do not mount under happy-dom; render the frame inline so the
@@ -51,7 +56,25 @@ function grants(workspaceIds: string[]) {
   }));
 }
 
-function contextValue(storedRouteTarget: string | null): Record<string, unknown> {
+type StoredRoute = { target: string; slackAgentId?: string };
+
+function slackAgent(id: string, name: string, connectionId: string, targetWorkspaceId: string) {
+  return {
+    id,
+    name,
+    connectionId,
+    targetWorkspaceId,
+    targetWorkspaceName: "Platform",
+    handle: name.toLowerCase(),
+  };
+}
+
+function contextValue(
+  storedRouteTarget: string | StoredRoute | null,
+  options: { agents?: unknown[]; saved?: unknown[] } = {},
+): Record<string, unknown> {
+  const stored: StoredRoute | null =
+    typeof storedRouteTarget === "string" ? { target: storedRouteTarget } : storedRouteTarget;
   const accessContext: AccessContext = {
     mode: "managed",
     subjectId: "subject-a",
@@ -85,23 +108,40 @@ function contextValue(storedRouteTarget: string | null): Record<string, unknown>
         channels: [{ id: "C1", name: "eng", isPrivate: false }],
       }),
       listOpenGeniSlackChannelRoutes: async () => ({
-        routes: storedRouteTarget
+        routes: stored
           ? [
               {
                 slackChannelId: "C1",
-                targetWorkspaceId: storedRouteTarget,
-                targetWorkspaceName: storedRouteTarget === PERSONAL_ID ? "Sam" : "Platform",
+                targetWorkspaceId: stored.target,
+                targetWorkspaceName: stored.target === PERSONAL_ID ? "Sam" : "Platform",
+                slackAgentId: stored.slackAgentId ?? null,
+                slackAgentName: stored.slackAgentId ? "Data" : null,
                 source: "admin",
               },
             ]
           : [],
       }),
+      ...(options.agents
+        ? {
+            listOpenGeniSlackAgents: async () => ({
+              agents: options.agents,
+              routingEnabled: true,
+              memoryReviewFirst: false,
+            }),
+          }
+        : {}),
+      updateOpenGeniSlackChannelRoutes: async (_workspaceId: string, request: unknown) => {
+        options.saved?.push(request);
+      },
     },
   };
 }
 
-async function renderDialog(storedRouteTarget: string | null): Promise<HTMLElement> {
-  mutableContext.current = contextValue(storedRouteTarget);
+async function renderDialog(
+  storedRouteTarget: string | StoredRoute | null,
+  options: { agents?: unknown[]; saved?: unknown[] } = {},
+): Promise<HTMLElement> {
+  mutableContext.current = contextValue(storedRouteTarget, options);
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -140,5 +180,64 @@ describe("Slack channel routing dialog", () => {
     const labels = [...host.querySelectorAll("option")].map((option) => option.textContent ?? "");
     expect(labels).toContain("Ask me");
     expect(labels.some((label) => label.includes("only you can see this"))).toBe(true);
+  });
+
+  test("offers this connection's Slack agents beside Opengeni in each workspace", async () => {
+    const host = await renderDialog(null, {
+      agents: [
+        slackAgent(AGENT_ID, "Data", CONNECTION_ID, SHARED_ID),
+        slackAgent(WORKSPACE_ID, "Elsewhere", OTHER_CONNECTION_ID, SHARED_ID),
+        slackAgent(PERSONAL_ID, "Private", CONNECTION_ID, PERSONAL_ID),
+      ],
+    });
+    const select = host.querySelector("select");
+    expect(select?.getAttribute("aria-label")).toBe("Who answers in #eng");
+    const labels = [...host.querySelectorAll("option")].map((option) => option.textContent ?? "");
+    expect(labels).toEqual(["Ask me", "Data", "Opengeni in Home", "Opengeni in Platform"]);
+  });
+
+  test("saves an agent together with its own workspace", async () => {
+    const saved: unknown[] = [];
+    const host = await renderDialog(
+      { target: SHARED_ID, slackAgentId: AGENT_ID },
+      { agents: [slackAgent(AGENT_ID, "Data", CONNECTION_ID, SHARED_ID)], saved },
+    );
+    const select = host.querySelector("select")!;
+    expect(select.value).toBe(`agent:${AGENT_ID}`);
+    await act(async () => {
+      select.value = WORKSPACE_ID;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const save = () =>
+      [...host.querySelectorAll("button")].find((button) => button.textContent === "Save")!;
+    await act(async () => save().click());
+    expect(saved).toEqual([
+      {
+        connectionId: CONNECTION_ID,
+        routes: [{ slackChannelId: "C1", targetWorkspaceId: WORKSPACE_ID }],
+      },
+    ]);
+
+    saved.length = 0;
+    const again = await renderDialog(null, {
+      agents: [slackAgent(AGENT_ID, "Data", CONNECTION_ID, SHARED_ID)],
+      saved,
+    });
+    const choose = again.querySelector("select")!;
+    await act(async () => {
+      choose.value = `agent:${AGENT_ID}`;
+      choose.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () =>
+      [...again.querySelectorAll("button")]
+        .find((button) => button.textContent === "Save")!
+        .click(),
+    );
+    expect(saved).toEqual([
+      {
+        connectionId: CONNECTION_ID,
+        routes: [{ slackChannelId: "C1", targetWorkspaceId: SHARED_ID, slackAgentId: AGENT_ID }],
+      },
+    ]);
   });
 });

@@ -244,15 +244,37 @@ cross-organization visibility remains impossible.
 Workspace settings › Available here shows what agent turns in one workspace can
 use, grouped by owner: the workspace's own things, the organization's things
 that reach the workspace, and the viewer's own things. It reads the same lists
-each kind's own page reads (connector installations, Connected Machines, rigs,
+each kind's own page reads (the connector catalog, Connected Machines, rigs,
 vaults, Skills and Knowledge), so it never shows anything those pages would not:
 other people's personal resources never appear, and a kind the viewer may not
-list is left out instead of shown as an error. Each row says who manages it
+list is left out instead of shown as an error. Connectors are the workspace's
+own installations, the organization's connectors that reach the workspace (one
+the workspace turned off is left out, and one whose organization setup is
+broken is marked unavailable), and, in a Personal workspace, the owner's Only
+me connectors carried in from other workspaces. Each row says who manages it
 (workspace admins for connectors and machines, workspace members and admins for
 rigs, vaults, Skills and Knowledge, organization owners for organization things,
 only the owner for personal things) and opens the thing's own page. Model plans
 and keys stay on Organization settings › Models, which already shows each
 one's owner; the page links there for people who may open it.
+
+### Shared
+
+Organization settings › Shared, for organization owners and admins, shows
+everything the organization shares with its workspaces and where each works.
+Model plans and keys link to Organization settings › Models. The
+organization's machines, rigs, Skills and Knowledge work in every workspace,
+Personal workspaces included, so the page reads them from the lists of the
+workspace it is opened from, kept to what the organization owns. Organization
+vaults work only where their "Available in" says, so the page reads
+`GET /v1/workspaces/:workspaceId/organization-vaults`, which lists every
+organization vault wherever it works (account administrators only), and says
+for each one where it works and where it opens: in this workspace when it works
+here, else in the first workspace by name that it works in and the viewer can
+open, else nowhere. An admin who isn't an owner, or a server that has not
+granted the list yet, gets the organization vaults that work in the current
+workspace, and the page says so. The page links to Developer (webhooks and the
+credential provider) for people who manage the organization's API keys.
 
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
@@ -865,6 +887,12 @@ The workspace itself stays: it still anchors the person's own machines,
 browsers and vaults, which keep working from shared workspaces, and existing
 chats, their workers and existing schedules there keep working and stay
 reachable by link.
+
+They also choose whether members connect machines of their own
+(`membersConnectOwnMachines`, column `members_connect_own_machines`, migration
+1148, on by default). Off, only owners and admins connect new Only me machines,
+or any machine in a Personal workspace; machines already connected keep
+working. See [Connect a machine](connected-machines.md#connect-a-machine).
 
 EU-only inference is an organization setting too
 (`organization_inference_residency` and its append-only

@@ -32,7 +32,8 @@ each hosted field keeps encrypted **versions**.
   default **Private** vault is always available everywhere. Vaults created
   before this setting existed stay available everywhere until narrowed.
 - **Workspace** vaults are usable by members of that workspace.
-- **Organization** vaults are managed with `account:admin`; their reach is set
+- **Organization** vaults are managed by the organization's owner or an admin
+  (or a credential holding `account:admin`); their reach is set
   by "Available in": every shared workspace (`allowedWorkspaceIds: null`) or a
   list of them, and separately whether members' Personal workspaces have it
   (`allowPersonalWorkspaces`). The switch alone decides Personal workspaces,
@@ -1003,6 +1004,7 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | Route | Purpose |
 |---|---|
 | `GET, POST /vaults`; `GET, PATCH, DELETE /vaults/:vaultId` | Vaults |
+| `GET /organization-vaults` | Every organization vault, wherever it works, for account administrators (`account:admin` and `secrets:list`). `complete: false` while the server can list only the ones that work in this workspace |
 | `GET, POST /vaults/:vaultId/items`; `GET, PATCH, DELETE /vaults/:vaultId/items/:itemId` | Items |
 | `POST /vaults/:vaultId/items/:itemId/restore`, `/move` | Restore an archived item; move or copy |
 | `POST …/fields/:fieldId/reveal`; `GET …/fields/:fieldId/versions`; `POST …/fields/:fieldId/restore` | Plaintext, history, version restore |

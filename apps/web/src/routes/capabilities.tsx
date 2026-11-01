@@ -101,6 +101,10 @@ import {
   initialCustomApiFlowState,
 } from "@/components/capabilities/custom-api-flow";
 import { CustomApiSection } from "@/components/capabilities/custom-api-section";
+import {
+  OrganizationApiKeyDialog,
+  organizationApiKeyNoun,
+} from "@/components/capabilities/organization-api-key-dialog";
 import { featuredConnectors } from "@/components/capabilities/featured-connectors";
 import { useApiIntegrationOAuthCallback } from "@/components/capabilities/use-api-integration-accounts";
 import {
@@ -164,6 +168,7 @@ import {
   oauthCallbackReasonMessage,
 } from "@opengeni/react/app/lib/oauth-callback-messages";
 import {
+  markPersonalGitHubRepositoryChooser,
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
 } from "@/lib/personal-github-oauth";
@@ -199,6 +204,7 @@ import type {
   CapabilityCatalogItem,
   ConnectionMetadata,
   ConnectionOwnership,
+  CreateConnectionRequest,
   SkillUninstallPreview,
 } from "@opengeni/react/app/types";
 
@@ -470,6 +476,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     initialCustomApiFlowState,
   );
   const [customApiBusyKey, setCustomApiBusyKey] = useState<string | null>(null);
+  // An organization API where each person signs in, the person adding their own key.
+  const [ownKeyFor, setOwnKeyFor] = useState<ApiIntegrationInstallationSummary | null>(null);
   const [customApiRemoveTarget, setCustomApiRemoveTarget] = useState<{
     instance: ApiIntegrationInstallationSummary;
     removesDefinition: boolean;
@@ -1170,6 +1178,46 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
   }
 
+  // An organization's API is managed in its settings; a workspace manager
+  // only turns it off here or back on.
+  async function setOrganizationApiHere(
+    instance: ApiIntegrationInstallationSummary,
+    enabledHere: boolean,
+  ) {
+    setCustomApiBusyKey(instance.instanceKey);
+    try {
+      await client.setOrganizationApiIntegrationHere(workspaceId, instance.capabilityId, {
+        enabledHere,
+      });
+      await refresh();
+      onRuntimeChanged();
+      toast.success(
+        enabledHere ? `${instance.displayName} is on here` : `${instance.displayName} is off here`,
+        {
+          description: enabledHere
+            ? "Chats in this workspace can use it again."
+            : "Chats in this workspace stop using it. Your organization's other workspaces keep it.",
+        },
+      );
+    } catch (error) {
+      toast.error("Couldn't change it", { description: userErrorText(error) });
+    } finally {
+      setCustomApiBusyKey(null);
+    }
+  }
+
+  async function addOrganizationApiKey(connectionRequest: CreateConnectionRequest) {
+    if (!ownKeyFor) return;
+    const instance = ownKeyFor;
+    await client.createConnection(workspaceId, connectionRequest);
+    await refresh();
+    onRuntimeChanged();
+    setOwnKeyFor(null);
+    toast.success(`Your ${organizationApiKeyNoun(instance)} for ${instance.displayName} is added`, {
+      description: "Only you can use it.",
+    });
+  }
+
   async function removeCustomApiInstance(): Promise<boolean> {
     if (!customApiRemoveTarget) return false;
     const { instance } = customApiRemoveTarget;
@@ -1301,14 +1349,16 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     );
     setOpenIntegration("github", true);
     if (result.outcome === "success") {
+      // The GitHub page opens its repository chooser once the connection loads.
+      markPersonalGitHubRepositoryChooser(workspaceId);
       void context
         .refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true })
         .then(() => {
-          toast.success("Your GitHub identity is connected");
+          toast.success("Your GitHub is connected");
         });
       return;
     }
-    toast.error("Couldn't connect your GitHub identity", {
+    toast.error("Couldn't connect your GitHub", {
       description: personalGitHubOAuthFailureMessage(result.reason),
     });
   }, [context, workspaceId, setOpenIntegration]);
@@ -1796,7 +1846,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         canManageSocial={canManageSocial}
         socialSetupAvailable={selectedSocialSetupAvailable}
         canManageSkills={canManageSkills}
-        canTurnOff={integrationAccess.change}
+        canTurnOnOrOff={integrationAccess.change}
         onAction={(action) => void handleAction(action)}
         onConnectAccount={() => setAccountConnectOpen(true)}
         onRetryAuthInspection={
@@ -2150,6 +2200,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                         onUpdate={(instance) => editCustomApi(instance, "update")}
                         onReconnect={(instance) => editCustomApi(instance, "reconnect")}
                         onRemove={(instance) => void previewRemoveCustomApi(instance)}
+                        onAddOwnKey={setOwnKeyFor}
+                        onSetOrganizationHere={(instance, enabledHere) =>
+                          void setOrganizationApiHere(instance, enabledHere)
+                        }
                       />
                     ) : null}
 
@@ -2380,6 +2434,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           busy={busyId === "add"}
           error={addError}
           onSubmit={submitAddCustom}
+        />
+
+        <OrganizationApiKeyDialog
+          instance={ownKeyFor}
+          onOpenChange={(open) => {
+            if (!open) setOwnKeyFor(null);
+          }}
+          onAdd={addOrganizationApiKey}
         />
 
         <ConfirmDialog

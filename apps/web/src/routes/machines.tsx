@@ -391,6 +391,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           machinesError={machines.error}
           personalWorkspace={personalWorkspace}
           canShareWithWorkspace={machines.canManage}
+          canConnectOwnMachine={machines.canConnectOwnMachine}
         />
       ) : null}
 

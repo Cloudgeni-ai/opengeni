@@ -29,19 +29,6 @@ use super::observe::{By, Why};
 use super::remove::unmake;
 use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, unix_ms_now};
 
-/// How long a new sandbox's first wake stays booked if it is not woken:
-/// long enough for its creator to make it and ask for it, short enough
-/// that room a create never used comes back soon.
-const FIRST_WAKE_WITHIN: Duration = Duration::from_secs(120);
-
-/// When the first wake of a sandbox created, claimed or adopted now stops
-/// being booked, in milliseconds since the Unix epoch; see
-/// [`HostAgent::first_wake`].
-pub(super) fn first_wake_by_ms() -> u64 {
-    let within = u64::try_from(FIRST_WAKE_WITHIN.as_millis()).unwrap_or(u64::MAX);
-    unix_ms_now().saturating_add(within)
-}
-
 /// Replies to `reply` once the write in `outcome` has made a change
 /// durable, or with why the change was refused or could not be kept.
 fn answer_once_written<T: Send + 'static>(outcome: Result<(Write, T), HostError>, reply: Reply<T>) {
@@ -600,10 +587,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
+    /// When the first wake of a sandbox created, claimed or adopted now
+    /// stops being booked, in milliseconds since the Unix epoch, after
+    /// [`super::HostConfig::first_wake_within`]; see [`Self::first_wake`].
+    pub(super) fn first_wake_by_ms(&self) -> u64 {
+        let within = u64::try_from(self.first_wake_within.as_millis()).unwrap_or(u64::MAX);
+        unix_ms_now().saturating_add(within)
+    }
+
     /// What books the first wake of new sandbox `id` of `size` that sleeps
     /// by `policy`, checked with [`Self::room_for`], until it runs or until
-    /// `by_ms` (from [`first_wake_by_ms`]), which its record keeps so an
-    /// agent that starts before then books it again; see
+    /// `by_ms` (from [`Self::first_wake_by_ms`]), which its record keeps so
+    /// an agent that starts before then books it again; see
     /// [`Input::Creating`].
     pub(super) fn first_wake(
         &self,
@@ -639,7 +634,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let (CreateRoom::AwaitsReading(resource, needed, free)
         | CreateRoom::Short(resource, needed, free)) = room
         else {
-            let by_ms = record.first_wake_by_ms.unwrap_or_else(first_wake_by_ms);
+            let by_ms = record
+                .first_wake_by_ms
+                .unwrap_or_else(|| self.first_wake_by_ms());
             self.input(self.first_wake(id, size, policy, true, by_ms));
             return Ok(());
         };
@@ -717,7 +714,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Creates sandbox `id` from its shape's template, or cold, once the
-    /// host has its image, and books its first wake meanwhile.
+    /// host has its image, and books its first wake meanwhile. A build of
+    /// the template the create wanted and found missing starts only once
+    /// that wake is booked, so it takes only room the create leaves: the
+    /// sandbox boots cold rather than give its place to the build.
     pub(super) fn create_fresh(
         &mut self,
         id: Id,
@@ -725,19 +725,34 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         owner: OwnerEpoch,
         reply: Reply<()>,
     ) {
-        if let Some(image) = config.image.filter(|image| !self.rootfs.has(*image)) {
-            self.create_after_fetch(image, id, config, owner, reply);
-            return;
-        }
-        let shape = Shape::of(&config);
         let policy = match self.sleep_policy(&config) {
             Ok(policy) => policy,
             Err(problem) => {
+                self.first_wake_unbooked(id);
                 let _ = reply.send(Err(HostError::Invalid(problem)));
                 return;
             }
         };
-        let template = self.template_for(shape);
+        if let Some(image) = config.image.filter(|image| !self.rootfs.has(*image)) {
+            // Back from a disk reading, the image may have gone meanwhile:
+            // the room is checked again, its own hold given back, before
+            // it is held for the fetch.
+            if let Err(error) = self.room_for(
+                id,
+                self.size(&config, None),
+                policy,
+                false,
+                DiskSpace::default(),
+            ) {
+                self.first_wake_unbooked(id);
+                let _ = reply.send(Err(error));
+                return;
+            }
+            self.create_after_fetch(image, id, config, owner, reply);
+            return;
+        }
+        let shape = Shape::of(&config);
+        let (template, build) = self.template_for(shape);
         // Its first files are written before the core knows it: they are
         // booked from before the copy until a reading shows them, and must
         // fit together with its first wake.
@@ -746,10 +761,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         match self.room_for(id, self.size(&config, None), policy, false, disk) {
             Ok(Room::Now) => {}
             Ok(Room::AfterReading) => {
+                self.unwant_template(shape, build);
+                self.hold_room(id, &config);
                 self.after_reading(AfterReading::Create(id, Box::new(config), owner, reply));
                 return;
             }
             Err(error) => {
+                self.unwant_template(shape, build);
+                self.first_wake_unbooked(id);
                 let _ = reply.send(Err(error));
                 return;
             }
@@ -757,6 +776,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
             Err(problem) => {
+                self.unwant_template(shape, build);
+                self.first_wake_unbooked(id);
                 let _ = reply.send(Err(HostError::Io(problem)));
                 return;
             }
@@ -767,21 +788,89 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Err(problem) => {
                 self.preparing.remove(&id.0);
                 self.ordinals.remove(&ordinal);
+                self.unwant_template(shape, build);
+                self.first_wake_unbooked(id);
                 let _ = reply.send(Err(HostError::Invalid(problem)));
                 return;
             }
         };
-        let by_ms = first_wake_by_ms();
+        let by_ms = self.first_wake_by_ms();
         self.inputs([
             Input::Writes { key: id.0, disk },
             self.first_wake(id, self.size(&config, None), policy, false, by_ms),
         ]);
+        if build {
+            self.build_template(shape);
+        }
         let mut record = Record::new(id, ordinal, allocation, config);
         record.owner_epoch = owner.0;
         record.first_wake_by_ms = Some(by_ms);
         // Made here from nothing the store holds of it.
         record.only_copy = true;
         self.prepare(record, template, reply);
+    }
+
+    /// Books what new sandbox `id`'s first wake takes of memory and
+    /// processor time while its create waits, for its image or for a disk
+    /// reading, before anything of it is made: a create the host took
+    /// keeps its room meanwhile, and nothing taken after it, a template
+    /// build, a ready clone's fill or another create, takes that room. Its
+    /// disk is booked with its first files once they can be written (see
+    /// [`Self::create_fresh`]); a fetch books its image's write itself.
+    /// Like any first wake, the booking lapses at [`Self::first_wake_by_ms`];
+    /// [`Self::held_rooms`] renews it while the create still waits, so
+    /// only a create the agent lost track of gives its room back that way.
+    /// The create is checked again when it goes on.
+    pub(super) fn hold_room(&mut self, id: Id, config: &SandboxConfig) {
+        // The hold books no disk, so no save either, whatever the policy.
+        let size = self.held_size(config);
+        self.input(self.first_wake(id, size, SleepPolicy::NEVER, false, self.first_wake_by_ms()));
+    }
+
+    /// What [`Self::hold_room`] books for a create of `config`: its first
+    /// wake's memory and processor time, without disk.
+    fn held_size(&self, config: &SandboxConfig) -> Size {
+        Size {
+            save: 0,
+            disk: 0,
+            fetch: 0,
+            ..self.size(config, None)
+        }
+    }
+
+    /// Renews the holds of the creates still waiting for their image or a
+    /// disk reading, each only while it still fits: a hold that lapsed
+    /// meanwhile, its room taken, is not booked again unchecked, and the
+    /// create is refused when it goes on.
+    pub(super) fn held_rooms(&self) -> Vec<Input> {
+        let fetching = self
+            .fetching
+            .values()
+            .flat_map(super::fetch::Fetch::waiting);
+        let reading = self.after_reading.iter().filter_map(|work| match work {
+            AfterReading::Create(id, config, ..) => Some((*id, &**config)),
+            AfterReading::Adopt(..)
+            | AfterReading::Fetch(..)
+            | AfterReading::Sleep(..)
+            | AfterReading::HandOff(..) => None,
+        });
+        fetching
+            .chain(reading)
+            .filter_map(|(id, config)| {
+                let size = self.held_size(config);
+                self.room_for(id, size, SleepPolicy::NEVER, false, DiskSpace::default())
+                    .is_ok()
+                    .then(|| {
+                        self.first_wake(
+                            id,
+                            size,
+                            SleepPolicy::NEVER,
+                            false,
+                            self.first_wake_by_ms(),
+                        )
+                    })
+            })
+            .collect()
     }
 
     /// Makes the files of the new sandbox `record` describes in the

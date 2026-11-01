@@ -45,17 +45,24 @@ not parse or publish them into Knowledge. The agent first identifies useful
 lasting information, then explicitly retains supporting evidence or a reusable
 reference when warranted.
 Off leaves the file available to the chat while refusing new agent Knowledge.
-Document parsing and indexing are mechanical infrastructure. Configured Drive
-sources are ordinary scheduled agent tasks: their exact source and
-connection selection lives in `agentConfig.knowledgeSource` and is frozen in the
-accepted run. The attempt-only `knowledge_source_fetch` tool transfers and
-prepares source content with provider ACLs and durable checkpoints;
-`knowledge_source_read` lists content changed in that run and reads bounded
-passages. The agent selects findings and saves them with `knowledge_save`.
-No separate ingestion workflow decides what the company should remember.
-Native Jira/Confluence source sync is retired: existing schedules cannot fetch
-new content, while imported Documents and history remain. Atlassian agent tools
-use its hosted MCP connector; see [Atlassian](atlassian.md).
+Document parsing and indexing are mechanical infrastructure.
+
+Integrations give agents tools and access; they do not import provider content
+into Knowledge. For recurring work, such as summarising a Drive folder or a Jira
+project every morning, create an ordinary agent schedule that uses the
+integration's tools; the agent saves lasting findings with `knowledge_save`
+under the usual learning policy. No separate ingestion workflow or integration
+scheduler decides what the company should remember.
+
+Integration Knowledge sync (Google Drive, OneDrive, Jira/Confluence) is retired.
+Saved source tasks, whether a frozen `knowledge_source_sync` action or an agent
+task carrying `agentConfig.knowledgeSource`, read as **Sync retired**: new
+fires, manual runs and resume are refused, and queued runs settle failed with
+the retirement reason before any session or model is created. The reasons and
+copy live in `packages/contracts/src/knowledge-source-sync-retirement.ts`.
+Imported Documents, Knowledge entries, source provenance and run history remain
+readable, and old tasks can still be deleted. See [Atlassian](atlassian.md) and
+[Google Drive](google-drive.md) for their MCP connections.
 
 A failed vector-index batch keeps its last completed projection and the durable
 queue retries it with backoff. The stored job reason stays the SQL lifecycle's
@@ -252,12 +259,50 @@ The original file, source entry, evidence and findings all retain their authorit
 A shared finding cannot point at private evidence. The human UI offers **Share with workspace** as an explicit, editable new entry. That action does not copy the
 private graph, grant access to its original files, or keep the two entries synced.
 Personal originals and Knowledge do not disappear just because their original
-shared workspace is removed. Migration derives original-file ownership from typed
+shared workspace is removed: they stay in the owner's Personal workspace and the
+other workspaces where the owner turned them on. Migration derives original-file ownership from typed
 chat resources, document authority and generated-artifact session references.
 If several private owners already used the same original, each keeps access;
 unrelated workspace readers do not. An original already referenced by a shared
 chat or document keeps its existing shared authority. Unbound historical files
 retain their prior workspace ownership instead of guessing an owner.
+
+### Where Knowledge works
+
+Every entry has a home: the workspace it was added in. The home always has the
+entry, so it can always be managed from there. Beyond the home, each scope
+follows the organization-wide ownership and reach rules:
+
+- **Workspace** Knowledge works only in its workspace.
+- **Organization** Knowledge works in every shared workspace of the
+  organization, or only in the listed ones, plus members' Personal workspaces
+  when that switch is on. This is the same shape as organization Skills, model
+  keys, connectors, vaults and machines. Existing entries keep working in every
+  workspace, Personal ones included.
+- **Personal** Knowledge works in its home, its owner's Personal workspace and
+  the workspaces the owner turned it on in, as their Only me meetings and files
+  do. New entries start with no other workspaces. Entries saved before this
+  change keep working in every workspace, until their owner narrows them.
+
+The reach is enforced by `knowledge_scope_visible`, the row policy every
+Knowledge read and write already uses, so it applies the same way to people,
+agent turns, search, citations and review. A workspace an entry no longer works
+in stops finding it on its next read. An entry that cites evidence can also be
+hidden in a workspace where that evidence is not available.
+
+`GET` and `PUT /v1/workspaces/{workspaceId}/knowledge/entries/{entryId}/reach`
+(`getKnowledgeEntryReach` and `updateKnowledgeEntryReach` in the SDK) read and
+change where an entry works, from any workspace that has it. The body is
+`{ allowedWorkspaceIds: string[] | null, allowPersonalWorkspaces: boolean }`;
+`null` means every workspace, and the home is never stored. Whoever may write
+the organization's Knowledge changes an organization entry, choosing from its
+shared workspaces. Only the owner changes a personal entry, choosing from the
+organization's workspaces they belong to, and its Personal switch stays on.
+Agents cannot read or change reach. Workspace entries return 409, unknown
+workspaces or a Personal switch turned off on a personal entry return 422, and
+people without write access return 403. A reach change is not a revision of the
+entry: it keeps its version and review state, and is recorded in the audit log
+as `knowledge.reach.changed`.
 
 ## Browsing Knowledge
 

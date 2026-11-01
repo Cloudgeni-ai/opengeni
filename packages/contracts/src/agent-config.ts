@@ -466,6 +466,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   slack_bot_delete_message: "workspaceConnectors",
   slack_bot_prepare_message: "workspaceConnectors",
   slack_bot_send_prepared_message: "workspaceConnectors",
+  slack_agent_handoff: "workspaceConnectors",
+  slack_agent_chats: "workspaceConnectors",
   fiken_companies_list: "workspaceConnectors",
   fiken_contacts_list: "workspaceConnectors",
   fiken_contact_create: "workspaceConnectors",

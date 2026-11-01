@@ -9,6 +9,8 @@ import {
   createSession,
   getSession,
   effectiveSessionPolicyQuery,
+  listSessionEntriesForSubject,
+  listSessionsForSubject,
   withWorkspaceSubjectRls,
 } from "../src";
 
@@ -68,6 +70,57 @@ test("a session detail read projects effective policy only once", async () => {
       latencyMode: "standard",
     });
     expect(queries.filter((query) => query.includes('"latest_started_policy"'))).toHaveLength(1);
+  } finally {
+    driver.options.debug = debug;
+  }
+});
+
+test("a session list page names models with fixed probes, never the effective-policy walk", async () => {
+  const suffix = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: suffix,
+    accountName: "Policy list",
+    workspaceExternalSource: "test",
+    workspaceExternalId: suffix,
+    workspaceName: "Policy list",
+    subjectId: `policy-list-${suffix}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const session = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    initialMessage: "hello",
+    resources: [],
+    metadata: {},
+    model: "stored-model",
+    reasoningEffort: "high",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  const debug = driver.options.debug;
+  const queries: string[] = [];
+  driver.options.debug = (_id, query) => {
+    queries.push(query);
+  };
+  try {
+    const options = { subjectId: grant.subjectId };
+    const full = await listSessionsForSubject(client.db, grant.workspaceId, options);
+    const compact = await listSessionEntriesForSubject(client.db, grant.workspaceId, options);
+    expect(full.sessions.find((row) => row.id === session.id)).toMatchObject({
+      model: "stored-model",
+      reasoningEffort: "high",
+    });
+    expect(compact.sessions.find((row) => row.id === session.id)).toMatchObject({
+      model: "stored-model",
+    });
+    // The walk can scan every turn started since the last settings write;
+    // a list page reads two fixed index probes per row instead.
+    expect(queries.filter((query) => query.includes('"latest_started_policy"'))).toHaveLength(0);
+    expect(queries.filter((query) => query.includes('"latest_started_turn_event"'))).toHaveLength(
+      2,
+    );
   } finally {
     driver.options.debug = debug;
   }
