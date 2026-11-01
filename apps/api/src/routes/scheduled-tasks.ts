@@ -537,7 +537,6 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         runMode: task.runMode,
         reusableSessionId: task.reusableSessionId,
         agentConfig: task.agentConfig,
-        audience: task.visibility === "private" ? "user_private" : "workspace_shared",
         requireOnline: true,
       });
       const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(db, {

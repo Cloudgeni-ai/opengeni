@@ -130,3 +130,5 @@ const context = {
 export const useAppContext = () => context;
 export const useOptionalAppContext = () => context;
 export const useRail = () => ({ workspaceId, setDrawerOpen: () => {} });
+// The settings shell reads the rail where it may be absent; it has no sidebar state here.
+export const useOptionalRail = () => null;

@@ -9,8 +9,12 @@
 //! - a sandbox never runs on two hosts: each run happens at an owner epoch
 //!   no lower than any run before it, and a different host runs it only
 //!   at a higher one;
+//! - a VM the guard would leave running for being its sandbox's only copy
+//!   never runs while a copy of the sandbox is in the store;
 //! - a host given up on stopped its VMs before its sandboxes could go
-//!   elsewhere, by at least what the lease terms leave to spare;
+//!   elsewhere, by at least what the lease terms leave to spare, all but
+//!   those its guard left running for being their sandboxes' only copies
+//!   while no copy of them could be handed on;
 //! - an archive pointer's stamp never goes back, so a former owner never
 //!   publishes over a new one and an older save never over a newer one;
 //! - a move loses nothing: the archive holds every write when the host
@@ -23,6 +27,15 @@
 //! owner under the store's epoch, except those whose host died for good
 //! before their first archive.
 //!
+//! The guard sees each VM's group. A sandbox is its only copy from its
+//! create until its first archive begins, which clears its VM's mark
+//! first; some, as runners' sandboxes, are archived only to hand them
+//! off. A mark names the agent that set it, so an agent restart leaves
+//! it orphaned until the next agent marks the VMs again, and a group a VM
+//! leaves behind keeps it until the next VM starts in it, unmarked. Now
+//! and then the groups cannot be listed, and the guard treats the VMs as
+//! a whole.
+//!
 //! `FLEET_SIM_SEEDS` sets how many seeds run (default 6) and
 //! `FLEET_SIM_FIRST_SEED` the first; `FLEET_SIM_PRINT` prints what each
 //! run exercised.
@@ -32,10 +45,10 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
 use std::time::Duration;
 
 use compute_fleet::{
-    AnsweredAt, At, Capacity, ClassId, Demand, Expiry, Fence, Fleet, Found, Guard, GuardAction,
-    HostEpoch, HostId, HostInfo, HostLease, HostState, LeaseRecord, LeaseTerms, Listed, Mutation,
-    Next, Observed, Op, Outcome, OwnerEpoch, Ownership, Prefer, Renewal, Rng, SandboxId, Sends,
-    Stamp, Verdict, ZoneId, answered, fence, reconcile,
+    AnsweredAt, At, Capacity, ClassId, Demand, Expiry, Fence, Fleet, Found, Group, Guard,
+    GuardAction, HostEpoch, HostId, HostInfo, HostLease, HostState, LeaseRecord, LeaseTerms,
+    Listed, Mutation, Next, Observed, Op, Outcome, OwnerEpoch, Ownership, Prefer, Renewal, Rng,
+    SandboxId, Sends, Stamp, Verdict, ZoneId, answered, fence, reconcile,
 };
 
 const TERMS: LeaseTerms = LeaseTerms::RECOMMENDED;
@@ -80,6 +93,10 @@ impl Clock {
 }
 
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a simulated sandbox's independent facts"
+)]
 struct Local {
     epoch: OwnerEpoch,
     content: u64,
@@ -89,9 +106,51 @@ struct Local {
     archiving: Option<At>,
     /// Being handed off: it takes no wakes, and goes once archived.
     releasing: bool,
+    /// The record says no copy of it could be handed on: from its create
+    /// here until its first archive begins.
+    only_copy: bool,
+    /// Archived only to hand it off, as a runner's sandbox.
+    runner: bool,
+    /// Its VM's group's mark as its only copy: the agent incarnation that
+    /// set it. A group its VM left behind keeps it.
+    mark: Option<u64>,
+    /// What the kernel does with its VM's own group.
+    group: Kernel,
 }
 
-/// What the kernel does with the VMs' cgroup.
+impl Local {
+    fn new(epoch: OwnerEpoch, content: u64, only_copy: bool, runner: bool) -> Self {
+        Self {
+            epoch,
+            content,
+            archived: content,
+            awake: false,
+            archiving: None,
+            releasing: false,
+            only_copy,
+            runner,
+            mark: None,
+            group: Kernel::default(),
+        }
+    }
+
+    /// Its VM starts, in the group an earlier one may have left: the
+    /// engine clears that group's mark and freezer first, then the agent
+    /// `incarnation` marks it if its record says it is its only copy.
+    fn start(&mut self, incarnation: u64) {
+        self.awake = true;
+        self.group = Kernel::default();
+        self.mark = self.only_copy.then_some(incarnation);
+    }
+
+    /// Its VM ends; its group, left behind, keeps the mark.
+    fn end(&mut self) {
+        self.awake = false;
+        self.group = Kernel::default();
+    }
+}
+
+/// What the kernel does with a cgroup: the VMs', or one VM's own.
 #[derive(Clone, Copy, Debug, Default)]
 struct Kernel {
     /// A freeze is asked for (`cgroup.freeze` is 1).
@@ -132,6 +191,9 @@ struct Host {
     suspended_until: Option<u64>,
     /// The sleep hook's mark that a suspend is under way.
     suspending: bool,
+    /// Its guard is asked to stop, for the next one to take over, as in
+    /// an upgrade: it stops at the first step that allows it.
+    handing_over: bool,
     /// The registration attempt under way and what it lists, fixed for
     /// every copy.
     registering: Option<(u64, Vec<Listed>)>,
@@ -156,6 +218,33 @@ impl Host {
 
     fn awake(&self) -> u64 {
         self.sandboxes.values().filter(|local| local.awake).count() as u64
+    }
+
+    /// Every VM is frozen, by the cgroup above: a VM's own freeze asked
+    /// for is then met too, as its processes are frozen, so it stays
+    /// frozen once the cgroup above thaws.
+    fn vms_frozen(&mut self) {
+        self.kernel.frozen = true;
+        self.kernel.freeze_at = None;
+        for local in self.sandboxes.values_mut() {
+            if local.group.freezing {
+                local.group.frozen = true;
+                local.group.freeze_at = None;
+            }
+        }
+    }
+
+    /// The VM of `local` as the guard sees its group: marked its only
+    /// copy by an agent that runs, or by one that has ended.
+    fn group(&self, local: &Local) -> Group {
+        let only_copy = self.agent_up && local.mark == Some(self.incarnation);
+        Group {
+            only_copy,
+            orphaned: local.mark.is_some() && !only_copy,
+            freezing: local.group.freezing,
+            frozen: local.group.frozen || self.kernel.frozen,
+            empty: !local.awake,
+        }
     }
 
     fn capacity(&self) -> Capacity {
@@ -327,6 +416,12 @@ struct Stats {
     superseded: u64,
     watchdog_reboots: u64,
     kills: u64,
+    /// Steps a VM marked its sandbox's only copy ran past its host's
+    /// deadline, and steps one ran with its mark orphaned.
+    only_copy_runs: u64,
+    orphaned_runs: u64,
+    /// Guards that handed over to the next one.
+    handovers: u64,
     suspends: u64,
     /// Registration answers that arrived after the host had sent the
     /// attempt again, and counted.
@@ -352,6 +447,8 @@ struct Ghost {
 
 impl Ghost {
     /// Notes a run; the first run that breaks the invariant is described.
+    /// A run not `fenced` (an only copy's, with no copy to hand on) does
+    /// not count as its host still running VMs.
     fn ran(
         &mut self,
         id: SandboxId,
@@ -359,6 +456,7 @@ impl Ghost {
         epoch: OwnerEpoch,
         content: u64,
         now: u64,
+        fenced: bool,
     ) -> Result<bool, String> {
         let mut changed = true;
         if let Some(&(last_host, last_epoch)) = self.last_run.get(&id) {
@@ -375,7 +473,9 @@ impl Ghost {
             changed = (last_host, last_epoch) != (host, epoch);
         }
         self.last_run.insert(id, (host, epoch));
-        self.host_last_run.insert(host, now);
+        if fenced {
+            self.host_last_run.insert(host, now);
+        }
         self.written.insert(id, content);
         Ok(changed)
     }
@@ -386,6 +486,10 @@ struct Sim {
     params: Params,
     now: u64,
     rng: Rng,
+    /// How long the kernel takes to freeze and kill, and when the guard
+    /// cannot list the VMs' groups: a stream of its own, so the faults and
+    /// the service's choices follow the seed whatever the guard does.
+    kernel_rng: Rng,
     seq: u64,
     queue: BinaryHeap<Reverse<(u64, u64)>>,
     events: BTreeMap<u64, Event>,
@@ -413,6 +517,16 @@ struct Sim {
 /// True time in seconds, for the trace.
 fn seconds(ns: u64) -> String {
     format!("{}.{:03}s", ns / SEC, ns % SEC / MS)
+}
+
+/// When a freeze or kill asked for at `now` completes: within `span`, or
+/// one time in `hang` never.
+fn completes(rng: &mut Rng, now: u64, hang: u64, span: u64) -> u64 {
+    if rng.chance(1, hang) {
+        u64::MAX
+    } else {
+        now + MS + rng.below(span)
+    }
 }
 
 impl Sim {
@@ -473,6 +587,7 @@ impl Sim {
                     stalled_until: 0,
                     suspended_until: None,
                     suspending: false,
+                    handing_over: false,
                     registering: None,
                     sandboxes: BTreeMap::new(),
                 }
@@ -483,6 +598,7 @@ impl Sim {
             params,
             now: 0,
             rng,
+            kernel_rng: Rng::new(seed ^ 0x9e37_79b9_7f4a_7c15),
             seq: 0,
             queue: BinaryHeap::new(),
             events: BTreeMap::new(),
@@ -654,15 +770,36 @@ impl Sim {
         if self.hosts[index].vms_run() {
             let host = &mut self.hosts[index];
             let id = host.id;
+            let past = host.now(now) >= host.file.deadline;
             let mut runs = Vec::new();
-            for (sandbox, local) in &mut host.sandboxes {
-                if local.awake {
-                    local.content += 1;
-                    runs.push((*sandbox, local.epoch, local.content));
+            for (sandbox, local) in &host.sandboxes {
+                if local.awake && !local.group.frozen {
+                    let group = host.group(local);
+                    runs.push((*sandbox, group.only_copy, group.orphaned));
                 }
             }
-            for (sandbox, epoch, content) in runs {
-                match self.ghost.ran(sandbox, id, epoch, content, now) {
+            for (sandbox, only_copy, orphaned) in runs {
+                let local = self.hosts[index].sandboxes.get_mut(&sandbox).unwrap();
+                local.content += 1;
+                let (epoch, content) = (local.epoch, local.content);
+                if past && only_copy {
+                    self.stats.only_copy_runs += 1;
+                }
+                if orphaned {
+                    self.stats.orphaned_runs += 1;
+                }
+                // Marked by an agent that runs or one that ended.
+                let marked = only_copy || orphaned;
+                if marked && self.objects.contains_key(&sandbox) {
+                    self.fail(
+                        sandbox,
+                        &format!("{sandbox:?} runs on {id:?} marked its only copy, with a copy in the store"),
+                    );
+                }
+                // Left running for being its only copy (an orphaned mark's
+                // until its freeze takes), it may outlast its host's
+                // give-up: no copy of it can be handed on.
+                match self.ghost.ran(sandbox, id, epoch, content, now, !marked) {
                     Ok(true) => self.note(sandbox, &format!("runs on {id:?} at {epoch}")),
                     Ok(false) => {}
                     Err(broken) => self.fail(sandbox, &broken),
@@ -689,8 +826,10 @@ impl Sim {
             let Some(local) = self.hosts[index].sandboxes.get_mut(&id) else {
                 continue;
             };
-            if local.awake && sleep {
-                local.awake = false;
+            // A runner's sandbox never sleeps (its runner counts as a
+            // running command), so it is never handed off either.
+            if local.awake && sleep && !local.runner {
+                local.end();
             }
             // An archive whose answer never came is given up on. It may
             // still land, over or under a later one: stamps order them.
@@ -706,6 +845,7 @@ impl Sim {
                 }
             } else if may_run
                 && archive
+                && !local.runner
                 && local.archiving.is_none()
                 && local.content > local.archived
             {
@@ -714,20 +854,34 @@ impl Sim {
         }
     }
 
-    /// The kernel: freezes and kills complete, and the watchdog fires.
+    /// The kernel: freezes and kills complete, and the watchdog fires. A
+    /// kill of the VMs' cgroup kills every VM that is neither frozen nor
+    /// gone, as the guard does.
     fn kernel_tick(&mut self, index: usize) {
         let now = self.now;
         let host = &mut self.hosts[index];
         if host.kernel.freeze_at.is_some_and(|at| at <= now) {
-            host.kernel.freeze_at = None;
-            host.kernel.frozen = true;
+            host.vms_frozen();
         }
         if host.kernel.kill_at.is_some_and(|at| at <= now) {
             host.kernel.kill_at = None;
+            let frozen = host.kernel.frozen;
             for local in host.sandboxes.values_mut() {
-                local.awake = false;
+                if !frozen && !local.group.frozen {
+                    local.end();
+                }
             }
             self.stats.kills += 1;
+        }
+        for local in host.sandboxes.values_mut() {
+            if local.group.freeze_at.is_some_and(|at| at <= now) {
+                local.group.freeze_at = None;
+                local.group.frozen = true;
+            }
+            if local.group.kill_at.is_some_and(|at| at <= now) {
+                local.end();
+                self.stats.kills += 1;
+            }
         }
         // The watchdog counts on the host's own clock.
         let watchdog = u64::try_from(TERMS.watchdog.as_nanos()).unwrap();
@@ -742,37 +896,74 @@ impl Sim {
 
     fn guard_tick(&mut self, index: usize) {
         let now = self.now;
+        // Now and then what is in the cgroup cannot be listed.
+        let apart = !self.kernel_rng.chance(1, 100);
+        let upgrade = self.kernel_rng.chance(1, 2_000);
         let host = &mut self.hosts[index];
+        if upgrade && !host.handing_over {
+            host.handing_over = true;
+            self.stats.handovers += 1;
+        }
         let observed = Observed {
             freezing: host.kernel.freezing,
             frozen: host.kernel.frozen,
             empty: host.awake() == 0,
             suspending: host.suspending,
         };
-        let step = host.guard.step(host.now(now), host.file.deadline, observed);
-        if let Some(action) = step.action {
-            self.host_note(index, &format!("guard {action:?}"));
+        let (ids, groups): (Vec<SandboxId>, Vec<Group>) = host
+            .sandboxes
+            .iter()
+            .filter(|(_, local)| local.awake)
+            .map(|(id, local)| (*id, host.group(local)))
+            .unzip();
+        let plan = host.guard.plan(
+            host.now(now),
+            host.file.deadline,
+            observed,
+            apart.then_some(groups.as_slice()),
+            host.handing_over,
+        );
+        if plan.vms.is_some() || plan.groups.iter().any(Option::is_some) {
+            let acted: Vec<_> = plan.groups.iter().flatten().collect();
+            self.host_note(index, &format!("guard {:?}, VMs {acted:?}", plan.vms));
+        }
+        for (id, action) in ids.iter().zip(&plan.groups) {
+            let host = &mut self.hosts[index];
+            let parent_frozen = host.kernel.frozen;
+            let group = &mut host.sandboxes.get_mut(id).unwrap().group;
+            match action {
+                // One frozen already, by the cgroup above, stays so.
+                Some(GuardAction::Freeze) if parent_frozen || group.frozen => {
+                    group.freezing = true;
+                    group.frozen = true;
+                    group.freeze_at = None;
+                }
+                Some(GuardAction::Freeze) => {
+                    group.freezing = true;
+                    // One VM in ten waits on its disk past the deadline.
+                    group.freeze_at = Some(completes(&mut self.kernel_rng, now, 10, 100 * MS));
+                }
+                Some(GuardAction::Kill) if group.kill_at.is_none() => {
+                    group.kill_at = Some(completes(&mut self.kernel_rng, now, 100, 200 * MS));
+                }
+                Some(GuardAction::Thaw) => {
+                    group.freezing = false;
+                    group.frozen = false;
+                    group.freeze_at = None;
+                }
+                Some(GuardAction::Kill) | None => {}
+            }
         }
         let host = &mut self.hosts[index];
-        match step.action {
+        match plan.vms {
             Some(GuardAction::Freeze) => {
-                let at = if self.rng.chance(1, 50) {
-                    u64::MAX
-                } else {
-                    now + MS + self.rng.below(100 * MS)
-                };
                 host.kernel.freezing = true;
-                host.kernel.freeze_at = Some(at);
+                host.kernel.freeze_at = Some(completes(&mut self.kernel_rng, now, 50, 100 * MS));
             }
             // Asked again on every step; the first ask is the one that
             // completes, or hangs.
             Some(GuardAction::Kill) if host.kernel.kill_at.is_none() => {
-                let at = if self.rng.chance(1, 100) {
-                    u64::MAX
-                } else {
-                    now + MS + self.rng.below(200 * MS)
-                };
-                host.kernel.kill_at = Some(at);
+                host.kernel.kill_at = Some(completes(&mut self.kernel_rng, now, 100, 200 * MS));
             }
             Some(GuardAction::Thaw) => {
                 host.kernel.freezing = false;
@@ -781,8 +972,13 @@ impl Sim {
             }
             Some(GuardAction::Kill) | None => {}
         }
-        if step.feed {
+        if plan.feed {
             host.fed = now;
+        }
+        if host.handing_over && plan.may_stop {
+            // The next guard, of the same release, keeps no state.
+            host.handing_over = false;
+            host.guard = Guard::new();
         }
     }
 
@@ -989,23 +1185,17 @@ impl Sim {
             return Answer::Full;
         }
         self.ghost.created_on.entry(id).or_insert(host.id);
-        host.sandboxes.insert(
-            id,
-            Local {
-                epoch,
-                content: 0,
-                archived: 0,
-                awake: true,
-                archiving: None,
-                releasing: false,
-            },
-        );
+        // One in ten is a runner's.
+        let mut local = Local::new(epoch, 0, true, id.0.is_multiple_of(10));
+        local.start(host.incarnation);
+        host.sandboxes.insert(id, local);
         Answer::Ok
     }
 
     fn host_wake(&mut self, index: usize, id: SandboxId, epoch: OwnerEpoch) -> Answer {
         let host = &mut self.hosts[index];
         let free = host.capacity().free_memory_mib;
+        let incarnation = host.incarnation;
         let Some(local) = host.sandboxes.get_mut(&id) else {
             return Answer::NotFound;
         };
@@ -1023,7 +1213,9 @@ impl Sim {
         if !local.awake && free < SANDBOX_MIB {
             return Answer::Full;
         }
-        local.awake = true;
+        if !local.awake {
+            local.start(incarnation);
+        }
         Answer::Ok
     }
 
@@ -1074,17 +1266,10 @@ impl Sim {
         }
         self.stats.lost_writes += written.saturating_sub(pointer.content);
         self.stats.adopts += 1;
-        self.hosts[index].sandboxes.insert(
-            id,
-            Local {
-                epoch,
-                content: pointer.content,
-                archived: pointer.content,
-                awake: true,
-                archiving: None,
-                releasing: false,
-            },
-        );
+        // Taken up from the store, it is never its only copy.
+        let mut local = Local::new(epoch, pointer.content, false, false);
+        local.start(self.hosts[index].incarnation);
+        self.hosts[index].sandboxes.insert(id, local);
         Answer::Ok
     }
 
@@ -1171,6 +1356,12 @@ impl Sim {
     fn begin_archive(&mut self, index: usize, id: SandboxId) {
         let host = &mut self.hosts[index];
         let local = host.sandboxes.get_mut(&id).unwrap();
+        // Before the store sees anything of it, its VM's mark goes (a
+        // group a VM left behind keeps its own), then its record's.
+        if local.awake {
+            local.mark = None;
+        }
+        local.only_copy = false;
         local.archiving = Some(host.clock.read(self.now));
         let (epoch, content, incarnation) = (local.epoch, local.content, host.incarnation);
         let delay = if self.rng.chance(1, 30) {
@@ -1360,8 +1551,13 @@ impl Sim {
         host.incarnation += 1;
         host.lease = HostLease::resume(TERMS, host.file, self.rng.next_u64());
         host.registering = None;
+        // Its recovery marks the VMs it takes back as their records say.
+        let incarnation = host.incarnation;
         for local in host.sandboxes.values_mut() {
             local.archiving = None;
+            if local.awake {
+                local.mark = local.only_copy.then_some(incarnation);
+            }
         }
     }
 
@@ -1374,8 +1570,7 @@ impl Sim {
         let host = &mut self.hosts[index];
         host.suspending = true;
         host.kernel.freezing = true;
-        host.kernel.frozen = true;
-        host.kernel.freeze_at = None;
+        host.vms_frozen();
         host.suspended_until = Some(until);
         host.cut_until = host.cut_until.max(until);
         // The watchdog's clock stops while suspended: it fires as much
@@ -1400,8 +1595,10 @@ impl Sim {
         let host = &mut self.hosts[index];
         host.machine_up = false;
         host.agent_up = false;
+        // The VMs' groups go with the machine.
         for local in host.sandboxes.values_mut() {
-            local.awake = false;
+            local.end();
+            local.mark = None;
         }
     }
 
@@ -1423,11 +1620,13 @@ impl Sim {
         host.stalled_until = 0;
         host.suspended_until = None;
         host.suspending = false;
+        host.handing_over = false;
         host.registering = None;
         host.incarnation += 1;
         host.agent_up = true;
         for local in host.sandboxes.values_mut() {
-            local.awake = false;
+            local.end();
+            local.mark = None;
             local.archiving = None;
         }
     }
@@ -1918,6 +2117,9 @@ fn run_seeds(params: Params) -> Stats {
         total.superseded += stats.superseded;
         total.watchdog_reboots += stats.watchdog_reboots;
         total.kills += stats.kills;
+        total.only_copy_runs += stats.only_copy_runs;
+        total.orphaned_runs += stats.orphaned_runs;
+        total.handovers += stats.handovers;
         total.suspends += stats.suspends;
         total.slow_registrations += stats.slow_registrations;
         total.dead_hosts += stats.dead_hosts;
@@ -1976,6 +2178,12 @@ fn the_protocol_keeps_every_sandbox_on_one_host_through_faults() {
     );
     assert!(
         total.slow_registrations > 0 && total.min_stop_gap_ns.is_some(),
+        "{total:?}"
+    );
+    // Only copies ran on past their hosts' deadlines, some with their
+    // marks orphaned by an agent restart, and guards handed over.
+    assert!(
+        total.only_copy_runs > 0 && total.orphaned_runs > 0 && total.handovers > 0,
         "{total:?}"
     );
 }

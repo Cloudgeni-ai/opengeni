@@ -10,12 +10,12 @@ use std::future::Future;
 
 use compute_control::e2b::lifecycle::{OnTimeout, Record, State};
 use compute_control::store::{
-    Admission, AgentRef, Collector, Found, Import, Imported, Inserted, LifecycleRow, Linked,
-    MemoryStore, PointerRow, PostgresStore, RequestRow, SandboxRow, Spec, Store, TEMPLATE_PREFIX,
-    TemplateRow, Write, replace_lifecycle,
+    Admission, AgentRef, Collector, Found, HostRow, Import, Imported, Inserted, LifecycleRow,
+    Linked, MemoryStore, PointerRow, PostgresStore, RequestRow, SandboxRow, Spec, Store,
+    TEMPLATE_PREFIX, TemplateRow, Write, replace_lifecycle,
 };
 use compute_fleet::{HostId, HostState, OwnerEpoch, Ownership, SandboxId, Sends, Stamp};
-use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Report, Verdict};
+use compute_protocol::fleet::{Boot, Capacity, Held, HostInfo, Register, Renew, Report, Verdict};
 use compute_protocol::host::{Id, ImageId, SandboxConfig, SleepConfig};
 
 fn random() -> u64 {
@@ -45,6 +45,7 @@ fn capacity() -> Capacity {
         awake: 0,
         sandboxes: 0,
         pointers_in_service: true,
+        info: None,
     }
 }
 
@@ -210,6 +211,160 @@ async fn registration<S: Store>(store: S) {
 #[tokio::test]
 async fn registrations_are_answered_once_refused_while_live_and_renewed_by_their_host() {
     each(registration, registration).await;
+}
+
+/// What a host can take on, telling that it is `info`.
+fn telling(info: &HostInfo) -> Capacity {
+    Capacity {
+        info: Some(info.clone()),
+        ..capacity()
+    }
+}
+
+async fn row_of<S: Store>(store: &S, host: HostId) -> HostRow {
+    let rows = store.hosts_changed(0).await.unwrap();
+    rows.into_iter().find(|row| row.id == host).unwrap()
+}
+
+async fn told_again<S: Store>(store: S) {
+    let name = name();
+    let mut first = register(&name, random(), Vec::new());
+    first.info.boot = Some(Boot {
+        id: "first-boot".into(),
+        nth: 3,
+    });
+    // What it registers with carries its description too, kept once.
+    first.capacity = telling(&first.info);
+    let (host, epoch) = registered(&store, &first).await;
+    let registered_row = row_of(&store, host).await;
+    assert_eq!(registered_row.info, first.info);
+    assert_eq!(
+        registered_row.capacity,
+        capacity(),
+        "kept as its description"
+    );
+
+    // Its agent restarts in place with a larger share and another offer,
+    // keeping its registration: it says so with what it can take on.
+    let grown = HostInfo {
+        name: "another-name.example".into(),
+        memory_mib: 8192,
+        address: "127.0.0.1:2".into(),
+        offers: vec!["previews".into()],
+        boot: None,
+        ..first.info.clone()
+    };
+    let renew = Renew {
+        host: host.0,
+        epoch,
+        seq: 1,
+        capacity: Some(telling(&grown)),
+    };
+    assert!(
+        store
+            .renew(&renew, std::slice::from_ref(&name))
+            .await
+            .unwrap()
+    );
+    let renewed = row_of(&store, host).await;
+    assert!(renewed.changed > registered_row.changed);
+    assert_eq!(
+        renewed.info,
+        HostInfo {
+            name: name.clone(),
+            boot: first.info.boot.clone(),
+            ..grown.clone()
+        },
+        "all it says, under the name and boot it registered with"
+    );
+    assert_eq!(renewed.capacity, capacity());
+
+    // A renewal that says nothing, as while it takes its sandboxes back,
+    // or one from an earlier release, keeps the description last heard.
+    for capacity in [None, Some(capacity())] {
+        let quiet = Renew {
+            seq: 2,
+            capacity,
+            ..renew.clone()
+        };
+        assert!(
+            store
+                .renew(&quiet, std::slice::from_ref(&name))
+                .await
+                .unwrap()
+        );
+        assert_eq!(row_of(&store, host).await.info, renewed.info);
+    }
+    told_in_reports(&store, &first.info, (host, epoch), &grown).await;
+}
+
+/// A report tells what the host is too; one under another registration
+/// changes nothing.
+async fn told_in_reports<S: Store>(
+    store: &S,
+    registered: &HostInfo,
+    (host, epoch): (HostId, u64),
+    grown: &HostInfo,
+) {
+    let name = &registered.name;
+    let shrunk = HostInfo {
+        memory_mib: 2048,
+        ..grown.clone()
+    };
+    let report = Report {
+        host: host.0,
+        epoch,
+        capacity: telling(&shrunk),
+    };
+    let stale = Report {
+        epoch: epoch + 1_000_000,
+        capacity: telling(&HostInfo {
+            memory_mib: 1,
+            ..shrunk.clone()
+        }),
+        ..report.clone()
+    };
+    assert!(
+        !store
+            .report(&stale, std::slice::from_ref(name))
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .report(&report, std::slice::from_ref(name))
+            .await
+            .unwrap()
+    );
+    let reported = row_of(store, host).await;
+    assert_eq!(reported.info, shrunk.told_again(registered));
+    assert_eq!(reported.info.memory_mib, 2048);
+    assert_eq!(reported.capacity, capacity());
+
+    // Once given up on, what its last renewal tells changes nothing.
+    let count = renewals(store, host).await.expect("counted");
+    assert_eq!(store.give_up(host, count, now_ms()).await.unwrap(), Some(0));
+    let late = Renew {
+        host: host.0,
+        epoch,
+        seq: 9,
+        capacity: Some(telling(&HostInfo {
+            memory_mib: 3,
+            ..shrunk
+        })),
+    };
+    assert!(
+        !store
+            .renew(&late, std::slice::from_ref(name))
+            .await
+            .unwrap()
+    );
+    assert_eq!(row_of(store, host).await.info, reported.info);
+}
+
+#[tokio::test]
+async fn a_host_restarted_in_place_is_kept_as_it_says_it_is_now() {
+    each(told_again, told_again).await;
 }
 
 async fn conditional_writes<S: Store>(store: S) {
