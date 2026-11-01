@@ -123,3 +123,30 @@ test("a boundary without `fallback` always keeps headers out of the bar", async 
     },
   );
 });
+
+test("inside the hidden page, dialogs never take the bar and pages outside the boundary do", async () => {
+  // Skill, plugin and bundle pages render inside the catalog's tree (portaled
+  // out), outside the header's boundary; its dialogs have a boundary of their own.
+  const Tree = ({ dialog, page }: { dialog: boolean; page: string | null }) => (
+    <windowBar.WindowBarPageTitle enabled>
+      <div hidden={page !== null}>
+        <titles.WindowBarTitleBoundary fallback>
+          <Header title="Capabilities" />
+          {dialog ? (
+            <titles.WindowBarTitleBoundary>
+              <Header title="A dialog" />
+            </titles.WindowBarTitleBoundary>
+          ) : null}
+        </titles.WindowBarTitleBoundary>
+        {page ? <Header key={page} title={page} /> : null}
+      </div>
+    </windowBar.WindowBarPageTitle>
+  );
+  await mount(<Tree dialog page={null} />, async (view) => {
+    expect(view.bar()).toBe("Capabilities");
+    await view.render(<Tree dialog page="A skill" />);
+    expect(view.bar()).toBe("A skill");
+    await view.render(<Tree dialog={false} page={null} />);
+    expect(view.bar()).toBe("Capabilities");
+  });
+});

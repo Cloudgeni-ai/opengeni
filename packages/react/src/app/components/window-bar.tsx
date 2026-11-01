@@ -156,9 +156,10 @@ export function useWindowBarRow(
 
 /**
  * While `enabled`, draws the page's title line in the window bar's row (as
- * the canvas's first child) and lets the first page header below claim it,
- * with its own title; `fallbackTitle` stands in until one does. Always
- * rendered, so turning it on or off never remounts the page.
+ * the canvas's first child) and lets the first page header below with a
+ * title claim it (headers in a `WindowBarTitleBoundary fallback` only when no
+ * other has one); `fallbackTitle` stands in until one does. Always rendered,
+ * so turning it on or off never remounts the page.
  */
 export function WindowBarPageTitle({
   enabled,
