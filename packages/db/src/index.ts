@@ -23845,6 +23845,67 @@ export async function updateOrganizationRigReach(
   );
 }
 
+/** An organization machine or rig, wherever it works: its name and reach only. */
+export type OrganizationComputeSummaryRow = {
+  id: string;
+  name: string;
+  /** Machines: the machine's sandbox, which their pages open by. */
+  sandboxId?: string | null;
+  reach: OrganizationComputeReach;
+};
+
+const LIST_ORGANIZATION_COMPUTE = "opengeni_private.list_organization_compute_v1(uuid, uuid, text)";
+
+/**
+ * Every active organization machine or rig in the account, wherever it works
+ * (migration 1224), for the people who decide where they work; the caller
+ * checks account:admin and refuses agent runs. Null while the routine's
+ * runtime EXECUTE is withheld (runtime-posture
+ * DEFERRED_RUNTIME_PRIVATE_ROUTINES). The grant is checked in its own
+ * statement, because EXECUTE is checked when a statement starts.
+ */
+export async function listOrganizationCompute(
+  db: Database,
+  access: RigAccessContext,
+  kind: "machine" | "rig",
+): Promise<OrganizationComputeSummaryRow[] | null> {
+  return await withRlsContext(db, access, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, access.subjectId);
+    const [grant] = await rawRows<{ granted: boolean | null }>(
+      scopedDb,
+      sql`select coalesce(has_function_privilege(
+          to_regprocedure(${LIST_ORGANIZATION_COMPUTE})::oid, 'EXECUTE'), false) as granted`,
+    );
+    if (grant?.granted !== true) return null;
+    const rows = await rawRows<{
+      value: {
+        id: string;
+        name?: string;
+        sandboxId?: string | null;
+        sandboxName?: string | null;
+        os?: string | null;
+        reach: OrganizationComputeReach;
+      };
+    }>(
+      scopedDb,
+      sql`select value from opengeni_private.list_organization_compute_v1(
+        ${access.accountId}::uuid, ${access.workspaceId}::uuid, ${kind}
+      ) value`,
+    );
+    return rows.map(({ value }) =>
+      kind === "machine"
+        ? {
+            id: value.id,
+            // As the machine list names it.
+            name: value.sandboxName ?? `${value.os} machine`,
+            sandboxId: value.sandboxId ?? null,
+            reach: value.reach,
+          }
+        : { id: value.id, name: value.name ?? "", reach: value.reach },
+    );
+  });
+}
+
 // --- Channels ---------------------------------------------------------------
 // Workspace-shared rail organization for root sessions. Pure metadata: filing
 // a session into a channel never affects execution, authority, or history.

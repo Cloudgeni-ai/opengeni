@@ -12180,6 +12180,42 @@ export const OrganizationComputeReachResponse = /* @__PURE__ */ defineSchema(() 
 );
 export type OrganizationComputeReachResponse = z.infer<typeof OrganizationComputeReachResponse>;
 
+/**
+ * An organization machine or rig, wherever it works: its name and where it
+ * works, for Organization settings > Shared. Machines carry the id of their
+ * sandbox, which machine pages open by.
+ */
+export const OrganizationComputeSummary = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: primitives.uuid,
+    name: primitives.string,
+    sandboxId: primitives.uuid.nullable().optional(),
+    reach: OrganizationComputeReach,
+  }),
+);
+export type OrganizationComputeSummary = z.infer<typeof OrganizationComputeSummary>;
+
+/**
+ * GET /v1/workspaces/:workspaceId/organization-machines: every organization
+ * machine, wherever it works, for organization owners. `complete` is false
+ * while the server can only list the ones that work in the requested
+ * workspace.
+ */
+export const ListOrganizationMachinesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ machines: z.array(OrganizationComputeSummary), complete: primitives.boolean }),
+);
+export type ListOrganizationMachinesResponse = z.infer<typeof ListOrganizationMachinesResponse>;
+
+/**
+ * GET /v1/workspaces/:workspaceId/organization-rigs: every organization
+ * sandbox environment, wherever it works, for organization owners.
+ * `complete` as for machines.
+ */
+export const ListOrganizationRigsResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ rigs: z.array(OrganizationComputeSummary), complete: primitives.boolean }),
+);
+export type ListOrganizationRigsResponse = z.infer<typeof ListOrganizationRigsResponse>;
+
 export const Rig = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,

@@ -261,6 +261,17 @@ describe("organization admins manage organization vaults, environments and machi
     expect(await rigReach(member, acmeRig)).toBe(403);
     expect(await rigReach(admin, acmeRig)).toBe(200);
 
+    // The owners and admins who pick where each works list every one,
+    // wherever it works (Organization settings > Shared).
+    for (const kind of ["machines", "rigs"] as const) {
+      const listEverywhere = (person: Person, workspaceId: string) =>
+        send(person, at(workspaceId, `/organization-${kind}`), "GET");
+      expect(await listEverywhere(member, acme.workspaceId)).toBe(403);
+      expect(await listEverywhere(admin, other.workspaceId)).toBe(403);
+      expect(await listEverywhere(admin, acme.workspaceId)).toBe(200);
+      expect(await listEverywhere(owner, acme.workspaceId)).toBe(200);
+    }
+
     expect(await revoke(member, acme.workspaceId, acmeMachine)).toBe(403);
     expect(await revoke(admin, other.workspaceId, otherMachine)).toBe(403);
     expect(await revoke(admin, acme.workspaceId, acmeMachine)).toBe(200);

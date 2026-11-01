@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireRestrictedRuntimeTestDatabase,
+  grantDeferredRuntimeAccess,
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
@@ -15,9 +16,11 @@ import {
   getSandbox,
   initializeSessionStartAtomically,
   listEnrollments,
+  listOrganizationCompute,
   listRigs,
   materializeRigVersionForAttempt,
   nestedPostgresSqlState,
+  revokeScopedRig,
   updateOrganizationMachineReach,
   updateOrganizationRigReach,
   type DbClient,
@@ -372,5 +375,116 @@ describe("where an organization machine works", () => {
       },
     });
     expect(await visibleMachineIds(org, org.home)).toContain(machine.enrollmentId);
+  }, 120_000);
+});
+
+describe("every organization machine and rig, wherever it works", () => {
+  test("listed from any workspace once granted, with where each works; never someone else's", async () => {
+    const org = await organization();
+    const machine = await organizationMachine(org);
+    const name = (label: string) => `${label}-${crypto.randomUUID().slice(0, 8)}`;
+    const rig = await createRig(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.home,
+      scope: "organization",
+      subjectId: org.owner,
+      allowOrganization: true,
+      name: name("shared-rig"),
+    });
+    const removed = await createRig(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.home,
+      scope: "organization",
+      subjectId: org.owner,
+      allowOrganization: true,
+      name: name("removed-rig"),
+    });
+    await revokeScopedRig(client.db, access(org, org.home), removed.id, {
+      allowOrganization: true,
+    });
+    // The workspace's own and the owner's own are not the organization's.
+    const workspaceRig = await createRig(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.second,
+      scope: "workspace",
+      subjectId: org.owner,
+      name: name("workspace-rig"),
+    });
+    // Neither works in the second workspace any more.
+    await updateOrganizationMachineReach(
+      client.db,
+      machine.enrollmentId,
+      reachInput(org, [], false),
+    );
+    await updateOrganizationRigReach(client.db, rig.id, reachInput(org, [org.third], false));
+    expect(await visibleMachineIds(org, org.second)).not.toContain(machine.enrollmentId);
+    expect(await visibleRigIds(org, org.second)).not.toContain(rig.id);
+
+    // Withheld for one release: the caller learns it is not there yet.
+    expect(await listOrganizationCompute(client.db, access(org, org.second), "machine")).toBeNull();
+    expect(await listOrganizationCompute(client.db, access(org, org.second), "rig")).toBeNull();
+
+    await grantDeferredRuntimeAccess(shared.admin);
+    expect(await listOrganizationCompute(client.db, access(org, org.second), "machine")).toEqual([
+      {
+        id: machine.enrollmentId,
+        name: "Shared build box",
+        sandboxId: machine.sandboxId,
+        reach: {
+          homeWorkspaceId: org.home,
+          allowedWorkspaceIds: [],
+          allowPersonalWorkspaces: false,
+        },
+      },
+    ]);
+    const rigs = await listOrganizationCompute(client.db, access(org, org.personal), "rig");
+    expect(rigs).toEqual([
+      {
+        id: rig.id,
+        name: rig.name,
+        reach: {
+          homeWorkspaceId: org.home,
+          allowedWorkspaceIds: [org.third],
+          allowPersonalWorkspaces: false,
+        },
+      },
+    ]);
+    expect(rigs!.map((entry) => entry.id)).not.toContain(workspaceRig.id);
+    expect(rigs!.map((entry) => entry.id)).not.toContain(removed.id);
+
+    // Another organization's owner lists only their own organization's.
+    const other = await organization();
+    expect(await listOrganizationCompute(client.db, access(other, other.home), "machine")).toEqual(
+      [],
+    );
+
+    // An API caller in the organization's context, with no membership, gets
+    // the same list, as it does the scoped lists (the routes require
+    // account:admin).
+    expect(
+      (
+        await listOrganizationCompute(
+          client.db,
+          { accountId: org.accountId, workspaceId: org.home, subjectId: "api_key:reach-test" },
+          "rig",
+        )
+      )?.map((entry) => entry.id),
+    ).toEqual([rig.id]);
+
+    // A member who can't use the workspace is refused there.
+    const outsider = `user:reach-outsider-${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${org.accountId}, ${outsider}, 'active', ${org.third}, 1)`;
+    const refused = await listOrganizationCompute(
+      client.db,
+      { accountId: org.accountId, workspaceId: org.second, subjectId: outsider },
+      "rig",
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(nestedPostgresSqlState(refused)).toBe("42501");
   }, 120_000);
 });

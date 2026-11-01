@@ -8556,6 +8556,30 @@ export type OrganizationComputeReachResponse = {
   reach: OrganizationComputeReach;
 };
 
+/** An organization machine or rig, wherever it works: its name and where it
+ * works. Machines carry the id of their sandbox, which machine pages open by. */
+export type OrganizationComputeSummary = {
+  id: string;
+  name: string;
+  sandboxId?: string | null | undefined;
+  reach: OrganizationComputeReach;
+};
+
+/** GET .../organization-machines: every organization machine, wherever it
+ * works, for organization owners. `complete` is false while the server can
+ * only list the ones that work in the requested workspace. */
+export type ListOrganizationMachinesResponse = {
+  machines: OrganizationComputeSummary[];
+  complete: boolean;
+};
+
+/** GET .../organization-rigs: every organization sandbox environment,
+ * wherever it works, for organization owners. `complete` as for machines. */
+export type ListOrganizationRigsResponse = {
+  rigs: OrganizationComputeSummary[];
+  complete: boolean;
+};
+
 export type RigChangeKind = "setup_append" | "definition_edit";
 
 export type RigChangeStatus = "proposed" | "verifying" | "merged" | "rejected" | "failed";
