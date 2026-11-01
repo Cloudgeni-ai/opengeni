@@ -14,6 +14,7 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ZodType } from "zod";
 import {
+  authorizationHoldsOrganizationAdministration,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requirePermission,
@@ -84,7 +85,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const rig = await requireRigForApi(db, authorization.grant, rigId);
     if (
       rig.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") !== true
+      !authorizationHoldsOrganizationAdministration(authorization)
     ) {
       throw new MissingPermissionRefusal("account:admin");
     }
@@ -193,7 +194,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const allowOrganization =
       payload.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") === true;
+      authorizationHoldsOrganizationAdministration(authorization);
     if (payload.scope === "organization" && !allowOrganization) {
       throw new MissingPermissionRefusal("account:admin");
     }
@@ -220,8 +221,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     requirePermission(grant, "rigs:manage");
     const rig = await requireRigForApi(db, grant, c.req.param("rigId"));
     const allowOrganization =
-      rig.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") === true;
+      rig.scope === "organization" && authorizationHoldsOrganizationAdministration(authorization);
     if (rig.scope === "organization" && !allowOrganization) {
       throw new MissingPermissionRefusal("account:admin");
     }
@@ -240,8 +240,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     requirePermission(grant, "rigs:manage");
     const rig = await requireRigForApi(db, grant, c.req.param("rigId"));
     const allowOrganization =
-      rig.scope === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") === true;
+      rig.scope === "organization" && authorizationHoldsOrganizationAdministration(authorization);
     if (rig.scope === "organization" && !allowOrganization) {
       throw new MissingPermissionRefusal("account:admin");
     }

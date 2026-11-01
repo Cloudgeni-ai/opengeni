@@ -62,6 +62,7 @@ import {
   loadExternalVaultConnection,
   pendingVaultCredentialBundle,
   MissingPermissionRefusal,
+  authorizationHoldsOrganizationAdministration,
 } from "@opengeni/core";
 import {
   createConnection,
@@ -248,8 +249,9 @@ function vaultContextFor(
   };
 }
 
+/** Organization vaults and connections: the organization's owner or an admin. */
 function isAccountAdmin(authorization: AccessGrantAuthorization): boolean {
-  return authorization.accountGrant?.permissions.includes("account:admin") === true;
+  return authorizationHoldsOrganizationAdministration(authorization);
 }
 
 type OnePasswordConnectionRow = NonNullable<Awaited<ReturnType<typeof getConnectionMetadata>>>;
@@ -398,10 +400,7 @@ export function registerVaultProviderRoutes(
     );
     const grant = authorization.grant;
     const payload = await parseRequestJson(c, InstallOnePasswordRequest);
-    if (
-      payload.ownership === "organization" &&
-      authorization.accountGrant?.permissions.includes("account:admin") !== true
-    ) {
+    if (payload.ownership === "organization" && !isAccountAdmin(authorization)) {
       throw new MissingPermissionRefusal("account:admin");
     }
     if (payload.ownership === "user" && !isPersonalConnectionOwnerPrincipal(authorization)) {

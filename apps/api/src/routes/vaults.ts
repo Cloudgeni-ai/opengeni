@@ -42,6 +42,7 @@ import {
   type VaultService,
   type VaultServiceDeps,
   MissingPermissionRefusal,
+  authorizationHoldsOrganizationAdministration,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -54,7 +55,8 @@ const PREFIX = "/v1/workspaces/:workspaceId";
 function actorFor(authorization: AccessGrantAuthorization): VaultRequestActor {
   return {
     grant: authorization.grant,
-    accountAdmin: authorization.accountGrant?.permissions.includes("account:admin") === true,
+    // Organization vaults: the organization's owner or an admin.
+    accountAdmin: authorizationHoldsOrganizationAdministration(authorization),
     // An agent or personal key acting as the person resolves as their human
     // session too; only their own sign-in counts as the person here.
     personSignedIn:

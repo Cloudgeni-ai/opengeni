@@ -32,7 +32,8 @@ each hosted field keeps encrypted **versions**.
   default **Private** vault is always available everywhere. Vaults created
   before this setting existed stay available everywhere until narrowed.
 - **Workspace** vaults are usable by members of that workspace.
-- **Organization** vaults are managed with `account:admin`; their reach is set
+- **Organization** vaults are managed by the organization's owner or an admin
+  (or a credential holding `account:admin`); their reach is set
   by "Available in": every shared workspace (`allowedWorkspaceIds: null`) or a
   list of them, and separately whether members' Personal workspaces have it
   (`allowPersonalWorkspaces`). The switch alone decides Personal workspaces,
