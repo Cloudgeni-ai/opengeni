@@ -14051,6 +14051,9 @@ export const capabilityInstallations = pgTable(
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     enabledAt: timestamp("enabled_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Who turned it on or last changed it; null (every row from before 1228)
+     * counts as installed by an admin. A member removes only their own. */
+    installedBySubjectId: text("installed_by_subject_id"),
   },
   (table) => ({
     kindAuthority: check("capability_installations_kind_authority_chk", sql`${table.kind} = 'mcp'`),

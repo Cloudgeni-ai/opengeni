@@ -391,6 +391,7 @@ import type {
   SessionMcpToolPermissionsResponse,
   UpdateSessionMcpToolPermissionsRequest,
   CapabilityInstallation,
+  RemoveCapabilityInstallationResponse,
   ApiIntegrationPreview,
   ApiIntegrationOAuthStartRequest,
   ApiIntegrationUninstallPreview,
@@ -9231,6 +9232,22 @@ export class OpenGeniClient {
     return await this.requestJson<CapabilityInstallation>(
       "POST",
       `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/disable`,
+    );
+  }
+
+  /**
+   * Remove a custom MCP server added in this workspace, so it is no longer
+   * on; anyone who may turn integrations on can add it again. Integration
+   * admins remove any; a member only one they turned on, while it is on
+   * (otherwise 403 `capabilities:manage`). See `canRemove` on catalog items.
+   */
+  async removeCapabilityInstallation(
+    workspaceId: string,
+    capabilityId: string,
+  ): Promise<RemoveCapabilityInstallationResponse> {
+    return await this.requestJson<RemoveCapabilityInstallationResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/installation`,
     );
   }
 

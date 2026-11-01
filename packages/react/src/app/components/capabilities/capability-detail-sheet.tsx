@@ -145,7 +145,9 @@ export type ConnectAction =
       ownership: ConnectionOwnership;
       headers: Record<string, string>;
     }
-  | { type: "disconnect"; item: CapabilityCatalogItem };
+  | { type: "disconnect"; item: CapabilityCatalogItem }
+  // Remove a custom MCP server the viewer may remove (`item.canRemove`).
+  | { type: "remove_server"; item: CapabilityCatalogItem };
 
 // Re-exported from the shared library so the sheet and the row/tile quick-connect
 // fast path can never drift on what a new connection defaults to.

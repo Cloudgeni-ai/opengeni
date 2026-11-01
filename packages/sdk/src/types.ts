@@ -9511,6 +9511,13 @@ export type CapabilityCatalogItem = {
   metadata: Record<string, unknown>;
   createdAt?: string | undefined;
   updatedAt?: string | undefined;
+  /**
+   * Whether the viewer may remove this custom MCP server from the workspace
+   * (`removeCapabilityInstallation` on the client): integration admins
+   * remove any, a member only one they turned on, while it is on. Older
+   * servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type CapabilityInstallation = {
@@ -9524,6 +9531,11 @@ export type CapabilityInstallation = {
   metadata: Record<string, unknown>;
   enabledAt: string;
   updatedAt: string;
+};
+
+export type RemoveCapabilityInstallationResponse = {
+  /** The installation that was removed. */
+  removed: CapabilityInstallation;
 };
 
 export type CapabilityCatalogResponse = {
