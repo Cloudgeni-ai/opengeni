@@ -22,6 +22,7 @@ import {
   type Workspace,
 } from "@opengeni/contracts";
 import {
+  INTEGRATION_SETUP_PERMISSION,
   PERSONAL_INTEGRATION_SETUP_PERMISSION,
   permissionSetCovers,
 } from "@opengeni/contracts/personal-integration-setup";
@@ -177,6 +178,33 @@ export function requireApiKeyDelegationContext(
  * the value the cookie branch produced.
  */
 const canonicalManagedCookieContexts = new WeakSet<AccessContext>();
+/**
+ * Grants resolved for a person signed in to Opengeni's own web, desktop or
+ * mobile apps (a canonical managed or local human session). Funding origin
+ * only (`BillingOrigin` app): never an authorization input.
+ */
+const appCredentialGrants = new WeakSet<AccessGrant>();
+
+/** Was this exact grant resolved for a person signed in to Opengeni's own apps? */
+export function isAppCredentialGrant(grant: AccessGrant): boolean {
+  return appCredentialGrants.has(grant);
+}
+
+/**
+ * Mark the grants of a just-stamped canonical app context (cookie, native app
+ * credential or local install) so work they start outside a turn (a model
+ * call, dictation, a search) is billed as app use.
+ */
+function markAppCredentialGrants(context: AccessContext): void {
+  for (const grant of context.workspaceGrants) {
+    if (
+      isCanonicalManagedHumanSession(context, grant) ||
+      isCanonicalLocalHumanSession(context, grant)
+    ) {
+      appCredentialGrants.add(grant);
+    }
+  }
+}
 /** Downstream legacy credentials cannot encode a partially selected admin. */
 export function requireExplicitPermissionDelegation(
   grant: Pick<AccessGrant, "permissions" | "permissionMode">,
@@ -840,6 +868,9 @@ export function accessGrantAuthorizationFromContext(
     canonicalLocalHumanSession: isCanonicalLocalHumanSession(context, grant),
   };
   resolvedAccessGrantAuthorizations.add(authorization);
+  if (authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession) {
+    appCredentialGrants.add(grant);
+  }
   if (contextIntegrity && developerSetupApiKeyContexts.has(context)) {
     developerSetupAuthorizations.set(authorization, grant);
     developerSetupGrants.add(grant);
@@ -1072,6 +1103,45 @@ export async function requireWorkspaceSettingsAuthorization(
   throw new MissingPermissionRefusal("workspace:admin", {
     message: WORKSPACE_SETTINGS_REFUSAL,
   });
+}
+
+/**
+ * Whether this grant may add integrations to its workspace (Members'
+ * `connections:write`, or an integration admin's `capabilities:manage`). See
+ * `INTEGRATION_SETUP_PERMISSION` for what that covers and what stays admin.
+ */
+export function hasIntegrationSetupPermission(
+  grant: Pick<AccessGrant, "permissions" | "permissionMode">,
+): boolean {
+  return (
+    hasPermission(grant.permissions, INTEGRATION_SETUP_PERMISSION, grant.permissionMode) ||
+    hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode)
+  );
+}
+
+/** Whether this grant holds integration admin rights (`capabilities:manage`). */
+export function hasIntegrationAdminPermission(
+  grant: Pick<AccessGrant, "permissions" | "permissionMode">,
+): boolean {
+  return hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode);
+}
+
+/**
+ * The access check of every route that adds or removes an integration
+ * (plugins, API integrations, custom MCP servers, integration sources):
+ * `connections:write` or `capabilities:manage`. The route still keeps what
+ * stays admin work (auto-approval, changing what is already on) behind
+ * {@link hasIntegrationAdminPermission}.
+ */
+export async function requireIntegrationSetupAuthorization(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<AccessGrantAuthorization> {
+  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  requireResolvedAccessGrantAuthorization(authorization, workspaceId);
+  if (hasIntegrationSetupPermission(authorization.grant)) return authorization;
+  throw new MissingPermissionRefusal(INTEGRATION_SETUP_PERMISSION);
 }
 
 /**
@@ -1848,6 +1918,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
       subjectLabel: "Local dev",
     });
     canonicalLocalHumanContexts.add(context);
+    markAppCredentialGrants(context);
     return context;
   }
 
@@ -1892,6 +1963,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;
     }
@@ -1925,6 +1997,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;
     }

@@ -499,6 +499,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rustls",
+ "rustls-native-certs 0.8.5",
  "rustls-webpki 0.103.15",
  "serde",
  "serde_json",

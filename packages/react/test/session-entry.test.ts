@@ -56,6 +56,8 @@ describe("session-only entry", () => {
     // Refusal copy and the controller's model labels/order are explicit pure
     // SDK leaves, not permission to import contracts/server/workbench barrels.
     expect([...thirdParty].sort()).toEqual([
+      // Claude citation tags shown as their text: a dependency-free contracts leaf.
+      "@opengeni/contracts/claude-cite-tags",
       // The MCP server question on a pending approval: a zod-free model leaf.
       "@opengeni/contracts/mcp-elicitation-model",
       // isRecord and errorMessage: a dependency-free contracts leaf, not a barrel.

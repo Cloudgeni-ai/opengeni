@@ -106,10 +106,10 @@ const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> 
   admin_action_call: "Do things in the app for you, asking before each change",
 };
 
-export const firstPartySessionToolOptions = FIRST_PARTY_MCP_TOOL_NAMES.map((id) => ({
-  id,
-  name: FIRST_PARTY_ACTION_LABELS[id] ?? firstPartyToolLabel(id),
-}));
+// Built on first use rather than at module load. This module has a chunk of
+// its own, and a load-time read of a binding owned by another chunk can run
+// before that chunk does, depending on which route a visitor opens first.
+let allFirstPartySessionToolOptions: Array<{ id: FirstPartyMcpToolName; name: string }> | undefined;
 
 export function clientFirstPartyMcpToolPolicy(config: Pick<ClientConfig, "firstPartyMcpTools">): {
   default: FirstPartyMcpToolName[];
@@ -126,9 +126,13 @@ export function clientFirstPartyMcpToolPolicy(config: Pick<ClientConfig, "firstP
 export function firstPartySessionToolOptionsFor(
   allowed: readonly FirstPartyMcpToolName[] | undefined,
 ): Array<{ id: FirstPartyMcpToolName; name: string }> {
-  if (!allowed) return firstPartySessionToolOptions;
+  allFirstPartySessionToolOptions ??= FIRST_PARTY_MCP_TOOL_NAMES.map((id) => ({
+    id,
+    name: FIRST_PARTY_ACTION_LABELS[id] ?? firstPartyToolLabel(id),
+  }));
+  if (!allowed) return allFirstPartySessionToolOptions;
   const allowedSet = new Set(allowed);
-  return firstPartySessionToolOptions.filter((option) => allowedSet.has(option.id));
+  return allFirstPartySessionToolOptions.filter((option) => allowedSet.has(option.id));
 }
 
 function firstPartyToolLabel(id: FirstPartyMcpToolName): string {

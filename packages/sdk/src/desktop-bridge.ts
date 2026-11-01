@@ -11,6 +11,16 @@ import type {
 /** Bumped only for incompatible changes; additions are new capabilities. */
 export const DESKTOP_BRIDGE_VERSION = 1;
 
+/** The macOS traffic lights: three 14px buttons. */
+export const DESKTOP_MAC_TRAFFIC_LIGHT_SIZE = 14;
+
+/**
+ * The window bar of macOS shells that don't report `windowBarHeight` (the
+ * desktop app 0.1.33 and older): they put the traffic lights 21px from the
+ * top, centred on a 56px row.
+ */
+export const DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT = 56;
+
 /** The global the preload script defines in the web app's main frame. */
 export const DESKTOP_BRIDGE_GLOBAL = "opengeniDesktop";
 
@@ -578,6 +588,18 @@ export interface DesktopBridge {
   readonly productName: string;
   /** The app's own version, e.g. "0.1.29". Absent from older apps. */
   readonly appVersion?: string;
+  /**
+   * macOS: the height of the window bar the shell centres the traffic lights
+   * on, in window points (CSS pixels at 100% zoom). The page centres its own
+   * bar controls on the same line. Absent from older apps; see
+   * `DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT`.
+   */
+  readonly windowBarHeight?: number;
+  /**
+   * The page's zoom factor (1 at 100%), so it can size what lines up with the
+   * window's own controls. Absent from older apps.
+   */
+  zoomFactor?(): number;
   /**
    * A PNG of the page in the window as it is now, at the screen's pixel
    * density, or null when nothing is shown. With the `captureWindow` capability.

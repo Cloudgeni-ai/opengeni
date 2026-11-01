@@ -96,6 +96,7 @@ export function CatalogItemPage({
   socialConnections,
   canManageSocial,
   canManageSkills,
+  canTurnOff,
   onAction,
   onConnectAccount,
   onRetryAuthInspection,
@@ -118,6 +119,8 @@ export function CatalogItemPage({
   socialConnections: SocialConnection[];
   canManageSocial: boolean;
   canManageSkills: boolean;
+  /** Turning an integration off for everyone is integration admin work (capabilities:manage). */
+  canTurnOff: boolean;
   onAction: (action: ConnectAction) => void;
   /** Sign-in connections run their short connect step (a popup flow) in a dialog. */
   onConnectAccount?: (() => void) | undefined;
@@ -171,7 +174,8 @@ export function CatalogItemPage({
     health.state === "attention" &&
     health.connection === null &&
     (personalOnly || item.connectionRef?.subjectScope === "subject");
-  const canDisconnect = item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
+  const canDisconnect =
+    canTurnOff && item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
   const addAccountOwnership = catalogAddAccountOwnership(item, personalOnly);
   const isSkill = item.kind === "skill";
   const signInFlow =
@@ -748,6 +752,7 @@ export function CatalogItemPage({
                     : {}),
                   ...(addAccountOwnership
                     ? {
+                        addOwnership: addAccountOwnership,
                         onAdd: () =>
                           onAction({
                             type: "add_oauth_account",

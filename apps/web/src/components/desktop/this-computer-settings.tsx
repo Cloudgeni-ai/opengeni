@@ -135,7 +135,7 @@ const UPDATE_THE_APP = "Update the Opengeni app to change this.";
 function Allowed() {
   return (
     <span className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
-      <CheckIcon className="size-4 text-success" aria-hidden />
+      <CheckIcon className="size-4 text-status-success" aria-hidden />
       Allowed
     </span>
   );

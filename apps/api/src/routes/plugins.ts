@@ -32,8 +32,11 @@ import {
 import {
   portableSkillCapabilityId,
   portableSkillPluginKey,
+  hasIntegrationAdminPermission,
+  MissingPermissionRefusal,
   requireAccessGrant,
-  requireAccessGrantAuthorization,
+  requireIntegrationSetupAuthorization,
+  requireMemberIntegrationSetupAllowed,
   resolveSkillImport,
   type ApiRouteDeps,
   type GitHubSkillSourceClient,
@@ -50,6 +53,7 @@ import {
   getPluginPackageUninstallPreview,
   PluginUninstallPreviewChangedError,
   integrationBindingKey,
+  IntegrationChangeRequiresAdminError,
   installApiIntegration,
   installPluginMcpReference,
   installPortableSkill,
@@ -205,14 +209,15 @@ export function registerPluginRoutes(
 
   app.post("/v1/workspaces/:workspaceId/plugins/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "capabilities:manage",
-    );
+    const access = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
     const { grant } = access;
     const payload = await parseRequestJson(c, InstallPluginRequest);
+    const memberCreate = !hasIntegrationAdminPermission(grant);
+    if (memberCreate)
+      await requireMemberIntegrationSetupAllowed(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+      });
     const resolved = await resolvePluginPackage({
       skillActor: () => skillInstallerActor(access),
       deps,
@@ -223,6 +228,7 @@ export function registerPluginRoutes(
       subjectId: grant.subjectId,
       url: payload.url,
       bindings: payload.bindings,
+      ...(memberCreate ? { memberCreate: true } : {}),
     });
     if (resolved.preview.manifestDigest !== payload.expectedManifestDigest) {
       throw new HTTPException(409, {
@@ -270,8 +276,13 @@ export function registerPluginRoutes(
         ...(payload.expectedInstallationVersion !== undefined
           ? { expectedInstallationVersion: payload.expectedInstallationVersion }
           : {}),
+        // Members add plugins and retry their own install; updating one that
+        // is already installed stays with admins (decided in the transaction).
+        ...(memberCreate ? { memberCreate: true } : {}),
       });
     } catch (error) {
+      if (error instanceof IntegrationChangeRequiresAdminError)
+        throw new MissingPermissionRefusal("capabilities:manage", { message: error.message });
       throw pluginMutationHttpError(error);
     }
     if (prepared.replayResult?.status === "installed") {
@@ -337,6 +348,10 @@ export function registerPluginRoutes(
       }).catch(() => undefined);
       if (error instanceof SkillSourceRemovalAuthorityError)
         throw new HTTPException(403, { message: error.message });
+      if (error instanceof IntegrationChangeRequiresAdminError)
+        throw new MissingPermissionRefusal("capabilities:manage", {
+          message: `Plugin component ${activeComponentKey} would change an integration that is already set up. Only an admin can install this plugin.`,
+        });
       if (error instanceof HTTPException) throw error;
       if (error instanceof CapabilityComponentVersionConflictError) {
         throw new HTTPException(409, {
@@ -364,12 +379,7 @@ export function registerPluginRoutes(
 
   app.delete("/v1/workspaces/:workspaceId/plugins/:pluginKey", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "capabilities:manage",
-    );
+    const access = await requireIntegrationSetupAuthorization(c, deps, workspaceId);
     const { grant } = access;
     const skillActor = skillRemovalActor(access);
     const pluginKey = decodeURIComponent(c.req.param("pluginKey"));
@@ -426,6 +436,8 @@ async function resolvePluginPackage(input: {
   subjectId: string;
   skillActor?: () => SkillActor;
   url: string;
+  /** A member's install: every component is create only (see installApiIntegration). */
+  memberCreate?: boolean;
   bindings: Record<
     string,
     {
@@ -624,6 +636,7 @@ async function resolvePluginPackage(input: {
             ownership: connection?.subjectId ? "subject" : "workspace",
             revision: resolved.revision,
             owner: { kind: "plugin", id: ownerPluginInstallationId, removable: true },
+            ...(input.memberCreate ? { memberCreate: true } : {}),
           });
           return {
             facetInstallationIds: [
@@ -736,6 +749,7 @@ async function resolvePluginPackage(input: {
                 ? "unknown"
                 : "none",
           digest,
+          ...(input.memberCreate ? { memberCreate: true } : {}),
         });
         return { facetInstallationIds: [installed.facetInstallationId] };
       },

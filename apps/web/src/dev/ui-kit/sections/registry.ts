@@ -88,6 +88,7 @@ export const SECTION_KEYS = [
   "list-row",
   "detail-sheet",
   "empty-state",
+  "available-here",
   // Selection
   "setting-row",
   "switch",
@@ -111,6 +112,7 @@ export const SECTION_KEYS = [
   "access-list",
   // Chat
   "chat-approvals",
+  "chat-app-actions",
   "chat-questions",
   "chat-connect",
   "chat-answers",
@@ -356,6 +358,16 @@ export const SECTIONS: readonly SectionMeta[] = [
       },
     ],
     load: () => import("./empty-state"),
+  },
+
+  {
+    key: "available-here",
+    group: "Lists",
+    title: "Available here",
+    purpose:
+      "What agents in one workspace can use, grouped by who it belongs to, with who manages each.",
+    usedOn: "Workspace settings › Available here",
+    load: () => import("./available-here"),
   },
 
   // ---------------------------------------------------------------- Selection
@@ -711,6 +723,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Ask the person to allow or decline one action the agent wants to take.",
     usedOn: "Chat, embedded chat, inbox and phone",
     load: () => import("./chat-approvals"),
+  },
+  {
+    key: "chat-app-actions",
+    group: "Chat",
+    title: "App action approvals",
+    purpose: "Ask the person to allow a change in Opengeni itself, naming exactly what it changes.",
+    usedOn: "Chat, embedded chat, inbox, phone and Slack",
+    load: () => import("./chat-app-actions"),
   },
   {
     key: "chat-questions",

@@ -28,8 +28,10 @@ export type ArtifactCatalogCandidate = {
   version_id: string | null;
   sort_key: string;
   pinned?: boolean;
-  /** Sites only: the stored audience. */
-  site_visibility?: "workspace_shared" | "user_private" | null;
+  /** Sites, documents, spreadsheets and presentations: the stored audience. */
+  visibility?: "workspace_shared" | "user_private" | null;
+  /** Who may change that audience; null for legacy and non-audience rows. */
+  owner_subject_id?: string | null;
 };
 
 /** API callers must first verify publish permission and domain-specific read authority. */
@@ -66,7 +68,10 @@ export async function listArtifactCatalogCandidates(
   input: {
     query: ArtifactCatalogListQuery;
     kinds: readonly ArtifactCatalogKind[];
-    /** Who is reading: Sites are limited to the workspace's and their own Only me ones. */
+    /**
+     * Who is reading: Sites, documents, spreadsheets and presentations are
+     * limited to the workspace's and this person's own Only me ones.
+     */
     siteViewer: WorkspaceArtifactViewer;
     snapshotAt: string;
     after?: ArtifactCatalogPosition;
@@ -102,7 +107,7 @@ export async function listArtifactCatalogCandidates(
           ? sql`(SELECT sv.source_session_id FROM workspace_artifact_versions sv WHERE sv.workspace_id = a.workspace_id AND sv.artifact_id = a.id AND sv.source_session_id = ANY(${sourceArray}) ORDER BY sv.revision DESC LIMIT 1)`
           : sql`v.source_session_id`
       } AS source_session_id,
-      a.current_version_id::text AS version_id, 'site'::text AS origin, a.visibility AS site_visibility
+      a.current_version_id::text AS version_id, 'site'::text AS origin, a.visibility, a.owner_subject_id
     FROM workspace_artifacts a LEFT JOIN workspace_artifact_versions v
       ON v.workspace_id = a.workspace_id AND v.artifact_id = a.id AND v.id = a.current_version_id
     WHERE a.account_id = ${scope.accountId}::uuid AND a.workspace_id = ${scope.workspaceId}::uuid
@@ -122,17 +127,22 @@ export async function listArtifactCatalogCandidates(
         sourceArray
           ? sql`(SELECT l.session_id FROM editable_artifact_session_links l WHERE l.account_id = a.account_id AND l.workspace_id = a.workspace_id AND l.artifact_id = a.id AND l.session_id = ANY(${sourceArray}) ORDER BY l.last_used_at DESC, l.session_id LIMIT 1)`
           : sql`NULL::uuid`
-      } AS source_session_id, NULL::text AS version_id, 'editable_artifact'::text AS origin, NULL::text AS site_visibility
+      } AS source_session_id, NULL::text AS version_id, 'editable_artifact'::text AS origin, a.visibility, a.owner_subject_id
     FROM editable_artifacts a WHERE a.account_id = ${scope.accountId}::uuid AND a.workspace_id = ${scope.workspaceId}::uuid
       AND a.modality IN (${sql.join(
         editableKinds.map((kind) => sql`${kind}`),
         sql`, `,
       )})
+      AND (a.visibility = 'workspace_shared'${
+        input.siteViewer.subjectId === null
+          ? sql``
+          : sql` OR a.owner_subject_id = ${input.siteViewer.subjectId}::text`
+      })
       ${sourceArray ? sql`AND EXISTS (SELECT 1 FROM editable_artifact_session_links l WHERE l.account_id = a.account_id AND l.workspace_id = a.workspace_id AND l.artifact_id = a.id AND l.session_id = ANY(${sourceArray}))` : sql``}`);
   if (input.kinds.includes("image"))
     branches.push(sql`
     SELECT f.id::text, 'image'::text AS kind, f.filename AS title, 'active'::text AS status,
-      g.created_at, g.updated_at, g.session_id AS source_session_id, NULL::text AS version_id, 'generated_image'::text AS origin, NULL::text AS site_visibility
+      g.created_at, g.updated_at, g.session_id AS source_session_id, NULL::text AS version_id, 'generated_image'::text AS origin, NULL::text AS visibility, NULL::text AS owner_subject_id
     FROM generated_image_artifacts g JOIN files f ON f.account_id = g.account_id AND f.workspace_id = g.workspace_id AND f.id = g.artifact_id
     WHERE g.account_id = ${scope.accountId}::uuid AND g.workspace_id = ${scope.workspaceId}::uuid AND g.status = 'ready' AND f.status = 'ready'
       ${sourceArray ? sql`AND g.session_id = ANY(${sourceArray})` : sql``}`);
@@ -140,7 +150,7 @@ export async function listArtifactCatalogCandidates(
   if (publishedKinds.length)
     branches.push(sql`
     SELECT p.file_id::text AS id, p.kind, p.title, 'active'::text AS status,
-      p.published_at AS created_at, p.published_at AS updated_at, p.source_session_id, NULL::text AS version_id, 'sandbox_file'::text AS origin, NULL::text AS site_visibility
+      p.published_at AS created_at, p.published_at AS updated_at, p.source_session_id, NULL::text AS version_id, 'sandbox_file'::text AS origin, NULL::text AS visibility, NULL::text AS owner_subject_id
     FROM opengeni_private.list_sandbox_file_publications_pinned(${scope.accountId}::uuid, ${scope.workspaceId}::uuid,
       ${JSON.stringify({ sourceSessionIds: sources, q: query.q, kinds: publishedKinds, sort: query.sort, snapshotAt: input.snapshotAt, after: input.after, limit: input.limit })}::jsonb) p`);
   if (!branches.length) return [];

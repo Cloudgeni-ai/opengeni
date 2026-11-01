@@ -280,7 +280,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
             }}
           >
             <InvitationSummary preview={preview} />
-            <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3">
+            <div className="mb-4 rounded-md border border-border bg-surface-2 p-3">
               <p className="text-sm font-medium">Already have an Opengeni account?</p>
               <p className="mt-1 text-xs leading-5 text-fg-subtle">
                 This invitation is for {preview.targetEmail}. Sign in with that account and
@@ -410,7 +410,7 @@ function InvitationSummary({
   preview: Extract<OrganizationUserSetupPreview, { state: "pending" }>;
 }) {
   return (
-    <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3 text-sm">
+    <div className="mb-4 rounded-md border border-border bg-surface-2 p-3 text-sm">
       <p>
         <span className="font-medium">{preview.organizationName}</span> invited{" "}
         <span className="font-medium">{preview.targetEmail}</span> as{" "}

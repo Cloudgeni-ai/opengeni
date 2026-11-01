@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use compute_core::{
     Action, At, Durability, HoldId, Host, HostPolicy, Input, Level, MemoryLevels, MemoryPolicy,
-    Outgrowth, Priority, SandboxId, ShrinkRequest, Size, SleepPolicy, SleepRules, State, Step,
+    Outgrowth, Priority, SandboxId, ShrinkCause, ShrinkRequest, Size, SleepPolicy, SleepRules,
+    State, Step,
 };
 
 const GIB: u64 = 1 << 30;
@@ -192,6 +193,7 @@ fn shrinks(actions: &[Action]) -> Vec<(u128, u64, u64, ShrinkRequest)> {
                 free,
                 keep,
                 request,
+                ..
             } => Some((sandbox.0, *free, *keep, *request)),
             _ => None,
         })
@@ -202,7 +204,20 @@ fn ended(actions: &[Action]) -> Vec<u128> {
     actions
         .iter()
         .filter_map(|action| match action {
-            Action::EndForMemory { sandbox } => Some(sandbox.0),
+            Action::EndForMemory { sandbox, .. } => Some(sandbox.0),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Why `actions` shrink or end each sandbox they do.
+fn causes(actions: &[Action]) -> Vec<(u128, ShrinkCause)> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Shrink { sandbox, cause, .. } | Action::EndForMemory { sandbox, cause } => {
+                Some((sandbox.0, *cause))
+            }
             _ => None,
         })
         .collect()
@@ -374,6 +389,17 @@ fn a_short_host_holds_every_sandbox_to_its_request_then_shrinks_the_furthest_abo
         panic!("{actions:?}");
     };
     assert_eq!((free, keep), (2 * GIB + 512 * MIB, GIB));
+    // A shortage of the host's, not of one sandbox's memory.
+    assert_eq!(
+        causes(&actions),
+        [(
+            1,
+            ShrinkCause::Short {
+                shortfall: 2 * GIB + 512 * MIB,
+                available: 0
+            }
+        )]
+    );
     // One at a time.
     rig.at(11);
     assert_eq!(shrinks(&rig.available(0)), []);
@@ -719,6 +745,17 @@ fn a_sandbox_the_kernel_cannot_hold_to_its_bound_is_shrunk_by_what_it_holds_abov
         panic!("{actions:?}");
     };
     assert_eq!((free, keep), (2 * GIB, GIB));
+    // Not a shortage of the host's: the kernel could not hold it.
+    assert_eq!(
+        causes(&actions),
+        [(
+            1,
+            ShrinkCause::OverBound {
+                over: 2 * GIB,
+                available: 2 * GIB
+            }
+        )]
+    );
     assert!(!sleeps(&actions));
     // It had nothing left to end: its VM is ended while it still costs
     // the others, once what its guest did had time to show.
@@ -734,7 +771,12 @@ fn a_sandbox_the_kernel_cannot_hold_to_its_bound_is_shrunk_by_what_it_holds_abov
         "it settles first"
     );
     rig.at(22);
-    assert_eq!(ended(&rig.available(2 * GIB)), [1]);
+    let actions = rig.available(2 * GIB);
+    assert_eq!(ended(&actions), [1]);
+    assert!(
+        matches!(causes(&actions)[..], [(1, ShrinkCause::OverBound { .. })]),
+        "{actions:?}"
+    );
     assert_eq!(rig.level(2), Level::Running);
 }
 
