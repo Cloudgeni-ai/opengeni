@@ -8547,7 +8547,7 @@ export async function requireFileForSubject(
     return file;
   }
 
-  const reaching = await filesReachingWorkspace(db, input);
+  const reaching = filesReachingWorkspace(input);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -8585,29 +8585,30 @@ export async function requireFileForSubject(
  * workspace all their Only me files work (docs/design/ownership-and-reach.md:
  * an Only me thing works where its owner turned it on, always in their
  * Personal workspace). Row-level security still decides whose Only me files
- * these are.
+ * these are, and a Personal workspace has exactly one member, so a person
+ * reading in one is its owner. The workspace kind is read once per statement
+ * inside the caller's workspace context, never in a separate round trip.
  */
-async function filesReachingWorkspace(
-  db: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string | null },
-): Promise<SQL> {
-  const personalHere =
-    input.subjectId !== null &&
-    (await namedSubjectPersonalWorkspaceId(db, {
-      accountId: input.accountId,
-      subjectId: input.subjectId,
-    })) === input.workspaceId;
+function filesReachingWorkspace(input: {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string | null;
+}): SQL {
+  const reachesHere = or(
+    isNull(schema.files.reachWorkspaceIds),
+    sql`${input.workspaceId}::uuid = ANY(${schema.files.reachWorkspaceIds})`,
+  );
   return or(
     eq(schema.files.workspaceId, input.workspaceId),
-    personalHere
-      ? isNotNull(schema.files.privateOwnerSubjectIds)
-      : and(
-          isNotNull(schema.files.privateOwnerSubjectIds),
-          or(
-            isNull(schema.files.reachWorkspaceIds),
-            sql`${input.workspaceId}::uuid = ANY(${schema.files.reachWorkspaceIds})`,
+    and(
+      isNotNull(schema.files.privateOwnerSubjectIds),
+      input.subjectId === null
+        ? reachesHere
+        : or(
+            sql`(select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid)) = 'personal'`,
+            reachesHere,
           ),
-        ),
+    ),
   )!;
 }
 
@@ -8686,7 +8687,7 @@ export async function listFilesForSubject(
       throw new z.ZodError([{ code: "custom", path: ["cursor"], message: "Invalid file cursor" }]);
     }
   }
-  const reaching = await filesReachingWorkspace(db, input);
+  const reaching = filesReachingWorkspace(input);
   return withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -8742,7 +8743,7 @@ export async function getFilesForSubject(
 ): Promise<FileAsset[]> {
   const ids = [...new Set(input.fileIds)];
   if (ids.length === 0) return [];
-  const reaching = await filesReachingWorkspace(db, input);
+  const reaching = filesReachingWorkspace(input);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
