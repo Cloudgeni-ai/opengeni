@@ -429,6 +429,7 @@ export function OrgSettingsRoute({
               person={person}
               invitation={invitation}
               view={organizationView === "invite" ? "invite" : undefined}
+              canManageBilling={canManageBilling}
             />
           ) : null}
 

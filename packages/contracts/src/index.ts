@@ -63,6 +63,7 @@ export * from "./opening-tools";
 import { SessionUsageLimit, SessionUsageLimitMicros } from "./session-usage-limits";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
+export * from "./organization-connectors";
 import { SkillReviewReference, skillReviewHumanInput } from "./skills";
 import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
@@ -4456,9 +4457,9 @@ export const USER_SETUP_BLOCKERS: readonly UserSetupBlocker[] = [
     code: "personal_machine_permission_required",
     capabilityId: "api:connected-machine",
     problem:
-      "This is a personal (Only me) machine, and its owner has not allowed this chat to use it yet.",
-    rationale: "Allow this chat to use your computer.",
-    nextStep: "open this chat in Opengeni and allow it to use their machine",
+      "This is a personal (Only me) machine, and its owner has not turned it on for agents in this workspace yet.",
+    rationale: "Let your agents use your computer in this workspace.",
+    nextStep: "open this chat in Opengeni and allow their machine in this workspace",
   },
 ];
 
@@ -6587,6 +6588,7 @@ export {
   SubscriptionPlanCatalog,
   BillingPlanBalance,
 } from "./subscription-plans";
+export { seatUpgradePlan, type SeatUpgradeCandidate } from "./seat-upgrade";
 export {
   BillingSubscriptionCatalog,
   CreateSubscriptionCheckoutRequest,
@@ -6617,6 +6619,22 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
      * whole plan credit. Absent means none.
      */
     apiDebtMicros: primitives.nonnegativeInteger.optional(),
+    /**
+     * Paid credit the bring-your-own-key platform fee may draw: an active
+     * paid plan's remaining credit (app use only) and credits that were paid
+     * for (top-ups and operator grants) and not yet spent, never Free,
+     * signup or promotional credit. Ordinary spending draws promotional
+     * credits first. `paidCreditsMicros` is present only on fee reads.
+     */
+    paidPlanCreditMicros: primitives.nonnegativeInteger.optional(),
+    paidCreditsMicros: primitives.nonnegativeInteger.optional(),
+    /** Own-key platform fees charged this calendar month (UTC). Absent means none. */
+    byokPlatformFeeMonthMicros: primitives.nonnegativeInteger.optional(),
+    /**
+     * Own-key fees that ran past paid credit (parallel calls settle after
+     * use). The next top-up repays it; promotional credit never does.
+     */
+    byokFeeDebtMicros: primitives.nonnegativeInteger.optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
     heldCreditMicros: primitives.nonnegativeInteger.optional(),
     heldGeneralCreditMicros: primitives.nonnegativeInteger.optional(),
@@ -14653,7 +14671,11 @@ export const CapabilityLifecycle = /* @__PURE__ */ defineSchema(() =>
     status: CapabilityLifecycleStatus,
     readiness: CapabilityReadiness,
     detail: primitives.nullableString.default(null),
-    managedBy: z.enum(["deployment", "platform", "workspace"]).nullable().default(null),
+    /** `organization`: an organization connector that reaches this workspace (OR-11). */
+    managedBy: z
+      .enum(["deployment", "platform", "workspace", "organization"])
+      .nullable()
+      .default(null),
   }),
 );
 export type CapabilityLifecycle = z.infer<typeof CapabilityLifecycle>;
@@ -21742,9 +21764,10 @@ export type ChangeMachineAudienceRequest = z.infer<typeof ChangeMachineAudienceR
 /**
  * What the change does to one thing on the machine. `move_off`: the chat
  * leaves the machine (its history and files stay). `keep`: the owner's chat
- * stays and keeps its audience. `make_only_me` / `pause`: a schedule that runs
- * on the machine. `remove_first`: the same computer is connected a second
- * time; remove that copy before switching.
+ * stays and keeps its audience. `pause`: another person's schedule that runs
+ * on the machine; the new owner's own schedules keep running with no change
+ * and are not listed. `make_only_me` is no longer produced. `remove_first`: the
+ * same computer is connected a second time; remove that copy before switching.
  */
 export const MachineAudienceAction = /* @__PURE__ */ defineSchema(() =>
   z.enum(["move_off", "keep", "make_only_me", "pause", "remove_first"]),
@@ -21786,6 +21809,7 @@ export const MachineAudienceSummary = /* @__PURE__ */ defineSchema(() =>
     /** The owner's shared chats that stay on the machine and stay shared. */
     keptSharedChats: primitives.nonnegativeInteger,
     movedOffChats: primitives.nonnegativeInteger,
+    /** No longer produced: always 0. A schedule runs as its owner, so the new owner's schedules keep running unchanged. */
     schedulesMadeOnlyMe: primitives.nonnegativeInteger,
     schedulesPaused: primitives.nonnegativeInteger,
     stoppedTurns: primitives.nonnegativeInteger,

@@ -143,6 +143,20 @@ export function nestedPostgresMessage(error: unknown): string | null {
   return null;
 }
 
+/** The DETAIL PostgreSQL raised with `sqlState`, even under nested causes. */
+export function nestedPostgresDetail(error: unknown, sqlState: string): string | null {
+  for (const current of nestedErrorRecords(error)) {
+    const matches = SQLSTATE_KEYS.some(
+      (key) =>
+        typeof current[key] === "string" &&
+        (current[key] as string).toUpperCase() === sqlState.toUpperCase(),
+    );
+    if (matches && typeof current.detail === "string" && current.detail.length > 0)
+      return current.detail;
+  }
+  return null;
+}
+
 export function databaseFailureCode(sqlState: string | null): DatabaseFailureCode {
   if (sqlState === "40P01") return "db_deadlock";
   if (sqlState === "40001") return "db_serialization_failure";

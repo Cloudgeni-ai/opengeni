@@ -7,7 +7,10 @@ import type {
 import { createGitHubAppInstallationTokenWithExpiry } from "@opengeni/github";
 
 /** Standalone credential broker: the deployment's GitHub App installation tokens.
- * Embedded hosts keep precedence by supplying their own connectionCredentials. */
+ * Embedded hosts keep precedence by supplying their own connectionCredentials.
+ * A session with several GitHub bindings (more than one App installation, or an
+ * installation next to the user's own GitHub) requires every provider to echo
+ * the exact binding it minted for, so this port echoes the requested binding. */
 export function createStandaloneConnectionCredentialsPort(
   settings: Settings,
 ): ConnectionCredentialsPort {
@@ -24,8 +27,13 @@ async function resolveStandaloneGitCredentials(
   if (provider !== "github") {
     throw new Error(`${provider} Git credentials require an explicit host binding`);
   }
+  const bindingEcho = {
+    ...(request.credentialBindingId ? { credentialBindingId: request.credentialBindingId } : {}),
+    ...(request.credentialBindingId ? { provider: "github" as const } : {}),
+    ...(request.providerHost ? { providerHost: request.providerHost } : {}),
+  };
   if (request.purpose === "identity") {
-    return { workspaceId: request.workspaceId };
+    return { workspaceId: request.workspaceId, ...bindingEcho };
   }
   const minted = await createGitHubAppInstallationTokenWithExpiry(settings, {
     installationId: request.installationId,
@@ -34,6 +42,7 @@ async function resolveStandaloneGitCredentials(
   return {
     token: minted.token,
     workspaceId: request.workspaceId,
+    ...bindingEcho,
     ...(minted.expiresAt ? { expiresAt: minted.expiresAt } : {}),
   };
 }

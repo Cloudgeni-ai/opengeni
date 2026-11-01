@@ -67,6 +67,8 @@ pub struct Counted {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostRow {
     pub id: HostId,
+    /// What it is, as it registered or last told it since
+    /// ([`Capacity::info`]).
     pub info: HostInfo,
     /// Its current registration.
     pub epoch: HostEpoch,
@@ -81,6 +83,18 @@ pub struct HostRow {
     /// When the row last changed, by the store's change counter: replicas
     /// read the rows changed since they last looked.
     pub changed: u64,
+}
+
+impl HostRow {
+    /// Takes in what the host says it can take on, with what it is now if
+    /// it says ([`Capacity::split`]).
+    pub fn told(&mut self, capacity: &Capacity) {
+        let (capacity, info) = capacity.split();
+        if let Some(info) = info {
+            self.info = info.told_again(&self.info);
+        }
+        self.capacity = capacity;
+    }
 }
 
 /// What a sandbox was created as.

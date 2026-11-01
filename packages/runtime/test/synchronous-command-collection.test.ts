@@ -127,6 +127,11 @@ test.each(["none", "capture", "settlement"] as const)(
   async (failure) => {
     const session = await new UnixLocalSandboxClient().create(new Manifest());
     const backend = { session, sandboxId: null, kind: "local", activeEpoch: 0 };
+    // The command prints its prefix, then waits for the test to create this
+    // file, so the first yield always holds exactly the prefix and the rest
+    // arrives during the synchronous read, however slow the machine is.
+    const root = await mkdtemp(join(tmpdir(), "native-concurrent-readers-"));
+    const release = join(root, "release");
     const initialCaptured = deferred();
     const beginSynchronousRead = deferred();
     const synchronousReadEntered = deferred();
@@ -168,8 +173,8 @@ test.each(["none", "capture", "settlement"] as const)(
     });
     const completion = route.execSynchronous(
       {
-        cmd: `printf prefix; sleep 0.15; printf %s '${"x".repeat(2_000)}'; printf %s '${"y".repeat(2_000)}' >&2`,
-        yieldTimeMs: 50,
+        cmd: `printf prefix; while [ ! -e '${release}' ]; do sleep 0.01; done; printf %s '${"x".repeat(2_000)}'; printf %s '${"y".repeat(2_000)}' >&2`,
+        yieldTimeMs: 500,
         maxOutputTokens: 1,
         login: false,
       },
@@ -198,6 +203,7 @@ test.each(["none", "capture", "settlement"] as const)(
       await externalReadEntered.promise;
       beginSynchronousRead.resolve();
       await synchronousReadEntered.promise;
+      await writeFile(release, "release");
       releaseExternalRead.resolve();
       const banner = await externalResult;
       if (failure === "none") {
@@ -222,9 +228,11 @@ test.each(["none", "capture", "settlement"] as const)(
         ).toBe(result[stream]);
       expect(durable.size).toBe(3);
     } finally {
+      await writeFile(release, "release");
       beginSynchronousRead.resolve();
       releaseExternalRead.resolve();
       await session.close();
+      await rm(root, { recursive: true, force: true });
     }
   },
 );

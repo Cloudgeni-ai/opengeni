@@ -33,6 +33,8 @@ import {
 import {
   WebSearchProviderCredentialsSchema,
   webSearchProviderCredentialsFromEnv,
+  webSearchCreditBillingActive,
+  type WebSearchSettings,
 } from "./web-search";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
 export {
@@ -370,6 +372,32 @@ export function isLegacyBillingAccount(
   );
 }
 
+/**
+ * THE single check point where the paid-hosted-tool charges start. True
+ * when the model of a response or turn is billed in Opengeni credits (cost
+ * class `credits`), credit billing is active and the account is not a legacy
+ * billing account. Every new charge depends on it: Opengeni's billed
+ * `web_search`/`web_fetch` replacing hosted search, the list-price charge for
+ * hosted searches a response reports, and the priced Gateway image tool
+ * replacing OpenAI hosted image generation on the deployment key. Turns on
+ * the user's own keys or subscriptions, free models, billing-off deployments
+ * and legacy accounts (CloudGeni's host account) are false and keep today's
+ * free hosted tools, as is every turn when the operator turned the charges
+ * off (`OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING=false`).
+ */
+export function paidHostedToolsChargeCredits(
+  settings: Pick<WebSearchSettings, "billingMode" | "usageLimitsMode"> &
+    Partial<Pick<Settings, "billingLegacyAccountIds" | "paidHostedToolsCreditBilling">>,
+  input: { accountId: string; chargesOpenGeniCredits: boolean },
+): boolean {
+  if (settings.paidHostedToolsCreditBilling === false) return false;
+  const billingLegacyAccountIds = settings.billingLegacyAccountIds ?? [
+    ...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
+  ];
+  if (isLegacyBillingAccount({ billingLegacyAccountIds }, input.accountId)) return false;
+  return input.chargesOpenGeniCredits && webSearchCreditBillingActive(settings);
+}
+
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
@@ -499,6 +527,12 @@ const SettingsSchema = z.object({
   // on the signed-out page and in the Help menu. Unset by default for the same
   // reason as the legal links.
   supportEmail: z.string().trim().email().max(254).optional(),
+  // Optional operator statements the agent's privacy_facts tool reports: where
+  // the app's data (database, files, backups) is hosted, in plain words, and a
+  // published subprocessor list. Unset by default, so a self-hosted deployment
+  // claims nothing and the tool says unknown.
+  dataHostingLocation: z.string().trim().min(1).max(200).optional(),
+  legalSubprocessorsUrl: PublicHttpUrl.optional(),
   publicBaseUrl: z.string().url().optional(),
   // Where other services send webhooks (event sources, the GitHub App's event
   // webhook, MCP Events webhook delivery), when that is a different public
@@ -2347,6 +2381,19 @@ const SettingsSchema = z.object({
         : value,
     z.array(z.string().uuid()).default([...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS]),
   ),
+  /**
+   * Platform fee on bring-your-own-key use (own provider keys and connected
+   * subscriptions), in basis points of each call's list-price equivalent.
+   * Charged only while credit billing is active, and payable only from paid
+   * credit. 0 turns the fee off.
+   */
+  byokPlatformFeeBps: z.coerce.number().int().min(0).max(10_000).default(500),
+  // On turns whose model Opengeni pays for while credit billing is active,
+  // paid tools the model provider hosts cost credit: Opengeni's billed web
+  // tools replace hosted search (or reported hosted searches are charged) and
+  // the priced Gateway image tool replaces OpenAI hosted image generation on
+  // the deployment key. False restores free hosted search and images.
+  paidHostedToolsCreditBilling: EnvBoolean.default(true),
   mcpServers: z
     .array(
       z.object({
@@ -5746,6 +5793,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     legalPrivacyPolicyUrl: optional("OPENGENI_LEGAL_PRIVACY_POLICY_URL"),
     legalTermsOfServiceUrl: optional("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL"),
     supportEmail: optional("OPENGENI_SUPPORT_EMAIL"),
+    dataHostingLocation: optional("OPENGENI_DATA_HOSTING_LOCATION"),
+    legalSubprocessorsUrl: optional("OPENGENI_LEGAL_SUBPROCESSORS_URL"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     webhookBaseUrl: optional("OPENGENI_WEBHOOK_BASE_URL"),
     documentationUrl: optional("OPENGENI_DOCUMENTATION_URL"),
@@ -6406,6 +6455,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
     subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
     billingLegacyAccountIds: optional("OPENGENI_BILLING_LEGACY_ACCOUNT_IDS"),
+    byokPlatformFeeBps: optional("OPENGENI_BYOK_PLATFORM_FEE_BPS"),
+    paidHostedToolsCreditBilling: optional("OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };
   const parsed = SettingsSchema.parse(raw);

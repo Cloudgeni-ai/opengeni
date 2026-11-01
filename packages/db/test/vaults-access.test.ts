@@ -1,7 +1,7 @@
 // Vault access (0739): the reach matrix (AX-1), narrowing (AX-2), schedule
 // owners rechecked per run (AX-3), "available in" (AX-4), Only-me privacy
 // (AX-7), stale attempts (AX-8), every organization vault for the people who
-// manage them (AX-9, 1172), integrity rules (DM-7) and limits (DM-8), all
+// manage them (AX-9, 1218), integrity rules (DM-7) and limits (DM-8), all
 // through the SECURITY DEFINER routines as the application role.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { SecretPrincipal } from "@opengeni/contracts";

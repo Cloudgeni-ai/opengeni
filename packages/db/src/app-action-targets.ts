@@ -21,6 +21,7 @@ import {
   listSelfOrganizationMemberships,
 } from "./organization-membership-lifecycle";
 import { accountPermissionsForOrganizationRole } from "./organization-role-permissions";
+import { membershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
 import { getVault, getVaultItem, VaultError, type VaultDbContext } from "./vaults";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import * as schema from "./schema";
@@ -147,7 +148,8 @@ async function liveOrganizationMembership(
 /**
  * The person's permissions in a workspace, as the API's workspace grant reads
  * them (its membership's permissions, never its role label), or null for
- * someone who isn't a member.
+ * someone who isn't a member. A row in a Personal workspace is not membership
+ * (migration 1159): the owner reaches it only through their pointer.
  */
 async function membershipPermissions(
   db: Database,
@@ -164,6 +166,7 @@ async function membershipPermissions(
           eq(schema.workspaceMemberships.accountId, accountId),
           eq(schema.workspaceMemberships.workspaceId, workspaceId),
           eq(schema.workspaceMemberships.subjectId, subjectId),
+          membershipOutsidePersonalWorkspace(),
         ),
       )
       .limit(1);
@@ -809,6 +812,8 @@ const workspaceMemberLookup: Lookup = async (where) => {
         and(
           eq(schema.workspaceMemberships.workspaceId, workspaceId),
           eq(schema.workspaceMemberships.subjectId, where.id),
+          // A Personal workspace lists no members, as listWorkspaceMembers reads it.
+          membershipOutsidePersonalWorkspace(),
         ),
       )
       .limit(1);

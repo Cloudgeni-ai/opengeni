@@ -388,7 +388,7 @@ export async function listVaultsForSubject(
 }
 
 /**
- * Every organization vault, wherever it works (migration 1172), for the
+ * Every organization vault, wherever it works (migration 1218), for the
  * people who manage organization vaults; the caller checks account:admin.
  * Summaries only: a vault's items still need it to reach the workspace.
  * Null while the routine's runtime EXECUTE is withheld (runtime-posture

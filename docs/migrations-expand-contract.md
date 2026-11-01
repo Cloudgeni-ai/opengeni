@@ -255,7 +255,7 @@ created the secret history scrub's reader and cell
 writer withheld; the scrub checks the grant once per run and reports the
 cells only they reach as pending until then. 1103 created the subscription
 account-administrator grant withheld, with the same caller check, and 1149
-granted it and removed the check. 1172 created the organization vault list
+granted it and removed the check. 1218 created the organization vault list
 withheld, with the same caller check; until it is granted the API lists only
 the organization vaults that work in the requested workspace and says the
 list is incomplete.
