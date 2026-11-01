@@ -1173,7 +1173,7 @@ test("SUB-OWN-04, D-52: a workspace's own account keeps its owner when shared; g
 
     // Every workspace, Personal workspaces or people move it, said before saving.
     for (const wider of [
-      ["All shared workspaces, including new ones"],
+      ["All workspaces in your organization"],
       ["Personal workspaces"],
       ["Only selected people", "Alex Morgan"],
     ]) {
