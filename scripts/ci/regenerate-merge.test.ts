@@ -121,6 +121,45 @@ describe("regenerating a merge of main", () => {
     });
   });
 
+  test("a generator that reads a regenerated file runs after it, on its new content", async () => {
+    const repo = divergent();
+    // derived.gen.txt is built from out.gen.txt and committed on main only, so
+    // it does not conflict; the registry lists it before its input.
+    repo.git("checkout", "-q", "main");
+    repo.write(
+      "derive.ts",
+      `import { readFileSync, writeFileSync } from "node:fs";
+writeFileSync("gen/derived.gen.txt", "derived:" + readFileSync("gen/out.gen.txt", "utf8"));
+`,
+    );
+    repo.write("gen/derived.gen.txt", "derived:a1|b\n");
+    const main = repo.commit("add derived");
+    repo.git("checkout", "-q", "--detach", repo.head);
+    const derived = {
+      name: "Derived",
+      artifacts: ["gen/derived.gen.txt"],
+      regenerate: "bun derive.ts",
+      reads: ["gen/out.gen.txt"],
+    };
+    await expect(
+      regenerateMerge({ ...options(repo), main, registry: [derived, ...REGISTRY] }),
+    ).rejects.toThrow('"Derived" reads gen/out.gen.txt, which "Toy" regenerates after it');
+    const result = await regenerateMerge({
+      ...options(repo),
+      main,
+      registry: [...REGISTRY, derived],
+    });
+    if (result.outcome !== "regenerated") throw new Error(`unexpected ${result.outcome}`);
+    expect(result.commands).toEqual(["bun gen.ts", "bun derive.ts"]);
+    expect(result.files.map((file) => file.path)).toEqual([
+      "gen/derived.gen.txt",
+      "gen/out.gen.txt",
+    ]);
+    const derivedFile = result.files.find((file) => file.path === "gen/derived.gen.txt")!;
+    if (!("content" in derivedFile)) throw new Error("derived file deleted");
+    expect(Buffer.from(derivedFile.content, "base64").toString()).toBe("derived:a2|b\n");
+  });
+
   test("a merge without a conflict needs nothing", async () => {
     const repo = repository();
     const main = repo.git("rev-parse", "HEAD");
