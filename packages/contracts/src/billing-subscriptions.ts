@@ -15,6 +15,8 @@ export const CreateSubscriptionCheckoutRequest = z.strictObject({
   planKey: z.string().min(1).max(40),
   /** Stable across retries of the same action; use a fresh UUID for a new action. */
   idempotencyKey: primitives.uuid,
+  /** A Stripe promotion code restricted to this plan's product, as the customer typed it. */
+  promotionCode: primitives.string.trim().min(1).max(64).optional(),
   successUrl: z.string().url().optional(),
   cancelUrl: z.string().url().optional(),
 });

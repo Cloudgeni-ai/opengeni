@@ -72,8 +72,23 @@ function price(key = "pro"): Stripe.Price {
     currency: "usd",
     billing_scheme: "per_unit",
     unit_amount: key.startsWith("max") ? 20_000 : 2_000,
+    product: `prod_${key}`,
     recurring: { interval: "month", interval_count: 1 },
   } as Stripe.Price;
+}
+
+function planPromotionCode(products?: string[], valid = true) {
+  return {
+    id: "promo_plan",
+    promotion: {
+      coupon: {
+        id: "coupon_plan",
+        valid,
+        percent_off: 100,
+        ...(products ? { applies_to: { products } } : {}),
+      },
+    },
+  };
 }
 
 function subscription(overrides: Partial<Stripe.Subscription> = {}): Stripe.Subscription {
@@ -212,6 +227,13 @@ function fixture(enabled = true) {
   };
   const stripe = {
     prices: { retrieve: mock(async (priceId: string) => price(priceId.slice(6))) },
+    promotionCodes: {
+      list: mock(
+        async (_input: Stripe.PromotionCodeListParams): Promise<{ data: unknown[] }> => ({
+          data: [],
+        }),
+      ),
+    },
     checkout: {
       sessions: {
         create: mock(
@@ -453,6 +475,95 @@ describe("subscription checkout and catalog", () => {
     });
   });
 
+  const checkoutInput = {
+    accountId,
+    customerId: "cus_org",
+    planKey: "pro",
+    idempotencyKey: requestKey,
+    successUrl: "https://app.test/billing",
+    cancelUrl: "https://app.test/billing",
+  };
+
+  test("a checkout without a code shows no code field and keeps its request key", async () => {
+    const f = fixture();
+    await f.service.checkout(checkoutInput);
+    const [params, options] = f.stripe.checkout.sessions.create.mock.calls[0]!;
+    expect(params).not.toHaveProperty("discounts");
+    expect(params).not.toHaveProperty("allow_promotion_codes");
+    expect(options).toEqual({ idempotencyKey: `subscription-checkout:${accountId}:${requestKey}` });
+    expect(f.stripe.promotionCodes.list).not.toHaveBeenCalled();
+  });
+
+  test("a code restricted to the plan's product is applied up front", async () => {
+    const f = fixture();
+    f.stripe.promotionCodes.list.mockResolvedValue({
+      data: [planPromotionCode(["prod_pro", "prod_max"])],
+    });
+    await f.service.checkout({ ...checkoutInput, promotionCode: "PLAN100" });
+    expect(f.stripe.promotionCodes.list.mock.calls[0]![0]).toMatchObject({
+      code: "PLAN100",
+      active: true,
+    });
+    const [params, options] = f.stripe.checkout.sessions.create.mock.calls[0]!;
+    expect(params.discounts).toEqual([{ promotion_code: "promo_plan" }]);
+    expect(params).not.toHaveProperty("allow_promotion_codes");
+    // Another code on the same plan attempt must not replay this Stripe request.
+    expect(options).toEqual({
+      idempotencyKey: `subscription-checkout:${accountId}:${requestKey}:promo_plan`,
+    });
+  });
+
+  test("codes that do not name the plan are refused before Stripe checkout", async () => {
+    for (const [data, message] of [
+      [[], "That code isn't valid or has expired."],
+      [[planPromotionCode(["prod_pro"], false)], "That code isn't valid or has expired."],
+      // An unrestricted credit coupon must not buy a plan worth more than it costs.
+      [[planPromotionCode()], "This code can't be used for this plan."],
+      [[planPromotionCode(["prod_max"])], "This code can't be used for this plan."],
+    ] as const) {
+      const f = fixture();
+      f.stripe.promotionCodes.list.mockResolvedValue({ data: [...data] });
+      await expect(f.service.checkout({ ...checkoutInput, promotionCode: "CODE" })).rejects.toThrow(
+        message,
+      );
+      expect(f.stripe.checkout.sessions.create).not.toHaveBeenCalled();
+    }
+  });
+
+  test("Stripe refusing a checked code is a customer error, and other failures stay failures", async () => {
+    const refused = fixture();
+    refused.stripe.promotionCodes.list.mockResolvedValue({
+      data: [planPromotionCode(["prod_pro"])],
+    });
+    refused.stripe.checkout.sessions.create.mockRejectedValue(
+      new Stripe.errors.StripeInvalidRequestError({
+        type: "invalid_request_error",
+        message: "first-time customers only",
+      }),
+    );
+    await expect(
+      refused.service.checkout({ ...checkoutInput, promotionCode: "CODE" }),
+    ).rejects.toThrow("This code can't be used for this plan.");
+
+    const noCode = fixture();
+    noCode.stripe.checkout.sessions.create.mockRejectedValue(
+      new Stripe.errors.StripeInvalidRequestError({
+        type: "invalid_request_error",
+        message: "bad price",
+      }),
+    );
+    await expect(noCode.service.checkout(checkoutInput)).rejects.toThrow("bad price");
+  });
+
+  test("a discounted first invoice still funds the plan's full monthly credit", async () => {
+    const f = fixture();
+    f.add();
+    f.invoices.set("in_main", { ...invoice(), amount_due: 0, amount_paid: 0 } as Stripe.Invoice);
+    await f.service.handleEvent(event("invoice.paid", invoice()));
+    expect(f.replace).toHaveBeenCalledTimes(1);
+    expect(f.timeline.at(-1)).toBe("grant:pro");
+  });
+
   test("returns runtime USD prices, credit, seats and excludes Enterprise from self-service", async () => {
     const catalog = await fixture().service.catalog(accountId);
     expect(catalog.revision).toBe(3);
@@ -612,6 +723,25 @@ describe("Stripe v22 paid receipt synchronization", () => {
     );
     expect(f.save).not.toHaveBeenCalled();
     expect(f.replace).not.toHaveBeenCalled();
+  });
+});
+
+describe("duplicate subscriptions paid with a full discount", () => {
+  test("a $0 duplicate invoice has nothing to refund and does not fail the delivery", async () => {
+    const f = fixture();
+    f.add();
+    const loser = f.add(
+      subscription({ id: "sub_free_duplicate", created: 200, latest_invoice: "in_free_duplicate" }),
+    );
+    f.invoices.set("in_free_duplicate", {
+      ...invoice(loser.id, "in_free_duplicate"),
+      amount_paid: 0,
+    } as Stripe.Invoice);
+    // A payment record with no charge would otherwise throw on every redelivery.
+    f.payments.set("in_free_duplicate", [{ payment: { type: "out_of_band_payment" } }] as never);
+    await f.service.handleEvent(event("invoice.paid", invoice(loser.id, "in_free_duplicate")));
+    expect(f.stripe.subscriptions.cancel).toHaveBeenCalledTimes(1);
+    expect(f.stripe.refunds.create).not.toHaveBeenCalled();
   });
 });
 
