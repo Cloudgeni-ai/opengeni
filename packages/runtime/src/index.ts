@@ -9006,12 +9006,13 @@ function isFirstPartyMcpServer(
 }
 
 /**
- * The bound for one server's setup requests (initialize, tools/list): the
- * longer of its call timeout and its setup timeout. Undefined keeps the
- * client default.
+ * The bound for one server's setup requests (initialize, tools/list): its
+ * setup timeout when it has one, else its call timeout. A long call timeout
+ * (a server whose tools legitimately run for minutes) never stretches setup
+ * against an unreachable server. Undefined keeps the client default.
  */
 function mcpSetupTimeoutMs(config: Settings["mcpServers"][number]): number | undefined {
-  const timeoutMs = Math.max(config.timeoutMs ?? 0, config.setupTimeoutMs ?? 0);
+  const timeoutMs = config.setupTimeoutMs ?? config.timeoutMs ?? 0;
   return timeoutMs > 0 ? timeoutMs : undefined;
 }
 
