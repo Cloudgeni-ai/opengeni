@@ -1386,6 +1386,7 @@ export * from "./persistence-errors";
 export * from "./runtime-posture";
 export * from "./capability-integrations";
 export * from "./integration-bindings";
+import { IntegrationChangeRequiresAdminError } from "./integration-bindings";
 export * from "./integration-facets";
 export * from "./insights";
 export * from "./insights-model-bundle";
@@ -7981,6 +7982,8 @@ export type EnableCapabilityInstallationInput = {
   onlyIfUninstalled?: boolean;
   config?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  /** The person turning it on or changing it; recorded as its installer. */
+  installedBySubjectId?: string | null;
 };
 
 export type InstallPortableSkillInput = {
@@ -11892,6 +11895,8 @@ export async function enableCapabilityInstallation(
             metadata: input.metadata ?? existing.metadata,
             enabledAt: now,
             updatedAt: now,
+            // Changing an installation hands it to whoever changed it.
+            installedBySubjectId: input.installedBySubjectId ?? null,
           })
           .where(
             and(
@@ -11913,6 +11918,7 @@ export async function enableCapabilityInstallation(
         status: "active",
         config: input.config ?? {},
         metadata: input.metadata ?? {},
+        installedBySubjectId: input.installedBySubjectId ?? null,
       });
       const [row] = await (
         input.onlyIfUninstalled ? insert.onConflictDoNothing() : insert
@@ -11931,6 +11937,79 @@ export async function enableCapabilityInstallation(
         throw new Error("Failed to enable capability installation");
       }
       return mapCapabilityInstallation(row);
+    },
+  );
+}
+
+/** Who turned each MCP server on in a workspace, and whether it is on now. */
+export async function listCapabilityInstallationInstallers(
+  db: Database,
+  workspaceId: string,
+): Promise<Map<string, { status: string; installedBySubjectId: string | null }>> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        capabilityId: schema.capabilityInstallations.capabilityId,
+        status: schema.capabilityInstallations.status,
+        installedBySubjectId: schema.capabilityInstallations.installedBySubjectId,
+      })
+      .from(schema.capabilityInstallations)
+      .where(eq(schema.capabilityInstallations.workspaceId, workspaceId));
+    return new Map(
+      rows.map((row) => [
+        row.capabilityId,
+        { status: row.status, installedBySubjectId: row.installedBySubjectId },
+      ]),
+    );
+  });
+}
+
+/**
+ * Removes an MCP server's installation from a workspace, so it is no longer
+ * on and can be turned on again from scratch (whoever does so becomes its
+ * installer). With `memberRemoval` the caller must be the recorded installer
+ * of an installation that is on: one an admin or another person turned on,
+ * one with no recorded installer, or one an admin turned off stays with
+ * admins ({@link IntegrationChangeRequiresAdminError}). Decided on the locked
+ * row, in the removal transaction. Null when nothing is installed.
+ */
+export async function removeCapabilityInstallation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    capabilityId: string;
+    subjectId: string;
+    memberRemoval?: boolean;
+  },
+): Promise<CapabilityInstallation | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const where = and(
+        eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
+        eq(schema.capabilityInstallations.capabilityId, input.capabilityId),
+      );
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.capabilityInstallations)
+        .where(where)
+        .limit(1)
+        .for("update");
+      if (!existing) return null;
+      if (input.memberRemoval) {
+        if (existing.installedBySubjectId !== input.subjectId)
+          throw new IntegrationChangeRequiresAdminError(
+            "Only an admin can remove a server someone else added",
+          );
+        if (existing.status !== "active")
+          throw new IntegrationChangeRequiresAdminError(
+            "An admin turned this server off. Only an admin can remove it.",
+          );
+      }
+      await scopedDb.delete(schema.capabilityInstallations).where(where);
+      return mapCapabilityInstallation(existing);
     },
   );
 }
@@ -12326,6 +12405,7 @@ async function organizationConnectorCapabilityRows(
           status: "active",
           config: connector.config,
           metadata: connector.metadata,
+          installedBySubjectId: null,
           enabledAt: connector.updatedAt,
           updatedAt: connector.updatedAt,
         },

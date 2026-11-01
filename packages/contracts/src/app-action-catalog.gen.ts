@@ -8020,6 +8020,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "removeCapabilityInstallation",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/capabilities/:capabilityId/installation",
+    "request": [],
+    "response": [
+      "RemoveCapabilityInstallationResponse"
+    ],
+    "permission": "connections:write"
+  },
+  {
     "id": "removeEnrollment",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/enrollments/:enrollmentId/revoke",

@@ -219,6 +219,18 @@ async function performCapabilityActionUntracked(
     return;
   }
 
+  if (action.type === "remove_server") {
+    if (item.canRemove !== true) {
+      throw new Error(`Ask a workspace admin to remove ${item.name}.`);
+    }
+    await client.removeCapabilityInstallation(workspaceId, item.id);
+    await refresh();
+    onRuntimeChanged();
+    await onComplete();
+    toast.success(`Removed ${item.name}`, { description: "Connected accounts are kept." });
+    return;
+  }
+
   if (action.type === "social_oauth" && plan.mode === "social_oauth") {
     if (connectReturnUrl) {
       const response = await client.beginConnect(workspaceId, {

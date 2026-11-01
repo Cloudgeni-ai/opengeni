@@ -15091,6 +15091,13 @@ export const CapabilityCatalogItem = /* @__PURE__ */ defineSchema(() =>
     metadata: z.record(primitives.string, z.unknown()).default({}),
     createdAt: z.string().optional(),
     updatedAt: z.string().optional(),
+    /**
+     * Whether the viewer may remove this custom MCP server from the workspace
+     * (`DELETE …/capabilities/:id/installation`): integration admins remove
+     * any, a member only one they turned on, while it is on. Set by the
+     * workspace catalog list; older servers omit it.
+     */
+    canRemove: primitives.boolean.optional(),
   }),
 );
 export type CapabilityCatalogItem = z.infer<typeof CapabilityCatalogItem>;
@@ -15138,6 +15145,14 @@ export const CapabilityInstallation = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type CapabilityInstallation = z.infer<typeof CapabilityInstallation>;
+
+/** `DELETE …/capabilities/:capabilityId/installation`: the installation that was removed. */
+export const RemoveCapabilityInstallationResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ removed: CapabilityInstallation }).strict(),
+);
+export type RemoveCapabilityInstallationResponse = z.infer<
+  typeof RemoveCapabilityInstallationResponse
+>;
 
 export const CreateCapabilityCatalogItemRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({

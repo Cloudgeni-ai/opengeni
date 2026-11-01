@@ -52,6 +52,8 @@ import {
   decryptEnvironmentValue,
   decryptedCapabilityHeaders,
   disableCapabilityInstallation,
+  listCapabilityInstallationInstallers,
+  removeCapabilityInstallation,
   enableCapabilityInstallation,
   encryptEnvironmentValue,
   getCapabilityCatalogItem,
@@ -863,6 +865,8 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     config: installationConfig,
     metadata: installationMetadata,
     ...(input.payload.onlyIfUninstalled ? { onlyIfUninstalled: true } : {}),
+    // Whoever turns it on or changes it; a member removes only their own.
+    installedBySubjectId: input.grant.subjectId,
   };
   const withServerLogo = async (tx: Database, enabled: CapabilityInstallation) => {
     if (mcpServerLogoAssetPath)
@@ -1592,6 +1596,93 @@ export async function disableCapability(input: {
     });
   }
   return await disableCapabilityInstallation(input.db, input.workspaceId, item.id);
+}
+
+/**
+ * A custom MCP server added in this workspace (`POST …/capabilities`): its
+ * own catalog entry, not a reviewed, registry, built-in or configured one,
+ * and not a server a plugin brings (removed with its plugin).
+ */
+export function isWorkspaceCustomMcpServer(
+  item: Pick<CapabilityCatalogItem, "kind" | "workspaceId" | "source" | "provenance" | "metadata">,
+  workspaceId: string,
+): boolean {
+  return (
+    item.kind === "mcp" &&
+    item.workspaceId === workspaceId &&
+    item.source !== "built_in" &&
+    item.source !== "configured" &&
+    item.provenance !== "plugin_configured_mcp" &&
+    item.metadata.pluginInstallationId === undefined
+  );
+}
+
+/**
+ * Whether the caller may remove each custom MCP server that is set up in the
+ * workspace: integration admins remove any, a member only one they turned on
+ * that is still on. False for everything else.
+ */
+export async function customMcpServerRemovability(input: {
+  db: Database;
+  workspaceId: string;
+  items: readonly CapabilityCatalogItem[];
+  canRemove: (installerSubjectId: string | null) => boolean;
+  admin: boolean;
+}): Promise<(item: CapabilityCatalogItem) => boolean> {
+  const installers = await listCapabilityInstallationInstallers(input.db, input.workspaceId);
+  return (item) => {
+    const installation = installers.get(item.id);
+    if (!installation || !isWorkspaceCustomMcpServer(item, input.workspaceId)) return false;
+    if (input.admin) return true;
+    return installation.status === "active" && input.canRemove(installation.installedBySubjectId);
+  };
+}
+
+/**
+ * Removes a custom MCP server from the workspace: its installation goes, so
+ * it is no longer on, and anyone who may turn integrations on can add it
+ * again (becoming its installer). Its catalog entry stays, so it keeps its
+ * address and an admin's tool rules. With `memberRemoval` (the caller lacks
+ * `capabilities:manage`) only the person who turned it on removes it, while
+ * it is on; the check runs in the removal transaction.
+ */
+export async function removeCustomMcpServer(input: {
+  db: Database;
+  accountId: string;
+  workspaceId: string;
+  settings: Settings;
+  capabilityId: string;
+  subjectId: string;
+  memberRemoval?: boolean;
+}): Promise<CapabilityInstallation> {
+  const item = await requireCatalogItem(
+    input.db,
+    input.workspaceId,
+    input.settings,
+    input.capabilityId,
+  );
+  if (!isWorkspaceCustomMcpServer(item, input.workspaceId))
+    throw new HTTPException(409, {
+      message: "Only a custom MCP server added in this workspace is removed here",
+    });
+  // The organization serving the same server here would take its place.
+  if (
+    (await listOrganizationConnectorsReachingWorkspace(input.db, input.workspaceId)).some(
+      (connector) => connector.capabilityId === item.id,
+    )
+  )
+    throw new HTTPException(409, {
+      message: "Your organization serves this server here; turn it off instead",
+    });
+  const removed = await removeCapabilityInstallation(input.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    capabilityId: item.id,
+    subjectId: input.subjectId,
+    ...(input.memberRemoval ? { memberRemoval: true } : {}),
+  });
+  if (!removed) throw new HTTPException(409, { message: "capability is not currently enabled" });
+  return removed;
 }
 
 export async function settingsWithEnabledCapabilityMcpServers(

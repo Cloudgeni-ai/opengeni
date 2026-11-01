@@ -222,6 +222,91 @@ describe("connector page account management", () => {
     await view.unmount();
   });
 
+  test("a member is offered Remove for a custom server exactly when the server says they may", async () => {
+    for (const canRemove of [true, false, undefined]) {
+      const custom = item({
+        id: "mcp:team-tools",
+        source: "manual",
+        name: "Team tools",
+        enabled: true,
+        actions: ["connect", "disconnect"],
+        metadata: {},
+        ...(canRemove === undefined ? {} : { canRemove }),
+      } as Partial<CapabilityCatalogItem>);
+      const onAction = mock(() => {});
+      const view = await render(
+        <CatalogItemPage
+          {...common}
+          canTurnOnOrOff={false}
+          item={custom}
+          health={{ state: "connected", connection: null } as never}
+          onAction={onAction}
+        />,
+      );
+      try {
+        const trigger = view.container.querySelector(
+          'button[aria-label^="More actions"]',
+        ) as HTMLButtonElement | null;
+        if (trigger)
+          await act(async () => {
+            trigger.dispatchEvent(
+              new PointerEvent("pointerdown", { button: 0, ctrlKey: false, bubbles: true }),
+            );
+          });
+        const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+        const remove = items.find(
+          (node) => node.textContent?.trim() === "Remove from this workspace",
+        );
+        expect(items.map((node) => node.textContent?.trim())).not.toContain(
+          "Turn off for this workspace",
+        );
+        if (canRemove !== true) {
+          expect(remove).toBeUndefined();
+          continue;
+        }
+        expect(remove).toBeDefined();
+        await act(async () => remove!.click());
+        expect(onAction).toHaveBeenLastCalledWith({ type: "remove_server", item: custom });
+      } finally {
+        await view.unmount();
+      }
+    }
+  });
+
+  test("an admin keeps Turn off, not Remove, on a server they may remove", async () => {
+    const custom = item({
+      id: "mcp:team-tools",
+      source: "manual",
+      name: "Team tools",
+      enabled: true,
+      actions: ["connect", "disconnect"],
+      metadata: {},
+      canRemove: true,
+    } as Partial<CapabilityCatalogItem>);
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={custom}
+        health={{ state: "connected", connection: null } as never}
+        onAction={mock(() => {})}
+      />,
+    );
+    const trigger = view.container.querySelector(
+      'button[aria-label^="More actions"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      trigger.dispatchEvent(
+        new PointerEvent("pointerdown", { button: 0, ctrlKey: false, bubbles: true }),
+      );
+    });
+    const menu = [...document.querySelectorAll('[role="menuitem"]')].map((node) =>
+      node.textContent?.trim(),
+    );
+    expect(menu).toContain("Turn off for this workspace");
+    expect(menu).not.toContain("Remove from this workspace");
+    await view.unmount();
+  });
+
   test("an organization connector turned off here turns back on with the organization's setup", async () => {
     const off = item({
       id: "registry:linear",
