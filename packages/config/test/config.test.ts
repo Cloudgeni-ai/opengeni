@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import {
   DEFAULT_MODAL_IMAGE_REF,
+  FIRST_PARTY_MCP_CALL_TIMEOUT_MS,
   FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
@@ -1867,6 +1868,12 @@ describe("sandbox preparation profiles", () => {
       });
     }
     expect(FIRST_PARTY_MCP_SETUP_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
+    // Opengeni's own tools may run for minutes (a large file publish); the
+    // client must not give up on a call the API goes on to finish.
+    expect(settings.mcpServers.find((server) => server.id === "opengeni")).toMatchObject({
+      timeoutMs: FIRST_PARTY_MCP_CALL_TIMEOUT_MS,
+    });
+    expect(FIRST_PARTY_MCP_CALL_TIMEOUT_MS).toBeGreaterThan(60_000);
   });
 
   test("derives built-in document MCP URL from OPENGENI_MCP_URL", () => {

@@ -11811,6 +11811,17 @@ function positiveInt(value: unknown): number {
  */
 export const FIRST_PARTY_MCP_SETUP_TIMEOUT_MS = 30_000;
 
+/**
+ * Call bound for Opengeni's own tools. The API bounds each of them itself;
+ * some, like publishing a large file, rightly take minutes. The client's
+ * 60-second default gave up on those while the API went on to finish them,
+ * leaving the agent an ambiguous timeout for work that succeeded. Four
+ * minutes stays inside the API server's 255-second idle timeout, which ends a
+ * response that sends nothing for longer. A cancelled turn still aborts a
+ * call at once.
+ */
+export const FIRST_PARTY_MCP_CALL_TIMEOUT_MS = 4 * 60_000;
+
 function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
   const existing = settings.mcpServers.filter((server) => server.id !== "opengeni");
   const firstPartyMcpUrl = firstPartyMcpServerUrl(settings);
@@ -11835,6 +11846,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // permission-invariant tool and docs is already uncached, so both stay
       // safe to cache / leave as-is.)
       cacheToolsList: false,
+      timeoutMs: FIRST_PARTY_MCP_CALL_TIMEOUT_MS,
       setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
       // App actions act as a person. The worker decides per call whether one
       // waits for the person's confirmation in the chat (a change without full

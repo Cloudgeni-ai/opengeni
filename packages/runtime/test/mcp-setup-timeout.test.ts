@@ -103,3 +103,34 @@ test("setupTimeoutMs lets a slow server finish setup while tool calls keep their
     await provider.stop();
   }
 });
+
+test("a long call timeout lets a slow tool call finish without stretching setup", async () => {
+  // A tool that runs longer than the client's default, such as publishing a
+  // large file, completes inside the server's own call bound.
+  const slowCall = slowProvider({ setupDelayMs: 0, callDelayMs: 1_500 });
+  try {
+    const prepared = await prepareSlow({
+      url: slowCall.url,
+      timeoutMs: 5_000,
+      setupTimeoutMs: 1_000,
+    });
+    try {
+      const [server] = prepared.mcpServers;
+      await expect(server!.callTool("slow__echo", {})).resolves.toBeDefined();
+    } finally {
+      await prepared.close();
+    }
+  } finally {
+    await slowCall.stop();
+  }
+  // Setup against an unresponsive server still gives up at the setup bound,
+  // not the much longer call bound.
+  const slowSetup = slowProvider({ setupDelayMs: 2_500, callDelayMs: 0 });
+  try {
+    await expect(
+      prepareSlow({ url: slowSetup.url, timeoutMs: 5_000, setupTimeoutMs: 1_000 }),
+    ).rejects.toThrow(/Request timed out/);
+  } finally {
+    await slowSetup.stop();
+  }
+});
