@@ -566,6 +566,51 @@ test("a lost connection fails the live view instead of leaving a frozen subscrip
   }
 });
 
+test("a live view opened while its page is busy shows the page once it answers", async () => {
+  // Its first frame used to count timeouts toward the three-failure limit,
+  // so opening the view during a busy period failed it after about 6 s.
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    fixture.setPageBusy(true);
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    const next = frames[Symbol.asyncIterator]().next();
+    expect(await nextFrameWithin(next, 6_000)).toBe("pending");
+    fixture.setPageBusy(false);
+    expect(await nextFrameWithin(next, 3_000)).toBe("frame");
+  } finally {
+    fixture.setPageBusy(false);
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 20_000);
+
+test("a live view of a busy page keeps at most one layout read waiting on it", async () => {
+  // Each frame deadline (about 2 s) used to send one more read into a
+  // renderer that answers none of them.
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    fixture.setPageBusy(true);
+    const before = fixture.calls.length;
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    const next = frames[Symbol.asyncIterator]().next();
+    expect(await nextFrameWithin(next, 7_000)).toBe("pending");
+    const layoutReads = fixture.calls
+      .slice(before)
+      .filter((call) => call.method === "Page.getLayoutMetrics" && call.sessionId);
+    expect(layoutReads).toHaveLength(1);
+    fixture.setPageBusy(false);
+    expect(await nextFrameWithin(next, 3_000)).toBe("frame");
+  } finally {
+    fixture.setPageBusy(false);
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 20_000);
+
 test("frames that keep failing for another reason still end the live view", async () => {
   const fixture = await captureFixture();
   let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
@@ -583,6 +628,19 @@ test("frames that keep failing for another reason still end the live view", asyn
     await fixture.driver.close();
   }
 }, 20_000);
+
+test("a live view whose first frame keeps failing for another reason is refused", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.failMethod("Page.captureScreenshot", "synthetic capture failure");
+    await expect(fixture.driver.subscribeFrames("target-1", { format: "jpeg" })).rejects.toThrow(
+      "synthetic capture failure",
+    );
+  } finally {
+    await fixture.driver.close();
+  }
+});
 
 test("a screenshot of attached Chrome queued behind a frame still gives up at the stall bound", async () => {
   // The wait for the frame comes out of the screenshot's own 3 s, not on top.
