@@ -2039,6 +2039,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1195 where organization Skills work: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 1107 agent calls: read, insert and update, FORCE RLS.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
@@ -2046,12 +2052,6 @@ describe("runtime database posture evaluator", () => {
             ? 1
             : 0) +
           // 1143_agent_call_host_phones: full DML, FORCE RLS.
-          (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0) +
-          // 1195 where organization Skills work: one full-DML FORCE-RLS table.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
