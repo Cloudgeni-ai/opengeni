@@ -67,6 +67,7 @@ const common = {
   socialConnections: [],
   canManageSocial: true,
   canManageSkills: true,
+  canTurnOnOrOff: true,
   onBack: () => {},
 };
 
@@ -188,5 +189,84 @@ describe("connector page account management", () => {
       connectionWorkspaceId: "personal-ws",
     });
     await view.unmount();
+  });
+
+  test("someone who can't turn the connector off for everyone isn't offered it", async () => {
+    const enabled = item({
+      enabled: true,
+      actions: ["connect", "disconnect"],
+    } as Partial<CapabilityCatalogItem>);
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        canTurnOnOrOff={false}
+        item={enabled}
+        health={{ state: "connected", connection: null } as never}
+        onAction={mock(() => {})}
+      />,
+    );
+    const trigger = view.container.querySelector(
+      'button[aria-label^="More actions"]',
+    ) as HTMLButtonElement | null;
+    if (trigger)
+      await act(async () => {
+        trigger.dispatchEvent(
+          new PointerEvent("pointerdown", { button: 0, ctrlKey: false, bubbles: true }),
+        );
+      });
+    const menu = [...document.querySelectorAll('[role="menuitem"]')].map((node) =>
+      node.textContent?.trim(),
+    );
+    expect(menu).not.toContain("Turn off for this workspace");
+    expect(view.container.textContent).not.toContain("Turn off for this workspace");
+    await view.unmount();
+  });
+
+  test("an organization connector turned off here turns back on with the organization's setup", async () => {
+    const off = item({
+      id: "registry:linear",
+      name: "Linear",
+      providerDomain: "mcp.linear.app",
+      endpointUrl: "https://mcp.linear.app/mcp",
+      mcpUrl: "https://mcp.linear.app/mcp",
+      lifecycle: {
+        status: "available",
+        readiness: "setup_required",
+        detail: "From your organization. Turned off in this workspace.",
+        managedBy: "organization",
+      },
+      actions: ["connect", "inspect"],
+      metadata: {
+        organizationConnector: { id: "c1", generation: 1, login: "each_person", source: "catalog" },
+      },
+    } as Partial<CapabilityCatalogItem>);
+    for (const canTurnOnOrOff of [true, false]) {
+      const onAction = mock(() => {});
+      const view = await render(
+        <CatalogItemPage
+          {...common}
+          item={off}
+          canTurnOnOrOff={canTurnOnOrOff}
+          onAction={onAction}
+          onConnectAccount={() => {}}
+        />,
+      );
+      try {
+        // No sign-in or key of its own: one button that uses the organization's setup.
+        expect(buttons(view.container, "Connect Linear")).toHaveLength(0);
+        expect(view.container.querySelector('input[type="password"]')).toBeNull();
+        const turnOn = buttons(view.container, "Turn on for this workspace")[0]!;
+        expect(view.container.textContent).toContain("Turned off in this workspace");
+        expect(turnOn.disabled).toBe(!canTurnOnOrOff);
+        if (canTurnOnOrOff) {
+          await act(async () => turnOn.click());
+          expect(onAction).toHaveBeenLastCalledWith({ type: "enable", item: off });
+        } else {
+          expect(view.container.textContent).toContain("Ask a workspace admin to turn it back on.");
+        }
+      } finally {
+        await view.unmount();
+      }
+    }
   });
 });

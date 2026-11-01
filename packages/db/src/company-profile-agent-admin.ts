@@ -58,8 +58,8 @@ function translate(error: unknown, stage: "propose" | "confirm"): never {
     throw new CompanyProfileAgentAdminError(
       stage === "confirm" ? "confirmation_unavailable" : "authority_unavailable",
       stage === "confirm"
-        ? "The bound organization-owner confirmation is unavailable or no longer valid."
-        : "An exact live turn initiated by the active organization owner is required.",
+        ? "The bound organization-administrator confirmation is unavailable or no longer valid."
+        : "An exact live turn initiated by an active organization owner or admin is required.",
       { cause: error },
     );
   }

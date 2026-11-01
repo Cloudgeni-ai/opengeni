@@ -239,6 +239,93 @@ describe("Meetings list", () => {
     }
   });
 
+  test("the owner chooses where their Only me meeting works, and leaves a workspace they turn it off in", async () => {
+    const fixture = createMeetingsFixture({ otherWorkspaces: true });
+    const personal = "c3d4e5f6-a7b8-4c9d-8e0f-2a3b4c5d6e7f";
+    const left: string[] = [];
+    const page = (reachWorkspaces?: { id: string; name: string; personal?: boolean }[]) => (
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={ELSEWHERE_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        reachWorkspaces={reachWorkspaces}
+        organizationName="Acme"
+        onBack={() => left.push("back")}
+      />
+    );
+    const openMenu = async (container: HTMLElement) => {
+      const trigger = container.querySelector<HTMLElement>(
+        '[aria-label="More actions for Pipeline review"]',
+      );
+      await act(async () => {
+        trigger!.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }),
+        );
+      });
+      await settle(50);
+      return [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    };
+    // Without the person's workspaces, the page doesn't offer the choice.
+    const bare = await render(page());
+    try {
+      await waitForText(bare.container, "recorded in Sales");
+      const items = await openMenu(bare.container);
+      expect(items.map((item) => item.textContent?.trim())).not.toContain("Available in…");
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+      await settle(50);
+    } finally {
+      await bare.unmount();
+    }
+
+    const view = await render(
+      page([
+        { id: fixture.workspaceId, name: "Design" },
+        { id: "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e", name: "Sales" },
+        { id: personal, name: "Ingrid", personal: true },
+      ]),
+    );
+    try {
+      await waitForText(view.container, "recorded in Sales");
+      const item = (await openMenu(view.container)).find(
+        (candidate) => candidate.textContent?.trim() === "Available in…",
+      );
+      expect(item).toBeDefined();
+      await act(async () => item!.click());
+      await settle(100);
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+      const text = dialog.textContent ?? "";
+      expect(text).toContain("It stays Only me");
+      expect(text).toContain("Belongs to you. Only you manage it.");
+      // The workspace storing it is always ticked; Personal always has it, so no row.
+      const box = (label: string) => {
+        const element = [...dialog.querySelectorAll("label")].find(
+          (each) => each.textContent === label,
+        );
+        return element ? (document.getElementById(element.htmlFor) as HTMLInputElement) : null;
+      };
+      expect(box("Sales")?.disabled).toBe(true);
+      expect(box("Sales")?.checked).toBe(true);
+      expect(box("Your Personal workspace")).toBeNull();
+      expect(text).not.toContain("will no longer show");
+      // Turning it off where it was opened says it will leave, then leaves.
+      await act(async () => box("Design (this workspace)")!.click());
+      expect(dialog.textContent).toContain("It will no longer show in this workspace");
+      const save = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Save",
+      )!;
+      await act(async () => save.click());
+      await waitFor(() => left.length > 0);
+      expect(left).toEqual(["back"]);
+      const saved = await fixture.client.getRecording(fixture.workspaceId, ELSEWHERE_RECORDING_ID);
+      expect(saved.reachWorkspaceIds).toEqual([]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("search finds meetings by transcript words and says what it searches", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
@@ -550,13 +637,11 @@ describe("Recorder provider", () => {
       await act(async () => controls!.requestStart());
       await waitFor(() => starts.length === 2);
       expect(store.pendingStart()).toBeNull();
-      const { title: buttonTitle, ...buttonOptions } = starts[0]!;
-      const { title: actionTitle, ...actionOptions } = starts[1]!;
-      expect(actionOptions).toEqual(buttonOptions);
-      // Both are named after when they start.
-      expect(typeof buttonTitle).toBe("string");
-      expect(typeof actionTitle).toBe("string");
-      expect((actionTitle as string).length).toBeGreaterThan(0);
+      expect(starts[1]).toEqual(starts[0]!);
+      // Neither makes up a name: Opengeni names the meeting, from the
+      // calendar or the conversation, so a made-up one never hides it.
+      expect(starts[0]!.title).toBeUndefined();
+      expect(starts[0]!.titleSource).toBeUndefined();
 
       // While one records, the action asks for no second start.
       state = "recording";
@@ -751,13 +836,26 @@ describe("Recorder provider", () => {
     try {
       await waitForText(view.container, "Start recording");
       const field = view.container.querySelector<HTMLInputElement>(
-        'input[placeholder="Name this meeting (optional)"]',
+        'input[placeholder="Name this meeting, or it\'s named for you"]',
       );
       expect(field).not.toBeNull();
+      // A call app's name, with nothing typed, is sent as the app's guess.
+      await act(async () => store.requestStart({ title: "Zoom meeting", titleSource: "app" }));
+      await waitFor(() => starts.length === 1);
+      expect(starts[0]).toMatchObject({ title: "Zoom meeting", titleSource: "app" });
+      expect(field!.value).toBe("");
+      starts.length = 0;
       await typeInto(field!, "Design review");
       await act(async () => store.requestStart({ title: "" }));
       await waitFor(() => starts.length === 1);
       expect(starts[0]!.title).toBe("Design review");
+      expect(starts[0]!.titleSource).toBeUndefined();
+      // A call app's guess never replaces a name someone typed.
+      starts.length = 0;
+      await act(async () => store.requestStart({ title: "Zoom meeting", titleSource: "app" }));
+      await waitFor(() => starts.length === 1);
+      expect(starts[0]).toMatchObject({ title: "Design review" });
+      expect(starts[0]!.titleSource).toBeUndefined();
     } finally {
       await act(async () => view.root.unmount());
       view.container.remove();
@@ -1290,6 +1388,52 @@ describe("Meeting page", () => {
     }
   });
 
+  test("while a meeting is processed, the player waits until every recorded track can play", async () => {
+    const fixture = createMeetingsFixture();
+    const listed = await fixture.client.listRecordings(fixture.workspaceId);
+    const processing = listed.recordings.find((entry) => entry.state === "processing")!;
+    // The microphone is ready to play; the computer audio isn't yet.
+    let playable = new Set([0]);
+    let reads = 0;
+    const recordings = {
+      ...fixture.client,
+      getRecording: async (workspaceId: string, id: string) => {
+        const found = await fixture.client.getRecording(workspaceId, id);
+        if (id !== processing.id) return found;
+        reads += 1;
+        return {
+          ...found,
+          tracks: found.tracks.map((track) => ({
+            ...track,
+            playable: playable.has(track.trackNumber),
+          })),
+        };
+      },
+    };
+    const player = (container: HTMLElement) =>
+      container.querySelector('[aria-label="Position"]') !== null;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={processing.id}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={recordings}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitFor(() => reads > 0);
+      await settle(600);
+      // The microphone alone would sound as if the call was never recorded.
+      expect(player(view.container)).toBe(false);
+      playable = new Set([0, 1]);
+      // The page reads the meeting again while it's processed.
+      await waitFor(() => player(view.container), 6_000);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a transcript that failed before the audio was prepared can be made again", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
@@ -1576,6 +1720,42 @@ describe("Transcription model picker", () => {
       "Azure Speech isn't available here right now",
     );
   });
+
+  test("transcribing again prices every recorded track, since each is billed on its own", async () => {
+    const { transcribeAgainEstimate } = await import("./meeting-detail-page");
+    const hour = 3_600_000;
+    const track = (trackNumber: number, durationMilliseconds: number, chunkCount = 10) => ({
+      trackNumber,
+      kind: "audio" as const,
+      source: trackNumber === 0 ? ("microphone" as const) : ("system" as const),
+      mimeType: "audio/webm",
+      chunkCount,
+      totalBytes: 1_000,
+      durationMilliseconds,
+      playable: true,
+      video: null,
+      live: null,
+    });
+    // A microphone beside computer audio: two hours of audio for a one-hour meeting.
+    const both = transcribeAgainEstimate(
+      { durationMilliseconds: hour, tracks: [track(0, hour), track(1, hour)] },
+      0.22,
+    );
+    expect(both?.tracks).toBe(2);
+    expect(both?.usd).toBeCloseTo(0.44, 6);
+    // A track that never got audio costs nothing.
+    const micOnly = transcribeAgainEstimate(
+      { durationMilliseconds: hour, tracks: [track(0, hour), track(1, 0, 0)] },
+      0.22,
+    );
+    expect(micOnly).toEqual({ usd: 0.22, tracks: 1 });
+    // Without track details the meeting's length is the audio.
+    expect(transcribeAgainEstimate({ durationMilliseconds: hour / 2, tracks: [] }, 0.22)).toEqual({
+      usd: 0.11,
+      tracks: 1,
+    });
+    expect(transcribeAgainEstimate({ durationMilliseconds: hour, tracks: [] }, null)).toBeNull();
+  });
 });
 
 describe("Recorder errors", () => {
@@ -1846,7 +2026,7 @@ describe("Live transcript", () => {
     } as unknown as Parameters<typeof RecorderPanel>[0]["recorder"];
     const view = await render(<RecorderPanel recorder={recorder} />);
     try {
-      expect(view.container.textContent).toContain("No name yet");
+      expect(view.container.textContent).toContain("Named for you");
       const nameIt = [...view.container.querySelectorAll("button")].find(
         (button) => button.textContent?.trim() === "Name it",
       )!;

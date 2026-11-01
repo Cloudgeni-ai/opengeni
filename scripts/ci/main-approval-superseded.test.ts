@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  cadenceApi,
   supersededParkedRuns,
   isVersionMerge,
   startedJobCount,
@@ -191,4 +192,28 @@ test("retries the newest full main run's failed jobs once", () => {
   expect(retryableMainRun([fullRun(3, 0.5, { conclusion: "cancelled" })])).toBeNull();
   expect(retryableMainRun([fullRun(3, 0.5, { runAttempt: 1, versionMerge: true })])).toBeNull();
   expect(retryableMainRun([deferred])).toBeNull();
+});
+
+test("a read survives one gateway error; a mutation is sent once", async () => {
+  const calls: string[] = [];
+  const statuses = [502, 200, 502];
+  const fetcher = (async (url: string, init?: RequestInit) => {
+    calls.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
+    const status = statuses.shift() ?? 200;
+    return new Response(status === 200 ? JSON.stringify({ sha: "abc" }) : "bad gateway", {
+      status,
+    });
+  }) as typeof fetch;
+  const api = cadenceApi("o/r", "t", fetcher, { delaysMs: [0, 0], sleep: async () => {} });
+
+  // Pass 41124205906 ended on exactly this: one 502 on a read.
+  expect(await api("commits/main")).toEqual({ sha: "abc" });
+  await expect(api("actions/runs/1/cancel", { method: "POST" })).rejects.toThrow(
+    "POST actions/runs/1/cancel: 502",
+  );
+  expect(calls).toEqual([
+    "GET /repos/o/r/commits/main",
+    "GET /repos/o/r/commits/main",
+    "POST /repos/o/r/actions/runs/1/cancel",
+  ]);
 });

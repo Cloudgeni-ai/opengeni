@@ -291,13 +291,17 @@ them, so a call site sets a width and nothing else.
   refresh updates them in place. Only a true first load shows skeleton rows at the final row
   height (`ComposerMenuRowsSkeleton`), never a "Loading…" sentence, and nothing behind the menu
   on the page says it is loading.
-- **Per-chat settings live under "+".** The composer bar holds only "+", voice, the model and
-  Send. Where the chat runs (managed sandbox and its Sandbox Environment, or a connected machine
-  and its folder), who can see it, variable sets, repositories and chat settings are "+" rows
-  with the current value as right-side meta, each opening a drill-in. The project chip above the
-  message stays: it says where the new chat is filed, not how it runs. A running chat's header
-  names its compute only when it runs on someone's own machine. Workspace defaults for these
-  are on workspace General > New session defaults.
+- **A new chat's setup sits above the message; the rest of its settings live under "+".** The
+  composer bar holds only "+", voice, the model and Send. The strip above a new chat's message
+  holds the choices people make once, before they type: the project it is filed in, where it
+  runs (managed sandbox and its Sandbox Environment, or a connected machine and its folder) and
+  who can see it. Each is a chip (icon, current value, chevron; the setting's name is its
+  tooltip and accessible name) opening the same menu body "+" uses, shown only when there is
+  something to choose. Repositories, connectors, secrets, usage limit and chat settings are "+"
+  rows with the current value as right-side meta, each opening a drill-in. In a running chat,
+  "+" > Runs on moves the chat to another computer, and the header names its compute only when
+  it runs on someone's own machine. Workspace defaults for these are on workspace General > New
+  session defaults.
 - Tiles and logos in rows (workspace initials, organization, apps) fit the 16px icon slot so
   labels align; richer rows (connectors with a logo, name and account) keep the same padding,
   radius and hover and have no dividers between them.
@@ -436,6 +440,14 @@ Learned on Settings > Models, 27 Sep 2026.
   genuinely needed, with the reason in place: Codex Apps, usage limit resets, an API key in a
   Personal workspace. Nobody else adds accounts; someone who can change a workspace's own account
   may still sign it in again or replace its key.
+- **One "Available in" for every shared thing.** Model accounts, Connect provider, vaults and the
+  Slack bot all use `WorkspaceReachFields`, which opens with its owner line ("Belongs to Acme.
+  Organization owners and admins manage it.") and offers "All workspaces in Acme" or "Selected
+  workspaces". A workspace's own thing always includes its home workspace, shown locked with the
+  reason. Your own thing always works in your Personal workspace, which is never a row; you choose
+  "All my workspaces" or "Selected workspaces". Organization things add a "Personal workspaces"
+  checkbox where the provider supports them. Pickers that choose an owner (rigs, machines) or where
+  a key or connected agent may act keep their own choices and reuse only `WorkspaceChecklist`.
 - **Who sees Models.** Organization owners and admins: everything. Workspace admins: the
   workspaces they administer plus their own Personal workspace and, read-only, the accounts those
   use, with "Only organization owners and admins can add accounts." Members: only their own

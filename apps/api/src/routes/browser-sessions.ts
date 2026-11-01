@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
+import { computerCursorIdentity } from "./computer-cursor-identity";
 import {
   assertEphemeralBrowserCreateEnabled,
   ephemeralBrowserPartition,
@@ -266,6 +267,8 @@ import { ApiHttpError } from "../http/api-error";
 import {
   interactionActionDeadlineApiError,
   interactionControlApiError,
+  interactionControlRequestFor,
+  type InteractionControlRequest,
   legacyInteractionCapacityError,
   legacyInteractionCapacityFailure,
 } from "../http/interaction-control-error";
@@ -804,7 +807,7 @@ export function registerBrowserSessionRoutes(
           error: interactionFailure(error),
         }).catch(() => undefined);
       }
-      throw browserRouteError(error);
+      throw browserRouteError(error, "open");
     }
   });
 
@@ -4766,7 +4769,7 @@ export function registerBrowserSessionRoutes(
         browserSessionStorageMode(record.session) !== "ephemeral_context",
       );
     } catch (error) {
-      throw browserRouteError(error);
+      throw browserRouteError(error, interactionControlRequestFor(channelOperation));
     }
   }
 
@@ -5711,6 +5714,14 @@ async function ensureLinkedComputerController(
   } catch (error) {
     if (!isMissingLinkedComputerControllerSession(error)) throw error;
     await client.createComputerSession({
+      cursorIdentity: await computerCursorIdentity(
+        deps,
+        grant,
+        await getSession(deps.db, browser.workspaceId, record.sourceSessionId).then((session) => {
+          if (!session) throw new BrowserSessionStateError("Associated session not found");
+          return session;
+        }),
+      ),
       ...reference,
       tokenGeneration: record.tokenGeneration,
       ...tokens,
@@ -7198,12 +7209,15 @@ type PreservedWorkingCopyCallback<T> = (input: {
   authority: PlacementBrowserWorkingCopyAuthority;
 }) => Promise<T>;
 
-export function browserRouteError(error: unknown): HTTPException {
+export function browserRouteError(
+  error: unknown,
+  request: InteractionControlRequest = "request",
+): HTTPException {
   const actionDeadline = interactionActionDeadlineApiError(error);
   if (actionDeadline) return actionDeadline;
   const tabDiagnosis = browserTabDiagnosisError(error);
   if (tabDiagnosis instanceof ApiHttpError) return tabDiagnosis;
-  const connectedMachineError = interactionControlApiError(error, "browser");
+  const connectedMachineError = interactionControlApiError(error, "browser", request);
   if (connectedMachineError) return connectedMachineError;
   const routeUnavailable = activeRouteUnavailableError(error);
   if (routeUnavailable) return routeUnavailable;

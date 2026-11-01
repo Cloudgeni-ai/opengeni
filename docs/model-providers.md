@@ -125,6 +125,17 @@ Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
 `OPENGENI_OPENAI_PROVIDER_ITEM_IDS`, `OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT`,
 `OPENGENI_WEB_SEARCH_ENABLED`.
 
+Responses requests to Azure OpenAI and the OpenAI platform (the built-in
+provider on `https://api.openai.com/v1`, or a workspace or organization key)
+send `store: false`, so the provider keeps no response objects: Opengeni sends
+the whole history with each request (over WebSocket, only the new items on the
+same connection, still storeless), with provider item ids stripped and
+reasoning round-tripped encrypted. A request is left alone when it chose
+`store`, chains `previous_response_id` over HTTP or a `conversation`, or still
+carries provider item ids (`OPENGENI_OPENAI_PROVIDER_ITEM_IDS=preserve`).
+OpenAI-compatible servers, gateways and an operator's registry provider keep
+their own contracts, even when a registry provider points at api.openai.com.
+
 **Keyless Azure OpenAI, without a console connection.** Set
 `OPENGENI_AZURE_OPENAI_AUTH_MODE` on the API and workers:
 
@@ -1029,8 +1040,10 @@ deployment-keyed HMAC and their reserved operation fields are stripped from all
 public connection metadata projections. The picker hides this rail until the
 connection is active.
 
-Admins may also add one exact Vercel model slug at a time in the same Settings
-card. The durable row stores only the workspace, slug, optional label, actor,
+Workspace admins, and anyone who can start chats in a shared workspace
+(`sessions:create`, signed in as themselves), may also add or remove one exact
+Vercel model slug at a time in the same Settings card. The key stays with
+admins. The durable row stores only the workspace, slug, optional label, actor,
 and timestamps. Custom IDs are `workspace-gateway/<slug>`; they receive the
 reviewed generic text/function-calling Gateway capability envelope and no
 provider pin, route order, pricing form, or upstream `/models` discovery.
@@ -1131,10 +1144,12 @@ connection and policy. These turns have `upstreamPayer: workspace` and
 deployment's free/credits rail. Billing settles directly through the
 workspace's OpenRouter account.
 
-Admins may add exact OpenRouter slugs in the same card. The API does not call
+Workspace admins, and anyone who can start chats in a shared workspace
+(`sessions:create`, signed in as themselves), may add or remove exact OpenRouter
+slugs in the same card; the key stays with admins. The API does not call
 OpenRouter `GET /models` or infer capabilities dynamically. Custom IDs receive
-the reviewed conservative text/function-calling Chat envelope, and the admin is
-asserting that the upstream slug supports that behavior. Opengeni does not claim
+the reviewed conservative text/function-calling Chat envelope, and whoever adds
+one is asserting that the upstream slug supports that behavior. Opengeni does not claim
 a reasoning vocabulary or context-window size for these unreviewed slugs.
 Duplicate and curated collisions are scoped to the OpenRouter workspace
 provider, not to Vercel AI Gateway or deployment-managed `openrouter/*`.
@@ -1257,7 +1272,7 @@ Opper membership is available through this rail even without
 `OPENGENI_OPPER_API_KEY`; turns are `upstreamPayer: workspace`,
 `metering: external`, and spend no Opengeni credits.
 
-Admins may add exact Opper ids in the same card (`/v1/workspaces/:id/opper-custom-models`,
+Workspace admins and members who can start chats there may add exact Opper ids in the same card (`/v1/workspaces/:id/opper-custom-models`,
 SDK `listWorkspaceOpperCustomModels` / `createWorkspaceOpperCustomModel` /
 `deleteWorkspaceOpperCustomModel`). An id may be a pool name or a pinned
 `provider/model` route. Curated collisions are scoped to the Opper provider.
@@ -1792,13 +1807,22 @@ DELETE /v1/workspaces/:workspaceId/model-policy
 
 Organization owners and admins also set an allowlist once for every workspace
 (**Organization settings → Models → Defaults for every workspace**, or
-`modelPolicy` on `PATCH /v1/organizations/:organizationId/model-defaults`). A
-workspace without a policy row follows it; a workspace row, including one that
-allows every model, is that workspace's own choice and wins. The GET response
-reports `source` (`workspace`, `organization` or `none`) and the `organization`
-policy the workspace would follow; DELETE removes the workspace's own policy so
-it follows the organization again (`deleteWorkspaceModelAccessPolicy`). In the
-form, **Use <organization>'s allowed models** switches between the two.
+`modelPolicy` on `PATCH /v1/organizations/:organizationId/model-defaults`). It
+is a ceiling: a workspace without a policy row uses it as is, and a workspace
+row only narrows it. A model runs in a workspace only when both lists allow its
+provider and both allow the model, so a workspace row that allows every model
+allows exactly what the organization allows, and listing a model the
+organization doesn't allow never lets it run. The API edges, the omitted-model
+default, goal admission, subscription placement and failover, and the worker's
+post-resolution gate all apply the combined policy. The GET response reports
+the workspace's own lists as saved, `source` (`workspace`, `organization` or
+`none`) and the `organization` lists; DELETE removes the workspace's own policy
+so it uses the organization's again (`deleteWorkspaceModelAccessPolicy`). The
+workspace catalog's `policyAllowed` is the combined verdict per model, and
+`organizationAllowed: false` marks a model the organization's list rules out
+(omitted when the organization allows every model); the form shows those
+models locked. In the form, **Use <organization>'s allowed models** switches
+between the two.
 
 Each workspace also has a credit switch, the workspace setting
 `allowCreditModels` (default `true`; `PATCH /v1/workspaces/:workspaceId/settings`,
@@ -2471,7 +2495,10 @@ Workspace Claude custom models use `/v1/workspaces/:workspaceId/model-providers/
 :providerKind/custom-models` (`anthropic` or `claude_subscription`) and the shared subscription account APIs for Claude. Anthropic API keys keep the
 workspace connection create/rotate/revoke API. Model IDs are scoped under
 `workspace-anthropic/` and `workspace-claude-subscription/`; organization models use
-`organization-anthropic/` and `organization-claude-subscription/`. Custom models use
+`organization-anthropic/` and `organization-claude-subscription/`. As with
+Gateway, OpenRouter and Opper custom models, anyone who can start chats in a
+shared workspace adds and removes its custom model entries; connecting a key or
+subscription for the workspace stays with admins. Custom models use
 immutable generations: retiring one prevents fresh selection while preserving
 accepted execution history. Connection/model allowlists still govern execution.
 

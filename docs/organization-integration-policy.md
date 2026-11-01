@@ -19,20 +19,35 @@ header-only credential rotation, and accepted host-delegation use are unchanged.
 Do not present this setting as a universal outbound-network or tool-execution
 allowlist.
 
-## Members turning integrations on for their own accounts
+Organization connectors, which an owner or admin adds once for many
+workspaces, are acquisitions under this policy too: adding one, or saving one
+that stays on, checks `custom:mcp` like a workspace's own MCP setup, and an
+organization API integration checks its definition's key or
+`custom:openapi` / `custom:graphql` like a workspace's own API integration. See
+[Organization connectors](capabilities.md#organization-connectors).
 
-`personalIntegrationSetup` decides who may turn on a reviewed catalog OAuth
-integration for personal accounts (each person signs in to their own account):
+## Members turning integrations on
+
+`personalIntegrationSetup` decides whether members may turn integrations on:
 
 - `members` (the default): anyone holding `connections:personal`, which every
   workspace Member has through `connections:write` and which embedded per-user
-  workspaces get by default. It covers only a reviewed catalog integration
-  (built in, deployment configured, or a verified registry entry) that signs
-  each person in with OAuth, only when it is not on yet, and only within the
-  rest of this policy. It never covers custom MCP servers, shared or workspace
-  connections, or removing or reconfiguring an integration.
-- `admins`: only people who manage integrations (`capabilities:manage`).
+  workspaces get by default, may turn on a reviewed catalog integration (built
+  in, deployment configured, or a verified registry entry) that signs each
+  person in with OAuth for personal accounts. Members holding
+  `connections:write` may also add anything else: custom MCP servers, API
+  integrations and plugins, with personal or shared connections. Both are
+  create-only and only within the rest of this policy: they never set tool
+  approval, update an integration, plugin or account that is already set up,
+  turn one back on that an admin turned off, or turn one off for everyone.
+- `admins`: only people who manage integrations (`capabilities:manage`) turn
+  integrations on, add MCP servers or API integrations, or install plugins.
+  Members can still connect their own accounts to integrations that are on,
+  configure their sources, and remove them.
 
+The workspace catalog (`GET /v1/workspaces/{workspaceId}/capabilities`)
+returns this setting as `memberIntegrationSetup`, so clients offer members only
+the setup the API will accept.
 Once on, the integration is visible to the workspace's other members as an
 optional integration that each of them must connect with their own account.
 Nobody gets access to anyone else's account. Workspace and organization admins
@@ -46,9 +61,12 @@ request key.
 ## Server administration
 
 Use the full-access organization API key on the product backend, or a verified
-native organization-administrator session. Workspace keys, delegated users and
-agent identities cannot administer this policy. Browser writes also require the
-existing same-origin mutation checks.
+native organization-administrator session. Workspace keys, host-delegated
+users (`asUser()`) and an agent turn's own credentials cannot administer this
+policy. A person's agent acting as them (a connected agent, or a chat they gave
+full access) counts as that person when its access includes `account:admin`;
+the database still checks their live owner or admin role. Browser writes also
+require the existing same-origin mutation checks.
 
 The SDK subpath `@opengeni/sdk/organization-integration-policy` exports:
 

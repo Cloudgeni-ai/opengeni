@@ -133,10 +133,22 @@ export function urlHost(url: string): string {
 }
 
 /** Which workspaces an organization registration reaches, in words. */
-export function workspaceFilterLabel(
-  filter: IntegrationWorkspaceFilter | null | undefined,
-): string {
-  return filter ? `Shared workspaces from ${filter.externalSource}` : "Every shared workspace";
+export function workspaceFilterLabel(registration: {
+  workspaceFilter?: IntegrationWorkspaceFilter | null | undefined;
+  allowedWorkspaceIds?: readonly string[] | null | undefined;
+  allowPersonalWorkspaces?: boolean | undefined;
+}): string {
+  const filter = registration.workspaceFilter;
+  const picked = registration.allowedWorkspaceIds;
+  const from = filter ? ` from ${filter.externalSource}` : "";
+  const shared =
+    picked != null
+      ? `${picked.length} shared workspace${picked.length === 1 ? "" : "s"}${from}`
+      : filter
+        ? `Shared workspaces${from}`
+        : "Every shared workspace";
+  if (!registration.allowPersonalWorkspaces) return shared;
+  return picked?.length === 0 ? "Personal workspaces only" : `${shared}, plus Personal workspaces`;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

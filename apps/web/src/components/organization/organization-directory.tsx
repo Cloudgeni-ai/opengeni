@@ -1,6 +1,11 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { BillingPlanBalance } from "@opengeni/sdk";
-import { isSeatLimitError } from "@opengeni/react/app/lib/subscription-plans";
+import {
+  isSeatLimitError,
+  seatUpgradeFromError,
+  type CatalogPlan,
+  type SeatUpgrade,
+} from "@opengeni/react/app/lib/subscription-plans";
 import { retryOrganizationUserSetupDelivery } from "@opengeni/sdk/organization-user-setup";
 import {
   createContext,
@@ -66,11 +71,19 @@ type Pending<Request> = Request & { operationId: string };
 
 export interface InviteResult {
   sent: OrganizationInvitation[];
-  failed: { email: string; message: string; seatLimitReached?: boolean }[];
+  failed: {
+    email: string;
+    message: string;
+    seatLimitReached?: boolean;
+    /** The plan the seat refusal names, when the server sent one. */
+    upgrade?: SeatUpgrade | null;
+  }[];
 }
 
 export interface OrganizationDirectory {
   plan: BillingPlanBalance | null;
+  /** The live plan catalog, for naming the plan that adds seats. */
+  plans: readonly CatalogPlan[];
   identity: OrganizationAdminIdentity;
   /** How the signed-in person is named when the server has no name ("Local dev"). */
   youLabel: string | null;
@@ -95,6 +108,8 @@ export interface OrganizationDirectory {
   createWorkspace: (name: string) => Promise<string | null>;
   renameWorkspace: (workspace: OrganizationWorkspaceAccess, name: string) => Promise<void>;
   deleteWorkspace: (workspace: OrganizationWorkspaceAccess) => Promise<void>;
+  /** Names of the Slack agents that work in a workspace (deleted with it). */
+  slackAgentNames: (workspaceId: string) => Promise<string[]>;
   /** Gives or changes a workspace role. `current` is the grant being replaced, if any. */
   setWorkspaceRole: (input: {
     workspaceId: string;
@@ -210,22 +225,39 @@ export function OrganizationDirectoryProvider({
   const [invitations, setInvitations] = useState<
     Owned<{ invitations: OrganizationInvitation[]; nextCursor: string | null }>
   >({ ownerKey: "", value: EMPTY_INVITATIONS, loading: true, error: null });
-  const [planState, setPlanState] = useState<{ ownerKey: string; plan: BillingPlanBalance | null }>(
-    { ownerKey: "", plan: null },
-  );
+  const [planState, setPlanState] = useState<{
+    ownerKey: string;
+    plan: BillingPlanBalance | null;
+    plans: readonly CatalogPlan[];
+  }>({ ownerKey: "", plan: null, plans: [] });
   // Both reads are necessary: existing plan rows can remain while the feature is off.
+  // A re-read keeps the previous plan until it answers, so the seat notice
+  // doesn't flicker after invitations change; another identity starts empty.
   useEffect(() => {
     let active = true;
-    setPlanState({ ownerKey: identityKey, plan: null });
-    if (!peopleEnabled) return;
+    const empty = { ownerKey: identityKey, plan: null, plans: [] };
+    if (!peopleEnabled) {
+      setPlanState(empty);
+      return;
+    }
+    setPlanState((current) => (current.ownerKey === identityKey ? current : empty));
     void (async () => {
       try {
         const billing = await client.getBilling({ accountId: identity.organizationId });
-        if (!active || !billing.balance.plan) return;
+        if (!active) return;
+        if (!billing.balance.plan) {
+          setPlanState(empty);
+          return;
+        }
         const catalog = await client.getBillingSubscriptionPlans({
           accountId: identity.organizationId,
         });
-        if (active && catalog.plan) setPlanState({ ownerKey: identityKey, plan: catalog.plan });
+        if (active)
+          setPlanState(
+            catalog.plan
+              ? { ownerKey: identityKey, plan: catalog.plan, plans: catalog.plans }
+              : empty,
+          );
       } catch {
         /* Billing details are optional for people administrators. */
       }
@@ -513,6 +545,18 @@ export function OrganizationDirectoryProvider({
     [loadOverview, onDeleteWorkspace, ownsIdentity],
   );
 
+  // Slack agents are listed per organization through any workspace the reader
+  // is in; the administered workspace is one.
+  const slackAgentNames = useCallback(
+    async (workspaceId: string) => {
+      const result = await client.listOpenGeniSlackAgents(identity.workspaceId);
+      return result.agents
+        .filter((agent) => agent.targetWorkspaceId === workspaceId)
+        .map((agent) => agent.name);
+    },
+    [client, identity.workspaceId],
+  );
+
   const setWorkspaceRole = useCallback(
     async ({
       workspaceId,
@@ -704,12 +748,13 @@ export function OrganizationDirectoryProvider({
                 ? { ...planState.plan, seatsUsed: planState.plan.seatsUsed + sent.length }
                 : null,
             )
-              ? { seatLimitReached: true }
+              ? { seatLimitReached: true, upgrade: seatUpgradeFromError(error) }
               : {}),
           });
         }
       }
       if (sent.length > 0 && owns(operation)) {
+        // Changing the invitations re-reads the plan, so its seat count stays the server's.
         setInvitations((current) => ({
           ...current,
           ownerKey: identityKey,
@@ -823,6 +868,7 @@ export function OrganizationDirectoryProvider({
     const visibleMembers = visible(members, []);
     return {
       plan: planState.ownerKey === identityKey ? planState.plan : null,
+      plans: planState.ownerKey === identityKey ? planState.plans : [],
       identity,
       youLabel,
       actorRole,
@@ -840,6 +886,7 @@ export function OrganizationDirectoryProvider({
       createWorkspace,
       renameWorkspace,
       deleteWorkspace,
+      slackAgentNames,
       setWorkspaceRole,
       removeWorkspaceAccess,
       changeOrganizationRole,
@@ -872,6 +919,7 @@ export function OrganizationDirectoryProvider({
     revokeInvitation,
     setWorkspaceRole,
     singleUser,
+    slackAgentNames,
     transitionMember,
     youLabel,
   ]);

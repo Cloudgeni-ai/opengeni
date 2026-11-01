@@ -3,8 +3,13 @@
 //! and memory, and since average linkage never merges at a smaller distance
 //! later, the merges sorted by distance form the dendrogram that is then cut
 //! either at a distance or at a number of clusters.
+//!
+//! Single-window embeddings of one voice are noisy, especially far from the
+//! microphone, so average linkage can leave one voice split into several
+//! clusters whose members sit far apart while their centres nearly agree.
+//! [`merge_centroids`] joins those by the distance between cluster centres.
 
-use crate::models::cosine;
+use crate::models::{cosine, normalized};
 
 struct Condensed {
     n: usize,
@@ -117,6 +122,51 @@ fn find(parent: &mut [usize], mut node: usize) -> usize {
     node
 }
 
+/// Centroid linkage over cluster sums: repeatedly joins the two clusters
+/// whose centres are closest while their cosine distance is below
+/// `threshold`, never going below `min_clusters`. Each sum is the sum of a
+/// cluster's unit vectors, so larger clusters weigh more in a joined centre.
+/// Returns, for each input cluster, its group id (0..k, in order of first
+/// appearance).
+pub fn merge_centroids(sums: &[Vec<f32>], threshold: f32, min_clusters: usize) -> Vec<usize> {
+    let mut groups: Vec<(Vec<usize>, Vec<f32>)> = sums
+        .iter()
+        .enumerate()
+        .map(|(index, sum)| (vec![index], sum.clone()))
+        .collect();
+    while groups.len() > min_clusters.max(1) {
+        let centres: Vec<Vec<f32>> = groups
+            .iter()
+            .map(|(_, sum)| normalized(sum.clone()))
+            .collect();
+        let mut best: Option<(usize, usize, f32)> = None;
+        for a in 0..centres.len() {
+            for b in a + 1..centres.len() {
+                let distance = 1.0 - cosine(&centres[a], &centres[b]);
+                if distance < threshold && best.is_none_or(|(_, _, d)| distance < d) {
+                    best = Some((a, b, distance));
+                }
+            }
+        }
+        let Some((a, b, _)) = best else {
+            break;
+        };
+        let (members, sum) = groups.remove(b);
+        groups[a].0.extend(members);
+        for (total, value) in groups[a].1.iter_mut().zip(sum) {
+            *total += value;
+        }
+    }
+    groups.sort_by_key(|(members, _)| members.iter().copied().min());
+    let mut ids = vec![0; sums.len()];
+    for (id, (members, _)) in groups.iter().enumerate() {
+        for &member in members {
+            ids[member] = id;
+        }
+    }
+    ids
+}
+
 /// Cluster ids (0..k, in order of first appearance) after applying merges
 /// closer than `threshold`, then continuing until at most `max_clusters`
 /// remain, and stopping early at `min_clusters`.
@@ -202,5 +252,25 @@ mod tests {
     fn handles_tiny_inputs() {
         assert!(dendrogram(&[]).is_empty());
         assert_eq!(cut(1, &[], 0.5, 1, 4), vec![0]);
+        assert!(merge_centroids(&[], 0.4, 1).is_empty());
+    }
+
+    #[test]
+    fn joins_close_centres_and_keeps_distinct_voices() {
+        // Three fragments of one voice, two of another, one distinct voice.
+        let sums = vec![
+            vec![10.0, 1.0, 0.0],
+            vec![0.0, 0.0, 6.0],
+            vec![8.0, 3.0, 0.5],
+            vec![1.0, 9.0, 0.0],
+            vec![6.0, -1.0, 0.5],
+            vec![2.0, 7.0, 1.0],
+        ];
+        assert_eq!(merge_centroids(&sums, 0.2, 1), vec![0, 1, 0, 2, 0, 2]);
+        // A minimum count stops the merging early.
+        let labels = merge_centroids(&sums, 0.2, 5);
+        assert_eq!(*labels.iter().max().unwrap() + 1, 5);
+        // A zero threshold merges nothing.
+        assert_eq!(merge_centroids(&sums, 0.0, 1), vec![0, 1, 2, 3, 4, 5]);
     }
 }

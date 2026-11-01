@@ -21,6 +21,7 @@ import {
   prescanTurnAnchors,
 } from "@opengeni/sdk/timeline-order";
 import fleetDecisionItem from "./fleet-decision-projection";
+import { rewriteClaudeCiteTags } from "@opengeni/contracts/claude-cite-tags";
 import { isAgentWorkHumanInput } from "./agent-work-human-input";
 import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";
 import { learningRefusalText } from "./learning-refusal-copy";
@@ -34,10 +35,12 @@ import {
   sessionUsageLimitReachedMessage,
 } from "@opengeni/sdk/session-usage-limits";
 import {
-  CREDIT_EXHAUSTION_MESSAGE,
+  creditExhaustionText,
+  creditRefusalKindFromText,
   presentFailure,
   isCreditExhaustion,
   tryParseJson,
+  type CreditRefusalKind,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { invokedTool } from "./invoked-tool";
@@ -292,6 +295,13 @@ export function buildTimeline(
   // Open approval waits by the approval ids they ask about, so the person's
   // answer is on the wait the moment it is recorded, before work resumes.
   const approvalWaitsById = new Map<string, { notice: NoticeItem; turnId: string | null }>();
+  // How each approval was first worded: a later wait that asks again about
+  // the ones still open may carry no display of its own, or other words, and
+  // history keeps the question the person first saw.
+  const approvalWordingById = new Map<
+    string,
+    Pick<NonNullable<NoticeItem["approvalActions"]>[number], "title" | "facts">
+  >();
   // Live model-capacity waits. Later lifecycle evidence that the turn is no
   // longer blocked (resume, a non-waiting status, its settlement) resolves
   // them, so a recovered wait never lingers as a warning.
@@ -1401,7 +1411,20 @@ export function buildTimeline(
             call.awaitingApproval = true;
           }
         }
-        const approvalActions = approvalActionsOf(payload);
+        const approvalActions = approvalActionsOf(payload).map((action) => {
+          const earlier = approvalWordingById.get(action.id);
+          if (earlier) {
+            const { facts: _later, ...rest } = action;
+            return { ...rest, ...earlier };
+          }
+          const worded = { ...action, title: action.title ?? null };
+          if (worded.title)
+            approvalWordingById.set(action.id, {
+              title: worded.title,
+              ...(action.facts ? { facts: action.facts } : {}),
+            });
+          return worded;
+        });
         const notice: NoticeItem = {
           kind: "notice",
           id: event.id,
@@ -1648,12 +1671,13 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
-          items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE(t)));
+          const creditText = creditExhaustionPayloadText(t, payload);
+          items.push(turnEndItem(event, "failed", creditText));
           items.push({
             kind: "notice",
             id: event.id,
             tone: "failed",
-            text: CREDIT_EXHAUSTION_MESSAGE(t),
+            text: creditText,
             occurredAt: event.occurredAt,
           });
           break;
@@ -1760,7 +1784,7 @@ export function buildTimeline(
         const failureText = allowance
           ? ALLOWANCE_TURN_END_TEXT(t)
           : creditExhausted
-            ? CREDIT_EXHAUSTION_MESSAGE(t)
+            ? creditExhaustionPayloadText(t, payload)
             : (presented?.reason ?? null);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
@@ -2351,13 +2375,20 @@ function markRepeatedMachineRequests(items: TimelineItem[]): void {
  * as `turn0search3`, then U+E201. It also reaches the timeline without its
  * delimiters (`citeturn0search3turn1view0`, when a model writes it as plain
  * text), cut short, or still streaming at the end of the text.
+ *
+ * Claude's web-search citation tags (a `cite` tag with an `index="N-M"`
+ * attribute) become their quoted text. The Claude transport already links them to their
+ * search results where it can; any tag left over, for example in an answer
+ * stored before that, would otherwise show as raw markup. Code keeps them.
  */
 export function stripOpaqueCitationTokens(text: string): string {
-  return text
-    .replace(PROVIDER_CITATION_HANDLE, "")
-    .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
-    .replace(PROVIDER_CITATION_DELIMITER, "")
-    .replace(BARE_PROVIDER_CITATION_HANDLE, "");
+  return rewriteClaudeCiteTags(
+    text
+      .replace(PROVIDER_CITATION_HANDLE, "")
+      .replace(UNFINISHED_PROVIDER_CITATION_HANDLE, "")
+      .replace(PROVIDER_CITATION_DELIMITER, "")
+      .replace(BARE_PROVIDER_CITATION_HANDLE, ""),
+  );
 }
 
 const PROVIDER_CITATION_HANDLE =
@@ -2374,6 +2405,15 @@ const BARE_PROVIDER_CITATION_HANDLE = /[ \t]*(?:file)?cite(?:turn\d+[a-z_]+\d+)+
  * the summary line stays a neutral fact instead of repeating remedy prose.
  */
 const ALLOWANCE_TURN_END_TEXT = (t: OpenGeniText) => t("timeline.projection.usageLimitReached");
+
+/** The credit-stop sentence for a turn-end payload (own key, API use, or none). */
+function creditExhaustionPayloadText(t: OpenGeniText, payload: Record<string, unknown>): string {
+  return creditExhaustionText(
+    t,
+    typeof payload.error === "string" ? payload.error : null,
+    typeof payload.detail === "string" ? payload.detail : null,
+  );
+}
 
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */
 function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
@@ -2392,6 +2432,26 @@ function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
  * settles any other way (someone topped up and kept working) clears it.
  */
 export function creditExhaustedFromEvents(events: SessionEvent[]): boolean {
+  const payload = lastTurnEndPayload(events);
+  return payload ? isCreditExhaustionPayload(payload) : false;
+}
+
+/**
+ * The one-fix refusal (own-key fee or API use) the session's most recent turn
+ * ended on, or null. Read from the same LAST turn-end as
+ * `creditExhaustedFromEvents`, so a stop between model calls (a completed,
+ * budget-exhausted turn) names its fix too, and an older failure never does.
+ */
+export function creditRefusalFromEvents(events: SessionEvent[]): CreditRefusalKind | null {
+  const payload = lastTurnEndPayload(events);
+  if (!payload || !isCreditExhaustionPayload(payload)) return null;
+  return creditRefusalKindFromText(
+    typeof payload.error === "string" ? payload.error : null,
+    typeof payload.detail === "string" ? payload.detail : null,
+  );
+}
+
+function lastTurnEndPayload(events: SessionEvent[]): Record<string, unknown> | null {
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
   for (let index = ordered.length - 1; index >= 0; index -= 1) {
     const event = ordered[index];
@@ -2402,9 +2462,9 @@ export function creditExhaustedFromEvents(events: SessionEvent[]): boolean {
     ) {
       continue;
     }
-    return isCreditExhaustionPayload(asRecord(event.payload));
+    return asRecord(event.payload);
   }
-  return false;
+  return null;
 }
 
 /** The latest session status carried in the event log, if any. */
@@ -3604,8 +3664,17 @@ function approvalActionsOf(
       (value): value is string => typeof value === "string" && value.length > 0,
     );
     if (!id) continue;
-    const title = stringValue(asRecord(record.display).title).trim();
-    actions.push({ id, title: title || null });
+    const display = asRecord(record.display);
+    const title = stringValue(display.title).trim();
+    // Beside the display, which stays the strict shape every client parses.
+    const facts = (Array.isArray(record.targetFacts) ? record.targetFacts : [])
+      .slice(0, 12)
+      .map((fact) => ({
+        label: stringValue(asRecord(fact).label).trim(),
+        value: stringValue(asRecord(fact).value).trim(),
+      }))
+      .filter((fact) => fact.label && fact.value);
+    actions.push({ id, title: title || null, ...(facts.length > 0 ? { facts } : {}) });
   }
   return actions;
 }

@@ -206,6 +206,7 @@ describe("settings rail", () => {
       expect(linkLabels(workspaceSection)).toEqual([
         "General",
         "Access",
+        "Available here",
         "Agent learning",
         "Usage",
         "API keys",
@@ -223,7 +224,7 @@ describe("settings rail", () => {
       expect(workspaceSection?.getAttribute("aria-label")).toBe("Workspace");
       expect(
         Array.from(workspaceSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([7, 3]);
+      ).toEqual([8, 3]);
 
       const organizationSection = view.section("organization");
       expect(organizationSection?.firstElementChild?.textContent).toBe("Organization");
@@ -232,6 +233,8 @@ describe("settings rail", () => {
         "People",
         "Workspaces",
         "Organization identity",
+        // Everything the organization shares, and where each works.
+        "Shared",
         // Every model setting, each workspace's included, lives on Organization > Models.
         "Models",
         "Integrations",
@@ -243,7 +246,7 @@ describe("settings rail", () => {
       ]);
       expect(
         Array.from(organizationSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([4, 7]);
+      ).toEqual([4, 8]);
       for (const link of Array.from(organizationSection!.querySelectorAll("a"))) {
         expect(link.getAttribute("href")).toBe(`${base}/organization`);
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");

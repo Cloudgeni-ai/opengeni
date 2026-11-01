@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { hostedSearchFixture } from "./fixtures/hosted-search";
-import { projectHostedSearchEvidence } from "../src/hosted-search-evidence";
+import {
+  isHostedSearchEvidenceRecord,
+  projectHostedSearchEvidence,
+} from "../src/hosted-search-evidence";
 import { AnthropicMessagesModel } from "../src/anthropic-messages";
 import { anthropicCompactionRequest } from "../src/anthropic-compaction";
 import { configuredProviders } from "@opengeni/config";
@@ -11,6 +14,7 @@ import {
   compactionProviderFailureDiagnostics,
   compactionProviderRejection,
   EmptyCompactionSummaryError,
+  buildCompactionPromptInput,
   buildCompactionReplacementHistory,
   estimateTokens,
   prepareCompactionPromptInput,
@@ -60,6 +64,25 @@ function assertProviderDependencies(input: Item[]) {
 }
 
 describe("portable compaction provider identity", () => {
+  test("a search record is never treated as a person's message when the oldest units are dropped", () => {
+    const raw: Item[] = [
+      { type: "message", role: "user", content: "First question" },
+      { type: "message", role: "assistant", content: "Long answer. ".repeat(400) },
+      hostedSearchFixture(),
+      { type: "message", role: "assistant", content: "Search follow-up" },
+      { type: "message", role: "user", content: "Second question" },
+      { type: "message", role: "assistant", content: "Second answer" },
+    ];
+    // History as the compaction projector hands it over in the runtime form.
+    const history = raw.map((item) => projectHostedSearchEvidence(item, { form: "runtime" }));
+    expect(isHostedSearchEvidenceRecord(history[2])).toBe(true);
+    // Enough room to keep everything from the search record onward.
+    const budget = estimateTokens(buildCompactionPromptInput(history.slice(2)));
+    const prepared = prepareCompactionPromptInput(history, budget);
+    expect(prepared.droppedHistoryItems).toBe(4);
+    expect(isHostedSearchEvidenceRecord(prepared.input[0])).toBe(false);
+    expect(prepared.input[0]).toMatchObject({ role: "user", content: "Second question" });
+  });
   test("budgets projected search facts before compaction and passes them to detached Responses checkpoints", async () => {
     const search = hostedSearchFixture();
     const raw = [{ type: "message", role: "user", content: "Find docs" }, search];
@@ -186,7 +209,8 @@ describe("portable compaction provider identity", () => {
         }),
         ...(prepared ? { preparedRequest } : {}),
       });
-      expect(azureRequests[0]!.store).toBeUndefined();
+      // Azure accepts store:false; a prepared request's own value never wins.
+      expect(azureRequests[0]!.store).toBe(false);
       expect(openaiRequests[0]!.store).toBe(false);
     });
   }

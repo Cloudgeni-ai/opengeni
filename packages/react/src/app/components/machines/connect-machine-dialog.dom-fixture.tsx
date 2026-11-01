@@ -95,6 +95,7 @@ type Props = {
   error?: unknown | undefined;
   personalWorkspace?: boolean | undefined;
   canShareWithWorkspace?: boolean | undefined;
+  canConnectOwnMachine?: boolean | undefined;
   defaultScope?: "user" | "workspace" | undefined;
   useInChat?: { canUse: boolean; onUse: (machine: MachineView) => void } | undefined;
 };
@@ -124,6 +125,7 @@ async function render(initial: Props = {}) {
           machinesError={props.error ?? null}
           personalWorkspace={props.personalWorkspace}
           canShareWithWorkspace={props.canShareWithWorkspace}
+          canConnectOwnMachine={props.canConnectOwnMachine}
           defaultScope={props.defaultScope}
           onConnected={onConnected}
           useInChat={props.useInChat}
@@ -685,6 +687,85 @@ describe("Connect a machine inside the desktop app", () => {
       expect(h.text()).not.toContain("Computer use");
       expect(h.text()).not.toContain("Download for Mac");
       expect(h.dialog()?.querySelector("[data-connect-machine-setup]")).not.toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe("an organization that keeps own machines to its owners and admins", () => {
+  const ADMINS_ONLY =
+    "Your organization lets only its owners and admins connect their own machines.";
+
+  test("a workspace admin sees Only me disabled, no app download, and mints This workspace", async () => {
+    const h = await render({ advanced: false, canConnectOwnMachine: false });
+    try {
+      expect(h.text()).not.toContain("Download for Mac");
+      expect(h.text()).not.toContain("Open app and connect");
+      const onlyMe = h.radio("Only me");
+      expect(onlyMe?.disabled).toBe(true);
+      expect(h.text()).toContain(ADMINS_ONLY);
+      expect(h.radio("This workspace")?.getAttribute("aria-checked")).toBe("true");
+      await click(onlyMe);
+      expect(h.radio("This workspace")?.getAttribute("aria-checked")).toBe("true");
+      expect(mintEnrollToken.mock.calls.length).toBeGreaterThan(0);
+      for (const [, input] of mintEnrollToken.mock.calls) expect(input.scope).toBe("workspace");
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a Member who may connect nothing here is told who can, and nothing is minted", async () => {
+    const h = await render({ canConnectOwnMachine: false, canShareWithWorkspace: false });
+    try {
+      expect(h.text()).toContain(ADMINS_ONLY);
+      expect(h.text()).toContain(
+        "A workspace admin can connect one for everyone in this workspace.",
+      );
+      expect(h.radio("Only me")).toBeNull();
+      expect(h.command()).toBe("");
+      expect(mintEnrollToken).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("in a Personal workspace every machine is one's own, so nothing is offered", async () => {
+    const h = await render({ canConnectOwnMachine: false, personalWorkspace: true });
+    try {
+      expect(h.text()).toContain(ADMINS_ONLY);
+      // Nobody else connects machines there: no one to point at.
+      expect(h.text()).not.toContain("workspace admin");
+      expect(h.radio("This workspace")).toBeNull();
+      expect(mintEnrollToken).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("inside the desktop app, this computer isn't offered; other machines connect for the workspace", async () => {
+    desktop = {
+      workspaceId: "workspace",
+      platform: "macos",
+      productName: "Opengeni",
+      labels: defaultThisComputerLabels(),
+      allowPermissions: () => {},
+      signIn: null,
+      computer: {
+        status: { state: "not_connected", busy: false, error: null, machineName: "Kari's Mac" },
+        acting: false,
+        actionError: null,
+        canDisconnect: true,
+        pending: null,
+        asking: null,
+      },
+    };
+    const h = await render({ advanced: false, canConnectOwnMachine: false });
+    try {
+      expect(h.text()).not.toContain("Computer use");
+      expect(h.text()).not.toContain("Kari's Mac");
+      expect(h.radio("Only me")?.disabled).toBe(true);
+      for (const [, input] of mintEnrollToken.mock.calls) expect(input.scope).toBe("workspace");
     } finally {
       await h.close();
     }

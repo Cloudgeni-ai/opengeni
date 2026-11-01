@@ -1626,6 +1626,21 @@ describe("BrowserControlClient", () => {
             { status: 500 },
           );
         }
+        if (url.pathname === "/v1/read-unavailable") {
+          return Response.json(
+            {
+              protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+              ok: false,
+              error: {
+                code: "resource_unavailable",
+                message: "browser observation unavailable",
+                retryable: true,
+              },
+              diagnostic: { errorClass: "Error", frame: "AgentBrowserDriver.refreshAccessibility" },
+            },
+            { status: 503 },
+          );
+        }
         if (url.pathname === "/v1/malformed") {
           return Response.json({ nope: true });
         }
@@ -1847,6 +1862,22 @@ describe("BrowserControlClient", () => {
         error: { code: "driver_failed", message: "driver broke", retryable: false },
         diagnostic: { errorClass: "TypeError", frame: "Backend.observe" },
       });
+      // A read the controller gave up retrying keeps the driver's cause too.
+      await expect(
+        client.requestForSession({
+          method: "GET",
+          path: "/v1/read-unavailable",
+          token: controlToken,
+        }),
+      ).rejects.toMatchObject<Partial<BrowserControlRequestError>>({
+        status: 503,
+        error: {
+          code: "resource_unavailable",
+          message: "browser observation unavailable",
+          retryable: true,
+        },
+        diagnostic: { errorClass: "Error", frame: "AgentBrowserDriver.refreshAccessibility" },
+      });
       await expect(
         client.requestForSession({
           method: "GET",
@@ -1879,6 +1910,59 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test.each([true, false])(
+    "cursor metadata retries only an old agent's definite parser rejection (%s)",
+    async (oldAgent) => {
+      const computerSessionId = randomUUID();
+      const controllerGeneration = "cursor-compatibility";
+      const bodies: Record<string, unknown>[] = [];
+      const server = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          bodies.push((await request.json()) as Record<string, unknown>);
+          if (bodies.length === 1)
+            return failure(
+              400,
+              "invalid_action",
+              oldAgent ? "request contains unknown fields" : "other invalid input",
+            );
+          return success({
+            computerSessionId,
+            controllerGeneration,
+            platform: "linux",
+            adapter: "fixture",
+            seatId: "seat-1",
+            displayId: ":101",
+            capabilities: computerCapabilities(),
+            targets: [],
+          });
+        },
+      });
+      const placement = await localPlacement();
+      try {
+        const client = new BrowserControlClient(placement.session, {
+          adminToken,
+          port: server.port,
+        });
+        const pending = client.createComputerSession({
+          computerSessionId,
+          controllerGeneration,
+          tokenGeneration: 1,
+          controlToken,
+          viewToken,
+          cursorIdentity: { label: "Research" },
+        });
+        if (oldAgent) await pending;
+        else await expect(pending).rejects.toBeInstanceOf(BrowserControlRequestError);
+        expect(bodies).toHaveLength(oldAgent ? 2 : 1);
+        expect(bodies[0]?.cursorIdentity).toEqual({ label: "Research" });
+        if (oldAgent) expect(bodies[1]?.cursorIdentity).toBeUndefined();
+      } finally {
+        server.stop(true);
+      }
+    },
+  );
+
   test("drives ComputerSessions through the same placement controller", async () => {
     const computerSessionId = randomUUID();
     const operationId = randomUUID();
@@ -1903,6 +1987,10 @@ describe("BrowserControlClient", () => {
           authorization: request.headers.get("authorization"),
         });
         if (url.pathname === "/v1/computer-sessions" && request.method === "POST") {
+          expect((await request.json()).cursorIdentity).toEqual({
+            label: "Research",
+            avatarPng: "aWNvbg==",
+          });
           return success(
             {
               computerSessionId,
@@ -1958,6 +2046,7 @@ describe("BrowserControlClient", () => {
       expect(
         await client.createComputerSession({
           ...reference,
+          cursorIdentity: { label: "Research", avatarPng: "aWNvbg==" },
           tokenGeneration: 1,
           controlToken,
           viewToken,

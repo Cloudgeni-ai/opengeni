@@ -53,12 +53,14 @@ import {
   deleteOrganizationWorkspaceWithReconciliation,
 } from "@opengeni/react/app/lib/workspace-deletion";
 import {
+  canContributeWorkspaceContent,
   canManageWorkspaceMembers,
   canManageWorkspaceSettings,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
 import type { DeveloperLocation } from "@/lib/developer-route";
+import { openSettingsDestination } from "@/lib/open-settings-destination";
 import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
 
@@ -240,6 +242,21 @@ function OperationalWorkspaceSettingsRoute({
         <WorkspaceApiKeysPage key={workspaceId} workspaceId={workspaceId} keyParam={apiKey} />
       ) : null}
 
+      {section === "available" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading what's available here" />}>
+          <LazyAvailableHere
+            key={workspaceId}
+            client={context.client}
+            workspaceId={workspaceId}
+            workspaceName={activeWorkspace?.name ?? "this workspace"}
+            organizationName={organizationLabel}
+            personal={personal}
+            canOpenModels={personal || canAdministerWorkspace || administersOrganization}
+            onOpen={(destination) => openSettingsDestination(navigate, workspaceId, destination)}
+          />
+        </Suspense>
+      ) : null}
+
       {section === "developer" ? (
         <Suspense fallback={<SettingsRowsFallback label="Loading developer settings" />}>
           <LazyWorkspaceDeveloperSettings
@@ -298,14 +315,21 @@ function WorkspaceGeneralSettings({
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const accountId = activeWorkspace?.accountId ?? "";
-  const canRename =
-    activeWorkspace !== null &&
-    hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
-  const canDeleteWorkspace = hasWorkspacePermission(
+  const canAdminister = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
     "workspace:admin",
   );
+  // Anyone who can start chats in a shared workspace renames it; a Personal
+  // workspace keeps its name.
+  const canRename =
+    !personal &&
+    canContributeWorkspaceContent(
+      context.accessContext,
+      activeWorkspace,
+      context.managedSelfContext,
+    );
+  const canDeleteWorkspace = canAdminister;
   // Deleting the account's only workspace is refused server-side; disable the
   // affordance when this is the only workspace in the active account.
   const isOnlyWorkspaceInAccount =
@@ -361,7 +385,11 @@ function WorkspaceGeneralSettings({
             // say it isn't allowed.
             personal ? undefined : (
               <DisabledReasonTooltip
-                reason={canRename ? undefined : "Only workspace admins can rename it."}
+                reason={
+                  canRename
+                    ? undefined
+                    : "Only people who can start chats here, acting as themselves, can rename it."
+                }
               >
                 <Button
                   type="button"
@@ -500,7 +528,7 @@ function WorkspaceGeneralSettings({
         <WorkspaceSandboxImageRow
           client={context.client}
           workspaceId={workspaceId}
-          canManage={canRename}
+          canManage={canAdminister}
         />
         <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <ConnectedAppsDefaultRow workspaceId={workspaceId} canManage={canManageSettings} />
@@ -1024,6 +1052,11 @@ const LazyAgentLearningSettingsPage = lazy(async () => {
 const LazyWorkspaceUsagePage = lazy(async () => {
   const module = await import("@/components/usage/workspace-usage-page");
   return { default: module.WorkspaceUsagePage };
+});
+
+const LazyAvailableHere = lazy(async () => {
+  const module = await import("@/components/settings/available-here");
+  return { default: module.AvailableHere };
 });
 
 const LazyWorkspaceDeveloperSettings = lazy(async () => {

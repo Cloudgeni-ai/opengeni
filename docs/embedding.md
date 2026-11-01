@@ -197,6 +197,14 @@ the HTTP API, send the same names as `modelContextTools` next to
 with the browser's own context.
 With the dock off, entries that only open a dock panel hide with it.
 
+`starters` replaces Opengeni's suggestions under the new-chat composer with
+the host's own, such as tasks that fit the app the chat sits in (the Excel
+add-in suggests explaining a sheet or writing a formula). Each one has an
+`id`, a `title`, an optional `description` and `icon`, and the `prompt` it puts
+in the composer for the person to edit and send. An empty list shows none, and
+the `starters` feature still turns them off. The new-chat page's recent chats
+lead with the ones the person opened there most recently.
+
 Links in agent messages to Opengeni objects (files, Sites, editable
 artifacts) open in the dock when it is on, and otherwise open the object's
 page in the web app through `openUrl`. `resolveLink` lets the host open them
@@ -308,8 +316,8 @@ control (`sessions:control`) plus one of these:
   custom MCP servers, shared or workspace connections, other people's
   connections, or removing or reconfiguring an integration, and an
   organization can reserve turning integrations on for admins.
-- `connections:write` with `connections:read` and `capabilities:manage` (or an
-  integration that is already on): any account, shared or personal.
+- `connections:write` with `connections:read`: any account, shared or
+  personal, turning the integration on if it is not on yet.
 - `connections:read` alone, when the integration is already on and bound to a
   shared workspace account.
 
@@ -565,6 +573,35 @@ with `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/skills` (SDK
 and is recorded as a `session.skills.updated` event with the Skill names. An
 agent can only remove Skills this way. A session Skill shadows a workspace
 Skill with the same name.
+
+Repositories attached to a session can be removed with
+`POST /v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove` (SDK
+`removeSessionResources`) and a body of `{ resources: [{ kind: "repository", uri }] }`.
+The repositories are removed from the session and its child sessions, each
+recording a `session.resources.removed` event. Matching ignores letter case
+and a trailing `.git`. Removing a repository that is not attached is a no-op,
+so a retry completes a partial removal.
+
+Access through Opengeni ends on the next call: the personal Git broker, the
+GitHub tools and every new Git credential mint check the session's current
+repositories each time, including for a running turn, a child or a goal
+continuation. A token already written into a sandbox is not recalled: a
+shared GitHub App token stays valid until it expires (at most an hour). When
+Opengeni's own GitHub App minted a token for that repository alone, the next
+managed-sandbox turn best-effort revokes it; a token supplied by a host
+credential callback is never revoked. A sandbox shared with another session
+that still attaches the repository keeps its folder and credentials.
+
+Each session keeps a record of the removal (`session.removedRepositories`)
+until a person attaches the repository again with a message. Until then an
+agent cannot attach it again (to the chat or to a child it creates), turns
+queued earlier leave it out, and child sessions created later inherit the
+record. An agent acting through `admin_action_call` acts with the person's
+own authority and counts as that person. The next turn in a managed sandbox
+removes the repository folder and credential binding before the agent starts
+and then sets the record's `sandboxCleanupPending` to false; files on a
+Connected Machine are left alone. Check `session.git.read` status first if
+the folder may hold uncommitted or unpushed work.
 
 ### Agent instructions and per-message application context
 

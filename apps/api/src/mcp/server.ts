@@ -15,6 +15,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { assertGoalResumeAllowed, MissingPermissionRefusal } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
+import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import {
@@ -172,9 +173,14 @@ import {
   HumanInputResponseValidationError,
   getWorkspaceGrant,
   readTurnSenderAccess,
+  getPersonalGitHubRepositorySelectionState,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
-import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  canonicalPublicOrigin,
+  codemodeWorkspaceUrl,
+} from "@opengeni/config";
 import {
   createSignedState,
   GitHubAppConfigurationError,
@@ -272,7 +278,22 @@ import {
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import {
+  canonicalPersonalGitHubConnection,
+  listPersonalGitHubConnections,
+} from "../integrations/personal-github";
+import {
+  GITHUB_IDENTITIES_GUIDANCE,
+  personalGitHubConsoleBaseUrl,
+  personalGitHubIdentityStatus,
+  personalGitHubSetupProjection,
+  resolvePersonalGitHubPerson,
+  type PersonalGitHubIdentityStatus,
+  type PersonalGitHubPerson,
+} from "./github-identity-status";
+import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
+import {
   changeWorkspaceFileVisibility,
+  codemodeCallExecutionMachine,
   publishSandboxFileArtifact,
 } from "../sandbox-file-artifacts";
 import {
@@ -310,6 +331,8 @@ import {
   scheduledTaskViewerForGrant,
   siteViewerForGrant,
   resolveNewSiteAudience,
+  resolveNewProjectAudience,
+  projectSourceSessionId,
   scheduledTaskRunForGrant,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
@@ -320,6 +343,7 @@ import {
   validateScheduledTaskTarget,
   updateScheduledTaskForApi,
   triggerScheduledTaskForGrant,
+  manualScheduledTaskTriggerBillingOrigin,
   validatedScheduledTaskUpdate,
   withScheduledTaskEvents,
   withScheduledTaskRunEventOccurrences,
@@ -352,13 +376,18 @@ import {
   type RunOnOp,
 } from "@opengeni/core";
 import {
+  getSessionBackgroundCommand,
+  parseCommandOutputCursor,
   readSessionBackgroundCommandOutput,
   COMMAND_OUTPUT_MAX_BYTES,
 } from "@opengeni/db/session-background-commands";
 import {
   readCommandWithWait,
+  readCommandsWithWait,
+  COMMAND_READ_DEFAULT_SECONDS,
   COMMAND_READ_MAX_WAIT_SECONDS,
   COMMAND_WAIT_DEFAULT_SECONDS,
+  COMMAND_WAIT_MAX_COMMANDS,
 } from "./command-read";
 import {
   boundSessionEventCompactResult,
@@ -415,6 +444,10 @@ import {
 } from "../integrations/slack-bot";
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
 import {
+  handOffSlackAgentChat,
+  listSlackAgentChatsForSession,
+} from "../integrations/slack-interactions";
+import {
   marketplacePluginCapabilityItem,
   marketplacePluginCapabilityItems,
   mcpConnectionEndpointKey,
@@ -427,6 +460,7 @@ import {
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
 import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
@@ -440,6 +474,7 @@ import {
   requireSiteVersionPublishOpen,
 } from "../site-publishing/service";
 import { sitePlatformBrakeToolRefusal } from "../site-publishing/platform-usage";
+import { withSitePageSizeWarnings } from "../site-publishing/page-size";
 
 import {
   createSessionAdminReach,
@@ -1293,7 +1328,7 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "set_session_title",
       {
-        description: `Name this chat. Give a new chat a concise 3-7 word topic label: a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. After that, rename it only when the topic materially changes or the person asks, never as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
+        description: `Name this chat. Once a new chat has a task, question or subject (not while it holds only a greeting or small talk), give it a concise 3-7 word topic label in the language the person writes in: a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. After that, rename it only when the topic materially changes or the person asks, never as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
         inputSchema: {
           title: z4.string().min(1).max(200).optional(),
           ...sessionProfileToolInputShape,
@@ -1322,6 +1357,18 @@ export function buildOpenGeniMcpServer(
   // when new, their phones (see notification-tools.ts).
   if (sessionId !== null) {
     registerNotificationTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      attempt: () => exactAgentCommandContext(grant, sessionId),
+      json,
+    });
+    // Calling the person: their phones ring (see agent-call-tools.ts).
+    registerAgentCallTools({
       server,
       deps,
       grant,
@@ -1521,7 +1568,7 @@ export function buildOpenGeniMcpServer(
     registerCapabilityDiscoveryTools(server, deps, grant, sessionId, json);
   }
   if (can("github:use")) {
-    registerGitHubConnectTool(server, deps, grant, options, json);
+    registerGitHubConnectTool(server, deps, grant, options, sessionId, json);
   }
 
   if (can("github:use")) {
@@ -2413,7 +2460,6 @@ export function buildOpenGeniMcpServer(
             runMode: task.runMode,
             reusableSessionId: task.reusableSessionId,
             agentConfig: task.agentConfig,
-            audience: task.visibility === "private" ? "user_private" : "workspace_shared",
             requireOnline: true,
           });
           const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(deps.db, {
@@ -2431,6 +2477,8 @@ export function buildOpenGeniMcpServer(
                 taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null,
               action: "agent_run:create",
               quantity: 1,
+              // The run is API use when the caller or the task is.
+              billingOrigin: await manualScheduledTaskTriggerBillingOrigin(deps.db, grant, task.id),
               model: await resolveScheduledTaskPreflightModel(deps.db, catalogSettings, task),
             },
           );
@@ -2591,7 +2639,7 @@ function registerSandboxFileArtifactTool(
           ),
       },
     },
-    async ({ path, artifactId, visibility }) => {
+    async ({ path, artifactId, visibility }, extra) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       if ((path === undefined) === (artifactId === undefined))
         throw new Error("Pass exactly one of path or artifactId.");
@@ -2601,12 +2649,27 @@ function registerSandboxFileArtifactTool(
         return json(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility }));
       }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
+      // A Codemode call names its operation in the worker's trusted call
+      // metadata; code that a run_on exec runs on another machine publishes
+      // that machine's file (see codemodeCallExecutionMachine).
+      const operationId = extra?._meta?.["opengeniOperationId"];
+      const executionMachine = await codemodeCallExecutionMachine(deps, {
+        grant,
+        sessionId,
+        codemodeOperationId:
+          extra?._meta?.[FIRST_PARTY_MCP_CALLER_META_KEY] === "codemode" &&
+          typeof operationId === "string" &&
+          UUID_TARGET.test(operationId)
+            ? operationId
+            : null,
+      });
       return json(
         await publishSandboxFileArtifact(deps, {
           grant,
           session,
           path: path!,
           visibility,
+          executionMachine,
         }),
       );
     },
@@ -2848,6 +2911,37 @@ function registerSlackBotTools(
           },
         }),
       );
+    },
+  );
+
+  server.registerTool(
+    "slack_agent_handoff",
+    {
+      description:
+        "Pass the Slack request this chat is answering on to another Slack agent that fits it better. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
+      inputSchema: {
+        agent: z4.string().min(1).max(120),
+        note: z4.string().max(1000).optional(),
+      },
+    },
+    async ({ agent, note }) => {
+      if (!sessionId) throw new Error("Passing a request on requires a chat started from Slack");
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      return json(await handOffSlackAgentChat(deps, { grant, sessionId, agent, note }));
+    },
+  );
+
+  server.registerTool(
+    "slack_agent_chats",
+    {
+      description:
+        "List this Slack agent's other recent chats in its workspace, newest first, so you can recover context people did not repeat (for example when they do not reply in a thread). Read a relevant chat with session_events. Only chats of this same agent are listed.",
+      inputSchema: { limit: z4.number().int().min(1).max(50).optional() },
+    },
+    async ({ limit }) => {
+      if (!sessionId) throw new Error("Listing agent chats requires a chat started from Slack");
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      return json(await listSlackAgentChatsForSession(deps, { grant, sessionId, limit }));
     },
   );
 
@@ -3839,7 +3933,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.',
+        'Create and publish a Site from a complete HTML document. Its audience follows this chat unless you set visibility: in an Only me chat it is Only me (just the person you act for can see it; they can share it with the workspace from the Site page, and in a Personal workspace publishing it to the web shares it), otherwise everyone in the workspace can open it. Set visibility to "workspace" or "private" only when the person asks for that audience. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation. Keep the HTML small: compress images and link video or large media instead of embedding them; the result lists warnings for a heavy page.',
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -3901,17 +3995,19 @@ function registerWorkspaceArtifactTools(
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
       return json(
-        await mutation(
-          await createWorkspaceArtifact(deps.db, {
-            artifactId,
-            slug: resolvedSlug,
-            requestedSlug: slug ?? null,
-            title,
-            description: description ?? null,
-            ...audience,
-            ...(await prepare(html, source, requestedTools, uploadId)),
-            ...provenance(idempotencyKey, "artifacts_create"),
-          }),
+        withSitePageSizeWarnings(
+          await mutation(
+            await createWorkspaceArtifact(deps.db, {
+              artifactId,
+              slug: resolvedSlug,
+              requestedSlug: slug ?? null,
+              title,
+              description: description ?? null,
+              ...audience,
+              ...(await prepare(html, source, requestedTools, uploadId)),
+              ...provenance(idempotencyKey, "artifacts_create"),
+            }),
+          ),
         ),
       );
     },
@@ -3921,7 +4017,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_publish",
     {
       description:
-        "Publish a new immutable HTML version. The exact HTML runs in an opaque-origin sandboxed iframe. First read the current source and pass its version id for optimistic concurrency.",
+        "Publish a new immutable HTML version. The exact HTML runs in an opaque-origin sandboxed iframe. First read the current source and pass its version id for optimistic concurrency. The result lists warnings for a heavy page (embedded images or video): compress or link them instead.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         expectedCurrentVersionId: z4.string().uuid(),
@@ -3977,17 +4073,19 @@ function registerWorkspaceArtifactTools(
       );
       if (braked) return braked;
       return json(
-        await siteMutation(
-          await publishWorkspaceArtifactVersion(deps.db, {
-            artifactId,
-            viewer: await siteViewerForGrant(deps.db, grant),
-            expectedCurrentVersionId,
-            ...(title !== undefined ? { title } : {}),
-            ...(description !== undefined ? { description } : {}),
-            ...(await prepare(html, source, requestedTools, uploadId)),
-            ...provenance(idempotencyKey, "artifacts_publish"),
-          }),
-          true,
+        withSitePageSizeWarnings(
+          await siteMutation(
+            await publishWorkspaceArtifactVersion(deps.db, {
+              artifactId,
+              viewer: await siteViewerForGrant(deps.db, grant),
+              expectedCurrentVersionId,
+              ...(title !== undefined ? { title } : {}),
+              ...(description !== undefined ? { description } : {}),
+              ...(await prepare(html, source, requestedTools, uploadId)),
+              ...provenance(idempotencyKey, "artifacts_publish"),
+            }),
+            true,
+          ),
         ),
       );
     },
@@ -4540,14 +4638,21 @@ function registerFleetTools(
 
   const oneOffCodemodeEnvironment = async (
     op: RunOnOp,
+    target: string,
   ): Promise<Readonly<Record<string, string>> | undefined> => {
     if (op.kind !== "exec") return undefined;
     const claims = exactAgentAttemptClaims(grant);
     if (!claims || claims.sessionId !== sessionId) return undefined;
+    // The token names the machine the exec runs on, so a Codemode tool that
+    // takes a workspace path (sandbox_file_publish) resolves it there rather
+    // than on the session's active sandbox. run_on targets are sandbox ids.
     const material = await mintSandboxCodemodeToken(
       deps.settings,
       { accountId: grant.accountId, workspaceId: grant.workspaceId },
-      claims,
+      {
+        ...claims,
+        ...(UUID_TARGET.test(target) ? { executionSandboxId: target.toLowerCase() } : {}),
+      },
     );
     if (!material) return undefined;
     return {
@@ -4673,7 +4778,7 @@ function registerFleetTools(
       const resolvedValues = new SecretValueMemory();
       try {
         const typedOp = op as RunOnOp;
-        const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
+        const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp, target);
         // W1 (DL-9): an exact agent attempt resolves `{{secret:…}}` references.
         const claims = exactAgentAttemptClaims(grant);
         const secretResolver =
@@ -6295,49 +6400,137 @@ function registerWorkspaceOrchestrationTools(
     );
 
     if (callerSessionId !== null) {
+      const commandReadNotes =
+        "Output larger than maxOutputBytes (default 16384) returns its start and its end, with the size of the omitted middle and a cursor to read it; a read with a cursor pages on from there (pass waitSeconds 0 to page without waiting), and the end cursor continues after the newest output. Output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.";
       for (const toolName of ["command_read", "command_wait"] as const) {
+        const multi = toolName === "command_wait";
         server.registerTool(
           toolName,
           {
-            description: `${toolName === "command_read" ? "Read retained output immediately, or briefly wait" : "Briefly wait using the same read operation as command_read"} for one command owned by the current session, across sandbox and Connected Machine providers. Returns bounded stdout/stderr chunks, durable state and exitCode, nextCursor and hasMore, plus explicit retention limitations. Pass nextCursor to continue; output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. waitSeconds is at most 50; command_wait defaults to 45, command_read to 0. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.`,
+            description: multi
+              ? `Wait for background commands owned by the current session to finish, across sandbox and Connected Machine providers, then read them like command_read. Pass commandId, or commandIds (up to ${COMMAND_WAIT_MAX_COMMANDS}) with waitFor "all" (default) or "any", and optionally the cursor of each command. Returns when the commands finish or after waitSeconds (default ${COMMAND_WAIT_DEFAULT_SECONDS}, at most ${COMMAND_READ_MAX_WAIT_SECONDS}); new output alone does not end the wait. Returns each command's state, exit code and output; the output budget is shared across the commands. ${commandReadNotes}`
+              : `Read a background command owned by the current session, across sandbox and Connected Machine providers. While it runs, waits for it to finish for up to waitSeconds (default ${COMMAND_READ_DEFAULT_SECONDS}, at most ${COMMAND_READ_MAX_WAIT_SECONDS}; pass 0 to read at once); new output alone does not end the wait. Returns state, exit code and output. ${commandReadNotes}`,
             inputSchema: {
-              commandId: z4.string().uuid(),
+              commandId: multi ? z4.string().uuid().optional() : z4.string().uuid(),
+              ...(multi
+                ? {
+                    commandIds: z4
+                      .array(z4.string().uuid())
+                      .min(1)
+                      .max(COMMAND_WAIT_MAX_COMMANDS)
+                      .optional(),
+                    waitFor: z4.enum(["all", "any"]).optional(),
+                    cursors: z4
+                      .array(z4.string().max(128))
+                      .max(COMMAND_WAIT_MAX_COMMANDS)
+                      .optional(),
+                  }
+                : {}),
               cursor: z4.string().max(128).optional(),
               waitSeconds: z4.number().int().min(0).max(COMMAND_READ_MAX_WAIT_SECONDS).optional(),
               maxOutputBytes: z4.number().int().min(4).max(COMMAND_OUTPUT_MAX_BYTES).optional(),
             },
           },
-          async ({ commandId, cursor, waitSeconds, maxOutputBytes }, extra) => {
+          async (args, extra) => {
+            const { commandId, cursor, waitSeconds, maxOutputBytes } = args as {
+              commandId?: string;
+              cursor?: string;
+              waitSeconds?: number;
+              maxOutputBytes?: number;
+            };
+            const { commandIds, waitFor, cursors } = args as {
+              commandIds?: string[];
+              waitFor?: "all" | "any";
+              cursors?: string[];
+            };
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
-            let initialRead = true;
+            const identity = {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId: callerSessionId,
+            };
+            // Durable checks after the first reauthorize at most once a
+            // second, so a revoked caller stops waiting at its next recheck
+            // however many commands it waits on.
+            let authorizedAt = Date.now();
+            const reauthorize = async () => {
+              if (Date.now() - authorizedAt < 900) return;
+              await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
+              authorizedAt = Date.now();
+            };
+            const isTerminal = async (id: string) => {
+              await reauthorize();
+              const command = await getSessionBackgroundCommand(deps.db, {
+                ...identity,
+                commandId: id,
+              });
+              if (!command) throw new Error("Background command not found in this session");
+              return command.state === "exited" || command.state === "lost";
+            };
+            const readOutput = async (
+              id: string,
+              idCursor: string | undefined,
+              budget: number | undefined,
+            ) =>
+              await readSessionBackgroundCommandOutput(deps.db, {
+                ...identity,
+                commandId: id,
+                ...(idCursor === undefined ? {} : { cursor: idCursor }),
+                ...(budget === undefined ? {} : { maxOutputBytes: budget }),
+                // A read from the start returns the start and end of the
+                // output; an explicit cursor pages on from there, so paging
+                // through an omitted middle does not repeat the tail.
+                headAndTail: idCursor === undefined,
+              });
+            const controls = {
+              waitSeconds:
+                waitSeconds ??
+                (multi ? COMMAND_WAIT_DEFAULT_SECONDS : COMMAND_READ_DEFAULT_SECONDS),
+              ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+              ...(extra?.signal === undefined ? {} : { signal: extra.signal }),
+              subscribe: (onEvents: Parameters<typeof deps.bus.subscribe>[2]) =>
+                deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
+              yieldTo: async () => await callerTurnSteerPending(callerSessionId),
+            };
+            if (commandIds === undefined && cursors === undefined) {
+              if (commandId === undefined) throw new Error("Pass commandId or commandIds");
+              // A malformed cursor fails before any wait.
+              parseCommandOutputCursor(cursor, commandId);
+              return json(
+                await readCommandWithWait({
+                  ...controls,
+                  commandId,
+                  isTerminal: async () => await isTerminal(commandId),
+                  read: async () => {
+                    await reauthorize();
+                    return await readOutput(commandId, cursor, maxOutputBytes);
+                  },
+                }),
+              );
+            }
+            const ids = [
+              ...new Set([...(commandId === undefined ? [] : [commandId]), ...(commandIds ?? [])]),
+            ];
+            if (ids.length === 0) throw new Error("Pass commandId or commandIds");
+            // Each cursor names its own command; match them up by that prefix.
+            const cursorById = new Map<string, string>();
+            for (const value of [...(cursor === undefined ? [] : [cursor]), ...(cursors ?? [])]) {
+              const owner = ids.find((id) => value.startsWith(`${id}:`));
+              if (owner === undefined)
+                throw new Error("Each cursor must belong to one of the listed commands");
+              parseCommandOutputCursor(value, owner);
+              cursorById.set(owner, value);
+            }
             return json(
-              await readCommandWithWait({
-                commandId,
-                waitSeconds:
-                  waitSeconds ?? (toolName === "command_wait" ? COMMAND_WAIT_DEFAULT_SECONDS : 0),
-                ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
-                ...(extra?.signal === undefined ? {} : { signal: extra.signal }),
-                read: async () => {
-                  if (!initialRead)
-                    await authorizeFirstPartySession(
-                      deps,
-                      grant,
-                      callerSessionId,
-                      "session.events.read",
-                    );
-                  initialRead = false;
-                  return await readSessionBackgroundCommandOutput(deps.db, {
-                    accountId: grant.accountId,
-                    workspaceId: grant.workspaceId,
-                    sessionId: callerSessionId,
-                    commandId,
-                    ...(cursor === undefined ? {} : { cursor }),
-                    ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
-                  });
+              await readCommandsWithWait({
+                ...controls,
+                commandIds: ids,
+                ...(waitFor === undefined ? {} : { waitFor }),
+                isTerminal,
+                read: async (id, budget) => {
+                  await reauthorize();
+                  return await readOutput(id, cursorById.get(id), budget);
                 },
-                subscribe: (onEvents) =>
-                  deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
-                yieldTo: async () => await callerTurnSteerPending(callerSessionId),
               }),
             );
           },
@@ -7029,6 +7222,14 @@ function registerProjectTools(
       },
       async ({ name, description, avatar }) => {
         const exactAvatar = await projectAvatarFromToolInput(deps, grant, avatar);
+        // A project made in an Only me chat is Only me, so that chat fits it.
+        const audience = await resolveNewProjectAudience({
+          db: deps.db,
+          settings: deps.settings,
+          grant,
+          requested: undefined,
+          sourceSessionId: projectSourceSessionId(grant),
+        });
         return json({
           project: await createChannel(deps.db, {
             accountId: grant.accountId,
@@ -7037,6 +7238,7 @@ function registerProjectTools(
             description: description ?? null,
             avatar: exactAvatar ?? null,
             createdBy: grant.subjectId,
+            audience,
           }),
         });
       },
@@ -7149,6 +7351,7 @@ function registerCapabilityDiscoveryTools(
   const recommendations = () =>
     nativeConnectionCapabilityRecommendations({
       connectedMachines: deps.settings.sandboxSelfhostedEnabled,
+      personalGitHub: deps.settings.githubPersonalOauthEnabled,
       browserExtension: browserExtension(deps.settings),
       integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
     });
@@ -7207,20 +7410,22 @@ function registerCapabilityDiscoveryTools(
       items.map((item) =>
         item.id === EXCEL_ADDIN_CAPABILITY_ID
           ? excelAddinSetup(deps, grant, sessionId)
-          : item.kind === "plugin"
-            ? pluginCapabilitySetup(item)
-            : item.surfaceType === "integration_definition"
-              ? integrationDefinitionSetup(item, integrationContext!, availableServerIds)
-              : capabilitySetupProjection(
-                  deps,
-                  grant.workspaceId,
-                  item,
-                  availableServerIds,
-                  acceptedServerIds,
-                  accountSelectionKnown,
-                  availableFirstPartyTools,
-                  new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
-                ),
+          : item.id === PERSONAL_GITHUB_CAPABILITY_ID
+            ? personalGitHubSetup(deps, grant, sessionId)
+            : item.kind === "plugin"
+              ? pluginCapabilitySetup(item)
+              : item.surfaceType === "integration_definition"
+                ? integrationDefinitionSetup(item, integrationContext!, availableServerIds)
+                : capabilitySetupProjection(
+                    deps,
+                    grant.workspaceId,
+                    item,
+                    availableServerIds,
+                    acceptedServerIds,
+                    accountSelectionKnown,
+                    availableFirstPartyTools,
+                    new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+                  ),
       ),
     );
   };
@@ -7334,7 +7539,9 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself." +
+        (deps.settings.githubPersonalOauthEnabled
+          ? "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app), Your GitHub (api:github-personal) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. For 'connect my GitHub' or 'do it as me' use api:github-personal; for 'install the GitHub app' use api:github-app. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself."
+          : "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. GitHub App (api:github-app) and Connected Machine (api:connected-machine) are exceptions: when already connected their card is still shown, listing repositories or machines the person can use in this chat. Use api:connected-machine when the person should connect their own computer: the card gives them a one-line connect command and the Opengeni Browser Chrome extension link; never paste an enroll token into the chat yourself.") +
         (secretsSelected
           ? ' For a single password, API key or code for a service with no connector here, ask with a kind: "secret" question in request_human_input instead; you get a saved reference back.'
           : ""),
@@ -7358,7 +7565,9 @@ function registerCapabilityDiscoveryTools(
       // GitHub is the one capability whose card stays useful once connected:
       // it lists the shared repositories with a "Use" action that attaches one
       // to this chat, so a ready GitHub still gets its card.
-      const githubCardWhenReady = setup.status === "ready" && item.id === "api:github-app";
+      const githubCardWhenReady =
+        setup.status === "ready" &&
+        (item.id === "api:github-app" || item.id === PERSONAL_GITHUB_CAPABILITY_ID);
       // The machine card likewise lists connected machines with "Use in this
       // chat" and can connect another, so it is shown when machines exist too.
       const machineCardWhenReady =
@@ -7386,8 +7595,17 @@ function registerCapabilityDiscoveryTools(
       // without a membership), else their membership. Without either there is
       // nothing to say beyond the card.
       const person = await connectingPersonGrant(deps.db, grant, sessionId);
+      const memberIntegrationSetup =
+        person === null
+          ? undefined
+          : await withOrganizationIntegrationPolicyFence(
+              deps.db,
+              { accountId: grant.accountId, workspaceId: grant.workspaceId },
+              async (_tx, policy) => policy.personalIntegrationSetup,
+            ).catch(() => undefined);
       const personCannotConnect =
-        person !== null && inChatCapabilitySetup(person, item.id, item).kind === "unavailable";
+        person !== null &&
+        inChatCapabilitySetup(person, item.id, item, memberIntegrationSetup).kind === "unavailable";
       const eventId = await appendCapabilityCardEvent(deps, grant, sessionId, {
         item,
         action: setup.action ?? "connect",
@@ -7406,7 +7624,10 @@ function registerCapabilityDiscoveryTools(
           capabilityId: item.id,
           status: "ready",
           eventId,
-          message: `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
+          message:
+            item.id === PERSONAL_GITHUB_CAPABILITY_ID
+              ? `${setup.detail} The Your GitHub card is in this chat: the person can choose which repositories Opengeni may use as them.`
+              : `${setup.detail} The GitHub card is in this chat: the person picks a repository with its "Use" button, which attaches it to this chat.`,
         });
       }
       return json({
@@ -7559,6 +7780,21 @@ function registerCapabilityDiscoveryTools(
           : "The human review card was posted. No server was added or contacted.",
       });
     },
+  );
+}
+
+/**
+ * "Your GitHub" readiness for the person this agent acts for. Connected means
+ * ready (the card still shows, with its repository chooser); otherwise only
+ * that person can connect, from the card.
+ */
+async function personalGitHubSetup(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<CapabilitySetupProjection> {
+  return personalGitHubSetupProjection(
+    await personalGitHubStatusForGrant(deps, grant, sessionId, null).catch(() => null),
   );
 }
 
@@ -7830,22 +8066,101 @@ function capabilityProviderDomain(item: CapabilityCatalogItem): string {
   return "opengeni.local";
 }
 
+/**
+ * The human this agent acts for, as personal GitHub sees them: the initiating
+ * person of the exact live attempt (never the session creator), or the caller
+ * itself for a direct human grant. Null when no person started this work.
+ */
+async function personalGitHubPersonForGrant(
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  sessionId: string | null,
+): Promise<PersonalGitHubPerson | null> {
+  const isAgentAttempt = Boolean(exactAgentAttemptClaims(grant));
+  if (isAgentAttempt && !sessionId) return null;
+  return await resolvePersonalGitHubPerson({
+    grant,
+    isAgentAttempt,
+    loadInitiator: async () =>
+      (await requireLiveAgentAttemptAuthorization(db, grant, sessionId!))
+        .initiatingHumanSubjectId ?? null,
+    loadSenderGrant: async () => await connectingPersonGrant(db, grant, sessionId!),
+  });
+}
+
+/** The person's own GitHub identity for the status tool and its setup card. */
+async function personalGitHubStatusForGrant(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string | null,
+  requestOrigin: string | null | undefined,
+): Promise<PersonalGitHubIdentityStatus> {
+  return await personalGitHubIdentityStatus({
+    enabled: deps.settings.githubPersonalOauthEnabled,
+    workspaceId: grant.workspaceId,
+    baseUrl: personalGitHubConsoleBaseUrl({
+      webBaseUrl: deps.settings.webBaseUrl,
+      publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
+      requestOrigin,
+    }),
+    person: deps.settings.githubPersonalOauthEnabled
+      ? await personalGitHubPersonForGrant(deps.db, grant, sessionId)
+      : null,
+    loadConnection: async (subjectId) =>
+      canonicalPersonalGitHubConnection(
+        await listPersonalGitHubConnections(deps, {
+          workspaceId: grant.workspaceId,
+          subjectId,
+        }),
+      ),
+    loadRepositoryCount: async (subjectId, connection) => {
+      const state = await getPersonalGitHubRepositorySelectionState(deps.db, {
+        accountId: grant.accountId,
+        originWorkspaceId: connection.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+      });
+      return state ? state.repositories.length : null;
+    },
+  });
+}
+
 function registerGitHubConnectTool(
   server: McpServer,
   deps: ApiRouteDeps,
   grant: AccessGrant,
   options: McpServerOptions,
+  sessionId: string | null,
   json: JsonResult,
 ): void {
   server.registerTool(
     "github_connect_link",
     {
-      description:
-        "Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. Server App configuration alone is never reported as a usable binding.",
+      description: deps.settings.githubPersonalOauthEnabled
+        ? `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the Opengeni app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. When unclear, explain the difference in one or two sentences. On personal repositories, use github_personal__* tools and plain git; gh and raw GitHub API calls do not act as the person. Never returns tokens.`
+        : "Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. Server App configuration alone is never reported as a usable binding. Personal GitHub sign-in is not enabled on this deployment (personal.status is disabled).",
       inputSchema: {},
     },
     async () => {
       const { settings } = deps;
+      const personal = await personalGitHubStatusForGrant(
+        deps,
+        grant,
+        sessionId,
+        options.requestOrigin,
+      ).catch(
+        // The App status stays useful when the personal read fails.
+        (): PersonalGitHubIdentityStatus => ({
+          enabled: settings.githubPersonalOauthEnabled,
+          connected: null,
+          status: "unknown",
+          login: null,
+          repositoryCount: null,
+          connectUrl: null,
+          manageUrl: null,
+          note: "Your GitHub status could not be read right now; try again.",
+        }),
+      );
       const missing = githubAppMissingSettings(settings);
       const slug = settings.githubAppSlug?.trim() || null;
       const setupMode = settings.productAccessMode === "managed" ? "platform" : "operator";
@@ -7858,6 +8173,7 @@ function registerGitHubConnectTool(
           installUrl: null,
           linkUrl: null,
           missing: setupMode === "operator" ? missing : [],
+          personal,
         });
       }
       const installations = await listWorkspaceGitHubInstallationBindings(deps, grant.workspaceId);
@@ -7891,6 +8207,7 @@ function registerGitHubConnectTool(
         linkUrl: connectUrl,
         installations: installationViews,
         missing: [],
+        personal,
       });
     },
   );

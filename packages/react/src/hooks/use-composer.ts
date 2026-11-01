@@ -65,6 +65,11 @@ export type ComposerBusySend = "queue" | "steer";
 
 export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
+    /**
+     * Whether the viewer can buy credits or upgrade the plan. When false, a
+     * credit refusal tells them to ask an organization owner. Defaults to true.
+     */
+    canBuyCredits?: boolean | undefined;
     /** Called synchronously after local submission. Observer errors never change delivery. */
     onSubmitted?: ((text: string, input: SendMessageInput) => void) | undefined;
     /** Called with the accepted wire input. Observer errors never turn acceptance into failure. */
@@ -226,6 +231,7 @@ function optimisticSendStorageKey(key: string): string {
 function restoreOptimisticSendOperations(
   t: OpenGeniText,
   key: string | null,
+  canBuyCredits = true,
 ): OptimisticSendOperation[] {
   if (!key) return [];
   let stored = optimisticSendOperations.get(key);
@@ -274,7 +280,7 @@ function restoreOptimisticSendOperations(
           : operation.outcomeUnknown
             ? t("hooks.useComposer.theRequestCouldNotBe")
             : operation.error
-              ? composerSubmissionErrorMessage(t, new Error(operation.error))
+              ? composerSubmissionErrorMessage(t, new Error(operation.error), canBuyCredits)
               : undefined,
     ),
     retryable:
@@ -637,6 +643,12 @@ export type ComposerState = {
   error: Error | null;
   clearError: () => void;
   /**
+   * Whether the person can fix a credit refusal themselves (the
+   * `canBuyCredits` option). Surfaces that word `error` use it to pick the
+   * ask-an-owner text for members.
+   */
+  canBuyCredits?: boolean | undefined;
+  /**
    * True while a send is held because Opengeni is updating or briefly
    * unreachable. The message stays queued here with its idempotency key and
    * is retried automatically; surfaces show a calm "updating" state instead
@@ -825,7 +837,11 @@ export function useComposer(
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
   const pendingOperationKey = pendingComposerOperationKey(workspaceId, sessionId);
   const initialPendingOperation = restorePendingComposerOperation(pendingOperationKey);
-  const initialOptimisticSends = restoreOptimisticSendOperations(t, pendingOperationKey);
+  const initialOptimisticSends = restoreOptimisticSendOperations(
+    t,
+    pendingOperationKey,
+    options.canBuyCredits ?? true,
+  );
   const initialShadow =
     initialPendingOperation?.newerShadow ??
     initialOptimisticSends.at(-1)?.newerShadow ??
@@ -949,6 +965,9 @@ export function useComposer(
   const singleSend = busySend === "steer" && options.offerQueue !== true;
   const sendBlockedRef = useRef(options.sendBlocked);
   sendBlockedRef.current = options.sendBlocked;
+  // Who is viewing decides a credit refusal's fix, without invalidating `send`.
+  const canBuyCreditsRef = useRef(options.canBuyCredits ?? true);
+  canBuyCreditsRef.current = options.canBuyCredits ?? true;
   const effectiveControlRef = useRef<EffectiveSessionControl | null>(
     acceptedControl ?? options.effectiveControl ?? null,
   );
@@ -970,7 +989,11 @@ export function useComposer(
     targetGeneration.current += 1;
     draftReadGeneration.current += 1;
     pendingOperationRef.current = restorePendingComposerOperation(pendingOperationKey);
-    const restoredOptimisticSends = restoreOptimisticSendOperations(t, pendingOperationKey);
+    const restoredOptimisticSends = restoreOptimisticSendOperations(
+      t,
+      pendingOperationKey,
+      canBuyCreditsRef.current,
+    );
     optimisticSendsRef.current = restoredOptimisticSends;
     optimisticProcessorBusyRef.current = false;
     serviceWaitRef.current = new Map();
@@ -1466,6 +1489,15 @@ export function useComposer(
     }
     setAcceptedControl((current) => (current === acceptedControl ? null : current));
   }, [acceptedControl, options.effectiveControl]);
+  // The accepted receipt is newer than the authoritative control only until
+  // that control catches up; derive it per render so a caught-up snapshot wins
+  // in the same frame instead of after the clearing effect.
+  const pendingAcceptedControl =
+    acceptedControl &&
+    (!options.effectiveControl ||
+      options.effectiveControl.controlVersion < acceptedControl.controlVersion)
+      ? acceptedControl
+      : null;
 
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
     if (!durableDrafts || targetKeyRef.current !== targetKey) return null;
@@ -1509,71 +1541,82 @@ export function useComposer(
     [targetKey],
   );
 
-  const persistPayload = useCallback(
+  /**
+   * Take the session's one draft slot. The server accepts a durable send only
+   * with exactly the content saved at the revision it names, so a send holds
+   * the slot from its save through its submit: no autosave and no other send
+   * can write the draft in between. Everything that writes the draft waits
+   * its turn here, in order. Call the returned function to let the next one
+   * in; it is safe to call more than once.
+   */
+  const acquireDraftSlot = useCallback(async (): Promise<() => void> => {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const previous = saveChain.current;
+    saveChain.current = previous.then(
+      () => released,
+      () => released,
+    );
+    await previous.catch(() => undefined);
+    return release;
+  }, []);
+
+  /** Save the draft now. The caller holds the draft slot. */
+  const saveDraftInSlot = useCallback(
     async (
       payload: SaveComposerDraftRequest,
+      owner: { targetKey: string; generation: number },
       // Receives this call's own failure (never a later autosave's), so a send
       // blocked by it keeps its real cause.
       onFailure?: (problem: Error) => void,
     ): Promise<boolean> => {
-      const ownedTargetKey = targetKey;
-      const ownedGeneration = targetGeneration.current;
-      if (!sessionId || !durableDrafts || targetKeyRef.current !== ownedTargetKey) {
+      const owned = () =>
+        targetKeyRef.current === owner.targetKey && targetGeneration.current === owner.generation;
+      if (!sessionId || !durableDrafts || !owned()) return false;
+      const current = draftRef.current;
+      if (!current) return false;
+      const request = { ...payload, expectedRevision: current.revision };
+      if (draftSignature(request) === lastSavedSignature.current) return true;
+      setDraftSaving(true);
+      try {
+        const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
+        if (!owned()) return false;
+        adoptDraftBase(saved);
+        return true;
+      } catch (cause) {
+        if (owned()) {
+          const problem = asError(cause);
+          if (isDraftConflictError(problem)) setDraftConflict(problem);
+          setError(problem);
+          onFailure?.(problem);
+        }
+        return false;
+      } finally {
+        if (owned()) setDraftSaving(false);
+      }
+    },
+    [adoptDraftBase, client, durableDrafts, sessionId, workspaceId],
+  );
+
+  const persistPayload = useCallback(
+    async (
+      payload: SaveComposerDraftRequest,
+      onFailure?: (problem: Error) => void,
+    ): Promise<boolean> => {
+      const owner = { targetKey, generation: targetGeneration.current };
+      if (!sessionId || !durableDrafts || targetKeyRef.current !== owner.targetKey) {
         return false;
       }
-      let success = false;
-      let failure: Error | null = null;
-      const run = async () => {
-        if (
-          targetKeyRef.current !== ownedTargetKey ||
-          targetGeneration.current !== ownedGeneration
-        ) {
-          return;
-        }
-        const current = draftRef.current;
-        if (!current) return;
-        const request = { ...payload, expectedRevision: current.revision };
-        const signature = draftSignature(request);
-        if (signature === lastSavedSignature.current) {
-          success = true;
-          return;
-        }
-        setDraftSaving(true);
-        try {
-          const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
-          if (
-            targetKeyRef.current !== ownedTargetKey ||
-            targetGeneration.current !== ownedGeneration
-          ) {
-            return;
-          }
-          adoptDraftBase(saved);
-          success = true;
-        } catch (cause) {
-          if (
-            targetKeyRef.current === ownedTargetKey &&
-            targetGeneration.current === ownedGeneration
-          ) {
-            const problem = asError(cause);
-            failure = problem;
-            if (isDraftConflictError(problem)) setDraftConflict(problem);
-            setError(problem);
-          }
-        } finally {
-          if (
-            targetKeyRef.current === ownedTargetKey &&
-            targetGeneration.current === ownedGeneration
-          ) {
-            setDraftSaving(false);
-          }
-        }
-      };
-      saveChain.current = saveChain.current.then(run, run);
-      await saveChain.current;
-      if (!success && failure) onFailure?.(failure);
-      return success;
+      const release = await acquireDraftSlot();
+      try {
+        return await saveDraftInSlot(payload, owner, onFailure);
+      } finally {
+        release();
+      }
     },
-    [adoptDraftBase, client, durableDrafts, sessionId, targetKey, workspaceId],
+    [acquireDraftSlot, durableDrafts, saveDraftInSlot, sessionId, targetKey],
   );
 
   const flushDraft = useCallback(async (): Promise<void> => {
@@ -1682,6 +1725,8 @@ export function useComposer(
       // The draft save failed before anything was submitted.
       let notSubmitted = false;
       let holding = false;
+      // Held from this send's draft save through its submit.
+      let releaseDraftSlot: (() => void) | null = null;
       /**
        * Keep a send that failed only because Opengeni is updating: it stays
        * "sending" with the same client event ID and is retried with backoff.
@@ -1741,7 +1786,7 @@ export function useComposer(
                             reference: problem.correlationId,
                           })
                         : t("hooks.useComposer.notConfirmedCheckStatus")
-                      : composerSubmissionErrorMessage(t, problem),
+                      : composerSubmissionErrorMessage(t, problem, canBuyCreditsRef.current),
                   ),
                   retryable: outcomeUnknown || composerSubmissionCanRetry(problem),
                   outcomeUnknown,
@@ -1815,11 +1860,16 @@ export function useComposer(
         }
         let expectedDraftRevision: number | undefined;
         if (durableDrafts && operation.draftPayload) {
+          releaseDraftSlot = await acquireDraftSlot();
           let persistFailure = null as Error | null;
           if (
-            !(await persistPayload(operation.draftPayload, (problem) => {
-              persistFailure = problem;
-            }))
+            !(await saveDraftInSlot(
+              operation.draftPayload,
+              { targetKey: ownedTargetKey, generation: ownedGeneration },
+              (problem) => {
+                persistFailure = problem;
+              },
+            ))
           ) {
             // An update that blocks the draft save holds the send like any
             // other transient failure; nothing was submitted yet.
@@ -1884,6 +1934,7 @@ export function useComposer(
             });
           acceptedResult = result;
           adoptDraftBase(result.draft);
+          releaseDraftSlot?.();
         } else {
           acceptedEvent = await client
             .sendMessage(workspaceId, sessionId, wireInput)
@@ -1954,6 +2005,7 @@ export function useComposer(
           notifyComposerObserver(onDeliveryErrorRef.current, problem, operation.input, "send");
         }
       } finally {
+        releaseDraftSlot?.();
         optimisticProcessorBusyRef.current = false;
         if (
           targetKeyRef.current === ownedTargetKey &&
@@ -1977,6 +2029,7 @@ export function useComposer(
       }
     })();
   }, [
+    acquireDraftSlot,
     adoptDraftBase,
     client,
     durableDrafts,
@@ -1985,8 +2038,8 @@ export function useComposer(
     loadDraft,
     onSent,
     options.events,
-    persistPayload,
     replaceOptimisticSends,
+    saveDraftInSlot,
     sessionId,
     targetKey,
     workspaceId,
@@ -2172,6 +2225,8 @@ export function useComposer(
       };
 
       let keepSteering = pending?.delivery === "steer";
+      // Held from this send's draft save (or its retry) through its submit.
+      let releaseDraftSlot: (() => void) | null = null;
 
       const settleAccepted = (operation: PendingComposerOperation): void => {
         clearPending();
@@ -2311,6 +2366,7 @@ export function useComposer(
             return false;
           }
           try {
+            if (durableDrafts) releaseDraftSlot = await acquireDraftSlot();
             const result = await deliver(pending);
             if (pending.delivery === "steer" && result) {
               keepSteering = true;
@@ -2373,7 +2429,17 @@ export function useComposer(
         const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT(t);
         const currentPayload = currentDraftPayload();
         const payload = currentPayload ? { ...currentPayload, text: sendText } : null;
-        if (payload && !(await persistPayload(payload))) return false;
+        if (payload) {
+          releaseDraftSlot = await acquireDraftSlot();
+          if (
+            !(await saveDraftInSlot(payload, {
+              targetKey: ownedTargetKey,
+              generation: ownedGeneration,
+            }))
+          ) {
+            return false;
+          }
+        }
         if (
           targetKeyRef.current !== ownedTargetKey ||
           targetGeneration.current !== ownedGeneration
@@ -2472,6 +2538,7 @@ export function useComposer(
         settleAccepted(operation);
         return true;
       } finally {
+        releaseDraftSlot?.();
         if (
           targetKeyRef.current === ownedTargetKey &&
           targetGeneration.current === ownedGeneration
@@ -2482,14 +2549,15 @@ export function useComposer(
       }
     },
     [
+      acquireDraftSlot,
       client,
       currentDraftPayload,
       durableDrafts,
       onSent,
-      persistPayload,
       restoredResources,
       annotations,
       adoptDraftBase,
+      saveDraftInSlot,
       sending,
       sessionId,
       targetKey,
@@ -3228,10 +3296,16 @@ export function useComposer(
     removeOptimisticMessage,
     steer,
     steering: visibleSteering,
+    // Receipt-backed: an accepted Steer stops the previous attempt, and an
+    // accepted Pause whose receipt still reports physical settlement stops the
+    // current one. Once the authoritative control catches up, the queue
+    // snapshot owns this projection.
     stoppingAttempt: identityMatches
       ? visibleSteering?.phase === "accepted" && visibleSteering.stoppingPreviousAttempt === true
         ? "previous"
-        : null
+        : pendingAcceptedControl?.state === "paused" && pendingAcceptedControl.settlement !== null
+          ? "current"
+          : null
       : null,
     sending: identityMatches ? sending : false,
     canSend:
@@ -3276,6 +3350,7 @@ export function useComposer(
     removeRestoredResource,
     error: identityMatches ? (error ?? draftReadError) : null,
     clearError,
+    canBuyCredits: options.canBuyCredits ?? true,
     reconnecting: identityMatches ? serviceWaiting : false,
   };
 }

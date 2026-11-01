@@ -15,6 +15,7 @@ import {
 import {
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
@@ -2168,6 +2169,41 @@ describe("buildTimeline", () => {
     const items = buildTimeline(englishText, [event("agent.message.completed", { text })]);
 
     expect((items[0] as AgentMessageItem).text).toBe(visible);
+  });
+
+  // Built from escapes so no tool that acts on citation tags rewrites this file.
+  const claudeCite = (index: string, inner: string) =>
+    `\u003ccite index="${index}">${inner}\u003c/cite>`;
+
+  test("shows Claude citation tags as their quoted text, outside code only", () => {
+    reset();
+    const text = [
+      `Vals describes it as ${claudeCite("23-5", '"a fresh set of 66 tasks"')} (tbench.ai).`,
+      "```html",
+      claudeCite("1-1", "kept"),
+      "```",
+      `The board ${claudeCite("15-1", '"added no model since 3 Sep"')}; \`${claudeCite("2-2", "x")}\` too.`,
+    ].join("\n");
+    const items = buildTimeline(englishText, [
+      event("agent.message.completed", { text, phase: "final_answer" }),
+    ]);
+    expect((items[0] as AgentMessageItem).text).toBe(
+      [
+        'Vals describes it as "a fresh set of 66 tasks" (tbench.ai).',
+        "```html",
+        claudeCite("1-1", "kept"),
+        "```",
+        `The board "added no model since 3 Sep"; \`${claudeCite("2-2", "x")}\` too.`,
+      ].join("\n"),
+    );
+  });
+
+  test("hides a Claude citation tag that is still streaming", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("agent.message.delta", { text: 'Done. \u003ccite index="4-2">"half' }),
+    ]);
+    expect((items[0] as AgentMessageItem).text).toBe('Done. "half');
   });
 
   test("keeps ordinary words that contain cite", () => {
@@ -5560,6 +5596,33 @@ describe("credit exhaustion", () => {
     expect(items[1]).toMatchObject({ kind: "notice", tone: "failed" });
   });
 
+  test("an own-key or API credit stop keeps its own sentence on the turn and the notice", () => {
+    for (const [payload, text] of [
+      [
+        { type: "turn.failed", error: "Activity task failed: Add credits to use your own key." },
+        "Add credits to use your own key. The conversation is preserved.",
+      ],
+      [
+        {
+          type: "turn.completed",
+          detail: "API usage uses credits, not your plan credit.",
+          segmentLimit: "budget_exhausted",
+        },
+        "API usage uses credits, not your plan credit. Add credits to continue. The conversation is preserved.",
+      ],
+    ] as const) {
+      reset();
+      const { type, ...rest } = payload;
+      const items = buildTimeline(englishText, [event(type, rest)]);
+      expect(items.find((item) => item.kind === "turn-end")).toMatchObject({
+        outcome: "failed",
+        failureText: text,
+      });
+      expect(items.find((item) => item.kind === "notice")).toMatchObject({ tone: "failed", text });
+      expect(creditExhaustedFromEvents([event(type, rest)])).toBe(true);
+    }
+  });
+
   test("ordinary turn.completed is untouched — complete turn-end, no notice", () => {
     reset();
     const items = buildTimeline(englishText, [
@@ -5628,6 +5691,51 @@ describe("credit exhaustion", () => {
     const turnGroup = groups.find((group) => group.kind === "turn");
     expect(turnGroup?.outcome).toBe("failed");
     expect(turnGroup?.failureText).toBe(CREDIT_EXHAUSTION_MESSAGE(englishText));
+  });
+});
+
+describe("creditRefusalFromEvents", () => {
+  test("names the one fix of a stop between model calls from the last turn end", () => {
+    reset();
+    const stop = (detail: string, turnId: string) =>
+      event("turn.completed", { detail, segmentLimit: "budget_exhausted" }, { turnId });
+    expect(creditRefusalFromEvents([stop("Add credits to use your own key.", "turn-1")])).toBe(
+      "byok_paid_credit_required",
+    );
+    reset();
+    expect(creditRefusalFromEvents([stop("Upgrade to Pro to use your own key.", "turn-1")])).toBe(
+      "byok_upgrade_required",
+    );
+    reset();
+    expect(
+      creditRefusalFromEvents([stop("API usage uses credits, not your plan credit.", "turn-1")]),
+    ).toBe("api_credits_required");
+  });
+
+  test("an older refusal never names the latest stop's fix", () => {
+    reset();
+    expect(
+      creditRefusalFromEvents([
+        event(
+          "turn.failed",
+          { error: "Upgrade to Pro to use your own key." },
+          { turnId: "turn-1" },
+        ),
+        event(
+          "turn.completed",
+          { detail: "insufficient Opengeni credits", segmentLimit: "budget_exhausted" },
+          { turnId: "turn-2" },
+        ),
+      ]),
+    ).toBeNull();
+    reset();
+    expect(
+      creditRefusalFromEvents([
+        event("turn.failed", { error: "Add credits to use your own key." }, { turnId: "turn-1" }),
+        event("turn.completed", {}, { turnId: "turn-2" }),
+      ]),
+    ).toBeNull();
+    expect(creditRefusalFromEvents([])).toBeNull();
   });
 });
 

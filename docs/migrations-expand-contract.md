@@ -250,12 +250,15 @@ withheld the same way, with the same caller check, and 1101 granted it and
 removed that check. 1002 created the
 held-browser inventory withheld, with the same caller check, and 1093 granted
 it and removed the check. 1060 created the EU-only
-inference change function withheld the same way; until it is granted the
-setting stays off. 1091 created the secret history scrub's reader and cell
+inference change function withheld the same way, and 1210 granted it. 1091
+created the secret history scrub's reader and cell
 writer withheld; the scrub checks the grant once per run and reports the
 cells only they reach as pending until then. 1103 created the subscription
-account-administrator grant withheld, with the same caller check; its
-follow-up release grants it.
+account-administrator grant withheld, with the same caller check, and 1149
+granted it and removed the check. 1218 created the organization vault list
+withheld, with the same caller check; until it is granted the API lists only
+the organization vaults that work in the requested workspace and says the
+list is incomplete.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects
@@ -331,6 +334,38 @@ steps (drain, roles, image pinning) in `docs/deployment.md` or a note under
 `docs/maintenance-migrations/`.
 
 ## The CI guard
+
+### Retiring removed-feature schema
+
+`RETIRING_FEATURE_TABLES` in `packages/db/src/runtime-posture.ts` is the explicit
+release-N inventory for the removed Variable Sets, subscription pools, first
+automation API, PR Review and resumable-transcription features. Readiness permits
+those tables to be absent but retains their exact ownership, grants and RLS
+checks while present. No prefix rule makes other tables optional. Modern
+subscription-core tables, vaults, automation templates, event sources and meeting
+recordings are not retired.
+
+The inspector checks the data schema in `pg_catalog`, not tenant-filtered rows.
+Cutover receipts remain required while any table of the corresponding legacy
+feature exists. Their absence is accepted only after its entire table group is
+gone, including in scoped/embedded mode. Surviving routines keep their existing
+execution, ownership and search-path contracts.
+
+This is not a drop migration or permission-snapshot rewrite. Before release N+1:
+
+- Deploy this compatibility binary everywhere; record exact source ancestry and
+  advance the previous-production readiness pin in a separate change.
+- Replace every surviving SQL lifecycle/retention caller, remove unused ORM
+  fields from live projections, and preserve outstanding blob-deletion work.
+- Migrate mutable legacy permission grants without rewriting model history or
+  invalidating frozen execution identities; reconcile old tokens and workflows.
+- Use an explicit `contract-step` migration with reviewed dependency removals,
+  not blanket `DROP ... CASCADE`, and test it as the non-superuser migration owner.
+
+`retiring-feature-posture-postgres.test.ts` physically removes the named objects
+in a disposable database to prove readiness compatibility. Its test-only cascade
+is deliberately not a production migration or proof that remaining SQL callers
+can already run without those objects.
 
 ### Pinned previous-binary readiness
 

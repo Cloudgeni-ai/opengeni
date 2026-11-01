@@ -108,6 +108,13 @@ test("signup trial credits pay for dictation like general credits; chat-scoped c
     code: "insufficient_credits",
     message: "Voice input needs credits. Add credits to continue.",
   });
+  // A meeting's live transcript is refused in its own words.
+  await expect(
+    billing.admit({ accountId, workspaceId, attribution, feature: "live_transcript" }),
+  ).rejects.toMatchObject({
+    code: "insufficient_credits",
+    message: "Live transcript needs credits. Add credits to continue.",
+  });
   // A chat-model-scoped coupon does not pay for voice.
   await applyCreditLedgerEntry(client!.db, {
     accountId,

@@ -114,18 +114,30 @@ describe("allowAgentsOnComputer", () => {
 describe("disallowAgentsOnComputer", () => {
   function revoking(authorities: UserResourceAuthoritySummary[]) {
     const revoked: Array<{ workspaceId: string; grantId: string }> = [];
+    const issued: Array<{ workspaceId: string; authorityId: string; context: string }> = [];
     const api = {
       listUserResourceAuthorities: async () => ({
         scope: "user" as const,
         authorities,
         nextCursor: null,
       }),
+      issueUserResourceGrant: async (
+        workspaceId: string,
+        authorityId: string,
+        request: { context: "user_private" | "workspace_shared" },
+      ) => {
+        issued.push({ workspaceId, authorityId, context: request.context });
+        return {
+          scope: "user" as const,
+          grant: grant({ grantId: "marker", context: request.context }),
+        };
+      },
       revokeUserResourceGrant: async (workspaceId: string, grantId: string) => {
         revoked.push({ workspaceId, grantId });
         return {};
       },
     };
-    return { api, revoked };
+    return { api, revoked, issued };
   }
 
   test("takes back only the standing permission in this workspace", async () => {
@@ -146,6 +158,26 @@ describe("disallowAgentsOnComputer", () => {
       { workspaceId: WORKSPACE, grantId: "private" },
       { workspaceId: WORKSPACE, grantId: "shared" },
     ]);
+    expect(h.issued).toEqual([]);
+  });
+
+  test("remembers it is off where nothing was recorded yet", async () => {
+    // On by default where it was connected, before any standing permission.
+    const h = revoking([
+      authority(MACHINE, [grant({ grantId: "one-chat", mode: "session", targetSessionId: "s" })]),
+    ]);
+    await disallowAgentsOnComputer(h.api, WORKSPACE, MACHINE);
+    expect(h.issued).toEqual([
+      { workspaceId: WORKSPACE, authorityId: `authority-${MACHINE}`, context: "user_private" },
+    ]);
+    expect(h.revoked).toEqual([{ workspaceId: WORKSPACE, grantId: "marker" }]);
+  });
+
+  test("records nothing more when it is already off here", async () => {
+    const h = revoking([authority(MACHINE, [grant({ grantId: "off", status: "revoked" })])]);
+    await disallowAgentsOnComputer(h.api, WORKSPACE, MACHINE);
+    expect(h.issued).toEqual([]);
+    expect(h.revoked).toEqual([]);
   });
 
   test("is done when the computer isn't listed", async () => {

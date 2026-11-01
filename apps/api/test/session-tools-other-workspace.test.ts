@@ -285,6 +285,10 @@ describe("session tools on a chat in another workspace", () => {
     expect(localMissSend.isError).toBe(true);
     expect(localMissSend.text).toContain("session_send_message_not_found_or_denied");
     expect(localMissSend.text).toContain("needs this session to have full access");
+    // It also says a private chat of another person is out of reach, and that
+    // a turn woken by another person's message acts for them.
+    expect(localMissSend.text).toContain("another person's private chat is out of reach");
+    expect(localMissSend.text).toContain("acts for that person");
     expect((await call(withoutFullAccess(), "session_get", { sessionId: local })).isError).toBe(
       false,
     );

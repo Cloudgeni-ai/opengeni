@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use compute_core::{
     Action, At, BalloonRequest, HoldId, Host, Input, Level, LoanId, MemoryPolicy, OpId, Outcome,
-    Priority, Resource, SandboxId, ShrinkRequest, Size, SleepPolicy, State, Step,
+    Priority, Resource, SandboxId, ShrinkRequest, State, Step,
 };
 use compute_engine::{CancellationToken, Engine, MemoryStats, PageSize, VmSpec};
 use tokio::sync::{mpsc, oneshot};
@@ -49,6 +49,7 @@ mod fetch;
 mod handle;
 mod holds;
 mod link;
+mod lost;
 mod observe;
 mod owners;
 mod ready;
@@ -56,6 +57,7 @@ mod recover;
 mod remove;
 mod requests;
 mod sample;
+mod size;
 mod steps;
 mod usage;
 mod warm;
@@ -450,10 +452,7 @@ enum Event<V> {
         id: Id,
         reading: Reading,
     },
-    Exited {
-        id: Id,
-        incarnation: u64,
-    },
+    Exited(Exit),
     /// The VM of `id`, under removal, is known to have ended; the rest of
     /// the removal may still be under way, or stop part way.
     VmEnded {
@@ -485,10 +484,12 @@ enum Event<V> {
         request: BalloonRequest,
     },
     /// The guest of `id` answered the shrink of `request` (ADR 24), or
-    /// could not be asked or did not answer: `None`.
+    /// could not be asked or did not answer: `None`. `cause` is why it was
+    /// asked.
     Shrunk {
         id: Id,
         request: ShrinkRequest,
+        cause: compute_core::ShrinkCause,
         answer: Option<crate::restore_notice::Shrunk>,
     },
     /// A ready sandbox's fill ended.
@@ -548,8 +549,8 @@ struct Slot<V> {
     /// VM processes started for it (boots and restores) since the agent
     /// started.
     launches: u64,
-    /// A VM that died while a step held it.
-    dead: Option<u64>,
+    /// A VM that died while a step held it: its incarnation, and how.
+    dead: Option<(u64, End)>,
     /// Listeners for connections the guest opens to the host.
     _ports: Option<Listeners>,
     /// The listener for its agent's connections, on a host with links.
@@ -660,6 +661,53 @@ enum Origin {
     Fleet(OwnerEpoch, Option<Admission>),
 }
 
+/// A watched VM process went without the agent ending it (see
+/// [`HostAgent::own`]).
+#[derive(Debug)]
+struct Exit {
+    id: Id,
+    incarnation: u64,
+    end: End,
+    /// When the agent took the VM process on, on the boot clock the guard
+    /// records its kills by: a kill before then was of an earlier VM.
+    owned: compute_core::At,
+}
+
+/// How a sandbox's VM was lost: it went without the agent ending it, or
+/// the agent ended it because it could not go on. Its running programs
+/// are lost either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum End {
+    /// Its VM process ended on its own: its guest rebooted (as its kernel
+    /// does on a panic, and a reboot ends a Firecracker VM), its VMM
+    /// failed, or something killed it.
+    Exited,
+    /// Its memory could no longer be served, so its next page fault would
+    /// wait forever.
+    MemoryLost,
+    /// Its guest stopped taking connections: it halted, powered off or
+    /// hung.
+    Stopped,
+    /// The host ended it for memory (ADR 24).
+    ForMemory,
+    /// The host's guard ended it: the host's lease with the control
+    /// service ran out before the VM froze (ADR 18).
+    Fenced,
+}
+
+impl End {
+    /// Its name on events.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Exited => "vm_exited",
+            Self::MemoryLost => "memory_lost",
+            Self::Stopped => "guest_stopped",
+            Self::ForMemory => "ended_for_memory",
+            Self::Fenced => "fenced",
+        }
+    }
+}
+
 /// Keeps a sandbox awake while it lives. Dropping it lets the sandbox go
 /// idle again.
 #[derive(Debug)]
@@ -762,6 +810,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// at the last sample; see [`HostAgent::check_oom_kills`].
     oom_kills: Option<u64>,
     sample_every: Duration,
+    /// See [`HostConfig::first_wake_within`].
+    first_wake_within: Duration,
     /// Readings given in place of the agent's own; see
     /// [`HostConfig::disk_reading`].
     disk_gauge: Option<DiskGauge>,
@@ -1021,6 +1071,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             unseen_activity: 0,
             oom_kills: None,
             sample_every: config.sample_every,
+            first_wake_within: config.first_wake_within,
             disk_gauge: config.disk_reading,
             processor_share: ShareCheck::of(config.processor_share, config.policy.cpu_budget),
             guest_ports: config.guest_ports.into(),
@@ -1187,65 +1238,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             },
         );
         self.link_as_recorded(id);
-    }
-
-    /// Validates a sandbox's settings and fits its sleep policy to this
-    /// host.
-    fn sleep_policy(&self, config: &SandboxConfig) -> Result<SleepPolicy, String> {
-        config.validate()?;
-        let mut rules = config.sleep.rules();
-        rules.compress_under_pressure &= self.can_compress;
-        // A checkpoint clones the disk while its VM is paused. Where files
-        // cannot share extents that would copy the whole disk with the VM
-        // paused, so such a host takes none (its status says so), and its
-        // sandboxes reach the store only as they sleep.
-        if !self.shares_extents() {
-            rules.checkpoint_every = None;
-        }
-        SleepPolicy::new(rules).map_err(|error| format!("invalid sleep settings: {error}"))
-    }
-
-    /// Whether files under the state root share extents, which checkpoints
-    /// need: a save then writes one copy of memory at most.
-    const fn shares_extents(&self) -> bool {
-        self.save_copies == 1
-    }
-
-    /// What a sandbox of `config` whose disk is `disk_bytes` long reserves
-    /// and may use of host memory, and what one save of it may write: the
-    /// memory that changed, the merged image where files cannot share
-    /// extents, and its device state and chunk map; what its disk may grow
-    /// by while it runs; and what a wake from object storage writes
-    /// locally: its disk, the memory image its pager fills, and its device
-    /// state. A disk of unknown length counts as a copy of its image as it
-    /// is today grown to the length `config` asks for, as a new sandbox's
-    /// is.
-    fn size(&self, config: &SandboxConfig, disk_bytes: Option<u64>) -> Size {
-        let limit = u64::from(config.memory_mib) << 20;
-        let request = if self.reserve_whole {
-            limit
-        } else {
-            u64::from(config.memory_request()) << 20
-        };
-        let disk = disk_bytes.map_or_else(
-            || self.new_disk_bound(config),
-            |length| crate::disk_growth::disk_bound(length, self.allocation_unit),
-        );
-        Size {
-            request,
-            limit,
-            cpu: u64::from(config.cpu_request()),
-            save: limit * self.save_copies + SAVE_EXTRA,
-            disk,
-            fetch: disk
-                .saturating_add(limit.next_multiple_of(self.allocation_unit.max(1)))
-                .saturating_add(SAVE_EXTRA),
-        }
-    }
-
-    /// [`Self::size`] for the sandbox `record` describes.
-    fn record_size(&self, record: &Record) -> Size {
-        self.size(&record.config, record.allocation.disk_bytes)
     }
 
     async fn run(mut self) {

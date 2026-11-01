@@ -13,6 +13,7 @@ import {
 } from "@opengeni/db";
 import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
+import { openSuffixApprovedCallIds } from "../open-suffix-resume";
 import {
   formatSkillCatalog,
   skillCatalogEntryIds,
@@ -63,6 +64,7 @@ import {
 } from "../image-generation-references";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { managedCodemodeClientDownload } from "./codemode-client-download";
+import { personalGitHubLoginForTurn } from "./personal-github-login";
 import { withSandboxStartupPhases } from "./sandbox-startup-phase";
 import {
   VideoGenerationRejectedResult,
@@ -153,12 +155,15 @@ export type BuildTurnAgentDeps = {
   workspaceGovernance: GovernanceModelOk["workspaceGovernance"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
   workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
+  hostedToolsBillCredits: GovernanceModelOk["hostedToolsBillCredits"];
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
   rigVersion: GovernanceModelOk["rigVersion"];
   rigName: GovernanceModelOk["rigName"];
   buildCompanyBrainContributionReceiptFor: GovernanceModelOk["buildCompanyBrainContributionReceiptFor"];
   promptCacheKey: CompactionPrepOk["promptCacheKey"];
   runtimeResources: ReturnType<typeof runtimeResourcesForTurn>;
+  /** Repositories removed from the chat whose sandbox folders are removed before this turn. */
+  repositoryRemoval?: BuildAgentOptions["repositoryRemoval"] | null;
   sandboxEnvironment: Record<string, string>;
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
   sandboxGitToken: string | undefined;
@@ -227,6 +232,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     buildCompanyBrainContributionReceiptFor,
     promptCacheKey,
     runtimeResources,
+    repositoryRemoval,
     sandboxEnvironment,
     sandboxArtifactRuntime,
     sandboxGitToken,
@@ -271,11 +277,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   // tested gate) and is reused here — resolving once is correct because the
   // clone hook runs at beforeAgentStart, so a mid-turn swap can't affect it.
   // Fallback mode (the default) keeps hosted search exactly as resolved; the
-  // operator's `replace` mode withholds it in favour of provider tools.
+  // operator's `replace` mode withholds it in favour of provider tools, and
+  // so does a turn whose hosted search would run on Opengeni's bill.
   const hostedWebSearch = turnWebSearchPlan(
     resolvedModel,
     runSettings,
     deps.workspaceCreditModelsAllowed,
+    deps.hostedToolsBillCredits,
   ).hostedWebSearch;
   const resolveImageReferences = async (
     references: Parameters<typeof resolveImageGenerationReferencesForTool>[0]["references"],
@@ -671,7 +679,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   );
   const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
   const reasoningSummary = reasoningSummaryForTurn(resolvedModel);
-  const approvedToolCallId = approvedConnectorActionCallId(trigger);
+  // The calls this resume runs as approved: its trigger's and every sibling
+  // approval of the same pause decided before it began.
+  const approvedToolCallIds = await openSuffixApprovedCallIds({
+    db,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    trigger,
+  });
   const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -694,7 +710,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     governance: workspaceGovernance ?? null,
   });
-  eventing.modelVisibleSkillIds = skillCatalogEntryIds(modelVisibleSkillCatalogText);
+  eventing.modelVisibleSkillIds = skillCatalogEntryIds(
+    modelVisibleSkillCatalogText,
+    deps.skillCatalog,
+  );
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
       buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText),
@@ -786,6 +805,21 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     agent: session.agent,
     vaultAccess: deps.vaultAccess,
   });
+  // Prompt text only: the repositories module names the person's login for
+  // repositories mounted as them in a managed sandbox. Best effort and never
+  // an authority; a failed read only drops the login from that turn's prompt.
+  const promptBackend = activeSandboxBackend ?? groupBoxBackend;
+  const personalGitHubLogin =
+    session.agent &&
+    promptBackend !== "selfhosted" &&
+    promptBackend !== "none" &&
+    runtimeResources.some(
+      (resource) =>
+        resource.kind === "repository" &&
+        (resource as { connectionType?: string }).connectionType === "github_personal",
+    )
+      ? await personalGitHubLoginForTurn(db, turn.personalConnectionDelegations)
+      : undefined;
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
@@ -813,6 +847,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
         ...(session.agent ? { agentConfig: session.agent, toolRouterInHistory } : {}),
+        ...(personalGitHubLogin ? { personalGitHubLogin } : {}),
         ...(session.agent && promptToolAvailability
           ? { agentPromptToolAvailability: promptToolAvailability }
           : {}),
@@ -894,6 +929,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               ...(codemodeClientDownload ? { codemodeClientDownload } : {}),
             }
           : {}),
+        ...(activeSandboxBackend !== "selfhosted" && repositoryRemoval
+          ? { repositoryRemoval }
+          : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         ...(activeSandboxBackend === "selfhosted" && sandboxState.machinePrimarySession
           ? { sandboxWorkspaceRoot: sandboxState.machinePrimarySession.workspaceRoot }
@@ -903,7 +941,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,
         connectorActionPolicy,
         attemptConnectorActionBindings,
-        ...(approvedToolCallId ? { approvedToolCallId } : {}),
+        ...(approvedToolCallIds.length > 0 ? { approvedToolCallIds } : {}),
         // Legacy connector metadata remains available to non-progressive paths.
         // Progressive discovery reads the authorized pool, never a changing
         // source directory in its first-request control schemas.
@@ -1077,20 +1115,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     modelVisibleSkillCatalogText,
     postAgentPreparationStartedAt,
   };
-}
-
-function approvedConnectorActionCallId(trigger: ClaimTurnOk["trigger"]): string | null {
-  if (trigger.type !== "user.approvalDecision") {
-    return null;
-  }
-
-  const payload = trigger.payload as {
-    approvalId?: unknown;
-    decision?: unknown;
-  };
-  return payload.decision === "approve" && typeof payload.approvalId === "string"
-    ? payload.approvalId
-    : null;
 }
 
 export type BuildTurnAgentOk = Awaited<ReturnType<typeof buildTurnAgent>>;

@@ -167,6 +167,17 @@
       "fetchedAt": "2026-08-17T12:23:25.826Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:jira-com-e526db80ea55",
+      "domain": "jira.com",
+      "mcpUrl": "https://mcp.atlassian.com/v2/mcp?tools=all",
+      "file": "jira-com-e526db80ea55.svg",
+      "sourceUrl": "https://integrations.sh/logo/jira.com",
+      "sha256": "163aa411d5f626ac91c25a963ba8f31e554813bd7626866cbed06d4fb8218ca1",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 3894,
+      "fetchedAt": "2026-08-17T12:23:25.826Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:linear-app-4b4a9f349c60",
       "domain": "linear.app",
       "mcpUrl": "https://mcp.linear.app/mcp",

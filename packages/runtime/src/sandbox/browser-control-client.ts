@@ -326,6 +326,7 @@ export type PlacementComputerSession = PlacementComputerSessionReference & {
 };
 
 export type CreatePlacementComputerSessionInput = PlacementComputerSessionReference & {
+  cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity;
   tokenGeneration: number;
   controlToken: string;
   viewToken: string;
@@ -855,7 +856,7 @@ export class BrowserControlClient {
     input: CreatePlacementComputerSessionInput,
   ): Promise<PlacementComputerSession> {
     const reference = parseComputerReference(input);
-    const data = await this.requestJson({
+    const request = {
       method: "POST",
       path: "/v1/computer-sessions",
       token: this.adminToken,
@@ -864,8 +865,27 @@ export class BrowserControlClient {
         tokenGeneration: positiveSafeInteger(input.tokenGeneration, "token generation"),
         controlToken: requireToken(input.controlToken, "computer control token"),
         viewToken: requireToken(input.viewToken, "computer view token"),
+        ...(input.cursorIdentity ? { cursorIdentity: input.cursorIdentity } : {}),
       },
-    });
+    } as const;
+    let data: unknown;
+    try {
+      data = await this.requestJson(request);
+    } catch (error) {
+      // Older agents reject the new field in their request parser, before
+      // creating a session. Only this exact, definite pre-dispatch rejection
+      // permits a metadata-free retry; never replay an uncertain create.
+      if (
+        !input.cursorIdentity ||
+        !(error instanceof BrowserControlRequestError) ||
+        error.status !== 400 ||
+        error.error.code !== "invalid_action" ||
+        error.error.message !== "request contains unknown fields"
+      )
+        throw error;
+      const { cursorIdentity: _identity, ...body } = request.body;
+      data = await this.requestJson({ ...request, body });
+    }
     if (!isRecord(data) || !Array.isArray(data.targets)) {
       throw new BrowserControlProtocolError(
         "interaction controller returned malformed computer session data",
@@ -3178,7 +3198,9 @@ function parseEnvelope(body: string, status: number): unknown {
       throw new BrowserControlRequestError(
         status,
         parsed.data,
-        parsed.data.code === "driver_failed"
+        // A driver failure, or a read that kept failing for an unclassified
+        // reason, carries the driver's error class and frame for logs.
+        parsed.data.code === "driver_failed" || parsed.data.code === "resource_unavailable"
           ? parseInteractionDriverDiagnostic(value.diagnostic)
           : null,
       );

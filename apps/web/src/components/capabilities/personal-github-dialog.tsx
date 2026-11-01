@@ -29,6 +29,8 @@ export function PersonalGitHubDialog(props: {
   onOpenChange: (open: boolean) => void;
   login: string;
   repositories: PersonalGitHubRepositoryCatalogItem[];
+  /** The repository list is still loading from GitHub. */
+  loading?: boolean;
   busy: boolean;
   onSave: (repositories: PersonalGitHubRepositorySelectionInput[]) => Promise<boolean>;
   onReconnect: () => void;
@@ -81,9 +83,9 @@ export function PersonalGitHubDialog(props: {
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>Your GitHub identity</DialogTitle>
+          <DialogTitle>Your GitHub</DialogTitle>
           <DialogDescription>
-            Connected as @{props.login}. Choose the repositories Opengeni may use as you.
+            Connected as @{props.login}. Choose the repos Opengeni may use as you.
           </DialogDescription>
         </DialogHeader>
 
@@ -100,7 +102,9 @@ export function PersonalGitHubDialog(props: {
 
         <div className="max-h-[48vh] divide-y divide-border overflow-y-auto border-y border-border">
           {visible.length === 0 ? (
-            <p className="py-8 text-center text-sm text-fg-muted">No repositories found.</p>
+            <p className="py-8 text-center text-sm text-fg-muted">
+              {props.loading ? "Loading repositories…" : "No repositories found."}
+            </p>
           ) : (
             visible.map((repository) => {
               const access = selected[repository.repositoryId];

@@ -3,6 +3,7 @@ import { CommandReadResult } from "@opengeni/contracts";
 import {
   parseCommandOutputCursor,
   projectCommandOutputPage,
+  projectCommandOutputTail,
 } from "../src/session-background-commands";
 import { toPostgresLosslessJson } from "../src/lossless-json";
 
@@ -114,5 +115,70 @@ describe("command output paging", () => {
     for (const maxOutputBytes of [0, 3, 65_537, NaN, 4.5]) {
       expect(() => projectCommandOutputPage({ commandId, rows: [], maxOutputBytes })).toThrow();
     }
+  });
+});
+
+describe("command output tail", () => {
+  test("returns the newest bytes without splitting a code point", () => {
+    const tail = projectCommandOutputTail({
+      commandId,
+      from: { sequence: 1, offset: 0 },
+      maxOutputBytes: 9,
+      // Newest first.
+      rows: [row(3, "ab🙂"), row(2, "middle"), row(1, "start")],
+    });
+    // "ab🙂" is 6 bytes; 3 more reach back into row 2 ("dle").
+    expect(tail.chunks.map((item) => item.chunk)).toEqual(["dle", "ab🙂"]);
+    expect(tail.reachedFrom).toBe(false);
+    expect(tail.startCursor).toBe(`${commandId}:2:3`);
+    expect(tail.endCursor).toBe(`${commandId}:4:0`);
+    const split = projectCommandOutputTail({
+      commandId,
+      from: { sequence: 1, offset: 0 },
+      maxOutputBytes: 3,
+      rows: [row(1, "x🙂")],
+    });
+    expect(split.chunks).toEqual([]);
+    expect(split.startCursor).toBe(`${commandId}:1:3`);
+  });
+
+  test("stops at the from cursor and reports when it reached it", () => {
+    const tail = projectCommandOutputTail({
+      commandId,
+      from: { sequence: 1, offset: 2 },
+      maxOutputBytes: 100,
+      rows: [row(2, "end"), row(1, "skipme")],
+    });
+    expect(tail.chunks.map((item) => item.chunk)).toEqual(["ipme", "end"]);
+    expect(tail.reachedFrom).toBe(true);
+    // A row beyond the limit proves older output remains, whatever the gaps
+    // between sequences; exactly the limit, with no extra row, is complete.
+    const rows = Array.from({ length: 65 }, (_, index) => row(200 - index * 2, "a"));
+    const limited = projectCommandOutputTail({
+      commandId,
+      from: { sequence: 1, offset: 0 },
+      maxOutputBytes: 1000,
+      rows,
+    });
+    expect(limited.reachedFrom).toBe(false);
+    expect(limited.chunks).toHaveLength(64);
+    expect(limited.startCursor).toBe(`${commandId}:74:0`);
+    const exact = projectCommandOutputTail({
+      commandId,
+      from: { sequence: 1, offset: 0 },
+      maxOutputBytes: 1000,
+      rows: rows.slice(0, 64),
+    });
+    expect(exact.reachedFrom).toBe(true);
+    // A smaller row limit applies the same way.
+    const few = projectCommandOutputTail({
+      commandId,
+      from: { sequence: 1, offset: 0 },
+      maxOutputBytes: 1000,
+      rows: rows.slice(0, 11),
+      rowLimit: 10,
+    });
+    expect(few.chunks).toHaveLength(10);
+    expect(few.reachedFrom).toBe(false);
   });
 });

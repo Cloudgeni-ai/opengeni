@@ -5,6 +5,8 @@ import {
   Loader2Icon,
   RefreshCwIcon,
   RotateCwIcon,
+  KeyRoundIcon,
+  PowerIcon,
   Trash2Icon,
 } from "lucide-react";
 
@@ -14,6 +16,7 @@ import {
   customApiConnectionLabel,
   connectionOwnership,
 } from "@/components/capabilities/custom-api-flow";
+import { organizationApiKeyNoun } from "@/components/capabilities/organization-api-key-dialog";
 import type {
   ApiIntegrationInstallationSummary,
   ConnectionMetadata,
@@ -22,21 +25,37 @@ import type {
 export function CustomApiSection({
   instances,
   connections,
+  canAdd,
   canManage,
+  canChange,
   busyKey,
   onConnect,
   onUpdate,
   onReconnect,
   onRemove,
+  onAddOwnKey,
+  onSetOrganizationHere,
 }: {
   instances: ApiIntegrationInstallationSummary[];
   connections: ConnectionMetadata[] | null;
+  /** Connect a new custom API (members, unless their organization keeps it for admins). */
+  canAdd: boolean;
+  /** Remove an instance. */
   canManage: boolean;
+  /** Reconnect or update an instance that is already set up (integration admins). */
+  canChange: boolean;
   busyKey: string | null;
   onConnect: () => void;
   onUpdate: (instance: ApiIntegrationInstallationSummary) => void;
   onReconnect: (instance: ApiIntegrationInstallationSummary) => void;
   onRemove: (instance: ApiIntegrationInstallationSummary) => void;
+  /** An organization API where each person signs in: add the person's own key. */
+  onAddOwnKey: (instance: ApiIntegrationInstallationSummary) => void;
+  /** An organization API: turn it off in this workspace, or back on. */
+  onSetOrganizationHere: (
+    instance: ApiIntegrationInstallationSummary,
+    enabledHere: boolean,
+  ) => void;
 }) {
   const connectionById = new Map(
     (connections ?? []).map((connection) => [connection.id, connection]),
@@ -66,7 +85,7 @@ export function CustomApiSection({
           size="sm"
           className="pointer-coarse:min-h-11"
           onClick={onConnect}
-          disabled={!canManage || busyKey !== null}
+          disabled={!canAdd || busyKey !== null}
         >
           Connect custom API
         </Button>
@@ -80,10 +99,14 @@ export function CustomApiSection({
       ) : (
         <div className="mt-4 grid gap-3 lg:grid-cols-2">
           {instances.map((instance) => {
+            const organization = instance.organizationConnector;
+            const ownKey = organizationApiOwnConnection(instance, connections);
             const connection = instance.connectionId
               ? connectionById.get(instance.connectionId)
-              : undefined;
-            const status = customApiInstanceStatus(instance, connections, connection);
+              : (ownKey ?? undefined);
+            const status = organization
+              ? organizationApiStatus(instance, ownKey)
+              : customApiInstanceStatus(instance, connections, connection);
             return (
               <article
                 key={instance.instanceId}
@@ -108,6 +131,10 @@ export function CustomApiSection({
                       <p className="mt-1 text-2xs text-fg-muted">
                         From {instance.personalExtension.originWorkspaceName}
                       </p>
+                    ) : organization ? (
+                      <p className="mt-1 text-2xs text-fg-muted">
+                        From your organization{organization.enabledHere ? "" : " · Off here"}
+                      </p>
                     ) : null}
                   </div>
                   {busyKey === instance.instanceKey ? (
@@ -123,23 +150,29 @@ export function CustomApiSection({
                   <Fact
                     label="Owner"
                     value={
-                      instance.ownership === "personal"
-                        ? "Personal"
-                        : instance.ownership === "workspace"
-                          ? "Workspace"
-                          : "Workspace · no credential"
+                      organization
+                        ? "Your organization"
+                        : instance.ownership === "personal"
+                          ? "Personal"
+                          : instance.ownership === "workspace"
+                            ? "Workspace"
+                            : "Workspace · no credential"
                     }
                   />
                   <Fact
                     label="Account"
                     value={
-                      connection
-                        ? customApiConnectionLabel(connection)
-                        : instance.requiresConnection
-                          ? connections === null
-                            ? "Connection data unavailable"
-                            : "Connection unavailable"
-                          : "Anonymous / no authentication"
+                      organization?.login === "organization_key"
+                        ? "The organization's key"
+                        : organization?.login === "each_person" && !connection
+                          ? `Your own ${organizationApiKeyNoun(instance)}, once you add it`
+                          : connection
+                            ? customApiConnectionLabel(connection)
+                            : instance.requiresConnection
+                              ? connections === null
+                                ? "Connection data unavailable"
+                                : "Connection unavailable"
+                              : "Anonymous / no authentication"
                     }
                   />
                   <Fact
@@ -149,8 +182,45 @@ export function CustomApiSection({
                   />
                 </dl>
 
-                {/* An instance carried in from another workspace is managed there. */}
-                {instance.personalExtension ? null : (
+                {/* An instance carried in from another workspace is managed there;
+                    an organization's is managed in the organization's settings. */}
+                {instance.personalExtension ? null : organization ? (
+                  <div className="mt-3 flex flex-col gap-2">
+                    <p className="m-0 text-2xs leading-4.5 text-fg-muted">
+                      Your organization manages it in its settings.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {organization.login === "each_person" &&
+                      organization.enabledHere &&
+                      !ownKey ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="xs"
+                          className="pointer-coarse:min-h-11"
+                          disabled={busyKey !== null}
+                          onClick={() => onAddOwnKey(instance)}
+                        >
+                          <KeyRoundIcon />
+                          {`Add your ${organizationApiKeyNoun(instance)}`}
+                        </Button>
+                      ) : null}
+                      {canChange ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          className="pointer-coarse:min-h-11"
+                          disabled={busyKey !== null}
+                          onClick={() => onSetOrganizationHere(instance, !organization.enabledHere)}
+                        >
+                          <PowerIcon />
+                          {organization.enabledHere ? "Turn off here" : "Turn on here"}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : (
                   <div className="mt-3 flex flex-wrap gap-2">
                     {instance.requiresConnection ? (
                       <Button
@@ -158,7 +228,7 @@ export function CustomApiSection({
                         variant="outline"
                         size="xs"
                         className="pointer-coarse:min-h-11"
-                        disabled={!canManage || busyKey !== null}
+                        disabled={!canChange || busyKey !== null}
                         onClick={() => onReconnect(instance)}
                       >
                         <RotateCwIcon />
@@ -170,7 +240,7 @@ export function CustomApiSection({
                       variant="outline"
                       size="xs"
                       className="pointer-coarse:min-h-11"
-                      disabled={!canManage || busyKey !== null}
+                      disabled={!canChange || busyKey !== null}
                       onClick={() => onUpdate(instance)}
                     >
                       <RefreshCwIcon />
@@ -198,6 +268,43 @@ export function CustomApiSection({
   );
 }
 
+/**
+ * The person's own account an organization's "each person signs in" API runs
+ * through here: their active Only me connection to its provider, of the kind
+ * its authentication takes.
+ */
+export function organizationApiOwnConnection(
+  instance: ApiIntegrationInstallationSummary,
+  connections: ConnectionMetadata[] | null,
+): ConnectionMetadata | null {
+  const organization = instance.organizationConnector;
+  if (!organization || organization.login !== "each_person" || !connections) return null;
+  const kind = organization.auth.kind === "oauth2" ? "oauth2" : "api_key";
+  return (
+    connections.find(
+      (connection) =>
+        connection.status === "active" &&
+        connection.subjectId !== null &&
+        connection.kind === kind &&
+        connection.providerDomain.toLowerCase() === instance.providerDomain.toLowerCase(),
+    ) ?? null
+  );
+}
+
+export function organizationApiStatus(
+  instance: ApiIntegrationInstallationSummary,
+  ownKey: ConnectionMetadata | null,
+): { kind: "ready" | "attention" | "unavailable"; label: string } {
+  const organization = instance.organizationConnector!;
+  if (!organization.enabledHere) return { kind: "unavailable", label: "Off in this workspace" };
+  if (organization.login === "none") return { kind: "ready", label: "Ready · no authentication" };
+  if (organization.login === "organization_key")
+    return { kind: "ready", label: "Ready · organization key" };
+  return ownKey
+    ? { kind: "ready", label: "Ready · your own account" }
+    : { kind: "attention", label: `Add your ${organizationApiKeyNoun(instance)} to use it` };
+}
+
 function customApiInstanceStatus(
   instance: ApiIntegrationInstallationSummary,
   connections: ConnectionMetadata[] | null,
@@ -217,9 +324,10 @@ function customApiInstanceStatus(
 }
 
 function StatusIcon({ status }: { status: "ready" | "attention" | "unavailable" }) {
-  if (status === "ready") return <CheckCircle2Icon className="size-4 shrink-0 text-success" />;
+  if (status === "ready")
+    return <CheckCircle2Icon className="size-4 shrink-0 text-status-success" />;
   if (status === "unavailable") return <CloudOffIcon className="size-4 shrink-0 text-fg-subtle" />;
-  return <AlertTriangleIcon className="size-4 shrink-0 text-warning" />;
+  return <AlertTriangleIcon className="size-4 shrink-0 text-status-waiting" />;
 }
 
 function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {

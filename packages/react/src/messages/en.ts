@@ -523,7 +523,7 @@ export const englishMessages = {
   "automations.rows.sentAgain_other": "Sent again {count} times",
   "automations.rows.type": "Type",
   "automations.run.error.accessUnavailable":
-    "The access it was saved with has changed. Save it again to approve it with your current access.",
+    "The access it was saved with has changed. Its owner can save it again to approve it with their current access. If they've left, it can't run as them again.",
   "automations.run.error.accountUnavailable":
     "A connected account it needs can no longer be used. Reconnect that account.",
   "automations.run.error.allowanceUsed": "The usage allowance is used up.",
@@ -1876,7 +1876,7 @@ export const englishMessages = {
     "This chat's working folder isn't inside that machine's workspace. Start a new chat on that machine instead.",
   "hooks.useMachines.onlyTheMachineSOwner": "Only the machine's owner can use it in this chat.",
   "hooks.useMachines.theMachineSOwnerHas":
-    "The machine's owner has not allowed this chat to use it.",
+    "The machine's owner hasn't turned it on in this workspace.",
   "hooks.useNewConversation.newChatsAreNotEnabled": "New chats are not enabled for this product.",
   "hooks.useSandboxFiles.createFile": "create file",
   "hooks.useSandboxFiles.createFolder": "create folder",
@@ -2058,8 +2058,36 @@ export const englishMessages = {
   "interactiveAnswer.viewAs": "View as",
   "interactiveAnswer.writing": "Writing options…",
   "interactiveAnswer.yes": "Yes",
+  "lib.format.apiCreditsRequired":
+    "API usage uses credits, not your plan credit. Add credits to continue. The conversation is preserved.",
+  "lib.format.apiCreditsRequiredAskOwner":
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  "lib.format.apiCreditsRequiredHeadline":
+    "API usage uses credits, not your plan credit. Add credits to continue.",
+  "lib.format.byokPaidCreditRequired":
+    "Add credits to use your own key. The conversation is preserved.",
+  "lib.format.byokPaidCreditRequiredAskOwner":
+    "Ask an organization owner to add credits to use your own key.",
+  "lib.format.byokPaidCreditRequiredHeadline": "Add credits to use your own key.",
+  "lib.format.byokUpgradeRequired":
+    "Upgrade to Pro to use your own key. The conversation is preserved.",
+  "lib.format.byokUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  "lib.format.byokUpgradeRequiredHeadline": "Upgrade to Pro to use your own key.",
   "lib.format.capacityRecoveryExhausted":
     "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
+  "lib.format.composerApiCreditsRequired":
+    "API usage uses credits, not your plan credit. Add credits to continue. Your message and attachments are saved.",
+  "lib.format.composerApiCreditsRequiredAskOwner":
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits. Your message and attachments are saved.",
+  "lib.format.composerByokPaidCreditRequired":
+    "Add credits to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokPaidCreditRequiredAskOwner":
+    "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokUpgradeRequired":
+    "Upgrade to Pro to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
@@ -2461,6 +2489,8 @@ export const englishMessages = {
     "The audio, transcript and speaker names are deleted. This can't be undone.",
   "meetings.detailPage.aboutEstimateForThisDuration":
     "About ${estimate} for this {duration} meeting.",
+  "meetings.detailPage.aboutEstimateForTracks":
+    "About ${estimate} for this {duration} meeting. Each of its {count} audio tracks is transcribed and billed separately.",
   "meetings.detailPage.aboutLessThan001": "Less than $0.01 for this {duration} meeting.",
   "meetings.detailPage.aboutThisTranscript": "About this transcript",
   "meetings.detailPage.addCredits": "Add credits",
@@ -2547,6 +2577,21 @@ export const englishMessages = {
   "meetings.detailPage.sharedWithTheWorkspace": "Shared with the workspace",
   /** A person's own Only me meeting opened from another workspace of the same organization. */
   "meetings.detailPage.onlyMeRecordedIn": "Only me · recorded in {workspace}",
+  /** The meeting menu item that opens where the owner's Only me meeting works. */
+  "meetings.detailPage.availableInMenu": "Available in…",
+  /** Title of the dialog choosing the workspaces an Only me meeting works in. */
+  "meetings.detailPage.availableIn": "Available in",
+  "meetings.detailPage.onlyYouSeeItInThese":
+    "It stays Only me: in each of these workspaces, only you and agent turns you start can use it.",
+  /** The workspace that stores the meeting, always ticked. */
+  "meetings.detailPage.recordedThereAlwaysIncluded":
+    "It was recorded there, so it's always included.",
+  "meetings.detailPage.itWillNoLongerShowHere":
+    "It will no longer show in this workspace, and you'll go back to Meetings.",
+  "meetings.detailPage.itNoLongerShowsHere": "This meeting no longer shows in this workspace",
+  "meetings.detailPage.couldnTChangeWhereItWorks": "Couldn't change where this meeting works.",
+  /** Stands in for the organization's name when the app doesn't give it. */
+  "meetings.detailPage.thisOrganization": "this organization",
   /** Names the Summary · Transcript · Notepad switch for screen readers. */
   "meetings.detailPage.show": "Show",
   "meetings.detailPage.speakers": "Speakers",
@@ -2739,12 +2784,12 @@ export const englishMessages = {
     "Microphone only: other people on a call won't be heard.",
   "meetings.recorderPanel.nameIt": "Name it",
   "meetings.recorderPanel.nameThisMeeting": "Name this meeting",
-  "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting (optional)",
+  "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting, or it's named for you",
+  "meetings.recorderPanel.namedForYou": "Named for you",
   "meetings.recorderPanel.newRecording": "New recording",
   "meetings.recorderPanel.noLiveTranscriptionProviderIs":
     "Live transcription isn't set up. Ask an admin to connect it.",
   "meetings.recorderPanel.noMicrophoneFound": "No microphone found",
-  "meetings.recorderPanel.noNameYet": "No name yet",
   "meetings.recorderPanel.noSoundServerIsRunning":
     "No sound server (PipeWire or PulseAudio) is running. Start one, or record without computer audio.",
   "meetings.recorderPanel.nothingIsRecordedWhilePaused": "Nothing is recorded while paused.",
@@ -2945,6 +2990,8 @@ export const englishMessages = {
   "meetings.settings.meetingsAreDeletedAfterRetentionperiodname":
     "Meetings are deleted after {retentionPeriodName}",
   "meetings.settings.meetingsAreKeptUntilSomeone": "Meetings are kept until someone deletes them",
+  "meetings.settings.meetingsListenForNoWords": "Meetings no longer listen for particular words",
+  "meetings.settings.meetingsListenForTheseWords": "Meetings listen for these words",
   "meetings.settings.meetingsNoLongerGetNotes": "Meetings no longer get notes written for them",
   "meetings.settings.meetingsRecordedMoreThanPeriod":
     "Meetings older than {period} are deleted now with their audio and transcripts, and the rest when they turn {period}. This can't be undone.",
@@ -2992,6 +3039,7 @@ export const englishMessages = {
     "Audio older than {retentionPeriodName} is deleted now. Transcripts stay, but those meetings can't be played or transcribed again. This can't be undone.",
   "meetings.settings.thisDeploymentUsesOneModel":
     "This deployment uses one model for all transcription.",
+  "meetings.settings.tooManyWords": "Keep the list to {max} names and words.",
   "meetings.settings.transcriptionModel": "Transcription model",
   "meetings.settings.turnOffAndForgetVoices": "Turn off and forget voices",
   "meetings.settings.turnsAMeetingSAudio":
@@ -3005,6 +3053,11 @@ export const englishMessages = {
   "meetings.settings.whenATranscriptIsReady":
     "When a meeting's transcript is ready, an agent writes its notes: a summary, decisions and action items.",
   "meetings.settings.whoSeesNewMeetings": "Who sees new meetings",
+  "meetings.settings.wordTooLong": "“{term}” is too long. Keep each to {max} characters.",
+  "meetings.settings.wordsToListenFor": "Words to listen for",
+  "meetings.settings.wordsToListenForDescription":
+    "Names and words every meeting transcript listens for, such as people, customers, products and trade terms. One per line. Some models charge a little more when given words.",
+  "meetings.settings.wordsToListenForPlaceholder": "Ada Lovelace\nKubernetes",
   "meetings.settings.workspace": "Workspace",
   "meetings.settings.writeNotesAfterEachMeeting": "Write notes after each meeting",
   "meetings.settings.youAgreedOpengeniLearnsYour":
@@ -3406,6 +3459,19 @@ export const englishMessages = {
   "native.presentation.youAnswered": "You answered",
   "native.presentation.youLetTheAgentDecide": "You let the agent decide",
   "native.presentation.yourInputIsNeeded": "Your input is needed",
+  /** Heads the alert when an audio file shared to the app or picked with Import doesn't become a meeting. */
+  "native.meetings.audioImport.couldntImport": "Couldn't import the recording",
+  /** The Import button on the phone's meetings screen, under Record a meeting. */
+  "native.meetings.audioImport.importARecording": "Import a recording",
+  "native.meetings.audioImport.importHint":
+    "Recorded a phone call or a voice memo? Share it to this app, or import it here, for a transcript and notes.",
+  "native.meetings.audioImport.importing": "Importing…",
+  "native.meetings.audioImport.unreadable": "The file couldn't be read. Share it to the app again.",
+  "native.meetings.audioImport.unsupported":
+    "This kind of audio can't be imported. Phone call recordings and voice memos (M4A) can, as can AAC, WebM and Ogg files.",
+  /** While imported recordings upload, before they show in the list. */
+  "native.meetings.audioImport.uploading_one": "Uploading the imported recording…",
+  "native.meetings.audioImport.uploading_other": "Uploading {count} imported recordings…",
   "native.meetings.meetingView.aNewTranscriptIsMadeFromTheFullAudio":
     "Makes a new transcript from the audio. Speaker names carry over.",
   "native.meetings.meetingView.delete": "Delete",
@@ -4326,6 +4392,8 @@ export const englishMessages = {
     "This chat runs on your personal machine “{machine}”. Messages from other people cannot start work on it.",
   "sessionAdmission.ownMachineQueuedNext":
     "The queued message is saved. Choose a workspace or cloud machine, or ask a workspace admin to share this machine. After changing machines or access, recheck to run the saved message.",
+  "sessionAdmission.ownMachineSharedHeadsUp":
+    "This chat runs on your personal machine “{machine}”. People in this workspace see what the agent does on it.",
   "sessionAdmission.ownerRequest":
     "This chat runs on your personal machine “{machine}”, so my message can't start there. Could you make the machine available to the workspace, or help me choose a shared machine?",
   "sessionAdmission.pausedNote":
@@ -5281,16 +5349,21 @@ export const englishMessages = {
     "Waiting for {count} agents · since {since}",
   "timeline.noticePresentation.waitingSince": "Waiting · since {since}",
   "timeline.noticePresentation.declinedAutomatically": "Declined automatically.",
+  "timeline.noticePresentation.declinedAutomaticallyTitle": "Declined automatically: “{title}”.",
+  "timeline.noticePresentation.declinedAutomaticallyTitleWithDetail":
+    "Declined automatically: “{title}” ({detail}).",
   "timeline.noticePresentation.youApprovedActions_one": "You approved {count} action.",
   "timeline.noticePresentation.youApprovedActions_other": "You approved {count} actions.",
   "timeline.noticePresentation.youApprovedAndRejected":
-    "You approved {approved} and rejected {rejected}.",
+    "You approved {approved} and declined {rejected}.",
   "timeline.noticePresentation.youApprovedThis": "You approved this.",
   "timeline.noticePresentation.youApprovedTitle": "You approved “{title}”.",
-  "timeline.noticePresentation.youRejectedActions_one": "You rejected {count} action.",
-  "timeline.noticePresentation.youRejectedActions_other": "You rejected {count} actions.",
-  "timeline.noticePresentation.youRejectedThis": "You rejected this.",
-  "timeline.noticePresentation.youRejectedTitle": "You rejected “{title}”.",
+  "timeline.noticePresentation.youApprovedTitleWithDetail": "You approved “{title}” ({detail}).",
+  "timeline.noticePresentation.youRejectedActions_one": "You declined {count} action.",
+  "timeline.noticePresentation.youRejectedActions_other": "You declined {count} actions.",
+  "timeline.noticePresentation.youRejectedThis": "You declined this.",
+  "timeline.noticePresentation.youRejectedTitle": "You declined “{title}”.",
+  "timeline.noticePresentation.youRejectedTitleWithDetail": "You declined “{title}” ({detail}).",
   "timeline.noticePresentation.youRespondedToThisApproval": "You responded to this approval.",
   "timeline.patchApplyCommand.commandToApplyTheseChanges": "Command to apply these changes",
   "timeline.patchApplyCommand.copied": "Copied",
@@ -5310,7 +5383,7 @@ export const englishMessages = {
   "timeline.patchApplyCommand.tryAgain": "Try again",
   "timeline.paymentPage.balanceNow": "Balance {balance}",
   "timeline.paymentPage.billingPortal": "Billing",
-  "timeline.paymentPage.buyCredits": "Buy credits",
+  "timeline.paymentPage.buyCredits": "Add credits",
   "timeline.paymentPage.continueToPayment": "Continue to payment",
   "timeline.paymentPage.checkFailed":
     "Couldn't check your payment from here. If you paid, your credits still arrive.",
@@ -5530,6 +5603,11 @@ export const englishMessages = {
   "timeline.toolPresentation.binaryOutputSuppressed": "(binary output suppressed)",
   "timeline.toolPresentation.blockedByYourPermissionSettings":
     "Blocked by your permission settings",
+  "timeline.toolPresentation.callUser.answered": "Answered",
+  "timeline.toolPresentation.callUser.cancelled": "Cancelled",
+  "timeline.toolPresentation.callUser.declined": "Declined",
+  "timeline.toolPresentation.callUser.missed": "No answer",
+  "timeline.toolPresentation.callUser.notPlaced": "Didn't ring",
   "timeline.toolPresentation.created": "Created",
   "timeline.toolPresentation.deleted": "Deleted",
   "timeline.toolPresentation.deletedPathbasename": "Deleted {pathBasename}",
@@ -5736,7 +5814,7 @@ export const englishMessages = {
   "timeline.toolRenderers.waited": "Waited",
   "timeline.toolRenderers.waitingForYourApproval": "Waiting for your approval",
   "timeline.toolRenderers.declinedAutomatically": "Declined automatically",
-  "timeline.toolRenderers.youRejectedThis": "You rejected this",
+  "timeline.toolRenderers.youRejectedThis": "You declined this",
   "timeline.toolRenderers.wasNotFound": "was not found",
   "timeline.toolStep.archiveDocument.done": "Archived a document",
   "timeline.toolStep.archiveDocument.running": "Archiving a document",
@@ -5836,6 +5914,8 @@ export const englishMessages = {
   "timeline.toolStep.nameChat.running": "Naming the chat",
   "timeline.toolStep.noteProgress.done": "Noted progress",
   "timeline.toolStep.noteProgress.running": "Noting progress",
+  "timeline.toolStep.callYou.done": "Called you",
+  "timeline.toolStep.callYou.running": "Calling you",
   "timeline.toolStep.notify.done": "Notified you",
   "timeline.toolStep.notify.running": "Notifying you",
   "timeline.toolStep.openBrowser.done": "Opened the browser",

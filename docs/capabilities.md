@@ -2,8 +2,23 @@
 
 Opengeni exposes a workspace-level Capabilities control-plane read model for external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
 
-Capability, Plugin, API Integration, and Integration Facet mutations
-require the narrow `capabilities:manage` permission. Shared-workspace admins
+Adding integrations is member work: installing and removing Plugins and API
+Integrations, adding custom MCP catalog entries, turning on any catalog
+integration that is not on yet (with a personal or a shared account), and
+configuring an installed integration's facets and sources need
+`connections:write`, which ordinary Members hold, or `capabilities:manage`
+(`INTEGRATION_SETUP_PERMISSION` and `canAddIntegrations` in
+`packages/contracts/src/personal-integration-setup.ts`). A member's add is
+create-only: it never changes an installation that is already on, turns back
+on one an admin turned off, rewrites or shadows an existing catalog entry, or
+picks a server's tool ID, and the organization's integration policy (its
+allowlist, and `personalIntegrationSetup: "admins"`) still decides.
+What stays integration administration (`capabilities:manage`): connector and
+session-MCP tool permissions (Allow/Ask/Block), `autoApprovedTools` and any
+explicit MCP `requireApproval` other than `true`, changing an integration that
+is already set up (updating a plugin or a custom API to a new revision,
+reconnecting or rebinding a shared account, or turning a server back on), and
+turning one off for everyone. Members can remove what an admin added. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
 member-management or API-key-delegation powers of `workspace:admin`.
@@ -140,6 +155,135 @@ instance with `personalExtension`; the Connections page labels its account
 workspace.
 
 MCP event sources are not carried yet.
+
+### Organization connectors
+
+An organization owner or admin can add an MCP connector once for the whole
+organization and choose where it works, instead of each workspace setting it
+up. Each organization connector is either a reviewed catalog connector or a
+custom remote MCP server (name and streamable HTTP endpoint), and stores how
+turns sign in to it:
+
+- `each_person`: everyone connects their own account to the server's OAuth,
+  as with a workspace connector enabled for personal accounts. Google's MCP
+  servers only allow this.
+- `organization_key`: request headers held by the organization, probed and
+  then stored encrypted exactly like
+  [credential headers](#credential-headers). The API returns header names only.
+- `none`: a server that needs no credentials, probed when added.
+
+The sign-in mode is fixed once added; remove the connector and add it again to
+change it. Availability uses the same reach as organization model keys:
+`allowedWorkspaceIds: null` means every shared workspace, a list means only
+those shared workspaces, and `allowPersonalWorkspaces` separately decides
+whether members' Personal workspaces get it. A list may only name this
+organization's shared workspaces (`422` otherwise).
+
+In a workspace it reaches, an organization connector behaves like an enabled
+connector of the workspace's own. It appears once in the catalog with
+`lifecycle.managedBy: "organization"`, the detail **From your organization**
+and `metadata.organizationConnector` (`id`, `generation`, `login`, `source`).
+Agents get it in name order among the workspace's own connectors, with the
+same server ID a workspace setup of the same connector would have, so tool
+names don't change when a connector moves between the two. A catalog connector
+keeps its catalog approval floor; a custom one has none, as for a workspace's
+own custom server. When a person shares their own login made through it, that
+login carries into their Personal workspace like any other
+([Personal workspace extension](#personal-workspace-extension)).
+
+The workspace's own installation of the same capability, on or off, always
+wins:
+
+- A workspace manager (`capabilities:manage`) can turn it off for that
+  workspace with the ordinary disable action. That stores a turned-off
+  installation marked as the override; the catalog then shows the connector as
+  available, **Turned off in this workspace**. An enable request with an empty
+  body turns it back on by removing the override.
+- An admin's enable request that brings its own setup (connection reference,
+  headers, config or metadata) for a catalog connector creates the workspace's
+  own installation, which then replaces the organization's in that workspace.
+  A custom organization server has no definition outside the organization's,
+  so that is refused with `409`.
+- Anyone connecting their own account to an `each_person` connector (a
+  subject-scoped OAuth reference to the same provider, with no pinned account
+  or resources) uses the organization's setup; an admin doing so creates no
+  workspace installation either.
+- A member's personal setup (`connections:personal`) never adds a workspace
+  installation over the organization's and never turns back on one an admin
+  turned off here.
+
+Administration is organization-level and needs no workspace:
+
+| Route | SDK method |
+| --- | --- |
+| `GET /v1/organizations/:organizationId/connectors` | `listOrganizationConnectors` |
+| `POST /v1/organizations/:organizationId/connectors` | `createOrganizationConnector` |
+| `PATCH /v1/organizations/:organizationId/connectors/:connectorId` | `updateOrganizationConnector` |
+| `DELETE /v1/organizations/:organizationId/connectors/:connectorId` | `deleteOrganizationConnector` |
+| `POST /v1/organizations/:organizationId/connectors/api-integrations/preview` | `previewOrganizationApiIntegration` |
+| `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/organization` | `setOrganizationApiIntegrationHere` |
+
+A create request names exactly one of `capabilityId` (catalog), `custom` or
+`apiIntegration` (below), plus `login`, `headers` (only with an MCP
+`organization_key`), optional `allowedTools` and `availability`. A change sends
+`expectedGeneration` with any of `availability`, `allowedTools`, `status`
+(`active` or `disabled`), `headers` (MCP organization key only, probed again)
+and `apiKey` (API integration organization key only); a stale generation
+returns `409`. Removing a connector stops it in every workspace at once.
+
+#### Organization API integrations
+
+An organization connector can also be an
+[API integration](#protocol-neutral-api-integrations) (`kind: "api"`): a custom OpenAPI or
+GraphQL API, or a reviewed definition the organization's policy allows. The
+admin previews it first with the same sources a workspace previews
+(`previewOrganizationApiIntegration`, which may take an `apiKey` used only to
+read an API that needs one to describe itself), then adds it with
+`apiIntegration: { source, expectedRevisionId, expectedContentSha256 }`. The
+source is compiled again and must still be the previewed revision (`409`
+otherwise); the compiled revision is stored, so every workspace it reaches runs
+exactly what was reviewed. How turns sign in must fit how the API
+authenticates: an API with no authentication takes `none`, an OAuth API takes
+`each_person`, and a key or HTTP API takes `each_person` or `organization_key`
+(`422` otherwise). An organization key is `apiKey`: placements (header, query
+parameter or cookie, with an optional prefix such as `Bearer `) stored
+encrypted, decrypted per request and sent only to that API, never refreshed or
+retried when rejected. With `each_person`, a turn runs it through the
+person's own active Only me connection to the API's provider, of the kind its
+authentication takes; without one, the person's turns don't get its tools.
+The connector's `apiIntegration` summary returns the protocol, how the API
+authenticates and its tools; keys are never returned.
+
+In a workspace it reaches, it lists among the workspace's API integrations
+under the instance key `organization` (reserved: a workspace install,
+uninstall or uninstall preview with that key returns `409`), marked with
+`organizationConnector` (`connectorId`, `login`, `auth`, `enabledHere`). A
+workspace manager turns it off for that workspace, or back on, with
+`setOrganizationApiIntegrationHere`; one turned off still lists, with
+`enabledHere: false`. A workspace's own instance of the same capability wins
+there. Adding one checks the organization integration policy with the
+definition's key for a reviewed definition, or `custom:openapi` /
+`custom:graphql`; a restricted policy narrows an `auto` source to the custom
+protocols it allows. Storage is the same `organization_connectors` table
+(migration `1199_organization_api_integrations.sql` adds `kind`, and `1200_validate_organization_connector_kind.sql` validates its check).
+
+Only signed-in organization owners and admins, and agents acting for one,
+manage organization connectors; the database checks the person's live
+organization role in every change. Organization API keys are refused (`403`).
+Adding one, or saving one that stays on, is an acquisition under the
+[organization integration policy](organization-integration-policy.md) with
+the `custom:mcp` key, as for a workspace's own MCP setup; an organization key's
+headers also follow the EU-only content-flow rules. Storage is
+`organization_connectors` (migration `1175_organization_connectors.sql`), with
+row security serving each workspace exactly the connectors that reach it.
+
+In the app, owners and admins manage them under **Organization settings >
+Integrations > Connectors**: add one from the catalog or by server address,
+choose how people sign in and where it works, turn it off everywhere, change
+where it works, replace its organization key or remove it. In a workspace, the
+connector's page shows **Turn on for this workspace** when a workspace manager
+turned it off there; members without `capabilities:manage` are told to ask a
+workspace admin.
 
 ### Credential headers
 
@@ -314,10 +458,11 @@ exact instance; the underlying Connection and shared definition survive unless
 separately removed.
 
 Provider adapters may also publish immutable generic facet definitions for
-Knowledge Sources, Inbound Triggers, Delivery Destinations, and Identity Links.
-OneDrive exposes a drive-content Knowledge Source; Gmail and
+Inbound Triggers, Delivery Destinations, and Identity Links. Gmail and
 Outlook expose mail or calendar trigger/delivery facets and connected-account
-identity. In the web app these live in
+identity. Integrations give agents tools and access; they never import provider
+content into Knowledge. Recurring work is an ordinary agent schedule that uses
+the integration's tools. In the web app these live in
 `apps/web/src/components/capabilities/integration-facets-panel.tsx`, mounted
 per account entry inside the integration page's **Connected accounts** section
 through the lazy `integration-account-facets.tsx` boundary. The panel is
@@ -338,13 +483,18 @@ The projection reports only whether a provider cursor exists; page tokens,
 delta links, and other cursor contents remain private durable state.
 Integration definition upgrades migrate same-key facets without losing
 configuration, cursor, lifecycle status, evidence timestamps, or owner edges,
-and reject an upgrade that would silently remove a configured facet.
+and reject an upgrade that would silently remove a configured facet. The one
+exception is a retired Knowledge Source facet: a configured binding keeps its
+historical definition when a new revision no longer publishes it.
 
-Google Drive's previous `drive-content` facet is historical only. Native source
-browse, configuration and resume are retired; stored selections, imported
-records and run history remain available as evidence. New recurring Drive work
-uses an ordinary agent schedule with the personal Drive MCP connection. See
-[Google Drive](google-drive.md) for the replacement and its access limits.
+The Knowledge Source facet kind (`knowledge_source`, for example the former
+Drive and OneDrive `drive-content` facets) is retired. No integration publishes
+it, configuring one returns 410, and its browse and source routes return 410.
+Existing bindings stay listed as retired with Remove only; unconfigured ones are
+hidden. Stored selections, imported records and run history remain available
+as evidence. New recurring Drive or OneDrive work uses an ordinary agent
+schedule with the account's tools. See [Google Drive](google-drive.md) for the
+Drive MCP connection and its access limits.
 Generic browser editing refuses required object or array fields unless a
 provider-specific flow owns them, so OneDrive and future rich schemas cannot be
 submitted as silently incomplete primitive config.
@@ -816,7 +966,7 @@ Ordinary new sessions include two first-party Opengeni tools:
   endpoint not yet in the workspace catalog. The agent may propose a name and
   exact URL, but cannot register or contact the server. The signed-in human
   reviews/edits the address and creates a catalog entry with the ordinary
-  `capabilities:manage` permission; credential setup, enablement, and session
+  `connections:write` permission; credential setup, enablement, and session
   tool selection then use the existing protected flows. Search the catalog
   first; API/GraphQL definition import remains its separate preview wizard.
 
@@ -871,9 +1021,9 @@ as connecting your own account, so it needs only `connections:personal`
 (included in `connections:write`), not `capabilities:manage`: the instance
 resolves credentials for that person alone. The card itself also needs
 `sessions:control` to add the tools to the chat and continue it. A
-workspace-owned account or a custom source needs `connections:write`, and
-binding an instance that is not already bound to the same account still needs
-`capabilities:manage`. Where this client cannot connect a personal account
+workspace-owned account, a custom source, or binding an instance that is not
+already bound to the same account needs `connections:write`. Where this client
+cannot connect a personal account
 (for example a shared service identity), the card says so instead of offering
 Connect.
 

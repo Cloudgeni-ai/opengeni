@@ -316,16 +316,27 @@ describe.skipIf(!realDb)("Codex v2 accepted authority on the remaining carriers 
     ).catch((error: unknown) => error);
     expect(String((rewrite as { cause?: unknown })?.cause ?? rewrite)).toContain("immutable");
     // The revision slot is canonical and its trigger must narrow a foreign
-    // human's edit, not merely rely on the reader's defensive narrowing.
+    // human's edit, not merely rely on the reader's defensive narrowing. A
+    // Personal workspace has no member but its owner, so the guard refuses the
+    // foreign row; the fixture then plants it as legacy data (triggers off) to
+    // prove the revision trigger still narrows if such a row ever existed.
     const otherSubject = `user:other-${crypto.randomUUID()}`;
     const [otherWorkspace] = await shared!.admin`insert into workspaces (account_id, name)
       values (${org.accountId}::uuid, 'Other personal') returning id`;
     await shared!
       .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
       values (${org.accountId}::uuid, ${otherSubject}, 'active', ${otherWorkspace!.id}::uuid)`;
-    await shared!
+    const refused = await shared!
       .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
-      values (${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid, ${otherSubject}, 'admin')`;
+      values (${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid, ${otherSubject}, 'admin')`.catch(
+      (error: unknown) => error,
+    );
+    expect(String(refused)).toContain("a Personal workspace has exactly one member, its owner");
+    await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+        values (${org.accountId}::uuid, ${org.personalWorkspaceId}::uuid, ${otherSubject}, 'admin')`;
+    });
     await withSessionRlsActorContext({ subjectId: otherSubject }, () =>
       updateScheduledTask(client!.db, org.personalWorkspaceId, own.id, {
         refreshPersonalResourceAuthority: true,

@@ -440,7 +440,11 @@ export type {
 } from "./hooks/use-machine-chip";
 
 // Pending-approvals projection
-export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
+export {
+  approvalsDecidable,
+  approvalsFromRequiresAction,
+  projectPendingApprovals,
+} from "./approvals";
 export type { PendingApproval } from "./approvals";
 export { ApprovalSurface, defaultApprovalSurfaceMessages } from "./components/approval-surface";
 export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
@@ -473,6 +477,7 @@ export { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "./human-in
 export {
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,

@@ -38,6 +38,8 @@ import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
 import { RepeatedMachineRequestNote, SessionMachineCapabilityCard } from "./session-machine-card";
 import { SessionChromeCapabilityCard } from "./session-chrome-card";
+import { SessionPersonalGitHubCapabilityCard } from "./session-personal-github-card";
+import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import { useNobodyToShareWith } from "../../lib/workspace-sharing";
 import { SessionPluginCapabilityCard } from "./session-plugin-card";
 import { usePage } from "../../lib/navigation";
@@ -142,6 +144,15 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       />
     );
   }
+  if (capability?.id === PERSONAL_GITHUB_CAPABILITY_ID) {
+    return (
+      <SessionPersonalGitHubCapabilityCard
+        key={`${props.workspaceId}:${props.sessionId}`}
+        item={item}
+        workspaceId={props.workspaceId}
+      />
+    );
+  }
   const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
   const grant = context.accessContext?.workspaceGrants.find(
     (entry) => entry.workspaceId === props.workspaceId,
@@ -150,7 +161,14 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   // this card never offers a connection the agent was told isn't possible.
   // Until the grant has loaded, offer the card; the API still enforces access.
   const setup =
-    capability && grant ? inChatCapabilitySetup(grant, capability.id, resolved) : undefined;
+    capability && grant
+      ? inChatCapabilitySetup(
+          grant,
+          capability.id,
+          resolved,
+          context.workspaceMemberIntegrationSetup,
+        )
+      : undefined;
   if (setup?.kind === "unavailable") return <AuthNeededRow item={item} setupUnavailable />;
   if (capability?.kind === "plugin") {
     return (
@@ -518,7 +536,7 @@ function SessionCapabilitySetup({
           canManageSkills: hasWorkspacePermission(
             context.accessContext,
             workspaceId,
-            "capabilities:manage",
+            "documents:manage",
           ),
           refresh: catalog.refresh,
           onRuntimeChanged: () => {
@@ -663,7 +681,7 @@ function SessionCapabilitySetup({
           canManageSkills={hasWorkspacePermission(
             context.accessContext,
             workspaceId,
-            "capabilities:manage",
+            "documents:manage",
           )}
           onAction={(action) => void act(action)}
           nobodyToShareWith={nobodyToShareWith}

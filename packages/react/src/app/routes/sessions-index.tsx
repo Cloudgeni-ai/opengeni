@@ -1,4 +1,5 @@
 import { useAppApi } from "../lib/app-api";
+import { useAppHost } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
 import { t } from "../lib/console-text";
@@ -52,7 +53,7 @@ import {
   type SessionRealtimeModel,
 } from "@opengeni/sdk";
 import { Link, type PageHost, useNavigate, usePage } from "../lib/navigation";
-import { ChevronDownIcon, CreditCardIcon, FolderIcon, LockIcon, PlusIcon } from "lucide-react";
+import { CreditCardIcon, LockIcon } from "lucide-react";
 import {
   createElement,
   lazy,
@@ -68,8 +69,10 @@ import {
 import { toast } from "../lib/toast";
 
 import { BillingClassMark } from "../components/billing-class-mark";
-import { ChannelCreateDialog } from "../components/rail/channel-create-dialog";
-import { ProjectGlyph } from "../components/rail/project-glyph";
+import {
+  ChannelCreateDialog,
+  type ProjectAudience,
+} from "../components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "../components/Composer";
 import { NewSessionStarters } from "../components/new-session-starters";
 import { NewSessionDraftSyncNotice } from "../components/new-session-draft-sync-notice";
@@ -86,6 +89,12 @@ import {
   visibilitySummary,
 } from "../components/session/new-session-settings-menu";
 import {
+  SessionSetupStrip,
+  runsOnSetupIcon,
+  visibilitySetupIcon,
+  type SessionSetupSetting,
+} from "../components/session/new-session-setup-strip";
+import {
   NO_SESSION_USAGE_LIMIT,
   parseSessionUsageLimitDraft,
   sessionUsageLimitCapability,
@@ -99,18 +108,10 @@ import {
 } from "../components/repository-picker";
 import { Button } from "../../ui/button";
 import { sessionDisplayTitle } from "../lib/session-rename";
-import {
-  DropdownMenu,
-  DropdownMenuCheck,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "../../ui/dropdown-menu";
 import { Notice } from "../../ui/notice";
 import { CreditRefusalNotice } from "../components/credits/credit-refusal-notice";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
-import { isPaymentRequiredError } from "../lib/model-access";
+import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "../lib/transient-retry";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { StatusDot } from "../../ui/status-dot";
@@ -155,10 +156,12 @@ import {
 import {
   recentSessionModelPresentation,
   recentSessionStatus,
-  recentSessionsForHome,
+  recentSessionsWithOpened,
   relativeTimeLabel,
   sessionRepoLabel,
+  type OpenedChat,
 } from "../../session-list-model";
+import { readChatDirectory, useChatDirectoryVersion } from "../lib/actions/chat-directory";
 import { newChatWording, signupStarterSet } from "../lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
@@ -217,11 +220,12 @@ import {
   resolveAmbientNewSessionProjectChannelId,
   resolveHydratedNewSessionProjectSelection,
 } from "./sessions-index-hydration";
-import type { Channel, SandboxBackend, Session } from "../types";
+import type { SandboxBackend, Session } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
 import { BotLaunchStrip, type BotLaunchState } from "../components/bots/bot-launch-strip";
 import { BotTemplateShortcuts } from "../components/bots/bot-template-shortcuts";
 import { useBotTemplates } from "../lib/bot-templates";
+import { useWindowBarTitle } from "../../ui/window-bar-title";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -265,7 +269,10 @@ function SessionsIndexRouteContent({
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
+  // The macOS window bar names the page; the hero keeps its greeting.
+  useWindowBarTitle("New session");
   const starters = useSessionUiFeature("starters");
+  const hostStarters = useAppHost().starters;
   const addCredits = useSessionUiFeature("addCredits");
   // Without the chat list, the new-chat page shows no other chats either: no
   // recent chats and no project picker that files the chat among them.
@@ -331,6 +338,7 @@ function SessionsIndexRouteContent({
   const recentChannelId = selectionHistory.projects[0]?.channelId ?? null;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
+  const [projectAudienceDraft, setProjectAudienceDraft] = useState<ProjectAudience>("workspace");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   // ?botTemplateId= starts this chat as a bot: the template's setup
@@ -492,6 +500,12 @@ function SessionsIndexRouteContent({
     draft.visibility,
     tenancyCapabilities?.canCreatePrivate === true,
   );
+  const canCreatePrivateChat = tenancyCapabilities?.canCreatePrivate === true;
+  // A new project can be Only me wherever a new chat can.
+  const projectAudienceOffered = hasVisibilityChoice({
+    personalWorkspace,
+    canCreatePrivate: canCreatePrivateChat,
+  });
   const personalOwnerScope = resolvePersonalResourceOwnerScope({
     authMode: context.clientConfig.auth.mode,
     authSession: context.authSession,
@@ -549,7 +563,8 @@ function SessionsIndexRouteContent({
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
   const fleet = useWorkspaceMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
-  // "+" > Runs on: where the new chat runs and on which environment or folder.
+  // Runs on (a setup chip above the message): where the new chat runs and on
+  // which environment or folder.
   const runsOnChoices = {
     draft,
     machines,
@@ -670,11 +685,9 @@ function SessionsIndexRouteContent({
     useState<SessionUsageLimitDraft>(NO_SESSION_USAGE_LIMIT);
   const [usageLimitSendBlocked, setUsageLimitSendBlocked] = useState(false);
   // The API refused to start this chat because no credit pays for its model.
-  const [createCreditRefusal, setCreateCreditRefusal] = useState<{
+  const [createCreditRefusal, setCreateCreditRefusal] = useState<CreditRefusalRecord<{
     workspaceId: string;
-    model: string;
-    message: string;
-  } | null>(null);
+  }> | null>(null);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -755,7 +768,10 @@ function SessionsIndexRouteContent({
   const createProject = useCallback(async () => {
     const name = projectNameDraft.trim();
     if (!name) return;
-    const project = await channelsQuery.create({ name });
+    const project = await channelsQuery.create({
+      name,
+      ...(projectAudienceOffered ? { visibility: projectAudienceDraft } : {}),
+    });
     if (!project) {
       toast.error("Couldn't create the project. The name may already be in use.");
       return;
@@ -763,7 +779,30 @@ function SessionsIndexRouteContent({
     selectProject(project.id);
     setProjectDialogOpen(false);
     setProjectNameDraft("");
-  }, [channelsQuery, projectNameDraft, selectProject]);
+    setProjectAudienceDraft("workspace");
+  }, [
+    channelsQuery,
+    projectAudienceDraft,
+    projectAudienceOffered,
+    projectNameDraft,
+    selectProject,
+  ]);
+
+  // An Only me project holds only Only me chats, so choosing one makes the new
+  // chat Only me. Where Only me is off, its Only me projects take no new chats.
+  const selectedProjectOnlyMe =
+    channelsQuery.channels.find((channel) => channel.id === selectedChannelId)?.visibility ===
+    "private";
+  useEffect(() => {
+    if (!selectedProjectOnlyMe || !tenancyCapabilities) return;
+    if (!canCreatePrivateChat) {
+      selectProject(null, false);
+      return;
+    }
+    setDraft((current) =>
+      current.visibility === "private" ? current : { ...current, visibility: "private" },
+    );
+  }, [canCreatePrivateChat, selectProject, selectedProjectOnlyMe, tenancyCapabilities]);
 
   useEffect(() => {
     const onRequest = (event: Event) => {
@@ -1033,12 +1072,9 @@ function SessionsIndexRouteContent({
     ? creditRefusalGap(modelCatalog.rows, refusedCreate.model, creditCoverageOptions)
     : freeCreditGap(modelCatalog.rows, context.model, creditCoverageOptions);
   const noteCreditRefusal = (error: Error, request: { model?: string | undefined }): boolean => {
-    if (!isPaymentRequiredError(error)) return false;
-    setCreateCreditRefusal({
-      workspaceId,
-      model: request.model ?? context.model,
-      message: error.message,
-    });
+    const refusal = creditRefusalRecord(error, { workspaceId }, request.model ?? context.model);
+    if (!refusal) return false;
+    setCreateCreditRefusal(refusal);
     // Re-read funding so the notice and picker name what the credit covers now.
     void modelCatalog.refresh();
     return true;
@@ -1767,6 +1803,51 @@ function SessionsIndexRouteContent({
       selectedPolicyRow?.catalog.creditFunding === "unavailable");
   const openCreditTopup = () => setCreditTopupOpen(true);
 
+  // Where the chat runs and who can see it are chosen beside the project chip,
+  // above the message, and only when there is something to choose.
+  const setupDisabled = busy || newSessionDraft.loading;
+  const runsOnSetup: SessionSetupSetting | null = hasRunsOnChoices(runsOnChoices)
+    ? {
+        label: "Runs on",
+        summary: runsOnSummary(runsOnChoices),
+        icon: runsOnSetupIcon(runsOnChoices),
+        disabled: setupDisabled,
+        renderMenu: () => (
+          <RunsOnMenuBody
+            {...runsOnChoices}
+            disabled={setupDisabled}
+            onChange={setDraft}
+            onComputeChange={setExplicitComputeDraft}
+            onRetryMachines={() => void fleet.refresh()}
+          />
+        ),
+      }
+    : null;
+  const visibilitySetup: SessionSetupSetting | null = hasVisibilityChoice({
+    personalWorkspace,
+    canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
+  })
+    ? {
+        label: "Visibility",
+        summary: visibilitySummary(draft.visibility),
+        icon: visibilitySetupIcon(draft.visibility),
+        disabled: setupDisabled,
+        renderMenu: (close) => (
+          <VisibilityMenuBody
+            value={draft.visibility}
+            disabled={setupDisabled}
+            onChange={(visibility) => {
+              visibilityChosenRef.current = true;
+              // A shared chat can't go in an Only me project.
+              if (visibility === "workspace" && selectedProjectOnlyMe) selectProject(null);
+              setDraft((current) => ({ ...current, visibility }));
+              close();
+            }}
+          />
+        ),
+      }
+    : null;
+
   return createElement(
     LightboxProvider,
     null,
@@ -1800,6 +1881,11 @@ function SessionsIndexRouteContent({
               <Suspense fallback={null}>
                 <CreditTopupPrompt
                   purpose="topup"
+                  refusalCode={
+                    refusedCreate?.code === "byok_paid_credit_required"
+                      ? "byok_paid_credit_required"
+                      : null
+                  }
                   open={creditTopupOpen}
                   workspaceId={workspaceId}
                   accountId={workspace.accountId}
@@ -1826,6 +1912,7 @@ function SessionsIndexRouteContent({
             <CreditRefusalNotice
               gap={creditGap}
               message={refusedCreate?.message}
+              refusalCode={refusedCreate?.code}
               workspaceId={workspaceId}
               accountId={workspace?.accountId ?? null}
               canReadBilling={hasAccountPermission(
@@ -1934,47 +2021,6 @@ function SessionsIndexRouteContent({
                   onToolSelectionChange={(selection) => {
                     changeConnectorSelection(selection);
                   }}
-                  {...(hasRunsOnChoices(runsOnChoices)
-                    ? {
-                        runsOn: {
-                          summary: runsOnSummary(runsOnChoices),
-                          disabled: busy || newSessionDraft.loading,
-                          panel: (
-                            <RunsOnMenuBody
-                              {...runsOnChoices}
-                              disabled={busy || newSessionDraft.loading}
-                              onChange={setDraft}
-                              onComputeChange={setExplicitComputeDraft}
-                              onRetryMachines={() => void fleet.refresh()}
-                            />
-                          ),
-                        },
-                      }
-                    : {})}
-                  {...(hasVisibilityChoice({
-                    personalWorkspace,
-                    canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
-                  })
-                    ? {
-                        visibility: {
-                          summary: visibilitySummary(draft.visibility),
-                          disabled: busy || newSessionDraft.loading,
-                          panel: (
-                            <VisibilityMenuBody
-                              value={draft.visibility}
-                              disabled={busy || newSessionDraft.loading}
-                              onChange={(visibility) => {
-                                visibilityChosenRef.current = true;
-                                setDraft((current) => ({
-                                  ...current,
-                                  visibility,
-                                }));
-                              }}
-                            />
-                          ),
-                        },
-                      }
-                    : {})}
                   {...(usageLimitCapability === "enabled"
                     ? {
                         usageLimit: {
@@ -2120,7 +2166,7 @@ function SessionsIndexRouteContent({
               </>
             }
             header={
-              chatList || botLaunch ? (
+              chatList || botLaunch || runsOnSetup || visibilitySetup ? (
                 <>
                   {botLaunch ? (
                     <BotLaunchStrip
@@ -2129,13 +2175,25 @@ function SessionsIndexRouteContent({
                       onDismiss={dismissBotLaunch}
                     />
                   ) : null}
-                  {chatList ? (
+                  {chatList || runsOnSetup || visibilitySetup ? (
                     <SessionSetupStrip
                       disabled={busy || newSessionDraft.loading}
-                      channels={channelsQuery.channels}
-                      selectedChannelId={selectedChannelId}
-                      onChannelChange={selectProject}
-                      onCreateProject={() => setProjectDialogOpen(true)}
+                      project={
+                        chatList
+                          ? {
+                              channels: canCreatePrivateChat
+                                ? channelsQuery.channels
+                                : channelsQuery.channels.filter(
+                                    (channel) => channel.visibility !== "private",
+                                  ),
+                              selectedChannelId,
+                              onChange: selectProject,
+                              onCreate: () => setProjectDialogOpen(true),
+                            }
+                          : null
+                      }
+                      runsOn={runsOnSetup}
+                      visibility={visibilitySetup}
                     />
                   ) : null}
                 </>
@@ -2220,6 +2278,7 @@ function SessionsIndexRouteContent({
           <NewSessionStarters
             workspaceId={workspaceId}
             set={starterSet}
+            hostStarters={hostStarters}
             fileUploads={context.clientConfig.fileUploads.enabled === true}
             disabled={busy || newSessionDraft.loading}
             onSelect={(prompt) => {
@@ -2233,10 +2292,18 @@ function SessionsIndexRouteContent({
         open={projectDialogOpen}
         name={projectNameDraft}
         busy={channelsQuery.mutating}
+        audience={
+          projectAudienceOffered
+            ? { value: projectAudienceDraft, onChange: setProjectAudienceDraft }
+            : undefined
+        }
         onNameChange={setProjectNameDraft}
         onOpenChange={(open) => {
           setProjectDialogOpen(open);
-          if (!open) setProjectNameDraft("");
+          if (!open) {
+            setProjectNameDraft("");
+            setProjectAudienceDraft("workspace");
+          }
         }}
         onSubmit={() => void createProject()}
       />
@@ -2273,6 +2340,7 @@ function reportDraftSaveFailure(draft: {
 // the model picker — never raw wire ids as the primary display.
 function RecentSessions({ workspaceId }: { workspaceId: string }) {
   const { workspaceSessionListEvent } = useOpenGeni();
+  const subjectId = useAppContext().accessContext.subjectId;
   const hintsAvailable =
     workspaceSessionListEvent?.workspaceId === workspaceId && workspaceSessionListEvent.available;
   const { sessions, pinned, refresh, error } = useWorkspaceSessions({
@@ -2284,8 +2352,24 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
   });
   useSessionListHintRefresh(refresh, error);
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  // Pins are server-authoritative and sit above running and recency rows.
-  const recent = useMemo(() => recentSessionsForHome(t, sessions, pinned, 6), [pinned, sessions]);
+  // The chats the person opened here lead (kept across reloads, so the pane
+  // of an app that reopens often still shows them); then pins, which are
+  // server-authoritative, then running and recency rows.
+  const directoryVersion = useChatDirectoryVersion(subjectId);
+  const opened = useMemo<OpenedChat[]>(() => {
+    void directoryVersion;
+    const directory = readChatDirectory(subjectId, workspaceId);
+    return directory.recent.flatMap((id) => {
+      const record = directory.rows.get(id);
+      return record && record.workspaceId === workspaceId && !record.archived
+        ? [{ id, title: record.title, openedAt: record.updatedAt }]
+        : [];
+    });
+  }, [directoryVersion, subjectId, workspaceId]);
+  const recent = useMemo(
+    () => recentSessionsWithOpened(t, sessions, pinned, opened, 6),
+    [opened, pinned, sessions],
+  );
 
   if (recent.length === 0) {
     return null;
@@ -2299,16 +2383,45 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
       {/* flex-col, not grid: a grid auto track grows to a nowrap row's full
           min-content width, defeating truncate and overflowing the page. */}
       <ul className="flex min-w-0 flex-col divide-y divide-border/60">
-        {recent.map((session) => (
-          <RecentSessionRow
-            key={session.id}
-            workspaceId={workspaceId}
-            session={session}
-            catalogRows={modelCatalog.rows}
-          />
-        ))}
+        {recent.map((entry) =>
+          entry.kind === "session" ? (
+            <RecentSessionRow
+              key={entry.session.id}
+              workspaceId={workspaceId}
+              session={entry.session}
+              catalogRows={modelCatalog.rows}
+            />
+          ) : (
+            <OpenedChatRow key={entry.chat.id} workspaceId={workspaceId} chat={entry.chat} />
+          ),
+        )}
       </ul>
     </section>
+  );
+}
+
+/**
+ * A chat opened here that the current page of the list doesn't hold: its
+ * title and when it was opened. Its status isn't known here, so the row keeps
+ * the dot's place without claiming one.
+ */
+function OpenedChatRow({ workspaceId, chat }: { workspaceId: string; chat: OpenedChat }) {
+  return (
+    <li className="min-w-0">
+      <Link
+        to="/workspaces/$workspaceId/sessions/$sessionId"
+        params={{ workspaceId, sessionId: chat.id }}
+        className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-hover"
+      >
+        <span aria-hidden className="inline-block size-2 shrink-0" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm text-fg group-hover:text-fg">{chat.title}</span>
+        </span>
+        <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">
+          {chat.openedAt > 0 ? relativeTimeLabel(t, new Date(chat.openedAt).toISOString()) : null}
+        </span>
+      </Link>
+    </li>
   );
 }
 
@@ -2358,35 +2471,6 @@ function RecentSessionRow({
         </span>
       </Link>
     </li>
-  );
-}
-
-// Setup selections sit above the prompt so the footer remains an action row.
-// Repo stays out of the compute band so that band only shows when rigs /
-// machines exist. Tools and repos live under “+” at every width.
-function SessionSetupStrip({
-  disabled,
-  channels,
-  selectedChannelId,
-  onChannelChange,
-  onCreateProject,
-}: {
-  disabled: boolean;
-  channels: Channel[];
-  selectedChannelId: string | null;
-  onChannelChange: (channelId: string | null) => void;
-  onCreateProject: () => void;
-}) {
-  return (
-    <div className="flex min-w-0 items-center gap-1.5 border-b border-border/70 px-3 py-2 sm:px-4">
-      <SessionFolderPicker
-        channels={channels}
-        selectedChannelId={selectedChannelId}
-        disabled={disabled}
-        onChange={onChannelChange}
-        onCreateProject={onCreateProject}
-      />
-    </div>
   );
 }
 
@@ -2440,61 +2524,6 @@ function SessionModelControl({
   );
 }
 
-function SessionFolderPicker({
-  channels,
-  selectedChannelId,
-  disabled,
-  onChange,
-  onCreateProject,
-}: {
-  channels: Channel[];
-  selectedChannelId: string | null;
-  disabled: boolean;
-  onChange: (channelId: string | null) => void;
-  onCreateProject: () => void;
-}) {
-  const selected = channels.find((channel) => channel.id === selectedChannelId) ?? null;
-  const label = selected?.name ?? "Default";
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={disabled}
-          aria-label={`Project: ${label}`}
-          title={label}
-          className="h-8 min-w-0 max-w-[12rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg sm:shrink-0"
-        >
-          <ProjectGlyph project={selected} />
-          <span className="min-w-0 truncate">{label}</span>
-          <ChevronDownIcon className="size-3 shrink-0" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-60">
-        <DropdownMenuLabel>Save new session in</DropdownMenuLabel>
-        <DropdownMenuItem onSelect={() => onChange(null)}>
-          <FolderIcon />
-          <span className="min-w-0 flex-1 truncate">Default</span>
-          <DropdownMenuCheck checked={selectedChannelId === null} />
-        </DropdownMenuItem>
-        {channels.map((channel) => (
-          <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
-            <ProjectGlyph project={channel} className="size-4" />
-            <span className="min-w-0 flex-1 truncate">{channel.name}</span>
-            <DropdownMenuCheck checked={channel.id === selectedChannelId} />
-          </DropdownMenuItem>
-        ))}
-        <DropdownMenuItem onSelect={onCreateProject}>
-          <PlusIcon />
-          New project
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
 function workspaceRepositoryPickerProps(
   context: ReturnType<typeof useAppContext>,
   workspaceId: string,
@@ -2517,10 +2546,10 @@ function workspaceRepositoryPickerProps(
     selectedPersonalGitHubRepoIds: context.selectedPersonalGitHubRepoIds,
     selectedPersonalGitHubRepoRefs: context.selectedPersonalGitHubRepoRefs,
     personalGitHubBusy: context.personalGitHubBusy,
+    personalGitHubManageUrl: `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=integration:github`,
     groups: context.repositoryGroups,
     selectedRepoIds: context.selectedRepoIds,
     selectedRepoRefs: context.selectedRepoRefs,
-    selectedInstallationId: context.selectedInstallationId,
     manualRepos: context.manualRepos,
     manualOpen: context.manualReposOpen,
     githubAppOpen: context.githubAppOpen,
@@ -2605,11 +2634,7 @@ function workspaceRepositoryPickerProps(
         selectWorkspaceRepository: (matched, ref) => {
           assertCurrent();
           context.setSelectedRepoIds((current) => {
-            const next =
-              context.selectedInstallationId !== null &&
-              context.selectedInstallationId !== matched.installationId
-                ? new Set<number>()
-                : new Set(current);
+            const next = new Set(current);
             next.add(matched.id);
             return next;
           });
@@ -2798,7 +2823,7 @@ function ComputeTargetControl(props: {
     fleetLoading: fleet.loading,
   });
 
-  // Where it runs is chosen under "+" > Runs on. Only what needs attention
+  // Where it runs is chosen with the Runs on chip above the message. Only what needs attention
   // shows under the composer: why Send waits on where it runs (with a retry
   // for a failed machine load), a catalog that couldn't be verified, and the
   // personal resources this chat will use.

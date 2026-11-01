@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "6.2.1",
+  "version": "6.4.0",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -50,6 +50,10 @@
       "types": "./src/modal-native-proof-v2.ts",
       "default": "./src/modal-native-proof-v2.ts"
     },
+    "./billing-origin": {
+      "types": "./src/billing-origin.ts",
+      "default": "./src/billing-origin.ts"
+    },
     "./allowance-refusal": {
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
@@ -58,6 +62,10 @@
       "types": "./src/timeline-order.ts",
       "default": "./src/timeline-order.ts"
     },
+    "./knowledge-source-sync-retirement": {
+      "types": "./src/knowledge-source-sync-retirement.ts",
+      "default": "./src/knowledge-source-sync-retirement.ts"
+    },
     "./learning-refusal": {
       "types": "./src/learning-refusal.ts",
       "default": "./src/learning-refusal.ts"
@@ -65,6 +73,10 @@
     "./values": {
       "types": "./src/values.ts",
       "default": "./src/values.ts"
+    },
+    "./claude-cite-tags": {
+      "types": "./src/claude-cite-tags.ts",
+      "default": "./src/claude-cite-tags.ts"
     },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
@@ -77,6 +89,10 @@
     "./session-usage-limit-refusal": {
       "types": "./src/session-usage-limit-refusal.ts",
       "default": "./src/session-usage-limit-refusal.ts"
+    },
+    "./seat-upgrade": {
+      "types": "./src/seat-upgrade.ts",
+      "default": "./src/seat-upgrade.ts"
     },
     "./browser-storage": {
       "types": "./src/browser-storage.ts",
@@ -241,6 +257,10 @@
     "./model-display": {
       "types": "./src/model-display.ts",
       "default": "./src/model-display.ts"
+    },
+    "./claude-subscription-model-ids": {
+      "types": "./src/claude-subscription-model-ids.ts",
+      "default": "./src/claude-subscription-model-ids.ts"
     },
     "./secret-use-approval-question": {
       "types": "./src/secret-use-approval-question.ts",

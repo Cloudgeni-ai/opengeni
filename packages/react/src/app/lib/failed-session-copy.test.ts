@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { failedSessionCopy } from "./failed-session-copy";
+import {
+  chatComposerPlaceholder,
+  failedSessionCopy,
+  failureFallbackReason,
+} from "./failed-session-copy";
 
 const summary = { failedAt: null, consecutiveRecoveryCount: null };
 test("only explicit model availability evidence suggests another model", () => {
@@ -467,4 +471,112 @@ test("codes that record operator text get the plain headline, like unclassified 
       failedSessionCopy({ ...summary, reason: detail, recordedDetail: detail, failureCode }),
     ).toEqual({ reason: "The session stopped unexpectedly.", unavailableModel: false, detail });
   }
+});
+
+test("own-key and API credit stops name their one fix, never another model's free credit", () => {
+  const gap = {
+    modelLabel: "Claude Opus 5.5",
+    covered: [{ id: "free-model", label: "Free model" }],
+    selectionUsable: false,
+  } as never;
+  expect(
+    failedSessionCopy(
+      { ...summary, reason: "Activity task failed: Add credits to use your own key." },
+      true,
+      false,
+      true,
+      gap,
+    ),
+  ).toEqual({
+    reason: "Add credits to use your own key.",
+    unavailableModel: false,
+    creditRefusal: "byok_paid_credit_required",
+  });
+  expect(
+    failedSessionCopy(
+      { ...summary, reason: "Activity task failed: Upgrade to Pro to use your own key." },
+      true,
+      false,
+      true,
+      gap,
+    ),
+  ).toMatchObject({
+    reason: "Upgrade to Pro to use your own key.",
+    creditRefusal: "byok_upgrade_required",
+  });
+  expect(
+    failedSessionCopy(
+      { ...summary, reason: "API usage uses credits, not your plan credit." },
+      true,
+    ),
+  ).toMatchObject({
+    // The short sentence names its fix too: it is the whole message where no button shows.
+    reason: "API usage uses credits, not your plan credit. Add credits to continue.",
+    creditRefusal: "api_credits_required",
+  });
+});
+
+test("a stopped chat's composer names the refusal's one fix, or who can fix it", () => {
+  const stopped = {
+    cancelled: false,
+    creditStopped: true,
+    stopRefusal: null,
+    creditGap: null,
+    canBuyCredits: true,
+  } as const;
+  const gap = {
+    modelLabel: "Claude",
+    covered: [{ id: "m", label: "Free" }],
+    selectionUsable: false,
+  };
+  expect(chatComposerPlaceholder({ ...stopped, cancelled: true })).toBe(
+    "This session was cancelled.",
+  );
+  expect(chatComposerPlaceholder({ ...stopped, creditStopped: false })).toBe("Send a follow-up…");
+  expect(chatComposerPlaceholder(stopped)).toBe(
+    "Out of Opengeni credits — add credits to continue.",
+  );
+  expect(chatComposerPlaceholder({ ...stopped, creditGap: gap })).toBe(
+    "Your free credits don't cover this model — choose another model or add credits.",
+  );
+  expect(
+    chatComposerPlaceholder({ ...stopped, creditGap: { ...gap, selectionUsable: true } }),
+  ).toBe("Send a follow-up…");
+  // An own-key or API stop never suggests another model, even with free credit left.
+  expect(
+    chatComposerPlaceholder({ ...stopped, creditGap: gap, stopRefusal: "byok_upgrade_required" }),
+  ).toBe("Upgrade to Pro to use your own key.");
+  expect(chatComposerPlaceholder({ ...stopped, stopRefusal: "byok_paid_credit_required" })).toBe(
+    "Add credits to use your own key.",
+  );
+  expect(chatComposerPlaceholder({ ...stopped, stopRefusal: "api_credits_required" })).toBe(
+    "API usage uses credits, not your plan credit. Add credits to continue.",
+  );
+  const member = { ...stopped, canBuyCredits: false };
+  expect(chatComposerPlaceholder({ ...member, stopRefusal: "byok_upgrade_required" })).toBe(
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  );
+  expect(chatComposerPlaceholder({ ...member, stopRefusal: "byok_paid_credit_required" })).toBe(
+    "Ask an organization owner to add credits to use your own key.",
+  );
+  expect(chatComposerPlaceholder({ ...member, stopRefusal: "api_credits_required" })).toBe(
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  );
+});
+
+test("the plain failure line tells a member who can't fix a refusal to ask an owner", () => {
+  const copy = failedSessionCopy(
+    { ...summary, reason: null },
+    true,
+    false,
+    true,
+    null,
+    "byok_upgrade_required",
+  );
+  expect(failureFallbackReason(copy, true)).toBe("Upgrade to Pro to use your own key.");
+  expect(failureFallbackReason(copy, false)).toBe(
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  );
+  const generic = failedSessionCopy({ ...summary, reason: null }, true, false, true, null, null);
+  expect(failureFallbackReason(generic, false)).toBe(generic.reason);
 });

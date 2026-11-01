@@ -5,6 +5,7 @@ import {
 } from "../src/organization-access";
 import {
   PERSONAL_INTEGRATION_SETUP_PERMISSION,
+  canAddIntegrations,
   inChatCapabilitySetup,
   isPersonalIntegrationSetupCandidate,
   permissionSetCovers,
@@ -101,6 +102,70 @@ describe("personal integration setup", () => {
     ).toBeNull();
   });
 
+  test("members turn on any integration that is not on yet, custom servers included", () => {
+    const member = { permissions: ["connections:read", "connections:write"] };
+    expect(personalIntegrationSetupAccess(member, reviewed)).toBe("any");
+    expect(personalIntegrationSetupAccess(member, { ...reviewed, source: "manual" })).toBe("any");
+    expect(personalIntegrationSetupAccess(member, { ...reviewed, authKind: "api_key" })).toBe(
+      "any",
+    );
+    expect(canAddIntegrations(member)).toBe(true);
+    expect(canAddIntegrations({ permissions: ["capabilities:manage"] })).toBe(true);
+    expect(canAddIntegrations({ permissions: ["workspace:admin"] })).toBe(true);
+    expect(
+      canAddIntegrations({ permissions: ["workspace:admin"], permissionMode: "explicit" }),
+    ).toBe(false);
+    for (const permissions of [["connections:read"], ["connections:personal"], []])
+      expect(canAddIntegrations({ permissions })).toBe(false);
+  });
+
+  test("an organization that keeps turning integrations on for admins: members are offered nothing new", () => {
+    const member = { permissions: ["connections:read", "connections:write"] };
+    const narrow = { permissions: ["connections:read", "connections:personal"] };
+    const admin = { permissions: ["workspace:admin"] };
+    expect(canAddIntegrations(member, "admins")).toBe(false);
+    expect(canAddIntegrations(member, "members")).toBe(true);
+    expect(canAddIntegrations(admin, "admins")).toBe(true);
+    expect(personalIntegrationSetupAccess(member, reviewed, "admins")).toBeNull();
+    expect(personalIntegrationSetupAccess(narrow, reviewed, "admins")).toBeNull();
+    expect(personalIntegrationSetupAccess(admin, reviewed, "admins")).toBe("any");
+    // Connecting one's own account to what is already on changes no installation.
+    const on = { ...reviewed, enabled: true, connectionRef: { subjectScope: "subject" } };
+    expect(personalIntegrationSetupAccess(narrow, on, "admins")).toBe("personal");
+
+    const chat = ["workspace:read", "sessions:read", "sessions:control"];
+    expect(
+      inChatCapabilitySetup(
+        { permissions: [...chat, "connections:write"] },
+        "plugin:x/y",
+        undefined,
+        "admins",
+      ),
+    ).toEqual({ kind: "unavailable" });
+    expect(
+      inChatCapabilitySetup(
+        { permissions: [...chat, ...member.permissions] },
+        "mcp:gmail",
+        reviewed,
+        "admins",
+      ),
+    ).toEqual({ kind: "unavailable" });
+  });
+
+  test("in-chat setup: a member's card can install a plugin", () => {
+    const chat = ["workspace:read", "sessions:read", "sessions:control"];
+    expect(
+      inChatCapabilitySetup(
+        { permissions: [...chat, "connections:write"] },
+        "plugin:x/y",
+        undefined,
+      ),
+    ).toEqual({ kind: "default" });
+    expect(inChatCapabilitySetup({ permissions: chat }, "plugin:x/y", undefined)).toEqual({
+      kind: "unavailable",
+    });
+  });
+
   test("organization policies holding connections:write keep their preset", () => {
     const full = organizationAccessPresetPermissions("full");
     expect(full).toContain("connections:personal");
@@ -147,6 +212,17 @@ describe("personal integration setup", () => {
     expect(inChatCapabilitySetup({ permissions: personal }, gmail, shared)).toEqual({
       kind: "unavailable",
     });
+    // Your GitHub is connected by the person themselves: connections:write.
+    expect(
+      inChatCapabilitySetup(
+        { permissions: [...chat, "connections:write"] },
+        "api:github-personal",
+        undefined,
+      ),
+    ).toEqual({ kind: "default" });
+    expect(
+      inChatCapabilitySetup({ permissions: personal }, "api:github-personal", undefined),
+    ).toEqual({ kind: "unavailable" });
     // Other kinds of setup are not decided here.
     expect(inChatCapabilitySetup({ permissions: chat }, "api:github-app", undefined)).toEqual({
       kind: "default",

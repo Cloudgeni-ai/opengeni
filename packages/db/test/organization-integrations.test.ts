@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   integrationInitiatingHuman,
   integrationWorkspaceFilterMatches,
+  organizationWebhookReaches,
   selectWorkspaceCredentialProvider,
 } from "../src/workspace-integrations";
 
@@ -34,6 +35,8 @@ describe("workspace credential provider precedence", () => {
     accountId: "account",
     enabled: true,
     workspaceFilter: { externalSource: "product" },
+    allowPersonalWorkspaces: false,
+    allowedWorkspaceIds: null as string[] | null,
   };
   test("enabled workspace wins; disabled workspace opts out; only absence inherits", () => {
     expect(selectWorkspaceCredentialProvider(scope, workspace, provider, organization)).toBe(
@@ -51,12 +54,83 @@ describe("workspace credential provider precedence", () => {
       organization,
     );
   });
-  test("Personal never inherits but keeps its own provider", () => {
+  test("Personal inherits only with the Personal switch, and keeps its own provider", () => {
     const personal = { ...workspace, kind: "personal" as const };
     expect(selectWorkspaceCredentialProvider(scope, personal, null, organization)).toBeNull();
     expect(selectWorkspaceCredentialProvider(scope, personal, provider, organization)).toBe(
       provider,
     );
+    const reachesPersonal = { ...organization, allowPersonalWorkspaces: true };
+    expect(selectWorkspaceCredentialProvider(scope, personal, null, reachesPersonal)).toBe(
+      reachesPersonal,
+    );
+    // The filter selects shared workspaces only; the switch alone decides Personal.
+    expect(
+      selectWorkspaceCredentialProvider(
+        scope,
+        { ...personal, externalSource: null },
+        null,
+        reachesPersonal,
+      ),
+    ).toBe(reachesPersonal);
+    expect(selectWorkspaceCredentialProvider(scope, personal, provider, reachesPersonal)).toBe(
+      provider,
+    );
+    expect(
+      selectWorkspaceCredentialProvider(
+        scope,
+        personal,
+        { ...provider, enabled: false },
+        reachesPersonal,
+      ),
+    ).toBeNull();
+    expect(
+      selectWorkspaceCredentialProvider(scope, personal, null, {
+        ...reachesPersonal,
+        enabled: false,
+      }),
+    ).toBeNull();
+  });
+  test("the Personal switch never widens shared workspaces", () => {
+    expect(
+      selectWorkspaceCredentialProvider(scope, { ...workspace, externalSource: "other" }, null, {
+        ...organization,
+        allowPersonalWorkspaces: true,
+      }),
+    ).toBeNull();
+  });
+  test("picked workspaces narrow shared ones on top of the filter, never Personal ones", () => {
+    const picked = { ...organization, allowedWorkspaceIds: ["workspace"] };
+    expect(selectWorkspaceCredentialProvider(scope, workspace, null, picked)).toBe(picked);
+    const elsewhere = { ...organization, allowedWorkspaceIds: ["another"] };
+    expect(selectWorkspaceCredentialProvider(scope, workspace, null, elsewhere)).toBeNull();
+    // The list and the filter both have to allow it.
+    expect(
+      selectWorkspaceCredentialProvider(
+        scope,
+        { ...workspace, externalSource: "other" },
+        null,
+        picked,
+      ),
+    ).toBeNull();
+    // The Personal switch alone decides Personal workspaces, whatever the list says.
+    const personal = { ...workspace, kind: "personal" as const };
+    expect(
+      selectWorkspaceCredentialProvider(scope, personal, null, {
+        ...elsewhere,
+        allowPersonalWorkspaces: true,
+      }),
+    ).not.toBeNull();
+    expect(selectWorkspaceCredentialProvider(scope, personal, null, picked)).toBeNull();
+  });
+  test("organization webhooks follow the list and filter, and never reach Personal workspaces", () => {
+    const webhook = { workspaceFilter: null, allowedWorkspaceIds: ["workspace"] };
+    expect(organizationWebhookReaches(webhook, workspace)).toBe(true);
+    expect(organizationWebhookReaches(webhook, { ...workspace, id: "another" })).toBe(false);
+    expect(organizationWebhookReaches({ ...webhook, allowedWorkspaceIds: null }, workspace)).toBe(
+      true,
+    );
+    expect(organizationWebhookReaches(webhook, { ...workspace, kind: "personal" })).toBe(false);
   });
   test("organization must be enabled and match exact source/account", () => {
     expect(

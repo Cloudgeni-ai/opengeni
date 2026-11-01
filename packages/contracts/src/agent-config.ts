@@ -297,6 +297,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   notify_user: "humanInput",
   notification_withdraw: "humanInput",
   inbox_tidy: "humanInput",
+  // Ringing the person's phone for a live voice call.
+  call_user: "humanInput",
   command_wait: "sandbox",
   command_read: "sandbox",
 
@@ -464,6 +466,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   slack_bot_delete_message: "workspaceConnectors",
   slack_bot_prepare_message: "workspaceConnectors",
   slack_bot_send_prepared_message: "workspaceConnectors",
+  slack_agent_handoff: "workspaceConnectors",
+  slack_agent_chats: "workspaceConnectors",
   fiken_companies_list: "workspaceConnectors",
   fiken_contacts_list: "workspaceConnectors",
   fiken_contact_create: "workspaceConnectors",
@@ -551,6 +555,7 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
   // Runtime function tools.
   request_human_input: "humanInput",
   list_models: "subagents",
+  privacy_facts: "runtime",
   generate_image: "media",
   generate_video: "media",
   get_video_generation_capabilities: "media",

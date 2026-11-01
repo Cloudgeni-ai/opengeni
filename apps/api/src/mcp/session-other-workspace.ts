@@ -76,13 +76,17 @@ function refusal(message: string): CallToolResult {
 
 /**
  * Explains a not-found-or-denied answer about a chat in this workspace without
- * saying whether it exists anywhere else: how a chat in another workspace is
- * reached, given whether this session has full access.
+ * saying whether it exists anywhere else: whose chats this turn can see (a
+ * turn woken by another person's message acts for that person), and how a
+ * chat in another workspace is reached, given whether this session has full
+ * access.
  */
 export function sessionToolDenialHint(fullAccess: boolean): string {
+  const visible =
+    "Session tools see only chats that the person this turn acts for can open, so another person's private chat is out of reach. A turn started by a message from another person's chat acts for that person.";
   return fullAccess
-    ? "Session tools look in this workspace unless you pass workspaceId. For a chat in another workspace, pass the workspaceId from its link (/workspaces/<workspaceId>/sessions/<sessionId>); this session's full access reaches it as the person who gave that access."
-    : "Session tools reach only chats in this workspace. A chat in another workspace needs this session to have full access, which the person who started it can give from the session's menu in the app, if their organization allows it; then pass that chat's workspaceId.";
+    ? `${visible} Session tools look in this workspace unless you pass workspaceId. For a chat in another workspace, pass the workspaceId from its link (/workspaces/<workspaceId>/sessions/<sessionId>); this session's full access reaches it as the person who gave that access.`
+    : `${visible} Session tools reach only chats in this workspace. A chat in another workspace needs this session to have full access, which the person who started it can give from the session's menu in the app, if their organization allows it; then pass that chat's workspaceId.`;
 }
 
 function isDenial(result: { content?: unknown; structuredContent?: unknown }): boolean {

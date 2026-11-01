@@ -156,10 +156,24 @@ export type UpdateOrganizationPrivateSessionSettingsRequest = z.infer<
 export const OrganizationPrivacySettings = /* @__PURE__ */ defineSchema(() =>
   z.object({
     organizationId: primitives.uuid,
+    /**
+     * Whether members can connect machines of their own (Only me machines).
+     * Off: only owners and admins can connect new ones; machines already
+     * connected keep working. Workspace and organization machines keep their
+     * own rules.
+     */
+    membersConnectOwnMachines: z.boolean(),
     /** Who can see new chats and schedules unless the person picks otherwise. */
     defaultVisibility: z.enum(["private", "workspace"]),
     /** Whether people have their own Personal workspace to see and work in. */
     personalWorkspaces: z.boolean(),
+    /**
+     * The most each person can spend from the organization's credits in their
+     * own Personal workspace each calendar month (UTC), in USD micros; null
+     * for no limit. Work paid by their own model plans or keys doesn't count,
+     * and a Personal workspace's own budget wins.
+     */
+    personalWorkspaceMonthlyCredits: primitives.nonnegativeInteger.safe().nullable(),
     /** Whether admins see that other people's Only me schedules exist, and can pause them. */
     adminsSeePrivateSchedules: primitives.boolean,
     limits: z.object({
@@ -178,16 +192,21 @@ export type OrganizationPrivacySettings = z.infer<typeof OrganizationPrivacySett
 export const UpdateOrganizationPrivacySettingsRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
+      membersConnectOwnMachines: z.boolean().optional(),
       defaultVisibility: z.enum(["private", "workspace"]).optional(),
       adminsSeePrivateSchedules: primitives.optionalBoolean,
       personalWorkspaces: z.boolean().optional(),
+      /** USD micros a month per person; null removes the limit. */
+      personalWorkspaceMonthlyCredits: primitives.nonnegativeInteger.safe().nullable().optional(),
     })
     .strict()
     .refine(
       (value) =>
+        value.membersConnectOwnMachines !== undefined ||
         value.defaultVisibility !== undefined ||
         value.adminsSeePrivateSchedules !== undefined ||
-        value.personalWorkspaces !== undefined,
+        value.personalWorkspaces !== undefined ||
+        value.personalWorkspaceMonthlyCredits !== undefined,
       { message: "Change at least one setting." },
     ),
 );

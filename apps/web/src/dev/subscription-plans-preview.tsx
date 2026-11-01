@@ -1,6 +1,9 @@
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { AppContext } from "@opengeni/react/app/app-context";
+import { CreditRefusalNotice } from "@opengeni/react/app/components/credits/credit-refusal-notice";
+import { FailedSessionBanner } from "@opengeni/react/app/components/session/failed-session-banner";
 import { SubscriptionPlans } from "@/components/organization/subscription-plans";
 import { PlanSeats, SeatLimitNotice } from "@/components/organization/plan-seats";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
@@ -8,6 +11,7 @@ import { CreditTopupRow } from "@/components/credits/credit-topup-row";
 import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/ui/section";
 import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import type { BillingSummary } from "@opengeni/react/app/types";
+import { seatUpgradeFor } from "@opengeni/react/app/lib/subscription-plans";
 
 /** DEV only. The production components with deterministic API fixtures, no payments. */
 export const previewPlans: BillingSubscriptionCatalog["plans"] = [
@@ -69,8 +73,28 @@ export function previewPlan(key: string): BillingPlanBalance {
   };
 }
 
+// The seat view uses the switched-on limits: Free 1, Pro 2, Max 10, Enterprise unlimited.
+const seatPreviewLimits: Record<string, number | null> = { free: 1, pro: 2, max: 10 };
+const seatPreviewPlans = previewPlans.map((plan) => ({
+  ...plan,
+  seatLimit: seatPreviewLimits[plan.key] ?? null,
+}));
+function seatPreviewPlan(key: string, seatsUsed: number): BillingPlanBalance {
+  return { ...previewPlan(key), seatsUsed, seatLimit: seatPreviewLimits[key] ?? null };
+}
+
+// A refusal the server already explained reads no balance, so no client calls.
+const refusalPreviewContext = { client: {} } as never;
+
 export function SubscriptionPlansPreview() {
-  const view = new URLSearchParams(window.location.search).get("plan") ?? "free";
+  const search = new URLSearchParams(window.location.search);
+  const view = search.get("plan") ?? "free";
+  const theme = search.get("theme");
+  useLayoutEffect(() => {
+    if (theme !== "light" && theme !== "dark") return;
+    document.documentElement.dataset.ogTheme = theme;
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  }, [theme]);
   const [plan, setPlan] = useState(() => previewPlan(view));
   const [amount, setAmount] = useState("25.00");
   const [message, setMessage] = useState("");
@@ -114,6 +138,8 @@ export function SubscriptionPlansPreview() {
       accountId: "00000000-0000-4000-8000-000000000001",
       balanceMicros: plan.creditRemainingMicros + 25_000_000,
       generalBalanceMicros: (plan.creditScoped ? 0 : plan.creditRemainingMicros) + 25_000_000,
+      creditsMicros: 25_000_000,
+      byokPlatformFeeMonthMicros: 1_840_000,
       promotionalCredits: plan.creditScoped
         ? [
             {
@@ -137,18 +163,80 @@ export function SubscriptionPlansPreview() {
           Development preview · Sample account · No live payments
         </p>
         <h1 className="mb-8 text-xl font-semibold tracking-[-0.5px]">
-          {view === "seats" ? "Invite people" : "Billing & usage"}
+          {view === "seats" ? "Invite people" : view === "refusal" ? "Chat" : "Billing & usage"}
         </h1>
         <SectionVariantProvider variant="group">
           <SectionStack>
-            {view === "seats" ? (
+            {view === "refusal" ? (
+              <AppContext.Provider value={refusalPreviewContext}>
+                <div className="space-y-4">
+                  {(
+                    [
+                      "byok_upgrade_required",
+                      "byok_paid_credit_required",
+                      "api_credits_required",
+                    ] as const
+                  ).map((code) => (
+                    <CreditRefusalNotice
+                      key={code}
+                      gap={{ modelLabel: "Claude Opus 5.5", covered: [], selectionUsable: false }}
+                      refusalCode={code}
+                      workspaceId="00000000-0000-4000-8000-000000000003"
+                      canBuyCredits
+                      canConnectModel={false}
+                      onAddCredits={() => setMessage("Preview only. Add credits opens Stripe.")}
+                    />
+                  ))}
+                  {/* A chat that stopped on a refusal, for an owner and for a member. */}
+                  {(
+                    [
+                      ["byok_upgrade_required", true],
+                      ["byok_upgrade_required", false],
+                      ["byok_paid_credit_required", true],
+                      ["byok_paid_credit_required", false],
+                      ["api_credits_required", true],
+                      ["api_credits_required", false],
+                    ] as const
+                  ).map(([code, owner]) => (
+                    <FailedSessionBanner
+                      key={`${code}-${owner}`}
+                      failure={{ failedAt: null, consecutiveRecoveryCount: null, reason: null }}
+                      creditExhausted
+                      creditRefusal={code}
+                      workspaceId="00000000-0000-4000-8000-000000000003"
+                      canBuyCredits={owner}
+                    />
+                  ))}
+                  {message ? (
+                    <p role="status" className="text-sm text-fg-muted">
+                      {message}
+                    </p>
+                  ) : null}
+                </div>
+              </AppContext.Provider>
+            ) : view === "seats" ? (
               <>
-                <PlanSeats plan={plan} />
+                <PlanSeats plan={seatPreviewPlan("free", 1)} />
                 <SeatLimitNotice
                   canManage
+                  upgrade={seatUpgradeFor(seatPreviewPlan("free", 1), seatPreviewPlans)}
                   onUpgrade={() => {
                     window.location.search = "?plan=free";
                   }}
+                />
+                <p className="text-xs text-fg-muted">Without billing access:</p>
+                <PlanSeats plan={seatPreviewPlan("pro", 2)} />
+                <SeatLimitNotice
+                  canManage={false}
+                  upgrade={seatUpgradeFor(seatPreviewPlan("pro", 2), seatPreviewPlans)}
+                  onUpgrade={() => undefined}
+                />
+                <p className="text-xs text-fg-muted">A full Max plan:</p>
+                <PlanSeats plan={seatPreviewPlan("max", 10)} />
+                <SeatLimitNotice
+                  canManage
+                  upgrade={seatUpgradeFor(seatPreviewPlan("max", 10), seatPreviewPlans)}
+                  onUpgrade={() => undefined}
                 />
               </>
             ) : (

@@ -10,6 +10,7 @@ import { and, asc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 
 import { type Database, withWorkspaceRls } from "./database";
 import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
+import { membershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
@@ -615,6 +616,7 @@ async function membershipAllowsSlackLink(database: Database, row: RequestRow) {
       and(
         eq(schema.workspaceMemberships.workspaceId, row.workspaceId),
         eq(schema.workspaceMemberships.subjectId, row.subjectId),
+        membershipOutsidePersonalWorkspace(),
       ),
     )
     .limit(1);

@@ -10,6 +10,7 @@ import {
 } from "@opengeni/contracts";
 import { stableJson } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
+import { membershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
 import type { Database } from "./database";
 import * as schema from "./schema";
 import {
@@ -291,6 +292,7 @@ export async function saveNewSessionDraftInTransaction(
         and(
           eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
           eq(schema.workspaceMemberships.subjectId, input.subjectId),
+          membershipOutsidePersonalWorkspace(),
         ),
       )
       .for("key share")
@@ -394,12 +396,36 @@ export function reusableNewSessionRepositoryResource(
   // state. Credential bindings, connection refs, access intent, and generic
   // provider ids are per-session authorization/runtime state and must not seed
   // the next create.
-  return {
+  const base: RepositoryResourceRef = {
     kind: "repository",
     uri: resource.uri,
     ref: resource.ref,
     ...(resource.mountPath ? { mountPath: resource.mountPath } : {}),
     ...(resource.subpath ? { subpath: resource.subpath } : {}),
+  };
+  // "As you" (personal GitHub) is a selection, not a grant: the next create is
+  // authorized again against the person's live connection and allowlist. Its
+  // lane fields are what tells that selection apart from a typed URL, and the
+  // draft schema requires the binding selector and access with it, so keep the
+  // complete lane; dropping it would bring the repository back as a manual URL.
+  if (
+    resource.connectionType === "github_personal" &&
+    resource.provider === "github" &&
+    typeof resource.credentialBindingId === "string" &&
+    typeof resource.repositoryId === "string" &&
+    (resource.access === "read" || resource.access === "write")
+  ) {
+    return {
+      ...base,
+      provider: "github",
+      connectionType: "github_personal",
+      credentialBindingId: resource.credentialBindingId,
+      repositoryId: resource.repositoryId,
+      access: resource.access,
+    };
+  }
+  return {
+    ...base,
     ...(resource.githubInstallationId
       ? { githubInstallationId: resource.githubInstallationId }
       : {}),

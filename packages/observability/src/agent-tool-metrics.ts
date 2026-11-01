@@ -57,6 +57,7 @@ const EXACT: Record<string, AgentToolMetricFamily> = {
   notify_user: "session",
   notification_withdraw: "session",
   inbox_tidy: "session",
+  call_user: "session",
   set_other_session_title: "session",
   bot_template_save: "session",
   sessions_list: "session",
@@ -74,6 +75,7 @@ const EXACT: Record<string, AgentToolMetricFamily> = {
   google_drive_publish_file: "files",
   custom_mcp_setup_request: "connector",
   list_models: "other",
+  privacy_facts: "other",
 };
 
 const PREFIXES: ReadonlyArray<readonly [string, AgentToolMetricFamily]> = [

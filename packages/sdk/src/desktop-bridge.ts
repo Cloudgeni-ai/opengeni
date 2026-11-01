@@ -11,6 +11,16 @@ import type {
 /** Bumped only for incompatible changes; additions are new capabilities. */
 export const DESKTOP_BRIDGE_VERSION = 1;
 
+/** The macOS traffic lights: three 14px buttons. */
+export const DESKTOP_MAC_TRAFFIC_LIGHT_SIZE = 14;
+
+/**
+ * The window bar of macOS shells that don't report `windowBarHeight` (the
+ * desktop app 0.1.33 and older): they put the traffic lights 21px from the
+ * top, centred on a 56px row.
+ */
+export const DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT = 56;
+
 /** The global the preload script defines in the web app's main frame. */
 export const DESKTOP_BRIDGE_GLOBAL = "opengeniDesktop";
 
@@ -68,6 +78,12 @@ export interface DesktopSystemAudioError {
 export interface DesktopMeetingDetectionStatus {
   /** The person's switch: offer to record when a call starts. */
   enabled: boolean;
+  /**
+   * The person's second switch: when a call app's call starts, record it
+   * without asking, and stop when it ends. A meeting in a browser still asks.
+   * Absent from apps built before it existed.
+   */
+  autoRecord?: boolean;
   /** This computer, its OS version and this app build can tell when a call starts. */
   available: boolean;
   /** Why detection isn't working right now, in a sentence for its row. */
@@ -93,7 +109,10 @@ export type DesktopMeetingRequest =
  */
 export interface DesktopMeetingDetection {
   status(): Promise<DesktopMeetingDetectionStatus>;
-  update(change: { enabled?: boolean }): Promise<DesktopMeetingDetectionStatus>;
+  update(change: {
+    enabled?: boolean;
+    autoRecord?: boolean;
+  }): Promise<DesktopMeetingDetectionStatus>;
   /**
    * Tell the app whether this page is recording a meeting, so it doesn't
    * offer to record another and can offer to stop when the call ends.
@@ -578,6 +597,18 @@ export interface DesktopBridge {
   readonly productName: string;
   /** The app's own version, e.g. "0.1.29". Absent from older apps. */
   readonly appVersion?: string;
+  /**
+   * macOS: the height of the window bar the shell centres the traffic lights
+   * on, in window points (CSS pixels at 100% zoom). The page centres its own
+   * bar controls on the same line. Absent from older apps; see
+   * `DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT`.
+   */
+  readonly windowBarHeight?: number;
+  /**
+   * The page's zoom factor (1 at 100%), so it can size what lines up with the
+   * window's own controls. Absent from older apps.
+   */
+  zoomFactor?(): number;
   /**
    * A PNG of the page in the window as it is now, at the screen's pixel
    * density, or null when nothing is shown. With the `captureWindow` capability.

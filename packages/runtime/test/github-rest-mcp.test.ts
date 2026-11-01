@@ -6,6 +6,7 @@ import {
   GitHubRestMcpServer,
   GitHubRestMutationNotExecutedError,
   GitHubRestMutationOutcomeUnknownError,
+  GitHubRestRepositoryDetachedError,
   type GitHubRestRepository,
 } from "../src/github-rest-mcp";
 
@@ -198,6 +199,64 @@ describe("GitHubRestMcpServer", () => {
     expect(result.structuredContent).toMatchObject({
       data: { sha: "c".repeat(40), merged: true },
     });
+  });
+});
+
+describe("GitHubRestMcpServer with a repository removed from the chat", () => {
+  const kept: GitHubRestRepository = {
+    ...repository,
+    repositoryId: "43",
+    fullName: "Cloudgeni-ai/docs",
+    canonicalUrl: "https://github.com/Cloudgeni-ai/docs",
+  };
+  function serverWithRemoved(fetchImpl: () => Promise<Response>) {
+    return new GitHubRestMcpServer({
+      serverId: "github_personal",
+      authorityKind: "personal_oauth",
+      repositories: [repository, kept],
+      resolveAuthority: async (input) => {
+        if (input.repository.repositoryId === repository.repositoryId) {
+          throw new GitHubRestRepositoryDetachedError(
+            `${input.repository.fullName} was removed from this chat`,
+          );
+        }
+        return {
+          headers: { authorization: "Bearer secret" },
+          connectionId: repository.connectionId,
+          actor: { kind: "personal_oauth", login: "bendik" },
+          authorizeProviderRequest: async () => true,
+        };
+      },
+      fetchImpl,
+    });
+  }
+
+  test("refuses its tools before any provider call", async () => {
+    let calls = 0;
+    const server = serverWithRemoved(async () => {
+      calls += 1;
+      return response({ id: 42 });
+    });
+    const read = await server.callToolResult("repository_get", {
+      repository: repository.fullName,
+    });
+    expect(read.isError).toBe(true);
+    expect(read.content[0].text).toBe("Cloudgeni-ai/opengeni was removed from this chat");
+    const write = await server.callToolResult("issue_create", {
+      repository: repository.fullName,
+      title: "t",
+      body: "b",
+    });
+    expect(write.isError).toBe(true);
+    expect(calls).toBe(0);
+  });
+
+  test("leaves it out of repositories_list", async () => {
+    const server = serverWithRemoved(async () => response({}));
+    const listed = await server.callToolResult("repositories_list", {});
+    expect(
+      listed.structuredContent.repositories.map((entry: { fullName: string }) => entry.fullName),
+    ).toEqual(["Cloudgeni-ai/docs"]);
   });
 });
 

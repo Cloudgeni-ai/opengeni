@@ -89,10 +89,10 @@ ids `plugin:marketplace/<provider>/<name>`). When setup names a plugin, the
 agent asks for it with `capability_authorization_request` exactly as for a
 connector. The chat shows a plugin card with the agent's reason, who made the
 plugin and what it adds; **Review plugin** lists its Skills and MCP servers and
-installs it for the workspace. Installing needs the same `capabilities:manage`
-permission as the Plugins page. Someone without it sees that a workspace admin
-has to install it, and the agent is told the same, so it does not send them to
-the card. The agent continues once the plugin is installed, and a plugin that
+installs it for the workspace. Installing needs the same permission as the
+Plugins page: `connections:write`, which members hold, or `capabilities:manage`.
+Someone without it sees that they can't install it here, and the agent is told
+the same, so it does not send them to the card. The agent continues once the plugin is installed, and a plugin that
 is already installed shows as done.
 
 Templates are stored per workspace (`bot_templates`, visibility in migration
@@ -100,9 +100,13 @@ Templates are stored per workspace (`bot_templates`, visibility in migration
 shared with the workspace, so everyone can start bots from it, or **Only me**,
 so only whoever saved it can see, find or use it. A template the agent saves
 from an Only me chat is Only me; one saved from a shared chat is shared. People
-choose in the template dialog and can change it later. Whoever saved a shared
-template, a workspace admin, or a workspace-level (service) caller may change
-or delete it; an Only me template belongs to the person who saved it. Routes:
+choose in the template dialog and can change it later. A shared template is
+shared work, like a shared Skill or Site: anyone who may start chats in the
+workspace (`sessions:create`) may change or delete it, but only whoever saved
+it or a workspace admin may make it Only me; each template's
+`viewerCanMakePrivate` says whether the reader may, and the Edit dialog offers
+Only me only then. An Only me template belongs to the
+person who saved it. Routes:
 
 | Route | Needs |
 | --- | --- |

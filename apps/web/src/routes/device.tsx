@@ -25,10 +25,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { Input } from "@opengeni/react/ui/input";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import {
-  hasAccountPermission,
-  lacksWorkspacePermission,
-} from "@opengeni/react/app/lib/permissions";
+import { deviceApprovalScopes } from "@/lib/device-approval-scopes";
 
 /** The code the agent prints, e.g. `WXYZ-1234`. We do not enforce the exact
  * shape (the server is authoritative) — we just trim + uppercase what the user
@@ -181,24 +178,19 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
     );
   }
 
+  const scopes = deviceApprovalScopes({
+    accessContext,
+    clientConfig,
+    workspaceId: lookup?.workspaceId ?? null,
+  });
   return (
     <DeviceShell>
       <EnrollmentConsent
         userCode={lookup ? lookup.userCode : userCode}
         machine={lookup ? toConsentMachine(lookup.machine) : EMPTY_MACHINE}
         phase={phase}
-        allowWorkspaceScope={
-          !lookup ||
-          !lacksWorkspacePermission(accessContext, lookup.workspaceId, "enrollments:manage")
-        }
-        allowOrganizationScope={Boolean(
-          lookup &&
-          accessContext.workspaceGrants.some(
-            (grant) =>
-              grant.workspaceId === lookup.workspaceId &&
-              hasAccountPermission(accessContext, grant.accountId, "account:admin"),
-          ),
-        )}
+        allowWorkspaceScope={scopes.workspace}
+        allowOrganizationScope={scopes.organization}
         onApprove={(allowScreenControl, scope) => void approve(allowScreenControl, scope)}
         onDeny={() => void deny()}
         errorMessage={errorMessage}

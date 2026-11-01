@@ -260,11 +260,13 @@ export function SuperGrokAccessPage({
   grok,
   accountId,
   client,
+  organizationName,
   onClose,
 }: {
   grok: SuperGrokSubscriptions;
   accountId: string;
   client: OpenGeniBrowserClient;
+  organizationName?: string | undefined;
   onClose: () => void;
 }) {
   const account = grok.accounts.find((candidate) => candidate.id === accountId);
@@ -279,6 +281,7 @@ export function SuperGrokAccessPage({
     <ConnectionAccessFormPage
       access={access}
       organization={Boolean(grok.organizationId)}
+      organizationName={organizationName}
       canManage={account ? managesSubscriptionAccount(grok, account) : grok.canManageAccounts}
       name={account ? superGrokAccountName(account) : "this account"}
       onClose={onClose}

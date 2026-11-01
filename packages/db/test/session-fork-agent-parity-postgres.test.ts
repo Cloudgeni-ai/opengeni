@@ -65,6 +65,9 @@ const COPIED = [
   // only to that same person's fork, a policy pin never does.
   "codex_pinned_credential_id",
   "codex_pin_source",
+  // The fork's first request repeats the source's history, so it keeps the
+  // source's search-record form (docs/web-search.md).
+  "search_records_as_input",
 ] as const;
 
 const fresh = (value: unknown) => () => value;
@@ -120,6 +123,12 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   resources: {
     why: "the source creator's credential bindings are stripped",
     expected: ({ source }) => source.resources,
+  },
+  // The fork routines start from the source row (migration 1140): a
+  // repository a person removed from the source stays removed in the fork.
+  removed_repositories: {
+    why: "the source's repository removals",
+    expected: ({ source }) => source.removed_repositories,
   },
   create_idempotency_key: { why: "the source's create request", expected: fresh(null) },
   agent_creation_attempt_id: { why: "the source's create request", expected: fresh(null) },
@@ -379,6 +388,7 @@ async function configuredSource(org: Org) {
   // Settings changed after creation carry over too.
   await shared.admin`update sessions set keep_live = true, title = 'Release plan',
     title_source = 'user', description = 'Owns the release checklist',
+    search_records_as_input = true,
     avatar = ${shared.admin.json({ kind: "emoji", emoji: "🚀", hue: 210 })}
     where id = ${session.id}`;
   return session.id;
@@ -497,6 +507,7 @@ describe("a fork is the same agent as its source", () => {
       "keep_live",
       "instructions",
       "max_nested_agent_depth_override",
+      "search_records_as_input",
     ]) {
       expect({ column, value: source[column] }).not.toEqual({ column, value: blank[column] });
     }

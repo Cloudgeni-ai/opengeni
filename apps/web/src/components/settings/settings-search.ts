@@ -34,6 +34,17 @@ interface SettingsTopic {
 const PAGE_KEYWORDS: Record<string, readonly string[]> = {
   "workspace:general": ["workspace name", "workspace id", "preferences"],
   "workspace:access": ["people", "members", "invite", "permissions", "roles", "share"],
+  "workspace:available": [
+    "available",
+    "shared",
+    "owner",
+    "who manages",
+    "organization",
+    "model accounts",
+    "machines",
+    "vaults",
+    "connectors",
+  ],
   "workspace:learning": ["knowledge", "skills", "instructions", "memory", "review", "learn"],
   "workspace:usage": ["budget", "spend", "limit", "monthly", "cost"],
   "workspace:api-keys": ["token", "bearer", "sdk", "key"],
@@ -48,6 +59,12 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "one-time codes",
     "totp",
     "credentials",
+    "linked vaults",
+    "managed vault",
+    "1password",
+    "bitwarden",
+    "proton pass",
+    "keeper",
   ],
   "workspace:/workspaces/$workspaceId/rigs": ["sandbox", "rigs", "docker", "image", "setup script"],
   "workspace:/workspaces/$workspaceId/machines": [
@@ -72,11 +89,29 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "speech to text",
     "shortcut",
     "privacy",
+    "control the screen",
   ],
   "organization:general": ["organization name", "organization id", "rename organization"],
   "organization:people": ["members", "invite", "roles", "owner", "admin", "team"],
   "organization:workspaces": ["new workspace", "create workspace", "delete workspace"],
-  "organization:identity": ["mission", "company profile", "about", "documents"],
+  "organization:identity": [
+    "identity and mission",
+    "mission",
+    "company profile",
+    "about",
+    "documents",
+  ],
+  "organization:shared": [
+    "shared",
+    "available",
+    "where it works",
+    "organization vaults",
+    "organization machines",
+    "rigs",
+    "skills",
+    "knowledge",
+    "reach",
+  ],
   "organization:models": [
     "default model",
     "providers",
@@ -105,7 +140,16 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
     "install",
   ],
   "organization:insights": ["usage", "spend", "tokens", "cost", "analytics"],
-  "organization:billing": ["credits", "payments", "invoices", "top up", "budgets", "plan", "card"],
+  "organization:billing": [
+    "credits",
+    "payments",
+    "invoices",
+    "top up",
+    "budgets",
+    "plan",
+    "your plan",
+    "card",
+  ],
   "organization:developer": [
     "api keys",
     "organization api keys",
@@ -125,6 +169,7 @@ const PAGE_KEYWORDS: Record<string, readonly string[]> = {
   ],
   "account:security": [
     "password",
+    "passkeys",
     "sign-in methods",
     "google",
     "github",
@@ -171,6 +216,10 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
         "push to talk",
       ],
     },
+    {
+      label: "Offer to record calls",
+      keywords: ["meetings", "record meetings", "call recording", "zoom", "teams"],
+    },
   ],
   "workspace:developer": [
     { label: "Add webhook", keywords: ["events", "callback"], search: { view: "new-webhook" } },
@@ -192,7 +241,18 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
       keywords: ["install", "server url", "claude code", "cursor", "codex", "coding agents"],
     },
   ],
-  "organization:billing": [{ label: "Buy credits", keywords: ["top up", "payment"] }],
+  "organization:models": [
+    { label: "Default voice model", keywords: ["voice", "realtime", "speech"] },
+    { label: "ElevenLabs", keywords: ["voice", "text to speech", "tts"] },
+  ],
+  "organization:billing": [
+    { label: "Add credits", keywords: ["buy credits", "top up", "payment"] },
+    { label: "Promo code", keywords: ["coupon", "redeem", "discount"] },
+    { label: "Invoices and payment details", keywords: ["receipts", "payment method", "card"] },
+    { label: "Workspace budgets", keywords: ["budget", "spend limit", "monthly"] },
+    // On a workspace's budget page, under Workspace budgets.
+    { label: "Member limits", keywords: ["member budget", "per person limit", "spend limit"] },
+  ],
   "organization:developer": [
     {
       label: "Create organization API key",
@@ -203,15 +263,50 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
     { label: "Service accounts", keywords: ["bot", "machine user"] },
   ],
   "organization:security": [
-    { label: "Data retention", keywords: ["retention", "delete data"] },
+    // As the page names them, in page order, with the words people use for them.
+    {
+      label: "EU-only inference",
+      keywords: [
+        "eu",
+        "eu-only",
+        "europe",
+        "european union",
+        "data residency",
+        "residency",
+        "region",
+        "gdpr",
+        "location",
+        "data location",
+      ],
+    },
+    { label: "Personal workspaces", keywords: ["private workspace", "chats and automations"] },
+    {
+      label: "Only me chats and automations",
+      keywords: ["private chats", "private automations", "visibility"],
+    },
+    {
+      label: "New chats and automations",
+      keywords: ["default visibility", "who can see", "sharing"],
+    },
+    { label: "Admins see Only me automations", keywords: ["private automations", "visibility"] },
     {
       label: "Actions in chat",
       keywords: ["agents", "confirm", "invite", "share", "settings in chat"],
     },
     { label: "Full access for agent sessions", keywords: ["agents", "admin", "elevate"] },
+    {
+      label: "Members connect their own machines",
+      keywords: ["own machines", "connected machines", "computers", "servers", "connect a machine"],
+    },
+    {
+      label: "Keep a removed person's data",
+      keywords: ["data retention", "retention", "delete data", "removed people", "offboarding"],
+    },
+    { label: "Recovery contacts", keywords: ["recovery", "lost access", "owners"] },
   ],
   "account:security": [
     { label: "Password", keywords: ["change password", "sign in"] },
+    { label: "Passkeys", keywords: ["passkey", "face id", "touch id", "security key", "sign in"] },
     { label: "Analytics preferences", keywords: ["privacy", "tracking", "cookies"] },
   ],
 };

@@ -2,10 +2,48 @@ import { describe, expect, test } from "bun:test";
 import type { Session } from "@opengeni/contracts";
 import {
   buildSlackAppHomeAccessBlocks,
+  buildSlackAppHomeAgentBlocks,
   buildSlackAppHomeBlocks,
   isSlackAppHomeLinkAction,
   slackAppHomeOpenedEvent,
 } from "../src/integrations/slack-app-home";
+
+describe("Slack App Home agent directory", () => {
+  test("is empty without agents, so Home is unchanged", () => {
+    expect(buildSlackAppHomeAgentBlocks([])).toEqual([]);
+    const sessions: Session[] = [];
+    expect(
+      buildSlackAppHomeBlocks({ sessions, workspaceUrl: null, sessionUrl: () => null, agents: [] }),
+    ).toEqual(buildSlackAppHomeBlocks({ sessions, workspaceUrl: null, sessionUrl: () => null }));
+  });
+
+  test("lists each agent with its icon and how to call it, first on Home", () => {
+    const blocks = buildSlackAppHomeAgentBlocks([
+      {
+        id: "agent-1",
+        name: "Data <Team>",
+        description: "Answers revenue questions.",
+        call: "@Opengeni +data-team",
+        iconUrl: "https://example.test/icon.png",
+      },
+      {
+        id: "agent-2",
+        name: "Ops",
+        description: "Handles incidents.",
+        call: "@Opengeni +ops",
+        iconUrl: null,
+      },
+    ]);
+    expect(blocks[0]).toMatchObject({ type: "header", text: { text: "Agents you can ask" } });
+    expect(blocks[1]).toMatchObject({
+      type: "section",
+      text: { text: "*Data &lt;Team&gt;*\nAnswers revenue questions.\n`@Opengeni +data-team`" },
+      accessory: { type: "image", image_url: "https://example.test/icon.png" },
+    });
+    expect(blocks[2]).not.toHaveProperty("accessory");
+    expect(blocks.at(-1)).toEqual({ type: "divider" });
+  });
+});
 
 describe("Slack App Home projection", () => {
   test("accepts only bounded home-tab event callbacks", () => {

@@ -459,6 +459,9 @@ class BackgroundCommandWaitModel implements Model {
           functionCall("exec_command", {
             cmd: `sleep ${sleepSeconds ?? "5"}; echo bgwait-finished`,
             yield_time_ms: 250,
+            // Deliberately backgrounded: without it, a command this short
+            // finishes inside the exec_command call's finish floor.
+            background: true,
             max_output_tokens: 200,
           }),
         ],

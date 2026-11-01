@@ -3,6 +3,7 @@ import {
   INTERACTION_SECRET_MASK_OPTIONS,
   type InteractionSecretValues,
   SecretValueMemory,
+  maskSecretValues,
 } from "@opengeni/contracts";
 
 /** Most distinct secret values one controller remembers; the oldest drop first. */
@@ -12,13 +13,23 @@ const MAX_REMEMBERED_SECRETS = 256;
  * only once a secret is typed into it, and never leaves while the process
  * runs: it can be reattached at any time, and dropping its values would show
  * them again. */
-const sessions = new Map<string, SecretValueMemory>();
+type SessionSecrets = {
+  memory: SecretValueMemory;
+  paymentTargets: Set<string>;
+  /** Card numbers and security codes must not age out behind other values. */
+  paymentValues: Set<string>;
+};
+const sessions = new Map<string, SessionSecrets>();
 
 function newMemory(): SecretValueMemory {
   return new SecretValueMemory({
     ...INTERACTION_SECRET_MASK_OPTIONS,
     maxEntries: MAX_REMEMBERED_SECRETS,
   });
+}
+
+function newSessionSecrets(): SessionSecrets {
+  return { memory: newMemory(), paymentTargets: new Set(), paymentValues: new Set() };
 }
 
 /**
@@ -34,10 +45,28 @@ function newMemory(): SecretValueMemory {
  *
  * This is the shared known-value `SecretValueMemory` (the one agent tool
  * results use) with the interaction options: `[secret]` as the label, a
- * four-character minimum and identifier keys left alone.
+ * three-character minimum (including CVCs) and identifier keys left alone.
  */
 export class TypedSecretMemory {
-  private localMemory: SecretValueMemory | null = null;
+  private localState: SessionSecrets | null = null;
+
+  protectPaymentImages(targetId: string): void {
+    this.state(true)!.paymentTargets.add(targetId);
+  }
+
+  paymentImagesProtected(targetId: string): boolean {
+    return this.state(false)?.paymentTargets.has(targetId) === true;
+  }
+
+  containsPaymentValue(candidate: unknown): boolean {
+    const entries = [...(this.state(false)?.paymentValues ?? [])]
+      .filter((value) => value.length >= 12)
+      .map((value) => ({ value, label: INTERACTION_REDACTED_SECRET }));
+    return (
+      entries.length > 0 &&
+      maskSecretValues(candidate, entries, INTERACTION_SECRET_MASK_OPTIONS) !== candidate
+    );
+  }
 
   /** A memory of its own (tests, one-off use); forSession shares one per session. */
   constructor(private readonly sessionKey: string | null = null) {}
@@ -47,17 +76,28 @@ export class TypedSecretMemory {
     return new TypedSecretMemory(`${kind}:${sessionId}`);
   }
 
-  private memory(create: boolean): SecretValueMemory | null {
+  private state(create: boolean): SessionSecrets | null {
     if (this.sessionKey === null) {
-      if (create && this.localMemory === null) this.localMemory = newMemory();
-      return this.localMemory;
+      if (create && this.localState === null) this.localState = newSessionSecrets();
+      return this.localState;
     }
-    let memory = sessions.get(this.sessionKey) ?? null;
-    if (memory === null && create) {
-      memory = newMemory();
-      sessions.set(this.sessionKey, memory);
+    let state = sessions.get(this.sessionKey) ?? null;
+    if (state === null && create) {
+      state = newSessionSecrets();
+      sessions.set(this.sessionKey, state);
     }
-    return memory;
+    return state;
+  }
+
+  private entries() {
+    const state = this.state(false);
+    return [
+      ...(state?.memory.entries() ?? []),
+      ...[...(state?.paymentValues ?? [])].map((value) => ({
+        value,
+        label: INTERACTION_REDACTED_SECRET,
+      })),
+    ];
   }
 
   remember(secretValues: InteractionSecretValues | undefined): void {
@@ -66,18 +106,23 @@ export class TypedSecretMemory {
     // its field, after the action that typed it.
     for (const value of Object.values(secretValues)) {
       if (value.length < INTERACTION_SECRET_MASK_OPTIONS.minChars!) continue;
-      this.memory(true)?.remember(value, INTERACTION_REDACTED_SECRET);
+      const state = this.state(true)!;
+      state.memory.remember(value, INTERACTION_REDACTED_SECRET);
+      // These came from an explicit secret use or primary password/payment
+      // field discovery, never from arbitrary hidden/private page metadata.
+      const digits = value.replace(/[\s-]/gu, "");
+      if (/^(?:[0-9]{3,4}|[0-9]{12,19})$/u.test(digits)) state.paymentValues.add(digits);
     }
   }
 
   /** The remembered values plus any currently supplied ones, in the shape
    * redactInteractionSecretValues takes; undefined when there are none. */
   merged(current?: InteractionSecretValues): InteractionSecretValues | undefined {
-    const memory = this.memory(false);
-    if (memory === null || memory.size === 0) return current;
+    const entries = this.entries();
+    if (entries.length === 0) return current;
     const merged: Record<string, string> = {};
     let index = 0;
-    for (const { value } of memory.entries()) merged[`remembered:${index++}`] = value;
+    for (const { value } of entries) merged[`remembered:${index++}`] = value;
     if (current !== undefined) {
       for (const [key, secret] of Object.entries(current)) merged[`current:${key}`] = secret;
     }
@@ -90,7 +135,9 @@ export class TypedSecretMemory {
       value: secret,
       label: INTERACTION_REDACTED_SECRET,
     }));
-    const memory = this.memory(false) ?? newMemory();
-    return memory.maskWith(value, extra, "interaction");
+    // Browser output is a security boundary: unlike best-effort masking in
+    // general telemetry, a masking error must withhold the result, not return
+    // the original plaintext. The pure engine propagates such failures.
+    return maskSecretValues(value, [...this.entries(), ...extra], INTERACTION_SECRET_MASK_OPTIONS);
   }
 }

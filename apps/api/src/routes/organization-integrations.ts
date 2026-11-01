@@ -33,6 +33,7 @@ import {
   getOrganizationWebhook,
   listOrganizationWebhookDeliveries,
   listOrganizationWebhooks,
+  OrganizationIntegrationWorkspaceError,
   OrganizationWebhookLimitError,
   redeliverOrganizationWebhookDelivery,
   rotateOrganizationCredentialProviderSecret,
@@ -114,6 +115,8 @@ function providerProjection(
     ...integrationProviderFields(row),
     organizationId: row.accountId,
     workspaceFilter: row.workspaceFilter,
+    allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+    allowedWorkspaceIds: row.allowedWorkspaceIds,
   });
 }
 function webhookProjection(row: OrganizationWebhookRow): OrganizationWebhook {
@@ -121,7 +124,19 @@ function webhookProjection(row: OrganizationWebhookRow): OrganizationWebhook {
     ...integrationWebhookFields(row),
     organizationId: row.accountId,
     workspaceFilter: row.workspaceFilter,
+    allowedWorkspaceIds: row.allowedWorkspaceIds,
   });
+}
+
+/** A picked workspace that isn't one of the organization's shared workspaces is a 422. */
+async function withPickedWorkspaces<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    if (error instanceof OrganizationIntegrationWorkspaceError)
+      throw new HTTPException(422, { message: error.message });
+    throw error;
+  }
 }
 
 export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -176,20 +191,26 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
       row: providerRow,
       secret: signingSecret,
       created,
-    } = await withCredentialProviderConfigurationLock(deps.db, target, async (tx) => {
-      const existing = await getOrganizationCredentialProvider(tx, target);
-      const secret = existing ? undefined : newIntegrationSecret("ogcp");
-      const row = await upsertOrganizationCredentialProvider(tx, {
-        accountId: target.accountId,
-        url: request.url,
-        enabled: request.enabled ?? true,
-        timeoutMs: request.timeoutMs ?? 10_000,
-        workspaceFilter: request.workspaceFilter,
-        createdBySubjectId: target.subjectId,
-        ...(secret ? { secretEncrypted: encrypted(secret) } : {}),
-      });
-      return { row, secret, created: !existing };
-    });
+    } = await withPickedWorkspaces(() =>
+      withCredentialProviderConfigurationLock(deps.db, target, async (tx) => {
+        const existing = await getOrganizationCredentialProvider(tx, target);
+        const secret = existing ? undefined : newIntegrationSecret("ogcp");
+        const row = await upsertOrganizationCredentialProvider(tx, {
+          accountId: target.accountId,
+          url: request.url,
+          enabled: request.enabled ?? true,
+          timeoutMs: request.timeoutMs ?? 10_000,
+          workspaceFilter: request.workspaceFilter,
+          allowPersonalWorkspaces: request.allowPersonalWorkspaces ?? false,
+          ...(request.allowedWorkspaceIds !== undefined
+            ? { allowedWorkspaceIds: request.allowedWorkspaceIds }
+            : {}),
+          createdBySubjectId: target.subjectId,
+          ...(secret ? { secretEncrypted: encrypted(secret) } : {}),
+        });
+        return { row, secret, created: !existing };
+      }),
+    );
     return c.json(
       PutOrganizationCredentialProviderResponse.parse({
         provider: providerProjection(providerRow),
@@ -229,16 +250,19 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
     requireUrl(request.url);
     const secret = newIntegrationSecret("whsec");
     try {
-      const row = await createOrganizationWebhook(deps.db, {
-        accountId: target.accountId,
-        url: request.url,
-        secretEncrypted: encrypted(secret),
-        eventTypes: request.eventTypes,
-        enabled: request.enabled ?? true,
-        description: request.description ?? null,
-        workspaceFilter: request.workspaceFilter,
-        createdBySubjectId: target.subjectId,
-      });
+      const row = await withPickedWorkspaces(() =>
+        createOrganizationWebhook(deps.db, {
+          accountId: target.accountId,
+          url: request.url,
+          secretEncrypted: encrypted(secret),
+          eventTypes: request.eventTypes,
+          enabled: request.enabled ?? true,
+          description: request.description ?? null,
+          workspaceFilter: request.workspaceFilter,
+          allowedWorkspaceIds: request.allowedWorkspaceIds ?? null,
+          createdBySubjectId: target.subjectId,
+        }),
+      );
       return c.json(
         CreateOrganizationWebhookResponse.parse({ webhook: webhookProjection(row), secret }),
         201,
@@ -262,17 +286,22 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
     const target = await scope(c);
     const request = await body(c, UpdateOrganizationWebhookRequest, 422);
     if (request.url) requireUrl(request.url);
-    const row = await updateOrganizationWebhook(deps.db, {
-      accountId: target.accountId,
-      webhookId: webhookId(c),
-      ...(request.url !== undefined ? { url: request.url } : {}),
-      ...(request.eventTypes !== undefined ? { eventTypes: request.eventTypes } : {}),
-      ...(request.enabled !== undefined ? { enabled: request.enabled } : {}),
-      ...(request.description !== undefined ? { description: request.description } : {}),
-      ...(request.workspaceFilter !== undefined
-        ? { workspaceFilter: request.workspaceFilter }
-        : {}),
-    });
+    const row = await withPickedWorkspaces(() =>
+      updateOrganizationWebhook(deps.db, {
+        accountId: target.accountId,
+        webhookId: webhookId(c),
+        ...(request.url !== undefined ? { url: request.url } : {}),
+        ...(request.eventTypes !== undefined ? { eventTypes: request.eventTypes } : {}),
+        ...(request.enabled !== undefined ? { enabled: request.enabled } : {}),
+        ...(request.description !== undefined ? { description: request.description } : {}),
+        ...(request.workspaceFilter !== undefined
+          ? { workspaceFilter: request.workspaceFilter }
+          : {}),
+        ...(request.allowedWorkspaceIds !== undefined
+          ? { allowedWorkspaceIds: request.allowedWorkspaceIds }
+          : {}),
+      }),
+    );
     if (!row) throw new HTTPException(404, { message: "Webhook not found" });
     return c.json(webhookProjection(row));
   });

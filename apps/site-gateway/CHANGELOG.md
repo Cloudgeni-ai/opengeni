@@ -1,5 +1,69 @@
 # @opengeni/site-gateway
 
+## 0.1.28
+
+### Patch Changes
+
+- Updated dependencies [1f918a4]
+- Updated dependencies [92f419c]
+- Updated dependencies [000c023]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [b4e780e]
+- Updated dependencies [06adef4]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [894121c]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a853c7a]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [237329e]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [d55f740]
+- Updated dependencies [cdb9d27]
+- Updated dependencies [0d409a7]
+- Updated dependencies [cfce969]
+- Updated dependencies [df44bd8]
+- Updated dependencies [cf9415d]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [af8a173]
+  - @opengeni/contracts@6.4.0
+  - @opengeni/sdk@6.4.0
+
+## 0.1.27
+
+### Patch Changes
+
+- d9b9b0a: Large Sites open instead of failing with Cloudflare's "Error 1102 Worker exceeded resource limits". The gateway used to hold a Site's page as several full copies while adding the bridge bootstrap, resolving the client script tag and hashing it for the ETag, so a 65 MB page with inlined media ran past the Worker's memory limit. The page is now streamed through a bounded rewrite that holds only the leading head and short client-script tags, its ETag comes from the Site, version and gateway runtime instead of the body (a 304 still needs an edge-cache hit or the API's answer), and the edge cache is filled from a backpressured tee. A page the API reports as over 256 MB gets a clear "Site too large" page (one that runs past it while streaming is cut off and never cached), any unexpected gateway error shows a plain "Something went wrong" page instead of Cloudflare's, and the report form reads at most its size cap.
+- Updated dependencies [d5db2de]
+- Updated dependencies [d91058a]
+- Updated dependencies [b5c112c]
+- Updated dependencies [32bc3e9]
+- Updated dependencies [923c161]
+- Updated dependencies [ced76d5]
+- Updated dependencies [40b79c9]
+- Updated dependencies [d872b12]
+- Updated dependencies [d010825]
+- Updated dependencies [c35704f]
+- Updated dependencies [c0b945b]
+- Updated dependencies [008d073]
+- Updated dependencies [d0295f8]
+- Updated dependencies [e8b24d1]
+- Updated dependencies [f4ad926]
+- Updated dependencies [e53c5ad]
+- Updated dependencies [a550481]
+- Updated dependencies [af8fb16]
+- Updated dependencies [139a2be]
+- Updated dependencies [1afdda0]
+  - @opengeni/sdk@6.3.0
+  - @opengeni/contracts@6.3.0
+
 ## 0.1.26
 
 ### Patch Changes

@@ -20,11 +20,26 @@ share, unshare or delete it.
 
 A recording is stored in the workspace it was recorded in, and a shared one
 stays there. A signed-in person's (`user:`) own Only me meetings are theirs
-across their organization: every workspace of the same organization they
-belong to, their Personal workspace included, lists them in
-`GET …/recordings` (and agents acting for them find them with
-`meetings_search`), each marked with `sourceWorkspace` (`{ id, name }`, the
-storing workspace; `recordedIn` for agents). They open in place: every
+across their organization, where they turn them on. An Only me meeting always
+works in the workspace that stores it and in its owner's Personal workspace;
+`reachWorkspaceIds` lists the owner's other workspaces of the same
+organization where it also works, and `null` means every workspace they
+belong to, new ones included. A new meeting starts with an empty list;
+meetings recorded before the list existed are `null`, so they keep showing
+everywhere they did. Only the owner changes it, with
+`PATCH …/recordings/:recordingId` and `{ reachWorkspaceIds }`, from any
+workspace where they can change the meeting; each id must be a workspace of
+the organization they belong to (400 otherwise), and the storing workspace and
+their Personal workspace are dropped from the stored list. In the React
+Meetings page this is **Available in…** in the meeting's menu, when the host
+passes `reachWorkspaces`. Turning it on somewhere never shares it: there too,
+only its owner and agent turns they start can use it. Shared meetings ignore
+the list.
+
+Every workspace where a person's Only me meeting works lists it in
+`GET …/recordings` (and agents acting for them find it with
+`meetings_search`), marked with `sourceWorkspace` (`{ id, name }`, the
+storing workspace; `recordedIn` for agents). It opens in place: every
 `…/recordings/:recordingId` route reads and changes them in the storing
 workspace, as the person, so transcript, notes, speakers and re-runs work from
 any of those workspaces, and the React Meetings pages label them with where
@@ -48,6 +63,43 @@ language out to use the workspace's. `GET …/recording-models` returns the
 workspace's as `language` (null detects), and the React recorder starts on it
 unless the host passes `defaultLanguage`. Naming the language matters for
 close languages: without it, Norwegian can come back as Danish or Swedish.
+
+## Names
+
+Nobody has to name a meeting. Each recording keeps where its `title` came
+from as `titleSource`, and a title from a better source replaces one from a
+weaker source, in this order:
+
+1. `person`: someone typed or chose it, at start (`title` on create) or by
+   renaming it (`PATCH …/recordings/:recordingId`). Nothing replaces it.
+2. `calendar`: the event on the owner's own connected calendar at the time
+   the recording started. The create request looks it up when it has no
+   `title` from a person, in the owner's personal Google Calendar connection
+   (when the deployment enables Google Calendar) and Outlook Calendar
+   (Microsoft Graph with a `Calendars.Read` or `Calendars.ReadWrite` grant).
+   It picks an event under way at the start, or starting within ten minutes,
+   nearest to the start; it skips all-day, out-of-office, focus-time and
+   working-location events, ones the owner declined or that were cancelled,
+   and private or confidential ones, whose names must not reach a meeting
+   others may see. The lookup is bounded to three seconds and any failure
+   leaves the title as it was. Capture runs before the server has the
+   recording, so it never delays recording; the recorder shows the name
+   once the server has it (`serverTitle` in the upload status).
+3. `conversation`: written with the meeting's notes. The built-in summary
+   (below) passes a short name to `meeting_notes_save` as `title`, in the
+   meeting's language; it is kept only while the title is from a weaker
+   source. Any agent saving notes may pass one under the same rule.
+4. `app`: a guess by the recording app, such as "Zoom meeting" from the
+   desktop app's call detection (`titleSource: "app"` on create).
+5. `default`: none was given. The server stores `Recording 2026-10-30 13:51
+   UTC`, and the React pages show it as the viewer's local "Meeting, 30 Oct,
+   13:51".
+
+Rows from before `titleSource` existed (migration 1132) are `person`, so
+nothing renames them. Meeting window and browser tab titles are not read:
+on macOS that needs the Screen Recording or Accessibility permission, which
+the recorder otherwise never asks for, and most call apps' titles don't name
+the meeting.
 
 ## Capture contract
 
@@ -277,6 +329,28 @@ Native screens:
   knows the workspace.
 - `MeetingsList`: the recorder plus the list. `useMeetingView`: one
   meeting's transcript, player and actions, for a screen of your own.
+- Meetings from audio recorded elsewhere. A phone app can't record the other
+  side of a phone call, but the phone's own call recording can be brought in:
+  on iPhone the Phone app's record button saves the call to Notes, and on
+  Android the phone app saves it as a file. The person shares that recording
+  (or a voice memo, or any M4A, AAC, WebM or Ogg file) to the app, and it
+  becomes a meeting with a transcript and notes. It is saved on the phone first
+  and uploaded in the background, like a recording made in the app, and it is
+  placed at the time the file says it was recorded. To set it up:
+  - Add `audioImport: true` to the config plugin's options. On iOS the app
+    then accepts audio documents, so the share sheet offers it. On Android it
+    shows under "Open with" for audio files.
+  - Mount `useSharedAudioImport({ onImported, onError })` once inside
+    `MeetingRecorderProvider`. It takes the file the app was opened with,
+    files shared while it runs, and any file iOS left in the app's
+    Documents/Inbox before the app could take it.
+  - With expo-router, return `sharedAudioRedirect(path) ?? path` from
+    `redirectSystemPath` in `app/+native-intent.tsx`. That way a shared file
+    opens Meetings rather than an unknown screen.
+
+  `MeetingsList` also has an Import a recording button that does the same
+  with a picked file. `useRecorder().importAudio` (React) and
+  `uploadRecordingAudio` (SDK) are the same step for a host's own UI.
 
 The SDK client uses the web platform's `crypto` (request ids and upload
 checksums), which Hermes doesn't have. Mount the recorder inside
@@ -328,10 +402,161 @@ Opengeni, and the workspace's provider key never reaches the device:
 3. Finished stretches of text are saved with `POST …/live-segments`
    (`{ trackNumber, streamedMilliseconds, segments }`, at most 100 per call).
    A segment number sent again keeps its first copy, and the streamed time
-   (only ever raised) prices the track's `live.costUsd`.
+   (only ever raised) prices the track's `live.costUsd` at list price.
 4. Other viewers read them with `GET …/live-segments?after=<sequence>`, which
    returns the new segments, the `after` to pass next time, and `ended` once
    the transcript is ready. The saved live text is deleted then.
+
+### Live transcripts charged in credits
+
+A live model the deployment pays for (OpenAI or Azure OpenAI Realtime on the
+deployment's key) costs credits while credit billing is active. The payer is
+admitted before the grant is minted, so without credits `live-session`
+answers 402 ("Live transcript needs credits. Add credits to continue."), a
+usage limit 402 or 429, and credits turned off or an unidentified payer 403
+`policy_blocked`; the recorder stops asking. A live model with no credit
+price is listed `available: false` with `unavailableReason: "unpriced"`, and
+`live-session` answers 503 `model_unavailable` with `retryable: false`.
+Accounts on legacy billing (`OPENGENI_BILLING_LEGACY_ACCOUNT_IDS`) are
+neither admitted nor charged, and see no price for live-only models.
+
+Each `live-segments` save charges the track's audio from its charged mark
+(`recording_tracks.live_charged_milliseconds`) to its stored streamed total,
+at the model's voice price, as one unit named by both ends. The unit's usage
+receipt is recorded and the mark moved in the save's own transaction, with
+the text: overlapping saves (a retry after a lost response) wait on the
+recording's lock and charge only what the one before left, and a receipt
+that fails fails the save, which the recorder retries. The credit debit
+follows the commit with the same idempotency key; one that fails is applied
+from its receipt when the meeting is finalized, or by the workspace's next
+voice admission (dictation, voice input or another live session), within 3
+days. When the recorder stops, its last save is retried a few times, so the
+end of a meeting is charged too.
+
+`live.costUsd` is the list price of everything streamed, and
+`live_charged_cost_usd_micros` the list price of the part charged in credits;
+a usage allowance that prices unbilled use counts only the rest, so charged
+audio never counts twice (also when a track switches to a model not charged
+in credits). Audio streamed to a model not charged in credits moves the mark
+too.
+
+The audio goes from the device straight to the provider, so the charged
+duration is the recorder's own `streamedMilliseconds`, not something the
+server measured. The ledger records it with basis `client_reported_duration`.
+The server only lets the total grow, so retries and late saves never charge
+twice. The recorder reports its total about every minute while streaming
+(text or silence), when it pauses and resumes, and before asking for another
+session. A track charged in credits is bounded by those reports, with time
+measured between them so a pause never counts:
+
+- Of the time up to a report of more audio, at most that audio plus a minute
+  counts against the track (and at most 3 minutes), so a pause the recorder
+  didn't report doesn't count either; the time up to a report of no more
+  audio (a pause, or a session that never connected) doesn't, and a session
+  never reported on before the next request counts all its time up to that
+  request.
+- A track gets no more sessions once that time is ahead of its reported
+  audio by more than 10 minutes plus a quarter of it, once 4 of its sessions
+  went unreported, or after 20 sessions plus one for every 5 minutes it
+  reported (at most 100).
+- A provider session runs at most an hour (OpenAI and Azure end it then), so
+  time counts only within an hour of the latest session's start, and the
+  recorder asks for no new session while paused: a long pause counts at most
+  what is left of that hour, however long it lasts.
+- A session counts all it could run (its hour) up front against the
+  person's day. Each report, or the next request, swaps that for the time
+  the session actually left unaccounted plus what it could still run, so a
+  session nobody reports on, or one abandoned with a new recording, costs its
+  whole hour; a refusal leaves it counted, and a session the provider never
+  started gives it back. When a meeting ends, what its sessions could still
+  run stays counted, as the server can't tell a stopped recorder from one
+  still streaming.
+- The rest of the time between reports, which no reported audio accounts
+  for (pauses, sessions never reported on, and every minute beyond the
+  audio reported: the minute of slack is the track's alone, so a recorder
+  reporting a trickle of audio doesn't cover the time), adds up per person
+  and workspace, by the hour. A session is granted only if the person's
+  time in the last 24 hours, with the new session's hour counted, stays
+  within 4 hours plus six times the live audio charged in credits in those
+  hours; otherwise none of their tracks gets another session until older
+  hours drop out of the day. The charged audio keeps an honest day of
+  meetings going: a 10-minute meeting on two tracks leaves about 100
+  minutes of its sessions counted and charges 20 minutes, which allow 120
+  more, so meetings of about 9 minutes or longer never use the day up.
+  Session requests of the same person and workspace are handled one at a
+  time (as are saves on a session a previous release started, which has no
+  hour counted up front), so requests at the same moment can't run over the
+  bound. New
+  recordings don't reset it. The person is the human behind the request; a
+  personal API key or a delegated session acts as them. Organization and
+  workspace API keys record no person, so all of a workspace's keys share
+  one bound and a new key doesn't reset it (an integration that records for
+  its users should act as each user to get each their own). Pauses inside a session count, as the server can't tell
+  a pause from audio nobody reported while the provider session is open, so
+  a day with more of such pauses than the bound allows (for example a dozen
+  20-minute pauses, each shorter than the session's hour, with little audio
+  between them) loses the live preview for the rest of it; the recordings
+  and their transcripts are unaffected.
+
+A refused grant is a 409 (`live_grant_limit` or `live_streamed_behind`, "The
+live transcript stopped for this track. The recording continues and is
+transcribed when it ends."); the recording carries on. A session the
+provider fails to start isn't counted. An honest recorder isn't refused for
+silence, pauses (up to the daily bound) or quick pause and resume cycles.
+Accounts on legacy billing, and workspaces with credit billing off, aren't
+bounded.
+
+Residual risk, accepted for now: each grant still opens one provider
+session (up to the provider's hour) whose audio is only as metered as the
+recorder reports.
+
+- A modified client that reports its audio as paused (no more audio) while it
+  streams gets at most 4 hours of unpaid audio a day per person and
+  workspace (plus six times any audio it paid for) before the daily bound
+  stops it.
+- The bound is per person and workspace, not per billing account: other
+  people of the account (including each external user an organization key
+  acts as), and the same person's other workspaces, each have their own 4
+  hours, about $1.44 a day each at 6000 µ$ a minute. An account-wide sum
+  needs a SECURITY DEFINER database function, which a later release can add
+  (granting a new definer function to the runtime takes two releases).
+- Pauses inside an open session (shorter than its hour) count, as the server
+  can't tell them from audio nobody reported: a day with more of them than
+  the bound allows, for example a dozen 20-minute pauses with little audio
+  between them, loses the live preview; the recordings and their
+  transcripts are unaffected.
+- A client that asks for a new session while its earlier ones still run keeps
+  each running up to the provider's hour, counted only until the next
+  request, so parallel sessions are bounded only by a track's session limits
+  (20, plus one per 5 minutes reported).
+- The day grows by six times the audio charged in credits, so a client that
+  pays for some audio gets six times as much unaccounted: free provider time
+  is at most 4 hours plus six times what was paid. Meetings shorter than
+  about 9 minutes still leave more of their sessions counted than their
+  charged audio allows (a 5-minute meeting on two tracks nets about 50
+  minutes), so a day of many very short live meetings can still lose the
+  live preview.
+- Only time of tracks charged in credits is stored per hour. A session's
+  time stays in the hour it began in, so a report or request a day later
+  adds nothing to today for it, and a session that runs into the next hour
+  leaves the 24-hour window up to an hour early (slightly looser than
+  counting each minute in its own hour). Hours older than two days are removed on the
+  person's next write in that workspace (skipped while another request holds
+  them), not otherwise; they no longer count after a day either way.
+
+Telling an honest pause from a fake one needs a meter the client doesn't
+control, for example the server holding each provider session (and hanging
+it up on a pause or a new request) or reading the provider's own usage; that
+is follow-up work. A modified client that reports invented audio is charged
+for it. A save whose receipt never commits, after the recorder's last
+retries, leaves that last stretch unpaid, and a debit not reconciled within
+3 days stays a receipt without a ledger entry.
+
+Rollout: while pods of the previous release still serve during a deploy,
+a live save they handle stores the track's list-price total without moving
+the charged mark, so a usage allowance counts that audio at list price, and
+the next save on the new release charges it in credits as well. The overlap
+is limited to audio saved through old pods during the rollout.
 
 With a `system` track, the microphone's live text is under the recording
 owner's name (the person recording sees their own; others see the owner's
@@ -484,6 +709,22 @@ agreement. Speech the transcript left out is skipped rather than forced onto
 nearby words. The audio streams through window by window, so memory does
 not grow with the recording.
 
+The model only hears audio with sound in it. A stretch of 1.5 s or more
+below −55 dBFS (a microphone while its person listens, a call while nobody
+on it talks) is taken out but for half a second on either side, and the rest
+is joined up and scored as usual; the frames taken out read as silence, so
+no word can land in them. A pause inside a word also costs a little for
+each frame, so a word stays in one piece instead of starting on a sound long
+before the rest of it; pauses between words stay free. On 10 minutes of the
+AMI meeting corpus, aligned on one thread and scored against its manual word
+times:
+
+| Track | Words | CPU before → now | Starts within 100 ms | Within 500 ms | Words placed over 2 s |
+| --- | --- | --- | --- | --- | --- |
+| One person's headset, quiet 90% of the time | 161 | 184 s → 56 s | 67.7% → 76.4% | 78.9% → 90.1% | 9 → 0 |
+| The other three people mixed, as a call track | 945 | 172 s → 147 s | 84.3% → 84.8% | 96.9% → 97.6% | 8 → 0 |
+| The room mix, everyone | 1,106 | 180 s → 156 s | 76.9% → 81.4% | 88.7% → 96.1% | 14 → 0 |
+
 The worker image ships the model as `alignment.onnx` and
 `alignment-tokens.txt` (with its license) next to the speaker models,
 pinned by checksum.
@@ -501,8 +742,9 @@ desktop CPU with 8 threads:
 Words spoken over another speaker align worst (63% within 100 ms on the
 36-minute meeting, against 89% for the rest), mostly where the transcript
 leaves the crosstalk out; their low `score` marks them. Alignment takes
-about 0.6 CPU-seconds per second of audio (about 70 CPU-minutes for a
-two-hour meeting) and about 0.95 GB of memory whatever the length.
+about 0.6 CPU-seconds per second of sounding audio on 8 threads and 0.3 on
+one (about 70 or 36 CPU-minutes for two hours with no quiet stretches), and
+about 0.95 GB of memory whatever the length.
 
 `opengeni-speakers align --words FILE` reads a JSON array of words and 16
 kHz mono f32 audio on stdin or from `--input`, and prints each word's
@@ -698,6 +940,17 @@ text as plain text, never as a link. Copy on the Summary copies the Markdown
 with each mention replaced by its current name. Write a plain name, not a
 mention, for anyone who isn't a speaker or in the directory.
 
+Speaker labels belong to one transcript version, and a new version numbers
+its voices afresh. So when another version becomes the shown one (a re-run
+completes, or someone switches versions), each `speaker:` link in the notes
+moves to the label whose speech overlaps most of its own, the way names carry
+over; a track label such as `track-0` stays itself. A link whose voice has no
+counterpart becomes its plain link text, so a link never names a voice it
+wasn't written about. `person:` links never change. This rewrite is a new
+notes revision with a `recording.notes.updated` event (its `sessionId` is
+null), so an edit made against the old text is refused, but it keeps who
+wrote the notes and when.
+
 The standalone `MeetingNotes` section doesn't load the speakers and people,
 so there every mention shows its link text as plain text; chips and Copy are
 on `MeetingDetailPage`.
@@ -719,7 +972,8 @@ version never starts two (the chat is keyed by the version).
   has to ask.
 - **What it may do.** Only read that one meeting and save that meeting's
   notes. The chat has no sandbox, resources, Skills or other servers, and
-  its only tools are `meeting_read` and `meeting_notes_save`. Session
+  its only meeting tools are `meeting_read` and `meeting_notes_save`, plus
+  the runtime's `wait_for_input` and `privacy_facts`. Session
   creation refuses any other chat that claims to be a meeting summary, and
   the database's private-chat guard (migration 1005) accepts an Only me one
   only for the owner of that Only me meeting. It keeps that shape for its
