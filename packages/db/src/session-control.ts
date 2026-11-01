@@ -2714,6 +2714,10 @@ async function registerInterruptionWakes(
  * cannot discover them. Signal-with-start is intentional here: a closed
  * workflow cheaply re-reads the terminal row and exits, while an open workflow
  * is released from an otherwise unbounded durable wait.
+ *
+ * A sub-chat whose content is already stored (or being stored) has no
+ * workflow left to release and refuses new wakes, so it is left out; without
+ * that, cancelling an archived chat with a stored sub-chat failed outright.
  */
 async function registerCancellationWakes(
   db: Database,
@@ -2735,6 +2739,7 @@ async function registerCancellationWakes(
       from ${schema.sessions} session
       where session.workspace_id = ${input.workspaceId}
         and session.id in (${sessionIds})
+        and session.content_archive_state is null
     ), upserted as (
       insert into ${schema.sessionWorkflowWakeOutbox} (
         session_id, account_id, workspace_id, temporal_workflow_id, reason, control_revision
