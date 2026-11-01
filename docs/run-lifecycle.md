@@ -3743,9 +3743,29 @@ to active with its provider proof intact; the reaper defers that exact proof and
 never repeats provider execution.
 `command_read` returns command-specific bounded retained output and current
 status with a continuation cursor; reads work while running and after settlement,
-subject to explicit retention limits. `command_wait` uses the same read path,
-with output/terminal events as live hints rather than command-state authority.
-Waits also recheck durable state once a second if a hint is missed. Sending
+subject to explicit retention limits. While the command runs, `command_read`
+waits for it to finish (default 30 seconds; `waitSeconds: 0` reads at once) and
+`command_wait` uses the same read path with a 45-second default. `command_wait`
+also accepts `commandIds` (up to eight) with `waitFor: "all"` (default) or
+`"any"`, and an optional cursor per command; the output budget is split across
+them. A wait ends when the commands settle, at its deadline, on a pending Steer
+for the caller's turn, or on abort, never on new output alone; finish events are
+live hints rather than command-state authority, and waits recheck durable
+command state (reauthorizing) once a second if a hint is missed. The output is
+read once at the end. A read without a cursor that exceeds the byte budget
+returns its start (half the budget) as `chunks`, its end as `tail`, and the
+approximate size and cursor of the omitted middle as `omitted`; head and tail
+together stay within one 64-row page, so very many small frames show at most
+64 of them. The size counts the exact parts of the boundary rows plus the
+other rows in between at the average size of the rows the read fetched, from
+the event index alone. `nextCursor` then points at that middle, and a read with
+an explicit cursor pages on from it without repeating the tail, so callers that
+page still receive every byte; `endCursor` follows the newest output for later
+reads of new output only. A malformed cursor fails before any wait. The model
+receives these reads as plain text (state, exit code, output with an
+omitted-middle marker, and the cursor for newer output, with a hint to pass
+`waitSeconds: 0` when paging a running command); Codemode and other
+programmatic callers keep the structured receipt. Sending
 stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
@@ -4186,8 +4206,10 @@ If a live refresh encounters a recognized temporary failure, the runtime
 reauthorizes and rereads the API instead of discarding retained output.
 Recognized temporary failures are transport outages and a provider observation
 that missed its bounded read window when the provider marks another read of the
-same invocation safe. A `command_wait` keeps its requested wait and refreshes
-the same command again on its ordinary one-second cadence; that is a read, never
+same invocation safe. A `command_read` or `command_wait` keeps its requested
+wait (ending, like the API wait, when the commands settle or the API reports a
+yield, not on new output) and refreshes each still-running command again on its
+ordinary one-second cadence; that is a read, never
 a Start or stdin replay. A still-running result whose latest refresh failed
 reports `freshness.status: "refresh_unavailable"` and `retryable: true`; this is
 a freshness warning, not proof of command failure or completion. Authorization,
