@@ -4401,6 +4401,8 @@ export type FirstPartyMcpToolName =
   | "slack_bot_delete_message"
   | "slack_bot_prepare_message"
   | "slack_bot_send_prepared_message"
+  | "slack_agent_handoff"
+  | "slack_agent_chats"
   | "fiken_companies_list"
   | "fiken_contacts_list"
   | "fiken_contact_create"
@@ -6582,6 +6584,9 @@ export type SlackChannelRoute = {
   slackChannelId: string;
   targetWorkspaceId: string;
   targetWorkspaceName: string | null;
+  /** Set when a Slack agent answers in this channel. */
+  slackAgentId?: string | null | undefined;
+  slackAgentName?: string | null | undefined;
   source: "picker" | "admin";
   updatedAt: string;
 };
@@ -6593,7 +6598,12 @@ export type SlackChannelRouteListResponse = {
 
 export type UpdateSlackChannelRoutesRequest = {
   connectionId: string;
-  routes: Array<{ slackChannelId: string; targetWorkspaceId: string | null }>;
+  routes: Array<{
+    slackChannelId: string;
+    targetWorkspaceId: string | null;
+    /** A Slack agent working in `targetWorkspaceId`; omitted or null is plain Opengeni. */
+    slackAgentId?: string | null | undefined;
+  }>;
 };
 
 export type VoiceInputProviderId =

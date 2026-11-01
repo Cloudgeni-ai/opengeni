@@ -25,6 +25,8 @@ import type { SessionEventsConnectionState } from "../../../hooks/use-session-ev
 import type { SessionSummary } from "@opengeni/sdk";
 import { SiteOriginLink, SiteOriginMenuItem } from "../session/site-origin-link";
 import { sessionSiteOrigin } from "../../lib/session-site-origin";
+import { sessionSlackAgentInfo } from "../../lib/session-slack-agent";
+import { MetaChip } from "../../../ui/meta-chip";
 import type { CreateBotTemplateRequest, WorkspaceBotTemplate } from "@opengeni/contracts";
 import {
   ArchiveIcon,
@@ -291,6 +293,8 @@ export function SessionHeader({
   const panelKeys = useActionShortcut("view.workspacePanel");
   const hasCrumb =
     Boolean(session.parentSessionId) || ancestors.length > 0 || Boolean(lineageError);
+  // A chat started for a Slack agent says which one; its avatar is the agent's icon.
+  const slackAgent = sessionSlackAgentInfo(session.metadata);
   const overflow = useSessionHeaderOverflow({
     present: SESSION_HEADER_PARTS.filter((part) => {
       switch (part) {
@@ -306,6 +310,8 @@ export function SessionHeader({
           return Boolean(sandboxSlot);
         case "site":
           return sessionSiteOrigin(session) !== null;
+        case "slackAgent":
+          return slackAgent !== null;
         case "accessKey":
           return keyAuthRequired;
         default:
@@ -420,6 +426,19 @@ export function SessionHeader({
           {sessionSiteOrigin(session) && !inMenu("site") ? (
             <span ref={part("site")} className="flex shrink-0 items-center">
               <SiteOriginLink session={session} />
+            </span>
+          ) : null}
+          {slackAgent && !inMenu("slackAgent") ? (
+            <span ref={part("slackAgent")} className="flex min-w-0 shrink-0 items-center">
+              <MetaChip
+                variant="soft"
+                title={`Slack agent: ${slackAgent.name}`}
+                className="max-w-48"
+              >
+                <span data-session-slack-agent="" className="min-w-0 truncate">
+                  Slack agent: {slackAgent.name}
+                </span>
+              </MetaChip>
             </span>
           ) : null}
           {onOpenAutomations && !inMenu("automations") ? (
@@ -709,6 +728,11 @@ export function SessionHeader({
               />
             ) : null}
             {inMenu("site") ? <SiteOriginMenuItem session={session} /> : null}
+            {slackAgent && inMenu("slackAgent") ? (
+              <div className="flex min-h-9 min-w-0 items-center px-2 text-sm text-fg-muted">
+                <span className="min-w-0 truncate">Slack agent: {slackAgent.name}</span>
+              </div>
+            ) : null}
             {keyAuthRequired && inMenu("accessKey") ? (
               <DropdownMenuItem onSelect={onForgetAccessKey}>
                 <LockIcon />

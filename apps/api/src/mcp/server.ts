@@ -444,6 +444,10 @@ import {
 } from "../integrations/slack-bot";
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
 import {
+  handOffSlackAgentChat,
+  listSlackAgentChatsForSession,
+} from "../integrations/slack-interactions";
+import {
   marketplacePluginCapabilityItem,
   marketplacePluginCapabilityItems,
   mcpConnectionEndpointKey,
@@ -2907,6 +2911,37 @@ function registerSlackBotTools(
           },
         }),
       );
+    },
+  );
+
+  server.registerTool(
+    "slack_agent_handoff",
+    {
+      description:
+        "Pass the Slack request this chat is answering on to another Slack agent that fits it better. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
+      inputSchema: {
+        agent: z4.string().min(1).max(120),
+        note: z4.string().max(1000).optional(),
+      },
+    },
+    async ({ agent, note }) => {
+      if (!sessionId) throw new Error("Passing a request on requires a chat started from Slack");
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      return json(await handOffSlackAgentChat(deps, { grant, sessionId, agent, note }));
+    },
+  );
+
+  server.registerTool(
+    "slack_agent_chats",
+    {
+      description:
+        "List this Slack agent's other recent chats in its workspace, newest first, so you can recover context people did not repeat (for example when they do not reply in a thread). Read a relevant chat with session_events. Only chats of this same agent are listed.",
+      inputSchema: { limit: z4.number().int().min(1).max(50).optional() },
+    },
+    async ({ limit }) => {
+      if (!sessionId) throw new Error("Listing agent chats requires a chat started from Slack");
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      return json(await listSlackAgentChatsForSession(deps, { grant, sessionId, limit }));
     },
   );
 
