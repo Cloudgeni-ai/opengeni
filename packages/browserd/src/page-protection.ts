@@ -3,18 +3,54 @@ import { isRecord } from "@opengeni/contracts/values";
 export type ProtectedReason = "password" | "payment" | "private";
 
 /** Pure policy, also serialized into isolated-world DOM reads and fill
- * verification. Keep it self-contained: no page-provided helpers or globals. */
+ * verification. Keep it self-contained: no page-provided helpers or globals.
+ * `labelText` is the text of the field's labels (`<label for>`, a wrapping
+ * `<label>`, `aria-labelledby`), which the attributes alone do not carry. */
 export function sensitiveFieldReason(
   tag: string,
   attributes: Readonly<Record<string, string>>,
   editable: boolean,
   purpose: "read" | "remember" = "read",
+  labelText = "",
 ): ProtectedReason | null {
   if (purpose === "remember" && !["input", "textarea"].includes(tag) && !editable) return null;
   const type = tag === "input" ? (attributes.type ?? "text").toLowerCase() : "";
   if (purpose === "remember" && type === "hidden") return null;
   const autocomplete = (attributes.autocomplete ?? "").toLowerCase();
   if (type === "password" || /(?:current|new)-password|one-time-code/u.test(autocomplete))
+    return "password";
+  // A text field a site names or labels as a password holds one, whatever
+  // its type: some sites show passwords in ordinary text inputs.
+  const textField =
+    (tag === "input" &&
+      ![
+        "hidden",
+        "checkbox",
+        "radio",
+        "button",
+        "submit",
+        "reset",
+        "image",
+        "file",
+        "range",
+        "color",
+      ].includes(type)) ||
+    tag === "textarea" ||
+    editable;
+  const passwordName = (name: string) =>
+    /pass(?:word|wd|code|phrase)|(?:^|[^a-z])pwd(?:[^a-z]|$)|passord|passwort|l[öo]senord|adgangskode|wachtwoord|mot de passe|contrase[ñn]a|senha|salasana|has[łl]o|jelsz[óo]/iu.test(
+      name.replace(/password-?less/giu, ""),
+    );
+  if (
+    textField &&
+    [
+      attributes.name ?? "",
+      attributes.id ?? "",
+      attributes["aria-label"] ?? "",
+      attributes.placeholder ?? "",
+      labelText,
+    ].some(passwordName)
+  )
     return "password";
   const field = ["input", "textarea", "select"].includes(tag) || editable;
   const paymentName = (name: string) =>
@@ -126,6 +162,9 @@ export function pageProtection(snapshot: unknown): PageProtection {
       )
         found.values.push(value);
     };
+    const attributeList: Array<Record<string, string>> = [];
+    const tags: string[] = [];
+    const parents: number[] = [];
     for (let index = 0; index < backendIds.length; index++) {
       const attributes: Record<string, string> = {};
       const raw = (nodes.attributes as unknown[])[index];
@@ -136,16 +175,27 @@ export function pageProtection(snapshot: unknown): PageProtection {
       const parent = (nodes.parentIndex as unknown[])[index];
       if (!Number.isSafeInteger(parent) || (parent as number) < -1 || (parent as number) >= index)
         throw new Error("invalid page protection parent");
-      const inherited = (parent as number) >= 0 ? (reasons[parent as number] ?? null) : null;
-      const tag = stringAt((nodes.nodeName as unknown[])[index]).toLowerCase();
+      attributeList.push(attributes);
+      tags.push(stringAt((nodes.nodeName as unknown[])[index]).toLowerCase());
+      parents.push(parent as number);
+    }
+    const labels = fieldLabelTexts(tags, attributeList, parents, (index) =>
+      stringAt((nodes.nodeValue as unknown[])[index]),
+    );
+    for (let index = 0; index < backendIds.length; index++) {
+      const attributes = attributeList[index] as Record<string, string>;
+      const parent = parents[index] as number;
+      const inherited = parent >= 0 ? (reasons[parent] ?? null) : null;
+      const tag = tags[index] as string;
       const editable = "contenteditable" in attributes && attributes.contenteditable !== "false";
-      const ownReason = sensitiveFieldReason(tag, attributes, editable);
+      const labelText = labels.get(index) ?? "";
+      const ownReason = sensitiveFieldReason(tag, attributes, editable, "read", labelText);
       const reason = ownReason ?? inherited;
       reasons.push(reason);
       // Protection inherits; permission to remember does not. A named
       // payment wrapper must not turn its expiry options or postal code
       // into permanent secrets.
-      const memoryReason = sensitiveFieldReason(tag, attributes, editable, "remember");
+      const memoryReason = sensitiveFieldReason(tag, attributes, editable, "remember", labelText);
       memoryReasons.push(memoryReason);
       // Autofill may populate an unnamed field inside a payment wrapper.
       // Remember a complete card-sized number there, never a 3–4 digit
@@ -160,8 +210,8 @@ export function pageProtection(snapshot: unknown): PageProtection {
           ? index
           : !["input", "textarea", "select", "option"].includes(tag) &&
               attributes.contenteditable !== "false" &&
-              (parent as number) >= 0
-            ? (editableRoots[parent as number] ?? null)
+              parent >= 0
+            ? (editableRoots[parent] ?? null)
             : null;
       editableRoots.push(editableRoot);
       if (reason) {
@@ -206,4 +256,82 @@ export function pageProtection(snapshot: unknown): PageProtection {
     }
   }
   return found;
+}
+
+/** Label text cap per field: enough for any real label, bounded for a page
+ * that labels a field with a whole article. */
+const LABEL_TEXT_LIMIT = 256;
+
+/**
+ * The text of each form field's labels in one snapshot document: a
+ * `<label for>` naming its id, a `<label>` around it, and the elements its
+ * `aria-labelledby` names. Keyed by node index; fields without labels are
+ * absent.
+ */
+function fieldLabelTexts(
+  tags: readonly string[],
+  attributes: ReadonlyArray<Readonly<Record<string, string>>>,
+  parents: readonly number[],
+  nodeValue: (index: number) => string,
+): Map<number, string> {
+  const labelled = new Map<number, string>();
+  const isField = (index: number) =>
+    ["input", "textarea"].includes(tags[index] ?? "") ||
+    ("contenteditable" in (attributes[index] ?? {}) &&
+      attributes[index]?.contenteditable !== "false");
+  // Ids a label or aria-labelledby points at, and which elements carry text
+  // someone may need: every label, and every element so referenced.
+  const referenced = new Set<string>();
+  for (let index = 0; index < tags.length; index++) {
+    const own = attributes[index] ?? {};
+    if (isField(index))
+      for (const id of (own["aria-labelledby"] ?? "").split(/\s+/u)) if (id) referenced.add(id);
+  }
+  const texts = new Map<number, string>();
+  const owners: number[][] = [];
+  for (let index = 0; index < tags.length; index++) {
+    const parent = parents[index] ?? -1;
+    const inherited = parent >= 0 ? (owners[parent] ?? []) : [];
+    const own = attributes[index] ?? {};
+    const owner = tags[index] === "label" || (own.id !== undefined && referenced.has(own.id));
+    const mine = owner ? [...inherited, index] : inherited;
+    owners.push(mine);
+    if (tags[index] === "#text" && mine.length > 0) {
+      const value = nodeValue(index);
+      for (const at of mine) {
+        const text = texts.get(at) ?? "";
+        if (text.length < LABEL_TEXT_LIMIT)
+          texts.set(at, `${text}${value}`.slice(0, LABEL_TEXT_LIMIT));
+      }
+    }
+  }
+  const byId = new Map<string, number>();
+  for (let index = 0; index < tags.length; index++) {
+    const id = attributes[index]?.id;
+    if (id !== undefined && !byId.has(id)) byId.set(id, index);
+  }
+  const add = (field: number, text: string | undefined) => {
+    if (!text) return;
+    labelled.set(field, `${labelled.get(field) ?? ""} ${text}`.trim());
+  };
+  for (let index = 0; index < tags.length; index++) {
+    if (tags[index] === "label") {
+      const target = attributes[index]?.for;
+      const field = target === undefined ? undefined : byId.get(target);
+      if (field !== undefined && isField(field)) add(field, texts.get(index));
+    }
+    if (!isField(index)) continue;
+    // The nearest label around the field.
+    for (let at = parents[index] ?? -1; at >= 0; at = parents[at] ?? -1) {
+      if (tags[at] === "label") {
+        add(index, texts.get(at));
+        break;
+      }
+    }
+    for (const id of (attributes[index]?.["aria-labelledby"] ?? "").split(/\s+/u)) {
+      const at = id ? byId.get(id) : undefined;
+      if (at !== undefined) add(index, texts.get(at));
+    }
+  }
+  return labelled;
 }
