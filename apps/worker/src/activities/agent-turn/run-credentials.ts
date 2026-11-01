@@ -1,5 +1,9 @@
 import { getSessionRootId } from "@opengeni/db";
 import {
+  assertTokenRepositoriesAttached,
+  attachedRepositoryResources,
+} from "./session-repository-authority";
+import {
   materializeRunCredentials,
   repositoryHasExplicitGitConnection,
   clearRunCredentials,
@@ -278,7 +282,14 @@ async function prepareRunCredentialsObserved(
     ? runCredentialModelNote(initialRunCredentialMaterial)
     : undefined;
   throwIfTurnOperationCancelled(cancellationSignal);
+  // Session membership is live repository authority. The first, lazy and
+  // renewed mints (every Git provider) narrow to the repositories still
+  // attached, so removing one repository mid-turn re-mints a token without
+  // it; the mint guard below fails closed if a removed repository still
+  // reaches a GitHub App token request.
+  const liveSession = { db, workspaceId: input.workspaceId, sessionId: input.sessionId };
   const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
+    await assertTokenRepositoriesAttached(liveSession, selection.repositoryRefs);
     await assertGitHubTokenMintSelectionAuthorized(
       db,
       input.workspaceId,
@@ -371,17 +382,21 @@ async function prepareRunCredentialsObserved(
     codemodeTokenExpiresAt: sandboxCodemodeTokenExpiresAt,
   } = await measure("credential_mint", () =>
     waitForTurnOperation(
-      sandboxEnvironmentForRun(sandboxEnvironmentSettings, platformGitResources, {
-        skipGitHubToken: activeSandboxBackend === "selfhosted",
-        codemodeDelivery: activeSandboxBackend === "selfhosted" ? "transient_exec" : "managed_file",
-        deferGitHubToken: activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
-        scope: connectionScope,
-        ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-        gitCredentials: connectionCredentials?.gitCredentials,
-        personalGitHubCredentials: personalGitHubCredentials ?? undefined,
-        authorizeGitHubTokenMint,
-        codemodeAuthority,
-      }),
+      attachedRepositoryResources(liveSession, platformGitResources).then((resources) =>
+        sandboxEnvironmentForRun(sandboxEnvironmentSettings, resources, {
+          skipGitHubToken: activeSandboxBackend === "selfhosted",
+          codemodeDelivery:
+            activeSandboxBackend === "selfhosted" ? "transient_exec" : "managed_file",
+          deferGitHubToken:
+            activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
+          scope: connectionScope,
+          ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+          gitCredentials: connectionCredentials?.gitCredentials,
+          personalGitHubCredentials: personalGitHubCredentials ?? undefined,
+          authorizeGitHubTokenMint,
+          codemodeAuthority,
+        }),
+      ),
       cancellationSignal,
       undefined,
     ),
@@ -447,13 +462,17 @@ async function prepareRunCredentialsObserved(
           backend: effectiveRunCredentialBackend,
         },
         async () => {
-          const minted = await mintRunGitCredentials(runSettings, platformGitResources, {
-            scope: connectionScope,
-            ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-            gitCredentials: connectionCredentials?.gitCredentials,
-            personalGitHubCredentials: personalGitHubCredentials ?? undefined,
-            authorizeGitHubTokenMint,
-          });
+          const minted = await mintRunGitCredentials(
+            runSettings,
+            await attachedRepositoryResources(liveSession, platformGitResources),
+            {
+              scope: connectionScope,
+              ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+              gitCredentials: connectionCredentials?.gitCredentials,
+              personalGitHubCredentials: personalGitHubCredentials ?? undefined,
+              authorizeGitHubTokenMint,
+            },
+          );
           for (const [provider, token] of Object.entries(minted?.gitTokens ?? {})) {
             rememberAttemptCredential(secretValues, token, `git token ${provider}`);
           }
@@ -490,7 +509,7 @@ async function prepareRunCredentialsObserved(
         mint: async () => {
           const binding = await mintRunGitCredentialBinding(
             runSettings,
-            platformGitResources,
+            await attachedRepositoryResources(liveSession, platformGitResources),
             initialBinding.provider,
             initialBinding.credentialBindingId,
             {

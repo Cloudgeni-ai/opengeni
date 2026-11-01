@@ -6878,6 +6878,115 @@ export function gitRemoteIdentity(
     : normalizedUri;
 }
 
+/**
+ * Comparison key for "the same repository" across stored session resources,
+ * provider-bound turn resources and provider repository identities. It
+ * ignores letter case and a trailing `.git`, so a bare stored URI and its
+ * bound form compare equal. An unparsable URI has no key.
+ */
+export function repositoryMembershipKey(uri: string): string | null {
+  try {
+    return normalizeRepositoryTransportUri(uri)
+      .replace(/\.git$/i, "")
+      .toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** Whether `resources` currently attach the repository at `uri`. */
+export function resourcesIncludeRepository(
+  resources: readonly ResourceRef[],
+  uri: string,
+): boolean {
+  const key = repositoryMembershipKey(uri);
+  return (
+    key !== null &&
+    resources.some(
+      (resource) => resource.kind === "repository" && repositoryMembershipKey(resource.uri) === key,
+    )
+  );
+}
+
+/**
+ * A repository a person (or an API caller) removed from a session. The record
+ * lasts until a person attaches the repository again: until then an agent
+ * cannot re-attach it (through a message, a child session or a goal
+ * continuation), queued turns and older resource snapshots leave it out, and
+ * child sessions created later inherit the record. `sandboxCleanupPending`
+ * is true until a managed-sandbox turn has removed the repository folder and
+ * credential binding from the sandbox.
+ */
+export const SessionRemovedRepository = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Identifies this removal; cleanup settles exactly this entry. */
+      id: primitives.uuid,
+      resource: RepositoryResourceRef,
+      removedAt: primitives.string,
+      sandboxCleanupPending: z.boolean(),
+    })
+    .strict(),
+);
+export type SessionRemovedRepository = z.infer<typeof SessionRemovedRepository>;
+
+/**
+ * Most removal records one session keeps, one per repository. Past the bound
+ * the oldest records whose cleanup already ran are dropped first; an agent
+ * could then attach a repository whose record was dropped.
+ */
+export const SESSION_REMOVED_REPOSITORIES_MAX = 500;
+
+/** Stored removal records, skipping unreadable entries (an unreadable value is empty). */
+export function parseSessionRemovedRepositories(value: unknown): SessionRemovedRepository[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const parsed = SessionRemovedRepository.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+/** The removal record for the repository at `uri`, if it was removed. */
+export function findSessionRemovedRepository(
+  removed: readonly SessionRemovedRepository[],
+  uri: string,
+): SessionRemovedRepository | undefined {
+  const key = repositoryMembershipKey(uri);
+  if (key === null) return undefined;
+  return removed.find((entry) => repositoryMembershipKey(entry.resource.uri) === key);
+}
+
+/**
+ * Keep the newest record per repository and stay within
+ * `SESSION_REMOVED_REPOSITORIES_MAX`, dropping settled records before
+ * records whose sandbox cleanup is still pending.
+ */
+export function boundSessionRemovedRepositories(
+  removed: readonly SessionRemovedRepository[],
+): SessionRemovedRepository[] {
+  const newest = new Map<string, SessionRemovedRepository>();
+  for (const entry of removed) {
+    const key = repositoryMembershipKey(entry.resource.uri);
+    if (key === null) continue;
+    newest.delete(key);
+    newest.set(key, entry);
+  }
+  const entries = [...newest.values()];
+  let excess = entries.length - SESSION_REMOVED_REPOSITORIES_MAX;
+  if (excess <= 0) return entries;
+  const dropped = new Set<SessionRemovedRepository>();
+  for (const pending of [false, true]) {
+    for (const entry of entries) {
+      if (excess <= 0) break;
+      if (entry.sandboxCleanupPending === pending) {
+        dropped.add(entry);
+        excess -= 1;
+      }
+    }
+  }
+  return entries.filter((entry) => !dropped.has(entry));
+}
+
 /** Provider-aware Git credential-helper path aliases, without a leading slash. */
 export function gitRemotePathAliases(
   uri: string,
@@ -9512,6 +9621,8 @@ export const SessionAuthorizationOperation = /* @__PURE__ */ defineSchema(() =>
     "session.personal_resource.grant",
     /** Create, refresh or stop a read-only share link anyone holding it can open. */
     "session.share_link.write",
+    /** Remove repositories attached to the session (and its child sessions). */
+    "session.resources.write",
   ]),
 );
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
@@ -14110,6 +14221,32 @@ export const UpdateSessionSkillsRequest = /* @__PURE__ */ /* @__PURE__ */ define
 );
 export type UpdateSessionSkillsRequest = z.infer<typeof UpdateSessionSkillsRequest>;
 
+/**
+ * `POST /v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove`:
+ * remove attached repositories from a session and its child sessions. Each
+ * entry names a repository by its URI; matching ignores letter case and a
+ * trailing `.git`. Access ends on the next Git or GitHub call and the next
+ * turn removes the repository folder from the sandbox.
+ */
+export const RemoveSessionResourcesRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      resources: z
+        .array(
+          z
+            .object({
+              kind: z.literal("repository"),
+              uri: primitives.nonEmptyString,
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(32),
+    })
+    .strict(),
+);
+export type RemoveSessionResourcesRequest = z.infer<typeof RemoveSessionResourcesRequest>;
+
 function projectStoredSkillMetadata(value: unknown): unknown {
   if (!Array.isArray(value)) return value;
   return value.map((skill: unknown) => {
@@ -16162,6 +16299,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     /** Typed Memory selector frozen at create; see {@link SessionMemoryScope}. */
     memoryScope: SessionMemoryScope.default("workspace"),
     resources: z.array(ResourceRef),
+    /**
+     * Repositories removed from the session and not attached again by a
+     * person since; see {@link SessionRemovedRepository}. Omitted by legacy
+     * readers.
+     */
+    removedRepositories: z.array(SessionRemovedRepository).optional(),
     skills: SessionSkills.default([]),
     tools: z.array(ToolRef),
     // Origin and optimistic-concurrency fence for the durable session policy.
@@ -16786,6 +16929,9 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     "session.agent.updated",
     // The Skills a session carries itself were replaced (names only).
     "session.skills.updated",
+    // A person removed repositories from the chat; access ends on the next
+    // Git or GitHub call and the next turn removes their sandbox folders.
+    "session.resources.removed",
     // Multi-account Codex (P1): the account a session's turn runs on changed
     // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
     // the in-session "Running on:" indicator's live flip.
@@ -17044,6 +17190,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.tool_policy.updated",
     "session.agent.updated",
     "session.skills.updated",
+    "session.resources.removed",
     "session.model_settings.updated",
     "session.usage_limit.updated",
   ],

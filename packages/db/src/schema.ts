@@ -26,6 +26,7 @@ import type {
   PromptCacheDiagnostics,
   RigProviderImages,
   SessionMcpApprovalPolicy,
+  SessionRemovedRepository,
   SessionGoalChangeKind,
   SessionGoalMutationPolicy,
   SessionGoalSnapshot,
@@ -4835,6 +4836,12 @@ export const sessions = pgTable(
     contentArchive: jsonb("content_archive").$type<Record<string, unknown>>(),
     contentArchivePurgedAt: timestamp("content_archive_purged_at", { withTimezone: true }),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
+    // Repositories a person removed from the session (migration 1140); see
+    // SessionRemovedRepository. Read with parseSessionRemovedRepositories.
+    removedRepositories: jsonb("removed_repositories")
+      .$type<SessionRemovedRepository[]>()
+      .notNull()
+      .default([]),
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),

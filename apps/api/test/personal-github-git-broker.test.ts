@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { removeSessionResources, type ApiRouteDeps } from "@opengeni/core";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   claimSessionWorkForAttempt,
   createDb,
@@ -671,8 +672,9 @@ describe("personal GitHub Git broker", () => {
     expect(isApiContractProtectedMutation("POST", receivePath)).toBe(false);
   });
 
-  test("revalidates the real accepted attempt and denies a stale repository selection generation", async () => {
-    if (!shared || !dbClient) return;
+  async function acceptedPersonalBrokerFixture() {
+    if (!shared || !dbClient) throw new Error("PostgreSQL test database unavailable");
+    const client = dbClient;
     const userId = `git-broker-${crypto.randomUUID()}`;
     const subjectId = `user:${userId}`;
     const access = await ensureManagedAccessForUser(dbClient.db, {
@@ -836,43 +838,9 @@ describe("personal GitHub Git broker", () => {
       reasoningEffortFallback: "medium",
       createdEventPayload: {},
     });
-    const attemptId = crypto.randomUUID();
-    const claimed = await claimSessionWorkForAttempt(dbClient.db, target!.id, {
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId,
-      dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
-    });
-    if (claimed.action !== "claimed") throw new Error(`turn was not claimed: ${claimed.reason}`);
-    const bearerClaims: PersonalGitHubGitBrokerClaims = {
-      version: 1,
-      accountId: originGrant.accountId,
-      workspaceId: target!.id,
-      sessionId: session.id,
-      rootSessionId: session.rootSessionId,
-      turnId: claimed.turn.id,
-      attemptId,
-      executionGeneration: claimed.turn.executionGeneration,
-      originWorkspaceId: originGrant.workspaceId,
-      connectionId: connection.id,
-      connectionAuthorityGeneration: emptySelection.connectionAuthorityGeneration,
-      ownerSubjectId: subjectId,
-      credentialBindingId,
-      selectionGeneration: selected.selectionGeneration,
-      nonce: crypto.randomUUID(),
-      issuedAt: Math.floor(Date.now() / 1_000),
-      expiresAt: Math.floor(Date.now() / 1_000) + 300,
-    };
-    const exactRouteId = personalGitHubGitBrokerRouteId(signingSecret, {
-      ...bearerClaims,
-      repository: frozenRepository,
-    });
-    const brokerBearer = sealPersonalGitHubGitBrokerClaims(signingSecret, bearerClaims);
-    let providerCalls = 0;
+    const counter = { providerCalls: 0 };
     const providerFetch = (async (input: string | URL | Request) => {
-      providerCalls += 1;
+      counter.providerCalls += 1;
       const url = String(input);
       return url === "https://api.github.com/user"
         ? liveUserResponse()
@@ -889,7 +857,65 @@ describe("personal GitHub Git broker", () => {
     } as ApiRouteDeps;
     const app = new Hono();
     registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
-    const brokerUrl = `https://broker.example/v1/git/personal/${exactRouteId}/info/refs?service=git-upload-pack`;
+    async function brokerFor(forSession: { id: string; rootSessionId: string }) {
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(client.db, target!.id, {
+        sessionId: forSession.id,
+        workflowId: `session-${forSession.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error(`turn was not claimed: ${claimed.reason}`);
+      const bearerClaims: PersonalGitHubGitBrokerClaims = {
+        version: 1,
+        accountId: originGrant.accountId,
+        workspaceId: target!.id,
+        sessionId: forSession.id,
+        rootSessionId: forSession.rootSessionId,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+        originWorkspaceId: originGrant.workspaceId,
+        connectionId: connection.id,
+        connectionAuthorityGeneration: emptySelection.connectionAuthorityGeneration,
+        ownerSubjectId: subjectId,
+        credentialBindingId,
+        selectionGeneration: selected.selectionGeneration,
+        nonce: crypto.randomUUID(),
+        issuedAt: Math.floor(Date.now() / 1_000),
+        expiresAt: Math.floor(Date.now() / 1_000) + 300,
+      };
+      const exactRouteId = personalGitHubGitBrokerRouteId(signingSecret, {
+        ...bearerClaims,
+        repository: frozenRepository,
+      });
+      const brokerBearer = sealPersonalGitHubGitBrokerClaims(signingSecret, bearerClaims);
+      const brokerUrl = `https://broker.example/v1/git/personal/${exactRouteId}/info/refs?service=git-upload-pack`;
+      return { attemptId, brokerBearer, brokerUrl };
+    }
+    return {
+      app,
+      counter,
+      session,
+      target: target!,
+      subjectId,
+      originGrant,
+      connection,
+      emptySelection,
+      selected,
+      credentialBindingId,
+      frozen,
+      brokerFor,
+    };
+  }
+
+  test("revalidates the real accepted attempt and denies a stale repository selection generation", async () => {
+    if (!shared || !dbClient) return;
+    const fixture = await acceptedPersonalBrokerFixture();
+    const { app, originGrant, connection, emptySelection, selected, subjectId } = fixture;
+    const { attemptId, brokerBearer, brokerUrl } = await fixture.brokerFor(fixture.session);
     // Credential rotation uses connections.version as a CAS but does not
     // alter the common repository-use authority generation frozen above.
     await shared.admin`
@@ -899,7 +925,7 @@ describe("personal GitHub Git broker", () => {
       headers: { authorization: basic(brokerBearer) },
     });
     expect(acceptedResponse.status).toBe(200);
-    expect(providerCalls).toBe(3);
+    expect(fixture.counter.providerCalls).toBe(3);
     const audit = await shared.admin<
       Array<{
         phase: "credential_resolution" | "provider_request";
@@ -938,6 +964,74 @@ describe("personal GitHub Git broker", () => {
       headers: { authorization: basic(brokerBearer) },
     });
     expect(staleResponse.status).toBe(401);
-    expect(providerCalls).toBe(3);
+    expect(fixture.counter.providerCalls).toBe(3);
+  }, 120_000);
+
+  test("refuses the next Git request for a repository removed from the chat, including in a child chat", async () => {
+    if (!shared || !dbClient) return;
+    const fixture = await acceptedPersonalBrokerFixture();
+    const { app, session, target, subjectId, originGrant, frozen } = fixture;
+    const child = await createSession(dbClient.db, {
+      accountId: originGrant.accountId,
+      workspaceId: target.id,
+      parentSessionId: session.id,
+      initialMessage: "child uses personal GitHub",
+      resources: session.resources,
+      tools: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      subjectId,
+      personalConnectionDelegations: frozen,
+    });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: originGrant.accountId,
+      workspaceId: target.id,
+      sessionId: child.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+    const parentRoute = await fixture.brokerFor(session);
+    const childRoute = await fixture.brokerFor(child);
+    for (const route of [parentRoute, childRoute]) {
+      const accepted = await app.request(route.brokerUrl, {
+        headers: { authorization: basic(route.brokerBearer) },
+      });
+      expect(accepted.status).toBe(200);
+    }
+    const providerCallsBeforeRemoval = fixture.counter.providerCalls;
+
+    await removeSessionResources(
+      { db: dbClient.db, bus: new MemoryEventBus() },
+      {
+        accountId: originGrant.accountId,
+        workspaceId: target.id,
+        subjectId,
+        permissions: ["sessions:read", "sessions:control"],
+        principalKind: "human_session",
+      },
+      session.id,
+      // A different spelling of the same repository still matches.
+      { resources: [{ kind: "repository", uri: `${repository.canonicalUrl.toLowerCase()}.git` }] },
+    );
+
+    // The turns keep their older snapshots and routes, but the next request
+    // for the removed repository fails before any provider call.
+    for (const route of [parentRoute, childRoute]) {
+      const refused = await app.request(route.brokerUrl, {
+        headers: { authorization: basic(route.brokerBearer) },
+      });
+      expect(refused.status).toBe(403);
+      expect(await refused.text()).toContain("This repository was removed from this chat.");
+      const push = await app.request(
+        route.brokerUrl.replace("service=git-upload-pack", "service=git-receive-pack"),
+        { headers: { authorization: basic(route.brokerBearer) } },
+      );
+      expect(push.status).toBe(403);
+    }
+    expect(fixture.counter.providerCalls).toBe(providerCallsBeforeRemoval);
   }, 120_000);
 });

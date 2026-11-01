@@ -30,6 +30,8 @@ import {
   updateSessionTitleWithEvent,
   subscriptionCoreCodexAppsRequestAuth,
   getSessionTitleOperation,
+  listSandboxGroupRepositoryResources,
+  settleSessionRepositoryCleanup,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -86,6 +88,8 @@ import {
   hasPermission,
   requireExplicitPermissionDelegation,
   createWebSearchBilling,
+  pendingSessionRepositoryCleanup,
+  withoutRemovedRepositories,
 } from "@opengeni/core";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
@@ -257,12 +261,46 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   const { input, db, turn, session, fileAuthoritySubjectId, capabilitySettings, runSettings } =
     deps;
 
-  const turnResources = mergeResourceRefs(session.resources, turn.resources);
+  // A repository a person removed from the chat stays out of every later
+  // turn: a turn queued before the removal never restores it from its own
+  // resource snapshot. The record lasts until a person attaches it again.
+  const turnResources = withoutRemovedRepositories(
+    mergeResourceRefs(session.resources, turn.resources),
+    session,
+  );
   // Repositories remain durable workspace inputs. File attachments do not:
   // only files attached to this exact turn enter the sandbox manifest and
   // eager materialization path. Historical file ids remain in canonical
   // history/session metadata and are recoverable through the Files MCP.
-  const runtimeResources = runtimeResourcesForTurn(session.resources, turn.resources);
+  const runtimeResources = withoutRemovedRepositories(
+    runtimeResourcesForTurn(session.resources, turn.resources),
+    session,
+  );
+  // The folders and credential bindings of newly removed repositories are
+  // removed from the sandbox before the agent runs. Child sessions share
+  // their parent's box by default: the cleanup keeps any folder or binding
+  // another session in the box still uses.
+  const pendingCleanup = pendingSessionRepositoryCleanup(session);
+  const repositoryRemoval =
+    pendingCleanup.length > 0
+      ? {
+          removed: pendingCleanup.map((entry) => entry.resource),
+          retained: await listSandboxGroupRepositoryResources(
+            db,
+            input.workspaceId,
+            session.sandboxGroupId,
+            input.sessionId,
+          ),
+          // Settles exactly these removals; a later removal stays pending.
+          onCleaned: async () =>
+            await settleSessionRepositoryCleanup(
+              db,
+              input.workspaceId,
+              input.sessionId,
+              pendingCleanup.map((entry) => entry.id),
+            ),
+        }
+      : null;
   // Attach the first-party MCP server to EVERY turn, regardless of how/when
   // the session was created (API, scheduled task, or a pre-existing session
   // whose stored tools predate this). The server registration is then
@@ -313,6 +351,7 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   return {
     turnResources,
     runtimeResources,
+    repositoryRemoval,
     mcpAvailabilityNote,
     turnTools,
     connectionScope,
