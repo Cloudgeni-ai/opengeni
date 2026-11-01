@@ -1830,8 +1830,23 @@ async function popupCloseTest(closeDuringFrameInspection: boolean) {
     closingInput = true;
     const receipt = await controller.run(close);
     if (closeDuringFrameInspection) expect(nativeInvalidSession).toBe(true);
-    expect(receipt.state).toBe("outcome_unknown");
-    expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+    if (closeDuringFrameInspection) {
+      // The input was delivered and the page then closed its own tab: the
+      // click completed, and only the closed tab's outline is missing.
+      expect(receipt.state).toBe("completed");
+      expect(receipt.error).toBeNull();
+      expect(receipt.observation).toBeNull();
+      expect(receipt.notes).toEqual([
+        {
+          actionIndex: 0,
+          kind: "observation_unavailable",
+          message: expect.stringContaining("this tab closed"),
+        },
+      ]);
+    } else {
+      expect(receipt.state).toBe("outcome_unknown");
+      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+    }
     expect(await controller.run(close)).toEqual(receipt);
     expect((await driver.listTargets()).map((target) => target.id)).toEqual([parent.target.id]);
     const retained = await driver.observe(parent.target.id);
