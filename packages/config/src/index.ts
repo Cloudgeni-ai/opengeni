@@ -527,6 +527,12 @@ const SettingsSchema = z.object({
   // on the signed-out page and in the Help menu. Unset by default for the same
   // reason as the legal links.
   supportEmail: z.string().trim().email().max(254).optional(),
+  // Optional operator statements the agent's privacy_facts tool reports: where
+  // the app's data (database, files, backups) is hosted, in plain words, and a
+  // published subprocessor list. Unset by default, so a self-hosted deployment
+  // claims nothing and the tool says unknown.
+  dataHostingLocation: z.string().trim().min(1).max(200).optional(),
+  legalSubprocessorsUrl: PublicHttpUrl.optional(),
   publicBaseUrl: z.string().url().optional(),
   // Where other services send webhooks (event sources, the GitHub App's event
   // webhook, MCP Events webhook delivery), when that is a different public
@@ -5780,6 +5786,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     legalPrivacyPolicyUrl: optional("OPENGENI_LEGAL_PRIVACY_POLICY_URL"),
     legalTermsOfServiceUrl: optional("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL"),
     supportEmail: optional("OPENGENI_SUPPORT_EMAIL"),
+    dataHostingLocation: optional("OPENGENI_DATA_HOSTING_LOCATION"),
+    legalSubprocessorsUrl: optional("OPENGENI_LEGAL_SUBPROCESSORS_URL"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     webhookBaseUrl: optional("OPENGENI_WEBHOOK_BASE_URL"),
     documentationUrl: optional("OPENGENI_DOCUMENTATION_URL"),
