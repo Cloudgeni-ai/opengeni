@@ -48,7 +48,7 @@ realTest(
     // reconcile frozen permission snapshots and prove previous-release ancestry.
     const names = Object.values(RETIRING_FEATURE_TABLES).flat();
     await database!.admin.unsafe(
-      `DROP TABLE ${names.map((name) => `"${database!.schema}"."${name}"`).join(", ")} CASCADE`,
+      `DROP TABLE IF EXISTS ${names.map((name) => `"${database!.schema}"."${name}"`).join(", ")} CASCADE`,
     );
     await database!.admin.unsafe(`
     DROP FUNCTION opengeni_private.subscription_provider_cutover_committed(text) CASCADE;
