@@ -2299,10 +2299,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             );
             let layout: ScrollbarLayout | null = null;
             try {
-              const metrics = await this.screenshotRead(
-                "Page.getLayoutMetrics",
+              const metrics = await this.untilLaidOut(
                 deadline,
-                async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+                async () =>
+                  await this.screenshotRead(
+                    "Page.getLayoutMetrics",
+                    deadline,
+                    async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+                  ),
               );
               const capture: Record<string, unknown> = {
                 format: normalized.format,
@@ -6532,6 +6536,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         ) {
           throw error;
         }
+        if (Date.now() + pause >= deadline) {
+          const failure = new InteractionControllerError(
+            "timeout",
+            UNDRAWN_SURFACE_TIMED_OUT,
+            true,
+          );
+          failure.cause = error;
+          throw failure;
+        }
+        await delay(pause);
+        pause = Math.min(pause * 2, 200);
+      }
+    }
+  }
+
+  /** Repeat a layout read while the tab reports no page size yet (a tab a
+   * relaunched browser has just restored lays out a moment after it is
+   * listed), until it lays out or the capture deadline passes. */
+  private async untilLaidOut<T>(deadline: number, read: () => Promise<T>): Promise<T> {
+    let pause = 16;
+    for (;;) {
+      try {
+        return await read();
+      } catch (error) {
+        if (!(error instanceof PageNotLaidOutError)) throw error;
         if (Date.now() + pause >= deadline) {
           const failure = new InteractionControllerError(
             "timeout",
@@ -14923,15 +14952,24 @@ function dimensionsRecord(
   value: unknown,
   includeOffset: boolean,
 ): { x: number; y: number; width: number; height: number } {
-  if (!isRecord(value)) throw new Error("CDP returned invalid page dimensions");
+  if (!isRecord(value)) throw new PageNotLaidOutError();
   const width = numberField(value, includeOffset ? "clientWidth" : "width");
   const height = numberField(value, includeOffset ? "clientHeight" : "height");
   const x = includeOffset ? (numberField(value, "pageX") ?? 0) : 0;
   const y = includeOffset ? (numberField(value, "pageY") ?? 0) : 0;
   if (width === null || height === null || width <= 0 || height <= 0) {
-    throw new Error("CDP returned invalid page dimensions");
+    throw new PageNotLaidOutError();
   }
   return { x, y, width, height };
+}
+
+/** Chromium reported no usable page size: a tab a relaunched browser has just
+ * restored, or one still loading, has not laid out its page yet. */
+class PageNotLaidOutError extends Error {
+  constructor() {
+    super("CDP returned invalid page dimensions");
+    this.name = "PageNotLaidOutError";
+  }
 }
 
 function numberField(value: Record<string, unknown>, key: string): number | null {
