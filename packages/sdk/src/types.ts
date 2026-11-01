@@ -37,8 +37,9 @@ import type {
   ScheduledTaskSkill,
   SessionAutomationWaitSummary,
   SessionAvatar,
+  SessionBotSuggestion,
 } from "@opengeni/contracts";
-export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
+export type { SessionAvatar, SessionAvatarIcon, SessionBotSuggestion } from "@opengeni/contracts";
 export type { ScheduledTaskSkill } from "@opengeni/contracts";
 export type {
   McpElicitationAnswer,
@@ -1967,6 +1968,8 @@ export type Session = {
   description?: string | null | undefined;
   /** Display-only avatar. Never sent to the model. */
   avatar?: SessionAvatar | null | undefined;
+  /** The newest bot suggestion the agent made here (`bot_suggest`); detail reads only. */
+  botSuggestion?: SessionBotSuggestion | null | undefined;
   // Per-session agent persona/system instructions supplied at create; null when
   // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
@@ -4325,6 +4328,7 @@ export type FirstPartyMcpToolName =
   | "session_human_input_respond"
   | "set_other_session_title"
   | "bot_template_save"
+  | "bot_suggest"
   | "interaction_discover"
   | "browser_open"
   | "browser_tabs"

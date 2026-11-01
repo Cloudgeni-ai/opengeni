@@ -51,6 +51,7 @@ import type {
   ApiIntegrationAuthPreview,
   ResolvedAgentConfig,
   SessionAvatar,
+  SessionBotSuggestion,
   SessionToolPolicy,
 } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
@@ -4940,6 +4941,8 @@ export const sessions = pgTable(
     // an avatar. Never part of the model's context; copied by forks.
     description: text("description"),
     avatar: jsonb("avatar").$type<SessionAvatar>(),
+    // The newest bot suggestion in this chat (migration 1219); display state only.
+    botSuggestion: jsonb("bot_suggestion").$type<SessionBotSuggestion>(),
     // Per-session agent persona/system instructions supplied at create (the
     // per-agent-type prompt lever for embedding hosts). NULL ⇒ the session
     // carried none, so the composed agent instructions are byte-identical to a

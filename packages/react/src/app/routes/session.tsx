@@ -1,5 +1,6 @@
 import { t } from "../lib/console-text";
 import { Fragment } from "react";
+import { currentBotSuggestion } from "../lib/bot-suggestions";
 import {
   createSessionRetainedScreenshotLoader,
   createWorkspaceRetainedArtifactLoader,
@@ -359,6 +360,11 @@ const ChatInteractiveBlock = lazy(() =>
 );
 
 const HumanInputSurface = lazy(() => import("../components/session/human-input"));
+const BotSuggestionCard = lazy(() =>
+  import("../components/bots/bot-suggestion-card").then((module) => ({
+    default: module.BotSuggestionCard,
+  })),
+);
 const DescendantRequests = lazy(() => import("../components/session/descendant-requests"));
 const SessionSkillReviews = lazy(() =>
   import("../components/session/session-skill-reviews").then((module) => ({
@@ -2932,6 +2938,10 @@ function SessionChatPane(props: {
     context.clientConfig.billingMode === "stripe" &&
     Boolean(workspaceAccountId) &&
     hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
+  const hasBotSuggestion = useMemo(
+    () => currentBotSuggestion(props.session, props.events) !== null,
+    [props.session, props.events],
+  );
   const composer = useComposer(props.session.id, {
     canBuyCredits,
     events: props.events,
@@ -4159,6 +4169,14 @@ function SessionChatPane(props: {
                                   events={props.events}
                                 />
                               </LazyPart>
+                              {hasBotSuggestion ? (
+                                <LazyPart fallback={null}>
+                                  <BotSuggestionCard
+                                    session={props.session}
+                                    events={props.events}
+                                  />
+                                </LazyPart>
+                              ) : null}
                               {props.humanInput.requests.length > 0 &&
                               props.session.status === "requires_action" ? (
                                 <div className="pb-1" data-human-input-timeline-surface="">

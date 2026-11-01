@@ -30,6 +30,8 @@ const COPIED = [
   "title_source",
   "description",
   "avatar",
+  // A fork keeps the newest bot suggestion card, like the rest of its profile.
+  "bot_suggestion",
   "instructions",
   "policy_role",
   "skills",

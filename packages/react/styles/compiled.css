@@ -634,6 +634,7 @@
     --font-display: "DM Sans Variable", "Inter Variable", ui-sans-serif, system-ui, sans-serif;
     --color-switch-track: var(--og-color-switch-track);
     --color-switch-thumb: var(--og-color-switch-thumb);
+    --color-glow-teal: var(--og-glow-teal);
     --color-session-update: light-dark(#0f766e, #5ad4c5);
     --color-chart-1: var(--og-chart-1);
     --color-chart-2: var(--og-chart-2);
@@ -4525,6 +4526,9 @@
 :where(.og-root).bg-gradient-to-t,:where(.og-root) .bg-gradient-to-t {
     --tw-gradient-position: to top in oklab;
     background-image: linear-gradient(var(--tw-gradient-stops));
+  }
+:where(.og-root).bg-\[radial-gradient\(420px_120px_at_0\%_0\%\,var\(--color-glow-teal\)\,transparent\)\],:where(.og-root) .bg-\[radial-gradient\(420px_120px_at_0\%_0\%\,var\(--color-glow-teal\)\,transparent\)\] {
+    background-image: radial-gradient(420px 120px at 0% 0%,var(--color-glow-teal),transparent);
   }
 :where(.og-root).bg-\[radial-gradient\(ellipse_60\%_70\%_at_0\%_0\%\,var\(--og-glow-teal\)\,transparent_70\%\)\,radial-gradient\(ellipse_60\%_70\%_at_100\%_100\%\,var\(--og-glow-peach\)\,transparent_70\%\)\],:where(.og-root) .bg-\[radial-gradient\(ellipse_60\%_70\%_at_0\%_0\%\,var\(--og-glow-teal\)\,transparent_70\%\)\,radial-gradient\(ellipse_60\%_70\%_at_100\%_100\%\,var\(--og-glow-peach\)\,transparent_70\%\)\] {
     background-image: radial-gradient(ellipse 60% 70% at 0% 0%,var(--og-glow-teal),transparent 70%),radial-gradient(ellipse 60% 70% at 100% 100%,var(--og-glow-peach),transparent 70%);
