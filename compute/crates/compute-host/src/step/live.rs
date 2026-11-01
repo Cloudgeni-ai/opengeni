@@ -123,8 +123,10 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// Records what the memory of `vm`, just started from `image` or booted
     /// fresh if `None`, is based on, for an agent that restarts while it
     /// runs (see [`record_base`]). Without it, that agent's first save of
-    /// the VM holds every page.
+    /// the VM holds every page. Marks it its sandbox's only copy if it is
+    /// ([`Self::mark_only_copy`]).
     pub(super) async fn record_started(&self, vm: &E::Vm, image: Option<&Verified>) {
+        self.mark_only_copy(vm);
         let process = match self.engine.process_identity(vm) {
             Ok(process) => process,
             Err(error) => {

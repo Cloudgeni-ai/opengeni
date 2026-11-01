@@ -96,7 +96,9 @@ pub struct SleepRules {
 
 /// The longest a sandbox with no copy in object storage runs before its
 /// first checkpoint, whatever [`SleepRules::checkpoint_every`] says: until
-/// then, losing its host loses the sandbox, not only its latest changes.
+/// then, losing its host loses the sandbox, not only its latest changes,
+/// and it is its only copy, which runs on through a lapse of its host's
+/// lease (ADR 18 counts on this bound).
 pub const FIRST_CHECKPOINT: Duration = Duration::from_secs(60);
 
 impl SleepRules {
