@@ -354,38 +354,54 @@ of one core.
 
 The protocol simulation (`tests/protocol.rs`) passed 1,000 seeds of each
 of its two runs (`FLEET_SIM_PRINT=1 FLEET_SIM_SEEDS=1000 cargo test
---release -p compute-fleet --test protocol`, 162 s on the same machine):
+--release -p compute-fleet --test protocol`, 216 s on a 16-core desktop):
 16 hosts and 600 sandboxes for 600 s with clocks up to 0.05 % off, and 8
 hosts and 200 sandboxes for 300 s with clocks up to 1 % off, the most the
 lease terms allow. Both run under partitions, lost and late messages,
 agent and guard stalls and restarts, suspends, power losses (some for
-good), stuck freezes and kills, and leader failovers. Over the 2,000 runs:
+good), stuck freezes and kills, and leader failovers. The guard plans with
+each VM's group, so VMs marked as their sandbox's only copy run on past
+the deadline, agent restarts leave marks orphaned until recovery, groups
+sometimes cannot be listed, and guards hand over to the next one. One
+sandbox in ten is a runner, which never sleeps and is archived only to be
+handed off. Over the 2,000 runs:
 
 | | 16 hosts, 0.05 % | 8 hosts, 1 % |
 | --- | --- | --- |
-| Hosts given up on and their sandboxes recovered elsewhere | 80,447 | 29,162 |
-| Adopts from an archive | 2,884,302 | 963,740 |
-| Moves while asleep | 648,641 | 160,051 |
-| Writes fenced (a former owner's archive refused) | 9,409 | 5,275 |
-| Watchdog reboots (a guard that could not stop its VMs) | 10,962 | 4,719 |
-| Suspends | 9,582 | 4,179 |
-| Registration answers that arrived after a copy was sent again | 8,824 | 4,614 |
-| Hosts that died for good / sandboxes lost with them (never archived) | 3,837 / 673 | 1,666 / 533 |
-| Least time a given-up host's VMs had been stopped when the service gave up | 2.13 s | 2.06 s |
+| Hosts given up on and their sandboxes recovered elsewhere | 47,901 | 18,830 |
+| Adopts from an archive | 1,354,514 | 429,240 |
+| Moves while asleep | 525,806 | 115,750 |
+| Writes fenced (a former owner's archive refused) | 380 | 179 |
+| Watchdog reboots (a guard that could not stop its VMs) | 10,863 | 4,687 |
+| VMs ended by the guard or a host's kill | 10,499 | 4,022 |
+| Suspends | 9,556 | 4,264 |
+| Registration answers that arrived after a copy was sent again | 15,468 | 6,599 |
+| Guard hand-overs | 39,988 | 10,267 |
+| Steps only copies ran past their host's deadline | 2,950,524 | 696,931 |
+| Steps VMs ran with their mark orphaned | 9,483,464 | 2,514,339 |
+| Hosts that died for good / sandboxes lost with them (never archived) | 3,831 / 12,525 | 1,692 / 4,071 |
+| Least time a given-up host's other VMs had been stopped when the service gave up | 4.80 s | 4.69 s |
 
-The terms leave 1.99 s and 1.87 s to spare at those clock errors (the
+The terms leave 1.98 s and 1.67 s to spare at those clock errors (the
 term and margin, less the term and watchdog on the slowest host clock);
 the simulation counts no time to stop the machine. No sandbox ran on two
 hosts or under an older epoch in any run, no pointer's stamp went back,
-and every lost sandbox had never been archived and last ran on a host
-that died.
+no VM marked as its sandbox's only copy ran while the service held an
+archive pointer for it, and every lost sandbox had never been archived
+and last ran on a host that died. Most lost sandboxes are runners and
+sandboxes that never took a checkpoint, which have nothing to be
+recovered from.
 
 Mutation checks: dropping the rule that a not-found answer must come
 after the create it might have overtaken runs one sandbox on two hosts at
 seed 247, and letting the sleep hook skip the freeze does so at seed 1.
 Making every registration copy a new attempt fails the lease's unit test
 for a registration answered after copies were sent again, and the
-simulation then never sees such an answer count.
+simulation then never sees such an answer count. Starting a VM with the
+mark its group was left with fails at seed 1. An archive that does not
+clear the mark of the sandbox's running VM fails too, and a guard that
+keeps feeding the watchdog but never stops anything runs a VM after its
+host was given up on.
 
 ## Checkpoints
 
