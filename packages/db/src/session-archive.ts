@@ -1,5 +1,5 @@
 import type { SessionEvent, SessionEventType } from "@opengeni/contracts";
-import { and, asc, eq, gt, isNull, notInArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, notInArray, sql, type SQL } from "drizzle-orm";
 import {
   rawRows,
   withRlsContext,
@@ -298,6 +298,8 @@ export async function completeSessionArchive(
           contentArchiveState: "archived",
           contentArchivedAt: new Date(),
           contentArchive: manifest as unknown as Record<string, unknown>,
+          // The idle archiver archives a chat for everyone as it stores it.
+          archivedAt: sql`coalesce(${schema.sessions.archivedAt}, now())`,
         })
         .where(
           and(
@@ -668,6 +670,7 @@ export async function setSessionKeepLive(
             keepLive: schema.sessions.keepLive,
             contentArchiveState: schema.sessions.contentArchiveState,
             contentArchivedAt: schema.sessions.contentArchivedAt,
+            archivedAt: schema.sessions.archivedAt,
           })
           .from(schema.sessions)
           .where(
@@ -679,7 +682,8 @@ export async function setSessionKeepLive(
           .for("no key update")
           .limit(1);
         if (!row) return { status: "not_found" as const };
-        if (row.contentArchiveState !== null) return { status: "archived" as const };
+        if (row.contentArchiveState !== null || row.archivedAt !== null)
+          return { status: "archived" as const };
         if (row.keepLive !== input.keepLive) {
           await tx
             .update(schema.sessions)
@@ -696,5 +700,287 @@ export async function setSessionKeepLive(
           retention: sessionRetentionFromRow({ ...row, keepLive: input.keepLive }),
         };
       }),
+  );
+}
+
+/**
+ * Seconds after Archive during which Undo returns the chat exactly as it was.
+ */
+export const SESSION_ARCHIVE_UNDO_SECONDS = 10;
+/** Undo is accepted a little past the window, for the request's own latency. */
+const SESSION_ARCHIVE_UNDO_GRACE_SECONDS = 3;
+/**
+ * Seconds after Archive when storing may start: only once Undo is no longer
+ * accepted, so a late Undo never races the store. session_archive_candidates
+ * in migration 1213 uses the same thirteen seconds.
+ */
+export const SESSION_ARCHIVE_STORE_AFTER_SECONDS =
+  SESSION_ARCHIVE_UNDO_SECONDS + SESSION_ARCHIVE_UNDO_GRACE_SECONDS;
+
+/** What keeps a chat live on purpose, so Archive refuses until it is removed. */
+export type SessionArchiveBlocker = {
+  kind: "keep_live" | "scheduled_task" | "site_sign_in" | "imported";
+  sessionId: string;
+};
+
+export class SessionArchiveBlockedError extends Error {
+  readonly code = "session_archive_blocked";
+  constructor(readonly blockers: SessionArchiveBlocker[]) {
+    super(sessionArchiveBlockedMessage(blockers));
+    this.name = "SessionArchiveBlockedError";
+  }
+}
+
+/** One plain sentence per kind of blocker, saying what to change. */
+export function sessionArchiveBlockedMessage(blockers: SessionArchiveBlocker[]): string {
+  const kinds = new Set(blockers.map((blocker) => blocker.kind));
+  const reasons: string[] = [];
+  if (kinds.has("keep_live"))
+    reasons.push('"Keep this chat active" is on. Turn it off in the chat\'s Agent tab first.');
+  if (kinds.has("scheduled_task"))
+    reasons.push(
+      "A scheduled task runs in this chat. Delete the task or let it start new chats first.",
+    );
+  if (kinds.has("site_sign_in"))
+    reasons.push("A site sign-in keeps itself signed in through this chat. Remove it first.");
+  if (kinds.has("imported")) reasons.push("Imported chats are already stored read-only.");
+  return `This chat can't be archived. ${reasons.join(" ")}`;
+}
+
+export class SessionArchiveFinalError extends Error {
+  readonly code = "session_archive_final";
+  constructor() {
+    super(
+      "This chat is archived and can no longer be restored. Start a new chat to continue its work.",
+    );
+    this.name = "SessionArchiveFinalError";
+  }
+}
+
+export type SessionArchiveRequest = {
+  /** The chat and every sub-chat it started, all archived together. */
+  sessionIds: string[];
+  archivedAt: Date;
+  /** Undo returns the chat as it was until this moment. */
+  undoUntil: Date;
+  /** Storing may start at this moment, once Undo is no longer accepted. */
+  storeAfter: Date;
+  /** The chat was archived already; nothing changed. */
+  alreadyArchived: boolean;
+};
+
+async function lockSessionTree(
+  tx: Database,
+  scope: { workspaceId: string; sessionId: string },
+): Promise<string[]> {
+  const tree = await rawRows<{ id: string }>(
+    tx,
+    sql`with recursive tree(id) as (
+        select ${scope.sessionId}::uuid
+        union
+        select child.id from sessions child join tree on child.parent_session_id = tree.id
+        where child.workspace_id = ${scope.workspaceId}::uuid
+      )
+      select id from tree order by id`,
+  );
+  const sessionIds = tree.map((row) => row.id);
+  await lockSessionEventWriteRows(tx, {
+    workspaceId: scope.workspaceId,
+    controlLock: "share",
+    sessionIds,
+  });
+  return sessionIds;
+}
+
+/**
+ * Archive a chat and its sub-chats for everyone: from now on they are listed
+ * as archived, and once the undo window has passed and nothing runs in them,
+ * the archiver moves their content to long-term storage and they become
+ * read-only for good. Refuses with {@link SessionArchiveBlockedError} when
+ * something keeps the chat live on purpose. Callers authorize session control
+ * first; stopping the chat's running work is theirs too.
+ */
+export async function requestSessionArchive(
+  db: Database,
+  scope: SessionArchiveScope & { subjectId: string },
+  now: Date = new Date(),
+): Promise<SessionArchiveRequest | null> {
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: scope.accountId, workspaceId: scope.workspaceId },
+    async (scoped) =>
+      await scoped.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const sessionIds = await lockSessionTree(tx, scope);
+        const rows = await tx
+          .select({
+            id: schema.sessions.id,
+            keepLive: schema.sessions.keepLive,
+            imported: schema.sessions.importedArchiveImportId,
+            archivedAt: schema.sessions.archivedAt,
+            contentArchiveState: schema.sessions.contentArchiveState,
+            parentSessionId: schema.sessions.parentSessionId,
+          })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, scope.workspaceId),
+              inArray(schema.sessions.id, sessionIds),
+            ),
+          );
+        const root = rows.find((row) => row.id === scope.sessionId);
+        // Sub-chats are archived with the chat that started them.
+        if (!root || root.parentSessionId !== null) return null;
+        if (root.archivedAt !== null || root.contentArchiveState !== null) {
+          const archivedAt = root.archivedAt ?? now;
+          return {
+            sessionIds,
+            archivedAt,
+            undoUntil: new Date(archivedAt.getTime() + SESSION_ARCHIVE_UNDO_SECONDS * 1_000),
+            storeAfter: new Date(
+              archivedAt.getTime() + SESSION_ARCHIVE_STORE_AFTER_SECONDS * 1_000,
+            ),
+            alreadyArchived: true,
+          };
+        }
+        const live = rows.filter((row) => row.contentArchiveState === null);
+        const blockers: SessionArchiveBlocker[] = [];
+        for (const row of live) {
+          if (row.keepLive) blockers.push({ kind: "keep_live", sessionId: row.id });
+          if (row.imported !== null) blockers.push({ kind: "imported", sessionId: row.id });
+        }
+        const liveIds = live.map((row) => row.id);
+        if (liveIds.length > 0) {
+          // The archiver's own rule, except one-time automations ("wake me
+          // when", run or not), which are retired when the undo window ends
+          // (see retireArchivedChatWaits). A private schedule another member
+          // owns is not visible here; the archiver then waits for it instead.
+          const ids = sql.join(
+            liveIds.map((id) => sql`${id}::uuid`),
+            sql`, `,
+          );
+          const bound = await rawRows<{
+            session_id: string;
+            kind: "scheduled_task" | "site_sign_in";
+          }>(
+            tx,
+            sql`select distinct task.reusable_session_id as session_id, 'scheduled_task' as kind
+                from scheduled_tasks task
+                left join scheduled_task_event_settings settings on settings.task_id = task.id
+                where task.workspace_id = ${scope.workspaceId}::uuid and task.deleted_at is null
+                  and task.reusable_session_id in (${ids})
+                  and not (task.run_mode = 'existing_session' and (
+                    settings.once
+                    or (settings.task_id is null and task.schedule ->> 'type' = 'once')))
+              union
+              select distinct maintenance_session_id, 'site_sign_in'
+                from site_auth_connections
+                where workspace_id = ${scope.workspaceId}::uuid
+                  and maintenance_session_id in (${ids})`,
+          );
+          for (const row of bound) blockers.push({ kind: row.kind, sessionId: row.session_id });
+        }
+        if (blockers.length > 0) throw new SessionArchiveBlockedError(blockers);
+        await tx
+          .update(schema.sessions)
+          .set({ archivedAt: now, archiveRequestedBy: scope.subjectId })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, scope.workspaceId),
+              inArray(schema.sessions.id, liveIds),
+              isNull(schema.sessions.archivedAt),
+            ),
+          );
+        return {
+          sessionIds,
+          archivedAt: now,
+          undoUntil: new Date(now.getTime() + SESSION_ARCHIVE_UNDO_SECONDS * 1_000),
+          storeAfter: new Date(now.getTime() + SESSION_ARCHIVE_STORE_AFTER_SECONDS * 1_000),
+          alreadyArchived: false,
+        };
+      }),
+  );
+}
+
+/**
+ * Undo an Archive within its window: the chat and its sub-chats are live and
+ * listed again, exactly as before. Throws {@link SessionArchiveFinalError}
+ * once the window has passed or storing has begun. Returns false when the
+ * chat was not archived (nothing to undo).
+ */
+export async function undoSessionArchive(
+  db: Database,
+  scope: SessionArchiveScope,
+  now: Date = new Date(),
+): Promise<boolean | null> {
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: scope.accountId, workspaceId: scope.workspaceId },
+    async (scoped) =>
+      await scoped.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const sessionIds = await lockSessionTree(tx, scope);
+        const [root] = await tx
+          .select({
+            archivedAt: schema.sessions.archivedAt,
+            contentArchiveState: schema.sessions.contentArchiveState,
+          })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, scope.workspaceId),
+              eq(schema.sessions.id, scope.sessionId),
+            ),
+          )
+          .limit(1);
+        if (!root) return null;
+        if (root.contentArchiveState !== null) throw new SessionArchiveFinalError();
+        if (root.archivedAt === null) return false;
+        const windowEnds = root.archivedAt.getTime() + SESSION_ARCHIVE_STORE_AFTER_SECONDS * 1_000;
+        if (now.getTime() > windowEnds) throw new SessionArchiveFinalError();
+        // Only what this Archive marked: a sub-chat stored on its own stays so.
+        await tx
+          .update(schema.sessions)
+          .set({ archivedAt: null, archiveRequestedBy: null })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, scope.workspaceId),
+              inArray(schema.sessions.id, sessionIds),
+              eq(schema.sessions.archivedAt, root.archivedAt),
+              isNull(schema.sessions.contentArchiveState),
+            ),
+          );
+        return true;
+      }),
+  );
+}
+
+/** A chat and its sub-chats with their archive state, for the step after the undo window. */
+export async function readSessionArchiveTree(
+  db: Database,
+  scope: { workspaceId: string; sessionId: string },
+): Promise<
+  Array<{
+    id: string;
+    archivedAt: Date | null;
+    archiveRequestedBy: string | null;
+    contentArchiveState: "archiving" | "archived" | null;
+  }>
+> {
+  return await withWorkspaceSessionActivityRls(db, scope.workspaceId, async (scoped) =>
+    (scoped as unknown as Database)
+      .select({
+        id: schema.sessions.id,
+        archivedAt: schema.sessions.archivedAt,
+        archiveRequestedBy: schema.sessions.archiveRequestedBy,
+        contentArchiveState: schema.sessions.contentArchiveState,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, scope.workspaceId),
+          eq(schema.sessions.rootSessionId, scope.sessionId),
+        ),
+      ),
   );
 }

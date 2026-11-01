@@ -9916,7 +9916,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "Session"
     ],
-    "permission": "sessions:read"
+    "permission": "sessions:control"
   },
   {
     "id": "updateSessionAttention",

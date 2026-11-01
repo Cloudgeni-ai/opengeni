@@ -12,7 +12,7 @@
 //   /workspaces/:id/secrets/:vaultId         → one vault (?view=availability|new-item&type)
 //   /workspaces/:id/secrets/:vaultId/:itemId → one item (?view=edit)
 //   /workspaces/:id/rigs                     → rigs list + create
-//   /workspaces/:id/read-only-chats          → chats moved to long-term storage (read-only)
+//   /workspaces/:id/archived                 → archived chats (long-term storage, read-only)
 //   /workspaces/:id/inbox                    → things that need you, from agents (temporary inbox)
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 
@@ -604,8 +604,14 @@ const workspaceRigsRoute = createRoute({
 });
 const workspaceReadOnlyChatsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
-  path: "read-only-chats",
+  path: "archived",
   component: ReadOnlyChats,
+});
+// The Archived page was called Read-only chats; old links still land on it.
+const workspaceLegacyReadOnlyChatsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "read-only-chats",
+  component: LegacyReadOnlyChatsRedirect,
 });
 const workspaceInboxRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -1072,6 +1078,7 @@ const routeTree = rootRoute.addChildren([
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceReadOnlyChatsRoute,
+    workspaceLegacyReadOnlyChatsRoute,
     workspaceInboxRoute,
     workspaceMachinesRoute,
     workspaceComputerUseRoute,
@@ -1347,6 +1354,11 @@ function AutomationTemplates() {
 function BotTemplates() {
   const { workspaceId } = workspaceBotTemplatesRoute.useParams();
   return <LazyBotTemplatesRoute workspaceId={workspaceId} />;
+}
+
+function LegacyReadOnlyChatsRedirect() {
+  const { workspaceId } = workspaceLegacyReadOnlyChatsRoute.useParams();
+  return <Navigate to="/workspaces/$workspaceId/archived" params={{ workspaceId }} replace />;
 }
 
 function LegacySchedulesRedirect() {

@@ -457,7 +457,6 @@ export type SessionSidebarEvidence = {
     workspaceId: string;
     sessionId: string;
     archived: boolean;
-    expectedVersion: number;
     previousChannelId: string | null;
     returnedChannelId: string | null;
   }[];
@@ -714,15 +713,9 @@ export const client = {
         : {}),
     };
   },
-  updateSessionArchive: async (
-    workspace: string,
-    id: string,
-    request: { archived: boolean; expectedVersion: number },
-  ) => {
+  updateSessionArchive: async (workspace: string, id: string, request: { archived: boolean }) => {
     const row = rows.find((candidate) => candidate.id === id);
     if (!row) throw new Error("Preview session not found");
-    if (request.expectedVersion !== row.archiveVersion)
-      throw new Error("Preview archive version changed");
     const previousChannelId = row.channelId ?? null;
     row.archived = request.archived;
     row.archivedAt = request.archived ? new Date().toISOString() : null;

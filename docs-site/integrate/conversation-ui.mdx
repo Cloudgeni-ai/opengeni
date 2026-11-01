@@ -56,7 +56,7 @@ If your app authenticates with a bearer token instead of cookies, pass it on eve
 
 The function runs per request, so it can return a refreshed token. Pass `fetch` instead when the token must be awaited. A `client` you pass with `baseUrl` is used instead of the one the component would create.
 
-The list shows every chat the user can read; pass `listProps={{ mineOnly: true }}` for only their own, `listProps={{ archive: false }}` to hide "Hide for me", and `newChat={false}` to hide "New chat". Control the selection with `sessionId` and `onSessionChange` (for example from the URL).
+The list shows every chat the user can read; pass `listProps={{ mineOnly: true }}` for only their own, `listProps={{ archive: false }}` to hide "Archive" (it archives the chat for everyone after a short Undo window and needs control of the chat), and `newChat={false}` to hide "New chat". Control the selection with `sessionId` and `onSessionChange` (for example from the URL).
 
 For a single conversation, use `SessionConversation`. It includes streaming replies, tool activity, approvals, questions, attachments, the message queue, Steer, and Pause/Resume.
 

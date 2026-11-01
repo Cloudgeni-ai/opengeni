@@ -351,20 +351,16 @@ describe("Session rail row metadata in Chromium", () => {
     });
     await pinButton.press("Enter");
     await row.getByRole("button", { name: "Unpin session", exact: true }).waitFor();
-    await row.getByRole("button", { name: "Archive session", exact: true }).click();
-    await row.getByRole("button", { name: "Restore session", exact: true }).waitFor();
-    expect(await row.getByRole("button", { name: "Pin session" }).count()).toBe(0);
     const titleBefore = await row.locator("[data-session-row-title]").boundingBox();
+    await row.getByRole("button", { name: "Archive session", exact: true }).click();
+    // An archived chat has no row actions: there is no Restore, and it cannot be pinned.
+    await row.getByRole("button", { name: "Archive session", exact: true }).waitFor({
+      state: "detached",
+    });
+    expect(await row.getByRole("button", { name: /Pin session/ }).count()).toBe(0);
+    expect(await row.getByRole("button", { name: /Restore/ }).count()).toBe(0);
     await page.locator("main").click({ position: { x: 900, y: 600 } });
     expect(await row.locator("[data-session-row-title]").boundingBox()).toEqual(titleBefore);
-    await row.getByRole("button", { name: "Restore session", exact: true }).focus();
-    expect(await row.locator("[data-session-row-title]").boundingBox()).toEqual(titleBefore);
-    expect(
-      await row
-        .locator("[data-session-row-slot]")
-        .last()
-        .evaluate((element) => getComputedStyle(element).visibility),
-    ).toBe("hidden");
   });
 
   test("coarse pointers retain metadata instead of showing desktop quick actions", async () => {

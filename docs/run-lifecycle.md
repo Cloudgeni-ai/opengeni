@@ -1498,24 +1498,19 @@ never replays historical work or changes the accepted account selection of a
 capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
 requires an authorized account change; time or a deploy cannot override it.
 
-Personal sidebar Archive composes native Pause and the member's archive row in
-one transaction, taking the personal-state fence before the control/workspace/
-session prefix. It pauses idle chats too; active work anywhere in the tree
-requires explicit confirmation under the control lock. `sessions:control` governs
-Pause regardless of the chat creator; `hide_for_me` explicitly changes only the
-caller's sidebar visibility. Shared Pause affects everyone. Restore changes only
-personal visibility and never resumes. A stable `clientEventId` replays an archive
-intent without undoing a later explicit Resume; use a new ID for a new intent.
-Native Pause interrupts descendant work and requests background-command
-cancellation through the existing durable settlement protocol. Completion of the
-HTTP request does not mean every external command has already stopped.
-
-Archive does not rewrite schedule ownership or enabled flags. Existing-session
-and reusable-session schedules cannot admit work into an effectively paused chat
-or descendant. Their definitions remain visible and enabled for their owners;
-only an explicit Resume can make the chat executable again. Independent
-new-chat-per-run schedules are not schedules *in* the archived chat and remain
-unaffected. Personal hiding alone makes no execution guarantee.
+The chat Archive action needs `sessions:control`, regardless of the chat
+creator, and applies to everyone. It refuses while something keeps the chat live
+on purpose (keep-live, a repeating automation in it, a site sign-in). Otherwise
+it marks the tree archived at once: new messages, steers and agent sends are
+refused, and machine inputs are settled like input to a cancelled chat. Running
+work is left alone for the ten-second Undo window, so Undo returns the chat
+exactly as it was. When the window ends, a delayed workflow retires the tree's
+one-time automations, pauses active goals, and cancels running work as the
+person who archived it (native cancel, so background commands are asked to stop
+through the existing durable settlement protocol). The idle-session archive
+then stores the chat as soon as nothing runs. Repeating an Archive changes
+nothing. See [session storage
+lifecycle](session-storage-lifecycle.md#archiving-a-chat).
 
 Scheduled admission refuses an effectively paused session under every overlap
 policy (`refusePaused`), not only skip: an occurrence queued behind a Pause

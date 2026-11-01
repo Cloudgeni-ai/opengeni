@@ -28,6 +28,7 @@ const PAGES = new Set([
   "secrets",
   "rigs",
   "playground",
+  "archived",
   "read-only-chats",
   "inbox",
   "sites",

@@ -9023,17 +9023,24 @@ export const UpdateSessionAttentionRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type UpdateSessionAttentionRequest = z.infer<typeof UpdateSessionAttentionRequest>;
 
-/** A member's personal archive state for a root chat. */
+/**
+ * Archive a root chat and its sub-chats for everyone (`archived: true`), or
+ * undo that (`archived: false`) within the few seconds after archiving. Once
+ * that window ends the chat's remaining work is stopped and its content moves
+ * to long-term storage; it stays readable and searchable but can no longer be
+ * restored or continued. Needs session control.
+ */
 export const UpdateSessionArchiveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       archived: primitives.boolean,
-      /** Stable for retries of one intent; use a fresh ID for a later intentional archive. */
+      /** Ignored; repeating an Archive changes nothing. Kept for older clients. */
       clientEventId: z.string().min(1).max(200).optional(),
-      /** Hiding alone never changes shared execution. Ordinary archive pauses first. */
+      /** Ignored; there is one kind of archive. Kept for older clients. */
       mode: z.enum(["pause_and_archive", "hide_for_me"]).optional(),
-      /** Required when the locked chat tree has active work. Restore never resumes. */
+      /** Ignored; archiving stops running work itself. Kept for older clients. */
       confirmPause: z.boolean().optional(),
+      /** Ignored. Kept for older clients. */
       expectedVersion: z.number().int().nonnegative().optional(),
     })
     .strict(),

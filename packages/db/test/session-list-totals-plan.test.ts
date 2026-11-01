@@ -80,12 +80,17 @@ test("shallow workspace totals only read cursors contributing to unarchived grou
         parent_id, root_id, 'idle', jsonb_build_object('ordinal', ordinal) from generated
     `);
   });
+  // Archiving a chat archives its whole tree.
+  await withWorkspaceSessionActivityRls(db, grant.workspaceId, async (tx) => {
+    await tx.execute(sql`
+      update sessions set archived_at = now()
+      where workspace_id = ${grant.workspaceId}
+        and (metadata->>'ordinal')::int <= ${archivedRoots}
+    `);
+  });
   await shared.admin`insert into session_pins(account_id, workspace_id, subject_id, session_id,
-    pinned, pinned_at, archived, archived_at, acknowledged_sequence, actively_working)
-    select account_id, workspace_id, ${grant.subjectId}, id, false, null,
-      parent_session_id is null and (metadata->>'ordinal')::int <= ${archivedRoots},
-      case when parent_session_id is null and (metadata->>'ordinal')::int <= ${archivedRoots}
-        then now() else null end, 0, false
+    pinned, pinned_at, acknowledged_sequence, actively_working)
+    select account_id, workspace_id, ${grant.subjectId}, id, false, null, 0, false
     from sessions where workspace_id=${grant.workspaceId}`;
   // A generic plan estimates average workspace/subject cardinalities. One
   // populated workspace hides the bad nested-loop choice made when a large

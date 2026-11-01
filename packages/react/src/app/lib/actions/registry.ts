@@ -6,7 +6,6 @@
  */
 import {
   ArchiveIcon,
-  ArchiveRestoreIcon,
   ArrowDownIcon,
   ArrowUpIcon,
   ChevronsUpDownIcon,
@@ -331,16 +330,10 @@ export function appActions(): readonly AppAction[] {
     },
     {
       id: "chat.archive",
-      title: (env, chat) =>
-        chat && env.ops.archiveLabel
-          ? env.ops.archiveLabel(chat)
-          : chat?.archived
-            ? "Restore"
-            : "Archive",
+      title: "Archive",
       group: "chat",
       icon: ArchiveIcon,
-      iconFor: (chat) => (chat?.archived ? ArchiveRestoreIcon : ArchiveIcon),
-      keywords: ["restore", "hide", "done"],
+      keywords: ["archive", "done", "storage"],
       // Apple Mail's Archive key; Ctrl+Alt elsewhere, as Pin, since browsers there
       // keep Ctrl+Shift+A for tab search.
       chords: [
@@ -349,8 +342,13 @@ export function appActions(): readonly AppAction[] {
       ],
       forChat: true,
       desktopMenu: "chat",
-      available: (_env, chat) => chat !== null && chat.parentSessionId === null,
-      run: (env, chat) => (chat ? env.ops.setArchived(chat, !chat.archived) : undefined),
+      // Archived chats stay archived; only people who can control a chat archive it.
+      available: (env, chat) =>
+        chat !== null &&
+        chat.parentSessionId === null &&
+        !chat.archived &&
+        (env.ops.archiveLabel ? env.ops.archiveLabel(chat) !== null : true),
+      run: (env, chat) => (chat ? env.ops.setArchived(chat, true) : undefined),
     },
     {
       id: "chat.find",

@@ -18,7 +18,7 @@ import {
   listVisibleSessionInvalidationIds,
   withSessionRlsActorContext,
   SessionListAccessError,
-  setSessionArchive,
+  requestSessionArchive,
   setSessionPin,
   updateChannel,
   updateScheduledTask,
@@ -248,15 +248,16 @@ test("commit hints coalesce, roll back, and ignore raw deltas and unrelated meta
   expect(changes).toHaveLength(1);
   expect(changes[0]?.subjectId).toBe(grant.subjectId);
   changes.length = 0;
-  await setSessionArchive(client.db, {
+  await requestSessionArchive(client.db, {
+    accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     sessionId: session.id,
     subjectId: grant.subjectId,
-    archived: true,
   });
   await drain();
   expect(changes).toHaveLength(1);
-  expect(changes[0]?.subjectId).toBe(grant.subjectId);
+  // Archive is shared, so every member's list changes.
+  expect(changes[0]).toMatchObject({ sessionId: session.id, subjectId: null });
 
   changes.length = 0;
   await shared.admin`delete from sessions where id=${session.id}`;

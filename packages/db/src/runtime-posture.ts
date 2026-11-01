@@ -442,6 +442,9 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "wake_teams_route_for_session_event()",
+  // Migration 1213: clears a new session's archive marker; triggers fire
+  // without the inserting role holding EXECUTE.
+  "session_insert_not_archived()",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
   ...MAINTENANCE_PROBE_OWNER_ROUTINES,

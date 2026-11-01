@@ -26,10 +26,14 @@ import {
   editQueuedTurnInTransaction,
   getComposerDraftInTransaction,
   getSession,
+  requireSessionArchiveMemberAuthority,
   retireArchivedChatWaits,
-  setSessionArchive,
-  SessionArchiveConfirmationRequiredError,
-  sessionArchiveNeedsPauseConfirmation,
+  requestSessionArchive,
+  undoSessionArchive,
+  getSessionGoal,
+  setSessionGoalStatusWithEvent,
+  sessionWorkstreamHasActiveWork,
+  readSessionArchiveTree,
   getSessionEvent,
   getWorkspaceControlEvent,
   getSessionQueueSnapshot,
@@ -1029,73 +1033,128 @@ function scheduleHumanControlPostCommit(
 }
 
 /**
- * Pause and personal visibility commit together; Restore never changes control.
- * Pausing also retires the chat's one-time waits in the same transaction, so
- * an archived chat is never woken by a "wake me when" it was waiting on.
+ * Archive a chat for everyone, or undo that within its window. Archiving marks
+ * the chat and its sub-chats archived at once and schedules
+ * {@link stopArchivedSessionWork} for when the undo window ends; the archiver
+ * then stores them. Undo returns the chat exactly as it was, since nothing
+ * else changes before the window ends. Both need session control.
  */
 export async function archiveHumanSessionWorkstream(
-  deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0],
-  context: HumanSessionCommandContext,
-  input: Omit<
-    Parameters<typeof setSessionArchive>[1],
-    "beforeArchive" | "workspaceId" | "subjectId" | "sessionId"
-  > & {
-    pause: boolean;
-    clientEventId?: string | undefined;
-    confirmPause?: boolean | undefined;
+  deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0] & {
+    workflowClient: Pick<SessionWorkflowClient, "scheduleSessionArchive">;
   },
-) {
-  if (input.archived && input.pause) {
-    await authorizeHumanSessionCommand(deps, context, "session.control");
-  }
-  // Ask about active work at once, not after the archive and control locks:
-  // waiting for those first is what delayed the question on busy workspaces.
-  if (
-    input.archived &&
-    input.pause &&
-    !input.confirmPause &&
-    (await sessionArchiveNeedsPauseConfirmation(deps.db, {
-      workspaceId: context.workspaceId,
-      subjectId: context.subjectId,
-      sessionId: context.sessionId,
-      expectedVersion: input.expectedVersion,
-      personalWorkspaceOwnerException: input.personalWorkspaceOwnerException,
-    }))
-  ) {
-    throw new SessionArchiveConfirmationRequiredError();
-  }
-  let control: Awaited<ReturnType<typeof mutateSessionControlInTransaction>> | undefined;
-  const session = await setSessionArchive(deps.db, {
-    ...input,
+  context: HumanSessionCommandContext,
+  input: {
+    archived: boolean;
+    /** Verified owning-user proof, for a Personal workspace (see requireSessionArchiveMemberAuthority). */
+    personalWorkspaceOwnerException?: boolean;
+  },
+): Promise<{ changed: boolean; undoUntil: string | null } | null> {
+  await authorizeHumanSessionCommand(deps, context, "session.control");
+  await requireSessionArchiveMemberAuthority(deps.db, {
     workspaceId: context.workspaceId,
     subjectId: context.subjectId,
-    sessionId: context.sessionId,
-    beforeArchive: input.pause
-      ? async (tx, archiveVersion) => {
-          await retireArchivedChatWaits(tx, {
-            workspaceId: context.workspaceId,
-            rootSessionId: context.sessionId,
-          });
-          control = await mutateSessionControlInTransaction(tx, {
-            accountId: context.accountId,
-            workspaceId: context.workspaceId,
-            sessionId: context.sessionId,
-            actor: { type: "human", subjectId: context.subjectId },
-            // The personal archive transition is the receipt identity. A retry does
-            // not re-pause after an explicit Resume; Restore advances the next epoch.
-            operationKey:
-              input.clientEventId ?? `archive-pause:${context.sessionId}:${archiveVersion}`,
-            action: "pause",
-            reason: "Archived",
-            requireIdleForArchive: !input.confirmPause,
-            controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
-          });
-          return control.replay;
-        }
-      : undefined,
+    personalWorkspaceOwnerException: input.personalWorkspaceOwnerException === true,
   });
-  if (control) scheduleHumanControlPostCommit(deps, context.workspaceId, control, "pause");
-  return session;
+  const scope = {
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+    sessionId: context.sessionId,
+  };
+  if (!input.archived) {
+    const undone = await undoSessionArchive(deps.db, scope);
+    return undone === null ? null : { changed: undone, undoUntil: null };
+  }
+  const request = await requestSessionArchive(deps.db, { ...scope, subjectId: context.subjectId });
+  if (!request) return null;
+  if (!request.alreadyArchived) {
+    // Durable: stopping work and storing must not depend on this process.
+    await deps.workflowClient.scheduleSessionArchive?.({
+      ...scope,
+      subjectId: context.subjectId,
+      archivedAt: request.archivedAt.toISOString(),
+      runAt: request.storeAfter,
+    });
+  }
+  return {
+    changed: !request.alreadyArchived,
+    undoUntil: request.undoUntil.getTime() > Date.now() ? request.undoUntil.toISOString() : null,
+  };
+}
+
+/**
+ * Once an Archive's undo window has ended, stop what still runs in the chat
+ * and its sub-chats so the archiver can store them: one-time waits are
+ * retired, active goals paused, and running work cancelled (as the person who
+ * archived it). Does nothing when the Archive was undone or the chat is
+ * stored already. Returns whether the chat is still waiting to be stored.
+ */
+export async function stopArchivedSessionWork(
+  deps: {
+    db: Database;
+    bus: EventBus;
+    workflowClient: Pick<
+      SessionWorkflowClient,
+      "requestSessionWorkflowWakeDispatch" | "wakeSessionWorkflow"
+    >;
+  } & SessionCommandPostCommitDeps,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    archivedAt: string;
+  },
+): Promise<{ pending: boolean }> {
+  const tree = await readSessionArchiveTree(deps.db, input);
+  const root = tree.find((row) => row.id === input.sessionId);
+  if (
+    !root ||
+    root.contentArchiveState !== null ||
+    root.archivedAt?.toISOString() !== input.archivedAt
+  ) {
+    return { pending: false };
+  }
+  await retireArchivedChatWaits(deps.db, {
+    workspaceId: input.workspaceId,
+    rootSessionId: input.sessionId,
+  });
+  const live = tree.filter((row) => row.contentArchiveState === null);
+  for (const session of live) {
+    const goal = await getSessionGoal(deps.db, input.workspaceId, session.id);
+    if (goal?.status !== "active") continue;
+    const { events } = await setSessionGoalStatusWithEvent(deps.db, input.workspaceId, session.id, {
+      status: "paused",
+      pausedReason: "archived",
+      event: { type: "goal.paused", actor: "api", reason: "archived" },
+    });
+    if (events.length > 0) await deps.bus.publish(input.workspaceId, session.id, events);
+  }
+  const active = await withWorkspaceSessionActivityRls(deps.db, input.workspaceId, (scoped) =>
+    sessionWorkstreamHasActiveWork(scoped, input.workspaceId, input.sessionId),
+  );
+  if (active) {
+    const result = await runSessionCommandPersistenceTransaction(
+      deps,
+      { workspaceId: input.workspaceId },
+      {
+        stage: "session_commands.archive_stop_work",
+        eventTypes: ["session.control.paused"],
+        transaction: async (tx) =>
+          await mutateSessionControlInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            actor: { type: "human", subjectId: input.subjectId },
+            operationKey: `archive-stop:${input.sessionId}:${input.archivedAt}`,
+            action: "cancel",
+            reason: "Archived",
+          }),
+      },
+    );
+    scheduleHumanControlPostCommit(deps, input.workspaceId, result, "cancel");
+  }
+  return { pending: true };
 }
 
 /** Backward-compatible response path used by the REST control route. */

@@ -27,7 +27,6 @@ import {
   saveNewSessionDraftInTransaction,
   SessionListAccessError,
   SessionPinAccessError,
-  setSessionArchive,
   setSessionAttention,
   setSessionPin,
   subjectHasLiveWorkspaceAuthorityInScope,
@@ -1828,16 +1827,6 @@ describe("the exception is owner-scoped at the database seam, not only at the ro
       ).rejects.toBeInstanceOf(SessionPinAccessError);
 
       await expect(
-        setSessionArchive(client.db, {
-          workspaceId: owner.personalWorkspaceId,
-          subjectId: other.subjectId,
-          sessionId,
-          archived: true,
-          personalWorkspaceOwnerException: true,
-        }),
-      ).rejects.toBeInstanceOf(SessionPinAccessError);
-
-      await expect(
         saveDraftDirectly(owner.personalWorkspaceId, owner.accountId, other.subjectId),
       ).rejects.toBeInstanceOf(NewSessionDraftAccessError);
 
@@ -1866,15 +1855,6 @@ describe("the exception is owner-scoped at the database seam, not only at the ro
           personalWorkspaceOwnerException: true,
         }),
       ).toMatchObject({ id: sessionId, unread: true });
-      expect(
-        await setSessionArchive(client.db, {
-          workspaceId: owner.personalWorkspaceId,
-          subjectId: owner.subjectId,
-          sessionId,
-          archived: true,
-          personalWorkspaceOwnerException: true,
-        }),
-      ).toMatchObject({ id: sessionId, archived: true });
       expect(
         await saveDraftDirectly(owner.personalWorkspaceId, owner.accountId, owner.subjectId),
       ).toMatchObject({ revision: 1 });
@@ -1924,15 +1904,6 @@ describe("the exception is owner-scoped at the database seam, not only at the ro
         subjectId: suspended.subjectId,
         sessionId,
         unread: true,
-        personalWorkspaceOwnerException: true,
-      }),
-    ).rejects.toBeInstanceOf(SessionPinAccessError);
-    await expect(
-      setSessionArchive(client.db, {
-        workspaceId: suspended.personalWorkspaceId,
-        subjectId: suspended.subjectId,
-        sessionId,
-        archived: true,
         personalWorkspaceOwnerException: true,
       }),
     ).rejects.toBeInstanceOf(SessionPinAccessError);

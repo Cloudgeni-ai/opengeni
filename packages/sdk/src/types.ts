@@ -2444,9 +2444,13 @@ export type UpdateSessionUnattendedRequest = {
 
 export type UpdateSessionArchiveRequest = {
   archived: boolean;
+  /** Ignored; kept for older clients. */
   clientEventId?: string;
+  /** Ignored; there is one kind of archive. Kept for older clients. */
   mode?: "pause_and_archive" | "hide_for_me";
+  /** Ignored; archiving stops running work itself. Kept for older clients. */
   confirmPause?: boolean;
+  /** Ignored; kept for older clients. */
   expectedVersion?: number;
 };
 
