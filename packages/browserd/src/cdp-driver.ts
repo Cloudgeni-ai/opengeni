@@ -112,6 +112,7 @@ import {
   pageProtection,
   protectedNodeKey,
   SENSITIVE_FIELD_REASON_SOURCE,
+  sensitiveFieldReason,
   type PageProtection,
 } from "./page-protection";
 import { reportUnexpectedDispatchError } from "./controller-diagnostics";
@@ -6023,9 +6024,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             ? protectedNodeKey(node.frameId, node.backendDOMNodeId)
             : null;
         const reason =
-          key === null
+          (key === null
             ? undefined
-            : protections.map((protection) => protection.nodes.get(key)).find(Boolean);
+            : protections.map((protection) => protection.nodes.get(key)).find(Boolean)) ??
+          passwordNamedTextbox(node);
         return reason ? { ...node, protectedReason: reason } : node;
       }),
     );
@@ -12608,7 +12610,15 @@ const SENSITIVE_CANDIDATE_SELECTOR = `[id], [name], [autocomplete], [aria-label]
  * page-protection.ts) that observations, captures and fill verification use,
  * applied to one element in the page. */
 const SENSITIVE_REASON_FUNCTION = `function(node) {
-  return (${SENSITIVE_FIELD_REASON_SOURCE})(String(node.tagName || "").toLowerCase(), Object.fromEntries(Array.from(node.attributes || [], (attr) => [attr.name, attr.value])), node.isContentEditable === true);
+  // The text of a field's labels, which its attributes do not carry.
+  const parts = Array.from(node.labels || [], (label) => String(label.textContent || ""));
+  const root = node.getRootNode ? node.getRootNode() : null;
+  for (const id of String((node.getAttribute && node.getAttribute("aria-labelledby")) || "").split(/\\s+/)) {
+    if (!id) continue;
+    const named = (root && typeof root.getElementById === "function" ? root.getElementById(id) : null) || node.ownerDocument?.getElementById(id);
+    if (named) parts.push(String(named.textContent || ""));
+  }
+  return (${SENSITIVE_FIELD_REASON_SOURCE})(String(node.tagName || "").toLowerCase(), Object.fromEntries(Array.from(node.attributes || [], (attr) => [attr.name, attr.value])), node.isContentEditable === true, "read", parts.join(" ").slice(0, 512));
 }`;
 
 /** Why an element's text or value must not leave the page: it is, sits in, or
@@ -14238,6 +14248,19 @@ const PAGE_FACTS_EXPRESSION = `(() => {
   }
   return facts.revealed.length === 0 ? null : [JSON.stringify(facts), ...nodes];
 })()`;
+
+/** A text box whose accessible name (however the page labels it, shadow
+ * roots and custom elements included) calls it a password holds one, even
+ * when the page made it an ordinary text input. */
+function passwordNamedTextbox(node: CdpAxNode): "password" | undefined {
+  const role = isRecord(node.role) ? node.role.value : undefined;
+  if (role !== "textbox" && role !== "searchbox") return undefined;
+  const name = isRecord(node.name) ? node.name.value : undefined;
+  if (typeof name !== "string" || name === "") return undefined;
+  return sensitiveFieldReason("input", { "aria-label": name }, false) === "password"
+    ? "password"
+    : undefined;
+}
 
 /**
  * The text a container shows without its protected descendants, for a DOM

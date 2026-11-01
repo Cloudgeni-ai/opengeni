@@ -23,9 +23,28 @@ describe("sensitiveFieldReason", () => {
     ["h1", { id: "credit-card-offers" }, false, null],
     ["select", { id: "link-expiration" }, false, null],
     ["input", { name: "orderNumber" }, false, null],
+    ["input", { type: "text", name: "password" }, false, "password"],
+    ["input", { "aria-label": "Password" }, false, "password"],
+    ["input", { placeholder: "Passord" }, false, "password"],
+    ["input", { id: "user_pwd" }, false, "password"],
+    ["textarea", { name: "passphrase" }, false, "password"],
+    ["input", { type: "checkbox", name: "show_password" }, false, null],
+    ["input", { name: "passwordless_email" }, false, null],
+    ["a", { id: "forgot-password" }, false, null],
+    ["input", { name: "username" }, false, null],
   ] as const)("the native and browser policy agree for %s %j", (tag, attrs, editable, reason) => {
     expect(sensitiveFieldReason(tag, attrs, editable)).toBe(reason);
     expect(browserPolicy(tag, attrs, editable)).toBe(reason);
+  });
+  test("a text field labelled as a password is one, for reading and remembering", () => {
+    for (const policy of [sensitiveFieldReason, browserPolicy]) {
+      expect(policy("input", { type: "text" }, false, "read", "Password")).toBe("password");
+      expect(policy("input", { type: "text" }, false, "remember", "App review password")).toBe(
+        "password",
+      );
+      expect(policy("input", { type: "text" }, false, "read", "Username")).toBeNull();
+      expect(policy("button", {}, false, "read", "Show password")).toBeNull();
+    }
   });
   test.each(["credit_card[year]", "credit_card[zip]"])(
     "%s protects its field without remembering ordinary numeric values",
@@ -268,4 +287,69 @@ test.each([
   { strings: [], documents: [{ frameId: 2, nodes: {} }] },
 ])("invalid snapshot withholds output rather than assuming no protected fields", (snapshot) => {
   expect(() => pageProtection(snapshot)).toThrow();
+});
+
+test.each([
+  ["a label for its id", "for"],
+  ["a label around it", "wrap"],
+  ["aria-labelledby", "labelledby"],
+] as const)("a plain text field labelled Password by %s is protected and remembered", (_, how) => {
+  // Strings: 0 frame, 1 DIV, 2 LABEL, 3 INPUT, 4 #text, 5 "Password", 6 id,
+  // 7 "secret-field", 8 for, 9 type, 10 text, 11 value, 12 aria-labelledby,
+  // 13 "secret-label", 14 SPAN
+  const strings = [
+    "frame-a",
+    "DIV",
+    "LABEL",
+    "INPUT",
+    "#text",
+    "Password",
+    "id",
+    "secret-field",
+    "for",
+    "type",
+    "text",
+    "synthetic-pass-123",
+    "aria-labelledby",
+    "secret-label",
+    "SPAN",
+  ];
+  const nodes =
+    how === "for"
+      ? {
+          // div > [label for=secret-field > "Password", input#secret-field]
+          backendNodeId: [1, 2, 3, 4],
+          parentIndex: [-1, 0, 1, 0],
+          nodeName: [1, 2, 4, 3],
+          nodeValue: [-1, -1, 5, -1],
+          attributes: [[], [8, 7], [], [6, 7, 9, 10]],
+          inputValue: { index: [3], value: [11] },
+        }
+      : how === "wrap"
+        ? {
+            // div > label > ["Password", input]
+            backendNodeId: [1, 2, 3, 4],
+            parentIndex: [-1, 0, 1, 1],
+            nodeName: [1, 2, 4, 3],
+            nodeValue: [-1, -1, 5, -1],
+            attributes: [[], [], [], [9, 10]],
+            inputValue: { index: [3], value: [11] },
+          }
+        : {
+            // div > [input aria-labelledby=secret-label, span#secret-label > "Password"]
+            backendNodeId: [1, 2, 3, 4],
+            parentIndex: [-1, 0, 0, 2],
+            nodeName: [1, 3, 14, 4],
+            nodeValue: [-1, -1, -1, 5],
+            attributes: [[], [12, 13, 9, 10], [6, 13], []],
+            inputValue: { index: [1], value: [11] },
+          };
+  const protection = pageProtection({ strings, documents: [{ frameId: 0, nodes }] });
+  const field = how === "labelledby" ? 2 : 4;
+  expect(protection.nodes.get(protectedNodeKey("frame-a", field))).toBe("password");
+  expect(protection.values).toEqual(["synthetic-pass-123"]);
+  // The label itself stays readable.
+  expect(
+    protection.nodes.get(protectedNodeKey("frame-a", how === "labelledby" ? 3 : 2)),
+  ).toBeUndefined();
 });
