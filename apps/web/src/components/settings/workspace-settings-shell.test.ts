@@ -408,9 +408,7 @@ describe("settings rail", () => {
     acmeRole = "member";
     const view = await renderShell({ kind: "organization", section: "workspaces" });
     try {
-      expect(view.rail().querySelector('a[aria-current="page"]')?.textContent).toBe(
-        "People",
-      );
+      expect(view.rail().querySelector('a[aria-current="page"]')?.textContent).toBe("People");
     } finally {
       await view.unmount();
     }
