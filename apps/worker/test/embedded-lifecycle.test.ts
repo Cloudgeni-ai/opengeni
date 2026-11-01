@@ -792,6 +792,18 @@ describe("embedded worker lifecycle contract", () => {
             has_dependents: false,
             configuration: ["search_path=pg_catalog, public, pg_temp"],
           },
+          // Migration 1172: the lock-free external identity read. Its runtime
+          // grant stays deferred for previous-release compatibility.
+          {
+            name: "read_external_identity_v1(uuid, text, text)",
+            owner: "opengeni_migrator",
+            can_execute: false,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=public, pg_catalog, pg_temp"],
+          },
           ...[
             "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
             "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",

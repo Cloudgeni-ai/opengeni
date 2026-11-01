@@ -663,6 +663,64 @@ describe("useTurnQueue", () => {
     await hook.unmount();
   });
 
+  test("a refresh for an observed event does not adopt a queue read that started before it", async () => {
+    const paused = {
+      ...queueSnapshot([]).effectiveControl,
+      state: "paused" as const,
+      directState: "paused" as const,
+      controlVersion: 4,
+      controlEtag: "control-4",
+    };
+    let requests = 0;
+    let releaseStale!: () => void;
+    const staleGate = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        // The second read starts while the paused attempt is still stopping
+        // and answers only after the attempt has quiesced.
+        if (request === 2) await staleGate;
+        return new Response(
+          JSON.stringify(
+            queueSnapshot([], {
+              version: request,
+              effectiveControl: paused,
+              stoppingPreviousAttempt: request <= 2,
+            }),
+          ),
+          { headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(requests).toBe(1);
+    expect(hook.result.current.stoppingPreviousAttempt).toBe(true);
+
+    // Another reader of the same session queue starts before quiescence.
+    const staleRead = client.getQueue(WORKSPACE_ID, SESSION_ID);
+    await flush();
+    expect(requests).toBe(2);
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "attempt_quiesced" })]);
+    await flush(250);
+    releaseStale();
+    await staleRead;
+    await flush();
+
+    expect(requests).toBe(3);
+    expect(hook.result.current.snapshot?.version).toBe(3);
+    expect(hook.result.current.stoppingPreviousAttempt).toBe(false);
+    await hook.unmount();
+  });
+
   test("without a shared log it tails the session stream from lastSequence", async () => {
     let listCalls = 0;
     const streamedAfter: { value: number | null } = { value: null };

@@ -19,6 +19,11 @@ header-only credential rotation, and accepted host-delegation use are unchanged.
 Do not present this setting as a universal outbound-network or tool-execution
 allowlist.
 
+Organization connectors, which an owner or admin adds once for many
+workspaces, are acquisitions under this policy too: adding one, or saving one
+that stays on, checks `custom:mcp` like a workspace's own MCP setup. See
+[Organization connectors](capabilities.md#organization-connectors).
+
 ## Members turning integrations on
 
 `personalIntegrationSetup` decides whether members may turn integrations on:
