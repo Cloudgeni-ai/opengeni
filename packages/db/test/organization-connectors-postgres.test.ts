@@ -3,10 +3,21 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import type postgres from "postgres";
 import {
   bootstrapWorkspace,
+  createConnection,
   createDb,
   deleteOrganizationConnector,
   enableCapabilityInstallation,
+  installApiIntegration,
   insertOrganizationConnector,
+  integrationRuntimeKey,
+  listInstalledApiIntegrations,
+  listInstalledApiIntegrationServerIdsForDelegations,
+  listOrganizationApiIntegrationsTurnedOffHere,
+  organizationConnectorHeaderNames,
+  organizationConnectorLogin,
+  uninstallApiIntegration,
+  type OrganizationApiIntegrationDefinition,
+  type StoredApiIntegrationRevision,
   listEnabledMcpCapabilityServerIds,
   listEnabledMcpCapabilityServers,
   listOrganizationConnectors,
@@ -361,5 +372,306 @@ describe("what agents in a workspace get", () => {
     expect(
       await restoreOrganizationConnectorInWorkspace(client.db, two.otherSharedId, catalogId),
     ).toBe(false);
+  });
+});
+
+describe("API integrations", () => {
+  const revision = (definitionId: string): StoredApiIntegrationRevision => ({
+    id: "openapi:222222222222222222222222",
+    protocol: "openapi",
+    definitionId,
+    contentSha256: "2".repeat(64),
+    source: { url: "https://ledger.example.test/openapi.json" },
+    title: "Ledger API",
+    tools: [
+      {
+        id: "list_entries",
+        operationKey: "listEntries",
+        name: "List entries",
+        description: "List ledger entries.",
+        inputSchema: { type: "object", properties: {} },
+        safety: "read",
+        approvalMode: "never",
+        deprecated: false,
+      },
+      {
+        id: "post_entry",
+        operationKey: "postEntry",
+        name: "Post entry",
+        description: "Post a ledger entry.",
+        inputSchema: { type: "object", properties: {} },
+        safety: "write",
+        approvalMode: "ask",
+        deprecated: false,
+      },
+    ],
+    bindings: {
+      list_entries: {
+        method: "get",
+        pathTemplate: "/entries",
+        serverUrl: "https://ledger.example.test/v1/",
+        parameters: [],
+      },
+      post_entry: {
+        method: "post",
+        pathTemplate: "/entries",
+        serverUrl: "https://ledger.example.test/v1/",
+        parameters: [],
+      },
+    },
+  });
+  const auth = (kind: "none" | "api_key"): OrganizationApiIntegrationDefinition["auth"] =>
+    kind === "none"
+      ? { kind: "none" }
+      : {
+          kind: "api_key",
+          providerDomain: "ledger.example.test",
+          carrier: "header",
+          name: "X-Key",
+        };
+  const definition = (
+    slug: string,
+    authKind: "none" | "api_key",
+  ): OrganizationApiIntegrationDefinition => ({
+    kind: "api",
+    name: "Ledger API",
+    description: "Read and post ledger entries.",
+    definitionId: slug,
+    definitionProvenance: "workspace",
+    protocol: "openapi",
+    pluginKey: `integration/openapi/${slug}`,
+    serverId: `api_openapi_${slug.replaceAll("-", "_")}`,
+    provider: null,
+    providerDomain: "ledger.example.test",
+    baseUrl: "https://ledger.example.test/v1/",
+    sourceUrl: "https://ledger.example.test/openapi.json",
+    source: { kind: "openapi", url: "https://ledger.example.test/openapi.json" },
+    requiredScopes: [],
+    auth: auth(authKind),
+    authScheme: auth(authKind),
+    revision: revision(slug),
+  });
+  async function addApi(
+    org: Org,
+    slug: string,
+    input: {
+      authKind?: "none" | "api_key";
+      config?: Record<string, unknown>;
+      allowedWorkspaceIds?: readonly string[] | null;
+      allowPersonalWorkspaces?: boolean;
+    } = {},
+  ) {
+    return await insertOrganizationConnector(
+      client.db,
+      { accountId: org.accountId },
+      {
+        kind: "api",
+        capabilityId: `api:openapi:${slug}`,
+        customDefinition: definition(slug, input.authKind ?? "none"),
+        config: input.config ?? {},
+        metadata: {},
+        allowedWorkspaceIds: input.allowedWorkspaceIds ? [...input.allowedWorkspaceIds] : null,
+        allowPersonalWorkspaces: input.allowPersonalWorkspaces ?? false,
+      },
+      as(org, org.admin),
+    );
+  }
+  const apiIn = async (workspaceId: string, subjectId: string | undefined, capabilityId: string) =>
+    (await listInstalledApiIntegrations(client.db, workspaceId, subjectId)).filter(
+      (integration) => integration.capabilityId === capabilityId,
+    );
+
+  test("an API integration reaches like a connector and runs as the organization's instance", async () => {
+    if (!available) return;
+    const slug = `ledger-reach-${crypto.randomUUID().slice(0, 8)}`;
+    const row = await addApi(one, slug, { allowedWorkspaceIds: [one.sharedId] });
+    expect(row.kind).toBe("api");
+    const [served] = await apiIn(one.sharedId, one.member, row.capabilityId);
+    expect(served).toMatchObject({
+      capabilityId: row.capabilityId,
+      instanceKey: "organization",
+      instanceId: row.id,
+      pluginInstallationId: row.id,
+      serverId: integrationRuntimeKey(`api_openapi_${slug.replaceAll("-", "_")}`, "organization"),
+      connectionRef: null,
+      allowedTools: ["list_entries", "post_entry"],
+      requireApproval: ["post_entry"],
+      organizationConnector: { id: row.id, generation: row.generation, login: "none" },
+    });
+    expect(served!.organizationCredential).toBeUndefined();
+    // A workspace read without a person serves it too (turns acting through delegations).
+    expect(await apiIn(one.sharedId, undefined, row.capabilityId)).toHaveLength(1);
+    // Narrowed to its server id, and never when narrowed to another.
+    expect(
+      await listInstalledApiIntegrations(client.db, one.sharedId, one.member, [served!.serverId]),
+    ).toEqual([expect.objectContaining({ capabilityId: row.capabilityId })]);
+    expect(
+      await listInstalledApiIntegrations(client.db, one.sharedId, one.member, ["other_server"]),
+    ).toEqual([]);
+    // Only where it reaches, and never as an MCP connector.
+    expect(await apiIn(one.otherSharedId, one.member, row.capabilityId)).toEqual([]);
+    expect(await apiIn(one.personalId, one.member, row.capabilityId)).toEqual([]);
+    expect(await apiIn(two.sharedId, two.member, row.capabilityId)).toEqual([]);
+    expect(await reaching(one.sharedId)).not.toContain(row.capabilityId);
+    expect(
+      (await listOrganizationConnectorsReachingWorkspace(client.db, one.sharedId, "api")).map(
+        (connector) => connector.capabilityId,
+      ),
+    ).toContain(row.capabilityId);
+    expect(
+      (await listEnabledMcpCapabilityServers(client.db, one.sharedId)).map(
+        (server) => server.capabilityId,
+      ),
+    ).not.toContain(row.capabilityId);
+    expect(await listEnabledMcpCapabilityServerIds(client.db, one.sharedId)).not.toContain(
+      served!.serverId,
+    );
+    expect(
+      await listInstalledApiIntegrationServerIdsForDelegations(client.db, one.sharedId, []),
+    ).toContain(served!.serverId);
+    // Turned off, it serves nothing until the organization turns it back on.
+    await updateOrganizationConnector(
+      client.db,
+      { accountId: one.accountId, connectorId: row.id },
+      { expectedGeneration: row.generation, status: "disabled" },
+      as(one, one.admin),
+    );
+    expect(await apiIn(one.sharedId, one.member, row.capabilityId)).toEqual([]);
+  });
+
+  test("a workspace turns it off or back on, and its own instance wins", async () => {
+    if (!available) return;
+    const slug = `ledger-own-${crypto.randomUUID().slice(0, 8)}`;
+    const row = await addApi(one, slug);
+    const other = one.otherSharedId;
+    expect(await apiIn(other, one.member, row.capabilityId)).toHaveLength(1);
+    await turnOffOrganizationConnectorInWorkspace(client.db, {
+      accountId: one.accountId,
+      workspaceId: other,
+      capabilityId: row.capabilityId,
+    });
+    expect(await apiIn(other, one.member, row.capabilityId)).toEqual([]);
+    expect(
+      (await listOrganizationApiIntegrationsTurnedOffHere(client.db, other)).map(
+        (integration) => integration.capabilityId,
+      ),
+    ).toEqual([row.capabilityId]);
+    // Other workspaces keep it.
+    expect(await apiIn(one.sharedId, one.member, row.capabilityId)).toHaveLength(1);
+    expect(await restoreOrganizationConnectorInWorkspace(client.db, other, row.capabilityId)).toBe(
+      true,
+    );
+    expect(await apiIn(other, one.member, row.capabilityId)).toHaveLength(1);
+    expect(await listOrganizationApiIntegrationsTurnedOffHere(client.db, other)).toEqual([]);
+
+    // A person's own "Only me" instance of the same API wins for them alone.
+    const connection = await createConnection(client.db, {
+      accountId: one.accountId,
+      workspaceId: other,
+      subjectId: one.member,
+      providerDomain: "ledger.example.test",
+      kind: "api_key",
+      credentialEncrypted: "test-only-personal-encrypted-bundle",
+      grantedScopes: [],
+      createdBySubjectId: one.member,
+    });
+    const own = definition(slug, "api_key");
+    const installed = await installApiIntegration(client.db, {
+      accountId: one.accountId,
+      workspaceId: other,
+      subjectId: one.member,
+      capabilityId: row.capabilityId,
+      pluginKey: own.pluginKey,
+      serverId: own.serverId,
+      name: own.name,
+      definitionId: own.definitionId,
+      definitionProvenance: "workspace",
+      providerDomain: own.providerDomain,
+      protocol: "openapi",
+      baseUrl: own.baseUrl,
+      sourceUrl: own.sourceUrl,
+      authScheme: own.authScheme,
+      connectionId: connection.id,
+      ownership: "subject",
+      revision: own.revision,
+    });
+    const mine = await apiIn(other, one.member, row.capabilityId);
+    expect(mine).toEqual([expect.objectContaining({ instanceId: installed.instanceId })]);
+    expect(mine[0]!.organizationConnector).toBeUndefined();
+    // Everyone else still gets the organization's.
+    expect(await apiIn(other, one.admin, row.capabilityId)).toEqual([
+      expect.objectContaining({ instanceId: row.id, instanceKey: "organization" }),
+    ]);
+    expect(await apiIn(other, undefined, row.capabilityId)).toEqual([
+      expect.objectContaining({ instanceId: row.id }),
+    ]);
+    // The narrowed read decides with the person's full own inventory.
+    const organizationServerId = integrationRuntimeKey(own.serverId, "organization");
+    expect(
+      await listInstalledApiIntegrations(client.db, other, one.member, [organizationServerId]),
+    ).toEqual([]);
+    await uninstallApiIntegration(client.db, {
+      accountId: one.accountId,
+      workspaceId: other,
+      subjectId: one.member,
+      capabilityId: row.capabilityId,
+      instanceKey: installed.instanceKey,
+      expectedInstallationVersion: installed.installationVersion,
+      expectedInstanceVersion: installed.instanceVersion,
+    });
+    expect(await apiIn(other, one.member, row.capabilityId)).toEqual([
+      expect.objectContaining({ instanceId: row.id }),
+    ]);
+  });
+
+  test("an organization key and each person's own sign-in", async () => {
+    if (!available) return;
+    const keyed = await addApi(two, `ledger-key-${crypto.randomUUID().slice(0, 8)}`, {
+      authKind: "api_key",
+      config: {
+        placementsEncrypted: [{ carrier: "header", name: "X-Key", valueEncrypted: "sealed" }],
+        allowedTools: ["list_entries"],
+      },
+    });
+    expect(organizationConnectorLogin(keyed.config)).toBe("organization_key");
+    expect(organizationConnectorHeaderNames(keyed.config)).toEqual(["X-Key"]);
+    const [withKey] = await apiIn(two.sharedId, two.member, keyed.capabilityId);
+    expect(withKey).toMatchObject({
+      connectionRef: null,
+      allowedTools: ["list_entries"],
+      requireApproval: [],
+      organizationConnector: { login: "organization_key" },
+      organizationCredential: {
+        placements: [{ carrier: "header", name: "X-Key", valueEncrypted: "sealed" }],
+      },
+    });
+
+    const perPerson = await addApi(two, `ledger-person-${crypto.randomUUID().slice(0, 8)}`, {
+      authKind: "api_key",
+      config: { connectionRef: { kind: "api_key" } },
+    });
+    const [selector] = await apiIn(two.sharedId, two.member, perPerson.capabilityId);
+    // A selector for each person's own account: no account of its own.
+    expect(selector!.connectionRef).toEqual({
+      providerDomain: "ledger.example.test",
+      kind: "api_key",
+      subjectScope: "subject",
+    });
+    expect(selector!.organizationCredential).toBeUndefined();
+    // A turn acting through delegations gets it only for a delegated account to that provider.
+    const delegated = (providerDomain: string) =>
+      listInstalledApiIntegrationServerIdsForDelegations(client.db, two.sharedId, [
+        {
+          serverId: selector!.serverId,
+          ownerSubjectId: two.member,
+          providerDomain,
+          connectionId: crypto.randomUUID(),
+        },
+      ]);
+    expect(
+      await listInstalledApiIntegrationServerIdsForDelegations(client.db, two.sharedId, []),
+    ).not.toContain(selector!.serverId);
+    expect(await delegated("ledger.example.test")).toContain(selector!.serverId);
+    expect(await delegated("other.example.test")).not.toContain(selector!.serverId);
   });
 });

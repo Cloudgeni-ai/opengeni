@@ -1,17 +1,26 @@
 import {
+  createPinnedIntegrationTransport,
+  type IntegrationCredentialResolver,
+} from "@opengeni/capabilities";
+import {
+  ApiIntegrationPreview,
   CreateOrganizationConnectorRequest,
   ListOrganizationConnectorsResponse,
   OrganizationConnector,
+  PreviewOrganizationApiIntegrationRequest,
   UpdateOrganizationConnectorRequest,
+  type OrganizationApiKeyPlacement,
 } from "@opengeni/contracts";
 import {
   accountScopedApiKeyWorkspaceAuthority,
   createOrganizationConnector,
   listOrganizationConnectorsForAdministration,
+  previewOrganizationApiIntegration,
   removeOrganizationConnector,
   requireAccessContext,
   updateOrganizationConnectorSettings,
   type ApiRouteDeps,
+  type ResolveOrganizationApiIntegration,
 } from "@opengeni/core";
 import {
   nestedPostgresSqlState,
@@ -21,12 +30,13 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { parseRequestBody } from "../http/request-body";
+import { resolveApiIntegrationPreview } from "../integrations/api-integrations";
 import { authorizeOrganizationIntegrationAdministration } from "./organization-integration-policy";
 
 /**
  * Organization connectors (docs/design/ownership-and-reach.md, OR-11): an
- * organization owner or admin adds an MCP connector once and chooses which
- * workspaces it reaches. Signed-in owners and admins, and agents acting for
+ * organization owner or admin adds a connector (a remote MCP server or an API
+ * integration) once and chooses which workspaces it reaches. Signed-in owners and admins, and agents acting for
  * one, manage them; organization API keys don't (the database checks a
  * person's live organization role on every change).
  */
@@ -69,8 +79,39 @@ async function connectorResponse<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * An organization key, sent only while reading an API that needs one even to
+ * describe itself (such as GraphQL introspection), and only to the request's
+ * own destination.
+ */
+function previewKeyResolver(
+  apiKey: readonly OrganizationApiKeyPlacement[],
+): IntegrationCredentialResolver {
+  return {
+    resolve: async (request) => {
+      if (request.forceRefresh) return null;
+      const destination = new URL(request.destinationUrl);
+      return {
+        audience: { origin: destination.origin, pathPrefix: "/" },
+        placements: apiKey.map((placement) => ({
+          carrier: placement.carrier,
+          name: placement.name,
+          value: placement.value,
+          ...(placement.prefix ? { prefix: placement.prefix } : {}),
+        })),
+      };
+    },
+  };
+}
+
 export function registerOrganizationConnectorRoutes(app: Hono, deps: ApiRouteDeps): void {
   const path = "/v1/organizations/:organizationId/connectors";
+  // API integration sources are read through the same pinned transport a
+  // workspace preview uses.
+  const transport = createPinnedIntegrationTransport({
+    network: deps.settings,
+    ...(deps.apiIntegrationSourceFetch ? { fetchImpl: deps.apiIntegrationSourceFetch } : {}),
+  });
   const organizationId = (context: Context) => {
     const parsed = z.string().uuid().safeParse(context.req.param("organizationId"));
     if (!parsed.success) throw new HTTPException(422, { message: "Invalid organization identity" });
@@ -87,11 +128,27 @@ export function registerOrganizationConnectorRoutes(app: Hono, deps: ApiRouteDep
   const administration = async (context: Context, mutation: boolean) => {
     const accountId = organizationId(context);
     const actor = await authorizeConnectorAdministration(context, deps, accountId, mutation);
+    const resolveApiIntegration: ResolveOrganizationApiIntegration = async ({ source, apiKey }) =>
+      await resolveApiIntegrationPreview({
+        source,
+        connection: null,
+        transport,
+        authority: {
+          accountId,
+          // No workspace yet: the organization's setup is compiled once for
+          // every workspace it will reach.
+          workspaceId: accountId,
+          initiatingSubjectId: actor.subjectId,
+          ...(apiKey ? { connectionRef: "organization-key-preview" } : {}),
+        },
+        ...(apiKey ? { credentialResolver: previewKeyResolver(apiKey) } : {}),
+      });
     return {
       db: deps.db,
       settings: deps.settings,
       accountId,
       authorize: async () => actor,
+      resolveApiIntegration,
     };
   };
 
@@ -102,6 +159,20 @@ export function registerOrganizationConnectorRoutes(app: Hono, deps: ApiRouteDep
       listOrganizationConnectorsForAdministration(input),
     );
     return context.json(ListOrganizationConnectorsResponse.parse({ connectors }));
+  });
+
+  app.post(`${path}/api-integrations/preview`, async (context) => {
+    context.header("cache-control", "private, no-store");
+    const input = await administration(context, true);
+    const payload = parseRequestBody(
+      PreviewOrganizationApiIntegrationRequest,
+      await context.req.json().catch(() => null),
+      { status: 422, message: "Invalid API integration preview" },
+    );
+    const preview = await connectorResponse(() =>
+      previewOrganizationApiIntegration({ ...input, payload }),
+    );
+    return context.json(ApiIntegrationPreview.parse(preview));
   });
 
   app.post(path, async (context) => {

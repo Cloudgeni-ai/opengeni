@@ -12276,6 +12276,7 @@ async function organizationConnectorCapabilityRows(
     .where(
       and(
         eq(schema.organizationConnectors.status, "active"),
+        eq(schema.organizationConnectors.kind, "mcp"),
         sql`not exists (
           select 1 from ${schema.capabilityInstallations} installation
           where installation.workspace_id = ${workspaceId}::uuid
@@ -12328,6 +12329,15 @@ async function organizationConnectorCapabilityRows(
   });
 }
 
+/** A custom organization MCP server's definition; an API integration's has no MCP endpoint. */
+function organizationMcpServerDefinition(
+  definition: OrganizationConnectorRow["customDefinition"],
+): { name: string; description?: string | null; endpointUrl: string } {
+  if (!definition || "kind" in definition)
+    return { name: definition?.name ?? "", description: null, endpointUrl: "" };
+  return definition;
+}
+
 /** A custom organization server, defined for the reading workspace. */
 function organizationCustomCatalogItem(
   connector: Pick<
@@ -12336,7 +12346,7 @@ function organizationCustomCatalogItem(
   >,
   workspaceId: string | null,
 ): EnabledMcpCapabilityRow["item"] {
-  const definition = connector.customDefinition!;
+  const definition = organizationMcpServerDefinition(connector.customDefinition);
   return {
     id: connector.capabilityId,
     accountId: connector.accountId,
@@ -12695,6 +12705,7 @@ async function organizationConnectorServerIdRows(
         .where(
           and(
             eq(connector.status, "active"),
+            eq(connector.kind, "mcp"),
             sql`not exists (
               select 1 from ${schema.capabilityInstallations} installation
               where installation.workspace_id = ${workspaceId}::uuid

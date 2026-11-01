@@ -1,4 +1,8 @@
-import type { OrganizationConnector } from "@opengeni/contracts";
+import type {
+  ApiIntegrationPreview,
+  CreateOrganizationConnectorRequest,
+  OrganizationConnector,
+} from "@opengeni/contracts";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useMemo, useState } from "react";
@@ -22,6 +26,7 @@ function connector(overrides: Partial<OrganizationConnector>): OrganizationConne
   return {
     id: "4f1d0c4a-1b2c-4d3e-8f9a-0b1c2d3e4f50",
     organizationId: organization.id,
+    kind: "mcp",
     capabilityId: "registry:linear",
     name: "Linear",
     description: null,
@@ -33,6 +38,7 @@ function connector(overrides: Partial<OrganizationConnector>): OrganizationConne
     availability: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
     status: "active",
     available: true,
+    apiIntegration: null,
     generation: 1,
     createdAt: "2026-10-30T09:00:00Z",
     updatedAt: "2026-10-30T09:00:00Z",
@@ -71,7 +77,73 @@ const CONNECTORS: OrganizationConnector[] = [
     login: "none",
     available: false,
   }),
+  connector({
+    id: "8d5b4a8e-5f6a-4b7c-8d3e-4f5a6b7c8d94",
+    kind: "api",
+    capabilityId: "api:openapi:billing",
+    name: "Billing API",
+    endpointUrl: "https://billing.acme.dev/v1/",
+    source: "custom",
+    login: "organization_key",
+    headerNames: ["X-Api-Key"],
+    availability: { allowedWorkspaceIds: [HERE], allowPersonalWorkspaces: false },
+    apiIntegration: {
+      definitionId: "billing",
+      protocol: "openapi",
+      providerDomain: "billing.acme.dev",
+      auth: {
+        kind: "api_key",
+        providerDomain: "billing.acme.dev",
+        carrier: "header",
+        name: "X-Api-Key",
+      },
+      revisionId: "openapi:4c1d8e2f9a7b",
+      contentSha256: "4c1d8e2f9a7b".padEnd(64, "0"),
+      tools: [
+        { id: "list_invoices", name: "List invoices", safety: "read" },
+        { id: "get_invoice", name: "Get an invoice", safety: "read" },
+        { id: "refund_invoice", name: "Refund an invoice", safety: "destructive" },
+      ],
+    },
+  }),
 ];
+
+const API = CONNECTORS[4]!;
+
+/** What checking a custom API finds, for the Add connector preview. */
+function previewFor(url: string): ApiIntegrationPreview {
+  const host = new URL(url).host;
+  return {
+    source: { kind: "auto", url },
+    definitionId: host,
+    definitionProvenance: "workspace",
+    protocol: "openapi",
+    capabilityId: `api:openapi:${host}`,
+    pluginKey: `integration/openapi/${host}`,
+    serverId: "api_openapi_inventory",
+    name: "Inventory API",
+    description: "Stock levels and warehouse moves.",
+    provider: null,
+    providerDomain: host,
+    baseUrl: `https://${host}/v2/`,
+    sourceUrl: url,
+    revisionId: "openapi:9e8d7c6b5a4f",
+    contentSha256: "9e8d7c6b5a4f".padEnd(64, "0"),
+    auth: { kind: "http", providerDomain: host, scheme: "bearer" },
+    connectionId: null,
+    connectionOwnership: null,
+    tools: Array.from({ length: 14 }, (_, index) => ({
+      id: `tool_${index}`,
+      operationKey: `op_${index}`,
+      name: `Tool ${index}`,
+      description: "",
+      safety: "read" as const,
+      approvalMode: "never" as const,
+      deprecated: false,
+    })),
+    warnings: [],
+  };
+}
 
 function catalogItem(id: string, name: string, description: string, authKind: string) {
   return {
@@ -105,16 +177,43 @@ function fakeClient(initial: OrganizationConnector[]): OpenGeniBrowserClient {
   let rows = [...initial];
   const client = {
     listOrganizationConnectors: async () => rows,
+    previewOrganizationApiIntegration: async (
+      _organizationId: string,
+      request: { source: { kind: string; url?: string } },
+    ) => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return previewFor(request.source.url ?? "https://api.example.com/openapi.json");
+    },
     createOrganizationConnector: async (
       _organizationId: string,
-      request: {
-        capabilityId?: string;
-        custom?: { name: string; endpointUrl: string };
-        login: OrganizationConnector["login"];
-        headers?: Record<string, string>;
-        availability: OrganizationConnector["availability"];
-      },
+      request: CreateOrganizationConnectorRequest,
     ) => {
+      if (request.apiIntegration) {
+        const source = request.apiIntegration.source as { url?: string };
+        const preview = previewFor(source.url ?? "https://api.example.com/openapi.json");
+        const created = connector({
+          id: crypto.randomUUID(),
+          kind: "api",
+          capabilityId: preview.capabilityId,
+          name: preview.name,
+          endpointUrl: preview.baseUrl,
+          source: "custom",
+          login: request.login,
+          headerNames: (request.apiKey ?? []).map((placement) => placement.name),
+          availability: request.availability,
+          apiIntegration: {
+            definitionId: preview.definitionId,
+            protocol: preview.protocol,
+            providerDomain: preview.providerDomain,
+            auth: preview.auth,
+            revisionId: preview.revisionId,
+            contentSha256: preview.contentSha256,
+            tools: preview.tools.map(({ id, name, safety }) => ({ id, name, safety })),
+          },
+        });
+        rows = [...rows, created];
+        return created;
+      }
       const item = CATALOG.find((each) => each.id === request.capabilityId);
       const created = connector({
         id: crypto.randomUUID(),
@@ -132,10 +231,13 @@ function fakeClient(initial: OrganizationConnector[]): OpenGeniBrowserClient {
     updateOrganizationConnector: async (
       _organizationId: string,
       id: string,
-      request: Partial<OrganizationConnector> & { headers?: Record<string, string> },
+      request: Partial<OrganizationConnector> & {
+        headers?: Record<string, string>;
+        apiKey?: unknown;
+      },
     ) => {
       const current = rows.find((row) => row.id === id)!;
-      const { headers, ...change } = request;
+      const { headers, apiKey: _apiKey, ...change } = request;
       const updated: OrganizationConnector = {
         ...current,
         ...change,
@@ -217,6 +319,17 @@ export default function PageOrgConnectorsSection() {
           />
         </PagePreview>
       </KitBlock>
+      <KitBlock
+        title="An API"
+        description="An OpenAPI or GraphQL API added once for the organization: its protocol, where its key goes and its tools."
+      >
+        <PagePreview label="Billing API" height={900}>
+          <ConnectorsPreview
+            initial={CONNECTORS}
+            start={{ kind: "connector", connectorId: API.id, view: "page" }}
+          />
+        </PagePreview>
+      </KitBlock>
       <KitBlock title="Available in" description="The same control as vaults and model keys.">
         <PagePreview label="Available in" height={900}>
           <ConnectorsPreview
@@ -233,6 +346,17 @@ export default function PageOrgConnectorsSection() {
           <ConnectorsPreview
             initial={CONNECTORS}
             start={{ kind: "connector", connectorId: CONNECTORS[1]!.id, view: "replace-key" }}
+          />
+        </PagePreview>
+      </KitBlock>
+      <KitBlock
+        title="Replace an API key"
+        description="The field follows where the API expects its key."
+      >
+        <PagePreview label="Replace an API key" height={640}>
+          <ConnectorsPreview
+            initial={CONNECTORS}
+            start={{ kind: "connector", connectorId: API.id, view: "replace-key" }}
           />
         </PagePreview>
       </KitBlock>

@@ -34,6 +34,36 @@ type Human = {
 let owner: Human;
 let outsider: Human;
 
+// An API whose key goes in a query parameter, served to the source transport.
+const ledgerSourceUrl = "https://127.0.0.1/org-ledger-openapi.json";
+const ledgerDocument = {
+  openapi: "3.1.0",
+  info: { title: "Ledger API", description: "Read and post ledger entries.", version: "1.0.0" },
+  servers: [{ url: "https://127.0.0.1/v1/" }],
+  components: { securitySchemes: { queryKey: { type: "apiKey", in: "query", name: "api_key" } } },
+  security: [{ queryKey: [] }],
+  paths: {
+    "/entries": {
+      get: { operationId: "ledger.listEntries", responses: { "200": { description: "Entries" } } },
+      post: {
+        operationId: "ledger.postEntry",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object" } } },
+        },
+        responses: { "201": { description: "Posted" } },
+      },
+    },
+  },
+};
+const sourceFetch = async (request: RequestInfo | URL) =>
+  String(request) === ledgerSourceUrl
+    ? new Response(JSON.stringify(ledgerDocument), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    : new Response(null, { status: 404 });
+
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("organization-connectors-routes");
   if (!acquired) throw new Error("Organization connector route tests require real PostgreSQL");
@@ -120,6 +150,7 @@ function app(actor = owner): Hono {
         }),
       },
     } as never,
+    apiIntegrationSourceFetch: sourceFetch as typeof fetch,
   } as ApiRouteDeps;
   registerOrganizationConnectorRoutes(application, deps);
   return application;
@@ -311,4 +342,139 @@ test("organization API keys don't manage organization connectors", async () => {
     (await app().request(path(), { method: "POST", headers, body: JSON.stringify(create()) }))
       .status,
   ).toBe(403);
+});
+
+test("an owner previews an API integration and adds it with an organization key", async () => {
+  const application = app();
+  const source = { kind: "openapi", url: ledgerSourceUrl };
+  const previewed = await application.request(`${path()}/api-integrations/preview`, {
+    method: "POST",
+    headers: browser(),
+    body: JSON.stringify({ source }),
+  });
+  expect(previewed.status).toBe(200);
+  const preview = await previewed.json();
+  expect(preview).toMatchObject({
+    protocol: "openapi",
+    auth: { kind: "api_key", carrier: "query", name: "api_key" },
+    connectionId: null,
+  });
+  expect(preview.tools.length).toBe(2);
+  const body = (overrides: Record<string, unknown> = {}) => ({
+    apiIntegration: {
+      source,
+      expectedRevisionId: preview.revisionId,
+      expectedContentSha256: preview.contentSha256,
+    },
+    login: "organization_key",
+    apiKey: [{ carrier: "query", name: "api_key", value: "org-secret-1" }],
+    availability: { allowedWorkspaceIds: null, allowPersonalWorkspaces: false },
+    ...overrides,
+  });
+  const post = (payload: Record<string, unknown>) =>
+    application.request(path(), {
+      method: "POST",
+      headers: browser(),
+      body: JSON.stringify(payload),
+    });
+
+  // A stale preview, a sign-in the API can't use or an unknown tool is refused before saving.
+  const before = await connectorCount();
+  const stale = {
+    apiIntegration: {
+      source,
+      expectedRevisionId: "openapi:stale",
+      expectedContentSha256: "0".repeat(64),
+    },
+  };
+  expect((await post(body(stale))).status).toBe(409);
+  expect((await post(body({ login: "none", apiKey: undefined }))).status).toBe(422);
+  expect((await post(body({ allowedTools: ["not_a_tool"] }))).status).toBe(422);
+  // The key is never sent somewhere the protocol forbids.
+  expect(
+    (await post(body({ apiKey: [{ carrier: "header", name: "Host", value: "x" }] }))).status,
+  ).toBe(422);
+  expect(await connectorCount()).toBe(before);
+
+  const created = await post(body());
+  expect(created.status).toBe(201);
+  const connector = await created.json();
+  expect(connector).toMatchObject({
+    kind: "api",
+    capabilityId: preview.capabilityId,
+    name: preview.name,
+    endpointUrl: preview.baseUrl,
+    source: "custom",
+    login: "organization_key",
+    headerNames: ["api_key"],
+    allowedTools: null,
+    available: true,
+    apiIntegration: {
+      definitionId: preview.definitionId,
+      protocol: "openapi",
+      auth: { kind: "api_key", carrier: "query", name: "api_key" },
+      revisionId: preview.revisionId,
+      contentSha256: preview.contentSha256,
+    },
+  });
+  expect(JSON.stringify(connector)).not.toContain("org-secret-1");
+  const [stored] = await shared.admin<{ kind: string; config: unknown }[]>`
+    select kind, config from organization_connectors where id = ${connector.id}`;
+  expect(stored!.kind).toBe("api");
+  expect(JSON.stringify(stored!.config)).not.toContain("org-secret-1");
+  const listed = await (await application.request(path(), { headers: browser() })).json();
+  expect(listed.connectors.find((row: { id: string }) => row.id === connector.id)).toMatchObject({
+    kind: "api",
+    login: "organization_key",
+  });
+
+  const patch = (payload: Record<string, unknown>) =>
+    application.request(`${path()}/${connector.id}`, {
+      method: "PATCH",
+      headers: browser(),
+      body: JSON.stringify(payload),
+    });
+  // An API integration's key replaces as a key, never as MCP headers.
+  expect(
+    (await patch({ expectedGeneration: connector.generation, headers: { Authorization: "x" } }))
+      .status,
+  ).toBe(422);
+  expect(
+    (await patch({ expectedGeneration: connector.generation, allowedTools: ["not_a_tool"] }))
+      .status,
+  ).toBe(422);
+  const replaced = await patch({
+    expectedGeneration: connector.generation,
+    apiKey: [{ carrier: "query", name: "api_key", value: "org-secret-2" }],
+  });
+  expect(replaced.status).toBe(200);
+  expect(await replaced.json()).toMatchObject({
+    generation: connector.generation + 1,
+    headerNames: ["api_key"],
+  });
+  const [rekeyed] = await shared.admin<{ config: unknown }[]>`
+    select config from organization_connectors where id = ${connector.id}`;
+  expect(JSON.stringify(rekeyed!.config)).not.toContain("org-secret-2");
+  expect(
+    (
+      await application.request(`${path()}/${connector.id}`, {
+        method: "DELETE",
+        headers: browser(),
+      })
+    ).status,
+  ).toBe(204);
+});
+
+test("members can't preview an API integration for the organization", async () => {
+  await setRole("member");
+  try {
+    const previewed = await app().request(`${path()}/api-integrations/preview`, {
+      method: "POST",
+      headers: browser(),
+      body: JSON.stringify({ source: { kind: "openapi", url: ledgerSourceUrl } }),
+    });
+    expect(previewed.status).toBe(403);
+  } finally {
+    await setRole("owner");
+  }
 });

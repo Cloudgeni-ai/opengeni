@@ -7,6 +7,14 @@ export * from "./workspace-control-event";
 export * from "./secret-value";
 export * from "./claude-cite-tags";
 export * from "./integration-capability-id";
+import {
+  ApiIntegrationAuthPreview,
+  ApiIntegrationProtocol,
+  InlineOpenApiDocumentSource,
+  IntegrationSource,
+  IntegrationSourceInput,
+} from "./integration-sources";
+export * from "./integration-sources";
 import { defineSchema } from "./define-schema";
 import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
@@ -15204,11 +15212,6 @@ export const UninstallSkillResult = /* @__PURE__ */ defineSchema(() =>
 );
 export type UninstallSkillResult = z.infer<typeof UninstallSkillResult>;
 
-export const ApiIntegrationProtocol = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["openapi", "graphql"]),
-);
-export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
-
 export const IntegrationDefinitionProvenance = /* @__PURE__ */ defineSchema(() =>
   z.enum(["curated", "workspace"]),
 );
@@ -15437,76 +15440,6 @@ export const IntegrationFacetRemovalResult = /* @__PURE__ */ defineSchema(() =>
 );
 export type IntegrationFacetRemovalResult = z.infer<typeof IntegrationFacetRemovalResult>;
 
-export const IntegrationSource = /* @__PURE__ */ defineSchema(() =>
-  z.discriminatedUnion("kind", [
-    z
-      .object({
-        kind: z.literal("definition"),
-        definitionId: z.string().min(1).max(128),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("openapi"),
-        url: z.string().url().max(2048),
-        baseUrl: z.string().url().max(2048).optional(),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("graphql"),
-        endpoint: z.string().url().max(2048),
-        name: z.string().min(1).max(200).optional(),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("auto"),
-        url: z.string().url().max(2048),
-        baseUrl: z.string().url().max(2048).optional(),
-      })
-      .strict(),
-  ]),
-);
-export type IntegrationSource = z.infer<typeof IntegrationSource>;
-
-/** Custom OpenAPI documents must fit the same 8 MiB bound as fetched specs. */
-export const INLINE_OPENAPI_DOCUMENT_MAX_BYTES = 8 * 1024 * 1024;
-
-/**
- * An OpenAPI 3.x document supplied in the request body (JSON or YAML text)
- * instead of fetched from a URL. `sourceKey` is the caller's stable identity
- * for the Integration: the same key updates the same installation across
- * document revisions. Server URLs must be absolute (or `baseUrl` given), and
- * every call still goes through the deployment network policy, so a product
- * on a private or loopback address stays unreachable unless the operator
- * enables private targets; a local product still needs a public tunnel.
- */
-export const InlineOpenApiDocumentSource = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      kind: z.literal("openapi_document"),
-      sourceKey: z
-        .string()
-        .min(1)
-        .max(128)
-        .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
-      document: primitives.nonEmptyString.refine(
-        (value) => new TextEncoder().encode(value).byteLength <= INLINE_OPENAPI_DOCUMENT_MAX_BYTES,
-        `OpenAPI document must be at most ${INLINE_OPENAPI_DOCUMENT_MAX_BYTES} bytes`,
-      ),
-      baseUrl: z.string().url().max(2048).optional(),
-    })
-    .strict(),
-);
-export type InlineOpenApiDocumentSource = z.infer<typeof InlineOpenApiDocumentSource>;
-
-/** Preview/install input: every stored source kind plus an inline document. */
-export const IntegrationSourceInput = /* @__PURE__ */ defineSchema(() =>
-  z.discriminatedUnion("kind", [...IntegrationSource.options, InlineOpenApiDocumentSource]),
-);
-export type IntegrationSourceInput = z.infer<typeof IntegrationSourceInput>;
-
 /** Responses echo an inline document only by its digest, never its text. */
 export const InlineOpenApiDocumentSourceEcho = /* @__PURE__ */ defineSchema(() =>
   z
@@ -15564,35 +15497,6 @@ export const ApiIntegrationOAuthConnectionMetadata = /* @__PURE__ */ defineSchem
 export type ApiIntegrationOAuthConnectionMetadata = z.infer<
   typeof ApiIntegrationOAuthConnectionMetadata
 >;
-
-export const ApiIntegrationAuthPreview = /* @__PURE__ */ defineSchema(() =>
-  z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("none") }).strict(),
-    z
-      .object({
-        kind: z.literal("oauth2"),
-        providerDomain: z.string().min(1).max(253),
-        scopes: z.array(z.string().min(1).max(1024)).max(256),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("api_key"),
-        providerDomain: z.string().min(1).max(253),
-        carrier: z.enum(["header", "query", "cookie"]),
-        name: z.string().min(1).max(256),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("http"),
-        providerDomain: z.string().min(1).max(253),
-        scheme: z.string().min(1).max(64),
-      })
-      .strict(),
-  ]),
-);
-export type ApiIntegrationAuthPreview = z.infer<typeof ApiIntegrationAuthPreview>;
 
 export const ApiIntegrationToolPreview = /* @__PURE__ */ defineSchema(() =>
   z
@@ -15726,6 +15630,22 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
         .object({
           originWorkspaceId: primitives.uuid,
           originWorkspaceName: primitives.nonEmptyString,
+        })
+        .strict()
+        .optional(),
+      /**
+       * Set when the organization serves it here (an organization connector of
+       * kind "api"): managed in the organization's settings, not here. A
+       * workspace manager can turn it off here and back on; `enabledHere` is
+       * false while it is off here.
+       */
+      organizationConnector: z
+        .object({
+          connectorId: primitives.uuid,
+          login: z.enum(["each_person", "organization_key", "none"]),
+          /** How the API authenticates: what a person adds when each person signs in. */
+          auth: ApiIntegrationAuthPreview,
+          enabledHere: primitives.boolean,
         })
         .strict()
         .optional(),

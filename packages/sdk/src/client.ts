@@ -29,7 +29,10 @@ import type {
   ClaudeSubscriptionSetupTokenRequest,
   CreateOrganizationConnectorRequest,
   ListOrganizationConnectorsResponse,
+  OrganizationApiIntegrationHere,
   OrganizationConnector,
+  PreviewOrganizationApiIntegrationRequest,
+  SetOrganizationApiIntegrationHereRequest,
   SubscriptionPoolSettings,
   SubscriptionUsagePoolsResponse,
   UpdateOrganizationConnectorRequest,
@@ -6139,7 +6142,26 @@ export class OpenGeniClient {
     return response.connectors;
   }
 
-  /** Add a catalog connector or a custom MCP server for the workspaces its availability selects. */
+  /**
+   * Preview an API integration (a reviewed definition, or a custom OpenAPI or
+   * GraphQL API) for the organization before adding it: its tools, how it
+   * signs in, and the revision `createOrganizationConnector` must match.
+   */
+  async previewOrganizationApiIntegration(
+    organizationId: string,
+    request: PreviewOrganizationApiIntegrationRequest,
+  ): Promise<ApiIntegrationPreview> {
+    return await this.requestJson<ApiIntegrationPreview>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors/api-integrations/preview`,
+      request,
+    );
+  }
+
+  /**
+   * Add a catalog connector, a custom MCP server or a previewed API
+   * integration for the workspaces its availability selects.
+   */
   async createOrganizationConnector(
     organizationId: string,
     request: CreateOrganizationConnectorRequest,
@@ -10063,6 +10085,22 @@ export class OpenGeniClient {
     return await this.requestJson<ApiIntegrationUninstallPreview>(
       "GET",
       `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/uninstall-preview`,
+    );
+  }
+
+  /**
+   * Turn the organization's API integration off in this workspace, or back
+   * on. It stays managed in the organization's settings.
+   */
+  async setOrganizationApiIntegrationHere(
+    workspaceId: string,
+    capabilityId: string,
+    request: SetOrganizationApiIntegrationHereRequest,
+  ): Promise<OrganizationApiIntegrationHere> {
+    return await this.requestJson<OrganizationApiIntegrationHere>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/organization`,
+      request,
     );
   }
 

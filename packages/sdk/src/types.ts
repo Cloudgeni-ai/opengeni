@@ -9859,6 +9859,17 @@ export type ApiIntegrationInstallationSummary = {
    * workspace where they connected it "Only me"; it is managed there.
    */
   personalExtension?: { originWorkspaceId: string; originWorkspaceName: string };
+  /**
+   * Set when the organization serves it here (organization settings manage
+   * it); `enabledHere` is false while this workspace turned it off.
+   */
+  organizationConnector?: {
+    connectorId: string;
+    login: "each_person" | "organization_key" | "none";
+    /** How the API authenticates: what a person adds when each person signs in. */
+    auth: ApiIntegrationAuthPreview;
+    enabledHere: boolean;
+  };
 };
 
 export type ListApiIntegrationsResponse = {

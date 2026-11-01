@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { ApiIntegrationRuntime, ResolveConnectionCredentialResult } from "@opengeni/db";
+import {
+  encryptEnvironmentValue,
+  type ApiIntegrationRuntime,
+  type ResolveConnectionCredentialResult,
+} from "@opengeni/db";
 import { prepareAgentTools } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing/settings";
 import type { McpConnectionAccountBinding } from "@opengeni/contracts";
@@ -82,6 +86,129 @@ const authority = {
 };
 
 describe("installed API Integration worker adapters", () => {
+  test("an organization key is decrypted per request, sent only to the API, and not retried when rejected", async () => {
+    const encryptionKey = new Uint8Array(32).fill(23);
+    const item: ApiIntegrationRuntime = {
+      ...integration(),
+      instanceKey: "organization",
+      authScheme: { kind: "api_key", carrier: "query", name: "api_key" },
+      connectionRef: null,
+      connectionAuthorityGeneration: null,
+      organizationConnector: {
+        id: "33333333-4444-4555-8666-777777777777",
+        generation: 2,
+        login: "organization_key",
+        auth: {
+          kind: "api_key",
+          providerDomain: "127.0.0.1",
+          carrier: "query",
+          name: "api_key",
+        },
+      },
+      organizationCredential: {
+        placements: [
+          {
+            carrier: "query",
+            name: "api_key",
+            valueEncrypted: encryptEnvironmentValue(encryptionKey, "org-key"),
+          },
+        ],
+      },
+    };
+    const settings = testSettings({
+      environmentsEncryptionKey: Buffer.from(encryptionKey).toString("base64"),
+      mcpServers: [
+        {
+          id: item.serverId,
+          name: item.name,
+          url: item.baseUrl,
+          allowedTools: item.allowedTools,
+          cacheToolsList: true,
+          requireApproval: item.requireApproval,
+        },
+      ],
+    });
+    const requests: string[] = [];
+    let status = 200;
+    const localMcpServers = buildApiIntegrationServersForTurn({
+      settings,
+      integrations: [item],
+      authority,
+      resolveCredential: async () => {
+        throw new Error("An organization key never resolves a person's account");
+      },
+      fetchImpl: async (request) => {
+        requests.push(String(request));
+        return new Response(JSON.stringify({ items: [] }), {
+          status,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: item.serverId }], {
+      localMcpServers,
+    });
+    try {
+      const call = () => prepared.mcpServers[0]!.callToolResult!("inventory_api__list_items", {});
+      expect(await call()).toMatchObject({ isError: false });
+      expect(requests).toEqual(["https://127.0.0.1/v1/items?api_key=org-key"]);
+      status = 401;
+      // A rejected organization key is not refreshed or retried: the call fails once.
+      await expect(call()).rejects.toMatchObject({ code: "authorization_rejected", status: 401 });
+      expect(requests).toHaveLength(2);
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  test("an organization's each-person selector runs only through the person's accepted account", () => {
+    const selector: ApiIntegrationRuntime = {
+      ...integration(),
+      instanceKey: "organization",
+      connectionRef: { providerDomain: "127.0.0.1", kind: "oauth2", subjectScope: "subject" },
+      connectionAuthorityGeneration: null,
+    };
+    const keyed: ApiIntegrationRuntime = {
+      ...integration(),
+      serverId: "ledger_api",
+      connectionRef: null,
+      connectionAuthorityGeneration: null,
+    };
+    const tools = [
+      { kind: "mcp" as const, id: selector.serverId },
+      { kind: "mcp" as const, id: keyed.serverId },
+      { kind: "mcp" as const, id: "inventory-account-alice" },
+    ];
+    // Without accepted accounts it never runs as it is; an integration with no account does.
+    expect(
+      expandApiIntegrationAccountRoutes({ integrations: [selector, keyed], bindings: null, tools }),
+    ).toEqual([keyed]);
+    const connectionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const routed = expandApiIntegrationAccountRoutes({
+      integrations: [selector, keyed],
+      bindings: [
+        {
+          serverId: "inventory-account-alice",
+          canonicalServerId: selector.serverId,
+          connectionId,
+          originWorkspaceId: "11111111-1111-4111-8111-111111111111",
+          subjectScope: "subject",
+          ownerSubjectId: "human:alice",
+          accountLabel: "Alice",
+          providerDomain: "127.0.0.1",
+          kind: "oauth2",
+          connectionRef: { ...selector.connectionRef!, connectionId },
+          connectionAuthorityGeneration: 4,
+        },
+      ],
+      tools,
+    });
+    expect(routed.map((entry) => [entry.serverId, entry.connectionRef?.connectionId])).toEqual([
+      ["inventory-account-alice", connectionId],
+      ["ledger_api", undefined],
+    ]);
+  });
+
   test("an already prepared Teams tool cannot resolve credentials after rollout is disabled", async () => {
     const item = { ...integration(), definitionId: "microsoft-teams" };
     const settings = testSettings({ microsoftTeamsToolsEnabled: true });
