@@ -584,13 +584,13 @@ export function useRecorder(
               ...(input.startedAt
                 ? { startedAt: input.startedAt.toISOString() }
                 : {}),
-              ...(options.visibility ? { visibility: options.visibility } : {}),
+              ...(current.visibility ? { visibility: current.visibility } : {}),
               ...(externalRef ? { externalRef } : {}),
-              ...(options.metadata
-                ? { metadata: options.metadata as never }
+              ...(current.metadata
+                ? { metadata: current.metadata as never }
                 : {}),
-              ...(options.transcription
-                ? { transcription: options.transcription }
+              ...(current.transcription
+                ? { transcription: current.transcription }
                 : {}),
             },
             onStored: resolve,
