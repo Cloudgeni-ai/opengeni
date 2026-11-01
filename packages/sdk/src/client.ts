@@ -575,10 +575,13 @@ import type {
   ListManagedOrganizationMembershipsResponse,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
+  IssueUserResourceGrantRequest,
+  UserResourceGrantMutationResponse,
   UpdateGitHubActionPolicyRequest,
   RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationAdministrationMembersResponse,
+  ListOrganizationMemberNamesResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
   AcceptOrganizationRecoveryCustodyRequest,
@@ -943,7 +946,7 @@ export type SessionListPageOptions = {
   /**
    * Only these sessions, at most 200 ids. Narrows the caller's ordinary list
    * (other filters, archive status and Site scope still apply); never widens it.
-   * Pass `archiveStatus: "all"` to include personally archived sessions.
+   * Pass `archiveStatus: "all"` to include archived sessions.
    */
   sessionIds?: readonly string[];
   /** Return only the complete personal pinned projection. */
@@ -952,7 +955,8 @@ export type SessionListPageOptions = {
   includePinned?: boolean;
   /** Return archived root chats instead of the active session list. */
   archivedOnly?: boolean;
-  sortBy?: "updatedAt" | "createdAt" | "name";
+  /** `archivedAt` orders archived chats by when they were archived. */
+  sortBy?: "updatedAt" | "createdAt" | "name" | "archivedAt";
   archiveStatus?: "active" | "archived" | "all";
   /** Stop this caller's finite page read when its owning route is abandoned. */
   signal?: AbortSignal | undefined;
@@ -6569,6 +6573,23 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Issue an exact-session or standing personal-resource grant. A person's
+   * own subscription is turned on for their own turns in a workspace with a
+   * standing `subscription_connection` grant there.
+   */
+  async issueUserResourceGrant(
+    workspaceId: string,
+    authorityId: string,
+    request: IssueUserResourceGrantRequest,
+  ): Promise<UserResourceGrantMutationResponse> {
+    return await this.requestJson<UserResourceGrantMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
+      request,
+    );
+  }
+
   /** Revoke an owner grant through the exact workspace it targets. */
   async revokeUserResourceGrant(
     workspaceId: string,
@@ -6675,6 +6696,16 @@ export class OpenGeniClient {
     organizationId: string,
   ): Promise<ListOrganizationAdministrationMembersResponse> {
     return await this.listOrganizationAdministrationMembers(organizationId);
+  }
+
+  /** Who is in the organization, by name only; any member may read it. */
+  async listOrganizationMemberNames(
+    organizationId: string,
+  ): Promise<ListOrganizationMemberNamesResponse> {
+    return await this.requestJson<ListOrganizationMemberNamesResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/member-names`,
+    );
   }
 
   /** Canonical organization identity and every non-personal workspace access roster. */
@@ -12134,6 +12165,22 @@ export class OpenGeniClient {
       "PUT",
       `/v1/${target.scope}/${encodeURIComponent(target.scopeId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
       policy,
+    );
+  }
+
+  /**
+   * Stops a workspace from using another workspace's own subscription account
+   * that was shared with it. Only the owning workspace or the organization
+   * changes the account otherwise. Requires workspace admin.
+   */
+  async removeModelConnectionFromWorkspace(target: {
+    workspaceId: string;
+    kind: "codex" | "supergrok" | "claude_subscription";
+    connectionId: string;
+  }): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${encodeURIComponent(target.workspaceId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
     );
   }
 

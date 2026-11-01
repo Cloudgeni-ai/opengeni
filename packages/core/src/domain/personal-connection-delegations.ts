@@ -31,6 +31,8 @@ import {
   listConnectionsMetadata,
   listSocialConnections,
   listOwnedConnectionAccounts,
+  listOwnLoginsTurnedOn,
+  issueSelfUserResourceGrant,
   namedSubjectHasLiveWorkspaceAuthority,
   isSubjectOwnPersonalWorkspace,
   type Database,
@@ -182,6 +184,7 @@ export async function listOwnConnectionAccountsForGrant(
   const personal = await listOwnConnectionMetadata(db, {
     ...source,
     workspaceId: grant.workspaceId,
+    reach: "anywhere",
     includeInactive: options.includeInactive === true,
   });
   return [...workspace, ...personal];
@@ -219,7 +222,7 @@ export async function personalWorkspaceOwnerOriginConnections(
   // Shared workspaces stop here, before any membership or connection read.
   if (!(await isSubjectOwnPersonalWorkspace(db, input))) return [];
   const byOrigin = new Map<string, ConnectionMetadata[]>();
-  for (const connection of await listOwnConnectionMetadata(db, input)) {
+  for (const connection of await listOwnConnectionMetadata(db, { ...input, reach: "anywhere" })) {
     if (
       connection.workspaceId === input.workspaceId ||
       connection.accountId !== input.accountId ||
@@ -250,13 +253,21 @@ export async function personalWorkspaceOwnerOriginConnections(
 
 /** The subject's own personal connections in this organization, whichever of
  * their workspaces each was created in. A personal account follows its owner,
- * so connecting it again or using it elsewhere reuses this same connection. */
+ * so connecting it again or using it elsewhere reuses this same connection.
+ *
+ * It works for the owner's messages only where it is turned on (D-54): their
+ * Personal workspace, and each shared workspace with a standing
+ * `connection.use` grant. `reach: "turned_on_here"` returns only those, for
+ * anything that binds or routes a login; `reach: "anywhere"` returns all of
+ * them, for inventories, setup and reuse. Either way each one says whether it
+ * is turned on in `workspaceId`. */
 export async function listOwnConnectionMetadata(
   db: Database,
   input: {
     accountId: string;
     workspaceId: string;
     subjectId: string;
+    reach: "turned_on_here" | "anywhere";
     includeInactive?: boolean;
     /** Read only these owned accounts (a live target fence); omit for all. */
     connectionIds?: ReadonlySet<string>;
@@ -265,11 +276,19 @@ export async function listOwnConnectionMetadata(
   const accounts = (await listOwnedConnectionAccounts(db, input)).filter(
     (account) => !input.connectionIds || input.connectionIds.has(account.connectionId),
   );
+  if (accounts.length === 0) return [];
+  // `db` may be one bounded transaction: these reads must not overlap.
+  const personalWorkspace = await isSubjectOwnPersonalWorkspace(db, input);
+  const turnedOn = personalWorkspace
+    ? new Map<string, string>()
+    : await listOwnLoginsTurnedOn(db, input);
   const connections: ConnectionMetadata[] = [];
   // The caller may supply a transaction handle (for example, credential
   // rotation). Each metadata read opens a nested RLS savepoint on that same
   // connection, so these reads must not overlap.
   for (const account of accounts) {
+    const turnedOnHere = personalWorkspace || turnedOn.has(account.connectionId);
+    if (input.reach === "turned_on_here" && !turnedOnHere) continue;
     const connection = await getConnectionMetadata(
       db,
       account.originWorkspaceId,
@@ -282,9 +301,34 @@ export async function listOwnConnectionMetadata(
       connection.authorityId != null &&
       (input.includeInactive === true || connection.status === "active")
     )
-      connections.push(connection);
+      connections.push({
+        ...connection,
+        turnedOnHere,
+        turnedOnHereGrantId: turnedOn.get(account.connectionId) ?? null,
+      });
   }
   return connections;
+}
+
+/**
+ * Turn the owner's own login on for their messages in this workspace (D-54):
+ * their standing `connection.use` grant here. A login starts on where it is
+ * added; this covers connecting it again, or reconnecting it, from another
+ * shared workspace. Their Personal workspace needs no grant. The caller must
+ * have established `subjectId` as the authenticated owner.
+ */
+export async function turnOnOwnLoginHere(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string; authorityId: string },
+): Promise<void> {
+  if (await isSubjectOwnPersonalWorkspace(db, input)) return;
+  await issueSelfUserResourceGrant(db, {
+    ...input,
+    resourceKind: "connection",
+    mode: "always",
+    context: "workspace_shared",
+    workspaceSharedAcknowledged: true,
+  });
 }
 
 export async function authorizedSocialConnectionsForGrant(input: {
@@ -890,6 +934,7 @@ export async function visibleMcpAccountConnections(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId: input.source.subjectId,
+          reach: "turned_on_here",
         })
       : [];
   const workspace = await listConnectionsMetadata(db, input.workspaceId, null);
@@ -932,6 +977,7 @@ export async function visibleMcpAccountConnectionsByIds(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId: input.source.subjectId,
+          reach: "turned_on_here",
           connectionIds: personalIds,
         })
       : [];
@@ -1075,6 +1121,9 @@ export async function freezePersonalConnectionDelegations(input: {
           accountId: input.source.accountId,
           workspaceId: input.workspaceId,
           subjectId: ownerSubjectId,
+          // Personal GitHub keeps its own per-chat repository choice; MCP
+          // logins below are bound only where they are turned on (D-54).
+          reach: "anywhere",
         })
       : [];
   const selectedMcpServerIds = new Set(servers.map((server) => server.id));
@@ -1103,7 +1152,7 @@ export async function freezePersonalConnectionDelegations(input: {
   const mcp = personalConnectionDelegationsFromVisibleConnections({
     servers,
     subjectId: ownerSubjectId,
-    connections: visibleConnections,
+    connections: visibleConnections.filter((connection) => connection.turnedOnHere === true),
     authoritySelections: (input.authoritySelections ?? []).filter((selection) =>
       selectedMcpServerIds.has(selection.serverId),
     ),

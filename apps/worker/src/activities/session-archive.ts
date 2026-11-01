@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ApplicationFailure } from "@temporalio/activity";
+import { stopArchivedSessionWork } from "@opengeni/core";
 import {
   SESSION_ARCHIVE_EXPORT_TABLES,
   SESSION_ARCHIVE_FORMAT,
@@ -16,6 +18,7 @@ import {
   listUnfinishedSessionArchives,
   purgeArchivedSessionContent,
   readSessionArchiveTablePages,
+  readSessionArchiveTree,
   readSessionArchiveSessionRow,
   readSessionArchiveTranscriptEvents,
   sessionArchiveObjectKeys,
@@ -124,6 +127,15 @@ async function writeTranscript(db: Database, scope: SessionArchiveScope, path: s
 }
 
 export type ArchiveSessionOutcome = "archived" | "skipped" | "failed";
+
+/** One Archive a person made: the chat, who archived it and when. */
+export type ArchivedSessionRequest = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  subjectId: string;
+  archivedAt: string;
+};
 
 export type SessionArchiveActivityOptions = {
   candidatesPerPass?: number;
@@ -299,6 +311,7 @@ export function createSessionArchiveActivities(
           const outcome = await archiveOne(db, objectStorage, scope, idleSeconds);
           if (outcome === "skipped") {
             result.skipped += 1;
+            await stopSettlingArchive(scope);
             continue;
           }
           result.archived += 1;
@@ -321,5 +334,100 @@ export function createSessionArchiveActivities(
     return result;
   }
 
-  return { archiveIdleSessions };
+  /**
+   * An archived chat the listing returned but that could not be stored yet
+   * still has work running (its own stop step was lost, or a migration
+   * archived it): stop that work so a later pass stores it. Only the chat
+   * that started a tree does this, for the whole tree; anything else is left
+   * for the pass to retry.
+   */
+  async function stopSettlingArchive(scope: SessionArchiveScope): Promise<void> {
+    const { db } = await services();
+    const tree = await readSessionArchiveTree(db, scope);
+    const root = tree.find((row) => row.id === scope.sessionId);
+    if (!root?.archivedAt || root.contentArchiveState !== null || !root.archiveRequestedBy) return;
+    await stopArchivedSessionWorkActivity({
+      ...scope,
+      subjectId: root.archiveRequestedBy,
+      archivedAt: root.archivedAt.toISOString(),
+    });
+  }
+
+  /**
+   * After an Archive's undo window: retire the chat's one-time waits, pause
+   * its goals and cancel its running work, so it can be stored. Returns
+   * whether the chat still waits to be stored (false once undone or stored).
+   */
+  async function stopArchivedSessionWorkActivity(
+    input: ArchivedSessionRequest,
+  ): Promise<{ pending: boolean }> {
+    const { db, bus, wakeSessionWorkflow } = await services();
+    return await stopArchivedSessionWork(
+      {
+        db,
+        bus,
+        workflowClient: {
+          // Committed wakes are drained from their durable outbox.
+          requestSessionWorkflowWakeDispatch: async () => undefined,
+          wakeSessionWorkflow: async (wake) => {
+            if (wakeSessionWorkflow) return await wakeSessionWorkflow(wake);
+          },
+        },
+        schedulePromptPostCommit: (task) => {
+          void task().catch(() => undefined);
+        },
+      },
+      input,
+    );
+  }
+
+  /**
+   * Store an archived chat and its sub-chats now instead of waiting for the
+   * maintenance pass. Fails (to be retried) while something in them still
+   * runs; succeeds once every one is stored, or when the Archive was undone.
+   */
+  async function storeArchivedSession(input: ArchivedSessionRequest): Promise<{ stored: number }> {
+    const { db, objectStorage, settings } = await services();
+    // The maintenance pass stores it later when this deployment can.
+    if (!settings.sessionArchiveEnabled || !objectStorage) return { stored: 0 };
+    const idleSeconds = settings.sessionArchiveIdleDays * 24 * 60 * 60;
+    const tree = await readSessionArchiveTree(db, input);
+    const root = tree.find((row) => row.id === input.sessionId);
+    if (!root || root.archivedAt === null) return { stored: 0 };
+    let stored = 0;
+    let waiting = 0;
+    // Sub-chats first: a running sub-chat keeps its parent live.
+    const ordered = [...tree].sort(
+      (a, b) => Number(a.id === input.sessionId) - Number(b.id === input.sessionId),
+    );
+    for (const row of ordered) {
+      if (row.contentArchiveState === "archived" || row.archivedAt === null) continue;
+      const scope = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: row.id,
+      };
+      const outcome =
+        row.contentArchiveState === "archiving"
+          ? "skipped"
+          : await archiveOne(db, objectStorage, scope, idleSeconds);
+      if (outcome === "archived") {
+        stored += 1;
+        await purgeUntilDone(db, scope, now() + timeBudgetMs);
+      } else waiting += 1;
+    }
+    if (waiting > 0) {
+      throw ApplicationFailure.retryable(
+        `${waiting} archived chat(s) still have work to finish before they can be stored`,
+        "session_archive_pending",
+      );
+    }
+    return { stored };
+  }
+
+  return {
+    archiveIdleSessions,
+    stopArchivedSessionWork: stopArchivedSessionWorkActivity,
+    storeArchivedSession,
+  };
 }

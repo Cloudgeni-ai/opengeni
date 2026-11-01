@@ -693,8 +693,10 @@ import {
 export * from "./model-connection-access";
 export {
   SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessMoveRequiredError,
   SubscriptionCoreAccessPeopleUnlistableError,
   SubscriptionCoreAccessPersonNotInOrganizationError,
+  SubscriptionCoreAccessWorkspaceNotAdministeredError,
   type SubscriptionCoreAccess,
 } from "./subscription-core/access";
 import { createHash, randomUUID } from "node:crypto";
@@ -1187,7 +1189,6 @@ import {
   registerSessionTurnAttemptClaim,
   reserveSessionCommandReceipt,
   serializeEffectiveSessionControl,
-  sessionWorkstreamHasActiveWork,
   type SessionDiscoveryControl,
   type SessionCommandActor,
   SessionControlConflictError,
@@ -21724,21 +21725,18 @@ export async function deleteScheduledTask(
 }
 
 /**
- * Archiving a chat pauses it, so the one-time waits that would continue it
- * are retired with it: a run-once event automation that has not run yet, and
- * a one-time scheduled run still ahead. Both belong to the chat (a "wake me
- * when" from that chat or one of its sub-chats); repeating automations stay,
- * and a run of theirs that meets the paused chat is blocked with a notice to
- * the owner. Pass the archive transaction so the chat never ends up archived
- * with a pending wait; any Temporal schedule is removed by the cleanup pump
- * from the durable outbox row each deletion writes. Restore does not bring
- * a retired wait back. Returns the retired automation ids.
+ * An archived chat can never continue, so its one-time automations are
+ * retired when its undo window ends: run-once event automations and one-time
+ * scheduled runs, whether still ahead or already run. They belong to the chat
+ * (a "wake me when" from that chat or one of its sub-chats). Repeating
+ * automations are not retired; they keep Archive from starting at all. Any
+ * Temporal schedule is removed by the cleanup pump from the durable outbox
+ * row each deletion writes. Returns the retired automation ids.
  */
 export async function retireArchivedChatWaits(
   db: Database,
-  input: { workspaceId: string; rootSessionId: string; now?: Date },
+  input: { workspaceId: string; rootSessionId: string },
 ): Promise<string[]> {
-  const now = input.now ?? new Date();
   const task = schema.scheduledTasks;
   const settings = schema.scheduledTaskEventSettings;
   const rows = await withWorkspaceRls(db, input.workspaceId, async (scoped) =>
@@ -21760,12 +21758,8 @@ export async function retireArchivedChatWaits(
           eq(task.runMode, "existing_session"),
           eq(schema.sessions.rootSessionId, input.rootSessionId),
           or(
-            and(eq(settings.once, true), isNull(settings.completedAt)),
-            and(
-              isNull(settings.taskId),
-              sql`${task.schedule} ->> 'type' = 'once'`,
-              sql`(${task.schedule} ->> 'runAt')::timestamptz > ${now.toISOString()}::timestamptz`,
-            ),
+            eq(settings.once, true),
+            and(isNull(settings.taskId), sql`${task.schedule} ->> 'type' = 'once'`),
           ),
         ),
       )
@@ -34668,17 +34662,19 @@ export class SessionPinVersionConflictError extends Error {
   }
 }
 
+/** Archived chats leave the Pinned list with every other list, so they cannot be pinned. */
+export class SessionArchivedPinError extends Error {
+  readonly code = "session_archived_pin";
+  constructor() {
+    super("Archived chats can't be pinned.");
+    this.name = "SessionArchivedPinError";
+  }
+}
+
 export class SessionAttentionVersionConflictError extends Error {
   constructor(readonly current: Pick<Session, "unread" | "activelyWorking" | "attentionVersion">) {
     super("session attention version conflict");
     this.name = "SessionAttentionVersionConflictError";
-  }
-}
-
-export class SessionArchiveVersionConflictError extends Error {
-  constructor(readonly current: Pick<Session, "archived" | "archivedAt" | "archiveVersion">) {
-    super("session archive version conflict");
-    this.name = "SessionArchiveVersionConflictError";
   }
 }
 
@@ -34783,6 +34779,25 @@ async function requireSessionPersonalStateWriteAuthority(
   ) {
     throw new SessionPinAccessError();
   }
+}
+
+/**
+ * Archive is for everyone, but like the personal state it replaced only a
+ * workspace member, or a Personal workspace's verified owner, may start or
+ * undo one: a token that merely names someone gets no further. Throws
+ * {@link SessionPinAccessError}.
+ */
+export async function requireSessionArchiveMemberAuthority(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
+  },
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) =>
+    requireSessionPersonalStateWriteAuthority(scopedDb as unknown as Database, input),
+  );
 }
 
 type SessionPinRow = Pick<
@@ -35078,16 +35093,44 @@ function mapSessionAttention(
       };
 }
 
+/**
+ * Whether a session row is archived for everyone: archived through the chat's
+ * Archive action (or since migration 1213 by the idle archiver), or stored by
+ * the idle archiver before archived_at existed.
+ */
+function sessionArchivedSql(alias: SQL): SQL {
+  return sql`(${alias}.archived_at is not null or ${alias}.content_archive_state is not null)`;
+}
+
+/** When a session row was archived, by {@link sessionArchivedSql}'s rule. */
+function sessionArchivedAtSql(alias: SQL): SQL {
+  return sql`coalesce(${alias}.archived_at, ${alias}.content_archived_at, ${alias}.content_archive_started_at)`;
+}
+
+/**
+ * The archive fields a session row does not carry itself: the version of the
+ * retired personal archive (kept for clients that still send it) and, from a
+ * list page, the exact archive time of its keyset. `archived` and `archivedAt`
+ * come from the session row (see mapSession).
+ */
 function mapSessionArchive(
   row: SessionPinRow | null | undefined,
-): Pick<Session, "archived" | "archivedAt" | "archiveVersion"> {
-  return row
-    ? {
-        archived: row.archived,
-        archivedAt: row.archivedAt?.toISOString() ?? null,
-        archiveVersion: Number(row.archiveVersion),
-      }
-    : { archived: false, archivedAt: null, archiveVersion: 0 };
+): Pick<Session, "archiveVersion"> & Partial<Pick<Session, "archivedAt">> {
+  return { archiveVersion: row ? Number(row.archiveVersion) : 0 };
+}
+
+/** A session row's archive fields, for everyone (migration 1213). */
+function sessionRowArchive(
+  row: Pick<
+    typeof schema.sessions.$inferSelect,
+    "archivedAt" | "contentArchiveState" | "contentArchivedAt" | "contentArchiveStartedAt"
+  >,
+): Pick<Session, "archived" | "archivedAt"> {
+  const archivedAt = row.archivedAt ?? row.contentArchivedAt ?? row.contentArchiveStartedAt;
+  return {
+    archived: row.archivedAt !== null || row.contentArchiveState !== null,
+    archivedAt: archivedAt?.toISOString() ?? null,
+  };
 }
 
 type SessionTreeStats = NonNullable<Session["treeStats"]>;
@@ -35714,7 +35757,11 @@ async function sessionListTotalsInScope(
     }),
     ...(archiveStatus === "all"
       ? []
-      : [sql`coalesce(root_archive.archived, false) = ${archiveStatus === "archived"}`]),
+      : [
+          archiveStatus === "archived"
+            ? sessionArchivedSql(sql`${schema.sessions}`)
+            : sql`not (${sessionArchivedSql(sql`${schema.sessions}`)})`,
+        ]),
     // A Site this person archived from their sidebar hides its conversations
     // with its row, as an archived chat hides its tree.
     ...(archiveStatus === "active" && siteConversations
@@ -35752,7 +35799,7 @@ async function sessionListTotalsInScope(
         ${schema.sessions.createdAt} as created_at,
         ${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'title' as origin_title,
         ${sessionRelatedListScope(options.authorizationScope)} as related,
-        coalesce(root_personal.archived, false) as archived,
+        ${sessionArchivedSql(sql`${schema.sessions}`)} as archived,
         coalesce(root_personal.pinned, false) as pinned,
         coalesce(case when root_personal.manually_unread_through is not null then -1
           else root_personal.acknowledged_sequence end, 0) as acknowledged_sequence,
@@ -35761,9 +35808,6 @@ async function sessionListTotalsInScope(
       left join lateral (
         select * from personal_state where session_id = ${schema.sessions.id} offset 0
       ) root_personal on true
-      left join lateral (
-        select * from personal_state where session_id = ${schema.sessions.rootSessionId} offset 0
-      ) root_archive on true
       where ${rootFilters}
     ), visible_children as materialized (
       -- Immutable root lineage excludes trees that cannot enter this recursion.
@@ -36166,13 +36210,13 @@ function sessionFilters(
         : sql`${schema.sessions.siteAccessRootId} is null`,
     );
   }
+  // A chat is archived for everyone, and its sub-chats with it.
   const archivedRoot = sql`exists (
     select 1
-    from ${schema.sessionPins} archive_state
-    where archive_state.workspace_id = ${schema.sessions.workspaceId}
-      and archive_state.subject_id = ${options.subjectId}
-      and archive_state.session_id = ${schema.sessions.rootSessionId}
-      and archive_state.archived = true
+    from ${schema.sessions} archive_root
+    where archive_root.workspace_id = ${schema.sessions.workspaceId}
+      and archive_root.id = ${schema.sessions.rootSessionId}
+      and ${sessionArchivedSql(sql`archive_root`)}
   )`;
   const archiveStatus = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
   if (archiveStatus !== "all") {
@@ -36927,14 +36971,12 @@ async function readSessionListForSubject(
             : or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false))!;
         const parentFilter = sessionParentFilter(options.parentSessionId);
         const searchFilter = sessionSearchFilter(options.search);
-        // Descendants inherit their root's subject-specific archive ordering,
-        // just as they inherit its archive visibility in sessionFilters.
-        const archiveSortAt = sql`(select archive_order.archived_at
-              from ${schema.sessionPins} archive_order
+        // Descendants inherit their root's archive ordering, just as they
+        // inherit its archive visibility in sessionFilters.
+        const archiveSortAt = sql`(select ${sessionArchivedAtSql(sql`archive_order`)}
+              from ${schema.sessions} archive_order
               where archive_order.workspace_id = ${schema.sessions.workspaceId}
-                and archive_order.subject_id = ${options.subjectId}
-                and archive_order.session_id = ${schema.sessions.rootSessionId}
-                and archive_order.archived = true)`;
+                and archive_order.id = ${schema.sessions.rootSessionId})`;
         // Locale-independent normalization shared with the UI contract. Do not
         // use localeCompare/lower(): those depend on deployment/client locale.
         const ordinarySortAt =
@@ -37362,7 +37404,7 @@ async function readSessionListForSubject(
                   mapSessionAttention(session, row.pin),
                   {
                     ...mapSessionArchive(row.pin),
-                    ...(row.pin?.archived && exactArchiveTimestamps.has(session.id)
+                    ...(exactArchiveTimestamps.get(session.id)
                       ? { archivedAt: exactArchiveTimestamps.get(session.id)! }
                       : {}),
                   },
@@ -37735,6 +37777,11 @@ export async function setSessionPin(
         if (input.expectedVersion !== undefined && input.expectedVersion !== current.pinVersion) {
           throw new SessionPinVersionConflictError(current);
         }
+        // The Pinned list shows chats that are not archived, so an archived
+        // chat cannot be pinned; unpinning one is always allowed.
+        if (input.pinned && sessionRowArchive(session).archived) {
+          throw new SessionArchivedPinError();
+        }
         let pin = existing ?? null;
         if (!existing) {
           const [inserted] = await tx
@@ -37779,16 +37826,6 @@ export async function setSessionPin(
               pinned: input.pinned,
               pinnedAt: input.pinned ? new Date() : null,
               version: sql`${schema.sessionPins.version} + 1`,
-              // Archiving unpins, and pinning restores: a chat is never both,
-              // because the Pinned list shows active chats only. Pinning an
-              // archived chat (opened from search) means keep it at hand.
-              ...(input.pinned && existing.archived
-                ? {
-                    archived: false,
-                    archivedAt: null,
-                    archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
-                  }
-                : {}),
             })
             .where(
               and(
@@ -37990,243 +38027,6 @@ export async function setSessionAttention(
           mapSessionArchive(state),
         );
       }),
-  );
-}
-
-/**
- * Whether archiving this chat must first ask to pause its work, answered from
- * a plain read before any lock. Archive takes the person's archive lock and the
- * workspace's control lock before it pauses; on a busy workspace those waits
- * last many seconds, and the question must not wait behind them. The locked
- * check in the pause stays the authority for work that starts in between.
- * False when the chat is not one this person can archive here, is already
- * archived for them, or changed since the version they saw, so those requests
- * take the ordinary path and get its answer.
- */
-export async function sessionArchiveNeedsPauseConfirmation(
-  db: Database,
-  input: {
-    workspaceId: string;
-    subjectId: string;
-    sessionId: string;
-    expectedVersion?: number | undefined;
-    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
-  },
-): Promise<boolean> {
-  return await withWorkspaceSubjectSessionActivityRls(
-    db,
-    input.workspaceId,
-    input.subjectId,
-    async (tx) => {
-      await requireSessionPersonalStateWriteAuthority(tx, input);
-      const [chat] = await tx
-        .select({
-          id: schema.sessions.id,
-          archived: schema.sessionPins.archived,
-          archiveVersion: schema.sessionPins.archiveVersion,
-        })
-        .from(schema.sessions)
-        .leftJoin(
-          schema.sessionPins,
-          and(
-            eq(schema.sessionPins.workspaceId, schema.sessions.workspaceId),
-            eq(schema.sessionPins.sessionId, schema.sessions.id),
-            eq(schema.sessionPins.subjectId, input.subjectId),
-          ),
-        )
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-            isNull(schema.sessions.parentSessionId),
-          ),
-        )
-        .limit(1);
-      if (!chat || chat.archived === true) return false;
-      if (
-        input.expectedVersion !== undefined &&
-        input.expectedVersion !== (chat.archiveVersion ?? 0)
-      ) {
-        return false;
-      }
-      return await sessionWorkstreamHasActiveWork(tx, input.workspaceId, input.sessionId);
-    },
-    undefined,
-    "none",
-  );
-}
-
-/**
- * Archive or restore one root chat for a single member. Archiving also removes
- * personal pin/follow-up labels so hidden work cannot remain in active rail
- * sections. Descendants inherit visibility from the archived root at list time.
- */
-export async function setSessionArchive(
-  db: Database,
-  input: {
-    workspaceId: string;
-    subjectId: string;
-    sessionId: string;
-    archived: boolean;
-    expectedVersion?: number | undefined;
-    /** Trusted composition hook, inside the personal-state fence and before hiding. */
-    beforeArchive?:
-      | ((tx: SessionActivityDatabase, archiveVersion: number) => Promise<boolean | void>)
-      | undefined;
-    /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
-    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
-  },
-): Promise<Session | null> {
-  return await withWorkspaceSubjectSessionActivityRls(
-    db,
-    input.workspaceId,
-    input.subjectId,
-    async (tx) => {
-      await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
-      await requireSessionPersonalStateWriteAuthority(tx, input);
-
-      const [storedSession] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-            isNull(schema.sessions.parentSessionId),
-          ),
-        )
-        .limit(1);
-      if (!storedSession) return null;
-      const [session] = await canonicalSessionRowsFromEventCursors(tx, input.workspaceId, [
-        storedSession,
-      ]);
-      if (!session) throw new Error(`Session event cursor missing for session ${input.sessionId}`);
-
-      const [existing] = await tx
-        .select()
-        .from(schema.sessionPins)
-        .where(
-          and(
-            eq(schema.sessionPins.workspaceId, input.workspaceId),
-            eq(schema.sessionPins.subjectId, input.subjectId),
-            eq(schema.sessionPins.sessionId, input.sessionId),
-          ),
-        )
-        .limit(1);
-      const current = mapSessionArchive(existing);
-      if (current.archived === input.archived) {
-        if (input.archived && input.beforeArchive) {
-          const replay = await input.beforeArchive(tx, current.archiveVersion);
-          // An identical receipt may replay the original pre-transition CAS.
-          // A fresh pause intent must not bypass a stale archive precondition.
-          if (
-            input.expectedVersion !== undefined &&
-            input.expectedVersion !== current.archiveVersion &&
-            !replay
-          ) {
-            throw new SessionArchiveVersionConflictError(current);
-          }
-        }
-        return await mapSessionWithControl(
-          tx as unknown as Database,
-          session,
-          [],
-          mapSessionPin(existing),
-          mapSessionAttention(session, existing),
-          current,
-        );
-      }
-      if (input.expectedVersion !== undefined && input.expectedVersion !== current.archiveVersion) {
-        throw new SessionArchiveVersionConflictError(current);
-      }
-
-      if (input.archived && input.beforeArchive) {
-        await input.beforeArchive(tx, current.archiveVersion + 1);
-      }
-
-      let state = existing ?? null;
-      if (!existing) {
-        const [inserted] = await tx
-          .insert(schema.sessionPins)
-          .values({
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId,
-            sessionId: input.sessionId,
-            pinned: false,
-            pinnedAt: null,
-            version: 0,
-            activelyWorking: false,
-            archived: true,
-            archivedAt: new Date(),
-            attentionVersion: 0,
-            archiveVersion: 1,
-          })
-          // A turn claim may have created this subject's row for the same
-          // session between the read above and here, to acknowledge a consumed
-          // child lifecycle notice. That row is archive-neutral and pin-neutral
-          // (the absent-row projection), so this is the same false -> true
-          // archive transition; its attention fence and version stay untouched.
-          .onConflictDoUpdate({
-            target: [
-              schema.sessionPins.subjectId,
-              schema.sessionPins.workspaceId,
-              schema.sessionPins.sessionId,
-            ],
-            set: {
-              archived: true,
-              archivedAt: new Date(),
-              archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
-              pinned: false,
-              pinnedAt: null,
-              activelyWorking: false,
-            },
-          })
-          .returning();
-        state = inserted ?? null;
-      } else {
-        const [updated] = await tx
-          .update(schema.sessionPins)
-          .set({
-            archived: input.archived,
-            archivedAt: input.archived ? new Date() : null,
-            archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
-            ...(input.archived
-              ? {
-                  pinned: false,
-                  pinnedAt: null,
-                  activelyWorking: false,
-                  version: existing.pinned
-                    ? sql`${schema.sessionPins.version} + 1`
-                    : sql`${schema.sessionPins.version}`,
-                  attentionVersion: existing.activelyWorking
-                    ? sql`${schema.sessionPins.attentionVersion} + 1`
-                    : sql`${schema.sessionPins.attentionVersion}`,
-                }
-              : {}),
-          })
-          .where(
-            and(
-              eq(schema.sessionPins.workspaceId, input.workspaceId),
-              eq(schema.sessionPins.subjectId, input.subjectId),
-              eq(schema.sessionPins.sessionId, input.sessionId),
-            ),
-          )
-          .returning();
-        state = updated ?? null;
-      }
-      const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
-        session.id,
-      ]);
-      return await mapSessionWithControl(
-        tx as unknown as Database,
-        session,
-        mcpServers.get(session.id) ?? [],
-        mapSessionPin(state),
-        mapSessionAttention(session, state),
-        mapSessionArchive(state),
-      );
-    },
   );
 }
 
@@ -90344,7 +90144,13 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // An archived session is read-only: machine input addressed to it (a
         // late child result, schedule or media completion) is settled exactly
         // like input to a cancelled session instead of being retried forever.
-        if (session.status === "cancelled" || session.contentArchiveState !== null) {
+        // That includes a chat archived and waiting to be stored, so nothing
+        // starts work in it again.
+        if (
+          session.status === "cancelled" ||
+          session.contentArchiveState !== null ||
+          session.archivedAt !== null
+        ) {
           await mutateSource(tx as unknown as Database, null, null, "session_cancelled");
           return { added: false, reason: "session_cancelled" } as const;
         }
@@ -94048,7 +93854,7 @@ async function mapSessionWithControl(
     activelyWorking: false,
     attentionVersion: 0,
   },
-  archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
+  archive: ReturnType<typeof mapSessionArchive> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
   tenancyViewer?: { subjectId: string },
   presentation: "full" | "model_gate" = "full",
@@ -94151,7 +93957,7 @@ function mapSession(
     activelyWorking: false,
     attentionVersion: 0,
   },
-  archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
+  archive: ReturnType<typeof mapSessionArchive> = mapSessionArchive(null),
   tenancyViewer?: { subjectId: string },
 ): Session {
   const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
@@ -94260,6 +94066,7 @@ function mapSession(
     agent: parseStoredSessionAgentConfig(row.agentConfig),
     ...pin,
     ...attention,
+    ...sessionRowArchive(row),
     ...archive,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

@@ -204,10 +204,15 @@ Opengeni's permissions, not by a list in the proxy; what the user sees is
 decided by your UI (component props and presets). The chat list
 (`SessionList` / `OpenGeniChat`) shows every root chat Opengeni lets the user
 read; `listProps={{ mineOnly: true }}` narrows it to the user's own chats.
-`listProps={{ archive: false }}` and `newChat={false}` hide "Hide for me" and
-"New chat". That personal archive only hides a chat from one member's list.
-The deployment's idle-session archive is separate: it makes long-idle sessions
-read-only and is reported on `session.retention`. Pass `keepLive: true` to
+`listProps={{ archive: false }}` and `newChat={false}` hide "Archive" and
+"New chat". There is one kind of archive, for everyone:
+`updateSessionArchive(workspaceId, sessionId, { archived: true })` (needs
+session control) takes the chat out of every list, offers Undo
+(`{ archived: false }`) for about ten seconds, and then moves its content to
+long-term storage for good. The deployment's idle-session archive does the
+same to long-idle sessions. An archived session stays readable and searchable
+(`archiveStatus: "archived"`) but is read-only, and its state is reported on
+`session.retention`. Pass `keepLive: true` to
 `createSession`, or call
 `updateSessionRetention(workspaceId, sessionId, { keepLive: true })`, to keep a
 persistent agent's session out of it.

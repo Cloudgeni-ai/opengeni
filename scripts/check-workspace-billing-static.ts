@@ -132,6 +132,8 @@ const organizationMcpSurfaceFiles = new Set([
   "apps/api/src/organization-mcp.ts",
   // Disconnect audit: an agent connected to the organization MCP endpoint disconnects.
   "apps/api/test/disconnect-audit-postgres.test.ts",
+  // Organization admins list and disconnect agents connected to the organization MCP endpoint.
+  "apps/api/test/organization-admin-connected-agents.test.ts",
   "apps/api/test/organization-mcp-e2e.test.ts",
   "apps/api/test/personal-api-keys.test.ts",
   "apps/api/test/workspace-content-flow-e2e.test.ts",

@@ -58,8 +58,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * account-administrator grant (1103), which records a request's verified
  * account:admin proof for one transaction, agent calls' device lookup,
  * register, claim, device count, busy check and ring (1107), the lock-free
- * read of a known external identity (1172) and the list of every
- * organization vault wherever it works (1218). Each is
+ * read of a known external identity (1172), the list of every
+ * organization vault wherever it works (1218), and the organization's
+ * names-only member list (1211). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -87,6 +88,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "ring_agent_call_v1(uuid, boolean)",
   "read_external_identity_v1(uuid, text, text)",
   "list_organization_vaults_v1(uuid, jsonb)",
+  "list_organization_member_names_v1(uuid)",
 ] as const;
 
 /**
@@ -116,6 +118,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 1218 withholds the organization vault list; until it is granted, the API
  * lists the organization vaults that work in the current workspace and says
  * the list is incomplete.
+ * 1211 withholds the names-only member list; until it is granted, members
+ * get no names (as before).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -130,6 +134,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "ring_agent_call_v1(uuid, boolean)",
   "read_external_identity_v1(uuid, text, text)",
   "list_organization_vaults_v1(uuid, jsonb)",
+  "list_organization_member_names_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -220,6 +225,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "organization_memberships",
   ],
   "list_organization_vaults_v1(uuid, jsonb)": ["vaults", "vault_items"],
+  "list_organization_member_names_v1(uuid)": ["organization_memberships", "auth_users"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -436,6 +442,9 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "wake_teams_route_for_session_event()",
+  // Migration 1213: clears a new session's archive marker; triggers fire
+  // without the inserting role holding EXECUTE.
+  "session_insert_not_archived()",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
   ...MAINTENANCE_PROBE_OWNER_ROUTINES,
@@ -473,8 +482,10 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // receipts and the provider-neutral cutover-row identity.
   "guard_subscription_provider_cutover_receipts()",
   "keep_subscription_cutover_identity()",
-  // Migration 0907: the invoker-rights trigger that keeps a workspace's own
-  // subscription connection serving only that workspace.
+  // Migration 0907: the invoker-rights trigger function that kept a
+  // workspace's own subscription connection serving only that workspace. Its
+  // triggers were dropped in migration 1166; the function stays until a later
+  // release removes it.
   "guard_subscription_workspace_owner_reach()",
   // Migration 0909: the invoker-rights trigger that mirrors a message event's
   // text into session_message_search_texts (triggers fire without the

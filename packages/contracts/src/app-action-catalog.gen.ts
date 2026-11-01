@@ -5632,6 +5632,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "listOrganizationMemberNames",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/member-names",
+    "request": [],
+    "response": [
+      "ListOrganizationMemberNamesResponse"
+    ]
+  },
+  {
     "id": "listOrganizationMemberships",
     "method": "GET",
     "path": "/v1/organization-memberships",
@@ -7993,6 +8002,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:write"
   },
   {
+    "id": "removeModelConnectionFromWorkspace",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "removeSessionResources",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove",
@@ -9900,7 +9916,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "Session"
     ],
-    "permission": "sessions:read"
+    "permission": "sessions:control"
   },
   {
     "id": "updateSessionAttention",

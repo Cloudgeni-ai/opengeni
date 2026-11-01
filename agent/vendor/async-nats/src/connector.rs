@@ -93,6 +93,25 @@ pub(crate) fn reconnect_delay_callback_default(attempts: usize) -> Duration {
     }
 }
 
+/// Resolves a websocket URL's host to the one socket address the connector is
+/// trying. Without it the websocket client resolves the host again and always
+/// dials its first answer, so an unreachable first address (for example an
+/// IPv6 route the network lacks) fails every attempt while a working address
+/// behind it is never tried. TLS and the HTTP upgrade still use the host name.
+#[cfg(feature = "websockets")]
+struct ResolvedAddress(SocketAddr);
+
+#[cfg(feature = "websockets")]
+impl tokio_websockets::resolver::Resolver for ResolvedAddress {
+    async fn resolve(
+        &self,
+        _host: &str,
+        _port: u16,
+    ) -> Result<SocketAddr, tokio_websockets::Error> {
+        Ok(self.0)
+    }
+}
+
 impl Connector {
     pub(crate) fn new<A: ToServerAddrs>(
         addrs: A,
@@ -390,6 +409,7 @@ impl Connector {
                 let ws = tokio::time::timeout(
                     self.options.connection_timeout,
                     tokio_websockets::client::Builder::new()
+                        .resolver(ResolvedAddress(*socket_addr))
                         .uri(server_addr.as_url_str())
                         .map_err(|err| {
                             ConnectError::with_source(crate::ConnectErrorKind::ServerParse, err)
@@ -413,6 +433,7 @@ impl Connector {
                 let ws = tokio::time::timeout(
                     self.options.connection_timeout,
                     tokio_websockets::client::Builder::new()
+                        .resolver(ResolvedAddress(*socket_addr))
                         .connector(&tokio_websockets::Connector::Rustls(tls_connector))
                         .uri(server_addr.as_url_str())
                         .map_err(|err| {
@@ -535,5 +556,59 @@ mod tests {
         // The max (4s) was reached and we shouldn't exceed it, regardless of the no of attempts
         let duration = reconnect_delay_callback_default(50);
         assert_eq!(duration.as_millis(), 4000);
+    }
+
+    #[cfg(feature = "websockets")]
+    #[tokio::test]
+    async fn websocket_attempt_dials_the_address_being_tried() {
+        // The URL's host cannot resolve, so reaching the listener proves the
+        // attempt dialed the socket address it was given instead of resolving
+        // the host again and taking its first answer.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket_addr = listener.local_addr().unwrap();
+        let server_addr: ServerAddr = format!("ws://nats.invalid:{}", socket_addr.port())
+            .parse()
+            .unwrap();
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel(8);
+        let (state_tx, _state_rx) = tokio::sync::watch::channel(State::Pending);
+        let connector = Connector::new(
+            server_addr.clone(),
+            ConnectorOptions {
+                tls_required: false,
+                certificates: Vec::new(),
+                client_cert: None,
+                client_key: None,
+                tls_client_config: None,
+                tls_first: false,
+                auth: Auth::default(),
+                no_echo: false,
+                connection_timeout: Duration::from_secs(5),
+                name: None,
+                ignore_discovered_servers: true,
+                retain_servers_order: true,
+                read_buffer_capacity: 65535,
+                reconnect_delay_callback: Box::new(reconnect_delay_callback_default),
+                auth_callback: None,
+                max_reconnects: Some(1),
+            },
+            events_tx,
+            state_tx,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(Statistics::default()),
+        )
+        .unwrap();
+
+        let attempt = tokio::spawn(async move {
+            connector
+                .try_connect_to(&socket_addr, false, server_addr)
+                .await
+                .map(|_| ())
+        });
+        let accepted = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
+        attempt.abort();
+        assert!(
+            matches!(accepted, Ok(Ok(_))),
+            "the websocket attempt never reached {socket_addr}"
+        );
     }
 }

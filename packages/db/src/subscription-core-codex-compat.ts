@@ -120,6 +120,7 @@ function projectAccount(
   return {
     id: row.id,
     source: input.source,
+    ownerWorkspaceId: row.managed_by_workspace_id ?? null,
     chatgptAccountId: row.provider_account_id,
     label: row.label,
     accountEmail: row.account_email,

@@ -202,6 +202,20 @@ export function modelsShort(policy: ModelConnectionAccessPolicy): string {
 }
 
 /**
+ * The short value for "Available in" on a workspace's own account, at that
+ * workspace: "Only this workspace", "This workspace + 2 more".
+ */
+export function servedShort(
+  policy: ModelConnectionAccessPolicy,
+  localWorkspaceIds: readonly string[] = [],
+): string {
+  const others = (policy.allowedWorkspaces ?? []).filter(
+    (id) => !localWorkspaceIds.includes(id),
+  ).length;
+  return others === 0 ? "Only this workspace" : `This workspace + ${others} more`;
+}
+
+/**
  * "Models it can serve" on an account's page, including unrestricted accounts.
  * At organization scope it also shows the workspaces that can use it.
  */
@@ -234,6 +248,8 @@ export function ConnectionAccessRows({
     );
   }
   const policy = access.data?.policy;
+  // A workspace's own subscription account can serve other workspaces too.
+  const shares = !organization && Boolean(access.data?.managedByWorkspaceId);
   if (!policy)
     return (
       <>
@@ -264,13 +280,22 @@ export function ConnectionAccessRows({
           disabled={!canManage}
           onOpen={onEdit}
         />
+      ) : shares ? (
+        <SettingNavRow
+          label="Available in"
+          value={servedShort(policy, access.data!.localWorkspaceIds)}
+          disabled={!canManage}
+          onOpen={onEdit}
+        />
       ) : null}
       <SettingNavRow
         label="Models it can serve"
         description={
           organization
             ? "New models are included until you limit them."
-            : "The workspace's Allowed models still apply."
+            : shares
+              ? "Each workspace's Allowed models still apply."
+              : "The workspace's Allowed models still apply."
         }
         value={modelsShort(policy)}
         // At organization scope both rows open the same page.
@@ -334,6 +359,7 @@ export function ConnectionAccessFormPage({
   const [draft, setDraft] = useState<ModelConnectionAccessPolicy | null>(data?.policy ?? null);
   const [error, setError] = useState<ReactNode>(null);
   const keptNoteId = useId();
+  const servableHintId = useId();
   useEffect(() => {
     if (data && !draft) setDraft(data.policy);
   }, [data, draft]);
@@ -341,6 +367,14 @@ export function ConnectionAccessFormPage({
   const disabled = !canManage;
   // Workspaces that use the account as their own keep it for any workspace choice.
   const local = data?.localWorkspaceIds ?? [];
+  // A workspace's own account (D-52): its workspace's admins share it with
+  // workspaces they also administer; the organization's owners and admins
+  // share it with any, and move it to the organization to go wider.
+  const owner = data?.managedByWorkspaceId ?? null;
+  const shares = !organization && owner !== null;
+  const ownerName = owner
+    ? data?.workspaces.find((workspace) => workspace.id === owner)?.name
+    : undefined;
   // People saved earlier stay a choice even when the member list can't be shown.
   const people = Boolean(organization && (data?.peopleSupported || data?.policy.allowedPeople));
   const peopleListed = Boolean(data?.people);
@@ -360,6 +394,23 @@ export function ConnectionAccessFormPage({
   );
   const reachesNoOne = scope === "people" && draft!.allowedPeople!.length === 0;
   const keptNote = scope === "people" && !reachesNoOne && local.length > 0;
+  // Every shared workspace, Personal workspaces or people make a workspace's
+  // own account the organization's: said here, and sent as an explicit move.
+  const needsMove = Boolean(
+    organization &&
+    owner &&
+    draft &&
+    data &&
+    (scope !== "only" || (data.personalWorkspacesSupported && draft.allowPersonalWorkspaces)),
+  );
+  // On a workspace's own route its workspace leads, then the others by name.
+  const servable = shares
+    ? [...(data?.workspaces ?? [])].sort(
+        (a, b) =>
+          Number(local.includes(b.id)) - Number(local.includes(a.id)) ||
+          a.name.localeCompare(b.name),
+      )
+    : [];
   /** A workspace choice; `allowedPeople` is cleared only when people were saved. */
   const withoutPeople = (policy: ModelConnectionAccessPolicy): ModelConnectionAccessPolicy => {
     const { allowedPeople: _dropped, ...rest } = policy;
@@ -528,7 +579,51 @@ export function ConnectionAccessFormPage({
                 No workspace can use it. It stays connected, ready to share later.
               </EmptyChoiceHint>
             ) : null}
+            {needsMove ? (
+              <Notice tone="info" title="This moves it to the organization">
+                {`The admins of ${ownerName ?? "the workspace it was connected in"} will no longer manage it. Only the organization's owners and admins will.`}
+              </Notice>
+            ) : null}
           </div>
+        ) : shares ? (
+          <fieldset aria-describedby={servableHintId} className="m-0 min-w-0 border-0 p-0">
+            {/* Styled like the form's other groups ("Models it can serve"). */}
+            <legend className="p-0 text-sm font-medium text-fg">Workspaces that can use it</legend>
+            <p id={servableHintId} className="mt-0.5 text-xs leading-4.5 text-fg-muted">
+              You can add workspaces you're an admin of.
+            </p>
+            <div className="mt-2 flex min-w-0 flex-col gap-3">
+              {servable.map((workspace) =>
+                local.includes(workspace.id) ? (
+                  <CheckboxField
+                    key={workspace.id}
+                    label={workspace.name}
+                    disabledReason="Connected in this workspace, so it's always included."
+                    disabled
+                    checked
+                  />
+                ) : (
+                  <CheckboxField
+                    key={workspace.id}
+                    label={workspace.name}
+                    disabled={disabled}
+                    checked={(draft.allowedWorkspaces ?? []).includes(workspace.id)}
+                    onCheckedChange={(checked) => {
+                      setError(null);
+                      setDraft({
+                        ...draft,
+                        allowedWorkspaces: toggle(
+                          draft.allowedWorkspaces ?? [],
+                          workspace.id,
+                          checked,
+                        ),
+                      });
+                    }}
+                  />
+                ),
+              )}
+            </div>
+          </fieldset>
         ) : null}
         <div className="flex min-w-0 flex-col gap-3">
           <ChoiceCards
@@ -536,7 +631,9 @@ export function ConnectionAccessFormPage({
             description={
               organization
                 ? undefined
-                : "Allowed models for the workspace still apply on top of this."
+                : shares
+                  ? "Allowed models for each workspace still apply on top of this."
+                  : "Allowed models for the workspace still apply on top of this."
             }
             value={draft.allowedModels === null ? "all" : "only"}
             disabled={disabled}
@@ -596,16 +693,18 @@ export function ConnectionAccessFormPage({
 
   return (
     <ModelsFormPage
-      title={organization ? `Where ${name} can be used` : `Models ${name} can serve`}
+      title={organization || shares ? `Where ${name} can be used` : `Models ${name} can serve`}
       description={
-        organization
+        organization || shares
           ? "Changes apply to new work. Running work rechecks access before its next model call."
           : "Only these models can use this account, including pinned chats. Access is rechecked before the next model call."
       }
       backLabel={name}
       onClose={onClose}
       loading={!data && !access.error}
-      submitLabel={data?.personalSharingSupported ? "Share account" : "Save"}
+      submitLabel={
+        data?.personalSharingSupported ? "Share account" : needsMove ? "Move and save" : "Save"
+      }
       pendingLabel="Saving…"
       submitDisabled={
         !canManage || !dirty || Boolean(data?.personalSharingSupported && reachesNoWorkspace)
@@ -618,7 +717,11 @@ export function ConnectionAccessFormPage({
         if (!draft) return false;
         try {
           await access.save(
-            data?.personalSharingSupported ? { ...draft, sharePersonal: true } : draft,
+            data?.personalSharingSupported
+              ? { ...draft, sharePersonal: true }
+              : needsMove
+                ? { ...draft, moveToOrganization: true }
+                : draft,
           );
         } catch (caught) {
           setError(saveFailure(caught));

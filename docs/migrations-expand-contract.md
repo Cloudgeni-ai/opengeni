@@ -258,7 +258,9 @@ account-administrator grant withheld, with the same caller check, and 1149
 granted it and removed the check. 1218 created the organization vault list
 withheld, with the same caller check; until it is granted the API lists only
 the organization vaults that work in the requested workspace and says the
-list is incomplete.
+list is incomplete. 1211 created the names-only organization member list
+withheld, with the same caller check; until it is granted the API reports the
+list as unavailable.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

@@ -135,6 +135,7 @@ export const SECTION_KEYS = [
   "page-service-accounts",
   "page-models",
   "page-models-cache",
+  "page-models-sharing",
   "page-schedules",
   "page-schedule-form",
   "page-meetings",
@@ -1006,6 +1007,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Production Models components with an in-memory API fixture.",
     usedOn: "Settings > Models",
     load: () => import("./page-models-cache"),
+  },
+  {
+    key: "page-models-sharing",
+    group: "Pages",
+    title: "Sharing a workspace's own account",
+    purpose:
+      "A workspace's own subscription account shared with other workspaces keeps its owner; going wider moves it to the organization.",
+    usedOn: "Settings > Models > account > Where it can be used",
+    load: () => import("./page-models-sharing"),
   },
   {
     key: "page-schedules",

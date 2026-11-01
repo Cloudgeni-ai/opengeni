@@ -1523,7 +1523,14 @@ export const SessionTenancyVisibility = /* @__PURE__ */ defineSchema(() =>
 
 export const UserResourceAuthorityScope = /* @__PURE__ */ defineSchema(() => z.literal("user"));
 export const UserResourceKind = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["connection", "document", "variable_set", "rig", "connected_machine"]),
+  z.enum([
+    "connection",
+    "document",
+    "variable_set",
+    "rig",
+    "connected_machine",
+    "subscription_connection",
+  ]),
 );
 export type UserResourceKind = z.infer<typeof UserResourceKind>;
 
@@ -1533,6 +1540,9 @@ export const USER_RESOURCE_ACTION_BY_KIND = {
   variable_set: "variable_set.use",
   rig: "rig.use",
   connected_machine: "connected_machine.use",
+  // An `always` grant in a workspace turns a person's own Codex, Claude or
+  // SuperGrok subscription on for their own turns there.
+  subscription_connection: "subscription_connection.use",
 } as const satisfies Record<UserResourceKind, string>;
 
 export const UserResourceLifecycleGrantMode = /* @__PURE__ */ defineSchema(() =>
@@ -1608,6 +1618,7 @@ export const UserResourceAuthorityGrant = /* @__PURE__ */ defineSchema(() =>
       "variable_set.use",
       "rig.use",
       "connected_machine.use",
+      "subscription_connection.use",
     ]),
     mode: UserResourceLifecycleGrantMode,
     context: SessionTenancyVisibility,
@@ -1648,7 +1659,9 @@ export const IssueUserResourceGrantRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       scope: UserResourceAuthorityScope,
-      resourceKind: UserResourceKind.exclude(["connection"]),
+      /** `connection` turns your own login on for your messages in this
+       * workspace; it takes only `always` (D-54). */
+      resourceKind: UserResourceKind,
       mode: ManagedUserResourceGrantMode,
       context: SessionTenancyVisibility,
       sessionId: z.string().uuid().nullable().optional(),
@@ -1656,6 +1669,13 @@ export const IssueUserResourceGrantRequest = /* @__PURE__ */ defineSchema(() =>
       workspaceSharedAcknowledged: primitives.boolean.default(false),
     })
     .superRefine((value, context) => {
+      if (value.resourceKind === "connection" && value.mode !== "always") {
+        context.addIssue({
+          code: "custom",
+          path: ["mode"],
+          message: "an own login is turned on for a workspace with always",
+        });
+      }
       if (value.context === "workspace_shared" && !value.workspaceSharedAcknowledged) {
         context.addIssue({
           code: "custom",
@@ -9003,17 +9023,24 @@ export const UpdateSessionAttentionRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type UpdateSessionAttentionRequest = z.infer<typeof UpdateSessionAttentionRequest>;
 
-/** A member's personal archive state for a root chat. */
+/**
+ * Archive a root chat and its sub-chats for everyone (`archived: true`), or
+ * undo that (`archived: false`) within the few seconds after archiving. Once
+ * that window ends the chat's remaining work is stopped and its content moves
+ * to long-term storage; it stays readable and searchable but can no longer be
+ * restored or continued. Needs session control.
+ */
 export const UpdateSessionArchiveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       archived: primitives.boolean,
-      /** Stable for retries of one intent; use a fresh ID for a later intentional archive. */
+      /** Ignored; repeating an Archive changes nothing. Kept for older clients. */
       clientEventId: z.string().min(1).max(200).optional(),
-      /** Hiding alone never changes shared execution. Ordinary archive pauses first. */
+      /** Ignored; there is one kind of archive. Kept for older clients. */
       mode: z.enum(["pause_and_archive", "hide_for_me"]).optional(),
-      /** Required when the locked chat tree has active work. Restore never resumes. */
+      /** Ignored; archiving stops running work itself. Kept for older clients. */
       confirmPause: z.boolean().optional(),
+      /** Ignored. Kept for older clients. */
       expectedVersion: z.number().int().nonnegative().optional(),
     })
     .strict(),
@@ -14509,6 +14536,17 @@ export const ConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
     updatedBySubjectId: primitives.nullableString,
     createdAt: primitives.string,
     updatedAt: primitives.string,
+    /**
+     * Your own login only: whether it works for your messages in the workspace
+     * this list was read from. It does in your Personal workspace and in each
+     * shared workspace where it is turned on; it starts on where it was added.
+     */
+    turnedOnHere: z.boolean().optional(),
+    /**
+     * The standing grant that turns your own login on here; revoke it to stop
+     * using the login here. Null in your Personal workspace, which needs none.
+     */
+    turnedOnHereGrantId: primitives.uuid.nullable().optional(),
   }),
 );
 export type ConnectionMetadata = z.infer<typeof ConnectionMetadata>;

@@ -82,10 +82,39 @@ Schedule runs it after content compaction; each pass keeps archiving batches
 of eligible sessions until its ten-minute budget ends or none remain, so a
 backlog drains steadily after the archive is first enabled.
 
+### Archiving a chat
+
+The chat Archive action is the same archive, started at once instead of after
+the idle period. `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/archive`
+with `{ "archived": true }` (session control; `updateSessionArchive` in the SDK)
+sets `sessions.archived_at` and `archive_requested_by` on the root chat and its
+sub-chats. From then on the chat is listed as archived for everyone
+(`archiveStatus=archived`), and new messages, steers and agent sends to it are
+refused. `{ "archived": false }` within ten seconds (a few seconds' grace for
+the request itself) undoes it exactly; after that it answers 409
+`session_archive_final`. Archive answers 409 `session_archive_blocked`, with
+`blockers` and a message saying what to change, while keep-live, a repeating
+automation, or a site sign-in keeps the chat live. One-time automations do not
+block: they are retired when the window ends. The older `mode`, `confirmPause`,
+`expectedVersion` and `clientEventId` fields are accepted and ignored.
+
+When the Undo window ends, a delayed workflow stops the chat (one-time
+automations retired, goals paused, running work cancelled) and stores it with
+the steps below. An archived chat qualifies as soon as nothing runs in it: the
+idle period, the age limit and recent activity no longer apply, and a sub-chat
+blocks it only while it runs. The maintenance pass is the backstop: its listing
+also returns archived chats that still have work running, and the worker stops
+that work first, so a chat whose workflow was lost is stored on a later pass.
+
+Migration 1213 replaced the earlier personal archive (a member hiding a chat
+from their own list, with Restore). Chats people had hidden that way were
+archived for real, unless keep-live, a scheduled task, or a site sign-in
+keeps them live; those came back to the list.
+
 ### What qualifies
 
-Each session is judged on its own, not by its tree. A session qualifies when
-all of these hold for the idle period:
+Each session is judged on its own, not by its tree. A session that was not
+archived by a person qualifies when all of these hold for the idle period:
 
 - it is older than the idle period, no turn was created or updated in it, and
   the session is `idle`, `failed` or `cancelled` with no active turn. Activity
@@ -171,25 +200,25 @@ event pages simply skip the missing sequences.
 `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/retention` with
 `{ "keepLive": true }`, `keepLive: true` on session create, or the SDK's
 `updateSessionRetention`, exempts a session permanently. It is workspace-wide
-and independent of a member's personal rail archive. It cannot change once a
+and keeps the chat Archive action from starting. It cannot change once a
 session is archived.
 
 ### In the web app
 
-The web app calls an archived session "read-only" and its storage "long-term
-storage", so it is never confused with the personal Archive action, which only
-hides a chat from one member's list.
-
-- A read-only chat opens normally with a notice above its timeline that says
-  when it was stored and offers a new chat; the composer is not shown.
+- Archive (in a chat's row, menu, header and the command menu) takes the chat
+  out of the list at once and shows a notice with Undo for ten seconds. After
+  that it says the chat moves to long-term storage and can't be restored.
+- An archived chat opens normally with a notice above its timeline that it is
+  archived and a "Continue in a new chat" button, which opens a new chat with a
+  message pointing at it; the composer is not shown.
 - The chat's Agent tab has a "Keep this chat active" switch (keep-live) under
   Storage, shown only when the deployment archives idle sessions
   (`ClientConfig.sessionArchive`, present when archiving is enabled and object
   storage is configured).
-- The session list's view menu links to a "Read-only chats" page that lists
-  every read-only root chat in the workspace, including chats a member
-  archived personally, with title search, a project filter and sorting. It is
-  backed by the session list's `contentArchivedOnly` filter.
+- The session list's view menu links to the Archived page
+  (`/workspaces/:id/archived`; the old `read-only-chats` path redirects), which
+  lists every archived root chat in the workspace with title search, a project
+  filter and sorting. Command-menu search finds archived chats too.
 
 ### Recovery and deletion
 

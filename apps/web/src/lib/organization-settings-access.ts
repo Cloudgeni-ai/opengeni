@@ -103,6 +103,16 @@ export function organizationSettingsAccess(input: {
     visible.add("shared");
     visible.add("integrations");
   }
+  // Every signed-in member sees who is in the organization, by name only;
+  // owners and admins manage people on the same page.
+  if (
+    managedHumanSession &&
+    !singleUser &&
+    actorRole === "member" &&
+    accessContext.subjectId.startsWith("user:")
+  ) {
+    visible.add("people");
+  }
   // Every model setting lives on Organization > Models: owners and admins manage
   // all of it, an account administrator without a person (a key or service)
   // the organization's subscription accounts, workspace admins the workspaces

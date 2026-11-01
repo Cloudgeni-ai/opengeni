@@ -10,7 +10,7 @@ import {
   listSessionsForSubject,
   SessionListCursorError,
   sessionLatestTurnsForSessions,
-  setSessionArchive,
+  requestSessionArchive,
   withSessionRlsActorContext,
   type Database,
   type DbClient,
@@ -160,11 +160,11 @@ describe("session list sessionIds selection (real PostgreSQL + FORCE RLS)", () =
     );
 
     // Pins obey the selection like ordinary rows; archived rows need archiveStatus.
-    await setSessionArchive(db, {
+    await requestSessionArchive(db, {
+      accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
       sessionId: shared2.id,
       subjectId: owner,
-      archived: true,
     });
     const active = await listSessionEntriesForSubject(db, workspace.workspaceId, {
       subjectId: owner,

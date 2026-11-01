@@ -1107,6 +1107,18 @@ export type ConnectionMetadata = {
   updatedBySubjectId: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Your own login only: whether it works for your messages in the workspace
+   * this list was read from. It does in your Personal workspace and in each
+   * shared workspace where it is turned on; it starts on where it was added.
+   */
+  turnedOnHere?: boolean | undefined;
+  /**
+   * The standing grant that turns your own login on here; revoke it with
+   * `revokeUserResourceGrant` to stop using the login here. Null in your
+   * Personal workspace, which needs none.
+   */
+  turnedOnHereGrantId?: string | null | undefined;
 };
 
 /** Where a brokered credential is written on each outbound provider request. */
@@ -2432,9 +2444,13 @@ export type UpdateSessionUnattendedRequest = {
 
 export type UpdateSessionArchiveRequest = {
   archived: boolean;
+  /** Ignored; kept for older clients. */
   clientEventId?: string;
+  /** Ignored; there is one kind of archive. Kept for older clients. */
   mode?: "pause_and_archive" | "hide_for_me";
+  /** Ignored; archiving stops running work itself. Kept for older clients. */
   confirmPause?: boolean;
+  /** Ignored; kept for older clients. */
   expectedVersion?: number;
 };
 
@@ -5412,6 +5428,12 @@ export type CodexAccount = {
   ownInWorkspaceIds?: string[];
   /** The organization's list only: who the account reaches. */
   reach?: SubscriptionAccountReach;
+  /**
+   * The workspace whose own account this is, or null for the organization's
+   * and personal accounts. In another workspace's list it was shared there by
+   * its owner, and that workspace can only remove it. Absent from older servers.
+   */
+  ownerWorkspaceId?: string | null;
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -6049,13 +6071,15 @@ export type UserResourceKind =
   | "document"
   | "variable_set"
   | "rig"
-  | "connected_machine";
+  | "connected_machine"
+  | "subscription_connection";
 export type UserResourceGrantAction =
   | "connection.use"
   | "document.read"
   | "variable_set.use"
   | "rig.use"
-  | "connected_machine.use";
+  | "connected_machine.use"
+  | "subscription_connection.use";
 export type UserResourceAuthorityGrant = {
   grantId: string;
   targetWorkspaceId: string;
@@ -6100,7 +6124,9 @@ export type IssueUserResourceGrantRequest =
     }
   | {
       scope: "user";
-      resourceKind: Exclude<UserResourceKind, "connection">;
+      /** `connection` turns your own login on for your messages in this
+       * workspace (its `authorityId` from `listOwnConnectionAccounts`). */
+      resourceKind: UserResourceKind;
       mode: "always";
       context: "user_private" | "workspace_shared";
       sessionId?: null | undefined;
@@ -6452,6 +6478,18 @@ export type ListOrganizationMembersResponse = {
 };
 export type ListOrganizationAdministrationMembersResponse = {
   members: OrganizationAdministrationMember[];
+};
+/** An active person in the organization, by name only. */
+export type OrganizationMemberName = {
+  /** The organization membership id. */
+  id: string;
+  name: string | null;
+  you: boolean;
+};
+/** `available` is false until the deployment's database grants the names list. */
+export type ListOrganizationMemberNamesResponse = {
+  available: boolean;
+  members: OrganizationMemberName[];
 };
 export type AcceptOrganizationInvitationResponse = {
   invitation: OrganizationInvitation;
@@ -11234,7 +11272,13 @@ export type EnrollTokenExchangeResponse = {
 
 export type ModelConnectionAccessPolicy = {
   allowedModels: string[] | null;
-  /** Organization-pool grants; null for every shared workspace, including new ones. */
+  /**
+   * The shared workspaces that may use the account; null for every shared
+   * workspace, including new ones. A workspace's own account always keeps
+   * serving its workspace. On a workspace's own route this is the list of
+   * workspaces it serves, and only workspaces the caller also administers
+   * can be added.
+   */
   allowedWorkspaces: string[] | null;
   allowPersonalWorkspaces: boolean;
   /**
@@ -11245,6 +11289,13 @@ export type ModelConnectionAccessPolicy = {
   allowedPeople?: string[] | null;
   /** Explicit owner consent to share a personal subscription with the organization. */
   sharePersonal?: true;
+  /**
+   * Explicit consent to make a workspace's own account the organization's, so
+   * that workspace's admins no longer manage it. Required on the organization
+   * route before it can serve every shared workspace, Personal workspaces or
+   * chosen people.
+   */
+  moveToOrganization?: true;
   version: number;
 };
 export type ModelConnectionAccessResponse = {

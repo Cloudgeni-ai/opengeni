@@ -10,6 +10,11 @@ import { inertProps } from "../../lib/inert";
 import { retainedImageId } from "../../components/markdown";
 import { LazyPart } from "../../components/lazy-part";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
+import { stopOwnLoginHere } from "../components/capabilities/own-login-turned-on";
+import {
+  OwnLoginsSharedHeadsUp,
+  ownLoginsInUse,
+} from "../components/capabilities/own-logins-shared-heads-up";
 import { sessionAuthRecommendation } from "../../session-auth-recommendation";
 import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
 import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
@@ -1534,6 +1539,13 @@ export function SessionRoute({
             params: { workspaceId },
           }))
       }
+      onContinueInNewSession={() =>
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions",
+          params: { workspaceId },
+          search: { continueSessionId: sessionId },
+        })
+      }
       onApprove={(approvalId, answer) => approve(approvalId, "approve", answer)}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
@@ -2173,6 +2185,8 @@ function SessionChatPane(props: {
   /** Opens where a person can make a refused Skill, instruction, or Knowledge change. */
   onLearningRefusalOpen: (place: LearningRefusalPlace) => void;
   onNewSession: () => void;
+  /** Starts a new chat that continues this archived chat's work. */
+  onContinueInNewSession: () => void;
   onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
@@ -2311,7 +2325,7 @@ function SessionChatPane(props: {
     [context.client, props.session.workspaceId],
   );
   const cancelled = isTerminalSessionStatus(props.session.status);
-  // Moved to long-term storage after a long idle period: readable, not continuable.
+  // Archived (moving to or in long-term storage): readable, not continuable.
   const readOnlyArchive = sessionReadOnlyArchive(props.session);
   const terminal = cancelled || readOnlyArchive !== null;
   const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
@@ -3049,7 +3063,7 @@ function SessionChatPane(props: {
     blocked: isTerminalSessionStatus(props.session.status)
       ? "This chat has ended. Start a new chat to use a repository."
       : sessionReadOnlyArchive(props.session)
-        ? "This chat is read-only. Start a new chat to use a repository."
+        ? "This chat is archived. Continue in a new chat to use a repository."
         : connectionAccounts.requiresAccountChoice
           ? "Choose an account for this chat's connected tools in the composer first."
           : personalAttachment.requiresDecision
@@ -3647,6 +3661,29 @@ function SessionChatPane(props: {
   const modelSwitchHeadsUp = chosenModelHeadsUp ? (
     <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
   ) : null;
+  // Your own logins in a chat shared with the workspace (D-54): a one-line
+  // heads-up for you only, never a gate. A Personal workspace has nobody else.
+  const ownLoginsHere =
+    !terminal &&
+    props.session.tenancy?.visibility === "workspace" &&
+    !isPersonalWorkspace(workspace, context.managedSelfContext)
+      ? ownLoginsInUse(
+          connectionAccounts.availableAccountGroups,
+          connectionAccounts.accountChoices,
+          context.accessContext.subjectId,
+        )
+      : [];
+  const ownLoginsHeadsUp =
+    ownLoginsHere.length > 0 ? (
+      <OwnLoginsSharedHeadsUp
+        logins={ownLoginsHere}
+        className="px-3.5 pt-2.5 md:px-4"
+        onStop={async (account) => {
+          await stopOwnLoginHere(context.client, props.session.workspaceId, account);
+          await connectionAccounts.refresh();
+        }}
+      />
+    ) : null;
   // The chat's Secrets row: hidden when its agent can't use secrets.
   const sessionSecrets = useSessionSecrets(props.session.id, {
     enabled: workspacePermissions.includes("secrets:list"),
@@ -4063,8 +4100,7 @@ function SessionChatPane(props: {
             <div className={cn("mx-auto w-full max-w-3xl pt-6", gutter)}>
               <ReadOnlySessionNotice
                 session={props.session}
-                idleDays={context.clientConfig.sessionArchive?.idleDays}
-                onNewSession={props.onNewSession}
+                onContinue={props.onContinueInNewSession}
               />
             </div>
           ) : null}
@@ -4430,6 +4466,7 @@ function SessionChatPane(props: {
                 }}
                 disabled={terminal}
                 header={
+                  ownLoginsHeadsUp ||
                   unavailableModelNotice ||
                   codexUsageNotice ||
                   modelSwitchHeadsUp ||
@@ -4463,6 +4500,7 @@ function SessionChatPane(props: {
                       {creditRefusalNotice ? (
                         <div className="px-2 pt-2">{creditRefusalNotice}</div>
                       ) : null}
+                      {ownLoginsHeadsUp}
                     </>
                   ) : null
                 }

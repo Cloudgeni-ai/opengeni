@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Permission, SessionEvent } from "@opengeni/sdk";
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
-import { flush, registerDom, renderComponent } from "./render-hook";
+import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 const { SessionConversation } = await import("../src/components/session-conversation");
@@ -294,5 +294,87 @@ test("an agent's reviewed-integration card offers a one-click Connect to people 
     expect(outlookButton()).toBeUndefined();
   } finally {
     await readOnly.unmount();
+  }
+});
+
+test("your login added in another workspace is offered here with one standing choice", async () => {
+  const installedMail = CapabilityCatalogItem.parse({
+    ...mail,
+    enabled: true,
+    connectionRef: { providerDomain: "mail.example", kind: "oauth2", subjectScope: "subject" },
+  });
+  const login = {
+    id: "connection-own-mail",
+    accountId: "account-1",
+    workspaceId: "workspace-personal",
+    subjectId: "user:me",
+    authorityId: "authority-own-mail",
+    providerDomain: "mail.example",
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: [],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: 1,
+    metadata: { mcpUrl: "https://mcp.mail.example/mcp", email: "me@mail.example" },
+    createdBySubjectId: "user:me",
+    updatedBySubjectId: "user:me",
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    turnedOnHere: false,
+    turnedOnHereGrantId: null,
+  };
+  const issued: unknown[] = [];
+  const client = conversationClient(CONNECT);
+  const session = await client.getSession(WORKSPACE_ID, SESSION_ID);
+  Object.assign(client, {
+    getSession: async () => ({ ...session, toolPolicy: { mode: "explicit", selectedIds: [] } }),
+    listCapabilities: async () => ({ items: [installedMail] }),
+    listOwnConnectionAccounts: async () => [login],
+    issueUserResourceGrant: async (workspaceId: string, authorityId: string, body: unknown) => {
+      issued.push({ workspaceId, authorityId, body });
+      return { grant: { grantId: "grant-1" } };
+    },
+  });
+  const useItHere = () =>
+    [...document.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Use it here",
+    );
+  const view = await renderComponent(
+    <SessionConversation
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      modelPicker={false}
+    />,
+  );
+  try {
+    await waitFor(
+      () =>
+        document.body.textContent?.includes("Use it for your messages here too?") === true &&
+        useItHere() !== undefined,
+      "The card did not offer your login from another workspace",
+    );
+    // No sign-in is involved, so the card doesn't say to review access first.
+    expect(document.body.textContent).toContain("You added me@mail.example in another workspace.");
+    expect(document.body.textContent).not.toContain("Review access before signing in");
+    expect(connectButton()).toBeUndefined();
+    await actRun(() => useItHere()!.click());
+    await waitFor(() => issued.length === 1, "Use it here did not turn the login on");
+    expect(issued[0]).toEqual({
+      workspaceId: WORKSPACE_ID,
+      authorityId: "authority-own-mail",
+      body: {
+        scope: "user",
+        resourceKind: "connection",
+        mode: "always",
+        context: "workspace_shared",
+        workspaceSharedAcknowledged: true,
+      },
+    });
+  } finally {
+    await view.unmount();
   }
 });

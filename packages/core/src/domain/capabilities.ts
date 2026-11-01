@@ -1249,6 +1249,7 @@ async function validateMcpCapabilityConnectionRef(
       accountId: input.grant.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.grant.subjectId,
+      reach: "anywhere",
       includeInactive: true,
     });
     connection =

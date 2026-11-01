@@ -3882,6 +3882,13 @@ export const englishMessages = {
   "openGeniChat.send": "Send",
   "openGeniLinks.fileIsTooLargeTo": "File is too large to download here.",
   "organizationModel.orgShortaccountid": "Org {shortAccountId}",
+  "ownLogins.couldNotStop": "Couldn't stop it. Try again.",
+  "ownLogins.sharedHeadsUp_one":
+    "Your {logins} login works for your messages here. People in this workspace see what the agent does with it.",
+  "ownLogins.sharedHeadsUp_other":
+    "Your {logins} logins work for your messages here. People in this workspace see what the agent does with them.",
+  "ownLogins.stopUsingHere": "Stop using it here",
+  "ownLogins.stopUsingLoginHere": "Stop using {login} here",
   "pierreDiff.diffForPath": "Diff for {path}",
   "pierreDiff.loadingDiff": "Loading diff…",
   "pierreDiff.noChanges": "No changes",
@@ -4701,7 +4708,8 @@ export const englishMessages = {
     "Finish signing in to {name}. If you closed the sign-in window, open it again.",
   "sessionIntegrationCapabilityCard.stopWaiting": "Cancel",
   "sessionIntegrationCapabilityCard.tryAgain": "Try again",
-  "sessionList.archive": "Hide for me",
+  "sessionList.archive": "Archive",
+  "sessionList.archived": "Archived",
   "sessionList.cancel": "Cancel",
   "sessionList.chats": "Chats",
   "sessionList.loadingChats": "Loading chats…",
@@ -4710,10 +4718,12 @@ export const englishMessages = {
   "sessionList.rename": "Rename",
   "sessionList.save": "Save",
   "sessionList.showMore": "Show more",
+  "sessionList.undo": "Undo",
   "sessionListModel.older": "Older",
   "sessionListModel.previous7Days": "Previous 7 days",
   "sessionListModel.today": "Today",
   "sessionListModel.yesterday": "Yesterday",
+  "sessionMcpCapabilityCard.connectADifferentAccount": "Connect a different account",
   "sessionMcpCapabilityCard.connected": "Connected",
   "sessionMcpCapabilityCard.connectionDetailsAreUnavailable": "Connection details are unavailable.",
   "sessionMcpCapabilityCard.connectionSetupCouldNotFinish":
@@ -4768,12 +4778,18 @@ export const englishMessages = {
     "This recommendation is not an available OAuth MCP integration. Review the current connection catalog.",
   "sessionMcpCapabilityCard.trySigningInAgain": "Try signing in again",
   "sessionMcpCapabilityCard.useInThisConversation": "Use in this conversation",
+  "sessionMcpCapabilityCard.useItHere": "Use it here",
+  "sessionMcpCapabilityCard.useYourLoginHereScope":
+    "Only you can use it. In shared chats here, people see what the agent does with it.",
+  "sessionMcpCapabilityCard.useYourLoginHereToo":
+    "You added {account} in another workspace. Use it for your messages here too?",
   "sessionMcpCapabilityCard.whoCanUseThisConnection": "Who can use this connection?",
   "sessionMcpCapabilityCard.yourAccountIsConnected": "Your account is connected.",
   "sessionMcpCapabilityCard.yourAccountIsConnectedEnable":
     "Your account is connected. Enable it for this conversation to finish.",
   "sessionMcpCapabilityCard.yourAccountNeedsReconnectionBefore":
     "Your account needs reconnection before it can be used here.",
+  "sessionMcpCapabilityCard.yourNameAccount": "your {name} account",
   "sessionProxyScope.chatIsUnavailableRightNow":
     "Chat is unavailable right now. Ask an administrator for help.",
   "sessionProxyScope.couldNotLoadTheConversation": "Could not load the conversation.",

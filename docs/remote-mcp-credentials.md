@@ -113,6 +113,33 @@ is disabled.
 The chat account list only controls attachments. Adding or connecting accounts
 uses the connector's Capabilities page or a prepared inline Connect card.
 
+### Where your own logins work
+
+A personal (Only me) login belongs to its owner across the organization, but it
+works for their messages only where they turned it on:
+
+- Always in their Personal workspace.
+- In a shared workspace when they turned it on there. A login starts on in the
+  workspace it was added from. Connecting the same account again, or
+  reconnecting it, from another shared workspace turns it on there too.
+- A connector's Capabilities page has a "Use for my messages here" switch on
+  each of the viewer's own logins in a shared workspace.
+- When a chat asks for a connector whose login the person added elsewhere, the
+  Connect card offers it with one click ("Use it here") instead of a new sign-in.
+- In a chat shared with the workspace, the owner sees a one-line note that their
+  logins work for their messages there and that people in the workspace see what
+  the agent does with them, with "Stop using it here". It never blocks a turn.
+
+Turning a login on is the owner's standing `connection.use` grant for that
+workspace (`always`, `workspace_shared`); it is not a per-chat approval. Other
+people's messages never use someone's own login. Logins that are off in a
+workspace are not attached to turns there, so the agent sees the connector as
+not connected and offers the Connect card. Accepted turns keep the accounts
+frozen at acceptance. Personal GitHub keeps its own per-chat repository choice.
+
+Logins that existed before this rule start on in every shared workspace their
+owner belonged to, so nothing that worked stops working.
+
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
 `accountSelection: "all_eligible"` mode cannot be combined with a connection ID,

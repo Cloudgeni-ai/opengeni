@@ -26,8 +26,11 @@ import {
   SessionPinAccessError,
   SessionPinVersionConflictError,
   SessionAttentionVersionConflictError,
-  SessionArchiveVersionConflictError,
-  setSessionArchive,
+  requestSessionArchive,
+  undoSessionArchive,
+  SessionArchiveFinalError,
+  SessionArchiveBlockedError,
+  SessionArchivedPinError,
   setSessionAttention,
   setSessionChannel,
   setSessionPin,
@@ -68,6 +71,28 @@ async function freshWorkspace(
     values (${account!.id}, 'session-pins-workspace', ${admin.json(workspaceSettings)}) returning id`;
   await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
   return { accountId: account!.id, workspaceId: workspace!.id };
+}
+
+/** Archive (or undo) a root chat for everyone, as the chat Archive action does. */
+async function archiveChat(input: {
+  accountId?: string;
+  workspaceId: string;
+  subjectId: string;
+  sessionId: string;
+  archived: boolean;
+  expectedVersion?: number;
+  now?: Date;
+}) {
+  const accountId =
+    input.accountId ??
+    (
+      await admin<{ account_id: string }[]>`
+        select account_id from workspaces where id = ${input.workspaceId}`
+    )[0]!.account_id;
+  const scope = { accountId, workspaceId: input.workspaceId, sessionId: input.sessionId };
+  return input.archived
+    ? await requestSessionArchive(db, { ...scope, subjectId: input.subjectId }, input.now)
+    : await undoSessionArchive(db, scope, input.now);
 }
 
 async function session(input: {
@@ -393,7 +418,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const pinned = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
     expect(pinned.totals?.needsYouCount).toBe(2);
     expect(pinned.totals?.groups.reduce((n, group) => n + group.total, 0)).toBe(7);
-    await setSessionArchive(db, {
+    await archiveChat({
       workspaceId: workspace.workspaceId,
       subjectId,
       sessionId: root.id,
@@ -1548,55 +1573,46 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(count?.count).toBe(0);
   }, 60_000);
 
-  test("pinning an archived chat restores it, so it shows under Pinned", async () => {
+  test("an archived chat cannot be pinned, and archiving hides its pin", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const subjectId = "user:pin-archived";
     await grantMember(workspace, subjectId);
+    const pinnedFirst = await session({ ...workspace, message: "pinned then archived" });
     const target = await session({ ...workspace, message: "archived then pinned" });
-    const archived = await setSessionArchive(db, {
+    await setSessionPin(db, {
       workspaceId: workspace.workspaceId,
       subjectId,
-      sessionId: target.id,
-      archived: true,
+      sessionId: pinnedFirst.id,
+      pinned: true,
     });
-    expect(archived).toMatchObject({ archived: true, archiveVersion: 1, pinned: false });
+    await archiveChat({ ...workspace, subjectId, sessionId: pinnedFirst.id, archived: true });
+    await archiveChat({ ...workspace, subjectId, sessionId: target.id, archived: true });
 
     // Opened from search and pinned from the chat header.
-    const pinned = await setSessionPin(db, {
-      workspaceId: workspace.workspaceId,
-      subjectId,
-      sessionId: target.id,
-      pinned: true,
-      expectedVersion: 0,
-    });
-    expect(pinned).toMatchObject({
-      pinned: true,
-      pinVersion: 1,
-      archived: false,
-      archivedAt: null,
-      archiveVersion: 2,
-    });
-
+    await expect(
+      setSessionPin(db, {
+        workspaceId: workspace.workspaceId,
+        subjectId,
+        sessionId: target.id,
+        pinned: true,
+      }),
+    ).rejects.toBeInstanceOf(SessionArchivedPinError);
     const page = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
       pinsOnly: true,
     });
-    expect(page.pinned.map((row) => row.id)).toEqual([target.id]);
+    expect(page.pinned).toEqual([]);
 
-    // Archive still wins afterwards: archiving the pinned chat unpins it.
-    const rearchived = await setSessionArchive(db, {
-      workspaceId: workspace.workspaceId,
+    // Undo within the window brings the pin back as it was.
+    expect(
+      await archiveChat({ ...workspace, subjectId, sessionId: pinnedFirst.id, archived: false }),
+    ).toBe(true);
+    const restored = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
-      sessionId: target.id,
-      archived: true,
-      expectedVersion: 2,
+      pinsOnly: true,
     });
-    expect(rearchived).toMatchObject({ archived: true, archiveVersion: 3, pinned: false });
-    const [both] = await admin<{ count: number }[]>`
-      select count(*)::int as count from session_pins
-      where workspace_id = ${workspace.workspaceId} and pinned and archived`;
-    expect(both?.count).toBe(0);
+    expect(restored.pinned.map((row) => row.id)).toEqual([pinnedFirst.id]);
   }, 60_000);
 
   test("ordinary-only pages skip pin hydration without changing pin exclusion or cursors", async () => {
@@ -1824,7 +1840,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       sessionId: a1.id,
       pinned: true,
     });
-    await setSessionArchive(db, {
+    await archiveChat({
       workspaceId: workspace.workspaceId,
       subjectId,
       sessionId: b1.id,
@@ -1948,7 +1964,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(attention.siteGroups?.[0]?.attention).toBe(1);
 
     // Archived conversations leave Active Site rows but count under All.
-    await setSessionArchive(db, {
+    await archiveChat({
       workspaceId: workspace.workspaceId,
       subjectId,
       sessionId: b1.id,
@@ -2083,7 +2099,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       createdBy: { kind: "subject", subjectId },
     });
     expect(conversation.channelId).toBe(project.id);
-    await setSessionArchive(db, {
+    await archiveChat({
       workspaceId: workspace.workspaceId,
       subjectId,
       sessionId: archivedChat.id,
@@ -2144,8 +2160,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       siteId: direct,
     });
     expect((await grouped()).siteGroups).toEqual(opened.siteGroups);
-    // Opens and archives are personal: the other member sees neither opened
-    // row, and still lists the chat this viewer archived.
+    // Opens are personal: the other member sees neither opened row. Archive is
+    // shared, so the archived chat's Site leaves their list too.
     const theirs = await listSessionEntriesForSubject(db, workspace.workspaceId, {
       subjectId: other,
       parentSessionId: null,
@@ -2154,7 +2170,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       limit: 10,
     });
     expect(new Set(theirs.siteGroups?.map((group) => group.siteId))).toEqual(
-      new Set([fromChat, fromArchived, fromPrivate]),
+      new Set([fromChat, fromPrivate]),
     );
     expect(theirs.siteGroups?.find((group) => group.siteId === fromChat)?.conversations).toBe(0);
 
@@ -3939,7 +3955,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(await unread()).toBe(true);
   });
 
-  test("archives a root chat personally, hides its tree, and restores it", async () => {
+  test("archives a root chat and its tree for everyone, with undo only within the window", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const root = await session({ ...workspace, message: "archive root" });
@@ -3952,54 +3968,79 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const otherSubject = "user:archive-two";
     await grantMember(workspace, subject);
     await grantMember(workspace, otherSubject);
-    await setSessionPin(db, {
-      workspaceId: workspace.workspaceId,
-      subjectId: subject,
-      sessionId: root.id,
-      pinned: true,
-    });
-    await setSessionAttention(db, {
-      workspaceId: workspace.workspaceId,
-      subjectId: subject,
-      sessionId: root.id,
-      activelyWorking: true,
-    });
 
-    const archived = await setSessionArchive(db, {
-      workspaceId: workspace.workspaceId,
+    // A sub-chat is archived with the chat that started it, not on its own.
+    expect(
+      await archiveChat({ ...workspace, subjectId: subject, sessionId: child.id, archived: true }),
+    ).toBeNull();
+    const archivedAt = new Date();
+    const archived = await archiveChat({
+      ...workspace,
       subjectId: subject,
       sessionId: root.id,
       archived: true,
-      expectedVersion: 0,
+      now: archivedAt,
     });
-    expect(archived).toMatchObject({
-      archived: true,
-      archiveVersion: 1,
-      pinned: false,
-      activelyWorking: false,
-    });
-
-    const activePage = await listSessionsForSubject(db, workspace.workspaceId, {
-      subjectId: subject,
-      limit: 20,
-    });
-    expect([...activePage.pinned, ...activePage.sessions].map((row) => row.id)).not.toContain(
-      root.id,
+    expect(archived).toMatchObject({ alreadyArchived: false });
+    expect((archived as { sessionIds: string[] }).sessionIds.sort()).toEqual(
+      [root.id, child.id].sort(),
     );
-    const activeChildren = await listSessionsForSubject(db, workspace.workspaceId, {
-      subjectId: subject,
-      parentSessionId: root.id,
-      limit: 20,
-    });
-    expect(activeChildren.sessions.map((row) => row.id)).not.toContain(child.id);
+    const [marks] = await admin<{ count: number; by: string }[]>`
+      select count(*)::int as count, min(archive_requested_by) as by from sessions
+      where root_session_id = ${root.id} and archived_at = ${archivedAt}`;
+    expect(marks).toEqual({ count: 2, by: subject });
+    // Repeating it changes nothing.
+    expect(
+      await archiveChat({ ...workspace, subjectId: subject, sessionId: root.id, archived: true }),
+    ).toMatchObject({ alreadyArchived: true });
 
-    const archivedPage = await listSessionsForSubject(db, workspace.workspaceId, {
-      subjectId: subject,
-      archivedOnly: true,
-      parentSessionId: null,
-      limit: 20,
-    });
-    expect(archivedPage.sessions.map((row) => row.id)).toContain(root.id);
+    for (const subjectId of [subject, otherSubject]) {
+      const activePage = await listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        limit: 20,
+      });
+      expect([...activePage.pinned, ...activePage.sessions].map((row) => row.id)).not.toContain(
+        root.id,
+      );
+      const activeChildren = await listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        parentSessionId: root.id,
+        limit: 20,
+      });
+      expect(activeChildren.sessions.map((row) => row.id)).not.toContain(child.id);
+      const archivedPage = await listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        archivedOnly: true,
+        parentSessionId: null,
+        limit: 20,
+      });
+      const row = archivedPage.sessions.find((entry) => entry.id === root.id);
+      expect(row).toMatchObject({ archived: true });
+    }
+
+    // Undo after the window is refused; within it, the chat is back for everyone.
+    await expect(
+      archiveChat({
+        ...workspace,
+        subjectId: subject,
+        sessionId: root.id,
+        archived: false,
+        now: new Date(archivedAt.getTime() + 60_000),
+      }),
+    ).rejects.toBeInstanceOf(SessionArchiveFinalError);
+    expect(
+      await archiveChat({
+        ...workspace,
+        subjectId: otherSubject,
+        sessionId: root.id,
+        archived: false,
+        now: new Date(archivedAt.getTime() + 5_000),
+      }),
+    ).toBe(true);
+    const [cleared] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sessions
+      where root_session_id = ${root.id} and (archived_at is not null or archive_requested_by is not null)`;
+    expect(cleared?.count).toBe(0);
     expect(
       (
         await listSessionsForSubject(db, workspace.workspaceId, {
@@ -4008,32 +4049,30 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         })
       ).sessions.map((row) => row.id),
     ).toContain(root.id);
-
-    await expect(
-      setSessionArchive(db, {
-        workspaceId: workspace.workspaceId,
-        subjectId: subject,
-        sessionId: root.id,
-        archived: false,
-        expectedVersion: 0,
-      }),
-    ).rejects.toBeInstanceOf(SessionArchiveVersionConflictError);
-    const restored = await setSessionArchive(db, {
-      workspaceId: workspace.workspaceId,
-      subjectId: subject,
-      sessionId: root.id,
-      archived: false,
-      expectedVersion: 1,
-    });
-    expect(restored).toMatchObject({ archived: false, archiveVersion: 2 });
     expect(
-      (
-        await listSessionsForSubject(db, workspace.workspaceId, {
-          subjectId: subject,
-          limit: 20,
-        })
-      ).sessions.map((row) => row.id),
-    ).toContain(root.id);
+      await archiveChat({ ...workspace, subjectId: subject, sessionId: root.id, archived: false }),
+    ).toBe(false);
+  });
+
+  test("Archive refuses while something keeps the chat live on purpose", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:archive-blocked";
+    await grantMember(workspace, subjectId);
+    const root = await session({ ...workspace, message: "kept live" });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set keep_live = true where id = ${root.id}`,
+    );
+    const refused = archiveChat({ ...workspace, subjectId, sessionId: root.id, archived: true });
+    await expect(refused).rejects.toBeInstanceOf(SessionArchiveBlockedError);
+    await expect(refused).rejects.toMatchObject({
+      blockers: [{ kind: "keep_live", sessionId: root.id }],
+      message: expect.stringContaining("Keep this chat active"),
+    });
+    const [row] = await admin<{ archived_at: Date | null }[]>`
+      select archived_at from sessions where id = ${root.id}`;
+    expect(row?.archived_at).toBeNull();
   });
 
   test("sorts bounded root/child/filter pages with archive modes and stable ties", async () => {
@@ -4096,7 +4135,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         "2026-02-01T00:00:00.123456Z",
       );
     }
-    await setSessionArchive(db, {
+    await archiveChat({
       workspaceId: workspace.workspaceId,
       subjectId,
       sessionId: roots[0]!.id,
@@ -4276,7 +4315,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     }
   }, 60_000);
 
-  test("pages archives by personal root archive time with exact ties and live re-archiving", async () => {
+  test("pages archives by root archive time with exact ties, the same for every member", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const subjectId = "user:archive-order";
@@ -4287,12 +4326,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       [0, 1, 2].map((index) => session({ ...workspace, message: `archive order ${index}` })),
     );
     for (const root of roots) {
-      await setSessionArchive(db, { ...workspace, subjectId, sessionId: root.id, archived: true });
+      await archiveChat({ ...workspace, subjectId, sessionId: root.id, archived: true });
     }
-    await admin`update session_pins set archived_at = case session_id
+    await admin`update sessions set archived_at = case id
       when ${roots[0]!.id} then '2026-01-01T00:00:00.123455Z'::timestamptz
       else '2026-01-01T00:00:00.123456Z'::timestamptz end
-      where workspace_id = ${workspace.workspaceId} and subject_id = ${subjectId}`;
+      where workspace_id = ${workspace.workspaceId}`;
     await executeSessionActivity(
       workspace.workspaceId,
       sql`update sessions set updated_at = case id
@@ -4350,15 +4389,16 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       parentSessionId: null,
       limit: 3,
     });
-    expect(active.sessions.map((row) => row.id)).toEqual(roots.map((row) => row.id));
+    expect(active.sessions).toEqual([]);
     expect(
       (
         await listSessionsForSubject(db, workspace.workspaceId, {
           ...options,
+          limit: 3,
           subjectId: otherSubject,
         })
-      ).sessions,
-    ).toEqual([]);
+      ).sessions.map((row) => row.id),
+    ).toEqual(expected);
 
     const envelope = JSON.parse(Buffer.from(first.nextCursor!, "base64url").toString("utf8"));
     expect(envelope.version).toBe(4);
@@ -4398,21 +4438,10 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       }),
     ).rejects.toBeInstanceOf(SessionListCursorError);
 
-    await setSessionArchive(db, {
-      ...workspace,
-      subjectId,
-      sessionId: roots[0]!.id,
-      archived: false,
-    });
-    await setSessionArchive(db, {
-      ...workspace,
-      subjectId,
-      sessionId: roots[0]!.id,
-      archived: true,
-    });
-    expect((await listSessionsForSubject(db, workspace.workspaceId, options)).sessions[0]!.id).toBe(
-      roots[0]!.id,
-    );
+    // Long past its undo window: final.
+    await expect(
+      archiveChat({ ...workspace, subjectId, sessionId: roots[0]!.id, archived: false }),
+    ).rejects.toBeInstanceOf(SessionArchiveFinalError);
   }, 60_000);
 
   test("archived child pages inherit root timestamps without child personal state", async () => {
@@ -4440,7 +4469,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       when ${expected[0]} then '2026-01-01'::timestamptz else '2026-02-01'::timestamptz end
       where parent_session_id = ${root.id}`,
     );
-    await setSessionArchive(db, { ...workspace, subjectId, sessionId: root.id, archived: true });
+    await archiveChat({ ...workspace, subjectId, sessionId: root.id, archived: true });
     const options = { subjectId, archivedOnly: true, parentSessionId: root.id, limit: 1 };
     const first = await listSessionsForSubject(db, workspace.workspaceId, options);
     const second = await listSessionsForSubject(db, workspace.workspaceId, {
@@ -5023,42 +5052,6 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         select acknowledged_sequence from session_pins
         where subject_id = ${subjectId} and session_id = ${target.id}`;
       expect(row?.acknowledged_sequence).toBe(9_000);
-    }, 60_000);
-
-    test("setSessionArchive lands on the conflict path and keeps the read fence", async () => {
-      if (!available || !shared) return;
-      const workspace = await freshWorkspace();
-      const subjectId = "user:ack-then-archive";
-      await grantMember(workspace, subjectId);
-      const target = await session({ ...workspace, message: "child work" });
-
-      const archived = await raceAcknowledgmentAgainstMutation(workspace, {
-        subjectId,
-        sessionId: target.id,
-        acknowledgedSequence: 6,
-        barrierObjectId: 13,
-        insertPredicate: "new.archived",
-        mutate: (handle) =>
-          setSessionArchive(handle, {
-            workspaceId: workspace.workspaceId,
-            subjectId,
-            sessionId: target.id,
-            archived: true,
-            expectedVersion: 0,
-          }),
-      });
-      expect(archived?.archived).toBe(true);
-      expect(archived?.archiveVersion).toBe(1);
-      const [row] = await admin<
-        { acknowledged_sequence: number; attention_version: number; archived: boolean }[]
-      >`
-        select acknowledged_sequence, attention_version, archived from session_pins
-        where subject_id = ${subjectId} and session_id = ${target.id}`;
-      expect(row).toMatchObject({
-        archived: true,
-        acknowledged_sequence: 6,
-        attention_version: 0,
-      });
     }, 60_000);
   });
 });

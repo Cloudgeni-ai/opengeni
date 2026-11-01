@@ -25,14 +25,17 @@ const LIST_PERMISSIONS = {
   variable_set: ["secrets:list"],
   rig: ["rigs:use"],
   connected_machine: ["enrollments:read"],
+  subscription_connection: ["connections:read"],
 } as const satisfies Record<UserResourceKind, readonly Permission[]>;
 
 const ISSUE_PERMISSIONS = {
-  connection: ["connections:read"],
+  // Turning your own login on in a workspace (D-54), like adding one there.
+  connection: ["connections:personal"],
   document: ["documents:search"],
   variable_set: ["secrets:list", "secrets:use"],
   rig: ["rigs:use"],
   connected_machine: ["enrollments:read"],
+  subscription_connection: ["connections:personal"],
 } as const satisfies Record<UserResourceKind, readonly Permission[]>;
 
 async function requireOwnerProductGate(

@@ -1229,8 +1229,9 @@ export async function acquireSharedTestDatabase(
  * summary (0988), the held browser
  * routines (1002), the secret history scrub's reader and cell writer (1091),
  * the agent call and native push v2 routines (1107), the lock-free external
- * identity read (1172) and the organization vault list (1218). Tests that
- * exercise them run as they will once they are granted.
+ * identity read (1172), the organization vault list (1218) and the names-only
+ * member list (1211). Tests that exercise them run as they will once they are
+ * granted.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
@@ -1257,6 +1258,8 @@ export async function grantDeferredRuntimeAccess(
       opengeni_private.ring_agent_call_v1(uuid, boolean)
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_vaults_v1(uuid, jsonb)
+      TO ${grantee};
+    GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_member_names_v1(uuid)
       TO ${grantee};
   `);
 }

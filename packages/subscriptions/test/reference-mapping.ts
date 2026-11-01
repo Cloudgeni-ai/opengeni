@@ -218,13 +218,27 @@ export function toPlacementInput(
         ? [variant(session.id, "reselection", 2) === 0 ? "compaction_completed" : "model_changed"]
         : [],
       // The reference has no accepted-authority concept: the owner's work
-      // carries personal authority for every provider.
+      // carries personal authority for every provider, and an accepted
+      // consent for one account (D-53) replaces that provider's entry.
       personalAuthority:
         ownerMembershipId !== null
-          ? providers.map((provider) => ({
-              provider,
-              ownerMembershipId,
-            }))
+          ? providers.map((provider) => {
+              const choice = session.sharedPersonalChoices?.find(
+                (candidate) =>
+                  world.connections.find((connection) => connection.id === candidate.connectionId)
+                    ?.provider === provider,
+              );
+              return choice
+                ? {
+                    provider,
+                    ownerMembershipId: choice.ownerId,
+                    sharedSessionChoice: {
+                      sessionId: session.id,
+                      connectionId: choice.connectionId,
+                    },
+                  }
+                : { provider, ownerMembershipId };
+            })
           : [],
       compactionProviderLock: null,
     },
@@ -232,7 +246,6 @@ export function toPlacementInput(
     people: world.people.map((person) => ({
       membershipId: person.id,
       active: person.active,
-      personalFallbackOptIn: person.personalFallbackOptIn,
     })),
     models: world.models,
     connections,

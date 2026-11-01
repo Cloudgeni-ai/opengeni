@@ -1,8 +1,4 @@
-import {
-  archiveActionLabel,
-  requestSessionArchive,
-  useArchiveConfirmation,
-} from "../../lib/archive-session";
+import { archiveActionLabel, requestSessionArchive } from "../../lib/archive-session";
 // The session list — the rail's home. Uses workspace discovery for search and
 // independently paged project folders for browsing, with pins above the tree.
 // Supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
@@ -397,7 +393,6 @@ export function SessionList() {
   const windowEvents = useUiEventTarget("window");
   const rail = useRail();
   const context = useAppContext();
-  const confirmArchive = useArchiveConfirmation();
   const { workspaceSessionListEvent, workspaceControlEvent } = useOpenGeni();
   const listHintsAvailable =
     workspaceSessionListEvent?.workspaceId === rail.workspaceId &&
@@ -2033,9 +2028,7 @@ export function SessionList() {
             .getSession(session.workspaceId, session.rootSessionId)
             .catch((): SessionDetails | null => null));
         if (!root || root.parentSessionId !== null) {
-          toast.error(
-            archived ? "Couldn't archive the workstream." : "Couldn't restore the workstream.",
-          );
+          toast.error(archived ? "Couldn't archive the workstream." : "Couldn't undo the archive.");
           return;
         }
         return await archiveSession(root, archived, restoreFocusTo);
@@ -2063,25 +2056,11 @@ export function SessionList() {
           context,
           session,
           archived,
-          {
-            page: confirmArchive.page,
-            confirm: async (input) => {
-              // A confirmation is not an archive: retain the row and its window while deciding.
-              if (archived) preserveArchiveWindow(session.id, false);
-              setArchiveTransitions((current) => {
-                const next = new Set(current);
-                next.delete(session.id);
-                return next;
-              });
-              const confirmed = await confirmArchive.confirm(input);
-              if (confirmed) {
-                if (archived) preserveArchiveWindow(session.id, true, archiveWindowKeys);
-                setArchiveTransitions((current) => new Set(current).add(session.id));
-              }
-              return confirmed;
-            },
-          },
           sessionDisplayTitle(session),
+          () => {
+            if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
+            void archiveSession({ ...session, archived: true }, false);
+          },
         );
         if (!updated) return;
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
@@ -2106,7 +2085,7 @@ export function SessionList() {
         await refreshSessionPages();
       } catch (archiveError) {
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
-        toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
+        toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
           description: errorMessage(archiveError),
         });
         await refreshSessionPages();
@@ -2126,30 +2105,9 @@ export function SessionList() {
           next.delete(session.id);
           return next;
         });
-        if (
-          archivedResult &&
-          context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
-        ) {
-          const updated = archivedResult;
-          toast.success(archived ? "Chat archived" : "Chat restored", {
-            ...(archived
-              ? {
-                  duration: 8000,
-                  action: {
-                    label: "Undo",
-                    onClick: () => {
-                      if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition))
-                        return;
-                      void archiveSession(updated, false);
-                    },
-                  },
-                }
-              : {}),
-          });
-        }
       }
     },
-    [context, rail.workspaceId, refreshSessionPages, confirmArchive, preserveArchiveWindow],
+    [context, rail.workspaceId, refreshSessionPages, preserveArchiveWindow],
   );
   // Site rows pin and archive for this person only, like sessions: a pin
   // moves the row to Pinned and archive only hides it from this sidebar.
@@ -3984,21 +3942,17 @@ export function SessionList() {
                     updateBrowsePreferences({ showEmptyGroups: show })
                   }
                 />
-                {context.clientConfig.sessionArchive ? (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      onSelect={() =>
-                        void navigate({
-                          to: "/workspaces/$workspaceId/read-only-chats",
-                          params: { workspaceId: rail.workspaceId },
-                        })
-                      }
-                    >
-                      Read-only chats
-                    </DropdownMenuItem>
-                  </>
-                ) : null}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/archived",
+                      params: { workspaceId: rail.workspaceId },
+                    })
+                  }
+                >
+                  Archived
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -5569,12 +5523,12 @@ function SessionRow(props: {
             </ContextMenuItem>
           </>
         ) : null}
-        <ContextMenuItem
-          onSelect={() => void props.onArchive(archiveTarget, !archiveTarget.archived)}
-        >
-          <ArchiveIcon className="size-4" />
-          {rowArchiveLabel(context, props.session, archiveTarget)}
-        </ContextMenuItem>
+        {rowArchiveLabel(context, props.session, archiveTarget) ? (
+          <ContextMenuItem onSelect={() => void props.onArchive(archiveTarget, true)}>
+            <ArchiveIcon className="size-4" />
+            {rowArchiveLabel(context, props.session, archiveTarget)}
+          </ContextMenuItem>
+        ) : null}
         {props.session.parentSessionId === null && props.session.archived ? (
           <ContextMenuItem
             variant="destructive"
@@ -5652,15 +5606,15 @@ function useWorkstreamArchiveTarget(session: Session): Session {
     : (roots?.get(session.rootSessionId) ?? session);
 }
 
-/** "Archive", "Hide for me" or "Restore", naming the workstream on a spawned row. */
+/** "Archive" (or "Archive workstream" on a spawned row) where allowed, otherwise null. */
 function rowArchiveLabel(
   context: Parameters<typeof archiveActionLabel>[0],
   session: Session,
   target: Session,
-): string {
+): string | null {
   const label = archiveActionLabel(context, target);
-  if (session.parentSessionId === null) return label;
-  return label === "Hide for me" ? "Hide workstream for me" : `${label} workstream`;
+  if (label === null || session.parentSessionId === null) return label;
+  return `${label} workstream`;
 }
 
 /**
@@ -5695,24 +5649,18 @@ export function RowQuickActions({
           <PinIcon className={session.pinned ? "size-3.5 fill-current" : "size-3.5"} />
         </RailRowQuickAction>
       ) : null}
-      <RailRowQuickAction
-        label={
-          session.parentSessionId !== null
-            ? archiveLabel
-            : archiveLabel === "Hide for me"
-              ? "Hide for me"
-              : session.archived
-                ? "Restore session"
-                : "Archive session"
-        }
-        tooltip={archiveLabel}
-        data-session-actions={session.id}
-        data-session-actions-mode="quick"
-        data-session-action="archive"
-        onActivate={() => void onArchive(target, !target.archived, "actions")}
-      >
-        <ArchiveIcon className="size-3.5" />
-      </RailRowQuickAction>
+      {archiveLabel ? (
+        <RailRowQuickAction
+          label={session.parentSessionId !== null ? archiveLabel : "Archive session"}
+          tooltip={archiveLabel}
+          data-session-actions={session.id}
+          data-session-actions-mode="quick"
+          data-session-action="archive"
+          onActivate={() => void onArchive(target, true, "actions")}
+        >
+          <ArchiveIcon className="size-3.5" />
+        </RailRowQuickAction>
+      ) : null}
     </div>
   );
 }
@@ -5832,13 +5780,15 @@ function RowActionsMenu({
             </DropdownMenuItem>
           </>
         ) : null}
-        <DropdownMenuItem
-          onSelect={() => void onArchive(archiveTarget, !archiveTarget.archived)}
-          onClick={(event) => event.stopPropagation()}
-        >
-          <ArchiveIcon className="size-4" />
-          {rowArchiveLabel(archiveContext, session, archiveTarget)}
-        </DropdownMenuItem>
+        {rowArchiveLabel(archiveContext, session, archiveTarget) ? (
+          <DropdownMenuItem
+            onSelect={() => void onArchive(archiveTarget, true)}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <ArchiveIcon className="size-4" />
+            {rowArchiveLabel(archiveContext, session, archiveTarget)}
+          </DropdownMenuItem>
+        ) : null}
         {session.parentSessionId === null && session.archived ? (
           <DropdownMenuItem
             variant="destructive"
