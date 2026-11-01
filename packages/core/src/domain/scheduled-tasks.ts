@@ -146,6 +146,7 @@ import {
   creationInitiatorForGrant,
   modelUnavailableHttpException,
   settingsWithSessionMcpServerMetadata,
+  settingsWithSessionMcpServerInputs,
   validateSessionMcpServersForCreate,
 } from "./sessions";
 import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
@@ -2479,7 +2480,15 @@ async function validateScheduledTaskAgentConfig(input: {
   const retainTools = unchangedCreationField("tools");
   const requestedTools = retainTools
     ? input.payload.agentConfig.tools
-    : validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
+    : // Tools may name the servers the task attaches to each chat it starts, as
+      // a session create's may; those servers are validated below.
+      validateToolRefs(
+        input.payload.agentConfig.tools ?? [],
+        settingsWithSessionMcpServerInputs(
+          runtimeSettings,
+          input.payload.agentConfig.mcpServers ?? [],
+        ),
+      );
   const workspace = await requireWorkspace(input.db, input.workspaceId);
   if (
     parent?.tenancy?.visibility === "private" &&
