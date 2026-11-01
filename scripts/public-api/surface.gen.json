@@ -32913,6 +32913,8 @@
         "$.autoSummary": "boolean?",
         "$.defaultVisibility": "ref(SessionVisibility)?",
         "$.diarizer": "ref(RecordingDiarizer)?",
+        "$.keyterms": "array?",
+        "$.keyterms[]": "string",
         "$.language": "string?",
         "$.liveTranscript": "boolean?",
         "$.retention": "ref(RecordingRetention)?",
@@ -39835,6 +39837,12 @@
       "PageHeaderWindowBarContext": "value",
       "useWindowBarTitle": "value",
       "WindowBarTitleBoundary": "value"
+    },
+    "@opengeni/react/ui/word-list-row": {
+      "WORD_LIST_MAX": "value",
+      "WORD_LIST_TERM_MAX": "value",
+      "WordListRow": "value",
+      "wordListTerms": "value"
     },
     "@opengeni/react/usage": {
       "allowanceLabels": "value",

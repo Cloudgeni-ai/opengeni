@@ -244,6 +244,13 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
         .regex(/^[a-z]{2,3}$/u)
         .optional(),
       /**
+       * Names and words every meeting transcript listens for, such as
+       * people, products and trade terms. A recording's own keyterms come
+       * first; together they are cut at the 100 a request takes. Models
+       * without keyterm support ignore them.
+       */
+      keyterms: z.array(z.string().trim().min(1).max(50)).max(100).optional(),
+      /**
        * Recognize people by voice. Off by default. While on, Opengeni keeps
        * each diarized speaker's voice vector with the transcript and
        * suggests who a speaker is from the voices of people who agreed to be

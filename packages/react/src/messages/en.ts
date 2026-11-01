@@ -2947,6 +2947,8 @@ export const englishMessages = {
   "meetings.settings.meetingsAreDeletedAfterRetentionperiodname":
     "Meetings are deleted after {retentionPeriodName}",
   "meetings.settings.meetingsAreKeptUntilSomeone": "Meetings are kept until someone deletes them",
+  "meetings.settings.meetingsListenForNoWords": "Meetings no longer listen for particular words",
+  "meetings.settings.meetingsListenForTheseWords": "Meetings listen for these words",
   "meetings.settings.meetingsNoLongerGetNotes": "Meetings no longer get notes written for them",
   "meetings.settings.meetingsRecordedMoreThanPeriod":
     "Meetings older than {period} are deleted now with their audio and transcripts, and the rest when they turn {period}. This can't be undone.",
@@ -2994,6 +2996,7 @@ export const englishMessages = {
     "Audio older than {retentionPeriodName} is deleted now. Transcripts stay, but those meetings can't be played or transcribed again. This can't be undone.",
   "meetings.settings.thisDeploymentUsesOneModel":
     "This deployment uses one model for all transcription.",
+  "meetings.settings.tooManyWords": "Keep the list to {max} names and words.",
   "meetings.settings.transcriptionModel": "Transcription model",
   "meetings.settings.turnOffAndForgetVoices": "Turn off and forget voices",
   "meetings.settings.turnsAMeetingSAudio":
@@ -3007,6 +3010,11 @@ export const englishMessages = {
   "meetings.settings.whenATranscriptIsReady":
     "When a meeting's transcript is ready, an agent writes its notes: a summary, decisions and action items.",
   "meetings.settings.whoSeesNewMeetings": "Who sees new meetings",
+  "meetings.settings.wordTooLong": "“{term}” is too long. Keep each to {max} characters.",
+  "meetings.settings.wordsToListenFor": "Words to listen for",
+  "meetings.settings.wordsToListenForDescription":
+    "Names and words every meeting transcript listens for, such as people, customers, products and trade terms. One per line. Some models charge a little more when given words.",
+  "meetings.settings.wordsToListenForPlaceholder": "Ada Lovelace\nKubernetes",
   "meetings.settings.workspace": "Workspace",
   "meetings.settings.writeNotesAfterEachMeeting": "Write notes after each meeting",
   "meetings.settings.youAgreedOpengeniLearnsYour":
