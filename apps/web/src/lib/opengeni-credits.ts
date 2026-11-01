@@ -60,7 +60,9 @@ export function useOpenGeniCredits(organizationId: string | undefined): OpenGeni
         const catalog = await client.getBillingSubscriptionPlans({ accountId }).catch(() => null);
         if (catalog?.plan) {
           const remaining = billing.balance.plan.creditRemainingMicros;
-          label = `${formatMoneyMicros(remaining, currency)} plan credit · ${formatMoneyMicros(balanceMicros - remaining, currency)} other credit`;
+          // Credits: what API use spends, apart from plan credit (as on Billing).
+          const credits = billing.balance.creditsMicros ?? balanceMicros - remaining;
+          label = `${formatMoneyMicros(remaining, currency)} plan credit · ${formatMoneyMicros(credits, currency)} credits`;
         }
       }
       return { label, promotionDecision: billing.balance.promotionDecision };

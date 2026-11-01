@@ -9,6 +9,7 @@ import {
   configuredModels,
   azureOpenAIDeploymentIdentityAvailable,
   deploymentAzureEntraCredential,
+  isDirectOpenAiApiBaseUrl,
   opperMaxOutputTokens,
   type ResolvedModelProvider,
   type Settings,
@@ -61,6 +62,7 @@ import {
   azureModelRequestPolicy,
   chatModelRequestPolicy,
   modelRequestPolicyForProvider,
+  withStorelessResponses,
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
@@ -197,7 +199,12 @@ export function buildOpenAIClientFromSettings(
         ),
       ),
     },
-    { modelRequestPolicy: chatModelRequestPolicy },
+    {
+      // Only the OpenAI platform; a compatible server keeps its own contract.
+      modelRequestPolicy: isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl)
+        ? withStorelessResponses(chatModelRequestPolicy)
+        : chatModelRequestPolicy,
+    },
   );
 }
 

@@ -23,6 +23,7 @@ import {
 import { Button } from "../ui/button";
 import { ConfirmDialog } from "../ui/confirm-dialog";
 import { Section } from "../ui/section";
+import { WordListRow } from "../ui/word-list-row";
 import { SegmentedControl } from "../ui/segmented-control";
 import { NativeSelect, type SelectOption } from "../ui/select-menu";
 import { SettingRow, SettingRowLink } from "../ui/setting-row";
@@ -250,6 +251,17 @@ function MeetingDefaultsViewContent({
   };
 
   const voiceprints = current.voiceprints === true;
+
+  const keyterms = current.keyterms ?? [];
+  const chooseKeyterms = (next: string[]) => {
+    const { keyterms: _previous, ...rest } = current;
+    void save(
+      next.length > 0 ? { ...rest, keyterms: next } : rest,
+      next.length > 0
+        ? msg("meetings.settings.meetingsListenForTheseWords")
+        : msg("meetings.settings.meetingsListenForNoWords"),
+    );
+  };
   const [confirmingOff, setConfirmingOff] = useState(false);
   const chooseVoiceprints = (next: boolean) => {
     if (next === voiceprints) return;
@@ -444,6 +456,21 @@ function MeetingDefaultsViewContent({
             {...(reason ? { disabledReason: reason } : {})}
           />
         }
+      />
+      <WordListRow
+        words={keyterms}
+        saving={saving}
+        disabled={!canManage}
+        disabledReason={reason}
+        text={{
+          label: msg("meetings.settings.wordsToListenFor"),
+          description: msg("meetings.settings.wordsToListenForDescription"),
+          placeholder: msg("meetings.settings.wordsToListenForPlaceholder"),
+          termTooLong: (term, max) =>
+            msg("meetings.settings.wordTooLong", { term, max: String(max) }),
+          tooMany: (max) => msg("meetings.settings.tooManyWords", { max: String(max) }),
+        }}
+        onChange={chooseKeyterms}
       />
       <SettingRow
         label={msg("meetings.settings.writeNotesAfterEachMeeting")}

@@ -9379,6 +9379,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateFileReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/files/:fileId/reach",
+    "request": [
+      "UpdateFileReachRequest"
+    ],
+    "response": [
+      "UpdateFileReachResponse"
+    ],
+    "permission": "files:upload"
+  },
+  {
     "id": "updateFileVisibility",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/files/:fileId/visibility",
@@ -9932,6 +9944,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SiteSqlSettingsRequest"
     ],
     "response": []
+  },
+  {
+    "id": "updateSkillReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/skills/content/:skillId/reach",
+    "request": [
+      "UpdateOrganizationSkillReachRequest"
+    ],
+    "response": [
+      "OrganizationSkillReach"
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "updateVideoGenerationPolicy",

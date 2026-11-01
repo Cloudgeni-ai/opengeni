@@ -9,6 +9,7 @@ import { useRecordingsClient } from "@opengeni/react/recordings";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { t } from "@opengeni/react/app/lib/console-text";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { meetingViewerName } from "../components/meetings/viewer-name";
 
@@ -71,6 +72,16 @@ export function MeetingDetailRoute({
     context.clientConfig.billingMode === "stripe" &&
     hasAccountPermission(accessContext, workspace?.accountId ?? "", "billing:manage");
   const canConnectModels = hasWorkspacePermission(accessContext, workspaceId, "connections:write");
+  // Where the person's own Only me meetings can work: their workspaces in
+  // this organization, their Personal workspace marked.
+  const reachWorkspaces = workspace
+    ? workspaces
+        .filter((candidate) => candidate.accountId === workspace.accountId)
+        .map(({ id, name, kind }) => ({ id, name, personal: kind === "personal" }))
+    : undefined;
+  const organizationName = workspace
+    ? orgLabel(t, workspace.accountId, accessContext.accountGrants)
+    : undefined;
   const ask = async (meetingId: string, question: string): Promise<boolean> => {
     const meeting = await recordings.getRecording(workspaceId, meetingId).catch(() => null);
     const created = await startSession(
@@ -95,6 +106,8 @@ export function MeetingDetailRoute({
         viewerSubjectId={accessContext.subjectId}
         viewerName={meetingViewerName(context) ?? "Me"}
         voiceRecognition={voiceRecognition}
+        reachWorkspaces={reachWorkspaces}
+        organizationName={organizationName}
         onBack={() =>
           void navigate({ to: "/workspaces/$workspaceId/meetings", params: { workspaceId } })
         }

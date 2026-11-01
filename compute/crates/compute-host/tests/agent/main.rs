@@ -1263,6 +1263,7 @@ impl Lab {
             base_image: root.join("base.img"),
             policy,
             sample_every: Duration::from_millis(50),
+            first_wake_within: HostConfig::FIRST_WAKE_WITHIN,
             disk_reading: None,
             stream_idle: HostConfig::STREAM_IDLE,
             guest_ports: Vec::new(),

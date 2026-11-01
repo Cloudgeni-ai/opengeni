@@ -1,6 +1,15 @@
 /** Public shared Skill folder/history shapes; no runtime contracts dependency. */
 export type SkillFile = { path: string; content: string };
 export type SkillScope = "workspace" | "organization" | "user";
+/**
+ * Where an organization Skill works: every shared workspace of the
+ * organization (`allowedWorkspaceIds: null`, new ones too) or the listed ones,
+ * and members' Personal workspaces when `allowPersonalWorkspaces` is on.
+ */
+export type OrganizationSkillReach = {
+  allowedWorkspaceIds: string[] | null;
+  allowPersonalWorkspaces: boolean;
+};
 export type SkillRecord = {
   removalOperationId?: string | null;
   activationMode: "workspace_managed" | "session_selected";
@@ -17,6 +26,14 @@ export type SkillRecord = {
   contentHash: string | null;
   files: SkillFile[];
   source: { pluginId: string; facetKey: string; skillFacetId: string } | null;
+  /** Where an organization Skill works; null for workspace and personal Skills. */
+  reach?: OrganizationSkillReach | null;
+  /**
+   * Whether agents in the workspace that was asked use it. False only for an
+   * organization Skill that doesn't work there, which the Skills page still
+   * lists so its managers can change that.
+   */
+  availableHere?: boolean;
 };
 export type SkillSummary = Omit<SkillRecord, "files">;
 export type SkillWriteReceipt = {

@@ -19,6 +19,7 @@ export const ANALYTICS_ACTIONS = [
   "install_skill",
   "invite_member",
   "buy_credits",
+  "upgrade_plan",
   "connect_model",
   "connect_codex",
   "connect_supergrok",

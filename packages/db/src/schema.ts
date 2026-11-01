@@ -4625,6 +4625,8 @@ export const organizationPrivacyPreferences = pgTable("organization_privacy_pref
     .$type<"workspace_shared" | "user_private">()
     .notNull()
     .default("workspace_shared"),
+  // Off: only owners and admins connect new machines of their own (1148).
+  membersConnectOwnMachines: boolean("members_connect_own_machines").notNull().default(true),
   adminsSeePrivateSchedules: boolean("admins_see_private_schedules").notNull().default(true),
   personalWorkspacesEnabled: boolean("personal_workspaces_enabled").notNull().default(true),
   // The most each person spends from the organization's credits in their own
@@ -5970,6 +5972,12 @@ export const files = pgTable(
     ownerSubjectId: text("owner_subject_id").default(sql`coalesce(
       nullif(current_setting('opengeni.private_file_owner',true),''),
       nullif(current_setting('opengeni.initiating_human_subject_id',true),''))`),
+    // Migration 1186. An Only me file's other workspaces of the organization
+    // where it also works, besides this one and its owner's Personal
+    // workspace; null for every workspace (files from before 1186).
+    reachWorkspaceIds: uuid("reach_workspace_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`),
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
       .notNull()

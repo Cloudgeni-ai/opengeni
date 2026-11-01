@@ -66,6 +66,7 @@ import {
 import {
   accessibilityContainer,
   CdpAccessibilityTreeTooLargeError,
+  nameRelatedBackendNodeIds,
   namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
   withPageAccessibilityFacts,
@@ -362,7 +363,24 @@ const LAYOUT_READ_EXPRESSION =
   "document.documentElement ? document.documentElement.getBoundingClientRect().width : null";
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
-const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
+/**
+ * An accessibility read is consistent only if no frame committed a new
+ * document while it ran. A page that is still loading (as every tab is right
+ * after the browser reopens) adds and navigates frames for a while, so a read
+ * that saw the frames change waits before the next, a little longer each time
+ * (50 + 100 + 200 + 400 ms at most), rather than spending its attempts within
+ * the same few milliseconds of loading.
+ */
+const ACCESSIBILITY_SETTLE_PAUSES_MS = [50, 100, 200, 400] as const;
+const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = ACCESSIBILITY_SETTLE_PAUSES_MS.length + 1;
+
+/** The page's frames kept changing through every accessibility read attempt. */
+export class CdpFrameTreeUnsettledError extends Error {
+  constructor() {
+    super("browser frame tree did not settle for a bounded accessibility observation");
+    this.name = "CdpFrameTreeUnsettledError";
+  }
+}
 /**
  * A page whose whole accessibility tree is too large for one observation
  * (or for one CDP message) is read node by node within this budget instead,
@@ -5869,7 +5887,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       });
     let rebuildPending = rebuilding;
     let switchedToBounded = false;
+    let framesChanged = false;
     for (let attempt = 0; attempt < ACCESSIBILITY_SNAPSHOT_ATTEMPTS; attempt += 1) {
+      if (framesChanged) {
+        framesChanged = false;
+        await delay(ACCESSIBILITY_SETTLE_PAUSES_MS[attempt - 1] ?? 0);
+      }
       const before = flattenFrameTree(await this.frameTree(state.sessionId));
       // The snapshot carries the current document's generation, so it must be
       // read from that document: a commit since the frame was last read makes
@@ -5878,6 +5901,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (main && (main.loaderId !== state.frame.loaderId || main.id !== state.frame.id)) {
         this.assertCurrentTargetState(state);
         this.adoptMainFrame(state, main);
+        framesChanged = true;
         continue;
       }
       if (rebuildPending) await this.rebuildAccessibility(state.sessionId);
@@ -5921,6 +5945,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       const after = flattenFrameTree(await this.frameTree(state.sessionId));
       if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
+        framesChanged = true;
         continue;
       }
       nodes = await this.withPageFacts(state, nodes, before);
@@ -5950,7 +5975,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (rebuilding) state.accessibilityRebuiltAt = Date.now();
       return accessibility;
     }
-    throw new Error("browser frame tree did not settle for a bounded accessibility observation");
+    throw new CdpFrameTreeUnsettledError();
   }
 
   /** Read-only renderer snapshot, including closed shadow roots. A failure
@@ -7124,12 +7149,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.sendActionTarget(state, "Input.insertText", {
             text: action.value,
           });
-        const confirmed = await this.callOnNode(
-          state,
-          node.backendDOMNodeId,
-          CONFIRM_EDITABLE_VALUE_FUNCTION,
-          [{ value: action.value }],
-        );
+        let confirmed: unknown;
+        try {
+          confirmed = await this.callOnNode(
+            state,
+            node.backendDOMNodeId,
+            CONFIRM_EDITABLE_VALUE_FUNCTION,
+            [{ value: action.value }],
+          );
+        } catch (error) {
+          // The input navigated the page or replaced its document (a
+          // one-time-code form that submits itself once complete) before the
+          // field could be read back. Chrome took the text, so the fill is
+          // done; the observation that follows shows the page it led to.
+          if (error instanceof CdpProtocolError && FILLED_DOCUMENT_GONE.test(error.message)) return;
+          throw error;
+        }
+        if (confirmed === "removed") return;
         if (confirmed !== true) {
           throw new InteractionOutcomeUnknownDriverError(
             "outcome_unknown",
@@ -8137,16 +8173,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return unknown;
     }
     if (!Array.isArray(response.nodes)) return unknown;
+    // Marked with the frame's protected fields, as an observation's tree is,
+    // so a protected field keeps its label and never its value.
+    let marked: CdpAxNode[];
+    try {
+      const frameId = entry.frameId ?? state.frame.id;
+      const protection = await this.readPageProtection(state);
+      const reasonOf = (backendNodeId: number) =>
+        protection.nodes.get(protectedNodeKey(frameId, backendNodeId));
+      let nodes = response.nodes as CdpAxNode[];
+      if (reasonOf(entry.backendDOMNodeId)) {
+        nodes = await this.withLabelSubtrees(state, frameId, nodes, entry.backendDOMNodeId);
+      }
+      marked = this.protectAccessibility(
+        nodes.map((node) => ({ ...node, frameId: node.frameId ?? frameId })),
+        protection,
+      );
+    } catch {
+      return unknown;
+    }
     let snapshot: CdpAccessibilitySnapshot;
     try {
       snapshot = normalizeCdpAccessibilityTree({
-        nodes: this.protectAccessibility(
-          (response.nodes as CdpAxNode[]).map((node) => ({
-            ...node,
-            frameId: node.frameId ?? entry.frameId ?? state.frame.id,
-          })),
-          await this.readPageProtection(state),
-        ),
+        nodes: marked,
         controllerGeneration: this.controllerGeneration,
         targetId: state.targetId,
         documentGeneration: state.documentGeneration,
@@ -8158,15 +8207,91 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       (candidate) => candidate.backendDOMNodeId === entry.backendDOMNodeId,
     );
     if (!resolved) return unknown;
+    // An element that holds a protected field without being one is named by
+    // its role alone: this partial tree cannot show which of its text is
+    // public. A protected field itself keeps the name an observation shows
+    // (its label, never its value).
+    let protectedReason: unknown;
+    try {
+      protectedReason = await this.callOnNode(
+        state,
+        entry.backendDOMNodeId,
+        `function() { return (${PROTECTED_CONTENT_FUNCTION})(this, null); }`,
+        [],
+        { isolatedFrameId: entry.frameId ?? state.frame.id },
+      );
+    } catch {
+      return unknown;
+    }
     const container = accessibilityContainer(snapshot, resolved.nodeId);
     return {
       ...unknown,
       role: boundedTargetRole(resolved.role),
-      name: boundedTargetText(resolved.name),
+      name: protectedReason && !resolved.protectedReason ? null : boundedTargetText(resolved.name),
       container: container
         ? { role: boundedTargetRole(container.role), name: boundedTargetText(container.name) }
         : null,
     };
+  }
+
+  /** A partial tree with the subtrees its target's name was taken from (a
+   * label, aria-labelledby) read in, so a protected field's label can be
+   * shown to hold no protected text. The read is bounded; what it leaves out
+   * keeps the label hidden. */
+  private async withLabelSubtrees(
+    state: TargetState,
+    frameId: string,
+    nodes: readonly CdpAxNode[],
+    backendDOMNodeId: number,
+  ): Promise<CdpAxNode[]> {
+    const byId = new Map<string, CdpAxNode>();
+    const byBackend = new Map<number, CdpAxNode>();
+    const add = (node: unknown): void => {
+      if (!isRecord(node) || typeof node.nodeId !== "string" || byId.has(node.nodeId)) return;
+      const axNode = node as CdpAxNode;
+      byId.set(node.nodeId, axNode);
+      if (typeof axNode.backendDOMNodeId === "number") {
+        byBackend.set(axNode.backendDOMNodeId, axNode);
+      }
+    };
+    for (const node of nodes) add(node);
+    const target = byBackend.get(backendDOMNodeId);
+    if (!target) return [...byId.values()];
+    let reads = 0;
+    const read = async (method: string, params: Record<string, unknown>): Promise<void> => {
+      if (reads >= LABEL_SUBTREE_READS || byId.size >= LABEL_SUBTREE_NODES) return;
+      reads += 1;
+      const response = await this.sendTarget<{ nodes?: unknown }>(state, method, params);
+      if (Array.isArray(response.nodes)) for (const node of response.nodes) add(node);
+    };
+    const pending: CdpAxNode[] = [];
+    for (const relatedId of nameRelatedBackendNodeIds(target)) {
+      if (!byBackend.has(relatedId)) {
+        await read("Accessibility.getPartialAXTree", {
+          backendNodeId: relatedId,
+          fetchRelatives: false,
+        });
+      }
+      const related = byBackend.get(relatedId);
+      if (related) pending.push(related);
+    }
+    const seen = new Set<string>();
+    while (pending.length > 0) {
+      const node = pending.pop()!;
+      const nodeId = String(node.nodeId);
+      if (node === target || seen.has(nodeId)) continue;
+      seen.add(nodeId);
+      if (node.role?.value === "StaticText") continue;
+      const childIds = Array.isArray(node.childIds) ? node.childIds.map(String) : [];
+      if (childIds.some((childId) => !byId.has(childId))) {
+        await read("Accessibility.getChildAXNodes", { id: nodeId, frameId });
+      }
+      for (const childId of childIds) {
+        const child = byId.get(childId);
+        if (child) pending.push(child);
+      }
+    }
+    return [...byId.values()];
   }
 
   private async resolveLocator(
@@ -8258,22 +8383,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "browser document changed while resolving the element reference",
       );
     }
-    const current = normalizeCdpAccessibilityTree({
-      nodes: namespaceCdpAccessibilityFrame(
-        frame.id,
-        this.protectAccessibility(
-          (response.nodes as CdpAxNode[]).map((node) => ({
-            ...node,
-            frameId: node.frameId ?? frame.id,
-          })),
-          await this.readPageProtection(state),
-        ),
-        `${frame.id}\0${frame.loaderId}`,
-      ),
+    // Marked as an observation's tree is, and what the snapshot withheld
+    // from this node stays withheld.
+    const protectedReason = previous.protectedReason ?? null;
+    const nodes = this.protectAccessibility(
+      (response.nodes as CdpAxNode[]).map((node) => ({
+        ...node,
+        frameId: node.frameId ?? frame.id,
+      })),
+      await this.readPageProtection(state),
+    ).map((node) =>
+      protectedReason &&
+      !node.protectedReason &&
+      node.backendDOMNodeId === previous.backendDOMNodeId
+        ? { ...node, protectedReason }
+        : node,
+    );
+    const read = normalizeCdpAccessibilityTree({
+      nodes: namespaceCdpAccessibilityFrame(frame.id, nodes, `${frame.id}\0${frame.loaderId}`),
       controllerGeneration: this.controllerGeneration,
       targetId: state.targetId,
       documentGeneration: state.documentGeneration,
     }).entriesByRef.get(previous.ref);
+    const current =
+      read && previous.nameWithheld ? { ...read, name: previous.name, nameWithheld: true } : read;
     // Chromium's incremental tree can report a visible node as not rendered.
     // Without this proof, the rebuilt full tree decides whether the ref holds.
     return current && current.backendDOMNodeId === previous.backendDOMNodeId ? current : null;
@@ -8774,6 +8907,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       () => undefined,
     );
     const value = isRecord(settled.result) ? settled.result.value : undefined;
+    if (value === "unpressed") {
+      // Chrome sent the press but the page never received it: something
+      // outside the page took it. A browser prompt that holds the tab's input
+      // (a passkey request the browser shows its own dialog for, a permission
+      // prompt) does this to every click until it closes, so repeating the
+      // click does not help; a frame over the element can also take it.
+      throw new InteractionOutcomeUnknownDriverError(
+        "outcome_unknown",
+        "browser click was sent, but the page never received the press: something outside the page took it, such as a browser prompt holding the tab's input (a passkey or permission request) or a frame over the element. Clicking again will not help while a prompt stays open; check the page and the screen before continuing",
+      );
+    }
     const verdict = hitTargetVerdict(value);
     if (settled.exceptionDetails || (value !== null && verdict === null)) {
       throw unknown();
@@ -12473,6 +12617,47 @@ const HIT_TEST_FUNCTION = `function() {
   return Boolean(hit && owns(element, hit));
 }`;
 
+const PRIVATE_SELECTOR = "[data-private], [data-sensitive], [data-opengeni-private]";
+/** Bounds on reading a protected field's label for an action's target. */
+const LABEL_SUBTREE_READS = 16;
+const LABEL_SUBTREE_NODES = 256;
+/** Every element SENSITIVE_REASON_FUNCTION can find a reason for: one with an
+ * attribute sensitiveFieldReason reads, a form field, or a private element. */
+const SENSITIVE_CANDIDATE_SELECTOR = `[id], [name], [autocomplete], [aria-label], [placeholder], [data-elements-stable-field-name], input, textarea, select, [contenteditable], ${PRIVATE_SELECTOR}`;
+
+/** Why one element is a password, one-time code, payment, hidden or
+ * explicitly private field, or null: the shared rule (sensitiveFieldReason in
+ * page-protection.ts) that observations, captures and fill verification use,
+ * applied to one element in the page. */
+const SENSITIVE_REASON_FUNCTION = `function(node) {
+  return (${SENSITIVE_FIELD_REASON_SOURCE})(String(node.tagName || "").toLowerCase(), Object.fromEntries(Array.from(node.attributes || [], (attr) => [attr.name, attr.value])), node.isContentEditable === true);
+}`;
+
+/** Why an element's text or value must not leave the page: it is, sits in, or
+ * (as a container) holds a password, one-time code, payment, hidden or
+ * explicitly private field. With a range, only the descendants that range
+ * touches count, for a copy of selected text. Shared by DOM reads and
+ * clipboard copies, so neither can return what the other withholds. */
+const PROTECTED_CONTENT_FUNCTION = `function(element, range) {
+  const sensitiveReason = ${SENSITIVE_REASON_FUNCTION};
+  let reason = sensitiveReason(element);
+  // Shadow hosts count as ancestors: a field inside a protected component's
+  // shadow root is protected too.
+  const parentOf = (node) => node.parentElement || node.getRootNode()?.host || null;
+  for (let ancestor = parentOf(element); !reason && ancestor; ancestor = parentOf(ancestor)) {
+    reason = sensitiveReason(ancestor);
+  }
+  if (reason) return reason;
+  // A container's text includes its sensitive descendants. Refuse the whole
+  // container rather than returning their protected text through an ancestor.
+  for (const node of element.querySelectorAll(${JSON.stringify(SENSITIVE_CANDIDATE_SELECTOR)})) {
+    if (range && !range.intersectsNode(node)) continue;
+    const found = sensitiveReason(node);
+    if (found) return found;
+  }
+  return null;
+}`;
+
 /** The hit test after a hover's move (see revealByHover): "hit" as soon as
  * the target's centre reaches it; "unpointed" once the frame has drawn two
  * frames with nothing in it under the pointer, so the move has not reached
@@ -12508,7 +12693,8 @@ const HOVER_HIT_TEST_FUNCTION = `async function(windowMs) {
 // Describes an element by its nearest labelled ancestor: role (or tag) and
 // accessible label. Text content is read only from non-editable elements and
 // bounded by code points, so a cut never splits a character; input values
-// never are read. The driver bounds the whole by bytes (coverName).
+// never are read, and an element that is, sits in or holds a protected
+// field is described by its role or tag alone. The driver bounds the whole by bytes (coverName).
 const DESCRIBE_HELPER = `
   const describe = (hit) => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
@@ -12525,9 +12711,10 @@ const DESCRIBE_HELPER = `
     let node = hit instanceof Element ? hit : hit && hit.parentElement;
     if (!(node instanceof Element)) return "another element";
     const start = node;
+    const withheld = (${PROTECTED_CONTENT_FUNCTION})(start, null) !== null;
     for (let depth = 0; node instanceof Element && depth < 6; depth += 1) {
       const role = node.getAttribute("role");
-      const label = clean(node.getAttribute("aria-label") || node.getAttribute("title"));
+      const label = withheld ? "" : clean(node.getAttribute("aria-label") || node.getAttribute("title"));
       if (role || label) {
         const kind = role || node.tagName.toLowerCase();
         return label ? kind + " " + JSON.stringify(head(label, 80)) : kind;
@@ -12535,7 +12722,7 @@ const DESCRIBE_HELPER = `
       node = node.parentElement;
     }
     const editable = start.closest("input, textarea, select, [contenteditable]");
-    const text = editable ? "" : head(clean(start.textContent), 60);
+    const text = editable || withheld ? "" : head(clean(start.textContent), 60);
     return start.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
   };`;
 
@@ -12833,11 +13020,15 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
     const roles = String(control.getAttribute("role") || "").trim().split(/\\s+/);
     const kind = roles.find((role) => controlRoles.has(role)) || control.localName;
     const editable = control.matches("input, textarea, select, [contenteditable]");
+    // A protected field keeps its label; other protected text is withheld.
+    const withheld = (${PROTECTED_CONTENT_FUNCTION})(control, null) !== null;
     const label = Array.from(
       clean(
-        control.getAttribute("aria-label") ||
-          control.getAttribute("title") ||
-          (editable ? "" : control.textContent),
+        withheld && !editable
+          ? ""
+          : control.getAttribute("aria-label") ||
+              control.getAttribute("title") ||
+              (editable ? "" : control.textContent),
       ),
     );
     return { kind, label: label.slice(0, 200).join(""), cut: label.length > 200 };
@@ -13077,6 +13268,10 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
 
 // Chromium's replies when a remote object's execution context is gone: the
 // document that held the click guard was replaced or detached.
+/** A fill's read-back found its field's document gone: the input navigated
+ * the page or replaced the document. */
+const FILLED_DOCUMENT_GONE =
+  /Cannot find context with specified id|Could not find object with given id|Execution context was destroyed|Inspected target navigated or closed|Node with given id does not belong to the document|No node with given id found/i;
 const GUARD_DOCUMENT_GONE =
   /Cannot find context with specified id|Could not find object with given id|Execution context was destroyed|Inspected target navigated or closed/i;
 
@@ -14070,30 +14265,90 @@ const PAGE_FACTS_EXPRESSION = `(() => {
   return facts.revealed.length === 0 ? null : [JSON.stringify(facts), ...nodes];
 })()`;
 
-/** Why an element's text or value must not leave the page: it is, sits in, or
- * (as a container) holds a password, one-time code, payment, hidden or
- * explicitly private field. With a range, only the descendants that range
- * touches count, for a copy of selected text. Shared by DOM reads and
- * clipboard copies, so neither can return what the other withholds. */
-const PROTECTED_CONTENT_FUNCTION = `function(element, range) {
-  const privateSelector = "[data-private], [data-sensitive], [data-opengeni-private]";
-  const sensitiveReason = (node) => {
-    return (${SENSITIVE_FIELD_REASON_SOURCE})(String(node.tagName || "").toLowerCase(), Object.fromEntries(Array.from(node.attributes || [], attr => [attr.name, attr.value])), node.isContentEditable === true);
-  };
-  let reason = sensitiveReason(element);
-  const parentOf = node => node.parentElement || node.getRootNode()?.host || null;
-  for (let ancestor = parentOf(element); !reason && ancestor; ancestor = parentOf(ancestor)) {
-    reason = sensitiveReason(ancestor);
-  }
-  if (reason) return reason;
-  // A container's text includes its sensitive descendants. Refuse the whole
-  // container rather than returning their protected text through an ancestor.
-  for (const node of element.querySelectorAll("[id], [name], [autocomplete], input, " + privateSelector)) {
-    if (range && !range.intersectsNode(node)) continue;
+/**
+ * The text a container shows without its protected descendants, for a DOM
+ * read of a container that holds some (a page's body nearly always holds a
+ * hidden field). Subtrees that hold none are read whole as innerText; only
+ * the elements on the way to a protected one are walked, and a protected
+ * element contributes nothing. Form fields (`input`, `textarea`) are skipped
+ * as innerText skips their values. Returns the text and the reason of the
+ * first element withheld (null when none showed text), or null when the
+ * container is not rendered, so innerText would be its raw source text and
+ * the read refuses it whole instead. Call it only for an element that is
+ * neither protected itself nor inside a protected element.
+ */
+const PUBLIC_TEXT_FUNCTION = `function(element) {
+  const sensitiveReason = ${SENSITIVE_REASON_FUNCTION};
+  const view = element.ownerDocument.defaultView;
+  if (!view || element.getClientRects().length === 0) return null;
+  const withheld = [];
+  let reason = null;
+  for (const node of element.querySelectorAll(${JSON.stringify(SENSITIVE_CANDIDATE_SELECTOR)})) {
     const found = sensitiveReason(node);
-    if (found) return found;
+    if (!found || withheld.some((root) => root.contains(node))) continue;
+    const tag = String(node.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea") continue;
+    withheld.push(node);
+    reason ??= found;
   }
-  return null;
+  if (withheld.length === 0) return { text: String(element.innerText ?? ""), reason: null };
+  const holds = (node) => withheld.some((root) => node.contains(root));
+  const blockLike = (display) =>
+    display !== "none" && display !== "contents" && !display.startsWith("inline");
+  const parts = [];
+  const range = element.ownerDocument.createRange();
+  const walk = (parent) => {
+    const parentStyle = view.getComputedStyle(parent);
+    for (const child of parent.childNodes) {
+      if (child.nodeType === 3) {
+        if (parentStyle.visibility !== "visible") continue;
+        // Text the page does not lay out (loose text in a closed details)
+        // shows nothing; spaces only separate what does.
+        range.selectNodeContents(child);
+        if (/\\S/.test(child.data) && range.getClientRects().length === 0) continue;
+        const space = parentStyle.whiteSpace;
+        if (space.startsWith("pre") || space === "break-spaces") {
+          parts.push(child.data);
+          continue;
+        }
+        // Collapsed as rendered: a space after a space or line start shows none.
+        let collapsed = child.data.replace(/\\s+/g, " ");
+        if (collapsed.startsWith(" ") && (parts.length === 0 || /\\s$/.test(parts[parts.length - 1])))
+          collapsed = collapsed.slice(1);
+        parts.push(collapsed);
+        continue;
+      }
+      if (child.nodeType !== 1) continue;
+      const style = view.getComputedStyle(child);
+      if (style.display === "none") continue;
+      const block = blockLike(style.display);
+      if (block) parts.push("\\n");
+      if (withheld.includes(child)) {
+        // Withheld: nothing of it is read.
+      } else if (String(child.tagName).toLowerCase() === "br") {
+        parts.push("\\n");
+      } else if (style.display === "contents") {
+        // Without a box of its own, innerText would be its source text,
+        // hidden parts included; its children are walked.
+        walk(child);
+      } else if (child.getClientRects().length === 0) {
+        // Not laid out (inside a closed details, or content-visibility:
+        // hidden): the page shows none of it.
+      } else if (holds(child)) {
+        walk(child);
+      } else {
+        parts.push(String(child.innerText ?? ""));
+      }
+      if (block) parts.push("\\n");
+    }
+  };
+  walk(element);
+  const text = parts
+    .join("")
+    .replace(/[ \\t]*\\n[ \\t]*/g, "\\n")
+    .replace(/\\n{3,}/g, "\\n\\n")
+    .trim();
+  return { text, reason };
 }`;
 
 /** Fixed browser-side projection. Every field shares one character budget, so
@@ -14102,8 +14357,23 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
   if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
   const tag = String(element.tagName || "").toLowerCase();
-  const redacted = (${PROTECTED_CONTENT_FUNCTION})(element, null);
-  if (redacted) return { ok: true, text: null, value: null, attributes: {}, redacted, truncated: false };
+  const field = tag === "input" || tag === "textarea" || tag === "select";
+  const protectedReason = (${PROTECTED_CONTENT_FUNCTION})(element, null);
+  // A container that only holds protected elements is read around them; a
+  // field, or anything that is or sits in a protected element, is refused.
+  let shownText = null;
+  let redacted = null;
+  if (protectedReason) {
+    const sensitiveReason = ${SENSITIVE_REASON_FUNCTION};
+    let inside = false;
+    for (let node = element; !inside && node; node = node.parentElement) inside = Boolean(sensitiveReason(node));
+    const partial = field || inside ? null : (${PUBLIC_TEXT_FUNCTION})(element);
+    if (!partial) {
+      return { ok: true, text: null, value: null, attributes: {}, redacted: protectedReason, truncated: false };
+    }
+    shownText = partial.text;
+    redacted = partial.reason;
+  }
   const allowed = new Set(["href", "src", "alt", "title", "role", "aria-label", "aria-expanded",
     "aria-checked", "aria-selected", "placeholder", "type", "name", "data-testid"]);
   let remaining = maxChars;
@@ -14126,7 +14396,7 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect
     return kept;
   };
   const skip = Number(offset) || 0;
-  const text = bounded(element.innerText ?? element.textContent ?? "", skip);
+  const text = bounded(shownText ?? element.innerText ?? element.textContent ?? "", skip);
   const value = tag === "input" || tag === "textarea" || tag === "select"
     ? bounded(element.value ?? "", skip) : null;
   const attributes = {};
@@ -14141,7 +14411,7 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect
         disabled: option.disabled || Boolean(option.closest("optgroup[disabled]"))
       })) };
   }
-  return { ok: true, text, value, attributes, redacted: null, truncated, select };
+  return { ok: true, text, value, attributes, redacted, truncated, select };
 }`;
 
 /** Attribute and pseudo selectors would turn count/not-found into a secret-value oracle. */
@@ -14416,7 +14686,10 @@ const SET_RANGE_VALUE_FUNCTION = `async function(expected) {
 
 const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   await Promise.resolve();
-  if (!(this instanceof Element) || !this.isConnected) return false;
+  if (!(this instanceof Element)) return false;
+  // The page removed the field in reaction to the input (a one-time-code
+  // form that submits itself and re-renders): the input arrived.
+  if (!this.isConnected) return "removed";
   const tag = String(this.tagName || "").toLowerCase();
   if (tag === "input" || tag === "textarea") {
     const actual = String(this.value);

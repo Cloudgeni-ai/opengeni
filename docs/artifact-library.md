@@ -120,6 +120,27 @@ enforces exactly these two transitions. Each change records a
 `file.visibility.changed` audit event. Session screenshots and saved tool
 output keep their chat's audience. Existing private files stay private.
 
+### Where an Only me file works
+
+An Only me file works in the workspace that stores it and in its owner's
+Personal workspace, plus the other workspaces of the organization its owner
+turns it on in. It stays Only me in each: only its owner, and agent turns they
+start, can list, open or attach it there. `FileAsset.reachWorkspaceIds` lists
+those other workspaces (`null` for all of them); it is returned only for Only me
+files. New Only me files start with none; files from before migration
+`1186_only_me_reach.sql` keep `null`, so they still work everywhere they did.
+
+The owner changes it from the workspace that stores the file, with
+`PUT /v1/workspaces/:workspaceId/files/:fileId/reach` and
+`{ reachWorkspaceIds }` (`client.updateFileReach`), or from **Available in…**
+in the file page's audience menu while the file is Only me. Every id must be
+one of the owner's workspaces in the organization (`400` otherwise); the
+Personal workspace is always included and is dropped from the list. Anyone else
+gets `404`, as for a file that does not exist, and so does a request from a
+workspace that doesn't store the file; a Workspace file gets `409`. Each change
+records a `file.reach.changed` audit event. The same rule applies to Only me
+meetings ([recordings.md](recordings.md)).
+
 Publish and upload results include `access: { visibility, whoCanOpen }`, one
 plain sentence telling the agent who can open the file before it shares a
 link. `ArtifactCatalogItem.visibility` and `ownedByViewer` drive the Only me

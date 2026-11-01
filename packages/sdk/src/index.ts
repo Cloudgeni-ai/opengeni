@@ -756,6 +756,7 @@ export type {
   SaveWorkspaceSkillRequest,
   RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
+  OrganizationSkillReach,
 } from "./skills";
 export type {
   ActivatePreferenceRegistryRevisionRequest,
@@ -1219,6 +1220,8 @@ export type {
   EntitlementsMode,
   FileAccess,
   FileAsset,
+  UpdateFileReachRequest,
+  UpdateFileReachResponse,
   UpdateFileVisibilityRequest,
   UpdateFileVisibilityResponse,
   FileListRequest,

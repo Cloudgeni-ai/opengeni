@@ -8553,6 +8553,102 @@ export async function updateFileVisibility(
   );
 }
 
+export type FileReachChangeResult =
+  | { kind: "changed" | "unchanged"; file: FileAsset }
+  | { kind: "not_found" }
+  | { kind: "not_owner" }
+  | { kind: "not_private" };
+
+/**
+ * Where the owner's Only me file works besides the workspace that stores it
+ * and their Personal workspace: the other workspaces of the organization in
+ * `reachWorkspaceIds`, or all of them (null). The caller resolves the list to
+ * the owner's own workspaces of this organization first. Only the owner
+ * changes it, from the workspace that stores the file, and the change and its
+ * audit fact commit together.
+ */
+export async function updateFileReach(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    fileId: string;
+    reachWorkspaceIds: readonly string[] | null;
+    /** The owner: the human caller, or the human an agent acts for. */
+    actorSubjectId: string;
+    /** Audit subject: the caller's own subject. */
+    auditSubjectId: string;
+  },
+): Promise<FileReachChangeResult> {
+  const reach =
+    input.reachWorkspaceIds === null
+      ? null
+      : [...new Set(input.reachWorkspaceIds)].filter((id) => id !== input.workspaceId).sort();
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      // Read and change it as its owner's private-file identity, the one the
+      // row-level policies check, then restore the caller's own identity.
+      const [previous] = await rawRows<{ owner: string | null }>(
+        tx,
+        sql`select current_setting('opengeni.private_file_owner', true) as owner`,
+      );
+      await rawRows(
+        tx,
+        sql`select set_config('opengeni.private_file_owner', ${input.actorSubjectId}::text, true)`,
+      );
+      const restore = async () =>
+        await rawRows(
+          tx,
+          sql`select set_config('opengeni.private_file_owner', ${previous?.owner ?? ""}::text, true)`,
+        );
+      const [row] = await tx
+        .select()
+        .from(schema.files)
+        .where(
+          and(eq(schema.files.workspaceId, input.workspaceId), eq(schema.files.id, input.fileId)),
+        )
+        .for("update")
+        .limit(1);
+      if (!row) {
+        await restore();
+        return { kind: "not_found" };
+      }
+      if (!row.privateOwnerSubjectIds) {
+        await restore();
+        return { kind: "not_private" };
+      }
+      if (mapFile(row).ownerSubjectId !== input.actorSubjectId) {
+        await restore();
+        return { kind: "not_owner" };
+      }
+      const current = row.reachWorkspaceIds === null ? null : [...row.reachWorkspaceIds].sort();
+      if (JSON.stringify(current) === JSON.stringify(reach)) {
+        await restore();
+        return { kind: "unchanged", file: mapFile(row) };
+      }
+      const [updated] = await tx
+        .update(schema.files)
+        .set({ reachWorkspaceIds: reach, updatedAt: new Date() })
+        .where(and(eq(schema.files.workspaceId, input.workspaceId), eq(schema.files.id, row.id)))
+        .returning();
+      await restore();
+      if (!updated) return { kind: "not_found" };
+      await recordAuditEvent(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.auditSubjectId,
+        action: "file.reach.changed",
+        targetType: "workspace_file",
+        targetId: row.id,
+        metadata: { fileId: row.id, from: current, to: reach },
+      });
+      return { kind: "changed", file: mapFile(updated) };
+    },
+  );
+}
+
 /**
  * Whether a finished file exists in this workspace but is Only me for someone
  * other than the caller. It reveals nothing else: no name, owner or content.
@@ -8595,6 +8691,7 @@ export async function requireFileForSubject(
     return file;
   }
 
+  const reaching = filesReachingWorkspace(input);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -8607,10 +8704,7 @@ export async function requireFileForSubject(
         .where(
           and(
             eq(schema.files.accountId, input.accountId),
-            or(
-              eq(schema.files.workspaceId, input.workspaceId),
-              isNotNull(schema.files.privateOwnerSubjectIds),
-            ),
+            reaching,
             eq(schema.files.id, input.fileId),
             sql`google_drive_file_authorized(
               ${input.accountId}::uuid,
@@ -8625,6 +8719,41 @@ export async function requireFileForSubject(
       return mapFile(row);
     },
   );
+}
+
+/**
+ * The files a workspace may read for a person: its own, plus their Only me
+ * files from the organization's other workspaces that work here, because the
+ * file's reach list names this workspace or is null (every workspace, as all
+ * files made before the list existed). In the person's own Personal
+ * workspace all their Only me files work (docs/design/ownership-and-reach.md:
+ * an Only me thing works where its owner turned it on, always in their
+ * Personal workspace). Row-level security still decides whose Only me files
+ * these are, and a Personal workspace has exactly one member, so a person
+ * reading in one is its owner. The workspace kind is read once per statement
+ * inside the caller's workspace context, never in a separate round trip.
+ */
+function filesReachingWorkspace(input: {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string | null;
+}): SQL {
+  const reachesHere = or(
+    isNull(schema.files.reachWorkspaceIds),
+    sql`${input.workspaceId}::uuid = ANY(${schema.files.reachWorkspaceIds})`,
+  );
+  return or(
+    eq(schema.files.workspaceId, input.workspaceId),
+    and(
+      isNotNull(schema.files.privateOwnerSubjectIds),
+      input.subjectId === null
+        ? reachesHere
+        : or(
+            sql`(select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid)) = 'personal'`,
+            reachesHere,
+          ),
+    ),
+  )!;
 }
 
 /**
@@ -8702,6 +8831,7 @@ export async function listFilesForSubject(
       throw new z.ZodError([{ code: "custom", path: ["cursor"], message: "Invalid file cursor" }]);
     }
   }
+  const reaching = filesReachingWorkspace(input);
   return withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -8717,10 +8847,7 @@ export async function listFilesForSubject(
           and(
             eq(schema.files.accountId, input.accountId),
             eq(schema.files.status, "ready"),
-            or(
-              eq(schema.files.workspaceId, input.workspaceId),
-              isNotNull(schema.files.privateOwnerSubjectIds),
-            ),
+            reaching,
             input.scope === "workspace"
               ? isNull(schema.files.privateOwnerSubjectIds)
               : input.scope === "personal"
@@ -8760,6 +8887,7 @@ export async function getFilesForSubject(
 ): Promise<FileAsset[]> {
   const ids = [...new Set(input.fileIds)];
   if (ids.length === 0) return [];
+  const reaching = filesReachingWorkspace(input);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -8787,10 +8915,7 @@ export async function getFilesForSubject(
         .where(
           and(
             eq(schema.files.accountId, input.accountId),
-            or(
-              eq(schema.files.workspaceId, input.workspaceId),
-              isNotNull(schema.files.privateOwnerSubjectIds),
-            ),
+            reaching,
             inArray(schema.files.id, ids),
             sql`google_drive_file_authorized(
               ${input.accountId}::uuid,
@@ -36923,13 +37048,13 @@ async function readSessionListForSubject(
           tx,
           workspaceId,
           [...pinnedRows, ...pageRows].map((row) => row.session),
-          !summary,
+          false,
         );
-        // Compact rows skip the unbounded effective-policy walk but still name
-        // the model with two fixed index probes per row.
-        const canonicalSessions = summary
-          ? await withSessionListModelPolicy(tx, workspaceId, canonicalRows)
-          : canonicalRows;
+        // Every list page names each row's model with two fixed index probes
+        // per row. The effective-policy walk can scan back over every turn
+        // started since the last settings write, which took seconds on long
+        // sessions; a single-session read still uses it.
+        const canonicalSessions = await withSessionListModelPolicy(tx, workspaceId, canonicalRows);
         const canonicalSessionById = new Map(
           canonicalSessions.map((session) => [session.id, session]),
         );
@@ -94027,6 +94152,8 @@ function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
     ownerSubjectId:
       row.ownerSubjectId ??
       (row.privateOwnerSubjectIds?.length === 1 ? row.privateOwnerSubjectIds[0]! : null),
+    // Only an Only me file works in other workspaces.
+    ...(row.privateOwnerSubjectIds ? { reachWorkspaceIds: row.reachWorkspaceIds ?? null } : {}),
     id: row.id,
     workspaceId: row.workspaceId,
     status: row.status as FileStatus,

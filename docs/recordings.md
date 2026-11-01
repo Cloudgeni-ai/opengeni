@@ -20,11 +20,26 @@ share, unshare or delete it.
 
 A recording is stored in the workspace it was recorded in, and a shared one
 stays there. A signed-in person's (`user:`) own Only me meetings are theirs
-across their organization: every workspace of the same organization they
-belong to, their Personal workspace included, lists them in
-`GET …/recordings` (and agents acting for them find them with
-`meetings_search`), each marked with `sourceWorkspace` (`{ id, name }`, the
-storing workspace; `recordedIn` for agents). They open in place: every
+across their organization, where they turn them on. An Only me meeting always
+works in the workspace that stores it and in its owner's Personal workspace;
+`reachWorkspaceIds` lists the owner's other workspaces of the same
+organization where it also works, and `null` means every workspace they
+belong to, new ones included. A new meeting starts with an empty list;
+meetings recorded before the list existed are `null`, so they keep showing
+everywhere they did. Only the owner changes it, with
+`PATCH …/recordings/:recordingId` and `{ reachWorkspaceIds }`, from any
+workspace where they can change the meeting; each id must be a workspace of
+the organization they belong to (400 otherwise), and the storing workspace and
+their Personal workspace are dropped from the stored list. In the React
+Meetings page this is **Available in…** in the meeting's menu, when the host
+passes `reachWorkspaces`. Turning it on somewhere never shares it: there too,
+only its owner and agent turns they start can use it. Shared meetings ignore
+the list.
+
+Every workspace where a person's Only me meeting works lists it in
+`GET …/recordings` (and agents acting for them find it with
+`meetings_search`), marked with `sourceWorkspace` (`{ id, name }`, the
+storing workspace; `recordedIn` for agents). It opens in place: every
 `…/recordings/:recordingId` route reads and changes them in the storing
 workspace, as the person, so transcript, notes, speakers and re-runs work from
 any of those workspaces, and the React Meetings pages label them with where
@@ -314,6 +329,28 @@ Native screens:
   knows the workspace.
 - `MeetingsList`: the recorder plus the list. `useMeetingView`: one
   meeting's transcript, player and actions, for a screen of your own.
+- Meetings from audio recorded elsewhere. A phone app can't record the other
+  side of a phone call, but the phone's own call recording can be brought in:
+  on iPhone the Phone app's record button saves the call to Notes, and on
+  Android the phone app saves it as a file. The person shares that recording
+  (or a voice memo, or any M4A, AAC, WebM or Ogg file) to the app, and it
+  becomes a meeting with a transcript and notes. It is saved on the phone first
+  and uploaded in the background, like a recording made in the app, and it is
+  placed at the time the file says it was recorded. To set it up:
+  - Add `audioImport: true` to the config plugin's options. On iOS the app
+    then accepts audio documents, so the share sheet offers it. On Android it
+    shows under "Open with" for audio files.
+  - Mount `useSharedAudioImport({ onImported, onError })` once inside
+    `MeetingRecorderProvider`. It takes the file the app was opened with,
+    files shared while it runs, and any file iOS left in the app's
+    Documents/Inbox before the app could take it.
+  - With expo-router, return `sharedAudioRedirect(path) ?? path` from
+    `redirectSystemPath` in `app/+native-intent.tsx`. That way a shared file
+    opens Meetings rather than an unknown screen.
+
+  `MeetingsList` also has an Import a recording button that does the same
+  with a picked file. `useRecorder().importAudio` (React) and
+  `uploadRecordingAudio` (SDK) are the same step for a host's own UI.
 
 The SDK client uses the web platform's `crypto` (request ids and upload
 checksums), which Hermes doesn't have. Mount the recorder inside
