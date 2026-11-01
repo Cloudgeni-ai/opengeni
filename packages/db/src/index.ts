@@ -37048,13 +37048,13 @@ async function readSessionListForSubject(
           tx,
           workspaceId,
           [...pinnedRows, ...pageRows].map((row) => row.session),
-          !summary,
+          false,
         );
-        // Compact rows skip the unbounded effective-policy walk but still name
-        // the model with two fixed index probes per row.
-        const canonicalSessions = summary
-          ? await withSessionListModelPolicy(tx, workspaceId, canonicalRows)
-          : canonicalRows;
+        // Every list page names each row's model with two fixed index probes
+        // per row. The effective-policy walk can scan back over every turn
+        // started since the last settings write, which took seconds on long
+        // sessions; a single-session read still uses it.
+        const canonicalSessions = await withSessionListModelPolicy(tx, workspaceId, canonicalRows);
         const canonicalSessionById = new Map(
           canonicalSessions.map((session) => [session.id, session]),
         );
