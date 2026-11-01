@@ -230,6 +230,30 @@ describe("organization admins manage organization vaults, environments and machi
     const otherMachine = await organizationMachine(other.accountId, other.workspaceId, otherOwner);
     const revoke = (person: Person, workspaceId: string, enrollmentId: string) =>
       send(person, at(workspaceId, `/enrollments/${enrollmentId}/revoke`), "POST", {});
+
+    // Where an organization machine or Sandbox Environment works follows the
+    // same rule: the owner or an admin of that organization picks it.
+    const everywhere = { allowedWorkspaceIds: null, allowPersonalWorkspaces: true };
+    const machineReach = (person: Person, workspaceId: string, enrollmentId: string) =>
+      send(person, at(workspaceId, `/machines/${enrollmentId}/reach`), "PUT", everywhere);
+    expect(await machineReach(member, acme.workspaceId, acmeMachine)).toBe(403);
+    expect(await machineReach(admin, other.workspaceId, otherMachine)).toBe(403);
+    expect(await machineReach(admin, acme.workspaceId, acmeMachine)).toBe(200);
+    const createdRig = await app.request(at(acme.workspaceId, "/rigs"), {
+      method: "POST",
+      headers: browser(owner.cookie),
+      body: JSON.stringify({
+        scope: "organization",
+        name: `Org environment ${crypto.randomUUID().slice(0, 8)}`,
+      }),
+    });
+    expect(createdRig.status).toBe(201);
+    const acmeRig = ((await createdRig.json()) as { id: string }).id;
+    const rigReach = (person: Person, rigId: string) =>
+      send(person, at(acme.workspaceId, `/rigs/${rigId}/reach`), "PUT", everywhere);
+    expect(await rigReach(member, acmeRig)).toBe(403);
+    expect(await rigReach(admin, acmeRig)).toBe(200);
+
     expect(await revoke(member, acme.workspaceId, acmeMachine)).toBe(403);
     expect(await revoke(admin, other.workspaceId, otherMachine)).toBe(403);
     expect(await revoke(admin, acme.workspaceId, acmeMachine)).toBe(200);

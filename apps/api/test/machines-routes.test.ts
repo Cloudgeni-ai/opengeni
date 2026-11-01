@@ -1308,7 +1308,7 @@ describe("Connected Machine command policy", () => {
 });
 
 describe("Where an organization machine works", () => {
-  test("organization owners pick the workspaces; elsewhere it disappears", async () => {
+  test("organization owners and admins pick the workspaces; elsewhere it disappears", async () => {
     if (!available) return;
     const putReach = async (
       machine: Awaited<ReturnType<typeof seedCrossWorkspaceScopedMachine>>,

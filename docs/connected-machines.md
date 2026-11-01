@@ -1841,8 +1841,8 @@ connection, so its chats, schedules and the installed agent are not registered
 again, and the agent keeps running (with its running commands) without a
 restart or an upgrade. On the Machines page, open the machine and choose
 **Who can use it?**. Organization machines belong to the organization and
-cannot be changed here. An organization owner chooses which workspaces they
-work in instead (see
+cannot be changed here. The organization's owner or an admin chooses which
+workspaces they work in instead (see
 [Choose where an organization machine works](#choose-where-an-organization-machine-works)).
 
 - Narrowing to **Only me** is done by the person who will own the machine, or by
@@ -1920,15 +1920,15 @@ with less than the person's full access, is refused.
 ### Choose where an organization machine works
 
 An organization machine works in the organization's workspaces that an
-organization owner picks, like the organization's model keys and connectors:
+organization owner or admin picks, like the organization's model keys and connectors:
 every shared workspace, or chosen ones, plus a separate switch for members'
 Personal workspaces. The workspace it was connected from always has it,
 because its rows live there. A machine connected before this keeps working
 everywhere it did: every shared workspace and every Personal workspace.
 
 On the Machines page, an organization machine shows **Available in** with a
-short summary. Organization owners see **Change** next to it, which opens the
-shared **Available in** picker. Taking workspaces away warns that chats and
+short summary. Organization owners and admins see **Change** next to it, which
+opens the shared **Available in** picker. Taking workspaces away warns that chats and
 schedules there stop using the machine from their next turn. Nothing is moved
 or rebuilt: the machine list, the fleet
 tools, attempt resolution and direct attaches all check where the machine works
@@ -1939,7 +1939,9 @@ on every call, so a workspace it no longer works in simply stops seeing it.
 sets it (`null` means every shared workspace) and answers `{ reach }`, the same
 shape the machine list reports as `reach` for organization machines
 (`homeWorkspaceId`, `allowedWorkspaceIds`, `allowPersonalWorkspaces`). It needs
-`enrollments:manage` and `account:admin`. The connecting workspace is dropped
+`enrollments:manage`, and the caller is the organization's owner or an admin
+signed in as themselves (or a credential holding `account:admin`), the same
+rule as changing the machine. The connecting workspace is dropped
 from the list, since it always has the machine, and any id that is not a shared
 workspace of the organization answers `400` with `details.workspaceIds`. A
 workspace machine or an Only me machine answers `409`: those already work only

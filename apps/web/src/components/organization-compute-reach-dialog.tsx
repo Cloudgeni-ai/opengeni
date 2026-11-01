@@ -20,8 +20,8 @@ import { useOrganizationWorkspaces } from "@/components/models/connect-audience"
    "Available in" for an organization machine or Sandbox Environment: every
    shared workspace of the organization or the ones picked, and members'
    Personal workspaces when switched on. The workspace it was connected from
-   or made in always has it, because that is where it lives. Organization
-   owners decide this. Chats and schedules in a workspace taken off
+   or made in always has it, because that is where it lives. The organization
+   owner or an admin decides this. Chats and schedules in a workspace taken off
    the list stop using it at their next turn, so the dialog says so before
    saving.
    -------------------------------------------------------------------------- */
@@ -136,7 +136,7 @@ export function OrganizationComputeReachDialog({
         <WorkspaceReachFields
           owner={{ kind: "organization", name: organizationName }}
           organizationName={organizationName}
-          managedBy="Organization owners manage it."
+          managedBy="Organization owners and admins manage it."
           value={draft}
           onChange={setDraft}
           workspaces={organization.workspaces}

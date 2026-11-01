@@ -258,7 +258,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // Where an organization rig works: every shared workspace or chosen ones,
   // and members' Personal workspaces when switched on. The workspace it was
-  // made in always has it. Organization owners decide this; chats and
+  // made in always has it. The organization's owner or an admin decides this; chats and
   // schedules in a workspace it no longer works in stop using it at their next
   // attempt.
   app.put("/v1/workspaces/:workspaceId/rigs/:rigId/reach", async (c) => {

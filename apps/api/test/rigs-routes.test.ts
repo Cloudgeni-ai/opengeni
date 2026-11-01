@@ -681,7 +681,7 @@ describe("rig route permission matrix", () => {
     expect(collision.status).toBe(409);
   });
 
-  test("organization owners pick where an organization rig works", async () => {
+  test("organization owners and admins pick where an organization rig works", async () => {
     if (!available) return;
     const origin = await freshWorkspace();
     const target = await freshWorkspace(origin.accountId);

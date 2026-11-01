@@ -49,7 +49,8 @@ import {
   apiErrorTechnicalFacts,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import type { MachineView } from "@opengeni/react/machines";
 
 /** While the connect dialog waits for the new machine, look for it sooner. */
@@ -67,7 +68,7 @@ export async function copyToClipboard(text: string, successMessage: string) {
 }
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
-  const { client, workspaces, accessContext } = useAppContext();
+  const { client, workspaces, accessContext, clientConfig } = useAppContext();
   const [enrollOpen, setEnrollOpen] = useState(false);
   const machines = useWorkspaceMachines({
     pollIntervalMs: enrollOpen ? CONNECT_WATCH_POLL_MS : MACHINES_DASHBOARD_POLL_MS,
@@ -112,11 +113,13 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       ? { ...selectedMachine, enrollmentId: selectedMachine.enrollmentId }
       : null;
   // Organization machines work in the workspaces their organization picks;
-  // organization owners change that.
+  // the organization's owner or an admin changes that, as the server allows.
   const organizationId = workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
-  const organizationAdmin = organizationId
-    ? hasAccountPermission(accessContext, organizationId, "account:admin")
-    : false;
+  const organizationAdmin = canAdministerOrganization({
+    accessContext,
+    clientConfig,
+    accountId: organizationId,
+  });
   const organizationName =
     useOrganizationName(organizationId ?? "", organizationAdmin) ?? "your organization";
   const selectedReach = selectedMachine?.scope === "organization" ? selectedMachine.reach : null;

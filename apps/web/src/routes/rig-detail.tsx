@@ -61,9 +61,9 @@ import { useAppContext } from "@opengeni/react/app/app-context";
 import { apiErrorDetails, userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
 import {
   canManageWorkspaceSettings,
-  hasAccountPermission,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import { rigActorLabel } from "@/lib/rig-status";
 import { usePersonName } from "@opengeni/react/app/lib/use-person-name";
 import { PermissionDenied, RigScopeChip } from "@/routes/rigs";
@@ -106,14 +106,16 @@ export function RigDetailRoute({
   const [tab, setTab] = useState<Tab>("overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [reachOpen, setReachOpen] = useState(false);
-  // An organization rig works in the workspaces its organization picks;
-  // organization owners change that.
+  // An organization rig works in the workspaces its organization picks; the
+  // organization's owner or an admin changes that, as the server allows.
   const organizationId = rig.rig?.scope === "organization" ? rig.rig.accountId : "";
-  const organizationAdmin = organizationId
-    ? hasAccountPermission(context.accessContext, organizationId, "account:admin")
-    : false;
-  // Changing an organization rig also needs an organization owner, as
-  // the API asks; without that its edit actions would only be refused.
+  const organizationAdmin = canAdministerOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId: organizationId,
+  });
+  // Changing an organization rig also needs the organization's owner or an
+  // admin, as the API asks; without that its edit actions would only be refused.
   const canManage = canManageRigs && (rig.rig?.scope !== "organization" || organizationAdmin);
   const organizationName =
     useOrganizationName(organizationId, organizationAdmin) ?? "your organization";

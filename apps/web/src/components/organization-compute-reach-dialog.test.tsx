@@ -136,7 +136,7 @@ describe("where an organization machine or rig works", () => {
     );
     const text = document.body.textContent ?? "";
     expect(text).toContain("Where can Build box be used?");
-    expect(text).toContain("Belongs to Acme. Organization owners manage it.");
+    expect(text).toContain("Belongs to Acme. Organization owners and admins manage it.");
     expect(text).toContain("It was connected from this workspace, so it always works there.");
     expect(text).not.toContain("stop using it");
 
