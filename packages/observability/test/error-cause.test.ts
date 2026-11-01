@@ -229,4 +229,53 @@ describe("error cause classification", () => {
       causeDriverMessage: "interaction controller request failed",
     });
   });
+
+  test("a read the controller gave up retrying keeps the driver's class and frame", () => {
+    const failure = new BrowserControlRequestError(
+      503,
+      { code: "resource_unavailable", message: "browser observation unavailable", retryable: true },
+      { errorClass: "Error", frame: "AgentBrowserDriver.refreshAccessibility" },
+    );
+    expect(errorCauseAttributes(new HTTPException(503, { message: "x", cause: failure }))).toEqual({
+      causeName: "BrowserControlRequestError",
+      causeCode: "resource_unavailable",
+      causeStatus: 503,
+      causeDriverClass: "Error",
+      causeDriverFrame: "AgentBrowserDriver.refreshAccessibility",
+      causeDriverMessage: "browser observation unavailable",
+    });
+    // Without a diagnostic, nothing about a driver is claimed.
+    const plain = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "browser observation unavailable",
+      retryable: true,
+    });
+    expect(errorCauseAttributes(plain)).toEqual({
+      causeName: "BrowserControlRequestError",
+      causeCode: "resource_unavailable",
+      causeStatus: 503,
+    });
+    const lines = capture((obs) => {
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        causeName: "BrowserControlRequestError",
+        causeCode: "resource_unavailable",
+        causeDriverClass: "Error",
+        causeDriverFrame: "AgentBrowserDriver.refreshAccessibility",
+        causeDriverMessage: "browser observation unavailable",
+      });
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        causeName: "BrowserControlRequestError",
+        causeCode: "resource_unavailable",
+        causeDriverMessage: "anything",
+      });
+    });
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      causeDriverClass: "Error",
+      causeDriverFrame: "AgentBrowserDriver.refreshAccessibility",
+      causeDriverMessage: "browser observation unavailable",
+    });
+    expect(JSON.parse(lines[1]!)).not.toHaveProperty("causeDriverMessage");
+  });
 });
