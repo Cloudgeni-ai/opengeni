@@ -50,6 +50,9 @@ import {
 import type { OrganizationView } from "@/lib/organization-route";
 import { useOrganizationWorkspaces } from "@/components/models/connect-audience";
 import type { DeveloperLocation } from "@/lib/developer-route";
+import { openSettingsDestination } from "@/lib/open-settings-destination";
+import type { SharedPlace } from "@/components/settings/shared-overview-model";
+import { hiddenPersonalWorkspaceIds } from "@opengeni/react/app/lib/managed-self-context";
 import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 import {
   completeWorkspaceDeletionFollowUp,
@@ -93,6 +96,10 @@ const LazyOrganizationModelsSection = lazy(async () => {
 const LazyOrganizationApiKeysSection = lazy(async () => {
   const module = await import("@/components/organization-api-keys-section");
   return { default: module.OrganizationApiKeysSection };
+});
+const LazySharedOverview = lazy(async () => {
+  const module = await import("@/components/settings/shared-overview");
+  return { default: module.SharedOverview };
 });
 
 // A Stripe return is a full page load, so one report per outcome per document
@@ -496,6 +503,17 @@ export function OrgSettingsRoute({
             />
           ) : null}
 
+          {!modelsRefused && section === "shared" ? (
+            <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+              <SharedOverviewSection
+                key={`${identityKey}:shared`}
+                workspaceId={workspaceId}
+                fallbackLabel={fallbackLabel}
+                canOpenDeveloper={canManageOrganizationApiKeys}
+              />
+            </Suspense>
+          ) : null}
+
           {!modelsRefused && section === "integrations" ? (
             // One position for the connectors, so moving between the list and a
             // connector's page keeps what was loaded.
@@ -809,6 +827,55 @@ function OrganizationModelsSectionWithName({
     <LazyOrganizationModelsSection
       {...props}
       organizationName={directory?.overview.value?.organization.name ?? fallbackLabel}
+    />
+  );
+}
+
+/**
+ * Shared, with the organization's workspaces named: where each vault works,
+ * and which of those workspaces the viewer can open it in.
+ */
+function SharedOverviewSection({
+  workspaceId,
+  fallbackLabel,
+  canOpenDeveloper,
+}: {
+  workspaceId: string;
+  fallbackLabel: string;
+  canOpenDeveloper: boolean;
+}) {
+  const context = useAppContext();
+  const navigate = useNavigate();
+  const directory = useOptionalOrganizationDirectory();
+  const overview = directory?.overview.value ?? null;
+  const place = useMemo<SharedPlace>(() => {
+    const anchor = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+    const accountId = anchor?.accountId ?? "";
+    const inOrganization = context.workspaces.filter(
+      (candidate) => candidate.accountId === accountId,
+    );
+    // A Personal workspace the organization turned off is never opened.
+    const hidden = hiddenPersonalWorkspaceIds(context.managedSelfContext);
+    const personalWorkspace = inOrganization.find(
+      (candidate) => candidate.kind === "personal" && !hidden.has(candidate.id),
+    );
+    return {
+      workspaceId,
+      workspaceName: anchor?.name ?? "this workspace",
+      personal: anchor?.kind === "personal",
+      workspaces:
+        overview?.workspaces ?? inOrganization.filter((candidate) => candidate.kind !== "personal"),
+      accessibleWorkspaceIds: new Set(inOrganization.map((candidate) => candidate.id)),
+      personalWorkspaceId: personalWorkspace?.id ?? null,
+    };
+  }, [context.managedSelfContext, context.workspaces, overview, workspaceId]);
+  return (
+    <LazySharedOverview
+      client={context.client}
+      organizationName={overview?.organization.name ?? fallbackLabel}
+      place={place}
+      canOpenDeveloper={canOpenDeveloper}
+      onOpen={(destination) => openSettingsDestination(navigate, workspaceId, destination)}
     />
   );
 }
