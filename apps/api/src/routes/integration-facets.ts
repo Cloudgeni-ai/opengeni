@@ -9,6 +9,9 @@ import {
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import {
+  canRemoveIntegration,
+  hasIntegrationAdminPermission,
+  MissingPermissionRefusal,
   requireAccessGrant,
   requireIntegrationSetupAuthorization,
   type ApiRouteDeps,
@@ -16,6 +19,7 @@ import {
 import {
   configureIntegrationFacet,
   integrationFacetConfigureRequestDigest,
+  IntegrationChangeRequiresAdminError,
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
   IntegrationFacetBindingVersionRequiredError,
@@ -69,6 +73,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
               grant.subjectId,
               decoded(c.req.param("capabilityId")),
               decoded(c.req.param("instanceKey")),
+              (installerSubjectId) => canRemoveIntegration(grant, installerSubjectId),
             ),
           ),
         );
@@ -223,6 +228,8 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
               facetKey: decoded(c.req.param("facetKey")),
               expectedVersion: payload.expectedVersion,
               idempotencyKey: payload.idempotencyKey,
+              // Members remove only sources and settings they added.
+              ...(hasIntegrationAdminPermission(grant) ? {} : { memberRemoval: true }),
             }),
           ),
         );
@@ -256,6 +263,8 @@ function installedFacetIntegrationKey(
 
 function facetHttpError(error: unknown): HTTPException {
   if (error instanceof HTTPException) return error;
+  if (error instanceof IntegrationChangeRequiresAdminError)
+    throw new MissingPermissionRefusal("capabilities:manage", { message: error.message });
   if (error instanceof IntegrationFacetNotFoundError) {
     return new HTTPException(404, { message: error.message });
   }

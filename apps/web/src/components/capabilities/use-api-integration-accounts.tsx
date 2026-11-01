@@ -315,6 +315,9 @@ export function useApiIntegrationAccounts({
   // A member reconnects only their own account; a shared one stays with admins.
   const canReconnect = (account: ApiIntegrationInstallationSummary) =>
     canChange || (canManage && account.ownership === "personal");
+  // The server says who may remove each account: admins remove any, a member
+  // only one they added. An older server omits it.
+  const canRemove = (account: ApiIntegrationInstallationSummary) => account.canRemove ?? canManage;
 
   async function startAdd(existing: ApiIntegrationInstallationSummary | null) {
     if (!definition || busy || !(existing ? canReconnect(existing) : canAdd)) return;
@@ -354,7 +357,7 @@ export function useApiIntegrationAccounts({
   // shared definition goes with it, and the authenticated Connection is always
   // retained so another instance (or a reconnect) can still use it.
   async function previewRemove(instance: ApiIntegrationInstallationSummary) {
-    if (!canManage || busy) return;
+    if (!canRemove(instance) || busy) return;
     setBusy(true);
     try {
       const preview = await client.previewApiIntegrationUninstall(
@@ -421,12 +424,16 @@ export function useApiIntegrationAccounts({
             ...(account.connected || !canReconnect(account)
               ? []
               : [{ label: "Reconnect", onClick: () => void startAdd(account), disabled: busy }]),
-            {
-              label: "Remove",
-              onClick: () => void previewRemove(account),
-              disabled: busy,
-              destructive: true,
-            },
+            ...(canRemove(account)
+              ? [
+                  {
+                    label: "Remove",
+                    onClick: () => void previewRemove(account),
+                    disabled: busy,
+                    destructive: true,
+                  },
+                ]
+              : []),
           ],
         }
       : {}),

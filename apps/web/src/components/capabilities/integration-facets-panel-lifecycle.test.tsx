@@ -434,6 +434,28 @@ describe("Integration Facet lifecycle state", () => {
     }
   });
 
+  test("the server's canRemove decides whether a facet's Remove is enabled", async () => {
+    for (const [canRemove, enabled] of [
+      [false, false],
+      [true, true],
+    ] as const) {
+      const configured = { ...binding("active", 1), canRemove };
+      const client = {
+        listIntegrationFacets: mock(async () => response(configured)),
+      } as unknown as OpenGeniBrowserClient;
+      const rendered = await renderPanel({ client });
+      try {
+        await act(async () => button(rendered.container, "Manage facets").click());
+        await waitFor(() => facet(rendered.container, "inventory-source") !== null);
+        const row = requiredFacet(rendered.container, "inventory-source");
+        // A source someone else added stays with admins; the member's own is theirs.
+        expect(button(row, "Remove").disabled).toBe(!enabled);
+      } finally {
+        await rendered.unmount();
+      }
+    }
+  });
+
   test("removes only direct control when another owner retains the facet", async () => {
     const directlyShared = binding("active", 1, "inventory-source", "502", [
       directOwner,

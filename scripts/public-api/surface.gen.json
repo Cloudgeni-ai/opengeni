@@ -11228,6 +11228,7 @@
         "$.allowedTools[]": "string",
         "$.approvalRequiredToolCount": "integer!",
         "$.baseUrl": "string!",
+        "$.canRemove": "boolean?",
         "$.capabilityId": "string!",
         "$.connected": "boolean!",
         "$.connectionId": "string! null",
@@ -19691,6 +19692,7 @@
       "shape": {
         "$": "object",
         "$.bindingKey": "string!",
+        "$.canRemove": "boolean?",
         "$.config": "object!",
         "$.config{}": "unknown",
         "$.connectionId": "string! null",
@@ -23697,6 +23699,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.canRemove": "boolean?",
         "$.category": "string!",
         "$.componentCount": "integer!",
         "$.description": "string!",

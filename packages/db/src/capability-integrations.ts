@@ -237,6 +237,8 @@ export type ApiIntegrationRuntime = {
   organizationCredential?: {
     placements: readonly OrganizationApiCredentialPlacement[];
   };
+  /** Who added this instance (a member removes only their own); set by the installed list. */
+  instanceCreatedBySubjectId?: string;
 };
 
 /** One encrypted credential placement of an organization key for an API integration. */
@@ -1384,6 +1386,7 @@ async function listOwnApiIntegrationsInRlsContext(
       instanceVersion: schema.integrationFacetBindings.version,
       runtimeKey: schema.integrationFacetBindings.runtimeKey,
       bindingConfig: schema.integrationFacetBindings.config,
+      instanceCreatedBySubjectId: schema.integrationFacetBindings.createdBySubjectId,
       connectionId: schema.integrationFacetBindings.connectionId,
       connectionAuthorityGeneration: schema.connections.authorityGeneration,
       connectionStatus: schema.connections.status,
@@ -1557,6 +1560,7 @@ async function listOwnApiIntegrationsInRlsContext(
         allowedTools,
         requireApproval,
         revision,
+        instanceCreatedBySubjectId: row.instanceCreatedBySubjectId,
       },
     ];
   });
@@ -1768,6 +1772,11 @@ export async function uninstallApiIntegration(
     instanceKey: string;
     expectedInstallationVersion: number;
     expectedInstanceVersion: number;
+    /**
+     * A member's removal: only an instance this subject added. One an admin
+     * or another person added throws {@link IntegrationChangeRequiresAdminError}.
+     */
+    memberRemoval?: boolean;
   },
 ): Promise<UninstallApiIntegrationResult> {
   return await withRlsContext(
@@ -1793,6 +1802,10 @@ export async function uninstallApiIntegration(
             definitionStatus: "retained",
           };
         }
+        if (input.memberRemoval && context.createdBySubjectId !== input.subjectId)
+          throw new IntegrationChangeRequiresAdminError(
+            "Only an admin can remove an account someone else added.",
+          );
         if (context.installationVersion !== input.expectedInstallationVersion) {
           throw new ApiIntegrationInstallationVersionConflictError(
             input.capabilityId,
@@ -2451,6 +2464,8 @@ type IntegrationInstanceContext = {
   displayName: string;
   pluginInstallationId: string;
   installationVersion: number;
+  /** Who added this instance; a member removes only their own. */
+  createdBySubjectId: string;
 };
 
 async function integrationInstanceContext(
@@ -2468,6 +2483,7 @@ async function integrationInstanceContext(
       displayName: schema.integrationFacetBindings.displayName,
       pluginInstallationId: schema.capabilityPluginInstallations.id,
       installationVersion: schema.capabilityPluginInstallations.version,
+      createdBySubjectId: schema.integrationFacetBindings.createdBySubjectId,
     })
     .from(schema.integrationFacetBindings)
     .innerJoin(

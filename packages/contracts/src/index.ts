@@ -15444,6 +15444,11 @@ export const IntegrationFacetBindingSummary = /* @__PURE__ */ defineSchema(() =>
       updatedAt: primitives.string.datetime({ offset: true }),
       directlyOwned: primitives.boolean,
       owners: z.array(CapabilityComponentOwner),
+      /**
+       * Whether the viewer may remove it: integration admins remove anything,
+       * a member only what they added. Older servers omit it.
+       */
+      canRemove: primitives.boolean.optional(),
     })
     .strict(),
 );
@@ -15729,6 +15734,11 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
         })
         .strict()
         .optional(),
+      /**
+       * Whether the viewer may remove this account: integration admins remove
+       * anything, a member only what they added. Older servers omit it.
+       */
+      canRemove: primitives.boolean.optional(),
     })
     .strict(),
 );
@@ -15976,6 +15986,11 @@ export const PluginInstallationSummary = /* @__PURE__ */ defineSchema(() =>
       status: z.enum(["active", "needs_attention"]),
       installedAt: primitives.string.datetime({ offset: true }),
       updatedAt: primitives.string.datetime({ offset: true }),
+      /**
+       * Whether the viewer may remove it: integration admins remove anything,
+       * a member only what they added. Older servers omit it.
+       */
+      canRemove: primitives.boolean.optional(),
     })
     .strict(),
 );

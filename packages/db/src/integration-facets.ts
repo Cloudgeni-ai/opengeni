@@ -12,6 +12,7 @@ import {
 import {
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
+  IntegrationChangeRequiresAdminError,
   listIntegrationFacetBindingOwners,
   listIntegrationFacetBindingOwnersForBindings,
   removeIntegrationFacetBindingOwner,
@@ -43,6 +44,8 @@ export type IntegrationFacetBindingSummary = {
   updatedAt: string;
   directlyOwned: boolean;
   owners: IntegrationFacetBindingOwner[];
+  /** Whether the viewer may remove it; set only by {@link listIntegrationInstanceFacets}. */
+  canRemove?: boolean;
 };
 
 export type IntegrationFacetDefinitionSummary = {
@@ -192,6 +195,11 @@ export async function listIntegrationInstanceFacets(
   subjectId: string,
   capabilityId: string,
   instanceKey: string,
+  /**
+   * Decides each configured facet's `canRemove` from who added it. Omitted,
+   * the list leaves `canRemove` out.
+   */
+  removableBy?: (installerSubjectId: string) => boolean,
 ): Promise<IntegrationInstanceFacets> {
   return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const context = await loadIntegrationInstanceContext(
@@ -220,6 +228,7 @@ export async function listIntegrationInstanceFacets(
         lastErrorCode: schema.integrationFacetBindings.lastErrorCode,
         createdAt: schema.integrationFacetBindings.createdAt,
         updatedAt: schema.integrationFacetBindings.updatedAt,
+        createdBySubjectId: schema.integrationFacetBindings.createdBySubjectId,
       })
       .from(schema.integrationFacetDefinitions)
       .leftJoin(
@@ -263,26 +272,29 @@ export async function listIntegrationInstanceFacets(
           capabilities: row.capabilities,
         },
         binding: row.bindingId
-          ? bindingSummary(
-              {
-                id: row.bindingId,
-                facetKey: row.facetKey,
-                kind: row.kind,
-                bindingKey: row.bindingKey!,
-                displayName: row.displayName!,
-                connectionId: row.connectionId ?? null,
-                status: row.status!,
-                config: row.config!,
-                cursor: row.cursor!,
-                version: row.version!,
-                lastSuccessAt: row.lastSuccessAt ?? null,
-                lastErrorCode: row.lastErrorCode ?? null,
-                createdAt: row.createdAt!,
-                updatedAt: row.updatedAt!,
-              },
-              ownersByBindingId.get(row.bindingId) ?? [],
-              { capabilityId, instanceKey, facetKey: row.facetKey },
-            )
+          ? {
+              ...bindingSummary(
+                {
+                  id: row.bindingId,
+                  facetKey: row.facetKey,
+                  kind: row.kind,
+                  bindingKey: row.bindingKey!,
+                  displayName: row.displayName!,
+                  connectionId: row.connectionId ?? null,
+                  status: row.status!,
+                  config: row.config!,
+                  cursor: row.cursor!,
+                  version: row.version!,
+                  lastSuccessAt: row.lastSuccessAt ?? null,
+                  lastErrorCode: row.lastErrorCode ?? null,
+                  createdAt: row.createdAt!,
+                  updatedAt: row.updatedAt!,
+                },
+                ownersByBindingId.get(row.bindingId) ?? [],
+                { capabilityId, instanceKey, facetKey: row.facetKey },
+              ),
+              ...(removableBy ? { canRemove: removableBy(row.createdBySubjectId!) } : {}),
+            }
           : null,
       })),
     };
@@ -453,6 +465,11 @@ export async function removeIntegrationFacet(
     facetKey: string;
     expectedVersion: number;
     idempotencyKey: string;
+    /**
+     * A member's removal: only a facet this subject added. One an admin or
+     * another person added throws {@link IntegrationChangeRequiresAdminError}.
+     */
+    memberRemoval?: boolean;
   },
 ): Promise<IntegrationFacetRemovalResult> {
   const requestDigest = sha256(
@@ -479,6 +496,10 @@ export async function removeIntegrationFacet(
         remainingOwners: [],
       };
     }
+    if (input.memberRemoval && binding.createdBySubjectId !== input.subjectId)
+      throw new IntegrationChangeRequiresAdminError(
+        "Only an admin can remove a source or setting someone else added.",
+      );
     if (binding.version !== input.expectedVersion) {
       throw new IntegrationFacetBindingVersionConflictError(
         input.instanceKey,

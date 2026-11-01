@@ -9683,6 +9683,11 @@ export type IntegrationFacetBindingSummary = {
   updatedAt: string;
   directlyOwned: boolean;
   owners: CapabilityComponentOwner[];
+  /**
+   * Whether the caller may remove it: admins remove anything, a member only
+   * what they added. Older servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type IntegrationInstanceFacetsResponse = {
@@ -9934,6 +9939,11 @@ export type ApiIntegrationInstallationSummary = {
     auth: ApiIntegrationAuthPreview;
     enabledHere: boolean;
   };
+  /**
+   * Whether the caller may remove this instance: admins remove any, a member
+   * only one they added. Older servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type ListApiIntegrationsResponse = {
@@ -10063,6 +10073,11 @@ export type PluginInstallationSummary = {
   status: "active" | "needs_attention";
   installedAt: string;
   updatedAt: string;
+  /**
+   * Whether the caller may remove this plugin: admins remove any, a member
+   * only one they added. Older servers omit it.
+   */
+  canRemove?: boolean | undefined;
 };
 
 export type ListInstalledPluginsResponse = {
