@@ -1803,8 +1803,8 @@ jobs:
             --test-name-pattern '^a (graceful|killed) controller leaves the same live browser'
 
       - name: Run headless browserd end-to-end suite
-        # The suite took about 5.6 minutes in October 2026; 9 leaves room for
-        # new files without letting a hung test run on.
+        # The suite runs about 5.5 minutes on main; 9 keeps a stalled run
+        # bounded without failing batches that add a few e2e files.
         timeout-minutes: 9
         run: |
           set -euo pipefail

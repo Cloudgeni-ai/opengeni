@@ -1,5 +1,0 @@
----
-"@opengeni/browserd": patch
----
-
-In the person's own Chrome, a tab in front whose page does not answer, often because it opened a dialog (alert, confirm or prompt) while no agent was controlling it, no longer hangs every call for two minutes and then advises closing the tab. After the 10 second attach deadline the agent is told plainly that the page is busy or holds a dialog only the person can see, and that it can ask them to answer it or cancel it with `handle_dialog` dismiss. Nothing is switched or cancelled on its own. An explicit dismiss hides the tab for a moment behind a new blank tab (Chrome then closes such a dialog as Cancel), puts the tab back in front unless the person showed another tab meanwhile, and closes the blank tab. It reports the dialog cancelled only if the page answers right away afterwards; otherwise it says no dialog was found and the page is busy. Page commands in attached Chrome now time out after 30 seconds and attaching after 10 seconds, instead of waiting without a limit.

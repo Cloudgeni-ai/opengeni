@@ -2,7 +2,8 @@
 //! fake hosts that speak the host protocol over mutual TLS: they register,
 //! renew, answer requests as a host would (holding what they created or
 //! adopted, archiving on a hand-off, claiming the archive on an adopt), or
-//! as a test tells them to.
+//! as a test tells them to. The service keeps the archive's pointers (ADR
+//! 25), and fake hosts reach them over the host API, as hosts do.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -13,17 +14,21 @@ use std::time::{Duration, Instant};
 use compute_control::api::key_digest;
 use compute_control::authority::{Authority, Proven};
 use compute_control::leader::Scaling;
+use compute_control::pointers::Pointers;
 use compute_control::service::Settings;
 use compute_control::store::{MemoryStore, Store as _};
 use compute_control::tls::Tls;
 use compute_control::{Config, Running};
 use compute_fleet::{LeaseTerms, OwnerEpoch, Stamp};
 use compute_protocol::fleet::{
-    Answer, Answered, Boot, Capacity, Envelope, Held, HostInfo, METRICS_PATH, REGISTER_PATH,
+    Answer, Answered, Boot, Capacity, Envelope, Held, HostInfo, METRICS_PATH, POINTER_READ_PATH,
+    POINTER_WRITE_PATH, PointerFound, PointerRead, PointerWrite, PointerWritten, REGISTER_PATH,
     RENEW_PATH, ReadyClones, Register, Registered, Renew, Renewed, Verdict,
 };
 use compute_protocol::host::{ErrorCode, Id, ImageId, LevelName, Reply, Request};
+use compute_storage::pointer_store::{Kept, PointerStore, Version};
 use compute_storage::store::{Begun, ChunkStore};
+use futures::future::BoxFuture;
 use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -247,10 +252,46 @@ pub async fn given_up(fleet: &Fleet, host: &FakeHost) -> Instant {
 pub struct Fleet {
     pub pki: Pki,
     pub store: Arc<MemoryStore>,
+    /// The archive, its pointers read and written in the service's store
+    /// as the service does.
     pub archive: ChunkStore,
+    /// The archive's object store with nothing over it, as hosts of
+    /// earlier releases and the import see it.
+    pub objects: ChunkStore,
     pub running: Running<MemoryStore>,
     pub terms: LeaseTerms,
     http: reqwest::Client,
+}
+
+/// What a fleet starts over ([`Fleet::start_seeded`]): an archive, and
+/// hosts registered in its store before the service starts.
+#[derive(Default)]
+pub struct Seed {
+    pub objects: Option<ChunkStore>,
+    pub hosts: Vec<Register>,
+}
+
+/// A registration of host `name` with `capacity`, as a fake host sends.
+#[must_use]
+pub fn register_of(name: &str, capacity: Capacity) -> Register {
+    Register {
+        host: None,
+        attempt: 1,
+        info: HostInfo {
+            name: name.to_owned(),
+            address: "127.0.0.1:9".into(),
+            zone: "zone-a".into(),
+            profile: "nested".into(),
+            cpu_template: "none".into(),
+            memory_mib: 64 * 1024,
+            cpu_millis: 64_000,
+            disk_mib: 1 << 20,
+            offers: Vec::new(),
+            boot: None,
+        },
+        capacity,
+        held: Vec::new(),
+    }
 }
 
 impl Fleet {
@@ -281,11 +322,35 @@ impl Fleet {
         Self::start_full(None, None, sources, adjust).await
     }
 
+    /// A fleet over `seed`'s archive whose store holds `seed`'s hosts
+    /// registered before the service starts, as hosts of an earlier
+    /// release left them, with `settings` adjusted.
+    pub async fn start_seeded(seed: Seed, adjust: impl FnOnce(&mut Settings)) -> Self {
+        Self::start_seeded_full(None, None, BTreeMap::new(), adjust, seed).await
+    }
+
     async fn start_full(
         scaling: Option<Scaling>,
         host_metrics: Option<String>,
         image_sources: BTreeMap<String, String>,
         adjust: impl FnOnce(&mut Settings),
+    ) -> Self {
+        Self::start_seeded_full(
+            scaling,
+            host_metrics,
+            image_sources,
+            adjust,
+            Seed::default(),
+        )
+        .await
+    }
+
+    async fn start_seeded_full(
+        scaling: Option<Scaling>,
+        host_metrics: Option<String>,
+        image_sources: BTreeMap<String, String>,
+        adjust: impl FnOnce(&mut Settings),
+        seed: Seed,
     ) -> Self {
         let pki = Pki::new();
         let store = Arc::new(MemoryStore::new());
@@ -296,10 +361,18 @@ impl Fleet {
         ] {
             store.add_key(&key_digest(key), team).await.unwrap();
         }
-        let archive = ChunkStore::new(
-            Arc::new(object_store::memory::InMemory::new()),
-            object_store::path::Path::from("fleet"),
-        );
+        for host in &seed.hosts {
+            store.register(host).await.unwrap();
+        }
+        let objects = seed.objects.unwrap_or_else(|| {
+            ChunkStore::new(
+                Arc::new(object_store::memory::InMemory::new()),
+                object_store::path::Path::from("fleet"),
+            )
+        });
+        let archive = objects
+            .clone()
+            .with_pointers(Arc::new(Pointers::new(Arc::clone(&store))));
         let terms = terms();
         let mut settings = Settings {
             terms,
@@ -319,7 +392,7 @@ impl Fleet {
                 hosts: loopback,
                 tls: pki.service(),
                 identity: None,
-                archive: Some(archive.clone()),
+                archive: Some(objects.clone()),
                 settings,
                 operator: "operator".into(),
                 scaling,
@@ -336,6 +409,7 @@ impl Fleet {
             pki,
             store,
             archive,
+            objects,
             running,
             terms,
             http: reqwest::Client::new(),
@@ -401,6 +475,29 @@ impl Fleet {
     pub async fn delete(&self, path: &str) -> (u16, Value) {
         self.call(reqwest::Method::DELETE, path, Some(KEY), None)
             .await
+    }
+
+    /// Posts `body` to the host API's `path` with a certificate for host
+    /// `name`: the status and the body.
+    pub async fn post_as_host(
+        &self,
+        name: &str,
+        path: &str,
+        body: &impl serde::Serialize,
+    ) -> (u16, String) {
+        let http = reqwest::Client::builder()
+            .use_preconfigured_tls(self.pki.host_client(name))
+            .https_only(true)
+            .build()
+            .unwrap();
+        let response = http
+            .post(format!("https://{}{path}", self.running.hosts))
+            .json(body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        (status, response.text().await.unwrap())
     }
 
     /// Creates a sandbox of the default image and shape for the team, and
@@ -469,6 +566,8 @@ pub fn roomy() -> Capacity {
         ready: Vec::new(),
         awake: 0,
         sandboxes: 0,
+        pointers_in_service: true,
+        info: None,
     }
 }
 
@@ -521,7 +620,7 @@ struct HostInner {
     capacity: Mutex<Capacity>,
     /// Its host id and registration.
     id: AtomicU64,
-    epoch: AtomicU64,
+    epoch: Arc<AtomicU64>,
     /// The last renewal sent under the registration.
     seq: AtomicU64,
     /// Sandboxes it holds, by owner epoch.
@@ -550,6 +649,95 @@ struct HostInner {
     offers: Vec<String>,
     /// The boot of its machine it names when it registers.
     boot: Mutex<Boot>,
+}
+
+/// A fake host's pointers, kept by the service and reached over the host
+/// API under the registration the host holds, as a host's are (ADR 25).
+#[derive(Debug)]
+struct HostPointers {
+    http: reqwest::Client,
+    hosts_url: String,
+    /// The host epoch of the registration the host holds.
+    epoch: Arc<AtomicU64>,
+}
+
+impl HostPointers {
+    async fn post<B: serde::Serialize + Sync, A: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> compute_storage::Result<A> {
+        let response = self
+            .http
+            .post(format!("{}{path}", self.hosts_url))
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| compute_storage::Error::Transfer(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(compute_storage::Error::Transfer(format!(
+                "{status}: {text}"
+            )));
+        }
+        response
+            .json()
+            .await
+            .map_err(|error| compute_storage::Error::Transfer(error.to_string()))
+    }
+}
+
+impl PointerStore for HostPointers {
+    fn read<'a>(&'a self, name: &'a str) -> BoxFuture<'a, compute_storage::Result<Option<Kept>>> {
+        Box::pin(async move {
+            let read = PointerRead {
+                epoch: self.epoch.load(Ordering::SeqCst),
+                name: name.to_owned(),
+            };
+            let found: PointerFound = self.post(POINTER_READ_PATH, &read).await?;
+            Ok(found.kept.map(|kept| Kept {
+                owner: Stamp {
+                    epoch: OwnerEpoch(kept.owner_epoch),
+                    save: kept.owner_save,
+                },
+                pointer: kept.pointer.into(),
+                version: Version::Row(kept.version),
+            }))
+        })
+    }
+
+    fn write<'a>(
+        &'a self,
+        name: &'a str,
+        owner: Stamp,
+        pointer: bytes::Bytes,
+        on: Option<&'a Version>,
+    ) -> BoxFuture<'a, compute_storage::Result<Option<Version>>> {
+        Box::pin(async move {
+            let on = match on {
+                None => None,
+                Some(Version::Row(version)) => Some(*version),
+                Some(Version::Object { .. }) => {
+                    return Err(compute_storage::Error::Invalid("not a row's version"));
+                }
+            };
+            let write = PointerWrite {
+                epoch: self.epoch.load(Ordering::SeqCst),
+                name: name.to_owned(),
+                owner_epoch: owner.epoch.0,
+                owner_save: owner.save,
+                pointer: pointer.to_vec(),
+                on,
+            };
+            let written: PointerWritten = self.post(POINTER_WRITE_PATH, &write).await?;
+            Ok(written.version.map(Version::Row))
+        })
+    }
+
+    fn names(&self) -> BoxFuture<'_, compute_storage::Result<Vec<String>>> {
+        Box::pin(async { Err(compute_storage::Error::Unsupported("a host does not list")) })
+    }
 }
 
 /// A host that registers with the service and answers its requests.
@@ -601,18 +789,25 @@ impl FakeHost {
             .unwrap();
         let mut random = [0u8; 8];
         getrandom::fill(&mut random).unwrap();
+        let epoch = Arc::new(AtomicU64::new(0));
+        let hosts_url = format!("https://{}", fleet.running.hosts);
+        let pointers = HostPointers {
+            http: http.clone(),
+            hosts_url: hosts_url.clone(),
+            epoch: Arc::clone(&epoch),
+        };
         let inner = Arc::new(HostInner {
             name: name.to_owned(),
             address,
-            archive: fleet.archive.clone(),
-            hosts_url: format!("https://{}", fleet.running.hosts),
+            archive: fleet.objects.clone().with_pointers(Arc::new(pointers)),
+            hosts_url,
             http,
             capacity: Mutex::new(Capacity {
                 guest: guest.map(str::to_owned),
                 ..capacity
             }),
             id: AtomicU64::new(0),
-            epoch: AtomicU64::new(0),
+            epoch,
             seq: AtomicU64::new(0),
             held: Mutex::new(HashMap::new()),
             prepares: Mutex::new(HashMap::new()),
@@ -764,6 +959,17 @@ impl FakeHost {
         *self.inner.capacity.lock().unwrap() = capacity;
     }
 
+    /// Has its agent restart in place as what `change` makes of what it
+    /// registered as, keeping its registration, telling what it is now
+    /// with what it can take on from its next renewal, as an agent of
+    /// this release does.
+    pub fn restarts_in_place_as(&self, change: impl FnOnce(&mut HostInfo)) {
+        let mut info = described(&self.inner);
+        info.boot = None;
+        change(&mut info);
+        self.inner.capacity.lock().unwrap().info = Some(info);
+    }
+
     /// The requests it received.
     #[must_use]
     pub fn seen(&self) -> Vec<Seen> {
@@ -861,6 +1067,22 @@ async fn register(inner: &HostInner) -> Registered {
     send_register(inner, attempt).await
 }
 
+/// What a fake host registers as.
+fn described(inner: &HostInner) -> HostInfo {
+    HostInfo {
+        name: inner.name.clone(),
+        address: inner.address.to_string(),
+        zone: "zone-a".into(),
+        profile: "nested".into(),
+        cpu_template: "none".into(),
+        memory_mib: 64 * 1024,
+        cpu_millis: 64_000,
+        disk_mib: 1 << 20,
+        offers: inner.offers.clone(),
+        boot: Some(inner.boot.lock().unwrap().clone()),
+    }
+}
+
 async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
     let held: Vec<Held> = inner
         .held
@@ -873,18 +1095,7 @@ async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
     let body = Register {
         host: (id != 0).then_some(id),
         attempt,
-        info: HostInfo {
-            name: inner.name.clone(),
-            address: inner.address.to_string(),
-            zone: "zone-a".into(),
-            profile: "nested".into(),
-            cpu_template: "none".into(),
-            memory_mib: 64 * 1024,
-            cpu_millis: 64_000,
-            disk_mib: 1 << 20,
-            offers: inner.offers.clone(),
-            boot: Some(inner.boot.lock().unwrap().clone()),
-        },
+        info: described(inner),
         capacity: inner.capacity.lock().unwrap().clone(),
         held,
     };

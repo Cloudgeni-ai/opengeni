@@ -385,6 +385,12 @@ function decodeApiErrorBody(body: string): {
   }
 }
 
+const PUBLIC_BILLING_ACTIONS: ReadonlySet<string> = new Set([
+  "upgrade",
+  "add_credits",
+  "upgrade_plan",
+]);
+
 function boundedApiDetails(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const entries = Object.entries(value as Record<string, unknown>).slice(0, 16);
@@ -400,11 +406,12 @@ function boundedApiDetails(value: unknown): Record<string, unknown> | undefined 
       key === "action" &&
       typeof entry === "object" &&
       !Array.isArray(entry) &&
-      (entry as Record<string, unknown>).type === "upgrade" &&
+      PUBLIC_BILLING_ACTIONS.has(String((entry as Record<string, unknown>).type)) &&
       (entry as Record<string, unknown>).href === "/billing"
     ) {
-      // Preserve the bounded public seat-limit action, not arbitrary nested data.
-      details.action = { type: "upgrade", href: "/billing" };
+      // Preserve the bounded public billing actions (seat limit, Add credits,
+      // Upgrade to Pro), not arbitrary nested data.
+      details.action = { type: String((entry as Record<string, unknown>).type), href: "/billing" };
     }
   }
   return Object.keys(details).length > 0 ? details : undefined;
@@ -485,7 +492,21 @@ export function formatErrorMessage(
     } else if (error.code === "allowance_exhausted") {
       message = "Usage limit reached. Wait for the reset or ask an administrator for more usage.";
     } else if (error.code === "seat_limit_reached") {
-      message = "Your organization has reached its seat limit. Upgrade the plan to add people.";
+      // The refusal names the one plan that adds the seat when the server knows it.
+      const label = error.details?.upgradePlanLabel;
+      const named = typeof label === "string" && label.trim() ? label.trim() : null;
+      message =
+        error.details?.askOwner === true
+          ? !named
+            ? "This organization is full. Ask an organization owner to upgrade."
+            : error.details?.upgradePlan === "enterprise"
+              ? `Ask an organization owner about ${named}.`
+              : `Ask an organization owner to upgrade to ${named}.`
+          : !named
+            ? "Your organization has reached its seat limit. Upgrade the plan to add people."
+            : error.details?.upgradePlan === "enterprise"
+              ? `Talk to us about ${named} to add more people.`
+              : `Upgrade to ${named} to add more people.`;
     } else if (error instanceof OpenGeniSessionListCursorError) {
       message = "The conversation list changed. Refresh and try again.";
     } else if (error.status === 401) {
@@ -494,6 +515,14 @@ export function formatErrorMessage(
       message = "You don’t have permission to do that.";
     } else if (error.status === 404) {
       message = "The requested item is unavailable.";
+    } else if (error.details?.code === "api_credits_required") {
+      message = "API usage uses credits, not your plan credit. Add credits to continue.";
+    } else if (error.details?.code === "byok_paid_credit_required") {
+      message =
+        error.details?.action &&
+        (error.details.action as { type?: unknown }).type === "upgrade_plan"
+          ? "Upgrade to Pro to use your own key."
+          : "Add credits to use your own key.";
     } else if (error.status === 402 || error.code === "payment_required") {
       message = "There are not enough credits to continue.";
     } else if (error.status === 429 || error.code === "rate_limited") {

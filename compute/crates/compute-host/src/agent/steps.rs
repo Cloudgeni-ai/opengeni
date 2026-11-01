@@ -1,29 +1,28 @@
-//! Carrying out the core's decisions: steps, VM processes and teardown.
-//! Deleting sandboxes is in [`super::remove`].
+//! Carrying out the core's decisions: steps and their VM processes. VM
+//! processes that end, and their teardown, are in [`super::lost`];
+//! deleting sandboxes is in [`super::remove`].
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use compute_core::{
     Action, BalloonRequest, DiskSpace, Durability, Failure, Input, Level, Notice, OpId, Outcome,
-    ShrinkRequest, State, Step,
+    ShrinkCause, ShrinkRequest, State, Step,
 };
 use compute_engine::{CancellationToken, Engine, VmSpec};
-use tokio::time::{Instant, sleep};
+use tokio::time::Instant;
 
 use crate::layout::{Paths, vm_spec};
 use crate::observe::notes::Notes;
-use crate::observe::{Alarm, Cause, ShrinkOutcome, alarm_event};
+use crate::observe::{Alarm, ShrinkOutcome, alarm_event};
 use crate::pool::{Loaning, Template};
 use crate::protocol::{Id, StepStats};
 use crate::restore_notice::{Commands, REACH_LIMIT, Shrunk, ask_commands, ask_shrink};
 use crate::state::{Disk, Record};
-use crate::step::{After, Job, Live, LiveMemory, Meter, Reading, Report};
+use crate::step::{After, Job, Meter, Reading, Report};
 use crate::store::Store;
 
-use super::observe::Why;
-use super::{Event, HostAgent, HostError, Leftover, Reply, Running, Slot, TEARDOWN_RETRY, Woke};
+use super::{End, Event, HostAgent, HostError, Leftover, Reply, Running, Slot, Woke};
 
 /// How long a guest that took the connection may take to say whether
 /// commands still run before its sandbox sleeps anyway. It has as long to
@@ -36,6 +35,7 @@ const ASK_LIMIT: Duration = Duration::from_secs(1);
 const SHRINK_LIMIT: Duration = Duration::from_secs(15);
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
+    #[expect(clippy::too_many_lines, reason = "one arm for each event")]
     pub(super) fn on_event(&mut self, event: Event<E::Vm>) {
         match event {
             Event::Prepared {
@@ -81,7 +81,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     self.input(Input::Busy { sandbox: id.0 });
                 }
             }
-            Event::Exited { id, incarnation } => self.exited(id, incarnation),
+            Event::Exited(exit) => self.on_exit(&exit),
             Event::Checked(done) => self.checked(done),
             Event::Asked {
                 id,
@@ -136,8 +136,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Event::Shrunk {
                 id,
                 request,
+                cause,
                 answer,
-            } => self.shrunk(id, request, answer),
+            } => self.shrunk(id, request, cause, answer),
         }
     }
 
@@ -329,8 +330,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 free,
                 keep,
                 request,
-            } => self.shrink(Id(sandbox), free, keep, request),
-            Action::EndForMemory { sandbox } => self.end_for_memory(Id(sandbox)),
+                cause,
+            } => self.shrink(Id(sandbox), free, keep, request, cause),
+            Action::EndForMemory { sandbox, cause } => self.end_for_memory(Id(sandbox), cause),
             Action::Bound { sandbox, low, high } => {
                 if let Some(live) = self.slots.get(&sandbox).and_then(|slot| slot.vm.as_ref())
                     && let Err(error) = self.engine.bound_memory(&live.vm, low, high)
@@ -343,8 +345,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Asks the guest of `id`'s running VM to free `free` bytes of memory,
     /// keeping `keep` in use, in the background (ADR 24). Its answer, or
-    /// that it gave none, names `request`.
-    fn shrink(&self, id: Id, free: u64, keep: u64, request: ShrinkRequest) {
+    /// that it gave none, names `request`; `cause` is why it is asked.
+    fn shrink(&self, id: Id, free: u64, keep: u64, request: ShrinkRequest, cause: ShrinkCause) {
         let events = self.events_tx.clone();
         let (Some(port), Some(slot)) = (
             self.restore_notice_port,
@@ -354,6 +356,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = events.send(Event::Shrunk {
                 id,
                 request,
+                cause,
                 answer: None,
             });
             return;
@@ -363,7 +366,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .and_then(|memory| memory.outgrowth)
             .map_or(SHRINK_LIMIT, |rule| rule.answer);
         let vsock = slot.spec.vsock_path();
-        tracing::warn!(%id, free_mib = free >> 20, keep_mib = keep >> 20, "host short of memory: asking a guest to shrink");
+        match cause {
+            ShrinkCause::Short {
+                shortfall,
+                available,
+            } => tracing::warn!(
+                %id,
+                free_mib = free >> 20,
+                keep_mib = keep >> 20,
+                shortfall_mib = shortfall >> 20,
+                available_mib = available >> 20,
+                "host short of memory with every sandbox held to its request: asking a guest to shrink"
+            ),
+            ShrinkCause::OverBound { over, available } => tracing::warn!(
+                %id,
+                free_mib = free >> 20,
+                keep_mib = keep >> 20,
+                over_mib = over >> 20,
+                available_mib = available >> 20,
+                "the kernel cannot hold a sandbox to its memory bound: asking a guest to shrink"
+            ),
+        }
         tokio::spawn(async move {
             let answer = match ask_shrink(&vsock, port, free, keep, limit).await {
                 Ok(answer) => Some(answer),
@@ -375,13 +398,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = events.send(Event::Shrunk {
                 id,
                 request,
+                cause,
                 answer,
             });
         });
     }
 
     /// Takes in a guest's answer to the shrink of `request`.
-    fn shrunk(&mut self, id: Id, request: ShrinkRequest, answer: Option<Shrunk>) {
+    fn shrunk(
+        &mut self,
+        id: Id,
+        request: ShrinkRequest,
+        cause: ShrinkCause,
+        answer: Option<Shrunk>,
+    ) {
         let metrics = self.observer.metrics();
         let Some(answer) = answer else {
             metrics.shrink(ShrinkOutcome::Failed, 0, 0);
@@ -404,11 +434,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             ended = answer.ended,
             %names,
             spent = answer.spent,
+            cause = cause_name(cause),
             "a guest shrank for host memory"
         );
         self.observer.emit(
             crate::observe::Event::new("compute.memory.shrink", crate::observe::Severity::Warn)
                 .with("compute.sandbox.id", id.to_string())
+                .with("compute.memory.cause", cause_name(cause))
                 .with("compute.memory.freed", answer.freed)
                 .with("compute.processes.ended", u64::from(answer.ended))
                 .with("compute.processes.names", names)
@@ -422,10 +454,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         });
     }
 
-    /// Ends `id`'s running VM for host memory (ADR 24): the host is short
-    /// with every running sandbox held to its request, and its guest could
-    /// not be shrunk. It is restored from its last copy as any lost VM is.
-    fn end_for_memory(&mut self, id: Id) {
+    /// Ends `id`'s running VM for host memory (ADR 24): its guest could not
+    /// be shrunk, and the host is short with every running sandbox held to
+    /// its request, or the kernel cannot hold it to its bound (`cause`). It
+    /// is restored from its last copy as any lost VM is.
+    fn end_for_memory(&mut self, id: Id, cause: ShrinkCause) {
         let Some(incarnation) = self
             .slots
             .get(&id.0)
@@ -435,13 +468,34 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // A step holds it, or it is gone: the core asks again.
             return;
         };
-        tracing::error!(%id, "host out of memory with every sandbox at its request: ending a VM");
-        self.alarm(
-            id,
-            Alarm::EndedForMemory,
-            "VM ended for host memory: its guest could not be shrunk",
-        );
-        self.lost_vm(id, incarnation);
+        let why = match cause {
+            ShrinkCause::Short {
+                shortfall,
+                available,
+            } => {
+                tracing::error!(
+                    %id,
+                    shortfall_mib = shortfall >> 20,
+                    available_mib = available >> 20,
+                    "host out of memory with every sandbox at its request: ending a VM"
+                );
+                "VM ended for host memory: the host was short with every sandbox at its request, \
+                 and its guest could not be shrunk"
+            }
+            ShrinkCause::OverBound { over, available } => {
+                tracing::error!(
+                    %id,
+                    over_mib = over >> 20,
+                    available_mib = available >> 20,
+                    "the kernel cannot hold a sandbox to its memory bound and its guest could not \
+                     be shrunk: ending a VM"
+                );
+                "VM ended for host memory: the kernel could not hold it to its memory bound, and \
+                 its guest could not be shrunk"
+            }
+        };
+        self.alarm(id, Alarm::EndedForMemory, why);
+        self.lost_vm(id, incarnation, End::ForMemory);
     }
 
     /// Asks the guest of `id`'s running VM to give `bytes` back through its
@@ -688,10 +742,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         paths: Paths,
         cancel: CancellationToken,
     ) -> Job<E, S> {
-        let last_activity = self
-            .core
-            .sandbox(record.id.0)
+        let view = self.core.sandbox(record.id.0);
+        let last_activity = view
+            .as_ref()
             .map_or_else(|| self.now(), |view| view.last_activity);
+        let failures = view.map_or(0, |view| view.failures);
         let disk_image = self.image_path(record.config.image);
         Job {
             engine: Arc::clone(&self.engine),
@@ -715,6 +770,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             unthrottle: None,
             meter: None,
             last_used_ms: self.unix_ms(last_activity),
+            failures,
         }
     }
 
@@ -733,6 +789,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             After::NoVm => None,
         };
         let mut reap = None;
+        let mut lost = None;
         let mut destroy = false;
         let mut finished_step = None;
         if let Some(slot) = self.slots.get_mut(&id.0) {
@@ -753,7 +810,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // A process that already ended on its own only needs its
                 // resources released. One that lost its memory was ended by
                 // the step before it reported.
-                Some(live) if slot.dead == Some(live.incarnation) => {
+                Some(live) if slot.dead.is_some_and(|(dead, _)| dead == live.incarnation) => {
+                    lost = slot.dead.map(|(_, end)| end);
                     slot.incarnation = None;
                     slot.dead = None;
                     reap = Some(live);
@@ -784,7 +842,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             reap = fresh;
         }
         if let Some(live) = reap {
-            self.reap(id, live);
+            self.reap(id, live, lost);
         }
         // Decided together, so the activity counts before the core picks
         // the next step.
@@ -813,139 +871,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.settle(id);
             self.continue_hand_off(id);
         }
-    }
-
-    /// Takes charge of a VM process, started by a step or found still
-    /// running, and watches for it dying on its own.
-    pub(super) fn own(&mut self, id: Id, vm: E::Vm, memory: LiveMemory) -> Live<E::Vm> {
-        let incarnation = self.next_incarnation;
-        self.next_incarnation += 1;
-        let stopping = Arc::new(AtomicBool::new(false));
-        let exited = self.engine.exited(&vm);
-        let events = self.events_tx.clone();
-        let deliberate = Arc::clone(&stopping);
-        let memory_lost = memory.failed();
-        tokio::spawn(async move {
-            let lost = memory_lost;
-            tokio::select! {
-                () = exited => {}
-                // Its memory can no longer be served: the next page fault
-                // would wait forever, so it counts as dead.
-                () = lost => {}
-            }
-            if !deliberate.load(Ordering::Acquire) {
-                let _ = events.send(Event::Exited { id, incarnation });
-            }
-        });
-        Live {
-            vm,
-            incarnation,
-            stopping,
-            memory,
-        }
-    }
-
-    /// Ends a dead VM process and releases what it held, in the
-    /// background. Nothing new starts for the sandbox until that is done, so
-    /// the teardown never touches a newer VM's jail.
-    pub(super) fn reap(&mut self, id: Id, live: Live<E::Vm>) {
-        live.stopping.store(true, Ordering::Release);
-        *self.tearing_down.entry(id.0).or_default() += 1;
-        let spec = match self.slots.get(&id.0) {
-            Some(slot) => Some(VmSpec::clone(&slot.spec)),
-            None => self
-                .records
-                .get(id)
-                .map(|record| vm_spec(&record, &Paths::of(&self.root, &record), &self.images)),
-        };
-        let engine = Arc::clone(&self.engine);
-        // Keeps the state root locked until the teardown ends, so a
-        // successor agent cannot start beside it.
-        let records = Arc::clone(&self.records);
-        let shutdown = self.shutdown.clone();
-        let events = self.events_tx.clone();
-        self.teardowns.spawn(async move {
-            let _records = records;
-            live.memory.ending();
-            let mut result = engine.stop(live.vm).await;
-            let mut delay = Duration::from_millis(100);
-            while let Err(error) = &result {
-                tracing::error!(%id, %error, "could not tear down a dead VM; retrying");
-                let Some(spec) = &spec else {
-                    break;
-                };
-                tokio::select! {
-                    // The next agent finishes it when it adopts or cleans up.
-                    () = shutdown.cancelled() => break,
-                    () = sleep(delay) => {}
-                }
-                delay = (delay * 2).min(TEARDOWN_RETRY);
-                result = engine.clean_up(spec).await;
-            }
-            // Only once the process is gone: its pager may still serve it.
-            // A wake from the same image starts only after this teardown,
-            // so the old hydration never writes beside a new one.
-            if result.is_ok() {
-                live.memory.close().await;
-            }
-            let _ = events.send(Event::TornDown { id });
-        });
-    }
-
-    /// One of `id`'s dead VMs is gone; once none is left, whatever waited
-    /// for that proceeds.
-    pub(super) fn torn_down(&mut self, id: Id) {
-        if let Some(count) = self.tearing_down.get_mut(&id.0) {
-            *count = count.saturating_sub(1);
-            if *count > 0 {
-                return;
-            }
-            self.tearing_down.remove(&id.0);
-        }
-        let Some(slot) = self.slots.get_mut(&id.0) else {
-            return;
-        };
-        if let Some(step) = slot.deferred.take() {
-            if let Some(op) = slot.op.as_ref().map(|running| running.op) {
-                self.spawn_job(id, op, step);
-            }
-        } else if slot.destroy && slot.op.is_none() {
-            self.destroy_now(id);
-        }
-    }
-
-    pub(super) fn exited(&mut self, id: Id, incarnation: u64) {
-        if self.ready_exited(id, incarnation) {
-            return;
-        }
-        // A claimed ready sandbox's VM was watched under its host name.
-        let id = self.hosts.get(&id.0).map_or(id, |public| Id(*public));
-        let Some(slot) = self.slots.get_mut(&id.0) else {
-            return;
-        };
-        if slot.incarnation != Some(incarnation) {
-            return;
-        }
-        tracing::warn!(%id, "VM process ended on its own; running programs are lost");
-        self.lost_vm(id, incarnation);
-    }
-
-    /// Ends VM process `incarnation` of `id`, which is lost (it ended on its
-    /// own, or its guest stopped), and tells the core.
-    pub(super) fn lost_vm(&mut self, id: Id, incarnation: u64) {
-        let Some(slot) = self.slots.get_mut(&id.0) else {
-            return;
-        };
-        // Whatever starts it again puts things right.
-        slot.asked = Some(Why::plain(Cause::Recovery));
-        if let Some(live) = slot.vm.take() {
-            slot.incarnation = None;
-            self.reap(id, live);
-        } else {
-            // A step holds it and will hand it back.
-            slot.dead = Some(incarnation);
-        }
-        self.input(Input::Lost { sandbox: id.0 });
     }
 
     pub(super) fn notify(&mut self, id: Id, notice: Notice) {
@@ -1044,7 +969,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Raises `alarm` for sandbox `id`, with what happened.
-    fn alarm(&self, id: Id, alarm: Alarm, what: &str) {
+    pub(super) fn alarm(&self, id: Id, alarm: Alarm, what: &str) {
         let event = alarm_event(what).with("compute.sandbox.id", id.to_string());
         self.observer.alarm(alarm, event);
     }
@@ -1088,5 +1013,13 @@ fn count_step<V>(
                     .unwrap_or_else(|| "no error recorded".to_owned()),
             ));
         }
+    }
+}
+
+/// How a shrink's cause is named in events and logs.
+fn cause_name(cause: ShrinkCause) -> &'static str {
+    match cause {
+        ShrinkCause::Short { .. } => "short",
+        ShrinkCause::OverBound { .. } => "over_bound",
     }
 }

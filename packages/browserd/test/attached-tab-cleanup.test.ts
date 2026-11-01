@@ -187,6 +187,7 @@ class FakeChromeProfile {
         cssContentSize: { x: 0, y: 0, width: 800, height: 600 },
       };
     if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+    if (method === "DOMSnapshot.captureSnapshot") return { strings: [], documents: [] };
     if (method === "Runtime.evaluate") {
       const expression = String((params as Record<string, unknown> | undefined)?.expression);
       return {

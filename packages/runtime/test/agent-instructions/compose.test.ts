@@ -111,7 +111,11 @@ describe("modular composer: module selection (AC12)", () => {
   });
 
   test("all + every resource includes every module", () => {
-    const result = compose(allAgentCapabilities(), { ...ALL_RESOURCES, secretReferences: true });
+    const result = compose(allAgentCapabilities(), {
+      ...ALL_RESOURCES,
+      secretReferences: true,
+      unattended: true,
+    });
     expect(moduleIds(result)).toEqual(
       AGENT_PROMPT_MODULE_IDS.filter(
         (id) => id !== "renderer_markdown" && !RETIRED_MODULE_IDS.includes(id),

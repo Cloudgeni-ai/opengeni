@@ -5031,7 +5031,10 @@ hides its search evidence behind the stored `ws_` ID even when results are inlin
 When native search is attached, the Azure request policy requests sources and,
 with enabled reasoning, result snippets. `hosted-search-evidence.ts` exposes only
 actually returned URLs/titles/snippets as one bounded, explicitly untrusted
-assistant historical-fact message before model and portable-compaction accounting.
+search record before model and portable-compaction accounting: a user-role
+runtime record for sessions in the `runtime` form, the original assistant-role
+message for older sessions until that changes no sent text (see
+[search record forms](web-search.md#hosted-evidence-across-tool-calls)).
 Canonical hosted records remain unchanged. Missing legacy includes cannot be
 reconstructed; sources alone cannot supply page facts, and native citations are
 not guaranteed. See [hosted evidence across tool calls](web-search.md#hosted-evidence-across-tool-calls).
@@ -5126,6 +5129,19 @@ operation's result. `startup_phase_delivery` measures that batch delivery, and
 `run_git_credential_mint` measures the full prefetched mint, distinct from the
 remaining wait in the visible `credential_mint` row. Shared rig claim/join time
 remains covered by the existing shared-preparation metric.
+
+These startup checkpoints and receipts are progress only: nothing reads them
+back before the first model request, so startup does not wait for their
+delivery. Each attempt writes its events through one ordered lane. A checkpoint
+or receipt starts its append at once, after every append the attempt already
+issued, and the preparation continues; every awaited append (the
+`agent.model.request` started audit among them) and the turn settlement start
+only after the checkpoints issued before them. The event log therefore keeps
+the order the work produced, and the audit still commits before the request
+leaves the worker. A checkpoint that cannot be delivered does not fail the
+turn; a fenced attempt is still refused by its next awaited append. Activity
+finalization waits for any checkpoint still in flight. `startup_phase_delivery`
+measures only the append itself, not time spent queued behind earlier appends.
 
 The managed client download is gzip-compressed under a `.json.gz` object key.
 Its identity remains the digest of the original release JSON, not the compressed

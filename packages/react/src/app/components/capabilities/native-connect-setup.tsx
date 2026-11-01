@@ -30,6 +30,8 @@ export type NativeConnectRequest = {
   returnUrl: string;
   idempotencyKey: string;
   reconnectAccountId?: string | undefined;
+  /** Additional provider access this reconnect asks for (incremental consent). */
+  requestedScopes?: string[] | undefined;
   installationTarget?: ConnectInstallationTarget | undefined;
   displayName?: string | undefined;
   description?: string | undefined;
@@ -44,8 +46,17 @@ export function nativeConnectApiInput(request: NativeConnectRequest) {
     returnUrl: request.returnUrl,
     idempotencyKey: request.idempotencyKey,
     ...(request.reconnectAccountId ? { reconnectAccountId: request.reconnectAccountId } : {}),
+    ...(request.reconnectAccountId && request.requestedScopes?.length
+      ? { requestedScopes: [...request.requestedScopes] }
+      : {}),
     ...(request.installationTarget ? { installationTarget: request.installationTarget } : {}),
   };
+}
+
+function sameScopes(left: readonly string[] | undefined, right: readonly string[] | undefined) {
+  const a = [...new Set(left ?? [])].sort();
+  const b = [...new Set(right ?? [])].sort();
+  return a.length === b.length && a.every((scope, index) => scope === b[index]);
 }
 
 /** Native presentation only. Durable setup and provider callbacks are shared
@@ -117,7 +128,9 @@ export function NativeConnectSetup({
             attempt.providerId === request.providerId &&
             attempt.ownership === request.ownership &&
             attempt.installationTarget?.instanceKey === request.installationTarget?.instanceKey &&
-            (!request.reconnectAccountId || attempt.account?.id === request.reconnectAccountId),
+            (!request.reconnectAccountId || attempt.account?.id === request.reconnectAccountId) &&
+            // A pending reconnect resumes only if it asks for the same access.
+            sameScopes(attempt.requestedScopes, request.requestedScopes),
         );
         if (matches.length === 1) {
           setResumed(true);
@@ -213,7 +226,7 @@ export function NativeConnectSetup({
           {failed && (
             <div
               role="alert"
-              className="flex flex-wrap items-center justify-between gap-3 text-status-error"
+              className="flex flex-wrap items-center justify-between gap-3 text-danger"
             >
               Could not start setup.{" "}
               <Button variant="outline" onClick={() => setRetry((value) => value + 1)}>

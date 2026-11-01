@@ -127,6 +127,11 @@ config:
   OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "false"
   # See docs/deployment.md.
   OPENGENI_BILLING_MODE: disabled
+  # OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING (default "true", unset here): with
+  # credit billing active, hosted web search and OpenAI hosted image generation
+  # cost credit on turns whose model Opengeni pays for. Set "false" to restore
+  # free hosted search and images, for example without the Gateway image
+  # credential. See docs/web-search.md.
   # The offer and both new resource charges require separate operator activation.
   OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED: "false"
   OPENGENI_SANDBOX_WARM_BILLING_MODE: usage_only
@@ -1441,6 +1446,11 @@ computeControl:
     schema: compute
     # Defaults: the chart's Postgres, its database, and sslmode disable.
     # host is required when the chart runs no Postgres.
+    # sslmode is disable, prefer or require. With require the service and
+    # its sweep connect over TLS and check the database's certificate
+    # against the image's system authorities; for a private authority,
+    # mount it (extraVolumes, extraVolumeMounts) and name it in extraEnv as
+    # COMPUTE_CONTROL_DATABASE_CA, which both read.
     host: ""
     port: 5432
     name: ""
@@ -1616,9 +1626,9 @@ computeControl:
     nodePort: null
     annotations: {}
     loadBalancerSourceRanges: []
-  # The store's daily sweep (`compute-host sweep --delete`, ADR 17), from the
-  # same image, with the same identity. Deleting sweeps are for Google Cloud
-  # Storage archives only: turn it off for az:// and s3://.
+  # The store's daily sweep (`compute-control sweep --delete`, ADR 17 and
+  # 25), from the same image, with the same identity and database. It
+  # deletes on any archive: gs://, az:// and s3:// alike.
   sweep:
     enabled: true
     schedule: "17 3 * * *"

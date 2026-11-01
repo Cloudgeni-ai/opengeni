@@ -55,7 +55,8 @@ const PTY_COMMAND_BUFFER: usize = 32;
 /// replayable bytes; on a timeout the op returns a typed error rather than minting a
 /// dead URL (or hanging forever). Generous enough for a cold Xvfb/X11 to settle and
 /// a login shell to print a prompt, tight enough that a wedged pump fails the mint
-/// fast.
+/// fast. A browser frame pump is ready once browserd has opened its subscription,
+/// since a busy page sends its first frame only once it answers.
 const PUMP_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The logical port a PTY (terminal) stream maps to. Mirrors the in-box ttyd port
@@ -394,10 +395,10 @@ impl StreamRegistry for RelayHub {
             }
             release_browser_port(&browser_ports, port);
         });
-        if let Err(error) = await_pump_ready(ready_rx, "browser").await {
-            release_browser_port(&self.browser_ports, port);
-            return Err(error);
-        }
+        // Ready once browserd has opened the subscription; a page that is
+        // busy sends its first frame later. When this stops waiting, the pump
+        // ends the subscription, closes the channel and frees its port.
+        await_pump_ready(ready_rx, "browser").await?;
         Ok(descriptor)
     }
 
@@ -454,10 +455,9 @@ impl StreamRegistry for RelayHub {
             }
             release_browser_port(&browser_ports, port);
         });
-        if let Err(error) = await_pump_ready(ready_rx, "computer").await {
-            release_browser_port(&self.browser_ports, port);
-            return Err(error);
-        }
+        // When this stops waiting, the pump ends the subscription, closes the
+        // channel and frees its port.
+        await_pump_ready(ready_rx, "computer").await?;
         Ok(descriptor)
     }
 

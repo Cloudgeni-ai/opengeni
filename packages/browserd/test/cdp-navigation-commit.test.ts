@@ -173,6 +173,9 @@ function navigationFixture() {
           ],
         };
         break;
+      case "DOMSnapshot.captureSnapshot":
+        result = { strings: [], documents: [] };
+        break;
       case "Page.getLayoutMetrics":
         result = {
           cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 3, clientHeight: 2 },

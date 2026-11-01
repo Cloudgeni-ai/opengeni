@@ -13,6 +13,7 @@ import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-p
 import { registerClaudeSubscriptionOAuthRoutes } from "./routes/claude-subscription-oauth";
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
+import { registerAgentCallRoutes } from "./routes/agent-calls";
 import { registerInboxRoutes } from "./routes/inbox";
 import { registerWorkspaceIntegrationRoutes } from "./routes/workspace-integrations";
 import { registerOrganizationIntegrationRoutes } from "./routes/organization-integrations";
@@ -127,6 +128,8 @@ import {
   sessionStartedByPerson,
   rlsContextForWorkspace,
   withSubscriptionAccountAdministrators,
+  ambientBillingOrigin,
+  withBillingOriginOverride,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
@@ -187,7 +190,11 @@ import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
   eventTriggersEnabled,
   PersonalWorkspacesOffError,
+  requestBillingOrigin,
   sessionUsageLimitsProducerEnabled,
+  stampRequestBillingOrigin,
+  configureBillingLegacyAccounts,
+  fundedBillingOrigin,
 } from "@opengeni/core";
 import {
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -229,6 +236,7 @@ import {
   managedAuthNewSignupsPausedResponse,
   managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
+  findManagedAuthOAuthState,
 } from "./auth/managed-auth";
 import {
   adoptManagedAuthSession,
@@ -530,6 +538,8 @@ export function createAppComposition(deps: AppDependencies): {
   // Pause) run inside API-originated db commands; install the boot-validated
   // rollout flag once for this process.
   configureChildLifecycleNotices({ enabled: deps.settings.childLifecycleNoticesEnabled });
+  // Internal accounts on the billing terms from before the app/API split.
+  configureBillingLegacyAccounts(deps.settings.billingLegacyAccountIds);
   // Sessions created by this process freeze their code_search decision from
   // the boot-parsed deployment policy.
   configureCodeSearchDeploymentPolicy(codeSearchDeploymentPolicy(deps.settings));
@@ -783,6 +793,18 @@ export function createAppComposition(deps: AppDependencies): {
       /* Preserve the original error response if the logger fails. */
     }
   };
+
+  // A trusted in-process dispatcher (a published Site, an organization
+  // action) fixed who pays for this exact request; read it before any
+  // middleware rebuilds the Request.
+  app.use("*", async (c, next) => {
+    const billingOrigin = requestBillingOrigin(c.req.raw);
+    if (billingOrigin) {
+      await withBillingOriginOverride(billingOrigin, next);
+      return;
+    }
+    await next();
+  });
 
   app.use("*", async (c, next) => {
     const correlationId =
@@ -1237,9 +1259,7 @@ export function createAppComposition(deps: AppDependencies): {
       let signupChallengeVerified = false;
       if (deps.settings.signupChallengeEnabled && oauthCallbackProvider) {
         const state = new URL(c.req.url).searchParams.get("state");
-        const stored = state
-          ? await (await managedAuth.$context).internalAdapter.findVerificationValue(state)
-          : null;
+        const stored = state ? await findManagedAuthOAuthState(managedAuth, state) : null;
         if (stored && new Date(stored.expiresAt).getTime() > Date.now()) {
           signupChallengeVerified = oauthSignupChallengeVerified(
             stored.value,
@@ -1866,7 +1886,17 @@ export function createAppComposition(deps: AppDependencies): {
       ...(auditProvenance ? { auditProvenance } : {}),
       origin: new URL(c.req.url).origin,
       publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
-      dispatch: async (request) => await app.fetch(request, c.env),
+      // Sign-in, personal and organization keys over MCP are API use.
+      dispatch: async (request) => {
+        stampRequestBillingOrigin(
+          request,
+          fundedBillingOrigin(
+            caller.kind === "person" ? caller.accountId : organizationKeyAccountId,
+            "api",
+          ),
+        );
+        return await app.fetch(request, c.env);
+      },
       signal: c.req.raw.signal,
     });
     try {
@@ -2095,8 +2125,12 @@ export function createAppComposition(deps: AppDependencies): {
             ? {
                 access: {
                   origin: new URL(c.req.url).origin,
-                  dispatch: (request: Request) =>
-                    outsideAgentContext(async () => await app.fetch(request, c.env)),
+                  dispatch: (request: Request) => {
+                    // The agent acts as its person but keeps its chat's origin.
+                    const billingOrigin = ambientBillingOrigin();
+                    if (billingOrigin) stampRequestBillingOrigin(request, billingOrigin);
+                    return outsideAgentContext(async () => await app.fetch(request, c.env));
+                  },
                   signal: c.req.raw.signal,
                 },
                 startedByPerson,
@@ -2518,6 +2552,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
+  registerAgentCallRoutes(app, routeDeps);
   registerWorkspaceIntegrationRoutes(app, routeDeps);
   registerOrganizationIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);

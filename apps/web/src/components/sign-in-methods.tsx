@@ -1,6 +1,8 @@
 import { CircleAlertIcon, KeyRoundIcon } from "lucide-react";
 import { useRef, useState, type ReactNode, type Ref } from "react";
 import { Button } from "@opengeni/react/ui/button";
+import { cn } from "@opengeni/react/app/lib/utils";
+import { useWindowBarTitle } from "@opengeni/react/ui/window-bar-title";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
 import { Notice } from "@opengeni/react/ui/notice";
@@ -92,12 +94,17 @@ export function providerLabel(provider: ManagedSocialProvider): string {
  * no header) because the title is the focus fallback after a dialog closes.
  */
 export function SecurityPageHeader({ headingRef }: { headingRef?: Ref<HTMLHeadingElement> }) {
+  // In the macOS app the window bar shows the title.
+  const titleInWindowBar = useWindowBarTitle("Security");
   return (
     <header data-slot="page-header" className="min-w-0 pb-4">
       <h1
         ref={headingRef}
         tabIndex={-1}
-        className="text-xl leading-7 font-semibold tracking-[-0.5px] break-words text-fg"
+        className={cn(
+          "text-xl leading-7 font-semibold tracking-[-0.5px] break-words text-fg",
+          titleInWindowBar && "sr-only",
+        )}
       >
         Security
       </h1>

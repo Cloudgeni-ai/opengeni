@@ -15,6 +15,10 @@ import {
 } from "@opengeni/contracts/message-time-zone";
 import type { WorkspaceBackgroundCommandListResponse } from "./types";
 import type {
+  EditableArtifactResource,
+  UpdateEditableArtifactVisibilityRequest,
+} from "./editable-artifact-resources";
+import type {
   InsightsSiteUsageQuery,
   InsightsSiteUsageResponse,
 } from "@opengeni/contracts/insights-usage";
@@ -484,6 +488,8 @@ import type {
   UpdateInboxItemInput,
   NativePushDevice,
   RegisterNativePushDeviceInput,
+  AgentCall,
+  AgentCallHostPhones,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
   InstallLibrarySkillRequest,
@@ -643,6 +649,7 @@ import type {
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
   UpdateSessionRetentionRequest,
+  UpdateSessionUnattendedRequest,
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
@@ -1922,6 +1929,7 @@ export class OpenGeniClient {
         query: request.query,
         ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
         ...(request.groupBy !== undefined ? { groupBy: request.groupBy } : {}),
+        ...(request.order !== undefined ? { order: request.order } : {}),
         ...(request.archiveStatus !== undefined ? { archiveStatus: request.archiveStatus } : {}),
         ...(request.limit !== undefined ? { limit: String(request.limit) } : {}),
         ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
@@ -2354,6 +2362,23 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/retention`,
+      request,
+    );
+  }
+
+  /**
+   * Turn a chat's unattended mode on or off ("work without me"). Applies from
+   * the next turn and is an explicit choice: a person's later message does not
+   * change it. Fails with 409 SESSION_ARCHIVED_READ_ONLY once archived.
+   */
+  async updateSessionUnattended(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionUnattendedRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `${sessionPath(workspaceId, sessionId)}/unattended`,
       request,
     );
   }
@@ -2914,7 +2939,9 @@ export class OpenGeniClient {
    * non-interactive enroll path. The returned `token` is SECRET — surface it once
    * with a copy-now warning; it cannot be re-read. `allowScreenControl` bakes the
    * screen-control consent into the token. `scope: "user"` connects the signed-in
-   * person's own machine; `"workspace"` (or omitted) shares it with the workspace.
+   * person's own machine; `"workspace"` shares it with the workspace. Omitted, a
+   * signed-in teammate without `enrollments:manage` gets `"user"` and everyone
+   * else `"workspace"`.
    * Check the response's `scope` before showing a command: an older server ignores
    * the request and mints a workspace-shared token.
    */
@@ -6154,7 +6181,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Remove the workspace's own allowlist so it follows its organization's default. */
+  /** Remove the workspace's own allowlist so it uses its organization's list as is. */
   async deleteWorkspaceModelAccessPolicy(workspaceId: string): Promise<WorkspaceModelAccessPolicy> {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
       "DELETE",
@@ -6904,6 +6931,8 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      /** Additional provider access to ask for; only with `reconnectAccountId`. */
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
     },
   ): Promise<import("@opengeni/contracts/connect").ConnectAttempt>;
@@ -6919,6 +6948,7 @@ export class OpenGeniClient {
       returnUrl: string;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      requestedScopes?: string[];
       installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
       mcpSetup?: import("@opengeni/contracts/connect").PreparedMcpSetup;
     },
@@ -9116,6 +9146,25 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Change who can open a document, spreadsheet or presentation: the whole
+   * workspace, or only you. Only its owner can, from the app.
+   */
+  async updateEditableArtifactVisibility(
+    workspaceId: string,
+    artifactId: string,
+    request: UpdateEditableArtifactVisibilityRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<EditableArtifactResource> {
+    return await this.requestJson<EditableArtifactResource>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/visibility`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
   /** A Site's data collections, usage and limits. Needs a manager of the Site. */
   async getSiteData(
     workspaceId: string,
@@ -11051,6 +11100,75 @@ export class OpenGeniClient {
   /** Stop pushes to this device for this app credential. */
   async unregisterNativePushDevice(): Promise<void> {
     await this.requestJson<unknown>("DELETE", "/v1/native-app/push-device");
+  }
+
+  /** An agent's call to the signed-in person, while it rings and after. */
+  async getAgentCall(workspaceId: string, callId: string): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}`,
+    );
+    return call;
+  }
+
+  /**
+   * Take an agent's call. The first phone to answer wins; the call comes back
+   * `answered` with `answeredHere: true`, then start the chat's voice call.
+   * A call already taken, declined or rung out comes back in that state.
+   */
+  async answerAgentCall(
+    workspaceId: string,
+    callId: string,
+    options: { device?: string } = {},
+  ): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}/answer`,
+      options,
+    );
+    return call;
+  }
+
+  /** Decline an agent's call: it stops ringing everywhere and the agent is told. */
+  async declineAgentCall(workspaceId: string, callId: string): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}/decline`,
+      {},
+    );
+    return call;
+  }
+
+  /**
+   * The phones your product rings for this person's agent calls, as they last
+   * stated through it; null when none. For products that ring their own app
+   * from the `session.agentCall.ringing` webhook.
+   */
+  async getAgentCallHostPhones(workspaceId: string): Promise<AgentCallHostPhones | null> {
+    const { hostPhones } = await this.requestJson<{ hostPhones: AgentCallHostPhones | null }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-call-phones`,
+    );
+    return hostPhones;
+  }
+
+  /**
+   * State how many of this person's phones your product rings for agent calls
+   * (the phones where they turned agent calls on in your app), so agents can
+   * call them; `phones: 0` removes them. `teammates` lets agents working for
+   * other members of a shared workspace ring them too. Applies across the
+   * person's workspaces in this organization.
+   */
+  async setAgentCallHostPhones(
+    workspaceId: string,
+    input: { phones: number; teammates?: boolean },
+  ): Promise<AgentCallHostPhones | null> {
+    const { hostPhones } = await this.requestJson<{ hostPhones: AgentCallHostPhones | null }>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-call-phones`,
+      input,
+    );
+    return hostPhones;
   }
 
   // --- Organization-wide sessions ----------------------------------------------------------------

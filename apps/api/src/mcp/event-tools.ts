@@ -28,6 +28,7 @@ import {
   listEventSourceTypes,
   listReadyEventSources,
   requireEventSource,
+  resolveTurnBillingOrigin,
   scheduledTaskViewerForGrant,
   updateEventSourceForViewer,
   type ApiRouteDeps,
@@ -382,6 +383,9 @@ export function registerEventTools(
         viewer: await viewer(),
         request,
         baseUrl: webhookBaseUrl ?? "",
+        // An outside agent, or one in an API chat, setting the secret or
+        // format makes the source's deliveries API use.
+        billingOrigin: await resolveTurnBillingOrigin(deps.db, { grant }),
       }).catch(plainError);
       return json(changedSource(withoutUnroutableUrl(created.source)));
     },
@@ -414,6 +418,9 @@ export function registerEventTools(
         source: await manageable(sourceId),
         request: UpdateEventSourceRequest.parse(patch),
         baseUrl: webhookBaseUrl ?? "",
+        ...(patch.signingSecret !== undefined || patch.format !== undefined
+          ? { billingOrigin: await resolveTurnBillingOrigin(deps.db, { grant }) }
+          : {}),
       }).catch(plainError);
       return json(changedSource(withoutUnroutableUrl(updated)));
     },

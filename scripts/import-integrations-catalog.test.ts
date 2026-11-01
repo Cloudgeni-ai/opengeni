@@ -282,11 +282,8 @@ describe("integrations.sh catalog import normalization", () => {
       tier: "verified",
       provenance: "first-party:opengeni-gmail-rest",
       authKind: "oauth2",
-      scopesHint: [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose",
-        "https://www.googleapis.com/auth/gmail.modify",
-      ],
+      // A first connection asks only to read; more is asked for in the chat.
+      scopesHint: ["https://www.googleapis.com/auth/gmail.readonly"],
       allowedTools: [
         "create_draft",
         "send_message",

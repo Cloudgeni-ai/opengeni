@@ -105,15 +105,15 @@ e2e(
         "More",
         "Less",
         "Footer text",
-        // A payment-like id or name marks only a form field: page text keeps
-        // showing.
+        // A payment-like id marks a form field, or an element named exactly
+        // as one (#card-number): other page text keeps showing.
         "Credit card offers",
         "Your trial ends Friday",
         "Link expiration",
-        "Card ending 4242",
       ]) {
         expect(mixedBody.text).toContain(shown);
       }
+      expect(mixedBody.text).not.toContain("Card ending 4242");
       expect(JSON.stringify(mixedBody)).not.toMatch(/fixture-/u);
 
       // Paging through the text never reaches protected text either.
@@ -129,7 +129,13 @@ e2e(
       expect(paged).toBe(mixedBody.text!);
 
       // A protected element, and anything inside one, is still refused whole.
-      for (const selector of ["#inside", "#inside-child", "#card-number-editor", "#expiry-field"]) {
+      for (const selector of [
+        "#inside",
+        "#inside-child",
+        "#card-number",
+        "#card-number-editor",
+        "#expiry-field",
+      ]) {
         const refused = await read(mixed.target.id, selector);
         expect(refused).toMatchObject({ text: null, value: null });
         expect(refused.redacted).not.toBeNull();
@@ -139,7 +145,6 @@ e2e(
       for (const [selector, text] of [
         ["#credit-card-offers", "Credit card offers"],
         ["#expiration-notice", "Your trial ends Friday"],
-        ["#card-number", "Card ending 4242"],
       ]) {
         const shown = await read(mixed.target.id, selector!);
         expect(shown).toMatchObject({ redacted: null, text });
@@ -244,12 +249,12 @@ e2e(
       expect(expiry).toMatchObject({ value: { redacted: true, reason: "payment" } });
       expect(expiry.children ?? []).toEqual([]);
 
-      // A payment-like id or name marks only a form field: a heading, a
-      // paragraph, a plain div and a select whose name merely mentions
-      // expiration keep showing what they hold.
+      // A payment-like id or name marks a form field, or an element named
+      // exactly as one (#card-number). A heading, a paragraph and a select
+      // whose name merely mentions expiration keep showing what they hold.
       expect(node(page, "heading", "Credit card offers")).toBeDefined();
       expect(node(page, "text", "Your trial ends Friday")).toBeDefined();
-      expect(node(page, "text", "Card ending 4242")).toBeDefined();
+      expect(JSON.stringify(page)).not.toContain("Card ending 4242");
       const linkExpiration = node(page, "combobox", "Link expiration");
       expect(JSON.stringify(linkExpiration.value ?? null)).not.toContain("redacted");
       expect(JSON.stringify(linkExpiration)).toContain("7 days");

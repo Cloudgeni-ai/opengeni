@@ -6,7 +6,7 @@ const permissionRequired = {
   swapped: false,
   code: "personal_machine_permission_required",
   reason:
-    "This is a personal (Only me) machine, and its owner has not allowed this chat to use it.",
+    "This is a personal (Only me) machine, and its owner has not turned it on for agents in this workspace.",
 };
 
 describe("setup card on a refusal the person can fix", () => {

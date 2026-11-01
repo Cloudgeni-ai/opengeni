@@ -827,16 +827,14 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await waitFor(
         async () => {
           observedCounter = (await counter.innerText()).trim();
-          // Session search stops after the first nonempty bounded scan page.
-          // The final recent occurrence need not be counted until Next scans
-          // through the intervening history; '+' truthfully marks that bound.
-          return /^1\s*\/\s*(?:3\+|4\+?)$/.test(observedCounter);
+          // Find walks the history newest first and counts all of it.
+          return /^4\s*\/\s*4$/.test(observedCounter);
         },
         {
           timeoutMs: 20_000,
           intervalMs: 150,
           describe: () =>
-            `initial lumen scan page counted; observed ${JSON.stringify(observedCounter)}`,
+            `lumen counted from the newest; observed ${JSON.stringify(observedCounter)}`,
         },
       );
       const readOrdinal = async () =>
@@ -844,33 +842,31 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       const previousButton = find.getByRole("button", { name: "Previous match", exact: true });
       const nextButton = find.getByRole("button", { name: "Next match", exact: true });
 
-      // Traversal order is sequence-ascending, so the strip lands on the
-      // oldest occurrence first: first-ember sits outside the initially
-      // rendered window and only a real full-history jump brings it into
-      // view. There is no earlier match, so Previous stays disabled.
-      await expectTextInTimelineView(page, /first-ember/);
-      expect(await readOrdinal()).toBe(1);
-      expect(await previousButton.isDisabled()).toBe(true);
-
-      // Next walks the repeated occurrences: second-ember and the second
-      // offset inside the same assistant message, then the recent one.
+      // Like a chat, the strip lands on the most recent occurrence.
+      await expectTextInTimelineView(page, /third-ember/);
+      // Next from the last match wraps to the oldest one: first-ember sits
+      // outside the initially rendered window, so only a real full-history
+      // jump brings it into view.
       await nextButton.click();
+      await waitFor(async () => (await readOrdinal()) === 1, { timeoutMs: 10_000 });
+      await expectTextInTimelineView(page, /first-ember/);
+      // Previous from the first match wraps back to the newest one.
+      await previousButton.click();
+      await waitFor(async () => (await readOrdinal()) === 4, { timeoutMs: 10_000 });
+      await expectTextInTimelineView(page, /third-ember/);
+      // Keyboard: Shift+Enter walks back through the repeated occurrences
+      // (the second offset inside the assistant message, then second-ember),
+      // and Enter moves forward again.
+      await findInput.press("Shift+Enter");
+      await waitFor(async () => (await readOrdinal()) === 3, { timeoutMs: 10_000 });
+      await findInput.press("Shift+Enter");
       await waitFor(async () => (await readOrdinal()) === 2, { timeoutMs: 10_000 });
       await expectTextInTimelineView(page, /second-ember/);
-      await nextButton.click();
-      await waitFor(async () => (await readOrdinal()) === 3, { timeoutMs: 10_000 });
-      // Keyboard: Enter advances to the recent occurrence, Shift+Enter
-      // retreats again.
       await findInput.press("Enter");
-      await waitFor(async () => (await readOrdinal()) === 4, { timeoutMs: 10_000 });
-      await expectContainsText(counter, "4 / 4");
-      await expectTextInTimelineView(page, /third-ember/);
-      // No wrap-around past the exhausted history: Next disables instead.
-      expect(await nextButton.isDisabled()).toBe(true);
-      await findInput.press("Shift+Enter");
       await waitFor(async () => (await readOrdinal()) === 3, { timeoutMs: 10_000 });
       await previousButton.click();
       await waitFor(async () => (await readOrdinal()) === 2, { timeoutMs: 10_000 });
+      await expectContainsText(counter, "2 / 4");
 
       // Closing the strip must not move the conversation: no scroll, and
       // focus returns to the composer that opened it.

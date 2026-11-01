@@ -6,11 +6,11 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "ef99f65641b7829affca1b729928f0a10ed6798d446f447bd1125c0d750b2efd"
+      "sha256": "a66b7b96e093fff96afaf1d13cebc991a4c71d8083ac7cc04c456f130ddeade7"
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "87a9dd7d6fdcbec46702293ce5f2ba5ac0ef2d092c8ea3dc6a27f63106d2840a"
+      "sha256": "178bac8ba10fea147fa4cc9fb731bcd4105fcd67e6cbeacc1f014af84389ef9a"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -34,11 +34,11 @@
     },
     {
       "path": ".github/workflows/compute-ci.yml",
-      "sha256": "fd25682158c883800e4f7c72ff2533ef253bcc125473934659384ffaa92807a0"
+      "sha256": "0219ab5cf3ea2a1f3beb78c2ab674c4231fe774d71316f59a711b8531327987c"
     },
     {
       "path": ".github/workflows/compute-release.yml",
-      "sha256": "bb110865c8785d3d906761b6f5be4168c814bb0886de9eb83b0dfd2af589f3cb"
+      "sha256": "11eb439a5bf2e7b1bc9e5de5c5d0aeddfc7c391f4bc25668b79016d5a0175643"
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
@@ -58,7 +58,7 @@
     },
     {
       "path": ".github/workflows/merge-batcher.yml",
-      "sha256": "571e6ba36406bbdac24eb817ec49e96df5f0b11a78fd158fcfaddb82f93ff572"
+      "sha256": "7b965bf132f35ea5bbdc124899473bba1ee8711788cd92af85504b9e7bf87228"
     },
     {
       "path": ".github/workflows/merge-content.yml",
@@ -115,6 +115,10 @@
     {
       "path": ".github/workflows/reconcile-production-packages.yml",
       "sha256": "d05f65de51d9684c0c2ee08ffdacde3ab7a7ae7e1c09322edbd06ef37636014b"
+    },
+    {
+      "path": ".github/workflows/regenerate-generated.yml",
+      "sha256": "d4afb5c9410784e18f3de0924eae8e0b46e1d41a141e56d55d19759cf7c23ef5"
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
@@ -225,13 +229,25 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "cua-windows",
       "step": "Drive a real window and verify compiled packaging",
-      "sha256": "b814d6d0e9715fd6fe796d2190bd71343896a9ad8326799beecd770a9fa22f19"
+      "sha256": "da0606def0420ddb624802d7ae8a7a0db1b11e74dfcb3f7732a589b7a0b574ca"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "cua-windows",
       "step": "Install",
       "sha256": "6b53200cb717e5db732d2f6094f04af1cddc07e651f9f39df6961dd57ae9b831"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "cua-windows",
+      "step": "Stage the source-pinned Windows worker and transport",
+      "sha256": "5cfb3476a011e4a39e28ef2fcb79099c3cb86372d31208cee4bbbc6205d87914"
+    },
+    {
+      "workflow": ".github/workflows/agent-ci.yml",
+      "job": "cua-windows",
+      "step": "Verify the source worker keeps the admitted Windows catalog unchanged",
+      "sha256": "b3209555ca86c6359660d1e77ca3c5271a8f1ebba345615861b4c0a3abf1ec96"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
@@ -357,13 +373,13 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (Windows x64)",
-      "sha256": "d4077dd9f417a3c5e755e0afd6c7804de4cc97a2784f7aa8077e61641b0a15c9"
+      "sha256": "b3a144317b4213f203462e7db7c74868b38075315007781220c15592bb942bfd"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Check the Windows binaries run on stock Windows",
-      "sha256": "c15c2755fa4190b3f04e9e7e19441a82fd7627e93435e9a6b7661700401ec192"
+      "sha256": "69aa4d3a792aa0bcb5cf61f79fd93251138a1c1a867da96b35bc916487424ba3"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -1064,8 +1080,8 @@
     {
       "workflow": ".github/workflows/compute-ci.yml",
       "job": "kvm",
-      "step": "Collect the conformance logs and results",
-      "sha256": "2e66cee0781d1130b081db7a1de0e5b3ee5fa32cf6c2fe5a05904a0cfcca3d1a"
+      "step": "Collect the gate's logs and results",
+      "sha256": "3025a8bc30fb64bc45c0d25716e6ee2d6c37e4735550ce2ec39d30286fbef03d"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
@@ -1137,7 +1153,7 @@
       "workflow": ".github/workflows/compute-release.yml",
       "job": "control-image",
       "step": "Check the pushed image runs",
-      "sha256": "9aedd531227f13ae825a84c0ed1d9b07ed93a44ef80bc4b2c0beb9f75c57d6e9"
+      "sha256": "b64b0385386f5cd47e6f28e904f1fc09b3b789e5e78864868b62ef82351ef586"
     },
     {
       "workflow": ".github/workflows/compute-release.yml",
@@ -1666,6 +1682,18 @@
       "job": "reconcile",
       "step": "Publish missing packages for the healthy production revision",
       "sha256": "403bf534ac1eb6c2465f2260ec881f48c0b5744b28dd51d22e1633e113ddc59c"
+    },
+    {
+      "workflow": ".github/workflows/regenerate-generated.yml",
+      "job": "regenerate",
+      "step": "Check the inputs",
+      "sha256": "82749c7875104179005a29ff8c9f6c4baba271cf43eb213073b05e82c4003b9f"
+    },
+    {
+      "workflow": ".github/workflows/regenerate-generated.yml",
+      "job": "regenerate",
+      "step": "Merge main and regenerate the conflicting generated files",
+      "sha256": "5ce7874e92f2715403e67da29588b2116029e2a82f7565a1e1fa49c627b36005"
     },
     {
       "workflow": ".github/workflows/release-acceptance.yml",

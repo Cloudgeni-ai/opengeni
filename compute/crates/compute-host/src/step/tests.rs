@@ -4,13 +4,15 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use compute_core::SandboxId;
-use compute_engine::{Found, SnapshotFiles};
+use compute_engine::{Found, MemoryProfile, Readable, RestoreFiles, SnapshotFiles};
 use tokio::task::JoinHandle;
 
 use crate::layout::tests::FAILPOINTS;
 use crate::layout::vm_spec;
+#[cfg(target_os = "linux")]
+use crate::paging::Paging;
 use crate::protocol::{SandboxConfig, SleepConfig};
-use crate::state::Allocation;
+use crate::state::{Allocation, Disk};
 use crate::store::{Directory, NoStore};
 
 /// A VMM with one VM, which counts what it is asked to do.
@@ -234,6 +236,7 @@ impl Sandbox {
             unthrottle: None,
             meter: None,
             last_used_ms: 1_700_000_000_000,
+            failures: 0,
         }
     }
 
@@ -562,11 +565,13 @@ async fn an_archive_a_later_owner_fenced_hands_the_sandbox_off() {
 
 /// A refusal alone proves nothing about a sound image: the host may have
 /// run short of memory, or the VMM been killed while loading. So an image
-/// is kept for a retry when the engine reads its runtime, made it under
-/// another processor, or cannot tell (an image labelled before runtimes
-/// named their snapshot format, say). Only an image the engine proves no
-/// VMM of its reads is given up, and the sandbox wakes from its disk
-/// instead of retrying forever.
+/// is kept for a retry when the engine reads its runtime or cannot tell
+/// (an image labelled before runtimes named their snapshot format, say).
+/// An image the engine proves no VMM of its reads is given up, and the
+/// sandbox wakes from its disk instead of retrying forever; so is one made
+/// on another kind of host (another processor or host kernel) once it has
+/// been refused several wakes in a row, since retrying on a host that does
+/// not change would never end either.
 #[tokio::test(flavor = "multi_thread")]
 async fn only_an_image_no_vmm_here_reads_is_given_up() {
     const NOW: &str = "Firecracker snapshot format v13.0.0 on a new processor";
@@ -574,13 +579,21 @@ async fn only_an_image_no_vmm_here_reads_is_given_up() {
     const ELSEWHERE: &str = "Firecracker snapshot format v13.0.0 on another processor";
     const LEGACY: &str = "Firecracker v1.13.1 on a new processor";
     let unreadable = || Some(Readable::No("format v12 is not read here".into()));
-    for (made_under, runtime, reads, kept) in [
-        (NOW, NOW, None, true),
-        (OLD, NOW, unreadable(), false),
-        (OLD, NOW, Some(Readable::Yes), true),
-        (ELSEWHERE, NOW, Some(Readable::Yes), true),
-        (LEGACY, NOW, Some(Readable::Unknown), true),
-        (OLD, "", None, true),
+    let elsewhere = || {
+        Some(Readable::Elsewhere(
+            "it was made on another processor".into(),
+        ))
+    };
+    let last = super::restore::REFUSALS_FROM_ELSEWHERE - 1;
+    for (made_under, runtime, reads, failures, kept) in [
+        (NOW, NOW, None, last, true),
+        (OLD, NOW, unreadable(), 0, false),
+        (OLD, NOW, Some(Readable::Yes), last, true),
+        (ELSEWHERE, NOW, elsewhere(), 0, true),
+        (ELSEWHERE, NOW, elsewhere(), last - 1, true),
+        (ELSEWHERE, NOW, elsewhere(), last, false),
+        (LEGACY, NOW, Some(Readable::Unknown), last, true),
+        (OLD, "", None, last, true),
     ] {
         let mut sandbox = Sandbox::new().await;
         sandbox.engine = Arc::new(Counting {
@@ -608,15 +621,28 @@ async fn only_an_image_no_vmm_here_reads_is_given_up() {
             )
             .unwrap();
 
-        let ran = sandbox.job(NoStore, saved, false).run(Step::Restore).await;
+        let mut job = sandbox.job(NoStore, saved, false);
+        job.failures = failures;
+        let ran = job.run(Step::Restore).await;
         assert_eq!(Counting::count(&sandbox.engine.restores), 1);
         let durable = sandbox.records.settle(sandbox.id).await.unwrap();
         if kept {
-            assert_eq!(ran.outcome, Outcome::Failed(Failure::Transient));
-            assert!(durable.image, "a sound image of this runtime was given up");
+            assert_eq!(
+                ran.outcome,
+                Outcome::Failed(Failure::Transient),
+                "{made_under} after {failures}"
+            );
+            assert!(durable.image, "a sound image was given up: {made_under}");
         } else {
-            assert_eq!(ran.outcome, Outcome::Failed(Failure::MemoryLost));
-            assert!(!durable.image, "the sandbox would retry the image forever");
+            assert_eq!(
+                ran.outcome,
+                Outcome::Failed(Failure::MemoryLost),
+                "{made_under} after {failures}"
+            );
+            assert!(
+                !durable.image,
+                "the sandbox would retry the image forever: {made_under}"
+            );
         }
     }
 }
@@ -820,10 +846,12 @@ async fn a_checkpoint_cancelled_while_its_guest_syncs_reports_it_wrote() {
     );
 }
 
-/// A failed disk check, or one an agent never finished, keeps every later
-/// snapshot of the VM untrusted, even by a new agent; only a new VM starts
-/// clean. A new agent watches through the description the engine kept,
-/// and through nothing else.
+/// A failed disk check, or a sync an agent never finished, keeps every
+/// later snapshot of the VM untrusted, even by a new agent; only a new VM
+/// starts clean. An agent that stops between a check's start and its sync,
+/// as it may while the VMM takes a snapshot, costs nothing: only the sync
+/// can take an error from the description. A new agent watches through
+/// the description the engine kept, and through nothing else.
 #[tokio::test]
 async fn a_disk_check_that_failed_or_never_ended_outlives_the_agent() {
     let sandbox = Sandbox::new().await;
@@ -846,13 +874,27 @@ async fn a_disk_check_that_failed_or_never_ended_outlives_the_agent() {
         "another file was taken for the disk"
     );
 
-    // An agent stops part way through a check.
+    // An agent stops after starting a check, before its sync: the next
+    // sync through the kept description still sees every lost write.
     watch.begin().unwrap();
+    assert!(!marker.exists(), "a check marked the disk before its sync");
     let kept = watch.description().unwrap();
     drop(watch);
+    let adopted = DiskWatch::adopt(paths, kept);
+    assert!(
+        !adopted.failed(),
+        "a check stopped before its sync cost trust"
+    );
+    adopted.sync().unwrap();
+    assert!(!marker.exists(), "a clean sync left its marker");
+
+    // An agent stops part way through a sync, which leaves its marker.
+    let kept = adopted.description().unwrap();
+    drop(adopted);
+    fs::write(&marker, "").unwrap();
     assert!(
         DiskWatch::adopt(paths, kept).failed(),
-        "an unfinished check was forgotten"
+        "an unfinished sync was forgotten"
     );
 
     let watch = DiskWatch::fresh(paths).unwrap();
@@ -889,8 +931,9 @@ async fn a_disk_check_that_failed_or_never_ended_outlives_the_agent() {
 }
 
 /// A VM whose disk no one can vouch for, here because an agent stopped
-/// part way through a check, is never saved, yet keeps running: the save
-/// fails as unsavable and leaves the VM and its record as they were.
+/// part way through a disk check's sync, is never saved, yet keeps
+/// running: the save fails as unsavable and leaves the VM and its record
+/// as they were.
 #[tokio::test]
 async fn a_vm_whose_disk_cannot_be_vouched_for_is_kept_unsaved() {
     let sandbox = Sandbox::new().await;

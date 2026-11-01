@@ -1,9 +1,13 @@
 # syntax=docker/dockerfile:1.7
 # The control service and front door (compute-control) as a container image.
-# It also carries the host agent's binary for the store's daily sweep
-# (`compute-host sweep`, run as a job beside the service), never to run
-# VMs, and GitHub runner pools (`compute-runners serve`, ADR 23), each a
-# deployment of its own. Build context: the compute/ directory.
+# The same binary runs the store's daily sweep (`compute-control sweep`, a
+# job beside the service, with the pointers the service keeps; ADR 25). It
+# also carries GitHub runner pools (`compute-runners serve`, ADR 23), a
+# deployment of their own. It does not carry the host agent: a fleet's
+# store is never swept by the host agent's own sweep, which reads the
+# pointers an object store keeps, so a chart that still runs
+# `compute-host sweep` fails at once against this image instead of
+# sweeping. Build context: the compute/ directory.
 #
 #   docker build -f docker/control.Dockerfile -t compute-control .
 #
@@ -32,15 +36,14 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
-    cargo build --locked --release --target x86_64-unknown-linux-musl -p compute-control -p compute-host -p compute-runners \
+    cargo build --locked --release --target x86_64-unknown-linux-musl -p compute-control -p compute-runners \
   && install -D -m 0755 -t /out target/x86_64-unknown-linux-musl/release/compute-control \
     target/x86_64-unknown-linux-musl/release/compute-runners \
-    target/x86_64-unknown-linux-musl/release/compute-host \
-  && /out/compute-control --help >/dev/null && /out/compute-host sweep --help >/dev/null \
+  && /out/compute-control --help >/dev/null && /out/compute-control sweep --help >/dev/null \
   && /out/compute-runners serve --help >/dev/null
 
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/compute-control /out/compute-host /out/compute-runners /usr/local/bin/
+COPY --from=build /out/compute-control /out/compute-runners /usr/local/bin/
 USER nonroot:nonroot
 # 8080: the API (Opengeni's backend, and E2B clients behind a proxy);
 # 8443: hosts, with mutual TLS.

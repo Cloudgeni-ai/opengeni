@@ -1,4 +1,5 @@
 import {
+  ComputerCursorIdentity,
   ComputerNativeCommand,
   interactionDriverDiagnostic,
   type InteractionDriverDiagnostic,
@@ -182,6 +183,9 @@ type BrowserSocket = Bun.ServerWebSocket<InteractionSocketData>;
 
 /** Seconds a controller connection may stay silent before the server closes it. */
 const BROWSER_CONTROL_IDLE_TIMEOUT_SECONDS = 120;
+/** The payload of the ping a browser frame socket gets once its subscription
+ * is open (the agent's relay pump waits for it). */
+const BROWSER_FRAMES_SUBSCRIBED_PING = "opengeni.frames.subscribed";
 
 /**
  * An action request answers only once its action or batch finished, which
@@ -1388,6 +1392,7 @@ export class BrowserControlServer {
       const sessionOptions: ComputerSupervisorSessionOptions = {
         computerSessionId: body.computerSessionId,
         controllerGeneration: body.controllerGeneration,
+        ...(body.cursorIdentity ? { cursorIdentity: body.cursorIdentity } : {}),
       };
       const created = await supervisor.createSession(sessionOptions);
       const rotated = current && body.tokenGeneration > current.tokenGeneration;
@@ -2122,6 +2127,10 @@ export class BrowserControlServer {
         return;
       }
       data.subscription = subscription;
+      // Tells a relaying agent the stream is open before its first frame,
+      // which a page busy when its view opens sends only once it answers.
+      // A viewer's WebSocket answers it on its own.
+      socket.ping(BROWSER_FRAMES_SUBSCRIBED_PING);
       let sent = 0;
       for await (const frame of subscription) {
         if (data.closed) break;
@@ -2847,6 +2856,7 @@ function parseLinkedComputer(value: unknown): {
 }
 
 function parseCreateComputerSession(value: Record<string, unknown>): {
+  cursorIdentity?: import("@opengeni/contracts").ComputerCursorIdentity;
   computerSessionId: string;
   controllerGeneration: string;
   tokenGeneration: number;
@@ -2859,9 +2869,13 @@ function parseCreateComputerSession(value: Record<string, unknown>): {
     "tokenGeneration",
     "controlToken",
     "viewToken",
+    "cursorIdentity",
   ]);
   return {
     computerSessionId: requireUuid(value.computerSessionId, "computerSessionId"),
+    ...(value.cursorIdentity === undefined
+      ? {}
+      : { cursorIdentity: parseCursorIdentity(value.cursorIdentity) }),
     controllerGeneration: requireGeneration(value.controllerGeneration),
     tokenGeneration: requireInteger(
       value.tokenGeneration,
@@ -2872,6 +2886,12 @@ function parseCreateComputerSession(value: Record<string, unknown>): {
     controlToken: requireToken(value.controlToken, "controlToken"),
     viewToken: requireToken(value.viewToken, "viewToken"),
   };
+}
+
+function parseCursorIdentity(value: unknown): import("@opengeni/contracts").ComputerCursorIdentity {
+  const parsed = ComputerCursorIdentity.safeParse(value);
+  if (!parsed.success) throw new ProtocolError("invalid_action", "cursor identity is invalid", 400);
+  return parsed.data;
 }
 
 function parseBrowserTransport(

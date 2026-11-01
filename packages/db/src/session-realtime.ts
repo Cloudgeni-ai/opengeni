@@ -26,8 +26,10 @@ import {
 } from "./session-control";
 import {
   mirrorSessionRealtimeContextInTransaction,
+  renderRealtimeAgentCallContext,
   renderRealtimeHumanInputRequestContext,
 } from "./session-realtime-mirror";
+import { claimAnsweredAgentCallForRealtimeInTransaction } from "./agent-calls";
 import * as schema from "./schema";
 
 export { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
@@ -521,6 +523,28 @@ export async function beginSessionRealtimeInTransaction(
         requestIds: pendingHumanInputs.map((request) => request.id),
         trigger: "realtime_start",
       },
+      now,
+    });
+  }
+  // A call the agent placed and this person just answered: the voice call
+  // opens by saying why it called.
+  const answeredCall = await claimAnsweredAgentCallForRealtimeInTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    calleeSubjectId: input.ownerSubjectId,
+    realtimeId: row.id,
+  });
+  if (answeredCall) {
+    await mirrorSessionRealtimeContextInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sourceKind: "agent_call",
+      sourceId: answeredCall.id,
+      channel: "speakable",
+      text: renderRealtimeAgentCallContext({ reason: answeredCall.reason }),
+      payload: { callId: answeredCall.id, trigger: "realtime_start" },
       now,
     });
   }

@@ -735,6 +735,44 @@ describe("native approval without recorded arguments", () => {
     await act(async () => approve!.click());
     expect(decided).toEqual(["call-old:approve"]);
   });
+
+  test("rapid taps on one approval send one decision, and the next card stays decidable", async () => {
+    const decided: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mounted = await renderComponent(
+      <ApprovalStrip
+        approvals={[
+          { id: "call-delete-a", name: "example_tool" } as PendingApproval,
+          { id: "call-delete-b", name: "example_tool" } as PendingApproval,
+        ]}
+        onDecide={async (id, decision) => {
+          decided.push(`${id}:${decision}`);
+          if (id === "call-delete-a") await held;
+        }}
+      />,
+    );
+    const approveButtons = () =>
+      [...mounted!.container.querySelectorAll("button")].filter(
+        (entry) => entry.textContent?.trim() === "Approve",
+      );
+    const [first] = approveButtons();
+    await act(async () => {
+      first!.click();
+      first!.click();
+    });
+    expect(decided).toEqual(["call-delete-a:approve"]);
+    await act(async () => {
+      release();
+      await held;
+    });
+    const second = approveButtons().find((entry) => !(entry as HTMLButtonElement).disabled);
+    expect(second).toBeDefined();
+    await act(async () => second!.click());
+    expect(decided).toEqual(["call-delete-a:approve", "call-delete-b:approve"]);
+  });
 });
 
 describe("native MCP service card", () => {

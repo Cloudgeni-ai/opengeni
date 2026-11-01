@@ -10,6 +10,7 @@ import {
   createSession,
   deleteOrganizationCredentialProvider,
   encryptEnvironmentValue,
+  resolveWorkspaceCredentialProvider,
   upsertOrganizationCredentialProvider,
   type DbClient,
 } from "@opengeni/db";
@@ -85,11 +86,12 @@ async function call(
   path: string,
   body?: unknown,
   options: { kind?: "human_session" | "agent_attempt"; admin?: boolean; target?: Hono } = {},
+  as: { workspaceId: string; subjectId: string } = { workspaceId, subjectId },
 ) {
   const bearer = await signDelegatedAccessToken(delegationSecret, {
     accountId,
-    workspaceId,
-    subjectId,
+    workspaceId: as.workspaceId,
+    subjectId: as.subjectId,
     principalKind: options.kind ?? "human_session",
     permissions:
       options.admin === false ? ["workspace:read"] : ["workspace:read", "workspace:admin"],
@@ -103,7 +105,7 @@ async function call(
       : {}),
     exp: Math.floor(Date.now() / 1000) + 300,
   });
-  return await (options.target ?? app).request(`/v1/workspaces/${workspaceId}${path}`, {
+  return await (options.target ?? app).request(`/v1/workspaces/${as.workspaceId}${path}`, {
     method,
     headers: {
       authorization: `Bearer ${bearer}`,
@@ -494,6 +496,95 @@ describe("workspace integration routes", () => {
       expect(
         (await call("GET", "/inherited-integrations", undefined, { kind: "agent_attempt" })).status,
       ).toBe(403);
+    } finally {
+      await deleteOrganizationCredentialProvider(client.db, { accountId });
+      await shared!.admin`delete from organization_webhooks where account_id = ${accountId}`;
+    }
+  });
+
+  test("the organization provider reaches Personal workspaces only with its Personal switch", async () => {
+    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+    const memberSubjectId = `user:personal-${crypto.randomUUID()}`;
+    const personalWorkspaceId = crypto.randomUUID();
+    await shared!.admin`
+      insert into workspaces (id, account_id, name)
+      values (${personalWorkspaceId}, ${accountId}, 'Personal')`;
+    await shared!.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${personalWorkspaceId}, ${accountId})`;
+    await shared!.admin`
+      insert into organization_memberships (
+        account_id, subject_id, role, status, personal_workspace_id, authorization_revision
+      ) values (${accountId}, ${memberSubjectId}, 'member', 'active', ${personalWorkspaceId}, 1)`;
+    const personal = { accountId, workspaceId: personalWorkspaceId };
+    const owner = { workspaceId: personalWorkspaceId, subjectId: memberSubjectId };
+    const configure = async (allowPersonalWorkspaces: boolean | undefined) =>
+      await upsertOrganizationCredentialProvider(client.db, {
+        accountId,
+        url: "https://org.example/credentials",
+        enabled: true,
+        timeoutMs: 5000,
+        // The filter picks shared workspaces only; it never excludes Personal ones.
+        workspaceFilter: { externalSource: "test" },
+        ...(allowPersonalWorkspaces === undefined ? {} : { allowPersonalWorkspaces }),
+        createdBySubjectId: subjectId,
+        secretEncrypted: encryptEnvironmentValue(key, "ogcp_org_secret"),
+      });
+    await createOrganizationWebhook(client.db, {
+      accountId,
+      url: "https://org.example/events",
+      secretEncrypted: encryptEnvironmentValue(key, "whsec_org_secret"),
+      eventTypes: ["turn.completed"],
+      enabled: true,
+      description: null,
+      workspaceFilter: null,
+      createdBySubjectId: subjectId,
+    });
+    try {
+      expect((await configure(undefined)).allowPersonalWorkspaces).toBe(false);
+      expect(await resolveWorkspaceCredentialProvider(client.db, personal)).toBeNull();
+      expect(
+        await (await call("GET", "/inherited-integrations", undefined, {}, owner)).json(),
+      ).toEqual({ credentialProvider: null, webhooks: [] });
+
+      await configure(true);
+      expect(await resolveWorkspaceCredentialProvider(client.db, personal)).toMatchObject({
+        accountId,
+        url: "https://org.example/credentials",
+      });
+      expect(
+        await resolveWorkspaceCredentialProvider(client.db, { accountId, workspaceId }),
+      ).toMatchObject({ accountId, url: "https://org.example/credentials" });
+      // The provider shows in the Personal workspace; organization webhooks never do.
+      expect(
+        await (await call("GET", "/inherited-integrations", undefined, {}, owner)).json(),
+      ).toEqual({
+        credentialProvider: {
+          url: "https://org.example/credentials",
+          timeoutMs: 5000,
+          updatedAt: expect.any(String),
+        },
+        webhooks: [],
+      });
+
+      // The member's own provider still wins in their Personal workspace.
+      const own = await call(
+        "PUT",
+        "/credential-provider",
+        { url: "https://own.example/credentials" },
+        {},
+        owner,
+      );
+      expect(own.status).toBe(201);
+      expect(await resolveWorkspaceCredentialProvider(client.db, personal)).toMatchObject({
+        workspaceId: personalWorkspaceId,
+        url: "https://own.example/credentials",
+      });
+      await call("DELETE", "/credential-provider", undefined, {}, owner);
+
+      // A write that leaves the switch out turns it off again.
+      await configure(undefined);
+      expect(await resolveWorkspaceCredentialProvider(client.db, personal)).toBeNull();
     } finally {
       await deleteOrganizationCredentialProvider(client.db, { accountId });
       await shared!.admin`delete from organization_webhooks where account_id = ${accountId}`;

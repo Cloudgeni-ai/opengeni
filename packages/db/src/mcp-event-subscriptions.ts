@@ -1,3 +1,4 @@
+import type { BillingOrigin } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
 import { automationsListenTo } from "./event-trigger-listening";
@@ -365,6 +366,13 @@ export type RecordMcpEventDeliveryInput = {
   cursor?: string | null;
   /** The server skipped events before this delivery. */
   truncated?: boolean;
+  /**
+   * What the automations this delivery fires bill as when an API caller set
+   * the subscription's source up (`event_sources.secret_billing_origin` is
+   * api): the caller passes `fundedBillingOrigin(accountId, "api")`, which is
+   * app for a legacy account. The mark is read in the delivery's transaction.
+   */
+  apiSourceBillingOrigin?: BillingOrigin;
 };
 
 export type RecordMcpEventDeliveryResult = RecordEventDeliveryResult & {
@@ -400,8 +408,26 @@ export async function recordMcpEventDelivery(
         streamKey: row.streamKey,
         gapBefore: event.gapBefore || (gap && index === 0),
       }));
+      const apiSource =
+        input.apiSourceBillingOrigin !== undefined &&
+        input.delivery.billingOrigin === undefined &&
+        events.length > 0
+          ? await tx
+              .select({ holder: schema.eventSources.secretBillingOrigin })
+              .from(schema.eventSources)
+              .where(
+                and(
+                  eq(schema.eventSources.workspaceId, row.workspaceId),
+                  eq(schema.eventSources.id, row.sourceId),
+                ),
+              )
+              .limit(1)
+          : [];
       const recorded = await recordEventDeliveryInTransaction(tx, {
         ...input.delivery,
+        ...(apiSource[0]?.holder === "api" && input.apiSourceBillingOrigin
+          ? { billingOrigin: input.apiSourceBillingOrigin }
+          : {}),
         accountId: row.accountId,
         workspaceId: row.workspaceId,
         sourceId: row.sourceId,

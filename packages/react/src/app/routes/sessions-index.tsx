@@ -1,4 +1,5 @@
 import { useAppApi } from "../lib/app-api";
+import { useAppHost } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
 import { t } from "../lib/console-text";
@@ -68,7 +69,10 @@ import {
 import { toast } from "../lib/toast";
 
 import { BillingClassMark } from "../components/billing-class-mark";
-import { ChannelCreateDialog } from "../components/rail/channel-create-dialog";
+import {
+  ChannelCreateDialog,
+  type ProjectAudience,
+} from "../components/rail/channel-create-dialog";
 import { ProjectGlyph } from "../components/rail/project-glyph";
 import { ConsoleComposer, useDraftAttachments } from "../components/Composer";
 import { NewSessionStarters } from "../components/new-session-starters";
@@ -155,10 +159,12 @@ import {
 import {
   recentSessionModelPresentation,
   recentSessionStatus,
-  recentSessionsForHome,
+  recentSessionsWithOpened,
   relativeTimeLabel,
   sessionRepoLabel,
+  type OpenedChat,
 } from "../../session-list-model";
+import { readChatDirectory, useChatDirectoryVersion } from "../lib/actions/chat-directory";
 import { newChatWording, signupStarterSet } from "../lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
@@ -222,6 +228,7 @@ import { useUiEventTarget } from "../lib/ui-events";
 import { BotLaunchStrip, type BotLaunchState } from "../components/bots/bot-launch-strip";
 import { BotTemplateShortcuts } from "../components/bots/bot-template-shortcuts";
 import { useBotTemplates } from "../lib/bot-templates";
+import { useWindowBarTitle } from "../../ui/window-bar-title";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -265,7 +272,10 @@ function SessionsIndexRouteContent({
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
+  // The macOS window bar names the page; the hero keeps its greeting.
+  useWindowBarTitle("New session");
   const starters = useSessionUiFeature("starters");
+  const hostStarters = useAppHost().starters;
   const addCredits = useSessionUiFeature("addCredits");
   // Without the chat list, the new-chat page shows no other chats either: no
   // recent chats and no project picker that files the chat among them.
@@ -331,6 +341,7 @@ function SessionsIndexRouteContent({
   const recentChannelId = selectionHistory.projects[0]?.channelId ?? null;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
+  const [projectAudienceDraft, setProjectAudienceDraft] = useState<ProjectAudience>("workspace");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   // ?botTemplateId= starts this chat as a bot: the template's setup
@@ -492,6 +503,12 @@ function SessionsIndexRouteContent({
     draft.visibility,
     tenancyCapabilities?.canCreatePrivate === true,
   );
+  const canCreatePrivateChat = tenancyCapabilities?.canCreatePrivate === true;
+  // A new project can be Only me wherever a new chat can.
+  const projectAudienceOffered = hasVisibilityChoice({
+    personalWorkspace,
+    canCreatePrivate: canCreatePrivateChat,
+  });
   const personalOwnerScope = resolvePersonalResourceOwnerScope({
     authMode: context.clientConfig.auth.mode,
     authSession: context.authSession,
@@ -755,7 +772,10 @@ function SessionsIndexRouteContent({
   const createProject = useCallback(async () => {
     const name = projectNameDraft.trim();
     if (!name) return;
-    const project = await channelsQuery.create({ name });
+    const project = await channelsQuery.create({
+      name,
+      ...(projectAudienceOffered ? { visibility: projectAudienceDraft } : {}),
+    });
     if (!project) {
       toast.error("Couldn't create the project. The name may already be in use.");
       return;
@@ -763,7 +783,30 @@ function SessionsIndexRouteContent({
     selectProject(project.id);
     setProjectDialogOpen(false);
     setProjectNameDraft("");
-  }, [channelsQuery, projectNameDraft, selectProject]);
+    setProjectAudienceDraft("workspace");
+  }, [
+    channelsQuery,
+    projectAudienceDraft,
+    projectAudienceOffered,
+    projectNameDraft,
+    selectProject,
+  ]);
+
+  // An Only me project holds only Only me chats, so choosing one makes the new
+  // chat Only me. Where Only me is off, its Only me projects take no new chats.
+  const selectedProjectOnlyMe =
+    channelsQuery.channels.find((channel) => channel.id === selectedChannelId)?.visibility ===
+    "private";
+  useEffect(() => {
+    if (!selectedProjectOnlyMe || !tenancyCapabilities) return;
+    if (!canCreatePrivateChat) {
+      selectProject(null, false);
+      return;
+    }
+    setDraft((current) =>
+      current.visibility === "private" ? current : { ...current, visibility: "private" },
+    );
+  }, [canCreatePrivateChat, selectProject, selectedProjectOnlyMe, tenancyCapabilities]);
 
   useEffect(() => {
     const onRequest = (event: Event) => {
@@ -1965,6 +2008,9 @@ function SessionsIndexRouteContent({
                               disabled={busy || newSessionDraft.loading}
                               onChange={(visibility) => {
                                 visibilityChosenRef.current = true;
+                                // A shared chat can't go in an Only me project.
+                                if (visibility === "workspace" && selectedProjectOnlyMe)
+                                  selectProject(null);
                                 setDraft((current) => ({
                                   ...current,
                                   visibility,
@@ -2132,7 +2178,13 @@ function SessionsIndexRouteContent({
                   {chatList ? (
                     <SessionSetupStrip
                       disabled={busy || newSessionDraft.loading}
-                      channels={channelsQuery.channels}
+                      channels={
+                        canCreatePrivateChat
+                          ? channelsQuery.channels
+                          : channelsQuery.channels.filter(
+                              (channel) => channel.visibility !== "private",
+                            )
+                      }
                       selectedChannelId={selectedChannelId}
                       onChannelChange={selectProject}
                       onCreateProject={() => setProjectDialogOpen(true)}
@@ -2220,6 +2272,7 @@ function SessionsIndexRouteContent({
           <NewSessionStarters
             workspaceId={workspaceId}
             set={starterSet}
+            hostStarters={hostStarters}
             fileUploads={context.clientConfig.fileUploads.enabled === true}
             disabled={busy || newSessionDraft.loading}
             onSelect={(prompt) => {
@@ -2233,10 +2286,18 @@ function SessionsIndexRouteContent({
         open={projectDialogOpen}
         name={projectNameDraft}
         busy={channelsQuery.mutating}
+        audience={
+          projectAudienceOffered
+            ? { value: projectAudienceDraft, onChange: setProjectAudienceDraft }
+            : undefined
+        }
         onNameChange={setProjectNameDraft}
         onOpenChange={(open) => {
           setProjectDialogOpen(open);
-          if (!open) setProjectNameDraft("");
+          if (!open) {
+            setProjectNameDraft("");
+            setProjectAudienceDraft("workspace");
+          }
         }}
         onSubmit={() => void createProject()}
       />
@@ -2273,6 +2334,7 @@ function reportDraftSaveFailure(draft: {
 // the model picker — never raw wire ids as the primary display.
 function RecentSessions({ workspaceId }: { workspaceId: string }) {
   const { workspaceSessionListEvent } = useOpenGeni();
+  const subjectId = useAppContext().accessContext.subjectId;
   const hintsAvailable =
     workspaceSessionListEvent?.workspaceId === workspaceId && workspaceSessionListEvent.available;
   const { sessions, pinned, refresh, error } = useWorkspaceSessions({
@@ -2284,8 +2346,24 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
   });
   useSessionListHintRefresh(refresh, error);
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  // Pins are server-authoritative and sit above running and recency rows.
-  const recent = useMemo(() => recentSessionsForHome(t, sessions, pinned, 6), [pinned, sessions]);
+  // The chats the person opened here lead (kept across reloads, so the pane
+  // of an app that reopens often still shows them); then pins, which are
+  // server-authoritative, then running and recency rows.
+  const directoryVersion = useChatDirectoryVersion(subjectId);
+  const opened = useMemo<OpenedChat[]>(() => {
+    void directoryVersion;
+    const directory = readChatDirectory(subjectId, workspaceId);
+    return directory.recent.flatMap((id) => {
+      const record = directory.rows.get(id);
+      return record && record.workspaceId === workspaceId && !record.archived
+        ? [{ id, title: record.title, openedAt: record.updatedAt }]
+        : [];
+    });
+  }, [directoryVersion, subjectId, workspaceId]);
+  const recent = useMemo(
+    () => recentSessionsWithOpened(t, sessions, pinned, opened, 6),
+    [opened, pinned, sessions],
+  );
 
   if (recent.length === 0) {
     return null;
@@ -2299,16 +2377,45 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
       {/* flex-col, not grid: a grid auto track grows to a nowrap row's full
           min-content width, defeating truncate and overflowing the page. */}
       <ul className="flex min-w-0 flex-col divide-y divide-border/60">
-        {recent.map((session) => (
-          <RecentSessionRow
-            key={session.id}
-            workspaceId={workspaceId}
-            session={session}
-            catalogRows={modelCatalog.rows}
-          />
-        ))}
+        {recent.map((entry) =>
+          entry.kind === "session" ? (
+            <RecentSessionRow
+              key={entry.session.id}
+              workspaceId={workspaceId}
+              session={entry.session}
+              catalogRows={modelCatalog.rows}
+            />
+          ) : (
+            <OpenedChatRow key={entry.chat.id} workspaceId={workspaceId} chat={entry.chat} />
+          ),
+        )}
       </ul>
     </section>
+  );
+}
+
+/**
+ * A chat opened here that the current page of the list doesn't hold: its
+ * title and when it was opened. Its status isn't known here, so the row keeps
+ * the dot's place without claiming one.
+ */
+function OpenedChatRow({ workspaceId, chat }: { workspaceId: string; chat: OpenedChat }) {
+  return (
+    <li className="min-w-0">
+      <Link
+        to="/workspaces/$workspaceId/sessions/$sessionId"
+        params={{ workspaceId, sessionId: chat.id }}
+        className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-hover"
+      >
+        <span aria-hidden className="inline-block size-2 shrink-0" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm text-fg group-hover:text-fg">{chat.title}</span>
+        </span>
+        <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">
+          {chat.openedAt > 0 ? relativeTimeLabel(t, new Date(chat.openedAt).toISOString()) : null}
+        </span>
+      </Link>
+    </li>
   );
 }
 
@@ -2463,12 +2570,15 @@ function SessionFolderPicker({
           variant="outline"
           size="sm"
           disabled={disabled}
-          aria-label={`Project: ${label}`}
+          aria-label={`Project: ${label}${selected?.visibility === "private" ? ", Only me" : ""}`}
           title={label}
           className="h-8 min-w-0 max-w-[12rem] shrink gap-1.5 overflow-hidden rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg sm:shrink-0"
         >
           <ProjectGlyph project={selected} />
           <span className="min-w-0 truncate">{label}</span>
+          {selected?.visibility === "private" ? (
+            <LockIcon aria-hidden="true" className="size-3 shrink-0" />
+          ) : null}
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
@@ -2483,6 +2593,9 @@ function SessionFolderPicker({
           <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
             <ProjectGlyph project={channel} className="size-4" />
             <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+            {channel.visibility === "private" ? (
+              <LockIcon aria-label="Only me" className="size-3.5 shrink-0 text-fg-subtle" />
+            ) : null}
             <DropdownMenuCheck checked={channel.id === selectedChannelId} />
           </DropdownMenuItem>
         ))}
@@ -2517,10 +2630,10 @@ function workspaceRepositoryPickerProps(
     selectedPersonalGitHubRepoIds: context.selectedPersonalGitHubRepoIds,
     selectedPersonalGitHubRepoRefs: context.selectedPersonalGitHubRepoRefs,
     personalGitHubBusy: context.personalGitHubBusy,
+    personalGitHubManageUrl: `/workspaces/${encodeURIComponent(workspaceId)}/plugins?open=integration:github`,
     groups: context.repositoryGroups,
     selectedRepoIds: context.selectedRepoIds,
     selectedRepoRefs: context.selectedRepoRefs,
-    selectedInstallationId: context.selectedInstallationId,
     manualRepos: context.manualRepos,
     manualOpen: context.manualReposOpen,
     githubAppOpen: context.githubAppOpen,
@@ -2605,11 +2718,7 @@ function workspaceRepositoryPickerProps(
         selectWorkspaceRepository: (matched, ref) => {
           assertCurrent();
           context.setSelectedRepoIds((current) => {
-            const next =
-              context.selectedInstallationId !== null &&
-              context.selectedInstallationId !== matched.installationId
-                ? new Set<number>()
-                : new Set(current);
+            const next = new Set(current);
             next.add(matched.id);
             return next;
           });

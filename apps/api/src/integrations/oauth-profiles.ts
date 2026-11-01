@@ -43,10 +43,19 @@ import { canonicalProviderDomain } from "./provider-domain";
 
 export const OFFICIAL_SLACK_MCP_URL = OPENGENI_PERSONAL_SLACK_MCP_URL;
 export const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
-export const OFFICIAL_GMAIL_MCP_SCOPES = [
+/** A first Gmail connection asks only to read mail. */
+export const OFFICIAL_GMAIL_MCP_BASE_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
+] as const;
+/** Asked for later, in the chat, when a tool call needs it. */
+export const OFFICIAL_GMAIL_MCP_INCREMENTAL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.compose",
   "https://www.googleapis.com/auth/gmail.modify",
+] as const;
+/** Every Gmail scope the reviewed bridge can ever hold. */
+export const OFFICIAL_GMAIL_MCP_SCOPES = [
+  ...OFFICIAL_GMAIL_MCP_BASE_SCOPES,
+  ...OFFICIAL_GMAIL_MCP_INCREMENTAL_SCOPES,
 ] as const;
 
 export const OFFICIAL_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
@@ -136,6 +145,14 @@ export type OAuthProviderProfile = {
   extraAuthorizeParams?: Readonly<Record<string, string>>;
   /** Exact scope override; the caller can never widen past it. */
   requestedScopes?: readonly string[];
+  /**
+   * Incremental consent. A first connection asks only for `requestedScopes`.
+   * Reconnecting an existing account asks for `requestedScopes`, the account's
+   * current grants and the additional access the reconnect requested, each
+   * bounded by this list. The provider must accept a scope list that includes
+   * scopes already granted (Google and Microsoft both do).
+   */
+  incrementalScopes?: readonly string[];
   /** Reviewed local bridge grant normalization and token verification. Catalog profiles cannot supply code. */
   normalizeGrantedScopes?: (scopes: readonly string[] | string) => string[];
   reportedScopesRequired?: boolean;
@@ -266,8 +283,11 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
     prompt: "consent",
   },
   // The Gmail PRM advertises broader grants, including full-mail access. The
-  // reviewed connector never lets a caller widen the capability contract.
-  requestedScopes: OFFICIAL_GMAIL_MCP_SCOPES,
+  // reviewed connector never lets a caller widen the capability contract: a
+  // first connection asks only to read mail, and drafting, sending or
+  // organizing mail is asked for in the chat when a tool call needs it.
+  requestedScopes: OFFICIAL_GMAIL_MCP_BASE_SCOPES,
+  incrementalScopes: OFFICIAL_GMAIL_MCP_INCREMENTAL_SCOPES,
   reportedScopesRequired: true,
   freshRefreshTokenRequired: true,
   fullRequestedScopesRequired: true,
@@ -411,6 +431,18 @@ const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [
   OFFICIAL_GOOGLE_CALENDAR_PROFILE,
 ];
 
+/** What a verifier may read besides its own calls: the token endpoint's response,
+ * for providers that document identity fields there (Notion). */
+export type AccountIdentityContext = Readonly<{ tokenResponse: Record<string, unknown> }>;
+
+/** One read-only identity tool call. An optional call that is missing or fails
+ * contributes an empty payload instead of failing the whole check. */
+export type AccountIdentityToolCall = Readonly<{
+  toolName: string;
+  arguments: Record<string, unknown>;
+  optional?: boolean;
+}>;
+
 /**
  * Authenticated account identity for MCP servers whose OAuth profile does not
  * verify one itself. Without a verified identity, a second account for the same
@@ -421,24 +453,40 @@ const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [
 export type AccountIdentityVerifier = Readonly<{
   /** Verified metadata tuple identifying the account (see accountIdentityMetadataKeys). */
   identityKeys: readonly string[];
-  validateIdentity: (payload: Record<string, unknown>) => Record<string, string>;
+  /** One payload per call (an HTTP verifier has exactly one). Throws a
+   * "... verification failed" error when the payloads prove no identity. */
+  validateIdentity: (
+    payloads: readonly Record<string, unknown>[],
+    context: AccountIdentityContext,
+  ) => Record<string, string>;
 }> &
   (
     | Readonly<{ kind: "http"; url: string }>
-    | Readonly<{ kind: "mcp_tool"; toolName: string; arguments: Record<string, unknown> }>
+    | Readonly<{ kind: "mcp_tool"; calls: readonly AccountIdentityToolCall[] }>
   );
 
 const nonEmpty = (value: unknown): value is string =>
   typeof value === "string" && value.trim().length > 0;
+
+const record = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+
+/** Optional display fields: kept only when they are non-empty strings. */
+function labels(fields: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(fields).filter((entry): entry is [string, string] => nonEmpty(entry[1])),
+  );
+}
 
 const GOOGLE_DRIVE_IDENTITY: AccountIdentityVerifier = {
   kind: "http",
   // About is readable with the Drive scopes the connector already requests.
   url: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
   identityKeys: ["googleDriveEmail"],
-  validateIdentity: (payload) => {
-    const user = payload.user as Record<string, unknown> | undefined;
-    const email = user?.emailAddress;
+  validateIdentity: ([payload]) => {
+    const email = record(record(payload).user).emailAddress;
     if (!nonEmpty(email) || !/^[^\s@]+@[^\s@]+$/u.test(email))
       throw new Error("Google Drive account verification failed");
     return { googleDriveEmail: email };
@@ -448,15 +496,114 @@ const GOOGLE_DRIVE_IDENTITY: AccountIdentityVerifier = {
 /** Atlassian's hosted Rovo MCP reports the signed-in account through a read-only tool. */
 const ATLASSIAN_ROVO_IDENTITY: AccountIdentityVerifier = {
   kind: "mcp_tool",
-  toolName: "atlassianUserInfo",
-  arguments: {},
+  calls: [{ toolName: "atlassianUserInfo", arguments: {} }],
   identityKeys: ["atlassianAccountId"],
-  validateIdentity: (payload) => {
-    if (!nonEmpty(payload.account_id)) throw new Error("Atlassian account verification failed");
+  validateIdentity: ([payload]) => {
+    const user = record(payload);
+    if (!nonEmpty(user.account_id)) throw new Error("Atlassian account verification failed");
     return {
-      atlassianAccountId: payload.account_id,
-      ...(nonEmpty(payload.email) ? { atlassianEmail: payload.email } : {}),
-      ...(nonEmpty(payload.name) ? { atlassianName: payload.name } : {}),
+      atlassianAccountId: user.account_id,
+      ...labels({ atlassianEmail: user.email, atlassianName: user.name }),
+    };
+  },
+};
+
+/**
+ * Linear's MCP reads the signed-in user with get_user "me" (id, name, email) and
+ * the organization with get_workspace. Linear user ids are unique across
+ * organizations, so the user id alone identifies the account; the workspace only
+ * names it.
+ */
+const LINEAR_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  calls: [
+    { toolName: "get_user", arguments: { query: "me" } },
+    { toolName: "get_workspace", arguments: {}, optional: true },
+  ],
+  identityKeys: ["linearUserId"],
+  validateIdentity: ([user, workspace]) => {
+    const me = record(user);
+    if (!nonEmpty(me.id)) throw new Error("Linear account verification failed");
+    return {
+      linearUserId: me.id,
+      ...labels({
+        linearEmail: me.email,
+        linearName: nonEmpty(me.displayName) ? me.displayName : me.name,
+        linearWorkspaceName: record(workspace).name,
+      }),
+    };
+  },
+};
+
+/**
+ * Notion documents the connected user and workspace in the authorization-code
+ * token response (user_id, workspace_id) and through notion-get-self. A token
+ * acting as a workspace bot has no person in notion-get-self, so only the token
+ * fields identify who authorized it. One person can connect several workspaces.
+ */
+const NOTION_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  calls: [{ toolName: "notion-get-self", arguments: {}, optional: true }],
+  identityKeys: ["notionWorkspaceId", "notionUserId"],
+  validateIdentity: ([self], { tokenResponse }) => {
+    const workspace = record(record(self).workspace);
+    const user = record(record(self).user);
+    const tokenPair = nonEmpty(tokenResponse.workspace_id) && nonEmpty(tokenResponse.user_id);
+    const workspaceId = tokenPair ? tokenResponse.workspace_id : workspace.id;
+    const userId = tokenPair ? tokenResponse.user_id : user.type === "person" ? user.id : undefined;
+    if (!nonEmpty(workspaceId) || !nonEmpty(userId))
+      throw new Error("Notion account verification failed");
+    // notion-get-self labels only describe the same workspace and person.
+    const sameWorkspace = workspace.id === workspaceId;
+    const samePerson = sameWorkspace && user.type === "person" && user.id === userId;
+    return {
+      notionWorkspaceId: workspaceId,
+      notionUserId: userId,
+      ...labels({
+        notionEmail: samePerson ? user.email : undefined,
+        notionName: samePerson ? user.name : undefined,
+        notionWorkspaceName:
+          sameWorkspace && nonEmpty(workspace.name) ? workspace.name : tokenResponse.workspace_name,
+      }),
+    };
+  },
+};
+
+/** Asana's V2 MCP get_me returns the authenticated user (gid, name, email). */
+const ASANA_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  calls: [{ toolName: "get_me", arguments: {} }],
+  identityKeys: ["asanaUserId"],
+  validateIdentity: ([payload]) => {
+    const body = record(payload);
+    const user = nonEmpty(body.gid) ? body : record(body.data);
+    if (!nonEmpty(user.gid) || !/^\d{1,32}$/u.test(user.gid))
+      throw new Error("Asana account verification failed");
+    return {
+      asanaUserId: user.gid,
+      ...labels({ asanaEmail: user.email, asanaName: user.name }),
+    };
+  },
+};
+
+/** Stripe's MCP get_stripe_account_info returns the connected Account object. */
+const STRIPE_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  calls: [{ toolName: "get_stripe_account_info", arguments: {} }],
+  identityKeys: ["stripeAccountId"],
+  validateIdentity: ([payload]) => {
+    const account = record(payload);
+    if (!nonEmpty(account.id) || !/^acct_[A-Za-z0-9]{1,64}$/u.test(account.id))
+      throw new Error("Stripe account verification failed");
+    const displayName = record(record(account.settings).dashboard).display_name;
+    return {
+      stripeAccountId: account.id,
+      ...labels({
+        stripeEmail: account.email,
+        stripeAccountName: nonEmpty(displayName)
+          ? displayName
+          : record(account.business_profile).name,
+      }),
     };
   },
 };
@@ -468,6 +615,11 @@ const ACCOUNT_IDENTITY_VERIFIERS: ReadonlyMap<string, AccountIdentityVerifier> =
   [OFFICIAL_DRIVE_MCP_URL, GOOGLE_DRIVE_IDENTITY],
   ["https://mcp.atlassian.com/v1/mcp/authv2", ATLASSIAN_ROVO_IDENTITY],
   ["https://mcp.atlassian.com/v1/mcp", ATLASSIAN_ROVO_IDENTITY],
+  ["https://mcp.linear.app/mcp", LINEAR_IDENTITY],
+  ["https://mcp.notion.com/mcp", NOTION_IDENTITY],
+  ["https://mcp.asana.com/v2/mcp", ASANA_IDENTITY],
+  ["https://mcp.stripe.com/", STRIPE_IDENTITY],
+  ["https://mcp.stripe.com", STRIPE_IDENTITY],
 ]);
 
 /** The reviewed identity check for an exact MCP URL, when its profile has none. */
@@ -475,12 +627,36 @@ export function accountIdentityVerifierFor(mcpUrl: string): AccountIdentityVerif
   return ACCOUNT_IDENTITY_VERIFIERS.get(mcpUrl);
 }
 
-/** Identity keys for a connection: the profile's own, else the reviewed verifier's. */
+/** Generic OpenID Connect identity: the issuer's stable subject. Used only when
+ * neither a profile nor a reviewed verifier identifies the account. */
+export const OIDC_IDENTITY_KEYS: readonly string[] = ["oidcSubject"];
+
+/** Identity keys for a connection: the profile's own, else the reviewed verifier's,
+ * else OpenID Connect when this connection's sign-in can use it. */
 export function accountIdentityKeysFor(
   profile: OAuthProviderProfile | null | undefined,
   mcpUrl: string,
+  oidc = false,
 ): readonly string[] | undefined {
-  return profile?.accountIdentityMetadataKeys ?? accountIdentityVerifierFor(mcpUrl)?.identityKeys;
+  return (
+    profile?.accountIdentityMetadataKeys ??
+    accountIdentityVerifierFor(mcpUrl)?.identityKeys ??
+    (oidc ? OIDC_IDENTITY_KEYS : undefined)
+  );
+}
+
+/**
+ * MCP URLs that reach the same accounts. Connections of one account through any
+ * of them are the same account and share one owner bucket. Every other URL is
+ * its own group.
+ */
+const ACCOUNT_MCP_URL_GROUPS: readonly (readonly string[])[] = [
+  ["https://mcp.stripe.com/", "https://mcp.stripe.com"],
+];
+
+/** Stable key for the accounts an MCP URL reaches (see ACCOUNT_MCP_URL_GROUPS). */
+export function accountMcpUrlGroup(mcpUrl: string): string {
+  return ACCOUNT_MCP_URL_GROUPS.find((group) => group.includes(mcpUrl))?.[0] ?? mcpUrl;
 }
 
 /** Exact built-in profile by its stable key; throws on an unknown key. */

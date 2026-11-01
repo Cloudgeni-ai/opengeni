@@ -497,6 +497,7 @@ function inventoryFixture(
         const ready = String(params.expression ?? "").startsWith("document.readyState !==");
         return { result: { value: ready ? true : "complete" } } as T;
       }
+      if (method === "DOMSnapshot.captureSnapshot") return { strings: [], documents: [] } as T;
       if (method === "Accessibility.getFullAXTree")
         return {
           nodes: [

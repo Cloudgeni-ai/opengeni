@@ -1,4 +1,5 @@
 import type { TurnHeartbeatDetails } from "../../op-journal";
+import type { AppActionApprovalCard } from "./app-action-confirmation";
 import type { Settings } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
 import type {
@@ -8,6 +9,7 @@ import type {
   SessionEventMutation,
 } from "@opengeni/db";
 import type {
+  BillingOrigin,
   CodexCredentialPolicySnapshotV1,
   ModelContextContributionSummary,
   SessionStatus,
@@ -30,7 +32,7 @@ import type { createRuntimeBatcher, startActivityHeartbeat } from "../streaming"
 import type { RunAgentTurnResult } from "../types";
 import type { TurnOutcome } from "../../observability-metrics";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
-import type { TurnEventPublisher } from "./model-usage";
+import type { TurnBackgroundEventPublisher, TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
 import { InitialModelWireDispatchClock } from "./model-wire-dispatch";
 
@@ -114,6 +116,8 @@ export type BillingState = {
   isExternallyBilledTurn: boolean;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
+  /** The turn's frozen funding origin: API work spends credits only. */
+  billingOrigin?: BillingOrigin;
 };
 
 export type SandboxRuntimeState = {
@@ -175,6 +179,10 @@ export type EventingState = {
   codemodeDispatcher: CodemodeAttemptDispatcher | null;
   toolCancellationFenceRef: { current: TurnToolCancellationFence | null };
   publish: TurnEventPublisher | null;
+  /** Startup progress receipts that nothing awaits; ordered before later appends. */
+  publishInBackground: TurnBackgroundEventPublisher | null;
+  /** Settles once every background receipt issued so far has finished; never rejects. */
+  backgroundEventsSettled: (() => Promise<void>) | null;
   settle: TurnSettleFn | null;
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
@@ -190,6 +198,12 @@ export type EventingState = {
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
   modelVisibleSkillIds: ReadonlySet<string> | null;
+  /**
+   * The question and facts each app-action approval of this attempt shows,
+   * by call id, as its review saved them: the pending approval event says the
+   * same.
+   */
+  appActionApprovalCards: Map<string, AppActionApprovalCard>;
 };
 
 /** Rig telemetry: set once the session loads; empty string for a rig-less
@@ -327,6 +341,7 @@ export function createTurnContext(input: {
       isExternallyBilledTurn: false,
       chargesOpenGeniCredits: true,
       countsTowardTokenCap: true,
+      billingOrigin: "app",
     },
     sandboxState: {
       resolvedSandbox: null,
@@ -373,6 +388,8 @@ export function createTurnContext(input: {
       codemodeDispatcher: null,
       toolCancellationFenceRef: { current: null },
       publish: null,
+      publishInBackground: null,
+      backgroundEventsSettled: null,
       settle: null,
       turnStartedPublished: false,
       stream: undefined,
@@ -385,6 +402,7 @@ export function createTurnContext(input: {
       initialModelWireDispatch: new InitialModelWireDispatchClock(),
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
+      appActionApprovalCards: new Map(),
     },
     workspaceRefs: {
       rigId: "",

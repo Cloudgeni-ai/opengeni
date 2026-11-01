@@ -1757,6 +1757,57 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("a frame socket is told its stream is open before its first frame", async () => {
+    // A page busy when its view opens sends its first frame only once it
+    // answers; a relaying agent is ready at this ping instead.
+    let sendFirstFrame: (() => void) | undefined;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        const observation = (await json(created)).data.observation as BrowserObservation;
+        const websocket = new WebSocket(
+          `${server.url.replace("http:", "ws:")}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/frames`,
+          [
+            BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+            `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+          ],
+        );
+        websocket.binaryType = "arraybuffer";
+        let framesBeforePing = 0;
+        websocket.addEventListener("message", () => {
+          framesBeforePing += 1;
+        });
+        // Bun's WebSocket client reports pings as a "ping" event.
+        const ping = await new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("no subscribed ping")), 2_000);
+          websocket.addEventListener("ping" as "message", (event) => {
+            clearTimeout(timer);
+            resolve(Buffer.from((event as MessageEvent).data as ArrayBuffer).toString());
+          });
+        });
+        expect(ping).toBe("opengeni.frames.subscribed");
+        expect(framesBeforePing).toBe(0);
+        const message = websocketMessage(websocket);
+        sendFirstFrame!();
+        expect(decodeBrowserFrameMessage(new Uint8Array(await message))).toMatchObject({
+          browserSessionId: reference.browserSessionId,
+          sequence: 1,
+        });
+        websocket.close(1000, "done");
+        await websocketClosed(websocket);
+      },
+      {
+        deferFirstFrame: (send) => {
+          sendFirstFrame = send;
+        },
+      },
+    );
+  });
+
   test("a stale lifecycle request cannot disrupt the active session or its viewers", async () => {
     await withServer(async ({ server, reference }) => {
       const created = await request(server, "/v1/browser-sessions", {
@@ -1987,6 +2038,8 @@ async function withServer(
     screenshotError?: Error;
     closeError?: Error;
     onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
+    /** Holds a subscription's first frame until the test sends it. */
+    deferFirstFrame?: (send: () => void) => void;
     beforeDriverOperation?: (
       operation:
         | "listTargets"
@@ -2074,6 +2127,8 @@ function fakeDriver(
     screenshotError?: Error;
     closeError?: Error;
     onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
+    /** Holds a subscription's first frame until the test sends it. */
+    deferFirstFrame?: (send: () => void) => void;
     beforeDriverOperation?: (
       operation:
         | "listTargets"
@@ -2226,7 +2281,9 @@ function fakeDriver(
     async subscribeFrames() {
       const subscription = new LatestBrowserFrameSubscription(async () => undefined);
       options.onFrameSubscription?.(subscription);
-      queueMicrotask(() => subscription.push(frame(context, target)));
+      const send = () => subscription.push(frame(context, target));
+      if (options.deferFirstFrame) options.deferFirstFrame(send);
+      else queueMicrotask(send);
       return subscription;
     },
     async debug() {

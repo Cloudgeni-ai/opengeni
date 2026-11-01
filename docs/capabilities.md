@@ -2,8 +2,23 @@
 
 Opengeni exposes a workspace-level Capabilities control-plane read model for external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
 
-Capability, Plugin, API Integration, and Integration Facet mutations
-require the narrow `capabilities:manage` permission. Shared-workspace admins
+Adding integrations is member work: installing and removing Plugins and API
+Integrations, adding custom MCP catalog entries, turning on any catalog
+integration that is not on yet (with a personal or a shared account), and
+configuring an installed integration's facets and sources need
+`connections:write`, which ordinary Members hold, or `capabilities:manage`
+(`INTEGRATION_SETUP_PERMISSION` and `canAddIntegrations` in
+`packages/contracts/src/personal-integration-setup.ts`). A member's add is
+create-only: it never changes an installation that is already on, turns back
+on one an admin turned off, rewrites or shadows an existing catalog entry, or
+picks a server's tool ID, and the organization's integration policy (its
+allowlist, and `personalIntegrationSetup: "admins"`) still decides.
+What stays integration administration (`capabilities:manage`): connector and
+session-MCP tool permissions (Allow/Ask/Block), `autoApprovedTools` and any
+explicit MCP `requireApproval` other than `true`, changing an integration that
+is already set up (updating a plugin or a custom API to a new revision,
+reconnecting or rebinding a shared account, or turning a server back on), and
+turning one off for everyone. Members can remove what an admin added. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
 member-management or API-key-delegation powers of `workspace:admin`.
@@ -816,7 +831,7 @@ Ordinary new sessions include two first-party Opengeni tools:
   endpoint not yet in the workspace catalog. The agent may propose a name and
   exact URL, but cannot register or contact the server. The signed-in human
   reviews/edits the address and creates a catalog entry with the ordinary
-  `capabilities:manage` permission; credential setup, enablement, and session
+  `connections:write` permission; credential setup, enablement, and session
   tool selection then use the existing protected flows. Search the catalog
   first; API/GraphQL definition import remains its separate preview wizard.
 
@@ -871,9 +886,9 @@ as connecting your own account, so it needs only `connections:personal`
 (included in `connections:write`), not `capabilities:manage`: the instance
 resolves credentials for that person alone. The card itself also needs
 `sessions:control` to add the tools to the chat and continue it. A
-workspace-owned account or a custom source needs `connections:write`, and
-binding an instance that is not already bound to the same account still needs
-`capabilities:manage`. Where this client cannot connect a personal account
+workspace-owned account, a custom source, or binding an instance that is not
+already bound to the same account needs `connections:write`. Where this client
+cannot connect a personal account
 (for example a shared service identity), the card says so instead of offering
 Connect.
 
@@ -937,14 +952,23 @@ tools, limits and explicit replacement of old source schedules.
 The reviewed Gmail connector uses Opengeni's REST-backed MCP bridge. Its
 historical `https://gmailmcp.googleapis.com/mcp/v1` connection identity remains
 stable, but setup, tool discovery, and execution do not contact Google's
-Developer Preview MCP server. Opengeni requests only the three scopes used by
-the reviewed tool surface:
+Developer Preview MCP server. The reviewed tool surface uses three scopes,
+asked for one step at a time (incremental consent):
 
-- `https://www.googleapis.com/auth/gmail.readonly`
-- `https://www.googleapis.com/auth/gmail.compose`
-- `https://www.googleapis.com/auth/gmail.modify`
+- `https://www.googleapis.com/auth/gmail.readonly`, the only scope a first
+  connection asks for (search and read);
+- `https://www.googleapis.com/auth/gmail.compose`, asked for in the chat the
+  first time a tool drafts or sends;
+- `https://www.googleapis.com/auth/gmail.modify`, asked for in the chat the
+  first time a tool organizes, trashes or imports mail.
 
-Those scopes support search/read, drafts, sending and mailbox organization.
+All tools stay listed for the model. A tool whose scope the account lacks stops
+before any provider request or approval, publishes an `insufficient_scope` auth
+notice and returns a not-run error; the chat card's Allow reconnects the same
+account for the base scope, the account's current Gmail grants and the missing
+scope, never more than the three above. A plain reconnect keeps exactly the
+grants the account already holds. Accounts connected before incremental consent
+keep all three scopes.
 Permanent message deletion requires a broader scope and remains unavailable.
 Tool permissions use the selected account’s Allow / Ask first / Block choices;
 connector recommendations are defaults. Gmail OAuth is handled by the ordinary
@@ -987,7 +1011,7 @@ after an ambiguous provider response - it fails closed with an explicit
 
 OAuth discovery reads Google's pinned OpenID metadata with PKCE S256 and uses
 the deployment's registered client. After exchanging the authorization code,
-setup requires a fresh refresh token, all three reported Gmail scopes, and a
+setup requires a fresh refresh token, the reported `gmail.readonly` scope, and a
 successful `GET https://gmail.googleapis.com/gmail/v1/users/me/profile`. Only
 the verified mailbox email label is stored; counts and history identifiers are
 discarded. The label does not replace the signed Opengeni owner authority.
@@ -1016,6 +1040,9 @@ Before importing/enabling the capability in a deployment:
    verification and any applicable security assessment. A Google project left
    in Testing can expire refresh tokens after seven days; reauthorization is
    then required even when the bridge is working correctly.
+   All three Gmail scopes are restricted, including `gmail.readonly`, so
+   incremental consent does not change this requirement; list all three in the
+   consent screen's data access settings.
 5. Run the normal reviewed catalog import, open **Capabilities**, search for
    **Gmail**, and select **Connect only for me**. The ownership choice is fixed:
    every member connects their own mailbox, and other workspace members cannot

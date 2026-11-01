@@ -3,6 +3,7 @@ import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
 import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
+import { computerCursorIdentity } from "./computer-cursor-identity";
 import {
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
@@ -465,6 +466,7 @@ export function registerComputerSessionRoutes(
                   async (client) =>
                     await client.createComputerSession({
                       computerSessionId: preparedSession.id,
+                      cursorIdentity: await computerCursorIdentity(deps, grant, sourceSession),
                       controllerGeneration,
                       tokenGeneration: record.tokenGeneration,
                       ...tokens,
@@ -1834,6 +1836,12 @@ export function registerComputerSessionRoutes(
           if (!recoverMissing || !isMissingComputerControllerSession(error)) throw error;
           await client.createComputerSession({
             computerSessionId,
+            cursorIdentity: await computerCursorIdentity(
+              deps,
+              grant,
+              sourceSession ??
+                (await requireSourceSession(deps, workspaceId, record.sourceSessionId)),
+            ),
             controllerGeneration: binding.controllerGeneration,
             tokenGeneration: record.tokenGeneration,
             ...tokens,

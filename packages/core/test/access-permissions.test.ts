@@ -121,6 +121,49 @@ describe("literal high-trust permissions", () => {
     ).toBe(false);
   });
 
+  test("a deprecated permission name outside the policy is refused with its canonical name", () => {
+    const secrets: AccessGrant = {
+      ...grant(["workspace:read", "secrets:list", "secrets:use"]),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(secrets, ["secrets:use"])).not.toThrow();
+    expect(() =>
+      requireExplicitPermissionDelegation(secrets, ["workspace:read", "variable-sets:use"]),
+    ).toThrow("variable-sets:use is a deprecated permission name; state secrets:use instead");
+    // A deprecated name whose canonical permission the policy lacks is simply outside it.
+    expect(() => requireExplicitPermissionDelegation(secrets, ["variable-sets:write"])).toThrow(
+      "cannot delegate a permission outside the organization key policy",
+    );
+    // A policy that stores the deprecated name itself still covers it.
+    const legacy: AccessGrant = {
+      ...grant(["workspace:read", "variable-sets:use"]),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(legacy, ["variable-sets:use"])).not.toThrow();
+  });
+
+  test("a key holding exactly the canonical full set can delegate workspace:admin", () => {
+    const canonical = Permission.options.filter(
+      (permission) => normalizePermission(permission) === permission,
+    );
+    const full: AccessGrant = { ...grant(canonical), permissionMode: "explicit" };
+    expect(() => requireExplicitPermissionDelegation(full, ["workspace:admin"])).not.toThrow();
+    // Keys saved with the legacy variable-set names next to the canonical ones keep working.
+    const legacy: AccessGrant = {
+      ...grant([...Permission.options]),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(legacy, ["workspace:admin"])).not.toThrow();
+    // A key missing any canonical permission still can't hand out the wildcard.
+    const partial: AccessGrant = {
+      ...grant(canonical.filter((permission) => permission !== "secrets:use")),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(partial, ["workspace:admin"])).toThrow(
+      "cannot delegate a legacy workspace-admin wildcard",
+    );
+  });
+
   test("variable-set capabilities do not imply one another", () => {
     const exact = [
       "variable-sets:list",

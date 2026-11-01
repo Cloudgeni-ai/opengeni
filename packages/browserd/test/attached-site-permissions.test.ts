@@ -90,6 +90,8 @@ class SitePermissionBridge implements AttachedBrowserBridgeTransport {
         };
       case "Accessibility.getFullAXTree":
         return { nodes: [] };
+      case "DOMSnapshot.captureSnapshot":
+        return { strings: [], documents: [] };
       case "Runtime.evaluate":
         return {
           result: {

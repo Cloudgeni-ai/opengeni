@@ -137,11 +137,16 @@ export const ListWorkspaceWebhooksResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type ListWorkspaceWebhooksResponse = z.infer<typeof ListWorkspaceWebhooksResponse>;
 
-/** Organization webhooks fan out session and recording events; usage events are per-workspace. */
+/**
+ * Organization webhooks fan out session and recording events; usage and agent
+ * call events are per-workspace.
+ */
 export const OrganizationWebhookEventType = WorkspaceWebhookEventType.exclude([
   "usage.threshold_reached",
   "usage.exhausted",
   "usage.period_reset",
+  "session.agentCall.ringing",
+  "session.agentCall.settled",
 ]);
 export type OrganizationWebhookEventType = z.infer<typeof OrganizationWebhookEventType>;
 const OrganizationEventTypes = /* @__PURE__ */ defineSchema(() =>
@@ -276,6 +281,12 @@ export const SessionWorkspaceWebhookEvent = /* @__PURE__ */ defineSchema(() =>
         sender: z.object({ subjectId: primitives.string, label: primitives.string }).optional(),
         /** Present when Opengeni notified no one, so the receiver may deliver it. */
         undeliveredReason: z.lazy(() => NotificationUndeliveredReason).optional(),
+        /** `session.agentCall.*`: the call, so a product can ring its own app. */
+        callId: z.string().optional(),
+        calleeSubjectId: z.string().optional(),
+        callerLabel: z.string().optional(),
+        ringUntil: z.string().optional(),
+        outcome: z.enum(["answered", "declined", "missed", "cancelled"]).optional(),
       })
       .passthrough(),
   }),
@@ -391,6 +402,8 @@ export const OrganizationCredentialProvider = /* @__PURE__ */ defineSchema(() =>
   }).extend({
     organizationId: primitives.uuid,
     workspaceFilter: IntegrationWorkspaceFilter.nullable(),
+    /** Members' Personal workspaces; `workspaceFilter` picks shared ones only. */
+    allowPersonalWorkspaces: primitives.boolean,
   }),
 );
 export type OrganizationCredentialProvider = z.infer<typeof OrganizationCredentialProvider>;
@@ -400,6 +413,8 @@ export const PutOrganizationCredentialProviderRequest =
     PutWorkspaceCredentialProviderRequest.extend({
       /** Required; null explicitly covers all non-personal workspaces. PUT replaces configuration. */
       workspaceFilter: IntegrationWorkspaceFilter.nullable(),
+      /** Also cover members' Personal workspaces. Defaults to false; PUT replaces configuration. */
+      allowPersonalWorkspaces: primitives.optionalBoolean,
     }),
   );
 export type PutOrganizationCredentialProviderRequest = z.input<

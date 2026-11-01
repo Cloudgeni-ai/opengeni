@@ -33,8 +33,12 @@ each hosted field keeps encrypted **versions**.
   before this setting existed stay available everywhere until narrowed.
 - **Workspace** vaults are usable by members of that workspace.
 - **Organization** vaults are managed with `account:admin`; their reach is set
-  by "Available in" (all workspaces or a list, and optionally personal
-  workspaces).
+  by "Available in": every shared workspace (`allowedWorkspaceIds: null`) or a
+  list of them, and separately whether members' Personal workspaces have it
+  (`allowPersonalWorkspaces`). The switch alone decides Personal workspaces,
+  whichever workspace choice is made (migration 1171; before it, a vault with
+  a list never reached a Personal workspace, so 1171 turned the switch off on
+  those vaults to keep their reach).
 - **Task** vaults hold secrets created during one task. There is one per root
   session, and it is deleted with that session.
 - Default hosted vaults are created on first use: **Private** (Only me),
@@ -320,8 +324,9 @@ level. Changes are audited as `credential_profile.updated` or
 `credential_profile.cleared` with variable names only.
 
 **Configuring.** Reading needs `secrets:list`. Changing needs `secrets:write`
-plus `workspace:admin` for the workspace profile, or `sessions:control` and
-the chat's tool-policy access for a chat profile. Use the HTTP routes below or
+plus `workspace:admin` for the workspace profile (the owner of a Personal
+workspace changes its profile too), or `sessions:control` and the chat's
+tool-policy access for a chat profile. Use the HTTP routes below or
 the `secret_profile_get` and `secret_profile_set` agent tools; there is no web
 UI yet. Profiles hold references, never values.
 
@@ -849,8 +854,9 @@ Managed runtimes refuse to start with it set.
 
 A secret that already reached a session's stored history (pasted into a
 message, printed by a command, or resolved into a hand-off before references
-were kept) stays there until it is removed. A workspace owner or admin removes
-it with `POST /v1/workspaces/:workspaceId/secret-redactions`:
+were kept) stays there until it is removed. A workspace admin, or the owner of
+a Personal workspace, removes it with
+`POST /v1/workspaces/:workspaceId/secret-redactions`:
 
 ```json
 {
@@ -998,7 +1004,7 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `POST …/fields/:fieldId/reveal`; `GET …/fields/:fieldId/versions`; `POST …/fields/:fieldId/restore` | Plaintext, history, version restore |
 | `GET, PUT /vaults/:vaultId/items/:itemId/approval`; `POST …/approval/grants/:grantId/revoke` | "Ask me each time" marks and the approvals in force |
 | `PUT /sessions/:sessionId/vault-policy`; `GET /sessions/:sessionId/secrets` | Session policy and the secrets a session has used |
-| `GET, PUT /credential-profile` | The workspace [credential profile](#credential-profiles): `{profile}`; `PUT` takes `{entries, gitHelper?}` and needs `workspace:admin` and `secrets:write` |
+| `GET, PUT /credential-profile` | The workspace [credential profile](#credential-profiles): `{profile}`; `PUT` takes `{entries, gitHelper?}` and needs `secrets:write` plus `workspace:admin` (or owning the Personal workspace) |
 | `GET, PUT /sessions/:sessionId/credential-profile` | A chat's own profile and its effective profile `{profile, effective}`; `PUT` needs `sessions:control` and `secrets:write` |
 | `POST /connections/1password/install`; `GET /connections/1password/service-accounts`; `GET /connections/:connectionId/provider-vaults` | 1Password connections |
 | `PUT /connections/:connectionId/1password/token`; `DELETE /connections/:connectionId/1password` | Replace a 1Password token; disconnect (unlinks its vaults) |
@@ -1007,7 +1013,7 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `PUT /vault-providers/connections/:connectionId/credentials` | Reconnect without changing linked vault identities |
 | `POST /vault-providers/connections/:connectionId/verify` | Finish pending setup using saved credentials, without replaying a bootstrap token |
 | `DELETE /vault-providers/connections/:connectionId` | Unlink locally and revoke stored access; never delete upstream items |
-| `POST /secret-redactions` | Remove a secret from chosen sessions' stored history (admin; counts only) |
+| `POST /secret-redactions` | Remove a secret from chosen sessions' stored history (admin or Personal owner; counts only) |
 
 Errors use `{error, message, details?}` with the codes in `VaultErrorCode`
 (`packages/contracts/src/vaults.ts`).

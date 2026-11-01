@@ -147,6 +147,8 @@ test.each(["chrome_internal", "intercepted_local"] as const)(
             return { result: { value: "complete" } } as T;
           case "Accessibility.getFullAXTree":
             return { nodes: [] } as T;
+          case "DOMSnapshot.captureSnapshot":
+            return { strings: [], documents: [] } as T;
           default:
             return {} as T;
         }
@@ -435,6 +437,7 @@ test.each([
           return { data: Buffer.from(jpeg).toString("base64") } as T;
         }
         if (method === "Accessibility.getFullAXTree") return { nodes: [] } as T;
+        if (method === "DOMSnapshot.captureSnapshot") return { strings: [], documents: [] } as T;
         return {} as T;
       },
       on() {

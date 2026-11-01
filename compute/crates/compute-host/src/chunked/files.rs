@@ -179,15 +179,16 @@ impl Chunked {
             Prepared::Known(reusable) => Some(reusable.reference),
             Prepared::New(chunk) => {
                 let _permit = self.transfers.acquire().await.map_err(transient)?;
-                let stored = self
+                let put = self
                     .chunks
                     .put_chunk(&chunk)
                     .await
                     .map_err(|error| storage_error(OP, error))?;
-                if stored {
+                if put.new {
                     crate::observe::notes::bytes("uploaded", chunk.bytes.len() as u64);
                 }
-                Some(chunk.reference)
+                // Named as stored, under the day it was stored on.
+                Some(put.reference)
             }
         })
     }

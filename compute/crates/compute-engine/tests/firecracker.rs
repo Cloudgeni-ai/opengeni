@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use compute_engine::cgroup::{Cgroup, OnlyCopy};
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig, FirecrackerVm};
 use compute_engine::{
     CancellationToken, Completion, Drive, Engine, Found, MemorySource, RestoreFiles, RoomKept,
@@ -476,8 +477,11 @@ async fn boot_pause_compress_snapshot_restore() {
         (-0.2..1.0).contains(&after_restore),
         "a timer due while saved fired {after_restore} s after restore"
     );
+    // /proc/uptime counts hundredths: its two readings can understate the
+    // time the timer slept by one, and the subtraction then lands a hair
+    // below it (-1.8e-15 for a timer that fired on time).
     assert!(
-        (0.0..0.5).contains(&late_by),
+        (-0.0101..0.5).contains(&late_by),
         "a timer due after the restore fired {late_by} s late"
     );
     assert_trimmed_space_returns(&uds, &spec.drives[0].path).await;
@@ -615,6 +619,38 @@ async fn only_a_vmm_seen_running_counts_as_a_launch() {
         error.launched,
         "a VMM that refused its snapshot did not count: {error}"
     );
+    std::fs::remove_dir_all(&spec.logs).unwrap();
+}
+
+/// A VM started into the group an earlier VM of its name left behind (a
+/// group's removal gives up while the kernel still holds it) starts
+/// unmarked, whatever mark as its sandbox's only copy that VM had: the
+/// guard would otherwise leave running a VM whose sandbox has a copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vm_started_into_a_group_left_behind_starts_unmarked() {
+    let Some(lab) = lab() else { return };
+    let name = format!("mark-test-{}", std::process::id());
+    let spec = jailed_spec(&lab, &name, 3_900_004);
+    let engine = engine(&lab);
+    let left = Cgroup::at(Path::new("/sys/fs/cgroup/compute-test").join(&name));
+    let _ = std::fs::remove_dir(left.path());
+    std::fs::create_dir(left.path()).unwrap();
+    left.set_only_copy(true).unwrap();
+    assert_eq!(left.only_copy().unwrap(), OnlyCopy::Yes);
+
+    let vm = engine.boot(&spec).await.unwrap();
+    assert_eq!(
+        vm.cgroup().path(),
+        left.path(),
+        "started into the group left"
+    );
+    assert_eq!(vm.cgroup().only_copy().unwrap(), OnlyCopy::No);
+    engine.set_only_copy(&vm, true).unwrap();
+    assert_eq!(vm.cgroup().only_copy().unwrap(), OnlyCopy::Yes);
+
+    let cgroup = vm.cgroup().path().to_owned();
+    engine.stop(vm).await.unwrap();
+    assert!(!cgroup.exists(), "cgroup left behind");
     std::fs::remove_dir_all(&spec.logs).unwrap();
 }
 

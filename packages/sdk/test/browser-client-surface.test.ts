@@ -143,12 +143,19 @@ const integrationMethods = [
 // The native app exchanges its sign-in code, signs out and manages its push
 // device through the public client. The web app only starts the authorization.
 const nativeAppMethods = [
+  "answerAgentCall",
+  "declineAgentCall",
   "exchangeNativeAppCode",
+  "getAgentCall",
   "getNativePushDevice",
   "registerNativePushDevice",
   "signOutNativeApp",
   "unregisterNativePushDevice",
 ];
+
+// A product embedding Opengeni states, from its backend as the person, which
+// of their phones it rings for agent calls; no Opengeni browser surface uses it.
+const embeddingProductMethods = ["getAgentCallHostPhones", "setAgentCallHostPhones"];
 
 // #3470 retired the preference editor and learning/onboarding hooks, not their
 // public SDK contracts. Preserve these existing browser methods for old bundles
@@ -256,6 +263,7 @@ describe("browser client runtime surface", () => {
         ...agentInteractionMethods,
         ...integrationMethods,
         ...nativeAppMethods,
+        ...embeddingProductMethods,
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,

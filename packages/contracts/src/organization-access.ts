@@ -1,7 +1,7 @@
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
-import { Permission } from "./permissions";
+import { Permission, normalizePermission } from "./permissions";
 
 export const OrganizationAccessPreset = /* @__PURE__ */ defineSchema(() =>
   z.enum(["read_only", "full", "custom"]),
@@ -29,10 +29,13 @@ export const OrganizationActor = /* @__PURE__ */ defineSchema(() =>
 );
 export type OrganizationActor = z.infer<typeof OrganizationActor>;
 
-const aliases: Partial<Record<Permission, Permission>> = {
-  "environments:manage": "variable-sets:manage",
-  "environments:use": "variable-sets:use",
-};
+/**
+ * Every legacy name (`variable-sets:*`, `environments:*`) is an alias of its
+ * canonical `secrets:*` permission. Presets list canonical names only, so a
+ * key holding exactly the canonical set is a full key.
+ */
+const canonicalName = (permission: Permission): Permission =>
+  normalizePermission(permission) as Permission;
 // Computed on first use, never at module load: the web build can place
 // `Permission` in a chunk that finishes initializing after this one, and a
 // top-level read of `Permission.options` then crashes the whole app.
@@ -41,13 +44,15 @@ let permissionSets:
   | undefined;
 function sets() {
   if (permissionSets) return permissionSets;
-  const canonical = Permission.options.filter((permission) => !aliases[permission]);
+  const canonical = Permission.options.filter(
+    (permission) => canonicalName(permission) === permission,
+  );
   /** Everything that only observes. Reading secret values observes too. */
   const observational = canonical.filter((permission) =>
     /:(read|list|view|search)$/.test(permission),
   );
   /** Secret values are opt-in: Read only leaves them out, Custom can add them. */
-  const secretValue = new Set<Permission>(["secrets:read", "variable-sets:read"]);
+  const secretValue = new Set<Permission>(["secrets:read"]);
   const readOnly = observational.filter((permission) => !secretValue.has(permission));
   permissionSets = { canonical, observational, readOnly };
   return permissionSets;
@@ -67,7 +72,7 @@ export function organizationAccessPresetPermissions(
 /** True when nothing can be changed, including an empty set and secret-value reads. */
 export function isReadOnlyPermissionSet(permissions: readonly Permission[]): boolean {
   return permissions.every((permission) =>
-    sets().observational.includes(aliases[permission] ?? permission),
+    sets().observational.includes(canonicalName(permission)),
   );
 }
 
@@ -89,9 +94,7 @@ export function normalizeOrganizationAccessPolicy(
   policy: OrganizationAccessPolicy,
 ): OrganizationAccessPolicy {
   const parsed = OrganizationAccessPolicyInput.parse(policy);
-  const requested = new Set(
-    parsed.permissions.map((permission) => aliases[permission] ?? permission),
-  );
+  const requested = new Set(parsed.permissions.map(canonicalName));
   // `connections:write` includes connecting one's own accounts, so a policy
   // saved before the narrow permission existed keeps its exact meaning.
   if (requested.has("connections:write")) requested.add("connections:personal");

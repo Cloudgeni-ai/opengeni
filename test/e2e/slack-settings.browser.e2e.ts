@@ -161,8 +161,7 @@ test("multiple bot installations keep access changes on the selected workspace",
       await sheet.getByText("Publish important decisions to Slack", { exact: true }).count(),
     ).toBe(0);
     await sheet.getByRole("button", { name: "Edit access", exact: true }).click();
-    await sheet.getByRole("combobox", { name: "Bot workspace access" }).click();
-    await page.getByRole("option", { name: "Selected workspaces", exact: true }).click();
+    await sheet.getByRole("radio", { name: "Selected workspaces", exact: true }).click();
     await sheet.getByRole("checkbox", { name: "Analytics", exact: true }).click();
     await sheet.getByRole("button", { name: "Save", exact: true }).click();
     await sheet.getByRole("button", { name: "Edit access", exact: true }).waitFor();

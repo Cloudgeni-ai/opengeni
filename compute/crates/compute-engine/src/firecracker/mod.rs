@@ -15,7 +15,7 @@ mod holder;
 mod jail;
 mod logs;
 mod pager;
-mod process;
+pub(crate) mod process;
 mod room;
 mod run_state;
 mod runtime;
@@ -40,9 +40,7 @@ pub use self::api::ApiError;
 use self::balloon::Balloon;
 use self::drives::drive_config;
 pub use self::jail::BINARY_NAME;
-use self::jail::{
-    API_SOCKET, Jail, LAUNCH_LEFTOVERS, Launch, PID_FILE, jailer_args, remove_if_present,
-};
+use self::jail::{Jail, Launch, PID_FILE, jailer_args, remove_if_present, tidy};
 pub use self::process::Exit;
 use self::process::{Process, in_cgroup, parse_pid};
 use self::run_state::{RunState, set_run_state};
@@ -56,7 +54,7 @@ use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
 use crate::spec::{MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
-use crate::{CancellationToken, Completion, Engine, Found};
+use crate::{CancellationToken, Completion, Engine, Found, LastWords};
 
 /// Memory pushed to compressed RAM per reclaim request. Small enough that a
 /// wake arriving mid-compression waits only a few milliseconds.
@@ -68,8 +66,11 @@ const JAILER_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a VMM found by [`Engine::adopt`] may take to answer.
 const ADOPT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The search path the jailer runs with; it inherits nothing else.
-const JAILER_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
+/// The search path the jailer and the holders of a VM's files run with;
+/// they inherit nothing else. The system's own directories, then NixOS's
+/// system profile, which holds what those hold elsewhere: there `/bin` has
+/// only `sh`, and a holder's shell would find no `sleep`.
+const SYSTEM_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin";
 
 /// Guest clock source that restore can correct.
 ///
@@ -371,11 +372,17 @@ impl Firecracker {
             .map_err(|error| EngineError::caused_by(ErrorKind::Transient, operation, error))?
             .map_err(|error| EngineError::io(operation, error))?
         };
+        // A group an earlier VM left (its removal gives up while the kernel
+        // still holds it) keeps that VM's mark: this one starts unmarked,
+        // before any of its processes are in the group.
+        self.cgroup_of(spec)
+            .set_only_copy(false)
+            .map_err(|error| EngineError::io(operation, error))?;
         let mut command = Command::new(&self.jailer);
         command
             .args(&args)
             .env_clear()
-            .env("PATH", JAILER_PATH)
+            .env("PATH", SYSTEM_PATH)
             .stdin(Stdio::null())
             .stdout(console)
             .stderr(log);
@@ -478,6 +485,7 @@ impl Firecracker {
             compress_running: self.compress_running,
             runtime: recorded_runtime(jail),
             console: spec.logs.join(logs::CONSOLE_LOG),
+            logs: spec.logs.clone(),
         })
     }
 
@@ -613,26 +621,6 @@ fn prepare(
     logs::open(dir)
 }
 
-/// Removes what one launch leaves in the jail: the jailer's copy of the
-/// binary, its pid file and device nodes, and the VMM's sockets. Listener
-/// sockets the host serves in the jail stay.
-fn tidy(jail: &Jail) -> io::Result<()> {
-    let sockets = [API_SOCKET.trim_start_matches('/'), "vsock.sock"];
-    for name in LAUNCH_LEFTOVERS.iter().chain(&sockets) {
-        let path = jail.root().join(name);
-        let removed = match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&path),
-            Ok(_) => fs::remove_file(&path),
-            Err(error) => Err(error),
-        };
-        match removed {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
 /// A running Firecracker VM.
 #[derive(Debug)]
 pub struct FirecrackerVm {
@@ -656,6 +644,8 @@ pub struct FirecrackerVm {
     runtime: String,
     /// Its guest's serial console, written by this VM process alone.
     console: PathBuf,
+    /// Its logs: the console, the VMM's own log and its pager's.
+    logs: PathBuf,
 }
 
 impl FirecrackerVm {
@@ -1082,7 +1072,7 @@ impl Engine for Firecracker {
         vm: &FirecrackerVm,
         file: OwnedFd,
     ) -> impl Future<Output = Result<(), EngineError>> + Send {
-        holder::hold(vm.cgroup.clone(), JAILER_PATH, file)
+        holder::hold(vm.cgroup.clone(), SYSTEM_PATH, file)
     }
 
     fn held(
@@ -1177,10 +1167,20 @@ impl Engine for Firecracker {
         Ok(())
     }
 
+    fn bringing_down(&self, vm: &FirecrackerVm) -> bool {
+        vm.bounds.descending()
+    }
+
     fn set_memory_limit(&self, vm: &FirecrackerVm, bytes: Option<u64>) -> Result<(), EngineError> {
         vm.cgroup
             .set_memory_max(bytes)
             .map_err(|error| EngineError::io("set_memory_limit", error))
+    }
+
+    fn set_only_copy(&self, vm: &FirecrackerVm, only: bool) -> Result<(), EngineError> {
+        vm.cgroup
+            .set_only_copy(only)
+            .map_err(|error| EngineError::io("set_only_copy", error))
     }
 
     async fn resize_drives(&self, vm: &FirecrackerVm, spec: &VmSpec) -> Result<(), EngineError> {
@@ -1223,6 +1223,10 @@ impl Engine for Firecracker {
         vm: &FirecrackerVm,
     ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
         logs::halted(vm.console.clone(), vm.name.clone())
+    }
+
+    fn last_words(&self, vm: &FirecrackerVm) -> impl Future<Output = LastWords> + Send + 'static {
+        logs::last_words(vm.logs.clone(), vm.name.clone())
     }
 
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {
