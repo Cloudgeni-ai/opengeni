@@ -244,6 +244,13 @@ export const WorkspaceRecordingSettings = /* @__PURE__ */ defineSchema(() =>
         .regex(/^[a-z]{2,3}$/u)
         .optional(),
       /**
+       * Names and words every meeting transcript listens for, such as
+       * people, products and trade terms. A recording's own keyterms come
+       * first; together they are cut at the 100 a request takes. Models
+       * without keyterm support ignore them.
+       */
+      keyterms: z.array(z.string().trim().min(1).max(50)).max(100).optional(),
+      /**
        * Recognize people by voice. Off by default. While on, Opengeni keeps
        * each diarized speaker's voice vector with the transcript and
        * suggests who a speaker is from the voices of people who agreed to be
@@ -463,6 +470,13 @@ export const UpdateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
       /** A title given here is the person's, and nothing replaces it. */
       title: z.string().trim().min(1).max(300).optional(),
       visibility: RecordingVisibility.optional(),
+      /**
+       * Only the owner, for their Only me meeting: the other workspaces of the
+       * organization where it also works, besides the one that stores it and
+       * their Personal workspace. Null for every workspace they belong to.
+       * Each must be a workspace the owner belongs to.
+       */
+      reachWorkspaceIds: z.array(z.string().uuid()).max(200).nullable().optional(),
       externalRef: externalRef.nullable().optional(),
       metadata: recordingMetadata.optional(),
     })
@@ -643,6 +657,13 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
     workspaceId: z.string(),
     ownerSubjectId: z.string(),
     visibility: RecordingVisibility,
+    /**
+     * An Only me meeting's other workspaces where it also works, besides the
+     * one that stores it and its owner's Personal workspace; null for every
+     * workspace the owner belongs to (meetings from before this list existed).
+     * Shared meetings work only in their workspace and ignore it.
+     */
+    reachWorkspaceIds: z.array(z.string()).nullable().optional(),
     title: z.string(),
     /** Where the title came from. Absent from servers before it was added. */
     titleSource: RecordingTitleSource.optional(),

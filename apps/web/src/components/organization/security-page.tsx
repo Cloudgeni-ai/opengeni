@@ -53,8 +53,9 @@ import {
 
 /* ----------------------------------------------------------------------------
    Organization settings > Security & data: EU-only inference, Only me chats and
-   automations, full access for agent sessions, how long a removed person's data
-   is kept, and recovery (owners, managed sign-in only).
+   automations, full access for agent sessions, whether members connect their
+   own machines, how long a removed person's data is kept, and recovery
+   (owners, managed sign-in only).
    -------------------------------------------------------------------------- */
 
 export function OrganizationSecurityPage() {
@@ -89,6 +90,11 @@ export function OrganizationSecurityPage() {
       {administrator ? (
         <Section title="Agents">
           <AgentAdminAccessRow client={client} identity={directory.identity} />
+        </Section>
+      ) : null}
+      {managedPeople && administrator ? (
+        <Section title="Machines">
+          <OwnMachinesRow client={client} identity={directory.identity} />
         </Section>
       ) : null}
       {administrator ? (
@@ -764,6 +770,99 @@ function AgentAdminAccessRow({
           await save("sessionAdminAccessAllowed", false);
         }}
         onSubmitted={() => setConfirmOff(false)}
+      />
+    </SettingRowGroup>
+  );
+}
+
+/* ---------------------------------------------------------------- Machines */
+
+/**
+ * Whether members connect machines of their own. Owners and admins always
+ * can; off stops new ones, and machines already connected keep working.
+ */
+export function OwnMachinesRow({
+  client,
+  identity,
+}: {
+  client: OpenGeniBrowserClient;
+  identity: OrganizationAdminIdentity;
+}) {
+  const { claim, owns } = useOwnedOperations(identity, "own-machines");
+  const [value, setValue] = useState<boolean | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [pending, setPending] = useState<boolean | null>(null);
+
+  const load = useCallback(async () => {
+    const operation = claim("read");
+    setError(null);
+    try {
+      const privacy = await client.getOrganizationPrivacySettings(identity.organizationId);
+      if (owns(operation)) setValue(privacy.membersConnectOwnMachines !== false);
+    } catch (loadError) {
+      if (owns(operation))
+        setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
+    }
+  }, [claim, client, identity.organizationId, owns]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = useCallback(
+    async (next: boolean) => {
+      const operation = claim("mutation");
+      setPending(next);
+      try {
+        const privacy = await client.updateOrganizationPrivacySettings(identity.organizationId, {
+          membersConnectOwnMachines: next,
+        });
+        if (!owns(operation)) return;
+        setValue(privacy.membersConnectOwnMachines !== false);
+        toast.success(
+          next
+            ? "Members can connect their own machines"
+            : "Only owners and admins can connect their own machines now",
+        );
+      } catch (saveError) {
+        if (!owns(operation)) return;
+        toast.error("Couldn't change this setting", { description: userErrorText(saveError) });
+      } finally {
+        if (owns(operation)) setPending(null);
+      }
+    },
+    [claim, client, identity.organizationId, owns],
+  );
+
+  if (error && value === null) {
+    return (
+      <RowLoadFailure
+        title="Couldn't load this setting."
+        error={error}
+        onRetry={() => void load()}
+      />
+    );
+  }
+  if (value === null) return <SettingRowSkeleton />;
+  const shown = pending ?? value;
+
+  return (
+    <SettingRowGroup>
+      <SettingRow
+        label="Members connect their own machines"
+        description={
+          shown
+            ? "Members can connect their own computers and servers for agents to work on, as Only me or in their Personal workspace. Owners and admins always can."
+            : "Only owners and admins can connect machines of their own, including in Personal workspaces. Workspace admins still connect machines for their shared workspaces. Machines already connected keep working until they're removed or need connecting again."
+        }
+        control={
+          <Switch
+            aria-label="Members connect their own machines"
+            checked={shown}
+            pending={pending !== null}
+            onCheckedChange={(next) => void save(next)}
+          />
+        }
       />
     </SettingRowGroup>
   );

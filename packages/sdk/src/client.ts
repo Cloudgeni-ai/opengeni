@@ -211,6 +211,7 @@ import {
   type ReadRetryPolicy,
 } from "./read-retry";
 import type {
+  OrganizationSkillReach,
   SkillRecord,
   SkillSummary,
   SkillWriteReceipt,
@@ -454,6 +455,8 @@ import type {
   UserMessageEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
+  UpdateFileReachRequest,
+  UpdateFileReachResponse,
   UpdateFileVisibilityRequest,
   UpdateFileVisibilityResponse,
   ConnectionMetadata,
@@ -8285,6 +8288,27 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Change where your Only me file works besides the workspace that stores it
+   * and your Personal workspace: your other workspaces of this organization,
+   * or all of them (null). It stays Only me in each. Only the file's owner
+   * can, from the workspace that stores it.
+   */
+  async updateFileReach(
+    workspaceId: string,
+    fileId: string,
+    request: UpdateFileReachRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<UpdateFileReachResponse> {
+    return await this.requestJson<UpdateFileReachResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(fileId)}/reach`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
   async getFile(
     workspaceId: string,
     fileId: string,
@@ -10291,6 +10315,21 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/reject`,
       request,
+    );
+  }
+
+  /** Choose where an organization Skill works: every shared workspace (`null`)
+   * or the listed ones, plus members' Personal workspaces when switched on.
+   * Whoever may change the organization's Skills only. */
+  async updateSkillReach(
+    workspaceId: string,
+    skillId: string,
+    reach: OrganizationSkillReach,
+  ): Promise<{ reach: OrganizationSkillReach }> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/reach`,
+      reach,
     );
   }
 

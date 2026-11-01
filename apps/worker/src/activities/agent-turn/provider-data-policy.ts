@@ -71,7 +71,8 @@ export const PROVIDER_DATA_POLICIES: Readonly<
       "https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/abuse-monitoring",
       "https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses",
     ],
-    opengeni: "Opengeni does not turn off Responses API storage on Azure chat turns.",
+    opengeni:
+      "Opengeni asks Azure not to store Responses API response data for chat turns (store: false).",
     checkedOn: CHECKED_2026_10_30,
   },
   azure_foundry_fireworks: {
@@ -145,7 +146,8 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     location:
       "Not stated for default projects (unknown). Data residency projects and the regional endpoints pin processing to that region.",
     sources: ["https://developers.openai.com/api/docs/guides/your-data"],
-    opengeni: "Opengeni does not turn off Responses API storage for chat turns.",
+    opengeni:
+      "Opengeni asks OpenAI not to store Responses API response data for chat turns (store: false); abuse-monitoring logs still apply.",
     checkedOn: CHECKED_2026_10_30,
   },
   codex_subscription: {

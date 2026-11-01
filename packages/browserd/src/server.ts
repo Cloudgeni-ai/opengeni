@@ -229,8 +229,9 @@ export type BrowserControlServerOptions = {
 export type ControllerFailureContext = {
   method: string;
   pathname: string;
-  /** `driver_failed`: a driver failure with a code-written message;
-   * `unexpected`: any other error, whose message can be any text. */
+  /** `driver_failed`: a driver failure with a code-written message, including
+   * any failure of a read route's driver call; `unexpected`: any other error,
+   * whose message can be any text. */
   kind: "unexpected" | "driver_failed";
 };
 
@@ -445,6 +446,23 @@ export class BrowserControlServer {
     return this.updateBlockers().length === 0;
   }
 
+  /** Logs each failed attempt of a read route that browserReadResponse
+   * answers itself, since those failures never reach the request handler's
+   * own report. They come from the driver, so its message head is kept. */
+  private readFailureReporter(request: Request): (error: unknown) => void {
+    return (error) => {
+      try {
+        this.onUnexpectedError?.(error, {
+          method: request.method,
+          pathname: new URL(request.url).pathname,
+          kind: "driver_failed",
+        });
+      } catch {
+        // Diagnostics must never alter the controller response contract.
+      }
+    };
+  }
+
   private updateBlockers(): UpdateBlocker[] {
     const blockers = [
       ...this.supervisor.updateBlockers(),
@@ -645,8 +663,10 @@ export class BrowserControlServer {
     const reference = binding(authority);
     if (segments.length === 4 && segments[3] === "targets") {
       if (request.method === "GET") {
-        return await browserReadResponse("target inventory", () =>
-          this.supervisor.listTargets(reference),
+        return await browserReadResponse(
+          "target inventory",
+          () => this.supervisor.listTargets(reference),
+          this.readFailureReporter(request),
         );
       }
       if (request.method === "POST") {
@@ -923,13 +943,17 @@ export class BrowserControlServer {
       );
     }
     if (operation === "observation" && request.method === "GET") {
-      return await browserReadResponse("observation", () =>
-        this.supervisor.observe(reference, targetId, observationNotices(url)),
+      return await browserReadResponse(
+        "observation",
+        () => this.supervisor.observe(reference, targetId, observationNotices(url)),
+        this.readFailureReporter(request),
       );
     }
     if (operation === "state" && request.method === "GET") {
-      return await browserReadResponse("observation", () =>
-        this.supervisor.targetState(reference, targetId),
+      return await browserReadResponse(
+        "observation",
+        () => this.supervisor.targetState(reference, targetId),
+        this.readFailureReporter(request),
       );
     }
     if (operation === "dom-read" && request.method === "POST") {
@@ -937,8 +961,10 @@ export class BrowserControlServer {
       if (!parsed.success) {
         throw new ProtocolError("invalid_action", "browser DOM read request is invalid", 400);
       }
-      return await browserReadResponse("observation", () =>
-        this.supervisor.readDom(reference, targetId, parsed.data),
+      return await browserReadResponse(
+        "observation",
+        () => this.supervisor.readDom(reference, targetId, parsed.data),
+        this.readFailureReporter(request),
       );
     }
     if (operation === "diagnostics" && request.method === "GET") {
@@ -966,7 +992,7 @@ export class BrowserControlServer {
       );
     }
     if (operation === "screenshot" && request.method === "GET") {
-      const frame = await this.supervisor.screenshot(reference, targetId, {
+      const options = {
         ...(url.searchParams.has("format")
           ? { format: parseImageFormat(url.searchParams.get("format")) }
           : {}),
@@ -980,20 +1006,26 @@ export class BrowserControlServer {
               fullPage: parseBoolean(url.searchParams.get("fullPage"), "fullPage"),
             }
           : {}),
-      });
-      return new Response(new Uint8Array(frame.data), {
-        status: 200,
-        headers: {
-          "cache-control": "no-store",
-          "content-type": frame.mediaType,
-          "x-opengeni-browser-frame": encodeBrowserFrameMetadataHeader(frame),
-          ...(frame.inexactScrollbars
-            ? // A separate header: older readers reject unknown metadata fields
-              // but ignore unknown headers.
-              { "x-opengeni-browser-frame-note": "inexact-scrollbars" }
-            : {}),
-        },
-      });
+      };
+      return await browserReadResponse(
+        "screenshot",
+        () => this.supervisor.screenshot(reference, targetId, options),
+        this.readFailureReporter(request),
+        (frame) =>
+          new Response(new Uint8Array(frame.data), {
+            status: 200,
+            headers: {
+              "cache-control": "no-store",
+              "content-type": frame.mediaType,
+              "x-opengeni-browser-frame": encodeBrowserFrameMetadataHeader(frame),
+              ...(frame.inexactScrollbars
+                ? // A separate header: older readers reject unknown metadata fields
+                  // but ignore unknown headers.
+                  { "x-opengeni-browser-frame-note": "inexact-scrollbars" }
+                : {}),
+            },
+          }),
+      );
     }
     throw new ProtocolError("resource_not_found", "route not found", 404);
   }
@@ -2356,29 +2388,75 @@ class ProtocolError extends Error {
   }
 }
 
+/** The pause before a read route tries an unclassified failure once more. */
+export const BROWSER_READ_RETRY_PAUSE_MS = 250;
+
+/** A failure protocolResponse can only report as a generic driver failure:
+ * nothing classified it, so it says nothing about whether it will recur. */
+function unclassifiedFailure(error: unknown): boolean {
+  return !(
+    error instanceof BrowserWorkingRuntimeUnavailableError ||
+    error instanceof WorkingCopyAdoptionError ||
+    error instanceof ProtocolError ||
+    error instanceof InteractionControllerError ||
+    error instanceof InteractionDefiniteDriverError ||
+    error instanceof InteractionOutcomeUnknownDriverError ||
+    error instanceof CdpResponseRefusedError
+  );
+}
+
 // Only explicitly read-only browser routes may translate an uncertain CDP
-// transport result into a retryable read. Never apply this to target creation,
-// selection, closure, or journaled action dispatch; those may already have run.
-async function browserReadResponse(
-  operation: "target inventory" | "observation",
-  read: () => Promise<unknown>,
+// transport result into a retryable read, or repeat a read. Never apply this
+// to target creation, selection, closure, or journaled action dispatch; those
+// may already have run.
+//
+// A read that failed for a reason nothing classified (a page whose frames were
+// still changing, as while it loads) usually succeeds a moment later, so it is
+// tried once more after a short pause. If that fails too, the caller gets a
+// retryable error rather than a final driver failure. Each such failure is
+// reported, so its cause reaches the controller's log.
+async function browserReadResponse<T>(
+  operation: "target inventory" | "observation" | "screenshot",
+  read: () => Promise<T>,
+  reportFailure: (error: unknown) => void,
+  respond: (value: T) => Response = (value) => success(value),
 ): Promise<Response> {
-  try {
-    return success(await read());
-  } catch (error) {
-    if (
-      !(error instanceof CdpTransportError) &&
-      !(error instanceof CdpSessionDetachedError) &&
-      !(error instanceof CdpProtocolError && error.code === -32_000)
-    )
-      throw error;
-    const timeout = error instanceof CdpCommandTimeoutError;
-    return failure(
-      timeout ? "timeout" : "resource_unavailable",
-      `browser ${operation} ${timeout ? "timed out" : "unavailable"}`,
-      true,
-      timeout ? 504 : 503,
-    );
+  for (let attempt = 1; ; attempt += 1) {
+    let value: T;
+    try {
+      value = await read();
+    } catch (error) {
+      if (
+        error instanceof CdpTransportError ||
+        error instanceof CdpSessionDetachedError ||
+        (error instanceof CdpProtocolError && error.code === -32_000)
+      ) {
+        const timeout = error instanceof CdpCommandTimeoutError;
+        return failure(
+          timeout ? "timeout" : "resource_unavailable",
+          `browser ${operation} ${timeout ? "timed out" : "unavailable"}`,
+          true,
+          timeout ? 504 : 503,
+        );
+      }
+      if (!unclassifiedFailure(error)) throw error;
+      reportFailure(error);
+      if (attempt === 1) {
+        await new Promise((resolve) => setTimeout(resolve, BROWSER_READ_RETRY_PAUSE_MS));
+        continue;
+      }
+      // The driver's error class and frame travel beside the error, as for a
+      // driver failure, so the caller's log keeps the cause.
+      return failureResponse(
+        "resource_unavailable",
+        `browser ${operation} unavailable`,
+        true,
+        503,
+        undefined,
+        interactionDriverDiagnostic(error),
+      );
+    }
+    return respond(value);
   }
 }
 

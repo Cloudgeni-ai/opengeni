@@ -916,6 +916,13 @@ export async function changePreferenceRegistryScope(
       const active = updated.activeRevisionId
         ? await revisionForPreference(scopedDb, updated.id, updated.activeRevisionId)
         : null;
+      // Where an organization Skill works belongs to it as the organization's:
+      // moving it to a workspace or a person drops that, and moving it back
+      // starts again at every workspace.
+      if (preference.scope === "organization") {
+        await scopedDb.execute(sql`DELETE FROM organization_skill_reach
+          WHERE account_id=${input.accountId}::uuid AND preference_id=${preference.id}::uuid`);
+      }
       if (
         event.oldScope !== oldTarget.scope ||
         event.oldWorkspaceId !== oldTarget.workspaceId ||

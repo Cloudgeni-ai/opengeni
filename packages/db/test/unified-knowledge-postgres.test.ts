@@ -23,6 +23,7 @@ import {
   getFilesForSubject,
   listFilesForSubject,
   nestedPostgresSqlState,
+  updateFileReach,
   withSessionRlsActorContext,
   withRlsContext,
   KnowledgeEntryIdRequiredError,
@@ -1016,6 +1017,28 @@ describe("unified Knowledge storage", () => {
     const elsewhere = crypto.randomUUID();
     await shared!
       .admin`INSERT INTO workspaces(id,account_id,name) VALUES(${elsewhere},${f.accountId},'Another workspace')`;
+    // A new Only me file works only where it was stored until its owner turns
+    // it on in another workspace.
+    await withSessionRlsActorContext(owned, async () => {
+      const page = await listFilesForSubject(client.db, {
+        ...request,
+        workspaceId: elsewhere,
+        scope: "personal",
+      });
+      expect(page.files).toEqual([]);
+    });
+    expect(
+      (
+        await updateFileReach(client.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          fileId,
+          reachWorkspaceIds: [elsewhere],
+          actorSubjectId: f.subjectId,
+          auditSubjectId: f.subjectId,
+        })
+      ).kind,
+    ).toBe("changed");
     await withSessionRlsActorContext(owned, async () => {
       const page = await listFilesForSubject(client.db, {
         ...request,

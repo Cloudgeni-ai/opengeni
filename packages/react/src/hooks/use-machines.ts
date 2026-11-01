@@ -107,6 +107,11 @@ export type UseMachinesOptions = ClientOverride & {
 
 export type UseMachinesResult = {
   sessionMachineAccess?: MachinesResponse["sessionMachineAccess"];
+  /**
+   * False when the organization lets only its owners and admins connect new
+   * machines of their own here. True until the server says otherwise.
+   */
+  canConnectOwnMachine: boolean;
   machines: MachineView[];
   activeSandboxId: string | null;
   activeEpoch: number;
@@ -362,6 +367,7 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     machines: data.machines,
     activeSandboxId: data.activeSandboxId,
     sessionMachineAccess: data.sessionMachineAccess ?? null,
+    canConnectOwnMachine: data.canConnectOwnMachine !== false,
     activeEpoch: data.activeEpoch,
     loading,
     error,

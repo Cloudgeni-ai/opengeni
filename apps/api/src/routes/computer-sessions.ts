@@ -139,6 +139,8 @@ import { ApiHttpError } from "../http/api-error";
 import {
   interactionActionDeadlineApiError,
   interactionControlApiError,
+  interactionControlRequestFor,
+  type InteractionControlRequest,
   legacyInteractionCapacityError,
 } from "../http/interaction-control-error";
 import {
@@ -545,7 +547,7 @@ export function registerComputerSessionRoutes(
           error: interactionFailure(error),
         }).catch(() => undefined);
       }
-      throw computerRouteError(error);
+      throw computerRouteError(error, "open");
     }
   });
 
@@ -932,7 +934,7 @@ export function registerComputerSessionRoutes(
               ...(request.stream ? { stream: request.stream } : {}),
             });
           } catch (error) {
-            const publicFailure = interactionControlApiError(error, "computer");
+            const publicFailure = interactionControlApiError(error, "computer", "live_view");
             console.error("computer frame relay open failed", {
               computerSessionId,
               targetId: request.targetId,
@@ -1890,7 +1892,7 @@ export function registerComputerSessionRoutes(
           ),
       );
     } catch (error) {
-      throw computerRouteError(error);
+      throw computerRouteError(error, interactionControlRequestFor(channelOperation));
     }
   }
 
@@ -2405,10 +2407,13 @@ function interactionFailure(error: unknown) {
   };
 }
 
-function computerRouteError(error: unknown): HTTPException {
+function computerRouteError(
+  error: unknown,
+  request: InteractionControlRequest = "request",
+): HTTPException {
   const actionDeadline = interactionActionDeadlineApiError(error);
   if (actionDeadline) return actionDeadline;
-  const connectedMachineError = interactionControlApiError(error, "computer");
+  const connectedMachineError = interactionControlApiError(error, "computer", request);
   if (connectedMachineError) return connectedMachineError;
   const routeUnavailable = activeRouteUnavailableError(error);
   if (routeUnavailable) return routeUnavailable;
