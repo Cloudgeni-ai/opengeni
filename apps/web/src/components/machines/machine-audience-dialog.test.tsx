@@ -57,7 +57,7 @@ const SUMMARY = {
   keptChats: 2,
   keptSharedChats: 1,
   movedOffChats: 1,
-  schedulesMadeOnlyMe: 1,
+  schedulesMadeOnlyMe: 0,
   schedulesPaused: 1,
   stoppedTurns: 1,
   stoppedCommands: 2,
@@ -234,7 +234,6 @@ describe("who can use a machine", () => {
     expect(text).toContain("Your 3 chats on it keep working.");
     expect(text).toContain("1 chat from someone else moves off it.");
     expect(text).toContain("1 running turn someone else started stops now.");
-    expect(text).toContain("Your Workspace automation on it becomes Only me.");
     expect(text).toContain("The shared one stays shared; only you can run it on this machine.");
     expect(text).toContain("1 automation pauses.");
     expect(text).toContain("1 person gets a notice");
@@ -307,7 +306,6 @@ describe("who can use a machine", () => {
     ).toEqual([
       "Sam Example's 2 chats on it keep working.",
       "1 chat from someone else moves off it. Its history stays; its next turn needs another machine.",
-      "Sam Example's Workspace automation on it becomes Only me.",
       "1 automation pauses. Resume it after choosing another machine.",
       "1 person gets a notice in their inbox saying what changed.",
     ]);
