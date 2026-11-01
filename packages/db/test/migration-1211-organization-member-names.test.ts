@@ -207,6 +207,17 @@ describe("migration 1211 organization member names", () => {
     }
   });
 
+  test("caps a very long name at what the API accepts, so one name can't break the list", async () => {
+    await grantDeferredRuntimeAccess(shared.admin);
+    const accountId = await organization();
+    const member = await personIn(accountId, ` ${"N".repeat(3000)} `);
+    const listed = await listOrganizationMemberNames(client.db, {
+      organizationId: accountId,
+      actorSubjectId: member.subjectId,
+    });
+    expect(listed).toEqual([{ id: member.membershipId, name: "N".repeat(1024), you: true }]);
+  });
+
   test("leaves the caller's lifecycle marker as it found it", async () => {
     await grantDeferredRuntimeAccess(shared.admin);
     const accountId = await organization();

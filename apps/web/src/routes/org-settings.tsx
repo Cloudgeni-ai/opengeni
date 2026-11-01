@@ -692,7 +692,11 @@ function OrganizationSettingsFrame({
           description={
             hideDescription
               ? undefined
-              : organizationSettingsDescription(section, organizationLabel)
+              : organizationSettingsDescription(
+                  section,
+                  organizationLabel,
+                  directory?.canAdminister ?? true,
+                )
           }
           actions={actions}
         />

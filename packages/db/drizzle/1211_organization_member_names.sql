@@ -82,7 +82,8 @@ BEGIN
       SELECT coalesce(pg_catalog.jsonb_agg(
         pg_catalog.jsonb_build_object(
           'id', membership.id,
-          'name', nullif(pg_catalog.btrim(auth_user.name), ''),
+          -- Capped at the API's 1024 characters, so one long name can't fail the list.
+          'name', pg_catalog.left(nullif(pg_catalog.btrim(auth_user.name), ''), 1024),
           'you', membership.subject_id = context_subject
         ) ORDER BY pg_catalog.lower(nullif(pg_catalog.btrim(auth_user.name), '')) NULLS LAST,
           membership.id

@@ -8,6 +8,7 @@ import {
   organizationSettingsAccess,
   resolveOrganizationSettingsSection,
 } from "./organization-settings-access";
+import { organizationSettingsDescription } from "../components/settings/organization-settings-pages";
 import type { AccessContext, Workspace } from "@opengeni/react/app/types";
 
 const managed = { productAccessMode: "managed", auth: { mode: "managedSession" } } as const;
@@ -262,5 +263,14 @@ describe("organization helpers for the picker", () => {
     expect(pages("owner", ["account:admin"])).toBe(true);
     expect(pages("admin", ["account:read", "workspace:create"])).toBe(true);
     expect(pages("member", ["account:read"])).toBe(false);
+  });
+});
+
+describe("People subtitle", () => {
+  test("members, who see names only, aren't told about roles", () => {
+    expect(organizationSettingsDescription("people", "Acme")).toBe(
+      "Everyone in Acme, with one role each and a private Personal workspace.",
+    );
+    expect(organizationSettingsDescription("people", "Acme", false)).toBe("Everyone in Acme.");
   });
 });

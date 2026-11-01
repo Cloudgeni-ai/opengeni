@@ -58,13 +58,17 @@ export function organizationSettingsLabel(section: OrganizationAdminSection): st
 export function organizationSettingsDescription(
   section: OrganizationAdminSection,
   organizationName: string,
+  /** Members see People as names only, so its subtitle doesn't mention roles. */
+  canAdminister = true,
 ): string | undefined {
   switch (section) {
     case "general":
       // The rows (Name, Organization ID) say it; a description would restate them.
       return undefined;
     case "people":
-      return `Everyone in ${organizationName}, with one role each and a private Personal workspace.`;
+      return canAdminister
+        ? `Everyone in ${organizationName}, with one role each and a private Personal workspace.`
+        : `Everyone in ${organizationName}.`;
     case "workspaces":
       return `Shared workspaces in ${organizationName}. Everyone also has a private Personal workspace.`;
     case "models":
