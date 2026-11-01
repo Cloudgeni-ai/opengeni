@@ -925,8 +925,9 @@ export function WorkspaceModelsPageBody({
       </>
     );
     const blockedReason = audienceBlockedReason(audience);
-    // "All workspaces" changes nothing, so signing an existing account in
-    // again keeps its Available in; "Only selected workspaces" always applies.
+    // The default (all workspaces, Personal ones too) changes nothing, so
+    // signing an existing account in again keeps its Available in; any other
+    // choice always applies.
     const limitAfterConnect = async (connectionId: string | null) => {
       if (!connectionId) return;
       const applied = await applyConnectAudience(
@@ -941,7 +942,7 @@ export function WorkspaceModelsPageBody({
             : provider === "claude_subscription"
               ? accountKey("claude", connectionId, true)
               : accountKey("gateway", provider, true);
-        toast.error("Connected, but it couldn't be limited to those workspaces", {
+        toast.error("Connected, but its Available in couldn't be saved", {
           description: "Every workspace can use it until you change Available in.",
           action: {
             label: "Change Available in",
@@ -1172,13 +1173,33 @@ export function WorkspaceModelsPageBody({
     if (key.organization) {
       page =
         key.provider === "codex" ? (
-          <OrgCodexAccessPage codex={orgCodex} accountId={key.id} onClose={back} />
+          <OrgCodexAccessPage
+            codex={orgCodex}
+            accountId={key.id}
+            organizationName={organizationName}
+            onClose={back}
+          />
         ) : key.provider === "supergrok" ? (
-          <SuperGrokAccessPage grok={orgGrok} accountId={key.id} client={client} onClose={back} />
+          <SuperGrokAccessPage
+            grok={orgGrok}
+            accountId={key.id}
+            client={client}
+            organizationName={organizationName}
+            onClose={back}
+          />
         ) : key.provider === "claude" ? (
-          <ClaudeAccessPage claude={orgClaude} accountId={key.id} onClose={back} />
+          <ClaudeAccessPage
+            claude={orgClaude}
+            accountId={key.id}
+            organizationName={organizationName}
+            onClose={back}
+          />
         ) : (
-          <ProviderAccessPage state={orgGateways[key.id as GatewayId]} onClose={back} />
+          <ProviderAccessPage
+            state={orgGateways[key.id as GatewayId]}
+            organizationName={organizationName}
+            onClose={back}
+          />
         );
     } else {
       page =

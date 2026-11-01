@@ -7,6 +7,10 @@ import { buildOpenGeniAgent, prepareAgentTools, type BuildAgentOptions } from "@
 import { functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
+import {
+  hostedToolsBillCreditsForTurn,
+  openAiHostedImageProviderBindingForTurn,
+} from "../src/activities/agent-turn/tool-policy";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 import * as gatewayImages from "../src/activities/gateway-image-generation";
 import { managedImageGenerationCredential } from "../src/activities/gateway-image-generation";
@@ -28,6 +32,8 @@ async function creditTurnImageGeneration(input: {
   workspaceCreditModelsAllowed?: boolean;
   capabilitySettings?: (settings: Settings) => Settings;
   model?: Model;
+  /** Turn facts governance resolved (model, hosted image binding, billing). */
+  overrides?: Partial<BuildTurnAgentDeps>;
 }) {
   const settings: Settings = testSettings({
     sandboxBackend: "none",
@@ -123,6 +129,7 @@ async function creditTurnImageGeneration(input: {
     groupBoxBackend: "none",
     postToolPreparationStartedAt: performance.now(),
     trigger: { type: "user.message", payload: {} } as BuildTurnAgentDeps["trigger"],
+    ...input.overrides,
   };
   (deps as { leases?: unknown }).leases = {
     codex: { generation: null },
@@ -385,5 +392,83 @@ describe("managed image generation credential", () => {
     expect(
       managedImageGenerationCredential({ ...base, imageGenerationOpengeniCreditsEnabled: false }),
     ).toBeNull();
+  });
+});
+
+describe("provider-hosted tools on a turn Opengeni pays for", () => {
+  // An OpenAI model on the deployment's own key with hosted search and hosted
+  // image generation, on a deployment with a search provider and the managed
+  // Gateway image credential.
+  const settings = {
+    ...billed,
+    webSearchEnabled: true,
+    webSearchProvider: "exa",
+    webSearchApiKey: "exa-key",
+    openaiProvider: "openai",
+    openaiApiKey: "sk-deployment-test",
+    openaiBaseUrl: undefined,
+  } as Partial<Settings>;
+  const openAiDirect = {
+    provider: {
+      kind: "openai",
+      id: "openai",
+      api: "responses",
+      builtin: true,
+      baseUrl: "https://api.openai.com/v1",
+    },
+    configured: {
+      id: "gpt-6-sol",
+      hostedWebSearch: true,
+      capabilities: {
+        reasoning: { runnable: false },
+        hostedTools: { imageGeneration: { runnable: true } },
+      },
+    },
+  } as unknown as BuildTurnAgentDeps["resolvedModel"];
+
+  // What governance resolves for the turn, then the agent the worker builds.
+  async function builtTools(chargesOpenGeniCredits: boolean, overrides: Partial<Settings> = {}) {
+    const full = testSettings({ sandboxBackend: "none", ...settings, ...overrides });
+    const hostedToolsBillCredits = hostedToolsBillCreditsForTurn(full, {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      chargesOpenGeniCredits,
+    });
+    const { agent, imageGeneration } = await creditTurnImageGeneration({
+      settings: { ...settings, ...overrides },
+      overrides: {
+        resolvedModel: openAiDirect,
+        hostedToolsBillCredits,
+        nativeImageProviderBinding: openAiHostedImageProviderBindingForTurn(
+          full,
+          openAiDirect as Parameters<typeof openAiHostedImageProviderBindingForTurn>[1],
+          hostedToolsBillCredits,
+        ),
+      },
+    });
+    return {
+      names: (agent as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name),
+      imageGeneration: imageGeneration?.kind,
+    };
+  }
+
+  test("a credit-billed turn gets no hosted web search or hosted image generation", async () => {
+    const billedTurn = await builtTools(true);
+    expect(billedTurn.names).not.toContain("web_search");
+    expect(billedTurn.names).not.toContain("image_generation");
+    // The priced Gateway image tool instead.
+    expect(billedTurn.imageGeneration).toBe("provider_adapter");
+    expect(billedTurn.names).toContain("generate_image");
+  });
+
+  test("other turns, and every turn when the operator turned it off, keep both hosted tools", async () => {
+    for (const turn of [
+      // The user's own key or subscription, or a free model.
+      await builtTools(false),
+      await builtTools(true, { paidHostedToolsCreditBilling: false }),
+    ]) {
+      expect(turn.names).toContain("web_search");
+      expect(turn.names).toContain("image_generation");
+      expect(turn.imageGeneration).toBe("native_hosted");
+    }
   });
 });

@@ -360,15 +360,41 @@ export function anthropicMessages(
   // reply it would split it (thinking from its tool call), and it is never
   // Claude's speech. An assistant-form record keeps its original place.
   let pendingRecords: Json[] = [];
+  // Tool calls of the history so far that have no result yet.
+  const openCalls = new Set<string>();
+  // A system message inside an unfinished tool step (another provider can put
+  // one there, for example a search notice after a search that ran in the
+  // middle of a step). Claude accepts it there only when the step's results
+  // come next, so it keeps its place then; when more of the reply follows, it
+  // moves to just after the step's results. Either way it depends only on the
+  // items themselves, so every later request reproduces the same prefix.
+  let heldSystem: Json[] = [];
+  let heldPastReply = false;
+  const emit = (role: Message["role"], content: Json[]) => {
+    const previous = messages.at(-1);
+    if (previous?.role === role) previous.content.push(...content);
+    else messages.push({ role, content });
+  };
+  const releaseHeldSystem = () => {
+    if (heldSystem.length) emit("system", heldSystem);
+    heldSystem = [];
+    heldPastReply = false;
+  };
   const append = (role: Message["role"], content: Json[]) => {
     if (role === "user" && pendingRecords.length) {
       content = [...pendingRecords, ...content];
       pendingRecords = [];
     }
     if (!content.length) return;
-    const previous = messages.at(-1);
-    if (previous?.role === role) previous.content.push(...content);
-    else messages.push({ role, content });
+    if (role === "system" && openCalls.size) {
+      heldSystem.push(...content);
+      return;
+    }
+    if (heldSystem.length) {
+      if (role === "assistant") heldPastReply = true;
+      else if (!heldPastReply) releaseHeldSystem();
+    }
+    emit(role, content);
   };
   const items = typeof input === "string" ? [{ role: "user", content: input }] : input;
   for (const raw of items) {
@@ -390,25 +416,30 @@ export function anthropicMessages(
       case "function_call": {
         const args =
           typeof item.arguments === "string" ? JSON.parse(item.arguments) : item.arguments;
+        const id = anthropicToolUseId(text(item.callId ?? item.call_id, "tool ID"));
         append("assistant", [
           {
             type: "tool_use",
-            id: anthropicToolUseId(text(item.callId ?? item.call_id, "tool ID")),
+            id,
             name: anthropicToolName(text(item.name, "tool name"), item.namespace),
             input: object(args),
           },
         ]);
+        openCalls.add(id);
         break;
       }
       case "function_call_result": {
+        const id = anthropicToolUseId(text(item.callId ?? item.call_id, "tool result ID"));
         append("user", [
           {
             type: "tool_result",
-            tool_use_id: anthropicToolUseId(text(item.callId ?? item.call_id, "tool result ID")),
+            tool_use_id: id,
             content: contentBlocks(item.output),
             ...(item.providerData?.anthropic?.is_error ? { is_error: true } : {}),
           },
         ]);
+        openCalls.delete(id);
+        if (!openCalls.size && heldPastReply) releaseHeldSystem();
         break;
       }
       case "reasoning": {
@@ -451,6 +482,7 @@ export function anthropicMessages(
         ]);
     }
   }
+  releaseHeldSystem();
   // A request that ends in Claude's own reply continues it (a paused search).
   // A record placed after that reply would end it, and would move once the
   // reply grows, so records still waiting then reach Claude with the next

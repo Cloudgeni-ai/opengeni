@@ -7,11 +7,13 @@
 //! watchdog of its own service instead ([`ServiceWatchdog`]: `WatchdogSec=`
 //! of at most the lease terms' watchdog timeout), and the service's stop
 //! hook ([`guard_stopped`], its `ExecStopPost=`) does to the VMs what the
-//! reset would: it kills every one, and restarts the agent if it runs, so
-//! that a new guard starts with it. systemd kills a guard that stops
-//! feeding it (`WatchdogSignal=SIGKILL`), and one that does not end within
-//! the same timeout of being asked to stop (`TimeoutStopSec=`), so the hook
-//! runs within that timeout of the last feed, whatever stopped the guard.
+//! reset would: it kills every one but those that are their sandbox's
+//! only copy, which the guard never stops either, and restarts the agent
+//! if it runs, so that a new guard starts with it. systemd kills a guard
+//! that stops feeding it (`WatchdogSignal=SIGKILL`), and one that does not
+//! end within the same timeout of being asked to stop (`TimeoutStopSec=`),
+//! so the hook runs within that timeout of the last feed, whatever stopped
+//! the guard.
 //!
 //! The hook kills the VMs after every end of the guard but one: a hand-over
 //! to a new release's guard. An upgrade marks it ([`mark_hand_over`],
@@ -34,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure};
 use compute_core::At;
-use compute_engine::cgroup::Cgroup;
+use compute_engine::cgroup::{Cgroup, OnlyCopy};
 
 use super::gate::{boot_now, nanos};
 use super::kept;
@@ -215,7 +217,9 @@ pub struct StopHook {
 
 /// The guard service's stop hook (`compute-host guard-stopped`, its
 /// `ExecStopPost=` on a shared machine), run after every end of the guard:
-/// unless the guard was handed over, it kills every VM, waits up to
+/// unless the guard was handed over, it kills every VM but those marked
+/// their sandbox's only copy, which no other host can ever run, so
+/// nothing needs them stopped (see `compute_fleet::Group`), waits up to
 /// [`GONE_WITHIN`] for them to be gone, and restarts the agent if it runs,
 /// which starts a new guard with it. It says what it did; a VM it could
 /// not kill is an error.
@@ -239,25 +243,91 @@ pub fn guard_stopped(hook: &StopHook) -> anyhow::Result<()> {
             Some(until) if until <= now => "marked, but expired",
             Some(_) => "marked, but the guard did not end of its own accord",
         },
-        "the guard ended: killing every VM, as a reset of the machine would, and restarting the agent"
+        "the guard ended: killing every VM that is not its sandbox's only copy, as a reset of the machine would, and restarting the agent"
     );
     let gone = kill_every_vm(&Cgroup::at(&hook.cgroup), GONE_WITHIN);
     restart_agent(&hook.agent);
     gone
 }
 
-/// Kills every process in `cgroup` and its groups, and waits up to
-/// `within` for them to be gone.
+/// What is left in the VMs' cgroup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Left {
+    /// Nothing.
+    Nothing,
+    /// Only VMs marked their sandbox's only copy, this many.
+    OnlyCopies(usize),
+    /// VMs to kill.
+    Fenced,
+}
+
+/// Kills what is left in `cgroup` to kill, and says what that was: each
+/// VM's group that holds a process and is not marked its sandbox's only
+/// copy (a mark that cannot be read, or that no running agent vouches
+/// for, is not there), or every process in it when a process sits in the
+/// cgroup itself, what is inside cannot be listed, its freezer cannot be
+/// read, or no group shows the processes it holds.
+fn kill_fenced(cgroup: &Cgroup) -> io::Result<Left> {
+    match cgroup.freezer() {
+        Ok(state) if state.empty => return Ok(Left::Nothing),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "reading the VMs' cgroup failed");
+            cgroup.kill_all()?;
+            return Ok(Left::Fenced);
+        }
+    }
+    let children = match (cgroup.processes(), cgroup.children()) {
+        (Ok(own), Ok(children)) if own.is_empty() => children,
+        _ => {
+            cgroup.kill_all()?;
+            return Ok(Left::Fenced);
+        }
+    };
+    let (mut only, mut fenced) = (0, Vec::new());
+    for child in children {
+        if child.freezer().is_ok_and(|state| state.empty) {
+            continue;
+        }
+        if matches!(child.only_copy(), Ok(OnlyCopy::Yes)) {
+            only += 1;
+        } else {
+            fenced.push(child);
+        }
+    }
+    if fenced.is_empty() {
+        if only > 0 {
+            return Ok(Left::OnlyCopies(only));
+        }
+        cgroup.kill_all()?;
+        return Ok(Left::Fenced);
+    }
+    let mut result = Ok(Left::Fenced);
+    for child in fenced {
+        if let Err(error) = child.kill_all() {
+            result = Err(error);
+        }
+    }
+    result
+}
+
+/// Kills every VM in `cgroup` but those marked their sandbox's only copy
+/// ([`kill_fenced`]), and waits up to `within` for them to be gone.
 fn kill_every_vm(cgroup: &Cgroup, within: Duration) -> anyhow::Result<()> {
     let started = Instant::now();
     loop {
-        match cgroup.freezer() {
-            Ok(state) if state.empty => {
+        // Again at every look: a VM the agent started meanwhile goes too.
+        match kill_fenced(cgroup) {
+            Ok(Left::Nothing) => {
                 tracing::info!(took = ?started.elapsed(), "every VM is gone");
                 return Ok(());
             }
-            Ok(_) => {}
-            Err(error) => tracing::warn!(%error, "reading the VMs' cgroup failed"),
+            Ok(Left::OnlyCopies(running)) => {
+                tracing::info!(took = ?started.elapsed(), running, "every VM is gone but those that are their sandbox's only copy, which run on");
+                return Ok(());
+            }
+            Ok(Left::Fenced) => {}
+            Err(error) => tracing::error!(%error, "killing the VMs failed"),
         }
         if started.elapsed() >= within {
             bail!(
@@ -265,10 +335,6 @@ fn kill_every_vm(cgroup: &Cgroup, within: Duration) -> anyhow::Result<()> {
                 cgroup.path().display(),
                 within.as_secs()
             );
-        }
-        // Again at every look: a VM the agent started meanwhile goes too.
-        if let Err(error) = cgroup.kill_all() {
-            tracing::error!(%error, "killing the VMs failed");
         }
         std::thread::sleep(LOOK_EVERY);
     }
@@ -409,6 +475,51 @@ mod tests {
         std::fs::write(&mark, "soon").unwrap();
         assert_eq!(take_hand_over(&mark), None, "unreadable");
         assert!(!mark.exists(), "taken all the same");
+    }
+
+    /// The hook kills the VMs' cgroup until it is empty, and gives up,
+    /// saying so, if it never is.
+    #[test]
+    fn the_hook_leaves_a_vm_that_is_its_sandboxes_only_copy_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let set = |path: &Path, populated: bool| {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("cgroup.freeze"), "0").unwrap();
+            std::fs::write(
+                path.join("cgroup.events"),
+                format!("populated {}\nfrozen 0\n", u8::from(populated)),
+            )
+            .unwrap();
+            std::fs::write(path.join("cgroup.procs"), "").unwrap();
+        };
+        let group = dir.path().join("vms");
+        let (fenced, only, gone) = (group.join("fenced"), group.join("only"), group.join("gone"));
+        for path in [&group, &fenced, &only] {
+            set(path, true);
+        }
+        set(&gone, false);
+        if Cgroup::at(&only).set_only_copy(true).is_err() {
+            eprintln!(
+                "skipped: the test directory's file system keeps no user extended attributes"
+            );
+            return;
+        }
+        let cgroup = Cgroup::at(&group);
+        let killed = |path: &Path| path.join("cgroup.kill").exists();
+        assert!(kill_every_vm(&cgroup, Duration::from_millis(120)).is_err());
+        assert!(killed(&fenced));
+        assert!(!killed(&only), "the only copy runs on");
+        assert!(!killed(&gone));
+        assert!(!killed(&group), "nor is the cgroup above killed");
+        // Once the fenced VM is gone, the hook is done, the only copy
+        // running.
+        set(&fenced, false);
+        kill_every_vm(&cgroup, Duration::from_millis(120)).unwrap();
+        assert!(!killed(&only));
+        // A process in the cgroup itself: everything goes.
+        std::fs::write(group.join("cgroup.procs"), "4242\n").unwrap();
+        assert!(kill_every_vm(&cgroup, Duration::ZERO).is_err());
+        assert!(killed(&group));
     }
 
     /// The hook kills the VMs' cgroup until it is empty, and gives up,

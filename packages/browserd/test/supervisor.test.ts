@@ -28,7 +28,7 @@ import {
 } from "../src/working-runtime-journal";
 import { RECENT_USE_UPDATE_HOLD_MS } from "../src/update-admission";
 import { BROWSER_WAIT_HOLD_MAX_MS } from "@opengeni/contracts";
-import { offscreenBrowserNotice } from "../src/supervisor";
+import { engineContinuesProfile, offscreenBrowserNotice } from "../src/supervisor";
 import type { SqliteInteractionOperationJournal } from "../src/operation-journal";
 import {
   adoptionPaths,
@@ -1422,15 +1422,33 @@ describe("BrowserSupervisor", () => {
             ),
           ).toBe(false);
 
-          engineVersion = "141.0.0.0";
-          const incompatible = reference(4);
+          // A newer Chromium continues the saved profile, as when the browser
+          // updated itself since the save; an older one cannot read it.
+          engineVersion = "141.0.7390.54";
+          const newer = reference(4);
+          expect(
+            (
+              await supervisor.createSession({
+                ...newer,
+                headed: false,
+                restore,
+              })
+            ).browserSessionId,
+          ).toBe(newer.browserSessionId);
+          const newerProfile = contexts.get(newer.browserSessionId)!.profileDirectory;
+          expect(await readFile(join(newerProfile, "Cookies"), "utf8")).toBe("session=durable");
+
+          engineVersion = "139.0.7258.154";
+          const incompatible = reference(5);
           await expect(
             supervisor.createSession({
               ...incompatible,
               headed: false,
               restore,
             }),
-          ).rejects.toThrow("saved browser state requires another Chromium build");
+          ).rejects.toThrow(
+            "saved browser state was saved by Chromium 140.0.0.0 and needs that build or a newer one, but this placement runs Chromium 139.0.7258.154; open it on a placement with a newer Chromium, or update Chromium here",
+          );
           expect(
             await exists(
               join(supervisor.rootDirectory, "sessions", incompatible.browserSessionId, "profile"),
@@ -1447,6 +1465,27 @@ describe("BrowserSupervisor", () => {
         },
       },
     );
+  });
+});
+
+describe("which Chromium build continues a saved profile", () => {
+  test("the build that saved it or a newer one, compared by dotted number", () => {
+    expect(engineContinuesProfile("140.0.7339.80", "140.0.7339.80")).toBe(true);
+    expect(engineContinuesProfile("140.0.7339.207", "140.0.7339.80")).toBe(true);
+    expect(engineContinuesProfile("141.0.7390.54", "140.0.7339.207")).toBe(true);
+    expect(engineContinuesProfile("1000.0.0.0", "999.9.9999.9")).toBe(true);
+    expect(engineContinuesProfile("140", "140.0.0.0")).toBe(true);
+    expect(engineContinuesProfile("140.0.7339.79", "140.0.7339.80")).toBe(false);
+    expect(engineContinuesProfile("99.0.0.0", "100.0.0.0")).toBe(false);
+  });
+
+  test("a version that is not dotted numbers continues only an identical one", () => {
+    expect(engineContinuesProfile(null, null)).toBe(true);
+    expect(engineContinuesProfile("dev", "dev")).toBe(true);
+    expect(engineContinuesProfile("141.0.0.0", null)).toBe(false);
+    expect(engineContinuesProfile(null, "140.0.0.0")).toBe(false);
+    expect(engineContinuesProfile("141.0.0.0-beta", "140.0.0.0")).toBe(false);
+    expect(engineContinuesProfile("141.0.0.0.1", "140.0.0.0")).toBe(false);
   });
 });
 

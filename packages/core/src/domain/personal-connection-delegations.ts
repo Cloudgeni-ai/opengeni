@@ -756,11 +756,30 @@ export function withFrozenPersonalConnectionDelegations(input: {
                 request.connectionRef.kind === "oauth2",
             )
           : [];
+      // Your GitHub is not an MCP server in settings. Its REST tools resolve the
+      // one GitHub connection frozen on this turn, by its exact connection id.
+      const personalGitHubDelegations =
+        !config &&
+        request.serverId === PERSONAL_GITHUB_CONNECTION_SURFACE_ID &&
+        sameProviderDomain(request.connectionRef.providerDomain, "github.com") &&
+        request.connectionRef.kind === "oauth2" &&
+        request.connectionRef.connectionId
+          ? input.personalConnectionDelegations.filter(
+              (candidate) =>
+                candidate.serverId === PERSONAL_GITHUB_CONNECTION_SURFACE_ID &&
+                candidate.connectionType === "github_personal" &&
+                candidate.connectionId === request.connectionRef.connectionId &&
+                sameProviderDomain(candidate.providerDomain, "github.com") &&
+                (!candidate.kind || candidate.kind === "oauth2"),
+            )
+          : [];
       const delegation = config
         ? personalConnectionDelegationForServer(input.personalConnectionDelegations, config)
         : publicationDelegations.length === 1
           ? publicationDelegations[0]!
-          : null;
+          : personalGitHubDelegations.length === 1
+            ? personalGitHubDelegations[0]!
+            : null;
       if (!delegation || !(await input.ownerHasWorkspaceMembership(delegation.ownerSubjectId))) {
         return personalAuthorityUnavailable(request);
       }

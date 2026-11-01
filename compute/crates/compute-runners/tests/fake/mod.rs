@@ -57,6 +57,8 @@ pub struct World {
     pub refreshes: u32,
     /// The queue: a message stays until deleted.
     pub messages: VecDeque<Value>,
+    /// The jobs the last poll said the pool takes at most.
+    pub capacity: Option<u32>,
     pub deleted_messages: Vec<u64>,
     /// Acquisitions failing before one succeeds.
     pub acquire_failures: u32,
@@ -66,10 +68,14 @@ pub struct World {
     pub sandboxes: BTreeMap<String, Sandbox>,
     /// Sandbox creations failing (503) before one succeeds.
     pub create_failures: u32,
+    /// How long a sandbox creation takes.
+    pub create_delay: Duration,
     pub killed: Vec<String>,
     /// The repository's default branch's head.
     pub head: String,
     pub processes: Vec<Process>,
+    /// How long a command takes to run.
+    pub process_delay: Duration,
     /// Commands containing this exit 1.
     pub failing: Option<String>,
     /// Templates saved from sandboxes: id, name, the sandbox.
@@ -399,6 +405,9 @@ async fn poll(
     if headers["authorization"] != token.as_str() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    fake.world().capacity = headers
+        .get("x-scalesetmaxcapacity")
+        .and_then(|capacity| capacity.to_str().ok()?.parse().ok());
     let last = query
         .get("lastMessageId")
         .map_or(0, |last| last.parse().unwrap());
@@ -427,6 +436,8 @@ fn strings(value: &Value) -> BTreeMap<String, String> {
 }
 
 async fn create(State(fake): State<Fake>, axum::Json(body): axum::Json<Value>) -> Response {
+    let delay = fake.world().create_delay;
+    tokio::time::sleep(delay).await;
     let mut world = fake.world();
     if world.create_failures > 0 {
         world.create_failures -= 1;
@@ -530,14 +541,18 @@ async fn start_process(
         env: strings(&request["process"]["envs"]),
     };
     assert_eq!(headers["e2b-sandbox-port"], "49983");
-    let mut world = fake.world();
-    let exit = i32::from(
-        world
-            .failing
-            .as_ref()
-            .is_some_and(|failing| process.script.contains(failing.as_str())),
-    );
-    world.processes.push(process);
+    let (exit, delay) = {
+        let mut world = fake.world();
+        let exit = i32::from(
+            world
+                .failing
+                .as_ref()
+                .is_some_and(|failing| process.script.contains(failing.as_str())),
+        );
+        world.processes.push(process);
+        (exit, world.process_delay)
+    };
+    tokio::time::sleep(delay).await;
     let mut stream = envelope(0, &json!({"event": {"start": {"pid": 7}}}));
     stream.extend(envelope(
         0,

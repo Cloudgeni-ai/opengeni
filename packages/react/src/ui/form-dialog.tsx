@@ -24,6 +24,7 @@ import type { AnalyticsAction } from "./analytics-actions";
 import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "./api-error";
 import { cn } from "../lib/cn";
 import { containedPortal } from "./portal-container";
+import { useWindowBarTitle, WindowBarTitleBoundary } from "./window-bar-title";
 
 const DialogContainedPortal = containedPortal(DialogPrimitive.Portal);
 
@@ -257,6 +258,8 @@ export function FormFrame({
   };
 
   const Title = chrome?.Title ?? (variant === "page" ? "h1" : "h2");
+  // A form page's title goes in the macOS window bar, as a page header's does.
+  const titleInWindowBar = useWindowBarTitle(variant === "page" ? title : null);
   const Description = chrome?.Description ?? "p";
   const Close = chrome?.Close ?? null;
   const overlay = variant === "dialog" || variant === "sheet";
@@ -407,7 +410,10 @@ export function FormFrame({
                 {/* Focusable from script only: a form page opened in place moves focus here. */}
                 <Title
                   tabIndex={-1}
-                  className="text-xl font-semibold tracking-[-0.5px] text-fg outline-hidden"
+                  className={cn(
+                    "text-xl font-semibold tracking-[-0.5px] text-fg outline-hidden",
+                    titleInWindowBar && "sr-only",
+                  )}
                 >
                   {title}
                 </Title>
@@ -711,12 +717,14 @@ export function FormDialog({
         >
           <FormChromeContext.Provider value={DIALOG_CHROME}>
             <SectionFrameReset>
-              <FormFrame
-                variant="dialog"
-                {...frame}
-                {...overlay.frameProps}
-                className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
-              />
+              <WindowBarTitleBoundary>
+                <FormFrame
+                  variant="dialog"
+                  {...frame}
+                  {...overlay.frameProps}
+                  className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
+                />
+              </WindowBarTitleBoundary>
             </SectionFrameReset>
           </FormChromeContext.Provider>
         </DialogPrimitive.Content>

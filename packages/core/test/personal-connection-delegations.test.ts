@@ -176,6 +176,65 @@ describe("personal MCP connection delegation", () => {
     expect(membershipChecks).toBe(0);
   });
 
+  test("resolves Your GitHub REST tools through the exact frozen GitHub connection", async () => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    const otherConnectionId = "22222222-2222-4222-8222-222222222222";
+    const delegation: McpPersonalConnectionDelegation = {
+      serverId: "github:personal",
+      connectionId,
+      ownerSubjectId: "user:owner",
+      providerDomain: "github.com",
+      kind: "oauth2",
+      connectionType: "github_personal",
+    };
+    const received: ResolveConnectionCredentialInput[] = [];
+    const resolver = withFrozenPersonalConnectionDelegations({
+      // Your GitHub is never an MCP server in settings.
+      settings: { mcpServers: [] },
+      personalConnectionDelegations: [delegation],
+      ownerHasWorkspaceMembership: async () => true,
+      resolveCredential: async (request) => {
+        received.push(request);
+        return {
+          status: "ok",
+          headers: { authorization: "Bearer personal" },
+          connectionId: request.connectionRef.connectionId!,
+        } as unknown as Awaited<
+          ReturnType<
+            Parameters<typeof withFrozenPersonalConnectionDelegations>[0]["resolveCredential"]
+          >
+        >;
+      },
+    });
+    const request = (id: string): ResolveConnectionCredentialInput => ({
+      workspaceId: "workspace-1",
+      subjectId: "user:owner",
+      serverId: "github:personal",
+      destinationUrl: "https://api.github.com/repos/octo/repo/pulls",
+      credentialTarget: "http_api",
+      connectionRef: {
+        connectionId: id,
+        provider: "github",
+        providerDomain: "github.com",
+        kind: "oauth2",
+        scopes: ["repo"],
+        subjectScope: "subject",
+      },
+    });
+
+    await expect(resolver(request(connectionId))).resolves.toMatchObject({ status: "ok" });
+    expect(received).toHaveLength(1);
+    expect(received[0]!.subjectId).toBe("user:owner");
+    expect(received[0]!.connectionRef.connectionId).toBe(connectionId);
+
+    // Another GitHub connection than the one frozen on the turn stays refused.
+    await expect(resolver(request(otherConnectionId))).resolves.toMatchObject({
+      status: "auth_needed",
+      reason: "personal_authority_unavailable",
+    });
+    expect(received).toHaveLength(1);
+  });
+
   test("admits an exact same-organization portable selection and membershipless personal owner", async () => {
     const blank = await acquireBlankTestDatabase("core-portable-connection-authority");
     if (!blank) return;

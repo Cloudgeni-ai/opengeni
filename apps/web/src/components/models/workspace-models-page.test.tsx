@@ -344,6 +344,12 @@ mock.module("@opengeni/react/ui/dropdown-menu", () => ({
       {children}
     </button>
   ),
+  // The rest of the module, which the toolbar's search and filters import.
+  DropdownMenuCheckboxItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuLabel: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuMeta: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+  DropdownMenuSeparator: () => null,
 }));
 mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
@@ -439,7 +445,7 @@ test.each([false, true])(
       if (selectedBefore) {
         const selected = [
           ...view.container.querySelectorAll<HTMLElement>('[data-slot="choice-card"]'),
-        ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+        ].find((card) => card.textContent?.includes("Selected workspaces"))!;
         await act(async () => selected.click());
         await flush();
       }
@@ -450,7 +456,7 @@ test.each([false, true])(
       expect(save).toHaveBeenCalledTimes(1);
       const selected = [
         ...view.container.querySelectorAll<HTMLElement>('[data-slot="choice-card"]'),
-      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
       expect(selected).not.toBeNull();
       await act(async () => selected.click());
       await flush();
@@ -1813,15 +1819,15 @@ describe("One Models page for the organization and the workspace", () => {
       expect(text).toContain(
         "Sign in with the ChatGPT account whose plan pays for work across Acme.",
       );
-      expect(text).toContain("Which workspaces can use it");
+      expect(text).toContain("Available in");
       expect(text).toContain("All workspaces in Acme");
-      expect(text).toContain("including new ones and everyone's Personal workspace");
+      expect(text).toContain("Members can use it in their own Personal workspace");
       expect(
         view.container.querySelector<HTMLElement>('[data-slot=choice-card][data-state="checked"]')
           ?.textContent,
       ).toContain("All workspaces in Acme");
       // Owning it by this workspace is not a choice here: it would read the
-      // same as "Only selected workspaces" with this one ticked.
+      // same as "Selected workspaces" with this one ticked.
       expect(text).not.toContain("Advanced");
       expect(text).not.toContain("Connect for Design preview only");
     } finally {
@@ -1829,7 +1835,7 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("Only selected workspaces lists the organization's workspaces and Personal workspaces as one choice", async () => {
+  test("Selected workspaces lists the organization's workspaces and Personal workspaces as one choice", async () => {
     organizationAdmin = true;
     routeOrganizationReads();
     const view = await render();
@@ -1838,7 +1844,7 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       const selected = [
         ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
-      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
       await act(async () => selected.click());
       await flush();
       const text = view.container.textContent ?? "";
@@ -1863,11 +1869,11 @@ describe("One Models page for the organization and the workspace", () => {
       await act(async () => navigateTo({ view: "connect-org:claude_subscription" }));
       await flush();
       const everyWorkspaceText = view.container.textContent ?? "";
-      expect(everyWorkspaceText).toContain("including new ones and everyone's Personal workspace");
+      expect(everyWorkspaceText).toContain("Members can use it in their own Personal workspace");
       expect(everyWorkspaceText).not.toContain("can't be used in Personal workspaces");
       const selected = [
         ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
-      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
       await act(async () => selected.click());
       await flush();
       const personal = [
@@ -1897,12 +1903,12 @@ describe("One Models page for the organization and the workspace", () => {
       await act(async () => navigateTo({ view: "connect-org:openrouter" }));
       await flush();
       const text = view.container.textContent ?? "";
-      expect(text).toContain("including new ones and everyone's Personal workspace");
+      expect(text).toContain("Members can use it in their own Personal workspace");
       expect(text).not.toContain("can't be used in Personal workspaces");
       expect(text).not.toContain("can't be used there");
       const selected = [
         ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
-      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
       await act(async () => selected.click());
       await flush();
       const personal = [
@@ -2021,7 +2027,7 @@ describe("One Models page for the organization and the workspace", () => {
       expect(view.container.textContent).not.toContain("can't be used in Personal workspaces");
       const selected = [
         ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
-      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
       await act(async () => selected.click());
       await flush();
       const input = view.container.querySelector<HTMLInputElement>(
@@ -2431,7 +2437,7 @@ describe("One Models page for the organization and the workspace", () => {
       expect(view.container.textContent).toContain(
         "It will belong to Design preview: everyone here can use it. Design preview's admins and Acme's owners and admins can change or remove it.",
       );
-      expect(view.container.textContent).not.toContain("Which workspaces can use it");
+      expect(view.container.textContent).not.toContain("Available in");
     } finally {
       await cleanup(view);
     }
@@ -2855,7 +2861,7 @@ describe("One Models page for the organization and the workspace", () => {
         "This account will belong to Design preview. Use it for Codex Apps or to redeem usage limit resets. Design preview's admins can also share it with other workspaces they manage.",
       );
       expect(text).toContain("Codex Apps");
-      expect(text).not.toContain("Which workspaces can use it");
+      expect(text).not.toContain("Available in");
     } finally {
       await cleanup(view);
     }
@@ -2899,12 +2905,12 @@ describe("One Models page for the organization and the workspace", () => {
       await act(async () => navigateTo({ view: "connect-org:openrouter" }));
       await flush();
       const text = view.container.textContent ?? "";
-      expect(text).toContain("Which workspaces can use it");
-      expect(text).toContain("including new ones and everyone's Personal workspace");
+      expect(text).toContain("Available in");
+      expect(text).toContain("Members can use it in their own Personal workspace");
       expect(text).not.toContain("To use a key in your Personal workspace,");
       const selected = [
         ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
-      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      ].find((card) => card.textContent?.includes("Selected workspaces"))!;
       await act(async () => selected.click());
       await flush();
       // Opened from a Personal workspace, the Personal workspaces choice starts on.
@@ -2939,7 +2945,7 @@ describe("One Models page for the organization and the workspace", () => {
       await act(async () => openRouter.querySelector<HTMLElement>("[data-row-action]")!.click());
       await flush();
       expect(lastNavigation?.search).toMatchObject({ view: "connect-org:openrouter" });
-      expect(view.container.textContent).toContain("Which workspaces can use it");
+      expect(view.container.textContent).toContain("Available in");
     } finally {
       await cleanup(view);
     }

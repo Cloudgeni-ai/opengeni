@@ -1720,7 +1720,6 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       enrollmentId: machine.enrollmentId,
       target: "only_me",
       ownerSubjectId: owner,
-      schedulesMayBeOnlyMe: true,
       expectedGeneration: original.generation,
     });
     expect(narrowed).toMatchObject({ outcome: "changed", sandboxId: machine.sandboxId });
@@ -1740,7 +1739,6 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       enrollmentId: machine.enrollmentId,
       target: "workspace",
       ownerSubjectId: null,
-      schedulesMayBeOnlyMe: true,
       expectedGeneration: original.generation + 1,
     });
     expect(widened).toMatchObject({ outcome: "changed", audience: "workspace" });

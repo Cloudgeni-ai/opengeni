@@ -39,12 +39,14 @@ import {
   getScheduledTask,
   getNestedAgentDepthDeploymentPolicy,
   getScheduledTaskRevisionAuthority,
+  issueSelfUserResourceGrant,
   listSessionSystemUpdatesForTurn,
   listScheduledTaskRuns,
   nestedPostgresSqlState,
   persistSlackBotInstallationWithSuccessAudit,
   requestSessionTurnRecovery,
   requireSession,
+  revokeSelfUserResourceGrant,
   updateScheduledTask,
   type DbClient,
   type Database,
@@ -798,7 +800,7 @@ describe("scheduled task personal MCP authority", () => {
     180_000,
   );
 
-  test("an Only me schedule runs on its owner's own machine; nobody else's schedule can", async () => {
+  test("its owner's schedules run on their own machine, Only me or shared; nobody else's can", async () => {
     if (!available) return;
     const workspace = await workspaceFixture(`user:${crypto.randomUUID()}`);
     await admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
@@ -875,10 +877,10 @@ describe("scheduled task personal MCP authority", () => {
         producerKey: `personal-machine-${crypto.randomUUID()}`,
       });
 
-    // A schedule everyone can see, or a colleague's own schedule, never runs on it.
+    // A colleague's schedule never runs on it, Only me or shared.
     for (const refused of [
-      await scheduleOnMachine({ owner: workspace.subjectId, visibility: "workspace_shared" }),
       await scheduleOnMachine({ owner: colleague, visibility: "user_private" }),
+      await scheduleOnMachine({ owner: colleague, visibility: "workspace_shared" }),
     ]) {
       const result = await dispatch(refused.id);
       expect(result.action, refused.visibility).not.toBe("start");
@@ -889,52 +891,69 @@ describe("scheduled task personal MCP authority", () => {
       expect(runs!.count).toBe(0);
     }
 
-    // The owner's Only me schedule runs there, in an Only me chat with a grant
-    // for that chat alone, and the database admits the attempt on the machine.
-    const task = await scheduleOnMachine({
-      owner: workspace.subjectId,
-      visibility: "user_private",
-    });
-    const dispatched = await dispatch(task.id);
-    expect(dispatched).toMatchObject({ action: "start" });
-    if (dispatched.action !== "start") throw new Error(`Unexpected: ${dispatched.action}`);
-    const [session] = await admin<
-      Array<{ visibility: string; owner: string | null; sandboxId: string | null }>
-    >`select visibility, owner_subject_id as owner, active_sandbox_id as "sandboxId"
-      from sessions where id = ${dispatched.sessionId}`;
-    expect(session).toEqual({
-      visibility: "user_private",
-      owner: workspace.subjectId,
-      sandboxId: machine.sandboxId,
-    });
-    const grants = await admin<Array<{ mode: string; context: string; sessionId: string | null }>>`
-      select mode, context, session_id as "sessionId" from organization_user_resource_grants
-      where account_id = ${workspace.accountId} and action = 'connected_machine.use'
-        and status = 'active'`;
-    expect(grants).toEqual([
-      { mode: "session", context: "user_private", sessionId: dispatched.sessionId },
-    ]);
-    const attemptId = crypto.randomUUID();
-    const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
-      sessionId: dispatched.sessionId,
-      workflowId: dispatched.workflowId,
-      workflowRunId: crypto.randomUUID(),
-      attemptId,
-      dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
-    });
-    if (claimed.action !== "claimed") throw new Error(`claim ${JSON.stringify(claimed)}`);
-    const [authorization] = await admin<Array<{ enrollmentId: string; grantMode: string }>>`
-      select enrollment_id as "enrollmentId", grant_mode as "grantMode"
-      from session_attempt_connected_machine_authorizations where attempt_id = ${attemptId}`;
-    expect(authorization).toEqual({ enrollmentId: machine.enrollmentId, grantMode: "session" });
+    // The owner's schedules run there, Only me or shared, each run in a chat
+    // with the schedule's audience and a grant for that chat alone, and the
+    // database admits the attempt on the machine.
+    let task: Awaited<ReturnType<typeof scheduleOnMachine>> | undefined;
+    for (const visibility of ["user_private", "workspace_shared"] as const) {
+      task = await scheduleOnMachine({ owner: workspace.subjectId, visibility });
+      const dispatched = await dispatch(task.id);
+      expect(dispatched, visibility).toMatchObject({ action: "start" });
+      if (dispatched.action !== "start") throw new Error(`Unexpected: ${dispatched.action}`);
+      const [session] = await admin<
+        Array<{ visibility: string; owner: string | null; sandboxId: string | null }>
+      >`select visibility, owner_subject_id as owner, active_sandbox_id as "sandboxId"
+        from sessions where id = ${dispatched.sessionId}`;
+      expect(session).toEqual({
+        visibility,
+        // A shared chat has no owner; its runs still run as the schedule's owner.
+        owner: visibility === "user_private" ? workspace.subjectId : null,
+        sandboxId: machine.sandboxId,
+      });
+      const grants = await admin<Array<{ mode: string; context: string }>>`
+        select mode, context from organization_user_resource_grants
+        where account_id = ${workspace.accountId} and action = 'connected_machine.use'
+          and status = 'active' and session_id = ${dispatched.sessionId}`;
+      expect(grants).toEqual([{ mode: "session", context: visibility }]);
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+        sessionId: dispatched.sessionId,
+        workflowId: dispatched.workflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error(`claim ${JSON.stringify(claimed)}`);
+      const [authorization] = await admin<Array<{ enrollmentId: string; grantMode: string }>>`
+        select enrollment_id as "enrollmentId", grant_mode as "grantMode"
+        from session_attempt_connected_machine_authorizations where attempt_id = ${attemptId}`;
+      expect(authorization).toEqual({ enrollmentId: machine.enrollmentId, grantMode: "session" });
+    }
 
-    // Without that grant the database refuses the run's next attempt.
-    const second = await dispatch(task.id);
+    // Without that grant, and once the owner turned the machine off in this
+    // workspace, the database refuses the run's next attempt.
+    const second = await dispatch(task!.id);
     if (second.action !== "start") throw new Error(`Unexpected: ${second.action}`);
     await admin`update organization_user_resource_grants set status = 'revoked',
         revoked_at = clock_timestamp(), generation = generation + 1, updated_at = clock_timestamp()
       where session_id = ${second.sessionId} and action = 'connected_machine.use'`;
+    const [machineAuthority] = await admin<Array<{ authorityId: string }>>`
+      select authority_id as "authorityId" from enrollments where id = ${machine.enrollmentId}`;
+    const owner = {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: workspace.subjectId,
+    };
+    const standing = await issueSelfUserResourceGrant(client.db, {
+      ...owner,
+      authorityId: machineAuthority!.authorityId,
+      resourceKind: "connected_machine",
+      mode: "always",
+      context: "user_private",
+      workspaceSharedAcknowledged: false,
+    });
+    await revokeSelfUserResourceGrant(client.db, { ...owner, grantId: standing.grantId });
     const refused = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
       sessionId: second.sessionId,
       workflowId: second.workflowId,
