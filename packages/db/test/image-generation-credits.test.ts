@@ -10,6 +10,7 @@ import {
   createSession,
   getBillingBalance,
   getImageGenerationOperation,
+  grantPlanCreditPeriod,
   ImageGenerationCreditError,
   initializeSessionStartAtomically,
   markImageGenerationOperationOutcomeUnknown,
@@ -18,6 +19,7 @@ import {
   resetImageGenerationOperationBeforeProviderDispatch,
   setWorkspaceAllowance,
   settleGeneratedImageArtifactReady,
+  upsertOrganizationPlan,
   type DbClient,
 } from "../src";
 
@@ -410,6 +412,54 @@ describe("Opengeni-credit funded image generation", () => {
       join credit_ledger_entries d on d.id = a.debit_entry_id
       where d.source_id = ${operation.id}`;
     expect(allocation?.amount).toBe(String(PRICE));
+  }, 60_000);
+
+  test("Free plan credit pays for an image on a chat model outside its scope", async () => {
+    if (!available) return;
+    const value = await fixture(0);
+    // The Free plan takes its model scope from the verified-signup trial:
+    // here a model other than the chat's.
+    const human = crypto.randomUUID();
+    await applyCreditLedgerEntry(client.db, {
+      accountId: value.grant.accountId,
+      type: "grant",
+      amountMicros: 1_000_000,
+      sourceType: "verified_signup_trial",
+      sourceId: human,
+      idempotencyKey: `verified-signup-trial:v1:${human}`,
+      eligibleModelIds: ["other-model"],
+    });
+    const period = {
+      accountId: value.grant.accountId,
+      planKey: "free",
+      periodStart: new Date(Date.now() - 1000),
+      periodEnd: new Date(Date.now() + 3_600_000),
+    };
+    await upsertOrganizationPlan(client.db, {
+      ...period,
+      status: "active",
+      currentPeriodStart: period.periodStart,
+      currentPeriodEnd: period.periodEnd,
+    });
+    await grantPlanCreditPeriod(client.db, period);
+    const plan = (
+      await getBillingBalance(client.db, value.grant.accountId)
+    ).promotionalCredits?.find((grant) => grant.planCredit);
+    expect(plan?.eligibleModelIds).not.toContain(CHAT_MODEL);
+
+    const operation = await preparePriced(value, "call-free-plan-image", PRICE, CHAT_MODEL);
+    expect((await begin(value, operation)).started).toBe(true);
+    await retainReadyArtifact(value, operation, "call-free-plan-image", {
+      completeOperation: true,
+    });
+    const allocations = await shared!.admin<{ grant: string; amount: string }[]>`
+      select a.grant_entry_id::text as grant, a.amount_micros::text as amount
+      from credit_debit_allocations a
+      join credit_ledger_entries d on d.id = a.debit_entry_id
+      where d.source_id = ${operation.id}`;
+    expect(allocations.map((row) => [row.grant, row.amount])).toEqual([
+      [plan!.grantId, String(PRICE)],
+    ]);
   }, 60_000);
 
   test("an image still in its provider request holds its price against parallel images", async () => {

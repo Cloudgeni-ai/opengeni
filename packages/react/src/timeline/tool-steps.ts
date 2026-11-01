@@ -278,6 +278,7 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   rig_verify: "manageSetup",
   rig_promote: "manageSetup",
   list_models: "checkModels",
+  privacy_facts: "checkSettings",
   get_video_generation_capabilities: "checkModels",
 
   // Passwords and settings

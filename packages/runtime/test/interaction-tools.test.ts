@@ -1792,6 +1792,195 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  describe("a stopped browser whose working directory was moved, copied or restored", () => {
+    const digest = "ab".repeat(32);
+    const inspection = (overrides: Record<string, unknown> = {}) => ({
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      adoptable: true,
+      refusal: null,
+      explanation: "This working copy can be adopted.",
+      manifest: { digest, entries: 412, bytes: 9_876_543, excluded: [] },
+      platformSupported: true,
+      profileIdentityMatches: false,
+      profileInUse: false,
+      receipt: null,
+      freshness: { status: "unknown" as const, latestCheckpointAt: "2026-10-30T22:00:00.000Z" },
+      activeAdoption: null,
+      ...overrides,
+    });
+    const adoption = (phase: string, operationId: string) => ({
+      operationId,
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      manifestDigest: digest,
+      phase,
+      failureCode: null,
+      retainedDirectories: [],
+      createdAt: "2026-10-31T08:00:00.000Z",
+      updatedAt: "2026-10-31T08:00:01.000Z",
+    });
+    const browser = (options: {
+      inspected?: ReturnType<typeof inspection>;
+      phase?: string;
+      lifecycle?: BrowserSession["lifecycle"];
+    }) => {
+      const lost = discoveredBrowserSession(browserSessionId, sessionId);
+      lost.lifecycle = options.lifecycle ?? "lost";
+      lost.failureCode = "controller_resource_missing";
+      const active = discoveredBrowserSession(browserSessionId, sessionId);
+      active.lifecycle = "active";
+      active.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const target = browserTarget();
+      const calls: string[] = [];
+      const adoptions: Array<{ operationId: string; manifestDigest: string }> = [];
+      let adopted = false;
+      const transport = {
+        ...partialTransport({
+          getBrowserSession: async () => lost,
+          resumeBrowserSession: async () => {
+            calls.push("resume");
+            if (!adopted)
+              throw new OpenGeniApiError(
+                409,
+                JSON.stringify({
+                  error: {
+                    code: "conflict",
+                    message:
+                      "BrowserSession was lost when its controller restarted, and its working copy could not be recovered. Current browser is unavailable: its working directory is not the directory it was launched in (it was moved, copied or restored). If this copy should be kept, inspect it with inspectBrowserSessionWorkingCopy and adopt it with adoptBrowserSessionWorkingCopy",
+                    retryable: false,
+                  },
+                }),
+              );
+            return { session: active } as never;
+          },
+          listBrowserTargets: async () => ({
+            browserSessionId,
+            controllerGeneration: "controller-1",
+            targets: [target],
+          }),
+          observeBrowserTarget: async () => browserObservation(target),
+        }),
+        inspectBrowserSessionWorkingCopy: async () => {
+          calls.push("inspect");
+          return (options.inspected ?? inspection()) as never;
+        },
+        adoptBrowserSessionWorkingCopy: async (
+          _workspaceId: string,
+          _browserSessionId: string,
+          request: { operationId: string; manifestDigest: string },
+        ) => {
+          calls.push("adopt");
+          adoptions.push(request);
+          const phase = options.phase ?? "adopted";
+          adopted = phase === "adopted";
+          return {
+            inFlight: false,
+            adoption: adoption(phase, request.operationId),
+            explanation: "synthetic",
+          } as never;
+        },
+      };
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport,
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const open = async (input: Record<string, unknown>) =>
+        await definitions[0]!.execute(input, {
+          operationId: randomUUID(),
+          caller: { kind: "model", subjectId: "model:test" },
+        });
+      return { open, calls, adoptions, target };
+    };
+    const errorMessage = (result: unknown) =>
+      (result as { structuredContent: { error: { message: string } } }).structuredContent.error
+        .message;
+
+    test("its refusal offers adopting exactly that copy through browser_open, or a new browser", async () => {
+      const { open, calls } = browser({});
+      const result = await open({ browserSessionId });
+      expect(result).toMatchObject({ isError: true });
+      const message = errorMessage(result);
+      expect(message).toBe(
+        `API 409: BrowserSession ${browserSessionId} cannot continue by itself: its working directory was moved, copied or restored since it last ran, and how recent that copy is cannot be proven (its latest saved checkpoint is from 2026-10-30T22:00:00.000Z). To continue from exactly this copy (412 files, 9876543 bytes), call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${digest}"; the directory it replaces is kept. To start over without it, call browser_open with mode "new".`,
+      );
+      expect(message).not.toContain("inspectBrowserSessionWorkingCopy");
+      // Reading why changes nothing.
+      expect(calls).toEqual(["resume", "inspect"]);
+    });
+
+    test("browser_open with that digest adopts the copy and continues the browser from it", async () => {
+      const { open, calls, adoptions, target } = browser({});
+      const first = await open({ browserSessionId, adoptWorkingCopy: digest });
+      expect(first.isError ?? false).toBe(false);
+      expect(first.structuredContent).toMatchObject({
+        session: { lifecycle: "active" },
+        targets: [agentTarget(target)],
+      });
+      expect(calls).toEqual(["adopt", "resume"]);
+      expect(adoptions[0]!.manifestDigest).toBe(digest);
+      // Another call adopting the same copy is the same adoption, so a retry
+      // settles one that stopped instead of starting another.
+      await open({ browserSessionId, adoptWorkingCopy: digest });
+      expect(adoptions[1]!.operationId).toBe(adoptions[0]!.operationId);
+    });
+
+    test("an adoption that stopped part way is finished by the same call again", async () => {
+      const unfinished = browser({
+        phase: "source_preserved",
+      });
+      const stopped = await unfinished.open({ browserSessionId, adoptWorkingCopy: digest });
+      expect(errorMessage(stopped)).toBe(
+        `API 409: BrowserSession ${browserSessionId}'s working copy was not adopted: the adoption stopped part way; call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${digest}" again to finish it.`,
+      );
+      expect(unfinished.calls).toEqual(["adopt"]);
+      // A plain open of the browser names the same step.
+      const operationId = unfinished.adoptions[0]!.operationId;
+      const later = browser({
+        inspected: inspection({
+          adoptable: false,
+          refusal: "adoption_unresolved",
+          manifest: null,
+          activeAdoption: adoption("source_preserved", operationId),
+        }),
+      });
+      expect(errorMessage(await later.open({ browserSessionId }))).toBe(
+        `API 409: BrowserSession ${browserSessionId} cannot continue yet: adopting its working copy did not finish. Call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${digest}" again to finish it.`,
+      );
+    });
+
+    test("a collision leaves the browser to a person and points to a new browser", async () => {
+      const { open } = browser({ phase: "collision" });
+      expect(errorMessage(await open({ browserSessionId, adoptWorkingCopy: digest }))).toContain(
+        'stays unavailable until a person reverts the adoption. Call browser_open with mode "new"',
+      );
+    });
+
+    test("a resume refused for another reason keeps its own refusal", async () => {
+      const { open } = browser({
+        inspected: inspection({ adoptable: false, refusal: "authority_changed", manifest: null }),
+      });
+      expect(errorMessage(await open({ browserSessionId }))).toContain(
+        "working copy could not be recovered",
+      );
+    });
+
+    test("a browser that is not stopped has no copy to adopt", async () => {
+      const { open, calls } = browser({ lifecycle: "active" });
+      expect(errorMessage(await open({ browserSessionId, adoptWorkingCopy: digest }))).toBe(
+        `API 409: BrowserSession ${browserSessionId} is active, so it has no stopped working copy to adopt; call browser_open without adoptWorkingCopy.`,
+      );
+      expect(calls).toEqual([]);
+    });
+  });
+
   test.each([
     ["observe on the current tab", "browser_observe", {}, "replay"],
     ["observe on a named tab", "browser_observe", { targetId: "tab-1" }, "report"],

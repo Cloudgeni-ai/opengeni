@@ -90,6 +90,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Typecheck/lint/format toolchain | `docs/toolchain.md` | `CONTRIBUTING.md` links; other docs should not restate tool choice or version. |
 | Model providers and OpenAI-compatible inference routes | `docs/model-providers.md` (start at § Configuring inference) | `docs/local-development.md` § Configuration and `.env.example` should link instead of restating `OPENGENI_MODEL_PROVIDERS_JSON`. |
 | Model route residency and EU-only inference | `docs/eu-only-inference.md` | `docs/model-providers.md` and provider docs should link instead of restating residency rules. |
+| What agents say about privacy, retention, training and where a model runs | `docs/privacy-facts.md` | The provider table lives in code (`provider-data-policy.ts`); docs link instead of restating provider terms. |
 | Model catalog pricing audit | `docs/model-providers.md` § Price audit (`bun run check:model-pricing`) | Debit authority stays in `packages/config` `defaultModelPricing`; llm-prices is a canary only. |
 | Provider-aware image generation | `docs/image-generation.md` | Runtime, worker, artifact, SDK, and React summaries should link instead of restating provider and recovery semantics. |
 | Workspace and session artifact library | `docs/artifact-library.md` | Unified discovery and retained-file presentation; existing Site and editable-artifact authorities remain separate content models. |

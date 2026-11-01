@@ -125,14 +125,74 @@ describe("parseWatchLine", () => {
 function prompter() {
   const shown: MeetingPrompt[] = [];
   const closed: MeetingPrompt[] = [];
-  const subject = new MeetingPrompter(own, (prompt) => {
-    shown.push(prompt);
-    return { close: () => closed.push(prompt) };
-  });
-  return { subject, shown, closed };
+  const auto = { on: false, started: [] as string[], stopped: [] as string[] };
+  const subject = new MeetingPrompter(
+    own,
+    (prompt) => {
+      shown.push(prompt);
+      return { close: () => closed.push(prompt) };
+    },
+    {
+      enabled: () => auto.on,
+      start: (app) => auto.started.push(app.id),
+      stop: (app) => auto.stopped.push(app.id),
+    },
+  );
+  return { subject, shown, closed, auto };
 }
 
 describe("MeetingPrompter", () => {
+  test("recording without asking records a call app's call and stops it when it ends", () => {
+    const { subject, shown, closed, auto } = prompter();
+    auto.on = true;
+    subject.observe([zoom], 0);
+    subject.evaluate(PROMPT_AFTER_MS);
+    expect(auto.started).toEqual(["zoom"]);
+    expect(shown).toEqual([]);
+    // A browser joining before the page records joins that recording, unasked.
+    subject.observe([zoom, chrome], PROMPT_AFTER_MS + 500);
+    subject.evaluate(PROMPT_AFTER_MS * 3);
+    expect(shown).toEqual([]);
+    // Once the page records, the card says so; until then it claims nothing.
+    subject.setRecording(true, PROMPT_AFTER_MS * 3 + 100);
+    expect(shown.map((prompt) => [prompt.kind, prompt.app.id])).toEqual([["recording", "zoom"]]);
+    subject.observe([], 20_000);
+    subject.evaluate(20_000 + ENDED_AFTER_MS);
+    expect(auto.stopped).toEqual(["chrome"]);
+    expect(shown.map((prompt) => prompt.kind)).toEqual(["recording"]);
+    expect(closed.map((prompt) => prompt.kind)).toEqual(["recording"]);
+    subject.setRecording(false, 30_000);
+    expect(auto.started).toEqual(["zoom"]);
+  });
+
+  test("a meeting in a browser still asks, and a recording started by hand asks to stop", () => {
+    const { subject, shown, auto } = prompter();
+    auto.on = true;
+    subject.observe([chrome], 0);
+    subject.evaluate(PROMPT_AFTER_MS);
+    expect(shown.map((prompt) => prompt.kind)).toEqual(["record"]);
+    subject.setRecording(true, PROMPT_AFTER_MS + 100);
+    subject.observe([], 10_000);
+    subject.evaluate(10_000 + ENDED_AFTER_MS);
+    expect(shown.map((prompt) => prompt.kind)).toEqual(["record", "stop"]);
+    expect(auto).toMatchObject({ started: [], stopped: [] });
+  });
+
+  test("a start without asking that never began recording doesn't make a later one automatic", () => {
+    const { subject, shown, auto } = prompter();
+    auto.on = true;
+    subject.observe([zoom], 0);
+    subject.evaluate(PROMPT_AFTER_MS);
+    expect(auto.started).toEqual(["zoom"]);
+    // Much later the person starts recording by hand during the same call.
+    subject.setRecording(true, PROMPT_AFTER_MS + 120_000);
+    expect(shown).toEqual([]);
+    subject.observe([], 200_000);
+    subject.evaluate(200_000 + ENDED_AFTER_MS);
+    expect(auto.stopped).toEqual([]);
+    expect(shown.at(-1)?.kind).toBe("stop");
+  });
+
   test("asks once a call has held the microphone a few seconds", () => {
     const { subject, shown } = prompter();
     subject.observe([zoom], 0);
@@ -204,6 +264,24 @@ describe("prompt words", () => {
   const browser: MeetingPrompt = { kind: "record", app: identifyCallApp(chrome)! };
   const stop: MeetingPrompt = { kind: "stop", app: identifyCallApp(chrome)! };
 
+  test("a call recorded without asking says so, and its button stops it", () => {
+    const recording: MeetingPrompt = { kind: "recording", app: identifyCallApp(zoom)! };
+    expect(promptText(recording)).toEqual({
+      question: "Recording this call",
+      reason: "A call in Zoom started, so it's being recorded.",
+      action: "Stop recording",
+      dismiss: "OK",
+    });
+    expect(promptRequest(recording)).toEqual({ kind: "stop", app: "Zoom" });
+    // An app's words from before this card fall back to English for it.
+    const { recordingStarted, callRecording, ok, ...older } = ENGLISH_MEETING_WORDS;
+    void [recordingStarted, callRecording, ok];
+    expect(promptText(recording, { ...older, stop: "Stopp opptak" })).toMatchObject({
+      question: "Recording this call",
+      action: "Stopp opptak",
+    });
+  });
+
   test("the card asks, says why, and names its two buttons", () => {
     expect(promptText(record)).toEqual({
       question: "Record this meeting?",
@@ -241,6 +319,19 @@ describe("prompt words", () => {
 });
 
 describe("MeetingDetectionStore", () => {
+  test("recording without asking is off unless turned on, beside the other switch", () => {
+    const dir = mkdtempSync(join(tmpdir(), "meetings-"));
+    try {
+      expect(new MeetingDetectionStore(dir).autoRecord()).toBe(false);
+      new MeetingDetectionStore(dir).setAutoRecord(true);
+      new MeetingDetectionStore(dir).setEnabled(false);
+      expect(new MeetingDetectionStore(dir).autoRecord()).toBe(true);
+      expect(new MeetingDetectionStore(dir).enabled()).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("on unless turned off, and remembered", () => {
     const dir = mkdtempSync(join(tmpdir(), "meetings-"));
     try {
@@ -285,10 +376,13 @@ function detection(
     chooseTarget?: (pages: readonly MeetingPage[]) => MeetingPage | undefined;
     /** Whether a page said it can record, before this run. Yes by default. */
     canRecord?: boolean;
+    /** Recording without asking. Off by default. */
+    autoRecord?: boolean;
   } = {},
 ) {
   let now = 0;
   let enabled = true;
+  let autoRecord = options.autoRecord ?? false;
   let canRecord = options.canRecord ?? true;
   let helpers = 0;
   const helper = Object.assign(new EventEmitter(), {
@@ -313,6 +407,10 @@ function detection(
       enabled: () => enabled,
       setEnabled: (value) => {
         enabled = value;
+      },
+      autoRecord: () => autoRecord,
+      setAutoRecord: (value) => {
+        autoRecord = value;
       },
       canRecord: () => canRecord,
       setCanRecord: (value) => {
@@ -497,6 +595,57 @@ describe("MeetingDetection", () => {
     expect(changes).toBe(1);
     expect(log).toContain("Meeting detection: turned off.");
     subject.update({ enabled: false });
+    expect(changes).toBe(1);
+    subject.stop();
+  });
+
+  test("recording without asking starts and stops in the background, and its card stops it", () => {
+    const { subject, cards, call, microphone, log, revealed } = detection({ autoRecord: true });
+    const page = new FakePage(1);
+    subject.listen(page, true);
+    call();
+    // No question: the page records and the window stays where it is.
+    expect(page.sent).toEqual([{ kind: "record", app: "Zoom", title: "Zoom meeting" }]);
+    expect(revealed()).toBe(0);
+    expect(cards).toEqual([]);
+    expect(log).toContain("Meeting detection: recording a call without asking (zoom).");
+    // Once it records, the card says so.
+    subject.setRecording(page, true);
+    expect(cards.map((card) => card.prompt.kind)).toEqual(["recording"]);
+    // The call ends: the recording stops without a question.
+    microphone([], 10_000);
+    microphone([], 10_000 + ENDED_AFTER_MS);
+    expect(page.sent.at(-1)).toEqual({ kind: "stop", app: "Zoom" });
+    expect(cards.map((card) => card.prompt.kind)).toEqual(["recording"]);
+    subject.setRecording(page, false);
+    // The card's Stop recording stops it too.
+    call(zoom, 30_000);
+    subject.setRecording(page, true);
+    cards.at(-1)!.done("chosen");
+    expect(page.sent.at(-1)).toEqual({ kind: "stop", app: "Zoom" });
+    expect(revealed()).toBe(0);
+    subject.stop();
+  });
+
+  test("with no page open, a start without asking opens the window to record", () => {
+    const { subject, call, revealed } = detection({ autoRecord: true });
+    call();
+    expect(revealed()).toBe(1);
+    const page = new FakePage(1);
+    subject.listen(page, true);
+    expect(page.sent.map((request) => request.kind)).toEqual(["record"]);
+    subject.stop();
+  });
+
+  test("recording without asking is a switch of its own, remembered and announced", () => {
+    const { subject, log } = detection();
+    let changes = 0;
+    subject.onChange(() => (changes += 1));
+    expect(subject.status()).toMatchObject({ enabled: true, autoRecord: false });
+    expect(subject.update({ autoRecord: true })).toMatchObject({ enabled: true, autoRecord: true });
+    expect(changes).toBe(1);
+    expect(log).toContain("Meeting detection: recording without asking turned on.");
+    subject.update({ autoRecord: true });
     expect(changes).toBe(1);
     subject.stop();
   });

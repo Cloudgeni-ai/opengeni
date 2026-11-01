@@ -8,6 +8,7 @@ import {
   labelWordsFromTurns,
   mergeRecordingTranscriptionPieces,
   planRecordingTracks,
+  planRecordingSoundPieces,
   planRecordingTranscriptionPieces,
   recordingDiarizationKind,
   recordingSpeakerLabels,
@@ -28,6 +29,7 @@ import {
   type RecordingTranscriptionProvider,
   type RecordingTranscriptionProviderRegistry,
   type RecordingTranscriptionRequest,
+  type RecordingSoundRange,
   type RecordingTranscriptionResult,
   type RecordingTrackWords,
   type RecordingWordAligner,
@@ -97,6 +99,7 @@ import {
   type RecordingProcessingReport,
 } from "./recording-usage";
 import {
+  detectRecordingSound,
   prepareRecordingTrackAudio,
   preparedAudioFormat,
   recordingAudioContainer,
@@ -287,16 +290,38 @@ export async function transcribeTrack(input: {
   aligner?: RecordingWordAligner | null;
   /** Adds each aligned piece's placement counts and scores. */
   onAligned?: (aligned: RecordingAlignedWords) => void;
+  /**
+   * The track's stretches with sound: only those are sent, in pieces of
+   * their own, and none means nothing is sent. Omitted, the whole track is.
+   * Speakers the model told apart don't carry across pieces, so this is for
+   * tracks whose speakers come from elsewhere.
+   */
+  sound?: ReadonlyArray<RecordingSoundRange> | null;
+  /** Adds the milliseconds of audio each piece sent to the model. */
+  onSent?: (milliseconds: number) => void;
 }): Promise<RecordingTranscriptionResult> {
   const { source, format, maxPieceMilliseconds } = pieceShape(input.spec, input.audio.extension);
-  const pieces = planRecordingTranscriptionPieces(input.durationMilliseconds, maxPieceMilliseconds);
+  const pieces = input.sound
+    ? planRecordingSoundPieces(input.durationMilliseconds, maxPieceMilliseconds, input.sound)
+    : planRecordingTranscriptionPieces(input.durationMilliseconds, maxPieceMilliseconds);
+  if (pieces.length === 0) {
+    return {
+      languages: [],
+      audioMilliseconds: input.durationMilliseconds,
+      diarized: false,
+      words: [],
+    };
+  }
   const parts: Array<{
     piece: (typeof pieces)[number];
     result: RecordingTranscriptionResult;
   }> = [];
   for (const [index, piece] of pieces.entries()) {
     input.onPiece?.(index);
-    const whole = pieces.length === 1;
+    const whole =
+      pieces.length === 1 &&
+      piece.startMilliseconds === 0 &&
+      piece.endMilliseconds >= Math.ceil(input.durationMilliseconds);
     const audio =
       whole && !format
         ? input.audio
@@ -334,9 +359,12 @@ export async function transcribeTrack(input: {
     ).catch((error: unknown) => {
       throw asRecordingTranscriptionError(error);
     });
+    input.onSent?.(piece.endMilliseconds - piece.startMilliseconds);
     parts.push({ piece, result: await alignPiece(input, audio, result) });
   }
-  return mergeRecordingTranscriptionPieces(parts);
+  const merged = mergeRecordingTranscriptionPieces(parts);
+  // Leaving quiet out doesn't shorten the track.
+  return input.sound ? { ...merged, audioMilliseconds: input.durationMilliseconds } : merged;
 }
 
 /**
@@ -592,6 +620,7 @@ export function createRecordingActivities(
       model: job.version.model,
       funding: "none",
       audioSeconds: 0,
+      sentAudioSeconds: null,
       queueSeconds: job.queuedMilliseconds === null ? null : job.queuedMilliseconds / 1_000,
       preparedBytes: 0,
       providerCostUsd: null,
@@ -749,6 +778,8 @@ export function createRecordingActivities(
         let providerDiarized = false;
         let ourDiarized = false;
         let audioMilliseconds = 0;
+        // Audio actually sent to the model, which is what it bills.
+        let sentMilliseconds = 0;
         const languages = new Set<string>();
         const ourDiarizer = diarizerFor(settings);
         // Recognizing voices needs every speaker's voice vector, which only
@@ -831,8 +862,35 @@ export function createRecordingActivities(
           };
           const onPiece = (piece: number) =>
             heartbeat({ phase: "transcribing", trackNumber: plan.trackNumber, piece });
+          // Long quiet stretches (the computer's audio in a room meeting, a
+          // microphone while its person listens) hold no words, so they are
+          // never sent: a silent track not at all, and the rest only when the
+          // speakers come from our diarizer or nowhere, since a model's own
+          // speakers don't carry across the pieces.
+          const sound = await withHeartbeat(() =>
+            measureRecordingStage("convert", () =>
+              detectRecordingSound({
+                audio,
+                durationMilliseconds: audio.durationMilliseconds,
+                ffmpegPath: settings.voiceInputFfmpegPath,
+                signal,
+              }),
+            ),
+          ).catch((error: unknown) => {
+            if (signal?.aborted) throw error;
+            observability.warn("couldn't find a track's quiet stretches; sending all of it", {
+              workspaceId: input.workspaceId,
+              recordingId: input.recordingId,
+              versionId: input.versionId,
+              trackNumber: plan.trackNumber,
+              error: errorMessage(error),
+            });
+            return null;
+          });
+          const silent = sound !== null && sound.length === 0;
+          const sendOnly = silent || useOurs || !diarize ? sound : null;
           const runOurs = () =>
-            useOurs
+            useOurs && !silent
               ? measureRecordingStage("diarize", () =>
                   ourDiarizer.diarize(trackAudio, { maxSpeakers: requested.maxSpeakers, signal }),
                 ).catch((error: unknown) => {
@@ -861,6 +919,10 @@ export function createRecordingActivities(
                 request,
                 aligner,
                 onAligned: (aligned) => addAlignment(telemetry, aligned),
+                sound: sendOnly,
+                onSent: (milliseconds) => {
+                  sentMilliseconds += milliseconds;
+                },
               }),
               runOurs(),
             ]);
@@ -929,12 +991,13 @@ export function createRecordingActivities(
         });
         const costUsdMicros = estimateRecordingTranscriptionCostMicros(
           found.spec,
-          audioMilliseconds,
+          sentMilliseconds,
           {
             keyterms: capabilities.keyterms && (requested.keyterms?.length ?? 0) > 0,
           },
         );
         telemetry.audioSeconds = audioMilliseconds / 1_000;
+        telemetry.sentAudioSeconds = sentMilliseconds / 1_000;
         telemetry.diarization = diarization;
         telemetry.speakers = new Set(
           segments.flatMap((segment) => (segment.speakerLabel ? [segment.speakerLabel] : [])),

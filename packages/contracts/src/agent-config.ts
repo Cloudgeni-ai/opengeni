@@ -553,6 +553,7 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
   // Runtime function tools.
   request_human_input: "humanInput",
   list_models: "subagents",
+  privacy_facts: "runtime",
   generate_image: "media",
   generate_video: "media",
   get_video_generation_capabilities: "media",

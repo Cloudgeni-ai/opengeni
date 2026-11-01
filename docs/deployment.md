@@ -3273,6 +3273,14 @@ The runtime secret must provide values such as:
   defaults to our internal accounts (CloudGeni's host account and our own
   team's organizations) and `none` lists no account. See
   [billing-origin.md](billing-origin.md#internal-accounts-cloudgeni-and-our-team).
+- `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING` (default `true`): on turns whose
+  model Opengeni pays for while credit billing is active, hosted web search and
+  OpenAI hosted image generation cost credit. Billed provider search replaces
+  hosted search, or reported hosted searches are charged. The priced Gateway
+  image tool replaces OpenAI hosted images, so such turns have no image tool
+  without the Gateway image credential or a workspace Gateway key. `false`
+  restores free hosted search and images. See
+  [web-search.md](web-search.md#hosted-search-on-turns-opengeni-pays-for).
 - `OPENGENI_SUBSCRIPTION_PLANS_ENABLED=false` is the default. Enabling it opts into
   subscription API/webhook plan writes (and the separately integrated maintenance
   service); prepaid top-ups remain independent. Configure the operator runtime
