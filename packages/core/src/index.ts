@@ -122,6 +122,7 @@ export * from "./billing/limits";
 export * from "./domain/browser-retained-downloads";
 export * from "./billing/agent-run-admission";
 export * from "./billing/model-usage-settlement";
+export * from "./billing/byok-platform-fee";
 export * from "./billing/model-call-admission";
 export * from "./model-call";
 
@@ -130,6 +131,7 @@ export * from "./model-call";
 // scheduled-task/workspace-member logic, …).
 export * from "./domain/capabilities";
 export * from "./domain/mcp-credential-content-flow";
+export * from "./domain/organization-connectors";
 export * from "./domain/native-mcp-connection-admission";
 export * from "./domain/skill-imports";
 export * from "./domain/skill-search";

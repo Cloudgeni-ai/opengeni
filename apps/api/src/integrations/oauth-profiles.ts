@@ -493,10 +493,35 @@ const GOOGLE_DRIVE_IDENTITY: AccountIdentityVerifier = {
   },
 };
 
-/** Atlassian's hosted Rovo MCP reports the signed-in account through a read-only tool. */
+/**
+ * Atlassian's v1 Rovo MCP reports the signed-in account through its read-only
+ * atlassianUserInfo tool. The v2 server's tool answers `{ data: { accountId } }`
+ * without email or name; v1 connections switch to v2 tools on 1 March 2027, so
+ * both shapes are accepted.
+ */
 const ATLASSIAN_ROVO_IDENTITY: AccountIdentityVerifier = {
   kind: "mcp_tool",
   calls: [{ toolName: "atlassianUserInfo", arguments: {} }],
+  identityKeys: ["atlassianAccountId"],
+  validateIdentity: ([payload]) => {
+    const user = record(payload);
+    const accountId = nonEmpty(user.account_id) ? user.account_id : record(user.data).accountId;
+    if (!nonEmpty(accountId)) throw new Error("Atlassian account verification failed");
+    return {
+      atlassianAccountId: accountId,
+      ...labels({ atlassianEmail: user.email, atlassianName: user.name }),
+    };
+  },
+};
+
+/**
+ * Atlassian's v2 MCP token also reads the platform's own profile endpoint, which
+ * returns the same account id as atlassianUserInfo plus the email and name that
+ * the v2 tool leaves out. Same identity key as v1, so labels stay consistent.
+ */
+const ATLASSIAN_V2_IDENTITY: AccountIdentityVerifier = {
+  kind: "http",
+  url: "https://api.atlassian.com/me",
   identityKeys: ["atlassianAccountId"],
   validateIdentity: ([payload]) => {
     const user = record(payload);
@@ -507,6 +532,10 @@ const ATLASSIAN_ROVO_IDENTITY: AccountIdentityVerifier = {
     };
   },
 };
+
+/** Atlassian's recommended MCP endpoint, with every tool listed flat so each one
+ * keeps its own approval policy (the default lists gateway execute tools). */
+export const ATLASSIAN_V2_MCP_URL = "https://mcp.atlassian.com/v2/mcp?tools=all";
 
 /**
  * Linear's MCP reads the signed-in user with get_user "me" (id, name, email) and
@@ -615,6 +644,8 @@ const ACCOUNT_IDENTITY_VERIFIERS: ReadonlyMap<string, AccountIdentityVerifier> =
   [OFFICIAL_DRIVE_MCP_URL, GOOGLE_DRIVE_IDENTITY],
   ["https://mcp.atlassian.com/v1/mcp/authv2", ATLASSIAN_ROVO_IDENTITY],
   ["https://mcp.atlassian.com/v1/mcp", ATLASSIAN_ROVO_IDENTITY],
+  [ATLASSIAN_V2_MCP_URL, ATLASSIAN_V2_IDENTITY],
+  ["https://mcp.atlassian.com/v2/mcp", ATLASSIAN_V2_IDENTITY],
   ["https://mcp.linear.app/mcp", LINEAR_IDENTITY],
   ["https://mcp.notion.com/mcp", NOTION_IDENTITY],
   ["https://mcp.asana.com/v2/mcp", ASANA_IDENTITY],

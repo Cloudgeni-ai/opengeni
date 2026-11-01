@@ -749,23 +749,25 @@ as the new session row. If the target is invalid, removed, revoked, or otherwise
 no longer attachable, the create fails without leaving a queued session shell.
 
 Workspace- and organization-scoped machines run any schedule. A user-scoped
-(personal) machine runs only an **Only me** schedule owned by the machine's
-owner:
+(personal) machine runs only schedules owned by the machine's owner, **Only
+me** or **Workspace** alike, because a schedule runs as its owner:
 
-- Saving is the consent. Create and update accept a personal machine only when
-  the final audience is Only me; widening such a schedule to Workspace, or
-  saving it for Workspace, returns 422. The scoped sandbox lookup returns a
-  personal machine to its owner alone, so nobody else can select it.
+- Picking the machine on the schedule is the consent. The scoped sandbox
+  lookup returns a personal machine to its owner alone, so nobody else can
+  select it, and only a schedule's owner changes or runs it. A schedule never
+  uses a personal machine by following the workspace default (422).
 - Each run attaches the machine through the owner's scoped authorization and
   then issues a `session`-mode `connected_machine.use` grant (context
-  `user_private`) for exactly that run's chat. No standing `always` grant is
-  created, so the owner's other chats keep asking.
+  `user_private` or `workspace_shared`, like the run's chat) for exactly that
+  run's chat. No standing `always` grant is created.
 - Every attempt goes through the same database admission as an interactive
   turn (`admit_session_attempt_personal_machine`): the run's causal human must
   be the machine's owner and still an active member with access to the
   workspace, the machine's authority must be current, and the run's grant must
   be active. Removing the person, revoking the machine or revoking the grant
   stops the next attempt.
+- Other people can see a Workspace schedule's runs and write in its chats.
+  Their messages wait for the owner, as in any chat on a personal machine.
 
 In a chat on a personal machine, only the owner's own messages start work. A
 message somebody else sends there (through the API, an agent acting for them,
@@ -1846,9 +1848,9 @@ Nothing has to be resolved by hand first. Narrowing to **Only me** does this:
   cancelled (`authority_changed`): turns in chats that move off, and turns
   someone other than the owner started in the owner's shared chats. The agent's
   commands still running in chats that move off are stopped too.
-- **Schedules** that target the machine: the owner's Workspace schedules become
-  Only me schedules when the owner may have Only me schedules, and pause
-  otherwise. Everyone else's pause. The owner's Only me schedules keep running.
+- **Schedules** that target the machine: the new owner's schedules keep running
+  with no change, Only me or Workspace, because a schedule runs as its owner.
+  Everyone else's pause.
 - **Notices**: each affected person other than the one switching gets one
   inbox notification saying what moved, paused or stopped, and that they can
   choose another machine to continue.
@@ -1877,8 +1879,9 @@ The API is the same flow:
 - `POST /v1/workspaces/:ws/machines/:enrollmentId/audience/preview` with
   `{ audience: "only_me" | "workspace", ownerSubjectId? }` returns the plan:
   `summary` counts, `items` (each with its `action`: `move_off`, `keep`,
-  `make_only_me`, `pause` or `remove_first`), whether it is `ready`, and the
-  machine's `generation`.
+  `pause` or `remove_first`; `make_only_me` and `summary.schedulesMadeOnlyMe`
+  are no longer produced), whether it is `ready`, and the machine's
+  `generation`.
 - `PUT /v1/workspaces/:ws/machines/:enrollmentId/audience` with the same body
   plus `expectedGeneration` applies it and returns the counts and the chats it
   moved off. It answers `409` with `details.reason: "stale"` when the machine

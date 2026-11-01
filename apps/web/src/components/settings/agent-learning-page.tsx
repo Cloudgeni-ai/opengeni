@@ -31,8 +31,8 @@ export function AgentLearningSettingsPage({ workspaceId }: { workspaceId: string
     workspace,
     context.managedSelfContext,
   );
-  // Owner-only, the same rule as Organization settings > Organization identity.
-  const ownsOrganization = Boolean(
+  // Owners and admins, the same rule as Organization settings > Organization identity.
+  const managesOrganizationIdentity = Boolean(
     workspace?.accountId &&
     organizationSettingsAccess({
       accessContext: context.accessContext,
@@ -42,7 +42,7 @@ export function AgentLearningSettingsPage({ workspaceId }: { workspaceId: string
   );
   const shared = useLearningDefaults(workspaceId, "workspace");
   const mine = useLearningDefaults(workspaceId, "personal");
-  const identity = useIdentityLearningPolicy(workspaceId, ownsOrganization);
+  const identity = useIdentityLearningPolicy(workspaceId, managesOrganizationIdentity);
   const queue = useReviewQueue(workspaceId, 0);
 
   return (

@@ -75,6 +75,7 @@ const EXACT: Record<string, AgentToolMetricFamily> = {
   google_drive_publish_file: "files",
   custom_mcp_setup_request: "connector",
   list_models: "other",
+  privacy_facts: "other",
 };
 
 const PREFIXES: ReadonlyArray<readonly [string, AgentToolMetricFamily]> = [

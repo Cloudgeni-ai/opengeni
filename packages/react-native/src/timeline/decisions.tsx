@@ -915,6 +915,8 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
   const [answers, setAnswers] = useState<
     Record<string, { question: string; draft: McpQuestionDraft; problem: string | null }>
   >({});
+  // Taps land before the busy state re-renders: one request per card, however fast.
+  const inFlight = useRef(new Set<string>());
   if (approvals.length === 0) return null;
   const decide = async (
     id: string,
@@ -922,11 +924,14 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
     answer?: McpElicitationAnswer,
     key = id,
   ) => {
+    if (inFlight.current.has(key)) return;
+    inFlight.current.add(key);
     setPending((current) => ({ ...current, [key]: decision }));
     try {
       await (answer ? onDecide(id, decision, answer) : onDecide(id, decision));
       setSettled((current) => ({ ...current, [key]: decision }));
     } finally {
+      inFlight.current.delete(key);
       setPending((current) => {
         const next = { ...current };
         delete next[key];

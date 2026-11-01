@@ -275,7 +275,7 @@ filtered to that scope (Organization identity > Organization documents uses it).
 **Agent learning** (Settings → Workspace → Agent learning; Knowledge ⋯ → Agent
 learning opens the same page) holds the workspace defaults
 for shared chats and your private-chat defaults, each row Off / Review first /
-Automatic. Organization owners also see an **Organization identity** row there,
+Automatic. Organization owners and admins also see an **Organization identity** row there,
 in the same words, for the separate company-profile agent policy. One chat's own
 override lives in the session dock's **Agent** tab, next to its identity and
 capabilities; the composer's **+ → Chat settings** opens it. A new chat still
@@ -363,7 +363,7 @@ snapshots are unchanged; no existing policy is migrated.
 Each destination supports **Automatic**, **Review first** and **Off**. These
 control agent authoring and publication. Off does not remove existing Knowledge,
 disable installed Skills, prevent a human edit, or forbid a human plugin install.
-Organization identity keeps its separate organization-owner policy. External
+Organization identity keeps its separate organization owner/admin policy. External
 message sending, tool approvals, secrets and other action permissions remain
 separate from learning policy.
 

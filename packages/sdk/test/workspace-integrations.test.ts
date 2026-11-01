@@ -40,6 +40,7 @@ test("organization helpers preserve method, organization, filter and one-time re
       updatedAt: "2026-09-30T08:00:00Z",
       workspaceFilter: { externalSource: "product:production" },
       allowPersonalWorkspaces: false,
+      allowedWorkspaceIds: null,
     },
   };
   const client = new OpenGeniClient({

@@ -4110,6 +4110,8 @@ export const organizationCredentialProviders = pgTable(
     workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
     /** Personal workspaces; the workspace filter applies to shared ones only. */
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(false),
+    /** Shared workspaces it serves; null is every one. The filter applies on top. */
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     createdBySubjectId: text("created_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4132,6 +4134,8 @@ export const organizationWebhooks = pgTable(
     enabled: boolean("enabled").notNull().default(true),
     description: text("description"),
     workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
+    /** Shared workspaces whose events it receives; null is every one. Never Personal ones. */
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     createdBySubjectId: text("created_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -13051,6 +13055,13 @@ export const creditLedgerEntries = pgTable(
     scopedGrants: index("credit_ledger_scoped_grants_idx")
       .on(table.accountId, table.createdAt, table.id)
       .where(sql`${table.eligibleModelIds} is not null`),
+    // Rows that can carry a paid-credit receipt (credit-balances.ts reads
+    // paid credit and own-key fee debt from these alone).
+    receiptRows: index("credit_ledger_receipt_rows_idx")
+      .on(table.accountId, table.createdAt)
+      .where(
+        sql`${table.amountMicros} > 0 or ${table.type} in ('credit_refund', 'credit_dispute_hold', 'byok_platform_fee')`,
+      ),
     scopeValid: check(
       "credit_ledger_scope_valid",
       sql`${table.eligibleModelIds} is null or (
@@ -13614,6 +13625,51 @@ export const capabilityInstallations = pgTable(
     status: index("capability_installations_workspace_status_idx").on(
       table.workspaceId,
       table.status,
+    ),
+  }),
+);
+
+/**
+ * An organization's MCP connector, added once by an organization owner or
+ * admin and served to the workspaces its reach selects: every shared workspace
+ * (`allowedWorkspaceIds` null) or the listed ones, plus members' Personal
+ * workspaces when `allowPersonalWorkspaces` is on. `config` has the shape of a
+ * workspace installation's config; `customDefinition` holds a custom server's
+ * name and endpoint and is null for a catalog connector. A workspace's own
+ * installation of the same capability, on or off, wins (resolved by readers).
+ */
+export const organizationConnectors = pgTable(
+  "organization_connectors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    capabilityId: text("capability_id").notNull(),
+    customDefinition: jsonb("custom_definition").$type<{
+      name: string;
+      description?: string | null;
+      endpointUrl: string;
+    }>(),
+    config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status").$type<"active" | "disabled">().notNull().default("active"),
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(false),
+    generation: integer("generation").notNull().default(1),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    capability: unique("organization_connectors_capability_key").on(
+      table.accountId,
+      table.capabilityId,
+    ),
+    statusCheck: check(
+      "organization_connectors_status_chk",
+      sql`${table.status} in ('active', 'disabled')`,
     ),
   }),
 );

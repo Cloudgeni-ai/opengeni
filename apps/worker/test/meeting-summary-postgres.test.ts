@@ -285,7 +285,8 @@ describe("built-in meeting summary", () => {
       resources: [],
     });
     // What the agent can call: the two meeting tools and the runtime's own
-    // wait_for_input (agent-config: mechanics every agent has, reaching nothing).
+    // wait_for_input and privacy_facts (agent-config: mechanics every agent
+    // has, reaching nothing).
     const projected = projectAgentEffectiveTools(
       sessionEffectiveToolProjectionInput(session as never, session!.tools, {
         settings,
@@ -298,6 +299,7 @@ describe("built-in meeting summary", () => {
       "opengeni__meeting_notes_save",
       "opengeni__meeting_read",
       "opengeni__wait_for_input",
+      "privacy_facts",
     ]);
     const [turn] = await shared!.admin<{ count: number; authority: string; codex: string }[]>`
       select count(*)::int as count, min(subscription_authority::text) as authority, min(codex_provider_account_authority_snapshot::text) as codex from session_turns where session_id = ${first.sessionId}::uuid`;

@@ -5,7 +5,8 @@ import type { SkillReviewReference } from "@opengeni/contracts";
 import type { AppContextValue } from "../../app-context";
 import { Button } from "../../../ui/button";
 import { userErrorText } from "../../../ui/api-error";
-import { hasAccountPermission, hasWorkspacePermission } from "../../lib/permissions";
+import { hasWorkspacePermission } from "../../lib/permissions";
+import { canAdministerOrganization } from "../../lib/workspaces";
 import { sessionSkillReviews } from "../../lib/session-skill-reviews";
 
 type ReviewReference = Omit<SkillReviewReference, "sourceOperationId">;
@@ -178,8 +179,11 @@ function SkillReview({
       (record.scope === "workspace" &&
         hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage")) ||
       (record.scope === "organization" &&
-        grant &&
-        hasAccountPermission(context.accessContext, grant.accountId, "account:admin"))),
+        canAdministerOrganization({
+          accessContext: context.accessContext,
+          clientConfig: context.clientConfig,
+          accountId: grant?.accountId,
+        }))),
   );
 
   async function approve() {

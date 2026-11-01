@@ -582,6 +582,24 @@ describe("legal document links", () => {
     }
   });
 
+  test("parse the optional data hosting and subprocessor declarations", () => {
+    const unset = withEnv({}, () => getSettings());
+    expect(unset.dataHostingLocation).toBeUndefined();
+    expect(unset.legalSubprocessorsUrl).toBeUndefined();
+    const settings = withEnv(
+      {
+        OPENGENI_DATA_HOSTING_LOCATION: " Microsoft Azure, North Europe (Ireland) ",
+        OPENGENI_LEGAL_SUBPROCESSORS_URL: "https://opengeni.ai/privacy#sharing",
+      },
+      () => getSettings(),
+    );
+    expect(settings.dataHostingLocation).toBe("Microsoft Azure, North Europe (Ireland)");
+    expect(settings.legalSubprocessorsUrl).toBe("https://opengeni.ai/privacy#sharing");
+    expect(() =>
+      withEnv({ OPENGENI_LEGAL_SUBPROCESSORS_URL: "javascript:alert(1)" }, () => getSettings()),
+    ).toThrow();
+  });
+
   test("parse configured http(s) links and reject anything a browser should not follow", () => {
     const settings = withEnv(
       {

@@ -65,6 +65,11 @@ mock.module("@opengeni/db", () => ({
   readSubscriptionCoreFunding: async () => {
     throw new Error("Unexpected subscription-route funding lookup in knowledge fixture");
   },
+  // Knowledge queries make no own-key model call, so the imported billing
+  // helpers must never read the own-key fee balance.
+  getByokFeeSpendableBalance: async () => {
+    throw new Error("Unexpected own-key fee balance read in knowledge fixture");
+  },
   getWorkspaceModelPolicy: async () => creditPolicy,
   sumUsageQuantity: async (_db: unknown, input: { eventType: string }) =>
     input.eventType === "document.query_embedding_bytes"

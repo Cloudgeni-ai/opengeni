@@ -30,8 +30,8 @@ import {
   canAddWorkspaceIntegrations,
   canChangeWorkspaceIntegrations,
   canManageWorkspaceIntegrations,
-  hasAccountPermission,
 } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import type {
   ApiIntegrationInstallationSummary,
   ConnectionOwnership,
@@ -320,10 +320,11 @@ export function useApiIntegrationAccounts({
   const canManagePersonalDestination = Boolean(
     workspaceGrant && context.accessContext?.subjectId === workspaceGrant.subjectId,
   );
-  const canManageOrganizationDestination = Boolean(
-    workspaceGrant &&
-    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
-  );
+  const canManageOrganizationDestination = canAdministerOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId: workspaceGrant?.accountId,
+  });
 
   // A member reconnects only their own account; a shared one stays with admins.
   const canReconnect = (account: ApiIntegrationInstallationSummary) =>

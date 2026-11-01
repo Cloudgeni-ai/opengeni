@@ -1577,6 +1577,7 @@ describe("generic lazy tool dispatch", () => {
       "Pause this turn and request structured human input",
     );
     const models = firstPartyTool("list_models", "List selectable workspace models");
+    const privacy = firstPartyTool("privacy_facts", "Facts about privacy and data handling");
     const codeSearch = firstPartyTool("code_search", "Find where code is implemented");
     const browser = firstPartyTool(
       "interaction__browser_act",
@@ -1596,6 +1597,7 @@ describe("generic lazy tool dispatch", () => {
         skillSave,
         human,
         models,
+        privacy,
         codeSearch,
         browser,
       ],
@@ -1616,6 +1618,7 @@ describe("generic lazy tool dispatch", () => {
       "repository_skill_read",
       "request_human_input",
       "list_models",
+      "privacy_facts",
       "code_search",
       "tool_search",
       "tool_invoke",
@@ -1630,6 +1633,7 @@ describe("generic lazy tool dispatch", () => {
       "repository_skill_read",
       "request_human_input",
       "list_models",
+      "privacy_facts",
       "code_search",
     ]) {
       expect(

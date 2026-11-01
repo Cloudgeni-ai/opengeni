@@ -23,6 +23,9 @@ pub struct Options {
     pub step_seconds: f32,
     /// Cosine distance below which voices are one speaker.
     pub threshold: f32,
+    /// Cosine distance between speaker centres below which the clusters are
+    /// one voice that the noisy single-window embeddings split apart.
+    pub merge_threshold: f32,
     pub min_speakers: usize,
     pub max_speakers: usize,
     /// Clusters with fewer clean embeddings than this are not speakers of
@@ -41,6 +44,7 @@ impl Default for Options {
         Self {
             step_seconds: 2.0,
             threshold: 0.55,
+            merge_threshold: 0.4,
             min_speakers: 1,
             max_speakers: usize::MAX,
             min_cluster_size: 12,
@@ -432,7 +436,7 @@ pub fn diarize(
             .collect();
         keep.sort();
     }
-    let centroids: Vec<Vec<f32>> = keep
+    let sums: Vec<Vec<f32>> = keep
         .iter()
         .map(|&cluster| {
             let mut sum = vec![0f32; vectors.first().map_or(0, Vec::len)];
@@ -445,9 +449,24 @@ pub fn diarize(
                     *total += value;
                 }
             }
-            normalized(sum)
+            sum
         })
         .collect();
+    let groups = cluster::merge_centroids(
+        &sums,
+        options.merge_threshold,
+        options.min_speakers.min(sums.len()),
+    );
+    let mut joined = vec![
+        vec![0f32; vectors.first().map_or(0, Vec::len)];
+        groups.iter().copied().max().map_or(0, |max| max + 1)
+    ];
+    for (sum, &group) in sums.iter().zip(&groups) {
+        for (total, value) in joined[group].iter_mut().zip(sum) {
+            *total += value;
+        }
+    }
+    let centroids: Vec<Vec<f32>> = joined.into_iter().map(normalized).collect();
     let speakers = centroids.len();
     if speakers == 0 {
         return Ok(Diarization::default());

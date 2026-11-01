@@ -1,5 +1,16 @@
 # Modular prompt changelog
 
+Privacy questions are answered from server facts. One bullet joins "Rules for
+getting work done" in both the legacy CORE and the modular base behavior (about
+210 bytes): answer questions about privacy, retention, training, the model or
+provider, or where data is processed only from `privacy_facts`, link its
+policies, say what is unknown, and never claim more than it states. The tool
+description says when to call it. `privacy_facts` joins the always-visible
+first-request tools.
+Before, agents answered these questions from general knowledge and could
+over-claim. The legacy locks change by that one bullet; legacy and modular stay
+sentence-identical.
+
 The Skill index lists every installed Skill. Its last header sentence changes
 from "Use the id when names are ambiguous." to "Read a Skill by its name; an
 entry shows an id only when several Skills share that name, and then you read

@@ -10,6 +10,7 @@ import {
   type SiteViewerCapabilities,
 } from "@opengeni/contracts";
 import {
+  CREDIT_REFUSAL_CODES,
   hasPermission,
   sessionUsageLimitsProducerEnabled,
   stampSiteViewerSessionAuthorization,
@@ -500,8 +501,8 @@ export function siteAgentUnfunded(reason: SiteAgentUnfundedReason = "no_credits"
 
 /**
  * Core refuses a turn with 402 when the workspace can't pay for it: no
- * credits for the model (`payment_required` with `details.code`
- * `insufficient_credits`), or its allowance used up (`allowance_exhausted`).
+ * credits for the model (`payment_required` with a credit refusal
+ * `details.code`, own-key and API refusals included), or its allowance used up (`allowance_exhausted`).
  * Someone outside the workspace can neither add credits nor change the
  * allowance, so a forwarded refusal of either kind becomes the assistant's
  * plain "not available" refusal instead of the owner's prompt. Every other
@@ -521,7 +522,9 @@ export async function siteOutsiderUnfundedRefusal(
   const reason: SiteAgentUnfundedReason | null =
     code === "allowance_exhausted"
       ? "allowance_exhausted"
-      : code === "payment_required" && detail === "insufficient_credits"
+      : code === "payment_required" &&
+          typeof detail === "string" &&
+          CREDIT_REFUSAL_CODES.has(detail)
         ? "no_credits"
         : null;
   if (reason === null) return null;

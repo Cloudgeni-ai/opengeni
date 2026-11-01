@@ -1,11 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  detectRecordingSound,
   ffmpegReportedMilliseconds,
+  parseSilences,
   prepareRecordingTrackAudio,
   recordingAudioContainer,
   RecordingAudioError,
   renderRecordingAudioPiece,
+  soundBetweenSilences,
   startsAdtsFrame,
   startsContainer,
 } from "../src/activities/recording-audio";
@@ -14,6 +20,7 @@ import {
   adtsAac,
   adtsFrames,
   ffmpegPath,
+  gatedOpusWebm,
   gappedOpusWebm,
   hasFfmpeg,
   opusWebm,
@@ -247,6 +254,52 @@ describe("recording audio", () => {
   });
 
   test.skipIf(!hasFfmpeg)(
+    "ffmpeg stopped from outside is an interruption, not bad audio",
+    async () => {
+      // A deploy stops the worker mid-prepare: ffmpeg is killed by a signal,
+      // or exits saying it received one. The attempt is retried; only ffmpeg
+      // failing on its own means the audio can't be prepared.
+      const directory = await mkdtemp(join(tmpdir(), "fake-ffmpeg-"));
+      try {
+        const fakes = {
+          killed: "kill -TERM $$",
+          signalled: "echo 'Exiting normally, received signal 15.' >&2; exit 255",
+          broken: "echo 'Invalid data found when processing input' >&2; exit 1",
+        };
+        const codes: Record<string, string> = {};
+        for (const [name, body] of Object.entries(fakes)) {
+          const path = join(directory, name);
+          await writeFile(path, `#!/bin/sh\n${body}\n`);
+          await chmod(path, 0o755);
+          const bytes = opusWebm(1);
+          const error = await prepareRecordingTrackAudio({
+            chunks: [
+              {
+                chunkNumber: 0,
+                startMilliseconds: 0,
+                durationMilliseconds: 1_000,
+                objectKey: "k0",
+              },
+            ],
+            mimeType: "audio/webm",
+            ffmpegPath: path,
+            readChunk: async () => bytes,
+          }).catch((caught: unknown) => caught);
+          expect(error).toBeInstanceOf(RecordingAudioError);
+          codes[name] = (error as RecordingAudioError).code;
+        }
+        expect(codes).toEqual({
+          killed: "interrupted",
+          signalled: "interrupted",
+          broken: "ffmpeg_failed",
+        });
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(!hasFfmpeg)(
     "a capture with holes in its timestamps is prepared on its own timeline",
     async () => {
       // Ten seconds on the timeline, seven of audio. A model that decodes the
@@ -338,5 +391,105 @@ describe("recording audio", () => {
         readChunk: async () => new Uint8Array([1, 2, 3, 4]),
       }),
     ).rejects.toBeInstanceOf(RecordingAudioError);
+  });
+
+  test("long quiet stretches are left out, with a margin of sound kept around them", () => {
+    const stderr = [
+      "[silencedetect @ 0x1] silence_start: 0",
+      "[silencedetect @ 0x1] silence_end: 30.5 | silence_duration: 30.5",
+      "[silencedetect @ 0x1] silence_start: 40.25",
+      "[silencedetect @ 0x1] silence_end: 70 | silence_duration: 29.75",
+      "[silencedetect @ 0x1] silence_start: 95",
+    ].join("\n");
+    const silences = parseSilences(stderr, 120_000);
+    expect(silences).toEqual([
+      { startMilliseconds: 0, endMilliseconds: 30_500 },
+      { startMilliseconds: 40_250, endMilliseconds: 70_000 },
+      { startMilliseconds: 95_000, endMilliseconds: 120_000 },
+    ]);
+    expect(soundBetweenSilences(silences, 120_000)).toEqual([
+      { startMilliseconds: 29_500, endMilliseconds: 41_250 },
+      { startMilliseconds: 69_000, endMilliseconds: 96_000 },
+    ]);
+    // A short sound between two silences keeps its margins; margins that meet
+    // across a short silence join; no silence is all sound; all silence is none.
+    expect(
+      soundBetweenSilences(
+        [
+          { startMilliseconds: 10_000, endMilliseconds: 30_000 },
+          { startMilliseconds: 31_000, endMilliseconds: 60_000 },
+        ],
+        60_000,
+      ),
+    ).toEqual([
+      { startMilliseconds: 0, endMilliseconds: 11_000 },
+      { startMilliseconds: 29_000, endMilliseconds: 32_000 },
+    ]);
+    expect(
+      soundBetweenSilences([{ startMilliseconds: 10_000, endMilliseconds: 11_500 }], 60_000),
+    ).toEqual([{ startMilliseconds: 0, endMilliseconds: 60_000 }]);
+    expect(soundBetweenSilences([], 60_000)).toEqual([
+      { startMilliseconds: 0, endMilliseconds: 60_000 },
+    ]);
+    expect(
+      soundBetweenSilences([{ startMilliseconds: 0, endMilliseconds: 60_000 }], 60_000),
+    ).toEqual([]);
+  });
+
+  test.skipIf(!hasFfmpeg)("finds the sound in a track, and none in a silent one", async () => {
+    // However short a silent track is, it has no sound; a short tone is all sound.
+    expect(
+      await detectRecordingSound({
+        audio: { bytes: gatedOpusWebm(2, []), extension: "webm" },
+        durationMilliseconds: 2_000,
+        ffmpegPath,
+      }),
+    ).toEqual([]);
+    expect(
+      await detectRecordingSound({
+        audio: { bytes: opusWebm(2), extension: "webm" },
+        durationMilliseconds: 2_000,
+        ffmpegPath,
+      }),
+    ).toEqual([{ startMilliseconds: 0, endMilliseconds: 2_000 }]);
+    const near = (actual: number, expected: number) =>
+      expect(Math.abs(actual - expected)).toBeLessThan(300);
+    const sound = await detectRecordingSound({
+      audio: {
+        bytes: gatedOpusWebm(80, [
+          [0, 5],
+          [40, 45],
+        ]),
+        extension: "webm",
+      },
+      durationMilliseconds: 80_000,
+      ffmpegPath,
+    });
+    expect(sound).toHaveLength(2);
+    near(sound[0]!.startMilliseconds, 0);
+    near(sound[0]!.endMilliseconds, 6_000);
+    near(sound[1]!.startMilliseconds, 39_000);
+    near(sound[1]!.endMilliseconds, 46_000);
+    expect(
+      await detectRecordingSound({
+        audio: { bytes: gatedOpusWebm(30, []), extension: "webm" },
+        durationMilliseconds: 30_000,
+        ffmpegPath,
+      }),
+    ).toEqual([]);
+    // A short pause stays in.
+    expect(
+      await detectRecordingSound({
+        audio: {
+          bytes: gatedOpusWebm(30, [
+            [0, 10],
+            [20, 30],
+          ]),
+          extension: "webm",
+        },
+        durationMilliseconds: 30_000,
+        ffmpegPath,
+      }),
+    ).toEqual([{ startMilliseconds: 0, endMilliseconds: 30_000 }]);
   });
 });
