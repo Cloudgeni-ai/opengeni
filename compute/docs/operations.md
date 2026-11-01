@@ -344,7 +344,8 @@ installs three units:
   the software watchdog (3 s, `nowayout`) where the machine has no
   hardware one, and no suspend;
 - `compute-guard.service`, never restarted on failure: it stops every VM
-  when the host's lease runs out, and the watchdog resets the machine if
+  that is not its sandbox's only copy when the host's lease runs out
+  (ADR 18), and the watchdog resets the machine if
   the guard itself ends or stalls. So that a host short of processors or
   memory (guests holding more than it has, the swap file busy) does not
   stall it into that reset, it runs at real-time priority, locks its own
@@ -989,7 +990,8 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     control service go unanswered`: a host whose renewals went
     unanswered for most of its lease term (30 s) freezes its VMs three
     seconds before the term runs out, and kills those that do not freeze
-    in time. The service's histogram
+    in time, all but those that are their sandbox's only copy (never
+    archived, such as a CI runner's), which run on. The service's histogram
     `compute_fleet_host_renewal_gap_seconds`, by host, records how long
     each host went unheard; gaps of more than 15 s say the link or the
     host is close to that.

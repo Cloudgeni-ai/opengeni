@@ -27,8 +27,12 @@ import type {
   ClaudeSubscriptionAccount,
   ClaudeSubscriptionOAuthStartRequest,
   ClaudeSubscriptionSetupTokenRequest,
+  CreateOrganizationConnectorRequest,
+  ListOrganizationConnectorsResponse,
+  OrganizationConnector,
   SubscriptionPoolSettings,
   SubscriptionUsagePoolsResponse,
+  UpdateOrganizationConnectorRequest,
 } from "@opengeni/contracts";
 import {
   insightsUsageQueryString,
@@ -3373,10 +3377,21 @@ export class OpenGeniClient {
 
   // --- Turn queue ------------------------------------------------------------
 
-  async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
+  /**
+   * Read the session's prompt queue. Concurrent reads share one request; pass
+   * `fresh` after a change you observed so the read starts no earlier than
+   * this call instead of joining an older one still in flight.
+   */
+  async getQueue(
+    workspaceId: string,
+    sessionId: string,
+    options: GetSessionOptions = {},
+  ): Promise<SessionQueueSnapshot> {
     const path = `${sessionPath(workspaceId, sessionId)}/queue`;
-    return await this.sharedRead(path, () =>
-      this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
+    return await this.sharedRead(
+      path,
+      () => this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
+      options,
     );
   }
 
@@ -6081,6 +6096,48 @@ export class OpenGeniClient {
       "DELETE",
       `/v1/organizations/${organizationId}/model-providers/${providerKind}`,
       request,
+    );
+  }
+
+  /** The organization's connectors and where each works (organization owners and admins). */
+  async listOrganizationConnectors(organizationId: string): Promise<OrganizationConnector[]> {
+    const response = await this.requestJson<ListOrganizationConnectorsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/connectors`,
+    );
+    return response.connectors;
+  }
+
+  /** Add a catalog connector or a custom MCP server for the workspaces its availability selects. */
+  async createOrganizationConnector(
+    organizationId: string,
+    request: CreateOrganizationConnectorRequest,
+  ): Promise<OrganizationConnector> {
+    return await this.requestJson<OrganizationConnector>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors`,
+      request,
+    );
+  }
+
+  /** Change where it works, its tools, whether it is on, or its organization key. */
+  async updateOrganizationConnector(
+    organizationId: string,
+    connectorId: string,
+    request: UpdateOrganizationConnectorRequest,
+  ): Promise<OrganizationConnector> {
+    return await this.requestJson<OrganizationConnector>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/connectors/${connectorId}`,
+      request,
+    );
+  }
+
+  /** Remove it; every workspace stops serving it at once. */
+  async deleteOrganizationConnector(organizationId: string, connectorId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/connectors/${connectorId}`,
     );
   }
 
@@ -11175,8 +11232,8 @@ export class OpenGeniClient {
 
   /**
    * One page of sessions across every shared workspace of the organization the
-   * caller may read within its live workspace scope (an organization API key or
-   * organization owner). Each row carries its `workspaceId`; read events,
+   * caller may read within its live workspace scope (an organization API key, or
+   * the organization's owner or an admin). Each row carries its `workspaceId`; read events,
    * history, and files through the ordinary workspace methods. Personal
    * workspaces are never included and private sessions stay invisible.
    */

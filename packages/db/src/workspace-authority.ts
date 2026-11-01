@@ -1,6 +1,7 @@
 import { OrganizationMember } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, type Database } from "./database";
+import { rawMembershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
 
 /**
  * THE canonical live-workspace-authority resolver for one exact subject, run on
@@ -81,6 +82,7 @@ export async function subjectHasLiveWorkspaceAuthorityInScope(
     sql`select 1 as present from workspace_memberships
       where subject_id = ${input.subjectId}
         and workspace_id = ${input.workspaceId}
+        and ${rawMembershipOutsidePersonalWorkspace("workspace_memberships")}
       limit 1`,
   );
   if (!input.subjectId.startsWith("user:") && !input.subjectId.startsWith("external_user:")) {

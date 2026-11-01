@@ -32,7 +32,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use compute_core::{DiskSpace, Input, SandboxId};
+use compute_core::{DiskSpace, Input, Level, SandboxId};
 use compute_engine::{Engine, VmSpec, Writes};
 use tokio::task::JoinSet;
 
@@ -103,8 +103,9 @@ pub(super) struct ClaimedDisk {
 impl ClaimedDisk {
     /// Makes the disk as long as `config` asks for, and tells the paused
     /// guest of `vm` if that is longer than it knows: the guest learns it
-    /// as it next runs, and grows its file system to fit. Returns its
-    /// length, or why it could not be done.
+    /// as it next runs, and grows its file system to fit before it answers
+    /// the restore notice, which says the length. Returns its length, or
+    /// why it could not be done.
     pub(super) async fn lengthen<E: Engine>(
         self,
         engine: &E,
@@ -141,6 +142,13 @@ pub(super) enum AfterReading {
     Adopt(Id, Box<SandboxConfig>, OwnerEpoch, bool, Reply<()>),
     /// The fetch of an image whose file is `length` bytes long.
     Fetch(ImageId, u64),
+    /// A request, under `generation` if one is named, that sandbox `id`
+    /// sleep to `level` or deeper, whose save may not fit; see
+    /// [`compute_core::Host::save_room`].
+    Sleep(Id, Option<u64>, Level, Reply<()>),
+    /// A hand-off of sandbox `id` under `owner`, awake or not, whose save
+    /// may not fit.
+    HandOff(Id, OwnerEpoch, bool, Reply<()>),
 }
 
 /// What each sandbox with a VM had written, read just before the disk
@@ -380,13 +388,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     self.adopt(id, *config, owner, from_files, reply);
                 }
                 AfterReading::Fetch(image, length) => self.image_sized(image, Ok(Some(length))),
+                AfterReading::Sleep(id, generation, level, reply) => {
+                    self.sleep(id, generation, level, reply);
+                }
+                AfterReading::HandOff(id, owner, awake, reply) => {
+                    self.hand_off(id, owner, awake, reply);
+                }
             }
         }
     }
 
     /// Refuses with `error` the work that waits for a disk reading, none of
     /// which has started: its creates and adopts, and those waiting for
-    /// its fetches. It frees their ids.
+    /// its fetches, sleeps and hand-offs. It frees the ids of the creates
+    /// and adopts.
     pub(super) fn refuse_after_reading(&mut self, error: &HostError) {
         for work in std::mem::take(&mut self.after_reading) {
             match work {
@@ -395,6 +410,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     let _ = reply.send(Err(error.clone()));
                 }
                 AfterReading::Fetch(image, _) => self.fetch_ended(image, &Err(error.clone())),
+                AfterReading::Sleep(.., reply) | AfterReading::HandOff(.., reply) => {
+                    let _ = reply.send(Err(error.clone()));
+                }
             }
         }
     }

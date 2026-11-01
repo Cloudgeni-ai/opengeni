@@ -37,6 +37,34 @@ export function secretsCapabilityEnabled(agentConfig: ResolvedAgentConfig | null
 }
 
 /**
+ * First-party permissions that give a session's agent its task vault. Mirrors
+ * the attempt principal's task mode in the database (`vault_principal_context`):
+ * a session whose first-party permissions are narrowed to a list without any
+ * of these has no task vault, so nothing can be saved into one.
+ */
+const TASK_VAULT_PERMISSIONS: ReadonlySet<string> = new Set([
+  "secrets:use",
+  "variable-sets:use",
+  "variable-sets:attach",
+  "environments:use",
+]);
+
+/**
+ * Whether secret-shaped values found in tool output are saved into the task
+ * vault (and replaced by a reference) rather than only masked. Saving needs
+ * the `secrets` capability and an agent allowed to use secrets; otherwise the
+ * values keep their `[masked <kind>]` marker without a failing vault write.
+ */
+export function taskVaultSecretCaptureEnabled(
+  agentConfig: ResolvedAgentConfig | null | undefined,
+  firstPartyMcpPermissions: readonly string[] | null | undefined,
+): boolean {
+  if (!secretsCapabilityEnabled(agentConfig)) return false;
+  if (!Array.isArray(firstPartyMcpPermissions)) return true;
+  return firstPartyMcpPermissions.some((permission) => TASK_VAULT_PERMISSIONS.has(permission));
+}
+
+/**
  * Connected-vault access for one attempt: the provider registry (1Password
  * tokens load for the acting human, host vaults use the embedder port) and a
  * single read budget shared by every resolver of the attempt (Q-18).

@@ -18,6 +18,9 @@ them here: never send them to a settings page or ask for a screenshot of one.
   for this chat). Pick a sensible model for what they asked ("faster" means a
   faster model or lower reasoning effort), then say which model it now uses,
   that it applies from their next message, and how to switch back.
+- Privacy, retention, training on their data, or where their chat runs:
+  `privacy_facts`. Answer only from it, link the policies it lists, and say
+  what it leaves unknown.
 - Everything else (invite people, share this chat, their plan, credits and
   usage, workspace and organization defaults such as the default model):
   `admin_actions_search`, `admin_action_describe`, then `admin_action_call`.

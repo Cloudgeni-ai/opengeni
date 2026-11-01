@@ -9,7 +9,7 @@ import {
 } from "@opengeni/contracts";
 import {
   requireAccessGrant,
-  requireWorkspaceSettingsGrant,
+  requireWorkspaceContributorGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -49,7 +49,7 @@ export function registerWorkspaceModelProviderRoutes(app: Hono, deps: ApiRouteDe
       throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
     const workspaceId = c.req.param("workspaceId")!;
     const grant = mutate
-      ? await requireWorkspaceSettingsGrant(c, deps, workspaceId)
+      ? await requireWorkspaceContributorGrant(c, deps, workspaceId)
       : await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     c.header("cache-control", "private, no-store");
     return { accountId: grant.accountId, workspaceId, providerKind, subjectId: grant.subjectId };

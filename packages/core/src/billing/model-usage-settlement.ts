@@ -7,6 +7,7 @@ import {
   configuredModelListPricingSchedules,
   configuredModelPricingSchedules,
   resolveModelProvider,
+  resolveModelProviderForTurn,
   OPENGENI_GATEWAY_PROVIDER_ID,
   OPPER_PROVIDER_ID,
   ORGANIZATION_OPPER_PROVIDER_ID,
@@ -17,7 +18,9 @@ import {
 import { createHash } from "node:crypto";
 import type { BillingOrigin, LatencyMode } from "@opengeni/contracts";
 import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usage";
+import { BYOK_PLATFORM_FEE_TYPE } from "@opengeni/contracts";
 import {
+  applyByokPlatformFeeDebit,
   applyCreditDebitUpToBalance,
   isStoredVerbatimAsLosslessJsonString,
   recordUsageEvent,
@@ -28,6 +31,12 @@ import {
 } from "@opengeni/db";
 import type { ModelCallUsageNormalization, ModelResponseUsage } from "@opengeni/runtime";
 import type { ModelUsageInput } from "@opengeni/config";
+import { settleHostedWebSearchUsage } from "../domain/web-search-billing";
+import {
+  byokListEquivalent,
+  byokPlatformFeeActive,
+  byokPlatformFeeMicros,
+} from "./byok-platform-fee";
 import {
   recordSessionUsageLimitEvent,
   type SessionUsageLimitMetricsSink,
@@ -55,6 +64,8 @@ export type ModelUsageBillingRecord = {
   listByClassApprox?: boolean;
   normalizedUsage: ModelCallUsageNormalization;
   upstreamProvider?: string;
+  /** Bring-your-own-key platform fee charged for this response (USD micros). */
+  byokPlatformFeeMicros?: number;
 };
 
 // Exported for unit testing the external-billing bypass; not part of the activity surface.
@@ -68,6 +79,13 @@ export type ModelUsageSettlementInput = {
   countsTowardTokenCap: boolean;
   creditPolicyRevision?: number | undefined;
   gatewayBilling?: ModelResponseUsage["gatewayBilling"];
+  /**
+   * Searches the provider ran with its own hosted search tool for this
+   * response (`ModelResponseUsage.webSearchRequests`). On a credit-billed
+   * turn response while billing is active they are charged as a separate
+   * web-search debit, unless a Gateway reported the response cost.
+   */
+  hostedWebSearchRequests?: number | undefined;
   normalizedUsage: ModelCallUsageNormalization;
   /** Durable source identity (for a turn, `${turnId}:${sourceKey}`). */
   sourceId: string;
@@ -95,6 +113,11 @@ export type ModelUsageSettlementInput = {
    * debit's turn or the request's origin (API work spends credits only).
    */
   billingOrigin?: BillingOrigin;
+  /**
+   * Served by the person's own provider key or subscription. While credit
+   * billing is active it pays the platform fee from paid credit.
+   */
+  byok?: boolean;
   /** Best-effort metrics hook after a committed debit. */
   onCreditsDebited?: (result: { debitedMicros: number; grantDebitedMicros: number }) => void;
   /** Content-free per-task usage limit diagnostics (closed-set labels only). */
@@ -166,6 +189,47 @@ export function sessionUsageReceiptSourceId(sourceId: string, turnId?: string | 
     return stored;
   }
   return `sha256:${createHash("sha256").update(stored, "utf8").digest("hex")}`;
+}
+
+/**
+ * Charge the bring-your-own-key platform fee for one settled response: the
+ * configured share of its list-price equivalent (the fallback rate when no
+ * list price is known), debited once per source from paid credit.
+ */
+async function chargeByokPlatformFee(
+  settings: Settings,
+  db: Database,
+  input: ModelUsageSettlementInput,
+  priced: {
+    listPriceMicros: number | null;
+    reportedCostMicros: number | null;
+    pricingSource: ModelUsageBillingRecord["pricingSource"];
+    inputTokens: number | null;
+    outputTokens: number | null;
+  },
+): Promise<number> {
+  if (!byokPlatformFeeActive(settings, input.accountId)) return 0;
+  const list = byokListEquivalent(priced);
+  const feeMicros = byokPlatformFeeMicros(list.listMicros, settings.byokPlatformFeeBps);
+  if (feeMicros <= 0) return 0;
+  await applyByokPlatformFeeDebit(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    amountMicros: feeMicros,
+    sourceType: "model_response",
+    sourceId: input.sourceId,
+    idempotencyKey: `credit:${BYOK_PLATFORM_FEE_TYPE}:${input.sourceId}`,
+    ...(input.billingOrigin ? { usageOrigin: input.billingOrigin } : {}),
+    metadata: {
+      ...input.debitMetadata,
+      model: input.model,
+      listEquivalentMicros: list.listMicros,
+      listEquivalentSource: list.source,
+      ...(priced.pricingSource ? { pricingSource: priced.pricingSource } : {}),
+      feeBps: settings.byokPlatformFeeBps,
+    },
+  });
+  return feeMicros;
 }
 
 export async function settleModelUsage(
@@ -366,9 +430,37 @@ export async function settleModelUsage(
       ...usageContext,
       idempotencyKey: `usage:model.cost:${input.sourceId}`,
     });
+    // Explicit from the caller, else the served route's payer: the person's
+    // own key or subscription, never a deployment-funded free model.
+    const byok =
+      byokPlatformFeeActive(settings, input.accountId) &&
+      (input.byok ??
+        (resolveModelProviderForTurn(settings, input.model)?.model.billing.upstreamPayer ??
+          "deployment") !== "deployment");
+    const byokFee = byok
+      ? await chargeByokPlatformFee(settings, db, input, {
+          // The list price, even on a gateway route, then a reported cost.
+          listPriceMicros:
+            hasCompleteCoreTokenTelemetry && configuredListPricingModel
+              ? (calculateModelListUsageCostSnapshot(
+                  settings,
+                  configuredListPricingModel,
+                  sanitizedUsage,
+                  { latencyMode: input.latencyMode ?? "standard", priceContextKnown: false },
+                )?.providerCostMicros ?? null)
+              : !gatewayBilling && hasCompleteCoreTokenTelemetry
+                ? (pricingBreakdown?.providerCostMicros ?? null)
+                : null,
+          reportedCostMicros: gatewayBilling ? estimatedProviderCostMicros : null,
+          pricingSource,
+          inputTokens: sanitizedUsage.inputTokens ?? null,
+          outputTokens: sanitizedUsage.outputTokens ?? null,
+        })
+      : 0;
     return {
       billingPath: "external",
       pricedCostMicros: 0,
+      ...(byokFee > 0 ? { byokPlatformFeeMicros: byokFee } : {}),
       estimatedProviderCostMicros,
       equivalentCreditCostMicros,
       pricingSource,
@@ -378,7 +470,27 @@ export async function settleModelUsage(
     };
   }
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+  // Hosted provider searches are not in the token price. A Gateway-reported
+  // cost is the provider's whole bill for the response, search included, so
+  // it is never charged again. The searches run on the provider's search
+  // backend, so the model route's residency claim is not recorded on them.
+  const settleHostedWebSearch = async () => {
+    const requests = input.hostedWebSearchRequests ?? 0;
+    if (gatewayBilling || requests <= 0 || !input.turnId || !input.sessionId) return;
+    await settleHostedWebSearchUsage(db, settings, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId ?? null,
+      sourceId: input.sourceId,
+      model: input.model,
+      requests,
+      ...(input.billingOrigin ? { billingOrigin: input.billingOrigin } : {}),
+    });
+  };
   if (!shouldDebit || (totalTokens === 0 && !gatewayBilling)) {
+    if (shouldDebit) await settleHostedWebSearch();
     return {
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
@@ -437,6 +549,7 @@ export async function settleModelUsage(
       // The debit is committed; metrics are best-effort only.
     }
   }
+  await settleHostedWebSearch();
   return {
     billingPath: "opengeni_credits",
     pricedCostMicros: costMicros,

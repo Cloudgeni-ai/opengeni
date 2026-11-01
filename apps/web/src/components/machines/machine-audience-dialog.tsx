@@ -117,13 +117,6 @@ export function machineAudienceSummaryLines(
       `${count(summary.stoppedCommands, "agent command", "agent commands")} running in those chats ${summary.stoppedCommands === 1 ? "stops" : "stop"}.`,
     );
   }
-  if (summary.schedulesMadeOnlyMe > 0) {
-    lines.push(
-      summary.schedulesMadeOnlyMe === 1
-        ? `${owner} Workspace automation on it becomes Only me.`
-        : `${owner} ${summary.schedulesMadeOnlyMe} Workspace automations on it become Only me.`,
-    );
-  }
   if (summary.schedulesPaused > 0) {
     lines.push(
       `${count(summary.schedulesPaused, "automation pauses", "automations pause")}. Resume ${summary.schedulesPaused === 1 ? "it" : "them"} after choosing another machine.`,
@@ -147,9 +140,6 @@ function itemOutcome(item: MachineAudienceItem): string {
       parts.push(
         item.visibility === "workspace_shared" ? "Stays here, still shared" : "Stays here",
       );
-      break;
-    case "make_only_me":
-      parts.push("Becomes Only me");
       break;
     case "pause":
       parts.push("Pauses");

@@ -250,6 +250,10 @@ when the deployment can price it (tokens with token rates, or a reported
 duration); otherwise that server duration bills. Client timing and maximum
 recording limits are never billing quantities. Concurrent admitted calls may
 finish after a balance is exhausted; settlement charges their actual usage.
+The one exception is the meeting live transcript, whose audio never passes
+through the server: it bills the recorder's reported streaming time, recorded
+with basis `client_reported_duration` (see "Live transcripts charged in
+credits" in `docs/recordings.md`).
 
 Once the provider has returned text, the user always receives it. Settlement
 runs after the transcript (a resumable segment's text commits first, on its

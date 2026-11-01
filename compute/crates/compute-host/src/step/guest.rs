@@ -102,7 +102,18 @@ impl<E: Engine, S: Store> Job<E, S> {
             self.record.generation,
             self.record.revision,
         );
-        match tell_restored(&self.spec.vsock_path(), port, self.id, order, deadline).await {
+        // How long its disk is now: the guest grows its file system to fill
+        // it before it answers, so a disk a claim or a template's clone
+        // lengthened is never used at the length the guest's memory knew.
+        let disk = match tokio::fs::metadata(&self.paths.disk).await {
+            Ok(found) => Some(found.len()),
+            Err(error) => {
+                tracing::warn!(id = %self.id, %error, "could not read its disk's length for the restore notice");
+                None
+            }
+        };
+        let vsock = self.spec.vsock_path();
+        match tell_restored(&vsock, port, self.id, order, disk, deadline).await {
             Ok(told) if must && !told.seeded => {
                 // It took its id but draws the numbers every other clone
                 // of its snapshot draws.

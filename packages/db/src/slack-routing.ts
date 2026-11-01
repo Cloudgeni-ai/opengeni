@@ -25,6 +25,7 @@ import { and, eq, lte, sql } from "drizzle-orm";
 
 import { rawRows, withRlsContext, type Database } from "./database";
 import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
+import { joinedWorkspaceIsNotPersonal } from "./personal-workspace-membership";
 import * as schema from "./schema";
 import { workspaceMembershipPermissionsAllowSlackLink } from "./slack-user-link-access";
 
@@ -438,6 +439,7 @@ export async function listNamedSubjectSlackRoutableWorkspaces(
       and(
         eq(schema.workspaceMemberships.subjectId, input.subjectId),
         eq(schema.workspaces.accountId, input.accountId),
+        joinedWorkspaceIsNotPersonal(),
       ),
     );
 

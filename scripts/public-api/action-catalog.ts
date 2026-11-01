@@ -342,7 +342,8 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
  * deps, workspaceId, "sessions:read")`). Workspace settings need
  * workspace:admin; only a Personal workspace's own named owner gets in
  * without it, and nobody acting through another product is that owner.
- * Shared workspace content (instructions and their reviews) needs
+ * Shared workspace content (instructions and their reviews, a shared
+ * workspace's name, custom model entries) needs
  * sessions:create from a person acting as themselves.
  */
 const ACCESS_GATES: Readonly<Record<string, string | null>> = {

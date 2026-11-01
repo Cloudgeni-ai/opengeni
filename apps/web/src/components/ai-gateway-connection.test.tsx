@@ -185,6 +185,12 @@ mock.module("@opengeni/react/ui/dropdown-menu", () => ({
       {children}
     </button>
   ),
+  // The rest of the module, which the toolbar's search and filters import.
+  DropdownMenuCheckboxItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuLabel: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuMeta: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+  DropdownMenuSeparator: () => null,
 }));
 mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   DestructiveConfirm: ({
@@ -721,6 +727,36 @@ describe("AiGatewayConnectionCard custom models", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  test("a member manages custom models without the key or what it may serve", async () => {
+    listConnections.mockImplementation(async () => [gatewayConnection()]);
+    const props = {
+      client: context.client as unknown as Parameters<typeof useProviderConnection>[0]["client"],
+      workspaceId: "workspace-a",
+      config: PROVIDER_CONNECTION_CONFIGS.vercel,
+      canManageConnection: false,
+      canManageCustomModels: true,
+    };
+    const member = await renderHook(
+      () => useProviderConnection({ ...props, canManageAccess: false }),
+      undefined,
+    );
+    try {
+      await act(async () => await flush());
+      expect(member.result.current.canManageCustomModels).toBe(true);
+      expect(member.result.current.canManageConnection).toBe(false);
+      expect(member.result.current.canManageAccess).toBe(false);
+    } finally {
+      await member.unmount();
+    }
+    // Without its own flag, access follows custom models as before.
+    const admin = await renderHook(() => useProviderConnection(props), undefined);
+    try {
+      expect(admin.result.current.canManageAccess).toBe(true);
+    } finally {
+      await admin.unmount();
     }
   });
 

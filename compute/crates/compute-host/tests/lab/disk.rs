@@ -1,9 +1,9 @@
-//! A small disk: every VM whose state is not saved yet books what its next
-//! save may write and what its disk may still grow by, a create whose
-//! first wake the disk cannot book is refused at once as host full, saying
-//! so, and goes through once another VM's state is saved. A save that
-//! cannot be written shows in the sandbox's status and succeeds once there
-//! is room.
+//! A small disk: every VM whose state is not saved yet, of a sandbox the
+//! host may save on its own, books what its next save may write and what
+//! its disk may still grow by, a create whose first wake the disk cannot
+//! book is refused at once as host full, saying so, and goes through once
+//! another VM's state is saved. A save that cannot be written shows in the
+//! sandbox's status and succeeds once there is room.
 
 use compute_host::protocol::ErrorCode;
 
@@ -18,6 +18,16 @@ const SAVE: u64 = 576 * MIB;
 /// What a guest's boot writes to its disk alone, which its disk then no
 /// longer books: less than this.
 const BOOT_WRITES: u64 = 256 * MIB;
+
+/// Pauses and saves on its own after an hour idle, never within the test,
+/// so the host books the next save of its VM while the VM runs. One the
+/// host never saves on its own books only its disk's growth until a save
+/// of it is asked for (the core and agent tests cover that).
+const SAVES_LATER: SleepConfig = SleepConfig {
+    pause_after_ms: Some(3_600_000),
+    save_after_ms: Some(3_600_000),
+    ..NEVER
+};
 
 /// The most an awake sandbox's disk, a copy of `base`, may grow by on XFS:
 /// its length in 4 KiB blocks and a 256th more for metadata.
@@ -107,14 +117,14 @@ async fn sleep_to_saved(agent: &Agent, sandbox: Id) {
     assert_eq!(agent.client.call(&request).await.unwrap(), Reply::Done);
 }
 
-/// Creates `sandbox` of 512 MiB that never sleeps by itself: `Err` with
-/// the message when the host is full.
+/// Creates `sandbox` of 512 MiB that does not sleep by itself within the
+/// test ([`SAVES_LATER`]): `Err` with the message when the host is full.
 async fn try_create(agent: &Agent, sandbox: Id) -> Result<(), String> {
     let reply = agent
         .client
         .call(&Request::Create {
             id: sandbox,
-            config: SandboxConfig::new(1, 512, NEVER),
+            config: SandboxConfig::new(1, 512, SAVES_LATER),
         })
         .await
         .unwrap();

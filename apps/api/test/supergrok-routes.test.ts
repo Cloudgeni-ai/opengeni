@@ -172,16 +172,12 @@ beforeAll(async () => {
   managedAccountId = managedAccess.defaultAccountId!;
   managedWorkspaceId = managedAccess.defaultWorkspaceId!;
   // A private SuperGrok account connects only from its owner's Personal
-  // workspace on the shared core.
+  // workspace on the shared core. The owner reaches it through their
+  // organization membership; a Personal workspace has no admin row.
   const [membership] = await shared.admin<{ personal_workspace_id: string }[]>`
     select personal_workspace_id::text from organization_memberships
     where account_id = ${managedAccountId} and subject_id = ${managedSubjectId}`;
   managedPersonalWorkspaceId = membership!.personal_workspace_id;
-  await shared.admin`
-    insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
-    values (${managedAccountId}, ${managedPersonalWorkspaceId}, ${managedSubjectId}, 'owner',
-      '["workspace:read", "workspace:admin", "connections:write"]'::jsonb)
-    on conflict do nothing`;
   const managedAuth = {
     api: {
       getSession: async () => ({
