@@ -3125,6 +3125,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             this.states.get(state.targetId) !== state) ||
           (error instanceof InteractionControllerError &&
             error.cause instanceof CdpSessionDetachedError);
+        // The tab closed after the input, not by a close-tab call: its page
+        // closed it, as a finished sign-in or payment window does. The input
+        // reached the page, so the actions completed; only the outline of a
+        // tab that no longer exists is missing.
+        const gone = this.goneTargets.get(this.tabIdOf(state.targetId));
+        if (
+          gone?.kind === "closed" &&
+          !gone.byCloseCall &&
+          this.states.get(state.targetId) !== state &&
+          (retiredSession ||
+            (error instanceof InteractionDefiniteDriverError && error.code === "target_not_found"))
+        ) {
+          trace?.record({
+            actionIndex: actions.length - 1,
+            kind: "observation_unavailable",
+            message: `${
+              actions.length > 1
+                ? `all ${actions.length} actions completed`
+                : "the action completed"
+            }, and then this tab closed (its page closed it, as a finished sign-in or payment window does, or someone closed it), so this receipt has no outline; ${LIST_CURRENT_TABS}`,
+          } satisfies BrowserActionNoteValue);
+          return null;
+        }
         // A native invalid-session reply after this exact attachment retired
         // is target loss, not loss of the browser transport or healthy peers.
         if (!(error instanceof InteractionDefiniteDriverError) && !retiredSession) {
@@ -10938,10 +10961,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           !before.open.has(requestId) &&
           requestLoad(state.requests.get(requestId), Date.now()) === "loading",
       );
-    while (pending() && Date.now() < deadline && !state.dialog) {
+    while (pending() && Date.now() < deadline && !state.dialog && this.attached(state)) {
       await delay(ACTION_REQUEST_POLL_MS);
     }
-    if (!state.dialog) await delay(ACTION_RESPONSE_APPLY_MS);
+    if (!state.dialog && this.attached(state)) await delay(ACTION_RESPONSE_APPLY_MS);
+  }
+
+  /** Whether `state` is still this tab's attachment. A tab that closed (a
+   * popup its page closed, say) or lost its attachment has nothing left to
+   * settle, so the settle waits end at once instead of at their bound. */
+  private attached(state: TargetState): boolean {
+    return this.states.get(state.targetId) === state;
   }
 
   /**
@@ -10954,12 +10984,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async settleActionNavigation(state: TargetState): Promise<void> {
     const deadline = Date.now() + ACTION_NAVIGATION_SETTLE_LIMIT_MS;
     const loaderId = state.frame.loaderId;
-    while (state.navigationPending && Date.now() < deadline && !state.dialog) {
+    while (
+      state.navigationPending &&
+      Date.now() < deadline &&
+      !state.dialog &&
+      this.attached(state)
+    ) {
       if (state.frame.loaderId !== loaderId) break;
       await delay(ACTION_REQUEST_POLL_MS);
     }
     if (state.dialog || state.frame.loaderId === loaderId) return;
-    while (Date.now() < deadline && !state.dialog) {
+    while (Date.now() < deadline && !state.dialog && this.attached(state)) {
       try {
         if (await this.documentReady(state)) return;
       } catch {
