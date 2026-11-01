@@ -101,6 +101,8 @@ function fakeClient(overrides: Partial<Record<string, () => Promise<unknown>>> =
       skills: [
         { id: "s1", scope: "organization", status: "active" },
         { id: "s2", scope: "organization", status: "active" },
+        // An organization Skill that doesn't work here: listed for its managers only.
+        { id: "s5", scope: "organization", status: "active", availableHere: false },
         { id: "s3", scope: "workspace", status: "active" },
         { id: "s4", scope: "user", status: "inactive" },
       ],

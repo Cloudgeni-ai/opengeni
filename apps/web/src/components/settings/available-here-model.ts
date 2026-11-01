@@ -249,7 +249,9 @@ async function skills(client: AvailableHereClient, workspaceId: string) {
       ...(cursor ? { cursor } : {}),
     });
     for (const skill of listed.skills) {
-      if (skill.status !== "active") continue;
+      // People's Skills list also holds organization Skills that don't work
+      // here, so their managers can change that; agents here never use them.
+      if (skill.status !== "active" || skill.availableHere === false) continue;
       const owner = ownerOfScope(skill.scope);
       counts.set(owner, (counts.get(owner) ?? 0) + 1);
     }
