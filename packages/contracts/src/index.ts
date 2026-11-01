@@ -10,6 +10,18 @@ export * from "./integration-capability-id";
 import { defineSchema } from "./define-schema";
 import { SessionAvatar, SessionDescription } from "./bots";
 import { secretValue } from "./secret-value";
+import { SessionSkills } from "./session-skills";
+export { SessionSkills } from "./session-skills";
+import { ConnectionResponse } from "./connection-response";
+export { ConnectionResponse } from "./connection-response";
+import { DEFAULT_FIRST_PARTY_MCP_TOOLS as DEFAULT_FIRST_PARTY_MCP_TOOLS_LEAF } from "./first-party-mcp-tools";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+} from "./api-contract";
+export const DEFAULT_FIRST_PARTY_MCP_TOOLS: readonly FirstPartyMcpToolName[] =
+  DEFAULT_FIRST_PARTY_MCP_TOOLS_LEAF;
+export { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./api-contract";
 export * from "./session-target";
 export * from "./turn-serving-policy";
 import { AzureOpenAIEndpoint } from "./direct-model-provider";
@@ -1439,21 +1451,6 @@ export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET = SESSION_APP_ACTION_TOOL_NAME_S
  * chats may select the bot's explicit channel without borrowing a personal
  * account; accepted turn/task policies and permission ceilings remain fixed.
  */
-export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
-  (name) =>
-    !retiredLearningTools.has(name) &&
-    !retiredSecretTools.has(name) &&
-    !name.startsWith("social_") &&
-    !name.startsWith("x_") &&
-    !name.startsWith("reddit_") &&
-    (!name.startsWith("slack_bot_") ||
-      name === "slack_bot_list_channels" ||
-      name === "slack_bot_prepare_message" ||
-      name === "slack_bot_send_prepared_message") &&
-    !name.startsWith("fiken_") &&
-    !name.startsWith("atlassian_"),
-) satisfies readonly FirstPartyMcpToolName[];
-
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
   return `${registryId}__${toolName}`;
 }
@@ -14044,36 +14041,6 @@ export const SessionSkill = /* @__PURE__ */ defineSkillContractSchema(() =>
 export type SessionSkill = z.infer<typeof SessionSkill>;
 export type SessionSkillInput = z.input<typeof SessionSkill>;
 
-export const SessionSkills = /* @__PURE__ */ defineSkillContractSchema(() =>
-  z
-    .array(SessionSkill)
-    .max(32)
-    .transform((skills, ctx) => {
-      const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
-      for (const skill of skills) {
-        const key = skill.name.toLowerCase();
-        const fingerprint = JSON.stringify({
-          description: skill.description ?? null,
-          files: [...skill.files]
-            .sort((left, right) => left.path.localeCompare(right.path))
-            .map(({ path, content }) => ({ path, content })),
-        });
-        const existing = selected.get(key);
-        if (!existing) {
-          selected.set(key, { fingerprint, skill });
-          continue;
-        }
-        if (existing.fingerprint !== fingerprint) {
-          ctx.addIssue({
-            code: "custom",
-            message: `conflicting session skill definitions: ${skill.name}`,
-          });
-        }
-      }
-      return [...selected.values()].map(({ skill }) => skill);
-    }),
-);
-
 /** No header synthesis: stored files must still pass the canonical contract. */
 export const StoredSessionSkills = /* @__PURE__ */ defineSkillContractSchema(() =>
   z.preprocess(projectStoredSkillMetadata, SessionSkills),
@@ -14538,13 +14505,6 @@ export const UpdateConnectionRequest = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type UpdateConnectionRequest = z.infer<typeof UpdateConnectionRequest>;
-
-export const ConnectionResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({
-    connection: ConnectionMetadata,
-  }),
-);
-export type ConnectionResponse = z.infer<typeof ConnectionResponse>;
 
 export const ListConnectionsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -22702,8 +22662,6 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-09-plugins-and-skills-v1" as const;
-export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 

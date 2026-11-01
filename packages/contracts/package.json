@@ -18,6 +18,22 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./api-contract": {
+      "types": "./src/api-contract.ts",
+      "default": "./src/api-contract.ts"
+    },
+    "./first-party-mcp-tools": {
+      "types": "./src/first-party-mcp-tools.ts",
+      "default": "./src/first-party-mcp-tools.ts"
+    },
+    "./session-skills": {
+      "types": "./src/session-skills.ts",
+      "default": "./src/session-skills.ts"
+    },
+    "./connection-response": {
+      "types": "./src/connection-response.ts",
+      "default": "./src/connection-response.ts"
+    },
     "./event-triggers": {
       "types": "./src/event-triggers.ts",
       "default": "./src/event-triggers.ts"

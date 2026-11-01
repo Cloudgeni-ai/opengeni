@@ -1,4 +1,4 @@
-import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts";
+import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts/api-contract";
 const base = process.argv[2];
 if (!base || !["127.0.0.1", "localhost"].includes(new URL(base).hostname))
   throw new Error("Pass this worktree's local API URL");
