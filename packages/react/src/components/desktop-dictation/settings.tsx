@@ -443,7 +443,7 @@ export function DesktopDictationSettings({
                   control={
                     accessibility.granted ? (
                       <span className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
-                        <CheckIcon className="size-4 text-success" aria-hidden />
+                        <CheckIcon className="size-4 text-status-success" aria-hidden />
                         {t("desktopDictation.settings.allowed")}
                       </span>
                     ) : (
@@ -607,7 +607,11 @@ function CopyText({ text, label }: { text: string; label: string }) {
         });
       }}
     >
-      {copied ? <CheckIcon className="text-success" aria-hidden /> : <CopyIcon aria-hidden />}
+      {copied ? (
+        <CheckIcon className="text-status-success" aria-hidden />
+      ) : (
+        <CopyIcon aria-hidden />
+      )}
     </Button>
   );
 }

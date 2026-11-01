@@ -124,6 +124,8 @@ export async function windowBarRow(page: Page) {
       drag: getComputedStyle(header).getPropertyValue("-webkit-app-region"),
       // While a full-window layer is open the row must step aside.
       layerOpen: document.documentElement.hasAttribute("data-window-layer-open"),
+      // A page's title line (not a chat's header) has no buttons of its own.
+      titleOnly: header.hasAttribute("data-window-bar-title"),
       shown: header.getClientRects().length > 0,
       buttons: [...header.querySelectorAll<HTMLElement>("button")]
         .filter((button) => button.getClientRects().length > 0)
@@ -195,7 +197,8 @@ export async function windowBar(page: Page) {
  * the window controls and nothing of the page sits under it; elsewhere there
  * is no bar and the page starts at the top of the window. Only the macOS app
  * puts controls of its own in the bar (the sidebar toggle, and on a chat the
- * chat's header as the bar's row), right of the traffic lights; its buttons
+ * chat's header, or another page's title line, as the bar's row), right of
+ * the traffic lights; its buttons
  * are not draggable and take clicks, and the header's empty space drags.
  */
 export async function expectWindowTop(page: Page, platform: string) {
@@ -232,7 +235,7 @@ export async function expectWindowTop(page: Page, platform: string) {
       );
       expect(row.top).toBe(0);
       expect(row.drag).toBe("drag");
-      expect(row.buttons.length).toBeGreaterThan(0);
+      if (!row.titleOnly) expect(row.buttons.length).toBeGreaterThan(0);
       for (const button of row.buttons) {
         expect(button.drag).toBe("no-drag");
         expect({ label: button.label, clickable: button.clickable }).toEqual({

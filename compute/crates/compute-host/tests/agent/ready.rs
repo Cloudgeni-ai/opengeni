@@ -225,10 +225,22 @@ async fn a_fill_is_limited_to_its_booking_until_it_is_claimed() {
         "the limit is the booking, not the shape"
     );
     assert!(lab.world.limits_set.lock().unwrap().is_empty());
+    assert!(
+        filled
+            .iter()
+            .all(|name| lab.world.only_copies.lock().unwrap().get(name) != Some(&true)),
+        "a ready sandbox is no one's only copy"
+    );
     assert_eq!(create(&lab, id(1)).await, Reply::Done);
-    let (dir, _) = record_of(&lab, id(1));
+    let (dir, record) = record_of(&lab, id(1));
     assert!(filled.contains(&dir), "it took the ready sandbox");
-    assert_eq!(*lab.world.limits_set.lock().unwrap(), [(dir, None)]);
+    assert_eq!(*lab.world.limits_set.lock().unwrap(), [(dir.clone(), None)]);
+    // Claimed, it is its sandbox's only copy, and its VM marked so.
+    assert_eq!(record["only_copy"].as_bool(), Some(true));
+    assert_eq!(
+        lab.world.only_copies.lock().unwrap().get(&dir).copied(),
+        Some(true)
+    );
 }
 
 /// A ready sandbox is filled guaranteed its whole shape, but a create of

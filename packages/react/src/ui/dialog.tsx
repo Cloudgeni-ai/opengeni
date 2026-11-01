@@ -7,6 +7,7 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import { cn } from "../lib/cn";
 import { Button } from "./button";
 import { containedPortal } from "./portal-container";
+import { WindowBarTitleBoundary } from "./window-bar-title";
 
 const DialogContainedPortal = containedPortal(DialogPrimitive.Portal);
 
@@ -77,7 +78,7 @@ const DialogContent = /* @__PURE__ */ React.forwardRef<
         ref={ref}
         {...props}
       >
-        {children}
+        <WindowBarTitleBoundary>{children}</WindowBarTitleBoundary>
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"

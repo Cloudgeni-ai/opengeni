@@ -14,6 +14,7 @@ export default defineConfig({
     "src/usage-allowances.ts",
     "src/session-usage-limits.ts",
     "src/session-usage-limit-refusal.ts",
+    "src/seat-upgrade.ts",
     "src/mcp-endpoint.ts",
     "src/index.ts",
     "src/connect.ts",

@@ -48,6 +48,7 @@ const NOT_OFFERED = {
   "session.notification.withdrawn": "Only bookkeeping",
   "session.agentCall.ringing": "A call is for the phone it rings, not for automations",
   "session.agentCall.settled": "Its outcome goes back to the chat that called",
+  "turn.superseded": "The new message's turn carries on the chat's work",
 } as const satisfies Partial<Record<WorkspaceEventType, string>>;
 
 type ActivityEventType = Exclude<WorkspaceEventType, RecordingEventType | keyof typeof NOT_OFFERED>;

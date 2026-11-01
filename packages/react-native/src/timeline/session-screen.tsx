@@ -1,5 +1,6 @@
 import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./messages";
 import {
+  approvalsDecidable,
   conversationTimeline,
   personalMachineCopy,
   sessionAdmissionApprovedElsewhereCopy,
@@ -544,7 +545,8 @@ function SessionScreenBody({
                 />
               }
             />
-            {approvals.length > 0 && status === "requires_action" ? (
+            {/* The pause's other approvals stay up while a decision resumes the turn. */}
+            {approvals.length > 0 && approvalsDecidable(status) ? (
               <ApprovalStrip
                 approvals={approvals}
                 messages={approvalMessages}

@@ -168,13 +168,31 @@ export function chargeBillingOrigin(origin?: BillingOrigin | null): BillingOrigi
 /**
  * What a charge pays for. A canonical model ID uses grants scoped to that
  * model; {@link VOICE_CREDIT_USAGE} (dictation and live voice) uses grants
- * that cover voice: the verified-signup trial credits and plan credit. Omitted
- * means a non-model resource, which uses general credits and plan credit.
+ * that cover voice: the verified-signup trial credits and plan credit.
+ * {@link toolCreditUsage} (a paid tool a chat on a model uses) uses plan
+ * credit and grants scoped to that model. Omitted means a non-model resource,
+ * which uses general credits and plan credit.
  */
-export type CreditUsage = string | { readonly kind: "voice" } | undefined;
+export type CreditUsage =
+  | string
+  | { readonly kind: "voice" }
+  | { readonly kind: "tool"; readonly modelId?: string }
+  | undefined;
 
 /** Deployment-funded dictation and live voice. */
 export const VOICE_CREDIT_USAGE: { readonly kind: "voice" } = Object.freeze({ kind: "voice" });
+
+/**
+ * A paid tool (web search, image generation) a chat on `modelId` uses: plan
+ * credit, the Free plan's included, always pays, whatever models its scope
+ * lists; other grants pay only when they list the chat's model.
+ */
+export function toolCreditUsage(modelId?: string | null): {
+  readonly kind: "tool";
+  readonly modelId?: string;
+} {
+  return modelId ? { kind: "tool", modelId } : { kind: "tool" };
+}
 
 function grantCovers(grant: PromotionalCreditBalance, usage: CreditUsage): boolean {
   if (grant.held) return false;
@@ -183,6 +201,9 @@ function grantCovers(grant: PromotionalCreditBalance, usage: CreditUsage): boole
   if (grant.planCredit && typeof usage !== "string") return true;
   if (!usage) return false;
   if (typeof usage === "string") return grant.eligibleModelIds.includes(usage);
+  if (usage.kind === "tool") {
+    return usage.modelId !== undefined && grant.eligibleModelIds.includes(usage.modelId);
+  }
   return grant.coversVoice === true;
 }
 

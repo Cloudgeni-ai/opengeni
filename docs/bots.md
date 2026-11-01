@@ -89,10 +89,10 @@ ids `plugin:marketplace/<provider>/<name>`). When setup names a plugin, the
 agent asks for it with `capability_authorization_request` exactly as for a
 connector. The chat shows a plugin card with the agent's reason, who made the
 plugin and what it adds; **Review plugin** lists its Skills and MCP servers and
-installs it for the workspace. Installing needs the same `capabilities:manage`
-permission as the Plugins page. Someone without it sees that a workspace admin
-has to install it, and the agent is told the same, so it does not send them to
-the card. The agent continues once the plugin is installed, and a plugin that
+installs it for the workspace. Installing needs the same permission as the
+Plugins page: `connections:write`, which members hold, or `capabilities:manage`.
+Someone without it sees that they can't install it here, and the agent is told
+the same, so it does not send them to the card. The agent continues once the plugin is installed, and a plugin that
 is already installed shows as done.
 
 Templates are stored per workspace (`bot_templates`, visibility in migration

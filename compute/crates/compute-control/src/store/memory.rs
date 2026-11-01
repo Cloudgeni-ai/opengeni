@@ -186,7 +186,7 @@ impl MemoryStore {
                     },
                     renewals,
                     seq: 0,
-                    capacity: register.capacity.clone(),
+                    capacity: register.capacity.split().0,
                     changed,
                 },
                 attempt: register.attempt,
@@ -222,7 +222,7 @@ impl MemoryStore {
         row.seq = row.seq.max(renew.seq);
         // A renewal without a capacity keeps the one last heard.
         if let Some(capacity) = &renew.capacity {
-            row.capacity = capacity.clone();
+            row.told(capacity);
         }
         row.changed = changed;
         inner.changes = changed;
@@ -238,7 +238,7 @@ impl MemoryStore {
         let Some(row) = inner.current(report.host, report.epoch, names) else {
             return false;
         };
-        row.capacity = report.capacity.clone();
+        row.told(&report.capacity);
         row.changed = changed;
         inner.changes = changed;
         true

@@ -335,6 +335,11 @@ export const CREDIT_MARGIN_BPS_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE",
 ];
 
+/** Optional switch for credit billing of provider-hosted tools (default on). */
+export const PAID_HOSTED_TOOLS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING",
+];
+
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
@@ -2965,6 +2970,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of CREDIT_MARGIN_BPS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of PAID_HOSTED_TOOLS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 
