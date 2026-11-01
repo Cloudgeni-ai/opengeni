@@ -31,7 +31,6 @@ import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { UsageMeterGroup, UsageReadout } from "@opengeni/react/ui/usage-meter";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import type { OwnTurnsPlace } from "./own-subscription-turns";
 
 /* ----------------------------------------------------------------------------
    SuperGrok on Settings > Models, at workspace and organization scope: the
@@ -58,8 +57,8 @@ export interface SuperGrokPlaces {
    */
   removeFromWorkspace?: ((accountId: string) => Promise<void>) | undefined;
   backToList: () => void;
-  /** On your own account's page in a shared workspace: turn it on for your messages there (D-53). */
-  ownTurns?: OwnTurnsPlace | undefined;
+  /** Your own accounts: choose where each works for your own messages, asked from this workspace. */
+  ownReach?: { workspaceId: string } | undefined;
 }
 
 function needsReconnect(account: SuperGrokAccount): boolean {

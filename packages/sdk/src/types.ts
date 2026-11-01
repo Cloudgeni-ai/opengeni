@@ -6147,6 +6147,35 @@ export type RevokeUserResourceGrantResponse = {
     revokedAt: string;
   };
 };
+/** Your own things that you turn on workspace by workspace. */
+export type OwnResourceReachKind = "connection" | "subscription_connection" | "connected_machine";
+/** One of your workspaces in "Where it works" for your own login, plan or machine. */
+export type OwnResourceReachWorkspace = {
+  workspaceId: string;
+  name: string;
+  /** Your Personal workspace. */
+  personal: boolean;
+  /** The workspace this was asked from. */
+  current: boolean;
+  /** It works here for your own messages. Nobody else's messages ever use it. */
+  on: boolean;
+  /** Always on here: logins and plans in your Personal workspace. */
+  alwaysOn: boolean;
+  /** You may turn it on or off here. */
+  canChange: boolean;
+};
+export type OwnResourceReachResponse = {
+  resourceKind: OwnResourceReachKind;
+  resourceId: string;
+  /** Your Personal workspace first, then by name. */
+  workspaces: OwnResourceReachWorkspace[];
+};
+export type SetOwnResourceReachRequest = {
+  resourceKind: OwnResourceReachKind;
+  resourceId: string;
+  on: boolean;
+};
+export type SetOwnResourceReachResponse = { workspace: OwnResourceReachWorkspace };
 
 export type OrganizationMembershipRole = "owner" | "admin" | "member";
 export type WorkspaceMemberRole = "viewer" | "member" | "admin" | "custom";

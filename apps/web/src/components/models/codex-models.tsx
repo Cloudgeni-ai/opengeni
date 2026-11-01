@@ -62,7 +62,7 @@ import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge
 import { Switch } from "@opengeni/react/ui/switch";
 import { UsageMeterGroup, UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
 import { CODEX_EXTRA_CREDITS_DESCRIPTION, CodexCreditBalance } from "./codex-account-usage";
-import { OwnSubscriptionTurnsRow, type OwnTurnsPlace } from "./own-subscription-turns";
+import { OwnWhereItWorksSection } from "@opengeni/react/app/components/own-where-it-works";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
@@ -88,8 +88,8 @@ export interface CodexPlaces {
   openConnect: () => void;
   openAccess: (accountId: string) => void;
   sharePersonal?: ((accountId: string) => void) | undefined;
-  /** Your own account, seen from a shared workspace: turn it on for your messages there. */
-  ownTurns?: OwnTurnsPlace | undefined;
+  /** Your own accounts: choose where each works for your own messages, asked from this workspace. */
+  ownReach?: { workspaceId: string } | undefined;
   /** A workspace's name in the organization, where the viewer can read it. */
   workspaceNameOf?: ((workspaceId: string) => string | undefined) | undefined;
   /**
@@ -705,14 +705,6 @@ function CodexAccountDetail({
                 disabled={codex.busy}
                 onCheckedChange={(next) => void codex.setAllocator(account, next)}
               />
-              {places.ownTurns ? (
-                <OwnSubscriptionTurnsRow
-                  client={codex.client}
-                  place={places.ownTurns}
-                  connectionId={account.id}
-                  name={name}
-                />
-              ) : null}
               <SettingRow
                 label="Use extra credits"
                 description={CODEX_EXTRA_CREDITS_DESCRIPTION}
@@ -800,6 +792,15 @@ function CodexAccountDetail({
               ) : null}
             </SettingRowGroup>
           </DetailSection>
+        ) : null}
+        {places.ownReach && places.personal && !fromElsewhere ? (
+          <OwnWhereItWorksSection
+            client={codex.client}
+            workspaceId={places.ownReach.workspaceId}
+            resourceKind="subscription_connection"
+            resourceId={account.id}
+            name={name}
+          />
         ) : null}
         {!fromElsewhere && !planReportsNoResets(overview, attempts) ? (
           <DetailSection

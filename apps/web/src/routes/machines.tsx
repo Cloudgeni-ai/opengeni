@@ -38,6 +38,7 @@ import {
   organizationComputeReachSummary,
 } from "@/components/organization-compute-reach-dialog";
 import { useOrganizationName } from "@/lib/use-organization-name";
+import { OwnWhereItWorksCard } from "@opengeni/react/app/components/own-where-it-works";
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { Button } from "@opengeni/react/ui/button";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
@@ -299,6 +300,23 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
               ? { reachSummary: organizationComputeReachSummary(selectedReach) }
               : {})}
             {...(canChangeReach ? { onChangeReach: () => setReachOpen(true) } : {})}
+            {...(selectedMachine.scope === "user" &&
+            selectedMachine.enrollmentId &&
+            !selectedMachine.isSessionGroup
+              ? {
+                  // Shows only for the viewer's own machine; anyone else's isn't found.
+                  whereItWorks: (
+                    <OwnWhereItWorksCard
+                      key={selectedMachine.enrollmentId}
+                      client={client}
+                      workspaceId={workspaceId}
+                      resourceKind="connected_machine"
+                      resourceId={selectedMachine.enrollmentId}
+                      name={selectedMachine.name}
+                    />
+                  ),
+                }
+              : {})}
             {...(machines.canUpdateAgent && canChangeSelected
               ? {
                   onUpdateAgent: requestAgentUpdate,

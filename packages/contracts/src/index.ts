@@ -1723,6 +1723,66 @@ export const RevokeUserResourceGrantQuery = /* @__PURE__ */ defineSchema(() =>
     scope: UserResourceAuthorityScope,
   }),
 );
+/**
+ * Your own things that you turn on workspace by workspace: your logins
+ * (`connection`), model plans (`subscription_connection`) and machines
+ * (`connected_machine`). "Where it works" lists each workspace you belong to
+ * in the organization and whether the thing works there for your own
+ * messages. Nobody else's messages ever use it.
+ */
+export const OwnResourceReachKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["connection", "subscription_connection", "connected_machine"]),
+);
+export const OwnResourceReachQuery = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    resourceKind: OwnResourceReachKind,
+    resourceId: primitives.uuid,
+  }),
+);
+export const OwnResourceReachWorkspace = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: primitives.uuid,
+    name: z.string(),
+    /** Your Personal workspace. */
+    personal: primitives.boolean,
+    /** The workspace this was asked from. */
+    current: primitives.boolean,
+    /** It works here for your own messages. */
+    on: primitives.boolean,
+    /** Always on here and can't be turned off: logins and plans in your Personal workspace. */
+    alwaysOn: primitives.boolean,
+    /** You may turn it on or off here. Turning off is always allowed when it is on. */
+    canChange: primitives.boolean,
+  }),
+);
+export const OwnResourceReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    resourceKind: OwnResourceReachKind,
+    resourceId: primitives.uuid,
+    /** Personal first, then by name. */
+    workspaces: z.array(OwnResourceReachWorkspace),
+  }),
+);
+export const SetOwnResourceReachRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      resourceKind: OwnResourceReachKind,
+      resourceId: primitives.uuid,
+      on: primitives.boolean,
+    })
+    .strict(),
+);
+export const SetOwnResourceReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspace: OwnResourceReachWorkspace,
+  }),
+);
+export type OwnResourceReachKind = z.infer<typeof OwnResourceReachKind>;
+export type OwnResourceReachQuery = z.infer<typeof OwnResourceReachQuery>;
+export type OwnResourceReachWorkspace = z.infer<typeof OwnResourceReachWorkspace>;
+export type OwnResourceReachResponse = z.infer<typeof OwnResourceReachResponse>;
+export type SetOwnResourceReachRequest = z.infer<typeof SetOwnResourceReachRequest>;
+export type SetOwnResourceReachResponse = z.infer<typeof SetOwnResourceReachResponse>;
 export type UserResourceAuthorityGrant = z.infer<typeof UserResourceAuthorityGrant>;
 export type UserResourceAuthoritySummary = z.infer<typeof UserResourceAuthoritySummary>;
 export type ListUserResourceAuthoritiesQuery = z.infer<typeof ListUserResourceAuthoritiesQuery>;
