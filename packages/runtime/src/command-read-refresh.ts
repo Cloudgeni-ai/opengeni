@@ -3,8 +3,16 @@ import { ProviderCommandObservationUnavailableError } from "./sandbox/provider-c
 import { SelfhostedControlError } from "./sandbox/selfhosted/control-rpc";
 import { OpStreamUnavailableError } from "./sandbox/selfhosted/op-transport";
 
+/** Default waits, matching the API's command_read and command_wait. */
+const COMMAND_READ_DEFAULT_SECONDS = 30;
+const COMMAND_WAIT_DEFAULT_SECONDS = 45;
+const COMMAND_READ_MAX_WAIT_SECONDS = 50;
+
 /** First-party execution edge only. API reads authorize before provider access
- * and remain the sole terminal-observation authority. No background poller. */
+ * and remain the sole terminal-observation authority. No background poller.
+ * Like the API wait, it returns once the commands settle (all, or any for
+ * `waitFor: "any"`), at the deadline, or when the API reports a yield; new
+ * output alone does not end it. */
 export async function executeCommandReadWithRefresh(input: {
   toolName: string;
   args: Record<string, unknown>;
@@ -12,70 +20,73 @@ export async function executeCommandReadWithRefresh(input: {
   refresh: (commandId: string) => Promise<boolean>;
   call: (args: Record<string, unknown>) => Promise<AttemptToolResult>;
 }): Promise<AttemptToolResult> {
-  const seconds = input.args.waitSeconds ?? (input.toolName === "command_wait" ? 45 : 0);
+  const seconds =
+    input.args.waitSeconds ??
+    (input.toolName === "command_wait"
+      ? COMMAND_WAIT_DEFAULT_SECONDS
+      : COMMAND_READ_DEFAULT_SECONDS);
+  const multi = Array.isArray(input.args.commandIds);
   if (
-    typeof input.args.commandId !== "string" ||
+    (multi
+      ? !(input.args.commandIds as unknown[]).every((id) => typeof id === "string")
+      : typeof input.args.commandId !== "string") ||
     typeof seconds !== "number" ||
     !Number.isInteger(seconds) ||
     seconds < 0 ||
-    seconds > 50
+    seconds > COMMAND_READ_MAX_WAIT_SECONDS
   )
     return await input.call(input.args);
+  const waitFor = input.args.waitFor === "any" ? "any" : "all";
   const started = Date.now();
   const deadline = started + seconds * 1000;
+  const finish = (
+    result: AttemptToolResult,
+    unavailable: ReadonlySet<string> = new Set(),
+    deadlineReached = false,
+  ) => finishReceipt(result, started, seconds, waitFor, unavailable, deadlineReached);
   let result = await input.call({ ...input.args, waitSeconds: 0 });
   while (true) {
-    const snapshot = commandSnapshot(result);
-    if (!snapshot || snapshot.terminal || input.signal?.aborted)
-      return finishReceipt(result, started, seconds);
-    let refreshedOwner: boolean;
-    let refreshUnavailable = false;
-    try {
-      refreshedOwner = await input.refresh(input.args.commandId);
-    } catch (error) {
-      if (input.signal?.aborted || !isTransientRefreshFailure(error)) throw error;
-      // A failed live refresh must not hide durable output. The reread below
-      // reauthorizes rather than serving a cached receipt after authority
-      // changed. Within the caller's own wait, the next iteration refreshes
-      // the same retained command again exactly like a quiet refresh; that is
-      // a read only, never a Start or stdin replay.
-      refreshedOwner = true;
-      refreshUnavailable = true;
+    const snapshot = commandSnapshot(result, waitFor);
+    if (!snapshot || snapshot.settled || snapshot.yielded || input.signal?.aborted)
+      return finish(result);
+    let refreshedOwner = false;
+    const unavailable = new Set<string>();
+    for (const commandId of snapshot.running) {
+      try {
+        if (await input.refresh(commandId)) refreshedOwner = true;
+      } catch (error) {
+        if (input.signal?.aborted || !isTransientRefreshFailure(error)) throw error;
+        // A failed live refresh must not hide durable output. The reread below
+        // reauthorizes rather than serving a cached receipt after authority
+        // changed. Within the caller's own wait, the next iteration refreshes
+        // the same retained command again exactly like a quiet refresh; that is
+        // a read only, never a Start or stdin replay.
+        refreshedOwner = true;
+        unavailable.add(commandId);
+      }
     }
     if (!refreshedOwner) {
-      return finishReceipt(
+      return finish(
         await input.call({
           ...input.args,
           waitSeconds: Math.max(0, Math.ceil((deadline - Date.now()) / 1000)),
         }),
-        started,
-        seconds,
       );
     }
-    result = await input.call({ ...input.args, waitSeconds: 0 });
-    const refreshed = commandSnapshot(result);
+    // One reread per refresh: the API's one-second wait checks for the finish
+    // before it sleeps, reauthorizes, and returns at once when the command
+    // settled; under a second before the deadline it reads without waiting.
+    result = await input.call({
+      ...input.args,
+      waitSeconds: deadline - Date.now() >= 1000 ? 1 : 0,
+    });
+    const refreshed = commandSnapshot(result, waitFor);
     if (!refreshed) return result;
-    const expired = Date.now() >= deadline;
-    if (
-      refreshed.terminal ||
-      refreshed.chunks.length ||
-      refreshed.hasMore ||
-      expired ||
-      input.signal?.aborted
-    ) {
-      return finishReceipt(
-        refreshUnavailable && !refreshed.terminal
-          ? patchReceipt(result, {
-              freshness: { status: "refresh_unavailable", retryable: true },
-            })
-          : result,
-        started,
-        seconds,
-      );
+    if (refreshed.settled || refreshed.yielded || input.signal?.aborted) {
+      return finish(result, unavailable);
     }
-    // Reuse the API's existing one-second durable recheck wait. Each iteration
-    // reauthorizes, and the next owner refresh happens before any long wait.
-    result = await input.call({ ...input.args, waitSeconds: 1 });
+    // Under a second left: that read was the last, not the start of a burst.
+    if (Date.now() >= deadline - 1000) return finish(result, unavailable, true);
   }
 }
 
@@ -108,25 +119,45 @@ function isTransientRefreshFailure(error: unknown): boolean {
   );
 }
 
-function patchReceipt(
+type CommandReceipt = { terminal: boolean; chunks: unknown[] } & Record<string, unknown>;
+
+function isCommandReceipt(value: unknown): value is CommandReceipt {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    typeof (value as Record<string, unknown>).terminal === "boolean" &&
+    Array.isArray((value as Record<string, unknown>).chunks)
+  );
+}
+
+/** One read (`commandId`) or several (`commandIds`, under `commands`). */
+function commandSnapshot(
   result: AttemptToolResult,
-  fields: {
-    waitedMs?: number;
-    timedOut?: boolean;
-    freshness?: { status: "refresh_unavailable"; retryable: true };
-  },
-): AttemptToolResult {
-  const snapshot = commandSnapshot(result);
-  if (!snapshot) return result;
+  waitFor: "all" | "any",
+): {
+  value: Record<string, unknown>;
+  settled: boolean;
+  yielded: boolean;
+  running: string[];
+} | null {
+  if (result.isError || result.content[0]?.type !== "text") return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(result.content[0].text);
+  } catch {
+    return null;
+  }
+  if (value === null || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const commands = Array.isArray(record.commands) ? record.commands : [record];
+  if (commands.length === 0 || !commands.every(isCommandReceipt)) return null;
+  const running = commands.filter((command) => !command.terminal);
   return {
-    ...result,
-    ...(result.structuredContent
-      ? { structuredContent: { ...result.structuredContent, ...fields } }
-      : {}),
-    content: result.content.map((part, index) =>
-      index === 0 && part.type === "text"
-        ? { ...part, text: JSON.stringify({ ...snapshot, ...fields }) }
-        : part,
+    value: record,
+    settled: waitFor === "all" ? running.length === 0 : running.length < commands.length,
+    yielded: record.yielded === true,
+    running: running.flatMap((command) =>
+      typeof command.commandId === "string" ? [command.commandId] : [],
     ),
   };
 }
@@ -135,31 +166,37 @@ function finishReceipt(
   result: AttemptToolResult,
   started: number,
   seconds: number,
+  waitFor: "all" | "any",
+  unavailable: ReadonlySet<string>,
+  deadlineReached = false,
 ): AttemptToolResult {
-  const snapshot = commandSnapshot(result);
+  const snapshot = commandSnapshot(result, waitFor);
   if (!snapshot) return result;
   const waitedMs = Date.now() - started;
-  return patchReceipt(result, {
+  const freshness = { status: "refresh_unavailable", retryable: true } as const;
+  const stale = (command: CommandReceipt) =>
+    !command.terminal && typeof command.commandId === "string" && unavailable.has(command.commandId)
+      ? { ...command, freshness }
+      : command;
+  const value = Array.isArray(snapshot.value.commands)
+    ? { ...snapshot.value, commands: (snapshot.value.commands as CommandReceipt[]).map(stale) }
+    : stale(snapshot.value as CommandReceipt);
+  const fields = {
     waitedMs,
     timedOut:
       seconds > 0 &&
-      waitedMs >= seconds * 1000 &&
-      !snapshot.terminal &&
-      !snapshot.chunks.length &&
-      !snapshot.hasMore,
-  });
-}
-
-function commandSnapshot(
-  result: AttemptToolResult,
-): ({ terminal: boolean; chunks: unknown[]; hasMore?: boolean } & Record<string, unknown>) | null {
-  if (result.isError || result.content[0]?.type !== "text") return null;
-  try {
-    const value = JSON.parse(result.content[0].text);
-    return value && typeof value.terminal === "boolean" && Array.isArray(value.chunks)
-      ? value
-      : null;
-  } catch {
-    return null;
-  }
+      (deadlineReached || waitedMs >= seconds * 1000) &&
+      !snapshot.settled &&
+      !snapshot.yielded,
+  };
+  const patched = { ...value, ...fields };
+  return {
+    ...result,
+    ...(result.structuredContent
+      ? { structuredContent: patched as NonNullable<AttemptToolResult["structuredContent"]> }
+      : {}),
+    content: result.content.map((part, index) =>
+      index === 0 && part.type === "text" ? { ...part, text: JSON.stringify(patched) } : part,
+    ),
+  };
 }

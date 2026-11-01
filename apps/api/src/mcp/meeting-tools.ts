@@ -35,6 +35,7 @@ import {
   meetingSummarySessionScope,
   nameRecording,
   ownRecordingHome,
+  ownMeetingsReaching,
   ownRecordingWorkspaces,
   recordingVisible,
   RecordingConflictError,
@@ -227,6 +228,11 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     return workspaces.filter((workspace) => hasPermission(workspace.permissions, permission));
   }
 
+  /** This workspace, or null when it is the person's Personal workspace (see `ownMeetingsReaching`). */
+  async function reachingHere(who: RecordingActor): Promise<string | null> {
+    return await ownMeetingsReaching(deps.db, { ...who, accountId: grant.accountId });
+  }
+
   /**
    * The person, in the workspace storing the meeting: this one, or for their
    * own Only me meeting, another workspace of this organization where they
@@ -246,6 +252,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       subjectId: who.subjectId,
       recordingId: meetingId,
       workspaces: await ownElsewhere(who, permission),
+      reachingWorkspaceId: await reachingHere(who),
     });
     return home
       ? { who: { ...who, workspaceId: home.id }, recordedIn: home.name }
@@ -307,6 +314,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       const page = await listRecordingsWithOwnElsewhere(deps.db, {
         ...who,
         elsewhere: await ownElsewhere(who, "sessions:read"),
+        reachingWorkspaceId: await reachingHere(who),
         query: request.query?.trim() || undefined,
         person: request.person?.trim() || undefined,
         startedFrom: request.startedFrom ? new Date(request.startedFrom) : undefined,

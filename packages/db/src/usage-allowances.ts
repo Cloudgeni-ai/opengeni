@@ -353,10 +353,13 @@ export async function getWorkspaceUsage(
 
 function projectUsage(raw: RawUsage, pageSize: number): WorkspaceUsage {
   const config = raw.config ?? personalWorkspaceConfig(raw);
+  // The period's whole pool: included credits plus the grants spent this
+  // period and those still left. Usage counts the whole period, so its
+  // ceilings must too: against what is left, every credit spent would shrink
+  // every member's share.
   const pool = config
     ? config.includedCredits + Number(raw.grantsUsed) + Number(raw.grantsRemaining)
     : null;
-  const memberPool = config ? config.includedCredits + Number(raw.grantsRemaining) : null;
   const resetsAt = config ? raw.period.end : null;
   const members = raw.members.slice(0, pageSize).map((member) => {
     let rule = member.rule;
@@ -374,9 +377,9 @@ function projectUsage(raw: RawUsage, pageSize: number): WorkspaceUsage {
         ? null
         : "credits" in rule
           ? rule.credits
-          : memberPool === null
+          : pool === null
             ? null
-            : Math.min(Number.MAX_SAFE_INTEGER, Math.floor(memberPool * rule.share));
+            : Math.min(Number.MAX_SAFE_INTEGER, Math.floor(pool * rule.share));
     return {
       ...member,
       rule: member.rule,

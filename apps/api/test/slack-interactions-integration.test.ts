@@ -8,6 +8,8 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
+  OPENGENI_SLACK_BOT_IDENTITY_SCOPE,
+  slackAgentNameKey,
   type HumanInputQuestion,
   type Permission,
   type WorkspaceSlackOrchestrationNoticeSettings,
@@ -42,6 +44,7 @@ import {
   postSecretUseApprovalCard,
   requestSecretUseApproval,
   createWorkspace,
+  insertSlackAgent,
   getSlackChannelRoute,
   grantWorkspaceAccess,
   listInboundEvents,
@@ -74,6 +77,8 @@ import { Hono } from "hono";
 import {
   createSlackUserLinkToken,
   drainSlackInteractionsOnce,
+  handOffSlackAgentChat,
+  listSlackAgentChatsForSession,
   registerSlackInteractionRoutes,
   slackTaskFirstPartyMcpTools,
   SLACK_SESSION_INSTRUCTIONS,
@@ -155,6 +160,8 @@ type SlackPost = {
   threadTimestamp: string | null;
   clientMessageId: string | null;
   timestamp: string;
+  /** The name a post was signed with, for a chat posting as itself. */
+  username?: string | null;
 };
 
 type SlackCall = {
@@ -619,6 +626,7 @@ function fakeSlack(
         threadTimestamp: form.get("thread_ts"),
         clientMessageId,
         timestamp,
+        username: form.get("username"),
       };
       postAttempts.push(post);
       for (const block of post.blocks ?? []) {
@@ -11342,5 +11350,395 @@ describe("Slack event source", () => {
     const [private_] = await shared!.admin`select count(*)::int as count from event_deliveries
       where source_id = ${source.id} and convert_from(body, 'UTF8') like '%Something private%'`;
     expect(private_!.count).toBe(0);
+  }, 90_000);
+});
+
+describe("Slack agents", () => {
+  async function agentFixture(options: { linkOther?: boolean } = {}) {
+    const value = await fixture({
+      ...options,
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Analytics",
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, OPENGENI_SLACK_BOT_IDENTITY_SCOPE],
+    });
+    const home = { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId };
+    const create = async (name: string, targetWorkspaceId: string, description: string) => {
+      const created = await insertSlackAgent(client.db, home, {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        targetAccountId: value.owner.accountId,
+        targetWorkspaceId,
+        name,
+        nameKey: slackAgentNameKey(name),
+        description,
+        avatar: { kind: "emoji", emoji: "📊", hue: 210 },
+        instructions: `Always sign off as ${name}.`,
+        createdBySubjectId: value.owner.subjectId,
+      });
+      if (created === "name_taken") throw new Error("fixture agent name taken");
+      return created;
+    };
+    const analytics = await create(
+      "Analytics",
+      value.routed!.workspaceId,
+      "Answers revenue questions.",
+    );
+    const ops = await create("Ops Desk", value.owner.workspaceId, "Handles incidents.");
+    return { value, home, analytics, ops, create };
+  }
+
+  async function agentInteractions(workspaceId: string) {
+    return await shared!.admin<
+      {
+        id: string;
+        session_id: string | null;
+        route_key: string;
+        slack_agent_id: string | null;
+        handoff_from_slack_agent_id: string | null;
+      }[]
+    >`select id, session_id, route_key, slack_agent_id, handoff_from_slack_agent_id
+      from slack_interactions where workspace_id = ${workspaceId} order by created_at, id`;
+  }
+
+  async function mention(
+    value: Awaited<ReturnType<typeof fixture>>,
+    channel: string,
+    ts: string,
+    text: string,
+    threadTs?: string,
+    user = value.ownerSlackUserId,
+  ) {
+    const response = await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_AGENT_${crypto.randomUUID()}`,
+      event: {
+        type: "app_mention",
+        user,
+        channel,
+        ts,
+        ...(threadTs ? { thread_ts: threadTs } : {}),
+        // The fixture's bot id is not Slack-shaped, so the mention event
+        // carries only what the person typed after it.
+        text,
+      },
+    });
+    expect(response.status).toBe(200);
+    await drainAll(value.deps);
+  }
+
+  test("a named agent starts its own chat in its workspace and posts as itself", async () => {
+    if (!available) return;
+    const { value, analytics } = await agentFixture();
+    await mention(value, "C_AGENTS", "1765000000.000100", "+analytics revenue last week?");
+
+    expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
+    const [chat] = await agentInteractions(value.routed!.workspaceId);
+    expect(chat).toMatchObject({ slack_agent_id: analytics.id });
+    const [session] = await shared!.admin<
+      { initial_message: string; instructions: string | null; metadata: Record<string, unknown> }[]
+    >`select initial_message, instructions, metadata from sessions where id = ${chat!.session_id}`;
+    expect(session!.initial_message).toContain("revenue last week?");
+    expect(session!.initial_message).not.toContain("+analytics");
+    expect(session!.metadata).toMatchObject({
+      slackAgent: { id: analytics.id, name: "Analytics" },
+    });
+    expect(session!.instructions).toContain("You are Analytics");
+    expect(session!.instructions).toContain("Always sign off as Analytics.");
+    expect(session!.instructions).toContain("- Ops Desk (+ops-desk): Handles incidents.");
+
+    const first = value.slack.posts.find((post) => post.text.includes("Analytics is on it"));
+    expect(first).toBeDefined();
+    expect(first!.username).toBe("Analytics");
+    // Someone who typed the name is not told how to call it.
+    expect(first!.text).not.toContain("next time");
+
+    // A plain mention in the thread continues the same chat.
+    await mention(
+      value,
+      "C_AGENTS",
+      "1765000000.000200",
+      "and the week before?",
+      "1765000000.000100",
+    );
+    expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(1);
+  }, 90_000);
+
+  test("a channel set to an agent answers plain mentions; naming another agent switches the thread", async () => {
+    if (!available) return;
+    const { value, home, analytics, ops } = await agentFixture();
+    await upsertSlackChannelRoute(client.db, home, {
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      slackChannelId: "C_OPS",
+      targetAccountId: value.owner.accountId,
+      targetWorkspaceId: value.owner.workspaceId,
+      decidedBySubjectId: value.owner.subjectId,
+      decidedBySlackUserId: "admin",
+      source: "admin",
+      slackAgentId: ops.id,
+    });
+    await mention(value, "C_OPS", "1765000001.000100", "the API is slow");
+    const [opsChat] = await agentInteractions(value.owner.workspaceId);
+    expect(opsChat).toMatchObject({ slack_agent_id: ops.id });
+    const first = value.slack.posts.find((post) => post.text.includes("Ops Desk is on it"));
+    expect(first!.text).toContain(`Ops Desk · next time: <@${value.botUserId}> +ops-desk`);
+
+    await mention(
+      value,
+      "C_OPS",
+      "1765000001.000200",
+      "+analytics did revenue drop?",
+      "1765000001.000100",
+    );
+    const [moved] = await agentInteractions(value.owner.workspaceId);
+    expect(moved!.route_key).toBe(`C_OPS:1765000001.000100:switched:${moved!.id}`);
+    const [analyticsChat] = await agentInteractions(value.routed!.workspaceId);
+    expect(analyticsChat).toMatchObject({ slack_agent_id: analytics.id });
+    expect(analyticsChat!.route_key).toBe("C_OPS:1765000001.000100");
+  }, 90_000);
+
+  test("someone who cannot use a thread's workspace cannot move it to another agent", async () => {
+    if (!available) return;
+    const { value, analytics } = await agentFixture({ linkOther: true });
+    await mention(value, "C_TAKE", "1765000005.000100", "+analytics revenue?");
+    const [analyticsChat] = await agentInteractions(value.routed!.workspaceId);
+    expect(analyticsChat).toMatchObject({ slack_agent_id: analytics.id });
+
+    // The other person can use Ops Desk, but not the Analytics workspace, and
+    // did not start the thread.
+    await mention(
+      value,
+      "C_TAKE",
+      "1765000005.000200",
+      "+ops-desk take this over",
+      "1765000005.000100",
+      value.otherSlackUserId,
+    );
+    const [still] = await agentInteractions(value.routed!.workspaceId);
+    expect(still!.route_key).toBe("C_TAKE:1765000005.000100");
+    expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
+    expect(value.slack.posts.some((post) => post.text.includes("can't be moved"))).toBe(true);
+  }, 90_000);
+
+  test("unknown and unusable agents get a private reply and start nothing", async () => {
+    if (!available) return;
+    const { value, create } = await agentFixture();
+    const secret = await createWorkspace(client.db, {
+      accountId: value.owner.accountId,
+      name: "Secret",
+    });
+    await create("Vault", secret.id, "Keeps secrets.");
+    await mention(value, "C_REFUSE", "1765000002.000100", "+vault open it");
+    await mention(value, "C_REFUSE", "1765000002.000200", "+nobody hello");
+    expect(await agentInteractions(secret.id)).toHaveLength(0);
+    expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
+    const dm = `D_${value.ownerSlackUserId}`;
+    const replies = value.slack.posts
+      .filter((post) => post.channel === dm)
+      .map((post) => post.text);
+    expect(
+      replies.some((text) =>
+        text.startsWith(
+          "Vault works in the Secret workspace, which you don't have access to. Request access: https://app.example.test/",
+        ),
+      ),
+    ).toBe(true);
+    expect(replies).toContain(
+      "No agent called nobody. Available: +analytics, +ops-desk. No chat was started.",
+    );
+  }, 90_000);
+
+  test("a chat hands a misrouted request to another agent once, never back", async () => {
+    if (!available) return;
+    const { value, analytics, ops } = await agentFixture();
+    await mention(value, "C_HANDOFF", "1765000003.000100", "+ops-desk how did revenue do?");
+    const [opsChat] = await agentInteractions(value.owner.workspaceId);
+    const grant = value.owner as AccessGrant;
+
+    expect(
+      await handOffSlackAgentChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "Ops Desk",
+      }),
+    ).toMatchObject({ status: "refused" });
+    expect(
+      await handOffSlackAgentChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "+analytics",
+        note: "Revenue question.",
+      }),
+    ).toMatchObject({ status: "passed_on", agent: "Analytics" });
+    // A retried call reports the same hand-off and queues nothing more.
+    expect(
+      await handOffSlackAgentChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "+analytics",
+        note: "Revenue question.",
+      }),
+    ).toMatchObject({ status: "passed_on", agent: "Analytics" });
+    await drainAll(value.deps);
+
+    const [analyticsChat, ...more] = await agentInteractions(value.routed!.workspaceId);
+    expect(more).toEqual([]);
+    expect(analyticsChat).toMatchObject({
+      slack_agent_id: analytics.id,
+      handoff_from_slack_agent_id: ops.id,
+      route_key: "C_HANDOFF:1765000003.000100",
+    });
+    const passed = value.slack.posts.find((post) => post.text.includes("Analytics is on it"));
+    expect(passed!.text).toContain("Passed on by *Ops Desk*");
+    expect(passed!.threadTimestamp).toBe("1765000003.000100");
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions where id = ${analyticsChat!.session_id}`;
+    expect(session!.initial_message).toContain("(Ops Desk passed this on: Revenue question.)");
+    // Analytics gets the request, not the address meant for Ops Desk.
+    expect(session!.initial_message).not.toContain("+ops-desk");
+    expect(session!.initial_message).toContain("how did revenue do?");
+
+    // One hop per message, and never back to the agent that passed it on.
+    const routedGrant = { ...grant, workspaceId: value.routed!.workspaceId } as AccessGrant;
+    expect(
+      await handOffSlackAgentChat(value.deps, {
+        grant: routedGrant,
+        sessionId: analyticsChat!.session_id!,
+        agent: "Ops Desk",
+      }),
+    ).toMatchObject({ status: "refused" });
+
+    // Same-agent chats are listed by agent, and only that agent's.
+    const listed = await listSlackAgentChatsForSession(value.deps, {
+      grant,
+      sessionId: opsChat!.session_id!,
+    });
+    expect(listed.chats).toEqual([]);
+  }, 90_000);
+
+  test("a hand-off passes on the message the turn answers, not a later one", async () => {
+    if (!available) return;
+    const { value, analytics } = await agentFixture({ linkOther: true });
+    await mention(value, "C_TURN", "1765000006.000100", "+ops-desk how did revenue do?");
+    const [opsChat] = await agentInteractions(value.owner.workspaceId);
+    const [turn] = await shared!.admin<{ id: string }[]>`
+      select id from session_turns where session_id = ${opsChat!.session_id} order by created_at limit 1`;
+    expect(turn).toBeDefined();
+    // Someone else writes in the thread before the chat hands off. They cannot
+    // use Analytics; the person who asked can.
+    await mention(
+      value,
+      "C_TURN",
+      "1765000006.000200",
+      "also what about churn?",
+      "1765000006.000100",
+      value.otherSlackUserId,
+    );
+    const grant = { ...value.owner, metadata: { turnId: turn!.id } } as unknown as AccessGrant;
+    expect(
+      await handOffSlackAgentChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "Analytics",
+      }),
+    ).toMatchObject({ status: "passed_on", agent: "Analytics" });
+    await drainAll(value.deps);
+    const [analyticsChat] = await agentInteractions(value.routed!.workspaceId);
+    expect(analyticsChat).toMatchObject({ slack_agent_id: analytics.id });
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions where id = ${analyticsChat!.session_id}`;
+    expect(session!.initial_message).toContain("how did revenue do?");
+    expect(session!.initial_message).not.toContain("churn");
+  }, 90_000);
+
+  test("a chat whose thread was moved to another agent cannot hand it off", async () => {
+    if (!available) return;
+    const { value, create } = await agentFixture();
+    await create("Support", value.owner.workspaceId, "Answers customer questions.");
+    await mention(value, "C_MOVED", "1765000007.000100", "+ops-desk the API is slow");
+    const [opsChat] = await agentInteractions(value.owner.workspaceId);
+    await mention(
+      value,
+      "C_MOVED",
+      "1765000007.000200",
+      "+analytics did revenue drop?",
+      "1765000007.000100",
+    );
+    expect(
+      await handOffSlackAgentChat(value.deps, {
+        grant: value.owner as AccessGrant,
+        sessionId: opsChat!.session_id!,
+        agent: "Support",
+      }),
+    ).toMatchObject({ status: "refused" });
+    await drainAll(value.deps);
+    const chats = await agentInteractions(value.owner.workspaceId);
+    expect(chats).toHaveLength(1);
+  }, 90_000);
+
+  test("a hand-off is dropped, with a note, when another chat took the thread meanwhile", async () => {
+    if (!available) return;
+    const { value } = await agentFixture();
+    await mention(value, "C_STALE", "1765000008.000100", "+ops-desk how did revenue do?");
+    await mention(value, "C_ELSEWHERE", "1765000008.000300", "+ops-desk unrelated");
+    const [opsChat, otherChat] = await agentInteractions(value.owner.workspaceId);
+    expect(
+      await handOffSlackAgentChat(value.deps, {
+        grant: value.owner as AccessGrant,
+        sessionId: opsChat!.session_id!,
+        agent: "Analytics",
+      }),
+    ).toMatchObject({ status: "passed_on" });
+    // Another chat holds the thread before the queued hand-off runs.
+    await shared!.admin`update slack_interactions set route_key = 'C_STALE:1765000008.000100'
+      where id = ${otherChat!.id}`;
+    await drainAll(value.deps);
+    expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(0);
+    expect(
+      value.slack.posts.some((post) =>
+        post.text.startsWith("Your request couldn't be passed on because the thread has moved"),
+      ),
+    ).toBe(true);
+  }, 90_000);
+
+  test("the bare command and info list the agents the caller can use", async () => {
+    if (!available) return;
+    const { value } = await agentFixture();
+    for (const text of ["", "info"]) {
+      const response = await value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/commands",
+          new URLSearchParams({
+            command: "/opengeni",
+            team_id: value.teamId,
+            user_id: value.ownerSlackUserId,
+            channel_id: "C_INFO",
+            trigger_id: `info-${crypto.randomUUID()}`,
+            text,
+          }).toString(),
+          "application/x-www-form-urlencoded",
+        ),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { text: string };
+      expect(body.text).toContain("*Agents you can ask*");
+      expect(body.text).toContain(
+        "• *Analytics:* Answers revenue questions. `@Opengeni +analytics`",
+      );
+    }
+    expect(await agentInteractions(value.owner.workspaceId)).toHaveLength(0);
+  }, 90_000);
+
+  test("with no agents, routing reads a +name as ordinary text", async () => {
+    if (!available) return;
+    const value = await fixture({ slackWorkspaceRouting: true });
+    await mention(value, "C_PLAIN", "1765000004.000100", "+analytics hello");
+    const [chat] = await agentInteractions(value.owner.workspaceId);
+    expect(chat).toMatchObject({ slack_agent_id: null });
+    const [session] = await shared!.admin<{ initial_message: string; instructions: string }[]>`
+      select initial_message, instructions from sessions where id = ${chat!.session_id}`;
+    expect(session!.initial_message).toContain("+analytics hello");
+    expect(session!.instructions).toBe(SLACK_SESSION_INSTRUCTIONS);
+    expect(value.slack.posts.some((post) => post.text.includes("is on it"))).toBe(false);
   }, 90_000);
 });

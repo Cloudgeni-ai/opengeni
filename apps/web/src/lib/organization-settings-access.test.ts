@@ -65,6 +65,7 @@ describe("organization settings access", () => {
         "models",
         "people",
         "security",
+        "shared",
         "workspaces",
       ].sort(),
     );
@@ -83,6 +84,37 @@ describe("organization settings access", () => {
 
   test("a session without an organization membership gets no Models page", () => {
     expect(visible(undefined, ["account:read"])).toEqual(["identity", "security"]);
+  });
+
+  test("owners and admins manage the organization identity and Knowledge; members don't", () => {
+    const access = (
+      role: "owner" | "admin" | "member",
+      permissions: string[],
+      clientConfig: typeof managed | typeof local = managed,
+    ) =>
+      organizationSettingsAccess({
+        accessContext: context(role, permissions, []),
+        clientConfig: clientConfig as never,
+        accountId: "acme",
+      });
+    const admin = access("admin", ["account:read", "members:manage", "billing:read"]);
+    expect(admin.canManageOrganizationKnowledge).toBe(true);
+    expect(admin.canManageCompanyProfileAgentPolicy).toBe(true);
+    // Billing stays the owner's.
+    expect(admin.canManageBilling).toBe(false);
+    const owner = access("owner", ["account:read", "account:admin", "billing:manage"]);
+    expect(owner.canManageOrganizationKnowledge).toBe(true);
+    expect(owner.canManageCompanyProfileAgentPolicy).toBe(true);
+    const member = access("member", ["account:read"]);
+    expect(member.canManageOrganizationKnowledge).toBe(false);
+    expect(member.canManageCompanyProfileAgentPolicy).toBe(false);
+    // The admin role counts only in a signed-in session, as on the server.
+    expect(
+      access("admin", ["account:read"], {
+        productAccessMode: "managed",
+        auth: { mode: "none" },
+      } as never).canManageOrganizationKnowledge,
+    ).toBe(false);
   });
 
   test("the deployment's access key administers the organization's model accounts", () => {

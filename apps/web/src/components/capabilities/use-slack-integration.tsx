@@ -34,7 +34,8 @@ import type { IntegrationAdapter } from "@/components/capabilities/use-api-integ
 import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-install-feedback";
 import {
   enableNewSlackAccountTools,
@@ -237,10 +238,11 @@ export function useSlackIntegration({
     (grant) => grant.workspaceId === workspaceId,
   );
   const canManageWorkspaceDestination = isAdmin;
-  const canManageOrganizationDestination = Boolean(
-    workspaceGrant &&
-    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
-  );
+  const canManageOrganizationDestination = canAdministerOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId: workspaceGrant?.accountId,
+  });
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
   const reactionSettings = useMemo(
     () => resolveWorkspaceSlackReactionSummonSettings(workspace?.settings),

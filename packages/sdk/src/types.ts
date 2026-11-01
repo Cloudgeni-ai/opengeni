@@ -1961,6 +1961,11 @@ export type Session = {
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
   resources: ResourceRef[];
+  /**
+   * Repositories a person removed from this chat, newest per repository. The
+   * agent can't attach one again; a person attaching it again ends its record.
+   */
+  removedRepositories?: SessionRemovedRepository[] | undefined;
   skills: SessionSkill[];
   tools: ToolRef[];
   toolPolicy: SessionToolPolicy;
@@ -2826,6 +2831,7 @@ export const SESSION_EVENT_TYPES = [
   "session.tool_policy.updated",
   "session.agent.updated",
   "session.skills.updated",
+  "session.resources.removed",
   "session.model_settings.updated",
   // An authorized person or host changed the task root's usage limit.
   "session.usage_limit.updated",
@@ -4395,6 +4401,8 @@ export type FirstPartyMcpToolName =
   | "slack_bot_delete_message"
   | "slack_bot_prepare_message"
   | "slack_bot_send_prepared_message"
+  | "slack_agent_handoff"
+  | "slack_agent_chats"
   | "fiken_companies_list"
   | "fiken_contacts_list"
   | "fiken_contact_create"
@@ -5205,6 +5213,12 @@ export type InferenceFeatureAvailability = {
  */
 export type OrganizationPrivacySettings = {
   organizationId: string;
+  /**
+   * Whether members can connect machines of their own (Only me machines).
+   * Off: only owners and admins can connect new ones; machines already
+   * connected keep working. Older servers omit it: members can.
+   */
+  membersConnectOwnMachines?: boolean;
   /** Who sees new chats and schedules unless the person picks otherwise. */
   defaultVisibility: "private" | "workspace";
   /** Whether people have their own Personal workspace to see and work in. */
@@ -5229,6 +5243,8 @@ export type OrganizationPrivacySettings = {
 };
 
 export type UpdateOrganizationPrivacySettingsRequest = {
+  /** Off: only owners and admins connect new machines of their own. */
+  membersConnectOwnMachines?: boolean;
   defaultVisibility?: "private" | "workspace";
   adminsSeePrivateSchedules?: boolean;
   /** Off: people no longer see or start new work in their Personal workspace. */
@@ -6568,6 +6584,9 @@ export type SlackChannelRoute = {
   slackChannelId: string;
   targetWorkspaceId: string;
   targetWorkspaceName: string | null;
+  /** Set when a Slack agent answers in this channel. */
+  slackAgentId?: string | null | undefined;
+  slackAgentName?: string | null | undefined;
   source: "picker" | "admin";
   updatedAt: string;
 };
@@ -6579,7 +6598,12 @@ export type SlackChannelRouteListResponse = {
 
 export type UpdateSlackChannelRoutesRequest = {
   connectionId: string;
-  routes: Array<{ slackChannelId: string; targetWorkspaceId: string | null }>;
+  routes: Array<{
+    slackChannelId: string;
+    targetWorkspaceId: string | null;
+    /** A Slack agent working in `targetWorkspaceId`; omitted or null is plain Opengeni. */
+    slackAgentId?: string | null | undefined;
+  }>;
 };
 
 export type VoiceInputProviderId =
@@ -8557,6 +8581,12 @@ export type FileAsset = {
   scope?: "workspace" | "personal" | undefined;
   /** The person who alone can share the file or limit it to themselves. */
   ownerSubjectId?: string | null | undefined;
+  /**
+   * An Only me file's other workspaces of the organization where it also
+   * works, besides the one that stores it and its owner's Personal workspace;
+   * null for every workspace. Absent for workspace files.
+   */
+  reachWorkspaceIds?: string[] | null | undefined;
   id: string;
   workspaceId: string;
   status: FileStatus;
@@ -8579,6 +8609,13 @@ export type UpdateFileVisibilityRequest = {
   visibility: "private" | "workspace";
 };
 export type UpdateFileVisibilityResponse = { file: FileAsset };
+
+/** Where an Only me file works besides its own workspace and its owner's Personal workspace. */
+export type UpdateFileReachRequest = {
+  /** The owner's other workspaces of this organization; null for all of them. */
+  reachWorkspaceIds: string[] | null;
+};
+export type UpdateFileReachResponse = { file: FileAsset };
 
 /** Mirrors the closed, provider-neutral retained-output contract. */
 export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
@@ -9296,7 +9333,7 @@ export type CapabilityLifecycle = {
   status: CapabilityLifecycleStatus;
   readiness: CapabilityReadiness;
   detail: string | null;
-  managedBy: "deployment" | "platform" | "workspace" | null;
+  managedBy: "deployment" | "platform" | "workspace" | "organization" | null;
 };
 
 export type CapabilityRuntime = {
@@ -9822,6 +9859,17 @@ export type ApiIntegrationInstallationSummary = {
    * workspace where they connected it "Only me"; it is managed there.
    */
   personalExtension?: { originWorkspaceId: string; originWorkspaceName: string };
+  /**
+   * Set when the organization serves it here (organization settings manage
+   * it); `enabledHere` is false while this workspace turned it off.
+   */
+  organizationConnector?: {
+    connectorId: string;
+    login: "each_person" | "organization_key" | "none";
+    /** How the API authenticates: what a person adds when each person signs in. */
+    auth: ApiIntegrationAuthPreview;
+    enabledHere: boolean;
+  };
 };
 
 export type ListApiIntegrationsResponse = {
@@ -10167,6 +10215,18 @@ export type BillingBalance = {
   currency: "usd";
   updatedAt: string;
   generalBalanceMicros?: number | undefined;
+  /** Credits outside plan credit (top-ups, operator grants). API usage spends only this. */
+  creditsMicros?: number | undefined;
+  /** Credit debt from API usage. Plan credit never repays it. */
+  apiDebtMicros?: number | undefined;
+  /** Paid plan credit the own-key platform fee may draw (app use only). */
+  paidPlanCreditMicros?: number | undefined;
+  /** Paid-for credits the own-key platform fee may draw. */
+  paidCreditsMicros?: number | undefined;
+  /** Own-key platform fees charged this calendar month (UTC). */
+  byokPlatformFeeMonthMicros?: number | undefined;
+  /** Own-key fees that ran past paid credit; the next top-up repays it. */
+  byokFeeDebtMicros?: number | undefined;
   promotionalCredits?: PromotionalCreditBalance[] | undefined;
   heldCreditMicros?: number | undefined;
   heldGeneralCreditMicros?: number | undefined;
@@ -10795,8 +10855,10 @@ export type ChangeMachineAudienceRequest = MachineAudiencePreviewRequest & {
 
 /** What the change does to one thing on the machine. `move_off`: the chat
  * leaves the machine (its history and files stay). `keep`: the owner's chat
- * stays. `make_only_me` / `pause`: a schedule that runs on the machine.
- * `remove_first`: the same computer is connected a second time. */
+ * stays. `pause`: another person's schedule that runs on the machine; the new
+ * owner's own schedules keep running and are not listed. `make_only_me` is no
+ * longer produced. `remove_first`: the same computer is connected a second
+ * time. */
 export type MachineAudienceAction = "move_off" | "keep" | "make_only_me" | "pause" | "remove_first";
 
 /** One thing an audience change affects. Another member's private chat or
@@ -10823,6 +10885,7 @@ export type MachineAudienceSummary = {
   keptChats: number;
   keptSharedChats: number;
   movedOffChats: number;
+  /** No longer produced: always 0. */
   schedulesMadeOnlyMe: number;
   schedulesPaused: number;
   stoppedTurns: number;
@@ -10976,6 +11039,12 @@ export type MachinesResponse = {
   activeEpoch: number;
   machines: MachineView[];
   sessionMachineAccess?: SessionMachineAccess | null | undefined;
+  /**
+   * False when the organization lets only its owners and admins connect new
+   * machines of their own: an Only me machine, or any machine in a Personal
+   * workspace. Omitted for an agent listing its own chat, and by older servers.
+   */
+  canConnectOwnMachine?: boolean | undefined;
 };
 
 /** GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series — the downsampled
@@ -11388,6 +11457,25 @@ export type UpdateSessionSkillsRequest = {
   skills: SessionSkillInput[];
   /** The session's current `toolPolicyVersion` (shared CAS). */
   expectedVersion: number;
+};
+
+/**
+ * `POST .../sessions/:id/resources/remove`. Removes attached repositories from
+ * the session and its child sessions. Access ends on the next Git or GitHub
+ * call; the next turn removes the repository folders. Repositories that are
+ * not attached are ignored.
+ */
+export type RemoveSessionResourcesRequest = {
+  resources: Array<{ kind: "repository"; uri: string }>;
+};
+
+/** One repository removed from a session (`Session.removedRepositories`). */
+export type SessionRemovedRepository = {
+  id: string;
+  resource: RepositoryResourceRef;
+  removedAt: string;
+  /** True until the next turn has removed the folder from the sandbox. */
+  sandboxCleanupPending: boolean;
 };
 
 /** `PUT .../sessions/:id/agent`. Omitted agent fields keep their current values. */

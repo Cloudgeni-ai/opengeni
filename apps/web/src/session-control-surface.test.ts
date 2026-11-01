@@ -237,10 +237,10 @@ describe("session control surface architecture", () => {
     expect(header).toBeGreaterThan(voice);
     expect(setup).toBeGreaterThan(header);
 
-    const setupImplementation = route.slice(
-      route.indexOf("function SessionSetupStrip"),
-      route.indexOf("function SessionModelControl"),
+    const setupImplementation = await source(
+      "../../../packages/react/src/app/components/session/new-session-setup-strip.tsx",
     );
+    expect(setupImplementation).toContain("export function SessionSetupStrip");
     expect(route).toContain("<ComposerMobilePlus");
     expect(route).toContain("<RepositoryContextMenuBody");
     expect(setupImplementation).not.toContain("<SessionToolPicker");

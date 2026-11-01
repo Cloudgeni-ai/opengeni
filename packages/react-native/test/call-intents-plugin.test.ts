@@ -4,7 +4,11 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const { intentsSource, pluginFeatures, resolveOptions } = require("../plugin/call-intents.cjs") as {
   intentsSource(call: Record<string, unknown>): string;
-  pluginFeatures(props?: Record<string, unknown> | null): { call: boolean; recording: boolean };
+  pluginFeatures(props?: Record<string, unknown> | null): {
+    call: boolean;
+    recording: boolean;
+    audioImport: boolean;
+  };
   resolveOptions(props?: Record<string, unknown>): {
     call: Record<string, unknown> & { phrases: string[] };
     alternativeAppNames: string[];
@@ -15,7 +19,10 @@ const { intentsSource, pluginFeatures, resolveOptions } = require("../plugin/cal
 describe("native call config plugin", () => {
   test("generates an App Intent and App Shortcut phrases with the app-name interpolation", () => {
     const { call } = resolveOptions({
-      call: { title: "Call the agent", phrases: ["Call {app}", 'Ring "{app}" now'] },
+      call: {
+        title: "Call the agent",
+        phrases: ["Call {app}", 'Ring "{app}" now'],
+      },
     });
     const source = intentsSource(call);
     expect(source).toContain('static let title: LocalizedStringResource = "Call the agent"');
@@ -49,19 +56,41 @@ describe("native call config plugin", () => {
 
   test("sets up calls only when asked, so a meetings-only app gets no VoIP or Siri setup", () => {
     // The bare plugin has always meant calls.
-    expect(pluginFeatures()).toEqual({ call: true, recording: false });
-    expect(pluginFeatures(null)).toEqual({ call: true, recording: false });
+    expect(pluginFeatures()).toEqual({
+      call: true,
+      recording: false,
+      audioImport: false,
+    });
+    expect(pluginFeatures(null)).toEqual({
+      call: true,
+      recording: false,
+      audioImport: false,
+    });
     expect(pluginFeatures({ microphonePermission: "Talk." })).toEqual({
       call: true,
       recording: false,
+      audioImport: false,
     });
-    expect(pluginFeatures({ recording: true })).toEqual({ call: false, recording: true });
-    expect(pluginFeatures({ recording: true, call: {} })).toEqual({ call: true, recording: true });
+    expect(pluginFeatures({ recording: true })).toEqual({
+      call: false,
+      recording: true,
+      audioImport: false,
+    });
+    expect(pluginFeatures({ recording: true, call: {} })).toEqual({
+      call: true,
+      recording: true,
+      audioImport: false,
+    });
     expect(pluginFeatures({ recording: true, call: true })).toEqual({
       call: true,
       recording: true,
+      audioImport: false,
     });
-    expect(pluginFeatures({ call: false })).toEqual({ call: false, recording: false });
+    expect(pluginFeatures({ call: false })).toEqual({
+      call: false,
+      recording: false,
+      audioImport: false,
+    });
   });
 });
 

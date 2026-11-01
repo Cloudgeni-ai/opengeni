@@ -22,6 +22,7 @@ import {
   ChevronDownIcon,
   CreditCardIcon,
   GlobeIcon,
+  LayersIcon,
   LoaderCircleIcon,
   LockIcon,
   PencilIcon,
@@ -94,6 +95,11 @@ import { SegmentedControl } from "../ui/segmented-control";
 import { NativeSelect, type SelectOption } from "../ui/select-menu";
 import { Skeleton } from "../ui/skeleton";
 import { cn } from "../app/lib/utils";
+import {
+  WorkspaceReachFields,
+  type ReachWorkspace,
+  type WorkspaceReach,
+} from "../app/components/workspace-reach";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
@@ -231,6 +237,106 @@ function RenameDialog({
           />
         </Field>
       </FieldStack>
+    </FormDialog>
+  );
+}
+
+/**
+ * Where the owner's own Only me meeting works: the workspace that stores it
+ * and their Personal workspace always, plus the ones they pick, or all of
+ * their workspaces in the organization. Only they, and agent turns they
+ * start, see it in any of them.
+ */
+function MeetingReachDialog({
+  open,
+  recording,
+  hereId,
+  workspaces,
+  organizationName,
+  onClose,
+  onSave,
+}: {
+  open: boolean;
+  recording: Recording;
+  /** The workspace the page was opened from. */
+  hereId: string;
+  workspaces: readonly ReachWorkspace[];
+  organizationName: string;
+  onClose: () => void;
+  /** Saves the other workspaces it works in (null for all), and says whether it still works here. */
+  onSave: (reachWorkspaceIds: string[] | null, leavesHere: boolean) => Promise<void>;
+}) {
+  const msg = useOpenGeniText();
+  const saved = recording.reachWorkspaceIds ?? null;
+  const savedKey = saved === null ? null : saved.join(",");
+  const [value, setValue] = useState<WorkspaceReach>({
+    workspaceIds: saved,
+    personalWorkspaces: true,
+  });
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (open) {
+      setValue({
+        workspaceIds: savedKey === null ? null : savedKey.split(",").filter(Boolean),
+        personalWorkspaces: true,
+      });
+      setError(null);
+    }
+  }, [open, savedKey]);
+  const home = recording.workspaceId;
+  const here = workspaces.find((workspace) => workspace.id === hereId);
+  const chosen =
+    value.workspaceIds === null ? null : value.workspaceIds.filter((id) => id !== home).sort();
+  // Opened from another workspace it was turned on in, which it would leave.
+  const leavesHere =
+    hereId !== home && here?.personal !== true && chosen !== null && !chosen.includes(hereId);
+  const unchanged =
+    chosen === null
+      ? saved === null
+      : saved !== null && [...saved].sort().join(",") === chosen.join(",");
+  return (
+    <FormDialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+      title={msg("meetings.detailPage.availableIn")}
+      description={msg("meetings.detailPage.onlyYouSeeItInThese")}
+      submitLabel={msg("meetings.detailPage.save")}
+      pendingLabel={msg("meetings.detailPage.saving")}
+      submitDisabled={unchanged}
+      error={error}
+      onSubmit={async () => {
+        try {
+          await onSave(chosen, leavesHere);
+        } catch (cause) {
+          setError(errorText(cause) ?? msg("meetings.detailPage.couldnTChangeWhereItWorks"));
+          return false;
+        }
+      }}
+      onSubmitted={onClose}
+    >
+      <div className="flex min-w-0 flex-col gap-4">
+        <WorkspaceReachFields
+          owner={{ kind: "person" }}
+          organizationName={organizationName}
+          label={msg("meetings.detailPage.availableIn")}
+          labelHidden
+          value={value}
+          onChange={setValue}
+          workspaces={workspaces}
+          hereId={hereId}
+          alwaysIncluded={{ [home]: msg("meetings.detailPage.recordedThereAlwaysIncluded") }}
+          // Switching from All keeps the workspace it was opened from.
+          seedSelected={() => (hereId !== home && here?.personal !== true ? [hereId] : [])}
+          personalWorkspaces="always"
+        />
+        {leavesHere ? (
+          <Notice tone="info" live="polite">
+            {msg("meetings.detailPage.itWillNoLongerShowHere")}
+          </Notice>
+        ) : null}
+      </div>
     </FormDialog>
   );
 }
@@ -822,6 +928,14 @@ type MeetingDetailPageProps = {
    * transcript, such as the project it belongs to.
    */
   details?: ((recording: Recording) => readonly MeetingDetail[]) | undefined;
+  /**
+   * The viewer's workspaces in this organization, their Personal workspace
+   * marked, so they can choose where their own Only me meetings work
+   * ("Available in"). Without it the page doesn't offer that choice.
+   */
+  reachWorkspaces?: readonly ReachWorkspace[] | undefined;
+  /** The organization's name, for "Available in". */
+  organizationName?: string | undefined;
   /** Opens a chat, such as the one whose agent wrote the notes. */
   onOpenChat?: ((sessionId: string) => void) | undefined;
   /**
@@ -859,6 +973,8 @@ function MeetingDetailPageForRecording({
   onOpenBilling,
   onConnectModels,
   details,
+  reachWorkspaces,
+  organizationName,
   onOpenChat,
   onAsk,
 }: MeetingDetailPageProps) {
@@ -905,6 +1021,7 @@ function MeetingDetailPageForRecording({
   const playerPinned = useStuckToTop(playerBar);
   const [position, setPosition] = useState(0);
   const [renaming, setRenaming] = useState(false);
+  const [choosingReach, setChoosingReach] = useState(false);
   const [rerunning, setRerunning] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [namingFromAside, setNamingFromAside] = useState<string | null>(null);
@@ -1237,6 +1354,13 @@ function MeetingDetailPageForRecording({
   }
 
   const owner = recording.ownerSubjectId === viewerSubjectId;
+  // The owner's own Only me meeting, on a server that keeps where it works.
+  const reachable =
+    owner &&
+    recording.visibility === "private" &&
+    recording.purpose === "meeting" &&
+    recording.reachWorkspaceIds !== undefined &&
+    reachWorkspaces !== undefined;
   // The person recording, as the transcript will name their microphone.
   const ownerName =
     peopleList.find((person) => person.memberSubjectId === recording.ownerSubjectId)?.displayName ??
@@ -1474,6 +1598,12 @@ function MeetingDetailPageForRecording({
               <PencilIcon aria-hidden="true" />
               {msg("meetings.detailPage.rename")}
             </DropdownMenuItem>
+            {reachable ? (
+              <DropdownMenuItem onSelect={() => setChoosingReach(true)}>
+                <LayersIcon aria-hidden="true" />
+                {msg("meetings.detailPage.availableInMenu")}
+              </DropdownMenuItem>
+            ) : null}
             {recording.state !== "capturing" ? (
               <DropdownMenuItem disabled={!canRerun} onSelect={() => setRerunning(true)}>
                 <RefreshCwIcon aria-hidden="true" />
@@ -1797,6 +1927,26 @@ function MeetingDetailPageForRecording({
           await update({ title }, msg("meetings.detailPage.couldnTRenameThisMeeting2"))
         }
       />
+      {reachable ? (
+        <MeetingReachDialog
+          open={choosingReach}
+          recording={recording}
+          hereId={workspaceId}
+          workspaces={reachWorkspaces ?? []}
+          organizationName={organizationName ?? msg("meetings.detailPage.thisOrganization")}
+          onClose={() => setChoosingReach(false)}
+          onSave={async (reachWorkspaceIds, leavesHere) => {
+            if (!leavesHere) {
+              await meeting.update({ reachWorkspaceIds });
+              return;
+            }
+            // It no longer works here: save without reading it back, then leave.
+            await client.updateRecording(workspaceId, recording.id, { reachWorkspaceIds });
+            toast.success(msg("meetings.detailPage.itNoLongerShowsHere"));
+            onBack();
+          }}
+        />
+      ) : null}
       <TranscribeAgainDialog
         open={rerunning}
         recording={recording}

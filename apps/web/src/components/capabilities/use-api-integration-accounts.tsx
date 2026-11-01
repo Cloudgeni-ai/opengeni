@@ -30,7 +30,6 @@ import {
   canAddWorkspaceIntegrations,
   canChangeWorkspaceIntegrations,
   canManageWorkspaceIntegrations,
-  hasAccountPermission,
 } from "@opengeni/react/app/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,
@@ -48,9 +47,8 @@ import type {
  */
 
 // The per-account facets surface is a large, rarely-opened control plane
-// (Knowledge sources, Inbound triggers, Delivery destinations, Identity links)
-// plus its Google Drive knowledge-source dialog. Keep it out of the
-// Capabilities route's first chunk.
+// (Inbound triggers, Delivery destinations, Identity links). Keep it out of
+// the Capabilities route's first chunk.
 const IntegrationAccountFacets = lazy(async () => {
   const module = await import("@/components/capabilities/integration-account-facets");
   return { default: module.IntegrationAccountFacets };
@@ -314,17 +312,6 @@ export function useApiIntegrationAccounts({
   const definition = definitions.find((candidate) => candidate.id === definitionId) ?? null;
   const accounts = instances.filter((instance) => instance.definitionId === definitionId);
 
-  const workspaceGrant = context.accessContext?.workspaceGrants.find(
-    (grant) => grant.workspaceId === workspaceId,
-  );
-  const canManagePersonalDestination = Boolean(
-    workspaceGrant && context.accessContext?.subjectId === workspaceGrant.subjectId,
-  );
-  const canManageOrganizationDestination = Boolean(
-    workspaceGrant &&
-    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
-  );
-
   // A member reconnects only their own account; a shared one stays with admins.
   const canReconnect = (account: ApiIntegrationInstallationSummary) =>
     canChange || (canManage && account.ownership === "personal");
@@ -453,9 +440,6 @@ export function useApiIntegrationAccounts({
                 instance={account}
                 facetCount={facetCount}
                 canManage={canManage}
-                canManagePersonalDestination={canManagePersonalDestination}
-                canManageWorkspaceDestination={canManage}
-                canManageOrganizationDestination={canManageOrganizationDestination}
                 refreshRevision={refreshRevision}
               />
             </Suspense>

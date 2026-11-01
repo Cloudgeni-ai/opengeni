@@ -33,7 +33,7 @@ import { useClientConfigFlags } from "../../../hooks/use-client-config-flags";
 import { userErrorText } from "../../../ui/api-error";
 import { isMachineComputeSelectable } from "../../lib/machine-selectability";
 import { useDesktopThisComputer } from "../desktop/this-computer";
-import { moveChatToMachine } from "../../lib/move-chat-to-machine";
+import { isPersonalMachine, moveChatToMachine } from "../../lib/move-chat-to-machine";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { useWorkspaceMachines } from "../../lib/use-workspace-machines";
 import { thisComputerReady, thisComputerNeedsPermissions } from "../../../this-computer";
@@ -163,6 +163,10 @@ export function SessionMachineCapabilityCard({
   // The person can allow it right here: lead with that, other machines fold away.
   const allowHere =
     asking && fleet.canAttach && isMachineComputeSelectable(requested.state) ? requested : null;
+  // Allowing your own machine turns it on for your work in this workspace.
+  const allowOwnMachine = allowHere !== null && isPersonalMachine(allowHere);
+  // In a shared chat, people in the workspace see what the agent does on it.
+  const sharedChat = sendContext?.().personalMachineIntent?.workspaceSharedAcknowledged === true;
   const personalWorkspace =
     context.workspaces?.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
 
@@ -350,11 +354,13 @@ export function SessionMachineCapabilityCard({
           logo={CONNECTED_MACHINE_LOGO}
           typeLabel="Machine"
           description={
-            allowHere
-              ? "The agent asked to use this machine. Allowing it moves this chat here, and the agent continues on it."
-              : asking
-                ? `The agent asked to use ${requestedName}.`
-                : recommendation.rationale
+            allowOwnMachine
+              ? "The agent asked to use this machine. Allowing it lets your agents use it in this workspace from now on, and moves this chat here."
+              : allowHere
+                ? "The agent asked to use this machine. Allowing it moves this chat here, and the agent continues on it."
+                : asking
+                  ? `The agent asked to use ${requestedName}.`
+                  : recommendation.rationale
           }
           skill={false}
           expanded={false}
@@ -378,7 +384,11 @@ export function SessionMachineCapabilityCard({
           opensDialog={false}
           note={
             allowHere
-              ? ""
+              ? allowOwnMachine && sharedChat
+                ? "Only your own messages run on it. This chat is shared, so people in this workspace see what the agent does there."
+                : allowOwnMachine
+                  ? "Only your own messages run on it."
+                  : ""
               : offerThisComputer
                 ? "Only you can use this computer. Your agents can work with files and use the screen after you allow system permissions. Turn it off anytime in the app."
                 : fleet.canConnect
@@ -513,6 +523,7 @@ export function SessionMachineCapabilityCard({
           machinesError={fleet.error}
           personalWorkspace={personalWorkspace}
           canShareWithWorkspace={fleet.canManage}
+          canConnectOwnMachine={fleet.canConnectOwnMachine}
           defaultScope={setupScope}
           defaultAllowScreenControl={setupScreenControl}
           onConnected={(machine) => {

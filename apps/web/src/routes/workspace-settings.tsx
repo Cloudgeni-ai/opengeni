@@ -53,13 +53,14 @@ import {
   deleteOrganizationWorkspaceWithReconciliation,
 } from "@opengeni/react/app/lib/workspace-deletion";
 import {
+  canContributeWorkspaceContent,
   canManageWorkspaceMembers,
   canManageWorkspaceSettings,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
 import type { DeveloperLocation } from "@/lib/developer-route";
-import type { AvailableHereDestination } from "@/components/settings/available-here";
+import { openSettingsDestination } from "@/lib/open-settings-destination";
 import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
 
@@ -251,7 +252,7 @@ function OperationalWorkspaceSettingsRoute({
             organizationName={organizationLabel}
             personal={personal}
             canOpenModels={personal || canAdministerWorkspace || administersOrganization}
-            onOpen={(destination) => openAvailable(navigate, workspaceId, destination)}
+            onOpen={(destination) => openSettingsDestination(navigate, workspaceId, destination)}
           />
         </Suspense>
       ) : null}
@@ -314,14 +315,21 @@ function WorkspaceGeneralSettings({
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const accountId = activeWorkspace?.accountId ?? "";
-  const canRename =
-    activeWorkspace !== null &&
-    hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
-  const canDeleteWorkspace = hasWorkspacePermission(
+  const canAdminister = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
     "workspace:admin",
   );
+  // Anyone who can start chats in a shared workspace renames it; a Personal
+  // workspace keeps its name.
+  const canRename =
+    !personal &&
+    canContributeWorkspaceContent(
+      context.accessContext,
+      activeWorkspace,
+      context.managedSelfContext,
+    );
+  const canDeleteWorkspace = canAdminister;
   // Deleting the account's only workspace is refused server-side; disable the
   // affordance when this is the only workspace in the active account.
   const isOnlyWorkspaceInAccount =
@@ -377,7 +385,11 @@ function WorkspaceGeneralSettings({
             // say it isn't allowed.
             personal ? undefined : (
               <DisabledReasonTooltip
-                reason={canRename ? undefined : "Only workspace admins can rename it."}
+                reason={
+                  canRename
+                    ? undefined
+                    : "Only people who can start chats here, acting as themselves, can rename it."
+                }
               >
                 <Button
                   type="button"
@@ -516,7 +528,7 @@ function WorkspaceGeneralSettings({
         <WorkspaceSandboxImageRow
           client={context.client}
           workspaceId={workspaceId}
-          canManage={canRename}
+          canManage={canAdminister}
         />
         <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <ConnectedAppsDefaultRow workspaceId={workspaceId} canManage={canManageSettings} />
@@ -1046,51 +1058,6 @@ const LazyAvailableHere = lazy(async () => {
   const module = await import("@/components/settings/available-here");
   return { default: module.AvailableHere };
 });
-
-/** Opens a row of Available here: the thing's own page, or this workspace's Models page. */
-function openAvailable(
-  navigate: ReturnType<typeof useNavigate>,
-  workspaceId: string,
-  destination: AvailableHereDestination,
-) {
-  switch (destination.page) {
-    case "models":
-      void navigate({
-        to: "/workspaces/$workspaceId/organization",
-        params: { workspaceId },
-        search: { section: "models", workspace: workspaceId },
-      });
-      return;
-    case "plugins":
-      void navigate({
-        to: "/workspaces/$workspaceId/plugins",
-        params: { workspaceId },
-        search: destination.section ? { section: destination.section } : {},
-      });
-      return;
-    case "machines":
-      void navigate({ to: "/workspaces/$workspaceId/machines", params: { workspaceId } });
-      return;
-    case "rig":
-      void navigate({
-        to: "/workspaces/$workspaceId/rigs/$rigId",
-        params: { workspaceId, rigId: destination.rigId },
-      });
-      return;
-    case "vault":
-      void navigate({
-        to: "/workspaces/$workspaceId/secrets/$vaultId",
-        params: { workspaceId, vaultId: destination.vaultId },
-      });
-      return;
-    case "knowledge":
-      void navigate({
-        to: "/workspaces/$workspaceId/state",
-        params: { workspaceId },
-        search: destination.scope ? { scope: destination.scope } : {},
-      });
-  }
-}
 
 const LazyWorkspaceDeveloperSettings = lazy(async () => {
   const module = await import("@/components/workspace-developer-settings");

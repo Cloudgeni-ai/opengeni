@@ -269,7 +269,6 @@ function preview(
     subjectId?: string;
     target: "only_me" | "workspace";
     ownerSubjectId?: string | null;
-    schedulesMayBeOnlyMe?: boolean;
   },
 ) {
   return previewMachineAudienceChange(client.db, {
@@ -284,7 +283,6 @@ function preview(
           ? org.owner
           : null
         : input.ownerSubjectId,
-    schedulesMayBeOnlyMe: input.schedulesMayBeOnlyMe ?? true,
   });
 }
 
@@ -305,7 +303,6 @@ function change(
           ? org.owner
           : null
         : input.ownerSubjectId,
-    schedulesMayBeOnlyMe: input.schedulesMayBeOnlyMe ?? true,
     expectedGeneration: input.expectedGeneration,
   });
 }
@@ -498,17 +495,19 @@ describe("changing who can use a Connected Machine in place", () => {
         keptChats: 1,
         keptSharedChats: 2,
         movedOffChats: 2,
-        schedulesMadeOnlyMe: 1,
+        schedulesMadeOnlyMe: 0,
         schedulesPaused: 1,
         stoppedTurns: 2,
         stoppedCommands: 1,
         notifiedPeople: 1,
       },
     });
-    // The owner's own Only me chat and schedule need nothing, so they are
-    // counted, not listed.
+    // The owner's own Only me chat needs nothing, so it is counted, not
+    // listed. The owner's schedules, Only me or shared, run as the owner and
+    // keep running unchanged, so they are not listed either.
     expect(itemFor(listed.items, ownerPrivate.id)).toBeUndefined();
     expect(itemFor(listed.items, ownerOnlyMeSchedule.id)).toBeUndefined();
+    expect(itemFor(listed.items, ownerWorkspaceSchedule.id)).toBeUndefined();
     expect(itemFor(listed.items, ownerShared.id)).toMatchObject({
       action: "keep",
       relation: "owner_shared",
@@ -532,11 +531,6 @@ describe("changing who can use a Connected Machine in place", () => {
       title: null,
       ownerSubjectId: null,
       stopsTurn: false,
-    });
-    expect(itemFor(listed.items, ownerWorkspaceSchedule.id)).toMatchObject({
-      kind: "schedule",
-      action: "make_only_me",
-      name: "Nightly build",
     });
     expect(itemFor(listed.items, memberSchedule.id)).toMatchObject({
       action: "pause",
@@ -571,7 +565,7 @@ describe("changing who can use a Connected Machine in place", () => {
       summary: listed.summary,
       reauthorizedAttemptIds: [ownerTurn.attemptId],
       pausedScheduleIds: [memberSchedule.id],
-      onlyMeScheduleIds: [ownerWorkspaceSchedule.id],
+      onlyMeScheduleIds: [],
     });
     if (changed.outcome !== "changed") throw new Error("unreachable");
     expect(new Set(changed.detachedSessionIds)).toEqual(
@@ -663,11 +657,11 @@ describe("changing who can use a Connected Machine in place", () => {
       connectionInstanceId: "connection-1",
     });
 
-    // Schedules: the owner's becomes Only me, the member's pauses and its
-    // Temporal schedule is queued to follow.
+    // Schedules: the owner's keep running unchanged, Only me or shared; the
+    // member's pauses and its Temporal schedule is queued to follow.
     expect(await scheduleRow(ownerWorkspaceSchedule.id)).toEqual({
       status: "active",
-      visibility: "user_private",
+      visibility: "workspace_shared",
     });
     expect(await scheduleRow(ownerOnlyMeSchedule.id)).toEqual({
       status: "active",
@@ -718,7 +712,7 @@ describe("changing who can use a Connected Machine in place", () => {
     expect(audit?.count).toBe(1);
   }, 120_000);
 
-  test("the owner's Workspace schedules pause when they can't have Only me schedules", async () => {
+  test("the owner's Workspace schedules keep running, shared, even when they can't have Only me schedules", async () => {
     const org = await organization();
     const machine = await workspaceMachine(org);
     const schedule = await scheduleOnMachine(
@@ -728,19 +722,20 @@ describe("changing who can use a Connected Machine in place", () => {
       "workspace_shared",
       "Nightly build",
     );
-    const listed = previewOf(
-      await preview(org, machine, { target: "only_me", schedulesMayBeOnlyMe: false }),
-    );
-    expect(itemFor(listed.items, schedule.id)).toMatchObject({ action: "pause" });
-    expect(listed.summary).toMatchObject({ schedulesMadeOnlyMe: 0, schedulesPaused: 1 });
+    const listed = previewOf(await preview(org, machine, { target: "only_me" }));
+    expect(itemFor(listed.items, schedule.id)).toBeUndefined();
+    expect(listed.summary).toMatchObject({ schedulesMadeOnlyMe: 0, schedulesPaused: 0 });
     const changed = await change(org, machine, {
       target: "only_me",
-      schedulesMayBeOnlyMe: false,
       expectedGeneration: listed.generation,
     });
-    expect(changed).toMatchObject({ outcome: "changed", pausedScheduleIds: [schedule.id] });
+    expect(changed).toMatchObject({
+      outcome: "changed",
+      pausedScheduleIds: [],
+      onlyMeScheduleIds: [],
+    });
     expect(await scheduleRow(schedule.id)).toEqual({
-      status: "paused",
+      status: "active",
       visibility: "workspace_shared",
     });
     // The person making the change gets no notice about their own schedule.

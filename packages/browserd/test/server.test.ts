@@ -330,6 +330,119 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test.each([
+    { operation: "listTargets" as const, label: "target inventory", suffix: "" },
+    { operation: "observe" as const, label: "observation", suffix: "/observation" },
+    { operation: "targetState" as const, label: "observation", suffix: "/state" },
+    { operation: "readDom" as const, label: "observation", suffix: "/dom-read" },
+    { operation: "captureScreenshot" as const, label: "screenshot", suffix: "/screenshot" },
+  ])(
+    "tries an unclassified $operation failure once more, then reports it as retryable",
+    async ({ operation, label, suffix }) => {
+      let failures = 0;
+      let attempts = 0;
+      const reported: Array<{ error: unknown; context: ControllerFailureContext }> = [];
+      await withServer(
+        async ({ server, reference }) => {
+          const created = await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          expect(created.status).toBe(201);
+          const path = `/v1/browser-sessions/${reference.browserSessionId}/targets${suffix ? `/target-${reference.browserSessionId}${suffix}` : ""}`;
+          const read = () =>
+            operation === "readDom"
+              ? request(server, path, {
+                  method: "POST",
+                  token: viewToken,
+                  body: {
+                    kind: "count",
+                    selector: "button",
+                    expectedTargetGeneration: "target-1",
+                    expectedDocumentGeneration: "document-1",
+                    expectedFrameId: "frame-1",
+                  },
+                })
+              : request(server, path, { token: viewToken });
+
+          // A failure that is gone a moment later never reaches the caller.
+          failures = 1;
+          attempts = 0;
+          const recovered = await read();
+          expect(recovered.status).toBe(200);
+          expect(attempts).toBe(2);
+          expect(reported).toHaveLength(1);
+          expect(reported[0]?.context).toEqual({
+            method: operation === "readDom" ? "POST" : "GET",
+            pathname: path,
+            kind: "driver_failed",
+          });
+          expect(reported[0]?.error).toMatchObject({ message: "frames still changing" });
+
+          // One that persists is retryable, not a final driver failure.
+          failures = Number.POSITIVE_INFINITY;
+          attempts = 0;
+          reported.length = 0;
+          const failed = await read();
+          expect(failed.status).toBe(503);
+          const body = (await failed.json()) as { error: unknown; diagnostic?: unknown };
+          expect(body.error).toEqual({
+            code: "resource_unavailable",
+            message: `browser ${label} unavailable`,
+            retryable: true,
+          });
+          // The driver's error class travels beside the error for the
+          // caller's log, never inside it.
+          expect(body.diagnostic).toMatchObject({ errorClass: "Error" });
+          expect(attempts).toBe(2);
+          expect(reported).toHaveLength(2);
+        },
+        {
+          beforeDriverOperation(name) {
+            if (name !== operation) return;
+            attempts++;
+            if (attempts <= failures) throw new Error("frames still changing");
+          },
+          onUnexpectedError: (error, context) => reported.push({ error, context }),
+        },
+      );
+    },
+  );
+
+  test("never repeats a mutation whose failure is unclassified", async () => {
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const failed = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+          { method: "POST", token: controlToken, body: { url: "https://example.test" } },
+        );
+        expect(failed.status).toBe(500);
+        expect(((await failed.json()) as { error: unknown }).error).toMatchObject({
+          code: "driver_failed",
+          retryable: false,
+        });
+        expect(attempts).toBe(1);
+      },
+      {
+        beforeDriverOperation(name) {
+          if (name === "openTarget") {
+            attempts++;
+            throw new Error("frames still changing");
+          }
+        },
+      },
+    );
+  });
+
   test("gives a tab's notice only to a caller that asks for it, once", async () => {
     // A person's viewer, an auth check or an API client reading the tab first
     // leaves the notice for the agent, whose tools ask for it.
@@ -1644,6 +1757,57 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("a frame socket is told its stream is open before its first frame", async () => {
+    // A page busy when its view opens sends its first frame only once it
+    // answers; a relaying agent is ready at this ping instead.
+    let sendFirstFrame: (() => void) | undefined;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        const observation = (await json(created)).data.observation as BrowserObservation;
+        const websocket = new WebSocket(
+          `${server.url.replace("http:", "ws:")}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/frames`,
+          [
+            BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+            `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+          ],
+        );
+        websocket.binaryType = "arraybuffer";
+        let framesBeforePing = 0;
+        websocket.addEventListener("message", () => {
+          framesBeforePing += 1;
+        });
+        // Bun's WebSocket client reports pings as a "ping" event.
+        const ping = await new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("no subscribed ping")), 2_000);
+          websocket.addEventListener("ping" as "message", (event) => {
+            clearTimeout(timer);
+            resolve(Buffer.from((event as MessageEvent).data as ArrayBuffer).toString());
+          });
+        });
+        expect(ping).toBe("opengeni.frames.subscribed");
+        expect(framesBeforePing).toBe(0);
+        const message = websocketMessage(websocket);
+        sendFirstFrame!();
+        expect(decodeBrowserFrameMessage(new Uint8Array(await message))).toMatchObject({
+          browserSessionId: reference.browserSessionId,
+          sequence: 1,
+        });
+        websocket.close(1000, "done");
+        await websocketClosed(websocket);
+      },
+      {
+        deferFirstFrame: (send) => {
+          sendFirstFrame = send;
+        },
+      },
+    );
+  });
+
   test("a stale lifecycle request cannot disrupt the active session or its viewers", async () => {
     await withServer(async ({ server, reference }) => {
       const created = await request(server, "/v1/browser-sessions", {
@@ -1874,6 +2038,8 @@ async function withServer(
     screenshotError?: Error;
     closeError?: Error;
     onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
+    /** Holds a subscription's first frame until the test sends it. */
+    deferFirstFrame?: (send: () => void) => void;
     beforeDriverOperation?: (
       operation:
         | "listTargets"
@@ -1882,7 +2048,8 @@ async function withServer(
         | "readDom"
         | "openTarget"
         | "openTargetWithInventory"
-        | "dispatch",
+        | "dispatch"
+        | "captureScreenshot",
     ) => void;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
@@ -1960,6 +2127,8 @@ function fakeDriver(
     screenshotError?: Error;
     closeError?: Error;
     onFrameSubscription?: (subscription: LatestBrowserFrameSubscription) => void;
+    /** Holds a subscription's first frame until the test sends it. */
+    deferFirstFrame?: (send: () => void) => void;
     beforeDriverOperation?: (
       operation:
         | "listTargets"
@@ -1968,7 +2137,8 @@ function fakeDriver(
         | "readDom"
         | "openTarget"
         | "openTargetWithInventory"
-        | "dispatch",
+        | "dispatch"
+        | "captureScreenshot",
     ) => void;
     reloadedTabNotices?: string[];
   },
@@ -2104,13 +2274,16 @@ function fakeDriver(
       };
     },
     async captureScreenshot() {
+      options.beforeDriverOperation?.("captureScreenshot");
       if (options.screenshotError) throw options.screenshotError;
       return frame(context, target);
     },
     async subscribeFrames() {
       const subscription = new LatestBrowserFrameSubscription(async () => undefined);
       options.onFrameSubscription?.(subscription);
-      queueMicrotask(() => subscription.push(frame(context, target)));
+      const send = () => subscription.push(frame(context, target));
+      if (options.deferFirstFrame) options.deferFirstFrame(send);
+      else queueMicrotask(send);
       return subscription;
     },
     async debug() {

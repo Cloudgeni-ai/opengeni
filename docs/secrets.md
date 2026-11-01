@@ -32,7 +32,8 @@ each hosted field keeps encrypted **versions**.
   default **Private** vault is always available everywhere. Vaults created
   before this setting existed stay available everywhere until narrowed.
 - **Workspace** vaults are usable by members of that workspace.
-- **Organization** vaults are managed with `account:admin`; their reach is set
+- **Organization** vaults are managed by the organization's owner or an admin
+  (or a credential holding `account:admin`); their reach is set
   by "Available in": every shared workspace (`allowedWorkspaceIds: null`) or a
   list of them, and separately whether members' Personal workspaces have it
   (`allowPersonalWorkspaces`). The switch alone decides Personal workspaces,
@@ -546,9 +547,13 @@ for it. Up to 16 values are saved per result, four at a time; the rest are
 saved from a later result. A value that got a marker is detected and saved
 again from the next result that contains it. An attempt captures into its root session's Task vault only
 while it holds fewer than 200 captured items (attempts running at the same
-time in one session tree can go slightly over). When saving is not possible (the secrets capability is off,
-the attempt cannot write to the Task vault, the capture or vault limit is
-reached, any error), the value is replaced by a marker such as
+time in one session tree can go slightly over). A session whose first-party
+permissions are narrowed to a list without `secrets:use`,
+`variable-sets:use`, `variable-sets:attach` or `environments:use` has no Task
+vault, so its attempts do not try to save and use markers from the start.
+When saving is not possible (the secrets capability is off, the agent may not
+use secrets, the attempt cannot write to the Task vault, the capture or vault
+limit is reached, any error), the value is replaced by a marker such as
 `[masked url password]` and the tool call still succeeds. After three failed
 saves in a row an attempt stops trying and writes markers. A save that
 finishes after the wait upgrades the marker to the reference from the next
@@ -999,6 +1004,7 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | Route | Purpose |
 |---|---|
 | `GET, POST /vaults`; `GET, PATCH, DELETE /vaults/:vaultId` | Vaults |
+| `GET /organization-vaults` | Every organization vault, wherever it works, for account administrators (`account:admin` and `secrets:list`). `complete: false` while the server can list only the ones that work in this workspace |
 | `GET, POST /vaults/:vaultId/items`; `GET, PATCH, DELETE /vaults/:vaultId/items/:itemId` | Items |
 | `POST /vaults/:vaultId/items/:itemId/restore`, `/move` | Restore an archived item; move or copy |
 | `POST …/fields/:fieldId/reveal`; `GET …/fields/:fieldId/versions`; `POST …/fields/:fieldId/restore` | Plaintext, history, version restore |

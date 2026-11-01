@@ -14,7 +14,7 @@ agent" in the context of a session means the AI agent driving it.
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
-account-admin approval. Only the owner may attach a user machine. Moving a running
+approval by the organization's owner or an admin. Only the owner may attach a user machine. Moving a running
 chat is explicit owner consent for that logical turn, even when another person,
 a schedule, or an agent started it. The route changes immediately; the next tool
 operation uses the new machine. Already dispatched work is not moved or replayed.
@@ -749,23 +749,25 @@ as the new session row. If the target is invalid, removed, revoked, or otherwise
 no longer attachable, the create fails without leaving a queued session shell.
 
 Workspace- and organization-scoped machines run any schedule. A user-scoped
-(personal) machine runs only an **Only me** schedule owned by the machine's
-owner:
+(personal) machine runs only schedules owned by the machine's owner, **Only
+me** or **Workspace** alike, because a schedule runs as its owner:
 
-- Saving is the consent. Create and update accept a personal machine only when
-  the final audience is Only me; widening such a schedule to Workspace, or
-  saving it for Workspace, returns 422. The scoped sandbox lookup returns a
-  personal machine to its owner alone, so nobody else can select it.
+- Picking the machine on the schedule is the consent. The scoped sandbox
+  lookup returns a personal machine to its owner alone, so nobody else can
+  select it, and only a schedule's owner changes or runs it. A schedule never
+  uses a personal machine by following the workspace default (422).
 - Each run attaches the machine through the owner's scoped authorization and
   then issues a `session`-mode `connected_machine.use` grant (context
-  `user_private`) for exactly that run's chat. No standing `always` grant is
-  created, so the owner's other chats keep asking.
+  `user_private` or `workspace_shared`, like the run's chat) for exactly that
+  run's chat. No standing `always` grant is created.
 - Every attempt goes through the same database admission as an interactive
   turn (`admit_session_attempt_personal_machine`): the run's causal human must
   be the machine's owner and still an active member with access to the
   workspace, the machine's authority must be current, and the run's grant must
   be active. Removing the person, revoking the machine or revoking the grant
   stops the next attempt.
+- Other people can see a Workspace schedule's runs and write in its chats.
+  Their messages wait for the owner, as in any chat on a personal machine.
 
 In a chat on a personal machine, only the owner's own messages start work. A
 message somebody else sends there (through the API, an agent acting for them,
@@ -1383,12 +1385,34 @@ every enrollment and per-machine write):
   keeps needing `enrollments:manage`, so a read-only delegation never connects
   a machine; keys, services and agents acting as themselves are refused.
 - **This workspace**: `enrollments:manage`.
-- **Organization**: `enrollments:manage` and `account:admin`.
+- **Organization**: `enrollments:manage`, and the caller is the organization's
+  owner or an admin signed in as themselves (or a credential holding
+  `account:admin`). Being an admin of one organization grants nothing in another.
 
 The same rule covers declining a pairing code and, for an existing machine,
 removal, command policy, screen control, macOS privacy panes and agent updates.
 `list_scoped_enrollments` returns an Only me machine only to its owner, so a
 teammate reaches only their own. Refusals are plain sentences.
+
+An organization's owners and admins can also turn off **Members connect their
+own machines** (Organization settings > Security & data > Machines;
+`membersConnectOwnMachines` on `/v1/organizations/:organizationId/privacy-settings`,
+column `organization_privacy_preferences.members_connect_own_machines`,
+migration 1148; on by default). Off, only the organization's owners and admins
+connect a new machine of their own: an Only me machine anywhere, or any machine
+in a Personal workspace, whose This workspace is still only its owner.
+Workspace permissions don't lift it, since a Personal workspace's owner manages
+machines there and an Only me machine follows its owner into every workspace.
+Approving a pairing code and minting a connect command check it before anything
+is created (`requireOwnMachineConnectAllowed`); declining a code never does.
+Shared-workspace and organization machines keep the rule above. It is
+acquisition policy only: machines already connected keep working and stay
+their owners' to change or remove, and a command minted before the change
+works until it expires (an hour). Connecting such a machine again is a new
+connection. `GET /v1/workspaces/:workspaceId/machines` reports
+`canConnectOwnMachine` for a person, so the connect dialog disables Only me
+(and This workspace in a Personal workspace), skips the desktop app's
+this-computer path, and mints nothing when nothing is left.
 
 The universal Machines-page one-liner securely installs or updates the runner
 installation, including a generated background-service definition when the
@@ -1757,7 +1781,7 @@ machine holds (its own dispatch gate checks them). Turning it on never needs a
 reconnect, a token or a human click:
 `POST /v1/workspaces/:ws/machines/:enrollmentId/screen-control`
 (the scope rule above: the owner for an Only me machine, `enrollments:manage`
-for a workspace machine, also `account:admin` for organization machines; no body)
+for a workspace machine, also the organization's owner or an admin for organization machines; no body)
 sets `allow_screen_control` on the enrollment in place, with the same id,
 scope, owner and credential generation, so the machine's current credentials
 stay valid. The API then sends the live agent a `credential_renew` control
@@ -1844,9 +1868,9 @@ Nothing has to be resolved by hand first. Narrowing to **Only me** does this:
   cancelled (`authority_changed`): turns in chats that move off, and turns
   someone other than the owner started in the owner's shared chats. The agent's
   commands still running in chats that move off are stopped too.
-- **Schedules** that target the machine: the owner's Workspace schedules become
-  Only me schedules when the owner may have Only me schedules, and pause
-  otherwise. Everyone else's pause. The owner's Only me schedules keep running.
+- **Schedules** that target the machine: the new owner's schedules keep running
+  with no change, Only me or Workspace, because a schedule runs as its owner.
+  Everyone else's pause.
 - **Notices**: each affected person other than the one switching gets one
   inbox notification saying what moved, paused or stopped, and that they can
   choose another machine to continue.
@@ -1875,8 +1899,9 @@ The API is the same flow:
 - `POST /v1/workspaces/:ws/machines/:enrollmentId/audience/preview` with
   `{ audience: "only_me" | "workspace", ownerSubjectId? }` returns the plan:
   `summary` counts, `items` (each with its `action`: `move_off`, `keep`,
-  `make_only_me`, `pause` or `remove_first`), whether it is `ready`, and the
-  machine's `generation`.
+  `pause` or `remove_first`; `make_only_me` and `summary.schedulesMadeOnlyMe`
+  are no longer produced), whether it is `ready`, and the machine's
+  `generation`.
 - `PUT /v1/workspaces/:ws/machines/:enrollmentId/audience` with the same body
   plus `expectedGeneration` applies it and returns the counts and the chats it
   moved off. It answers `409` with `details.reason: "stale"` when the machine

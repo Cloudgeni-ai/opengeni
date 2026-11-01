@@ -1,5 +1,47 @@
 # @opengeni/browserd
 
+## 0.4.16
+
+### Patch Changes
+
+- df10fb9: A saved browser identity now opens in the Chromium build that saved it or any newer one, so a placement whose Chromium has updated since the save keeps its sign-ins. Chromium migrates a profile forward itself, and the saved revision is never changed. Only an older build is refused, and the refusal names both versions. A placement on another operating system or architecture is still refused, and the message now says where the identity can open, or that the agent should open a new browser and sign in again.
+- 21d0e30: Browser reads hold up better and say what went wrong. Reading a page whose frames are still loading, which is common just after a browser reopens, no longer fails at once: the driver pauses briefly between its attempts, and a tab list, observation, page read or screenshot that still fails for an unclassified reason is tried once more and then reported as a retryable "unavailable" error instead of a final server error, with the driver's message logged. Actions are never repeated. Reading a page or container that holds a password, payment or private field now returns its public text with only those fields withheld, instead of withholding the whole container. A connected machine that does not answer an action in time now says that the action timed out and its outcome is unknown, instead of mentioning the live view.
+- 21d0e30: Every way an agent reads a page now withholds the same things. An observation showed the text of private and payment elements, the value of a private text area and the options of a card-expiry select, while a page read withheld exactly that text. Observations now find the page's protected elements the way page reads do and show each protected field as present, labelled and fillable, with its value, options, checked state and description withheld; protected text elsewhere is withheld too, and names or descriptions built from it (a button's contents, aria-labelledby, aria-describedby) keep only their public part. A payment-like id or name (card number, CVC, expiry) marks only a form field, so ordinary page text such as a heading with id="credit-card-offers" stays readable; an action on a protected field names it by its label, never its value. A page read no longer returns text the page does not show, such as the inside of a closed details element. A connected machine that does not answer a request in time now says whether the request may have run or was never sent, and a read says it is safe to retry; a missing controller and missing screen access say how to recover, and a controller that stops while a browser or computer is opening says to open it once more. A read the controller gave up retrying keeps the driver's error class and function in the caller's logs.
+- 610aebc: A browser click whose press never reached the page (Chrome sent it, but something outside the page took it) now says so instead of the generic "could not be confirmed": the error names the likely causes, a browser prompt holding the tab's input such as a passkey or permission request, or a frame over the element, and that clicking again will not help while a prompt stays open. It is still reported as `outcome_unknown`.
+- 940e7aa: `computer_open` with an `applicationId` targets the right window of an app that is already running. The launch is sent through the window the computer was last used in (else the focused window) instead of an arbitrary listed one, and when that window belongs to the app it is the window observed, rather than whichever of the app's windows the platform reports first (which can be one another agent works in). The launch receipt names the app window it observed as its target, so it no longer reads as having acted on an unrelated app's window. A desktop launch that finds no window of the app now observes nothing instead of passing the window it was sent through off as the app's.
+- 3805147: A browser fill whose own input navigates the page, or makes the page replace or remove the field (a one-time-code form that submits itself once complete), now reports done with the page it led to, instead of `outcome_unknown` with a raw "Cannot find context with specified id" or "Node with given id does not belong to the document" message. A field that is still there but holds a different value is still reported as `outcome_unknown`.
+- 7c3111a: A click on a control that takes the pointer only while it is hovered no longer fails now and then in cross-origin frames. Chromium sometimes sends the pointer move to the page holding the frame instead of the frame, so nothing in the frame was under the pointer and the control was refused as if it never took the pointer. The move is now sent again, up to three moves in all, while the frame shows nothing under the pointer, and the page is watched for a reaction for a full window after the last move. Controls that never take the pointer are still refused.
+- 6b24515: A browser live view opened while its page is busy now shows the page once it answers. The stream's first frame used to count timeouts toward its three-failure limit, so opening the view, or following a new tab still loading a heavy page, during a busy period of more than about 6 s failed the stream. A first frame that times out now leaves the stream open, and its first frame arrives as soon as the page answers. A first frame that fails for another reason still refuses the stream.
+
+  The same now holds for a browser on a connected machine, whose view goes through the stream relay. browserd pings a frame socket once its subscription is open, and the agent counts the stream ready at that ping instead of at the first frame, which a busy page sends only once it answers. When the agent stops waiting for a stream to be ready, it now closes that stream's browserd subscription and relay channel instead of leaving them running unpaired. While a page does not answer, its live view keeps at most one layout read waiting on it rather than sending another every frame deadline.
+
+- e3194c2: On a Mac, typing right after clicking a field now works in windows whose content is not in their accessibility tree, such as a web sign-in sheet in an iOS Simulator device: the text goes to the clicked point, in that window only. Typing there without such a click says to click the field first instead of naming driver options.
+- Updated dependencies [1f918a4]
+- Updated dependencies [000c023]
+- Updated dependencies [bc5c6d5]
+- Updated dependencies [06adef4]
+- Updated dependencies [ace882b]
+- Updated dependencies [dcb2352]
+- Updated dependencies [894121c]
+- Updated dependencies [f3e6835]
+- Updated dependencies [0b19c29]
+- Updated dependencies [b098518]
+- Updated dependencies [a99a7d6]
+- Updated dependencies [c2f978b]
+- Updated dependencies [c59d7f8]
+- Updated dependencies [237329e]
+- Updated dependencies [bf3cf84]
+- Updated dependencies [cdb9d27]
+- Updated dependencies [cfce969]
+- Updated dependencies [df44bd8]
+- Updated dependencies [4bd54f1]
+- Updated dependencies [3b9a997]
+- Updated dependencies [1efa378]
+- Updated dependencies [237329e]
+- Updated dependencies [af8a173]
+  - @opengeni/contracts@6.4.0
+  - @opengeni/interaction@6.4.0
+
 ## 0.4.15
 
 ### Patch Changes

@@ -579,7 +579,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if state.level != Level::Running
             && let Some(by_ms) = record.first_wake_by_ms.filter(|by| *by > unix_ms_now())
         {
-            inputs.push(self.first_wake(id, size, record.disk == Disk::Remote, by_ms));
+            inputs.push(self.first_wake(id, size, policy, record.disk == Disk::Remote, by_ms));
         }
         inputs.push(Input::Add {
             sandbox: id.0,

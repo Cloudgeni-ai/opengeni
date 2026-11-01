@@ -7,13 +7,30 @@ import type {
 import { createGitHubAppInstallationTokenWithExpiry } from "@opengeni/github";
 
 /** Standalone credential broker: the deployment's GitHub App installation tokens.
- * Embedded hosts keep precedence by supplying their own connectionCredentials. */
+ * Embedded hosts keep precedence by supplying their own connectionCredentials.
+ * A session with several GitHub bindings (more than one App installation, or an
+ * installation next to the user's own GitHub) requires every provider to echo
+ * the exact binding it minted for, so this port echoes the requested binding. */
 export function createStandaloneConnectionCredentialsPort(
   settings: Settings,
 ): ConnectionCredentialsPort {
-  return {
+  const port: ConnectionCredentialsPort = {
     gitCredentials: async (request) => await resolveStandaloneGitCredentials(settings, request),
   };
+  standalonePorts.add(port);
+  return port;
+}
+
+const standalonePorts = new WeakSet<ConnectionCredentialsPort>();
+
+/**
+ * True when Git tokens come from Opengeni's own GitHub App (the standalone
+ * port, or no port at all), not from a host credential callback.
+ */
+export function gitTokensMintedByOpengeni(
+  port: ConnectionCredentialsPort | null | undefined,
+): boolean {
+  return !port?.gitCredentials || standalonePorts.has(port);
 }
 
 async function resolveStandaloneGitCredentials(
@@ -24,8 +41,13 @@ async function resolveStandaloneGitCredentials(
   if (provider !== "github") {
     throw new Error(`${provider} Git credentials require an explicit host binding`);
   }
+  const bindingEcho = {
+    ...(request.credentialBindingId ? { credentialBindingId: request.credentialBindingId } : {}),
+    ...(request.credentialBindingId ? { provider: "github" as const } : {}),
+    ...(request.providerHost ? { providerHost: request.providerHost } : {}),
+  };
   if (request.purpose === "identity") {
-    return { workspaceId: request.workspaceId };
+    return { workspaceId: request.workspaceId, ...bindingEcho };
   }
   const minted = await createGitHubAppInstallationTokenWithExpiry(settings, {
     installationId: request.installationId,
@@ -34,6 +56,7 @@ async function resolveStandaloneGitCredentials(
   return {
     token: minted.token,
     workspaceId: request.workspaceId,
+    ...bindingEcho,
     ...(minted.expiresAt ? { expiresAt: minted.expiresAt } : {}),
   };
 }

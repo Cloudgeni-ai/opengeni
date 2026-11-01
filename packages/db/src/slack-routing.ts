@@ -25,6 +25,7 @@ import { and, eq, lte, sql } from "drizzle-orm";
 
 import { rawRows, withRlsContext, type Database } from "./database";
 import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
+import { joinedWorkspaceIsNotPersonal } from "./personal-workspace-membership";
 import * as schema from "./schema";
 import { workspaceMembershipPermissionsAllowSlackLink } from "./slack-user-link-access";
 
@@ -46,12 +47,14 @@ export type SlackChannelRoute = {
   decidedBySubjectId: string;
   decidedBySlackUserId: string;
   source: SlackRouteSource;
+  /** Set when a Slack agent answers in this channel. */
+  slackAgentId: string | null;
   version: number;
   createdAt: Date;
   updatedAt: Date;
 };
 
-export type SlackUserDmRoute = Omit<SlackChannelRoute, "slackChannelId"> & {
+export type SlackUserDmRoute = Omit<SlackChannelRoute, "slackChannelId" | "slackAgentId"> & {
   slackUserId: string;
 };
 
@@ -64,9 +67,14 @@ export type UpsertSlackChannelRouteInput = {
   decidedBySubjectId: string;
   decidedBySlackUserId: string;
   source: SlackRouteSource;
+  /** A Slack agent that answers here; its target must equal `targetWorkspaceId`. */
+  slackAgentId?: string | null;
 };
 
-export type UpsertSlackUserDmRouteInput = Omit<UpsertSlackChannelRouteInput, "slackChannelId"> & {
+export type UpsertSlackUserDmRouteInput = Omit<
+  UpsertSlackChannelRouteInput,
+  "slackChannelId" | "slackAgentId"
+> & {
   slackUserId: string;
 };
 
@@ -84,6 +92,8 @@ export type SlackRoutableWorkspace = {
   label: string;
   /** True for the subject's own personal workspace, which has no membership row. */
   personal: boolean;
+  /** Set when this choice is a Slack agent working in that workspace. */
+  slackAgentId?: string | null;
 };
 
 function mapChannelRoute(row: typeof schema.slackChannelRoutes.$inferSelect): SlackChannelRoute {
@@ -99,6 +109,7 @@ function mapChannelRoute(row: typeof schema.slackChannelRoutes.$inferSelect): Sl
     decidedBySubjectId: row.decidedBySubjectId,
     decidedBySlackUserId: row.decidedBySlackUserId,
     source: row.source,
+    slackAgentId: row.slackAgentId ?? null,
     version: row.version,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -284,6 +295,7 @@ export async function upsertSlackChannelRoute(
         decidedBySubjectId: input.decidedBySubjectId,
         decidedBySlackUserId: input.decidedBySlackUserId,
         source: input.source,
+        slackAgentId: input.slackAgentId ?? null,
       })
       .onConflictDoUpdate({
         target: [schema.slackChannelRoutes.connectionId, schema.slackChannelRoutes.slackChannelId],
@@ -294,6 +306,7 @@ export async function upsertSlackChannelRoute(
           decidedBySubjectId: input.decidedBySubjectId,
           decidedBySlackUserId: input.decidedBySlackUserId,
           source: input.source,
+          slackAgentId: input.slackAgentId ?? null,
           version: sql`${schema.slackChannelRoutes.version} + 1`,
           updatedAt: sql`now()`,
         },
@@ -438,6 +451,7 @@ export async function listNamedSubjectSlackRoutableWorkspaces(
       and(
         eq(schema.workspaceMemberships.subjectId, input.subjectId),
         eq(schema.workspaces.accountId, input.accountId),
+        joinedWorkspaceIsNotPersonal(),
       ),
     );
 
@@ -521,6 +535,8 @@ export type SlackRoutePromptOption = {
   candidateAccountId: string;
   candidateWorkspaceId: string;
   candidateLabel: string;
+  /** Set when the option is a Slack agent. */
+  candidateSlackAgentId: string | null;
   position: number;
 };
 
@@ -564,6 +580,7 @@ async function promptOptions(
     candidateAccountId: row.candidateAccountId,
     candidateWorkspaceId: row.candidateWorkspaceId,
     candidateLabel: row.candidateLabel,
+    candidateSlackAgentId: row.candidateSlackAgentId ?? null,
     position: row.position,
   }));
 }
@@ -669,6 +686,7 @@ export async function openSlackRoutePrompt(
         candidateAccountId: candidate.accountId,
         candidateWorkspaceId: candidate.workspaceId,
         candidateLabel: candidate.label,
+        candidateSlackAgentId: candidate.slackAgentId ?? null,
         position: index,
       }));
       if (offered.length > 0) {
@@ -712,6 +730,7 @@ export async function getSlackRoutePromptByOption(
         candidateAccountId: option.candidateAccountId,
         candidateWorkspaceId: option.candidateWorkspaceId,
         candidateLabel: option.candidateLabel,
+        candidateSlackAgentId: option.candidateSlackAgentId ?? null,
         position: option.position,
       },
     };
@@ -768,6 +787,8 @@ export async function answerSlackRoutePrompt(
     promptId: string;
     targetAccountId: string;
     targetWorkspaceId: string;
+    /** A Slack agent chosen on the card. Only ever remembered for a channel. */
+    slackAgentId?: string | null;
     answeredBySubjectId: string;
     decidedBySlackUserId: string;
     now?: Date;
@@ -834,6 +855,7 @@ export async function answerSlackRoutePrompt(
           decidedBySubjectId: input.answeredBySubjectId,
           decidedBySlackUserId: input.decidedBySlackUserId,
           source: "picker",
+          ...(input.slackAgentId ? { slackAgentId: input.slackAgentId } : {}),
         });
       }
 
@@ -858,6 +880,7 @@ export async function answerSlackRoutePrompt(
             routeState: "resolved",
             targetAccountId: input.targetAccountId,
             targetWorkspaceId: input.targetWorkspaceId,
+            ...(input.slackAgentId ? { targetSlackAgentId: input.slackAgentId } : {}),
           },
         ])
         .onConflictDoNothing();

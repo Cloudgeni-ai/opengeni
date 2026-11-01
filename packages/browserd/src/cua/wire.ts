@@ -116,6 +116,10 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   // Background keys refused before any was sent: another window of the app
   // (a sheet, a dialog) has the keyboard focus.
   window_not_key: "invalid_action",
+  // Background typing refused before any key was sent: the window's focused
+  // element is not a text input, as far as accessibility shows (a Simulator
+  // device or other content drawn outside it), so keys could drive the view.
+  no_focused_text_input: "invalid_action",
   // Background keys refused before any was sent: the app named no focused
   // window, so where they would go is unknown.
   key_focus_unknown: "invalid_action",

@@ -61,7 +61,7 @@ use crate::state::{Claim, Identity, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::{OwnerEpoch, Store};
 
-use super::requests::{first_wake_by_ms, new_files};
+use super::requests::new_files;
 use super::{End, Event, HostAgent, HostError, Reply};
 
 /// Most ready sandboxes filled at once on a host.
@@ -794,6 +794,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         else {
             return Some((config, reply));
         };
+        // Checked before the claim; a create the host would refuse goes on
+        // without a ready sandbox, which refuses it.
+        let Ok(policy) = self.sleep_policy(&config) else {
+            return Some((config, reply));
+        };
         let idle = self.ready.idle.remove(at)?;
         let Some(sources) = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources)) else {
             self.ready.idle.insert(at, idle);
@@ -811,8 +816,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // filled under until the sandbox joins the core.
         let bytes = self.ready.spares.remove(&host.0).unwrap_or(shape.bytes());
         let size = self.size(&config, None);
-        let by_ms = first_wake_by_ms();
-        let first_wake = self.first_wake(id, size, false, by_ms);
+        let by_ms = self.first_wake_by_ms();
+        let first_wake = self.first_wake(id, size, policy, false, by_ms);
         self.inputs([
             Input::Spare {
                 sandbox: host.0,

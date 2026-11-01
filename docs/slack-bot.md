@@ -461,6 +461,61 @@ Direct messages are a rule rather than a control: they always use each person's 
 
 App Home stays home, so it lists the installation workspace's tasks rather than aggregating routed ones. The "anyone in this channel may use this workspace" access mode is a separate piece of work: nothing here changes which channels the bot can read, `verifyChannelAccess`, or the reaction-channel allowlist semantics.
 
+## Slack agents
+
+A Slack agent is a named teammate people call through the one Opengeni app: a name, an icon, a one-line description, a fixed target workspace, instructions and a shared Memory. Each new top-level request starts a new chat in the agent's workspace and thread replies continue it, but all of an agent's chats share its Memory and can list each other, so it behaves like one teammate when several people ask at once. Agents are not bot templates; a template can prefill a new agent once ("Use in Slack") with no lasting link.
+
+Agents need workspace routing (`OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`). With routing off, or with no agents defined, every message is read and routed exactly as before: the agent list is empty, the name matcher returns nothing, and no agent text is added to any chat.
+
+### Data
+
+`slack_agents` belongs to one Slack installation, keyed by its connection, under the installation's home tenancy like `slack_channel_routes`. It records the target account and workspace (same organization by CHECK; deleting the target workspace deletes its agents), the name and its `name_key` (lower-cased with spaces and hyphens removed, unique per installation), description, required avatar (the session avatar type), instructions, the Memory collection id, `open` (default off), creator and version. Everyone in the organization can read the directory; writes stay under home tenancy.
+
+- `slack_channel_routes.slack_agent_id`: the channel's "who answers" setting may name an agent. Deleting the agent deletes that setting.
+- `slack_interactions.slack_agent_id` is frozen when a thread binds. `handoff_from_slack_agent_id` records who passed it on, and `last_inbound_*` says which message the chat is answering.
+- `slack_agent_user_states` holds the one-time "next time" hint and first use per person and agent.
+- `slack_bot_user_links.updates_muted_at` is the per-person mute for update messages.
+
+### Routing
+
+Deterministic, before any agent runs; there is no model-based choice. First match wins:
+
+1. A mapped thread keeps its chat. A plain mention continues the thread's agent; an explicit name in the thread switches it to that agent, retiring the old route like a handoff. Only the person who started the thread, or someone who can use its current workspace, can switch it. An unknown `+name` in a thread is ordinary text and continues the thread.
+2. `in <Workspace>:` exactly as before.
+3. **An agent name** at the start of what the person typed: the longest agent name, or `+name`. Case, spaces and hyphens are ignored, so `+data-team`, `+DataTeam` and `Data Team` all match "Data Team". `+name` also tolerates one typo when exactly one agent is that close; a bare name must match exactly and only right after a leading mention or in a slash command. `+` followed by anything but a letter (`+1`, `+100`, `+ also…`) is ordinary text, so a name starting with a digit matches only when typed exactly. In channels only a message that mentions Opengeni (or a slash command) is read; `+name` without a mention counts in a DM. Names start and end with a letter or digit. The name is stripped from the request like the `in X:` prefix. Reserved names: in, info, stop, help, create, opengeni, here, channel, everyone.
+4. **The channel setting**, "Who answers in #channel": an agent or "Opengeni in <Workspace>". Administrators set it under Capabilities → Slack, and the picker can remember it.
+5. DM rules, then a sole candidate, as before.
+6. The picker, which in a channel now lists agents before workspaces, with the choice remembered for the channel.
+
+When nothing names an agent, routing is unchanged, and the chat still knows the agent list so it can hand off.
+
+### Identity and context
+
+An agent's Slack posts use the agent's name and icon (`chat:write.customize`), read from the agent record rather than the session title; a deleted agent's chats post as Opengeni. Chats keep normal titles; in the app they show the agent's avatar and a "Slack agent: <name>" chip. The first message reads "<Agent> is on it", plus "Passed on by <Agent>" after a handoff, plus a one-time hint per person and agent: "<Agent> · next time: @Opengeni +name" (not shown when they already used the name).
+
+Every chat started from Slack in an installation with agents is told its own identity and instructions (when it is an agent), the other agents (name, description, workspace) and how to hand off, and to check its Memory and its recent chats when context is missing and save lasting facts to Memory. The existing attached channel history is the only channel context; chats do not re-read channels.
+
+**Memory** is a workspace Knowledge collection named after the agent, created with it. When the target workspace saves Knowledge for review first, the agent settings say Memory writes go to review. `slack_agent_chats` lists the agent's recent chats in its workspace, filtered by agent id and excluding private DM chats.
+
+### Handoff
+
+`slack_agent_handoff({ agent, note? })` exists only in Slack-started chats of an installation with agents. It re-runs the ordinary interaction pipeline for the same Slack message in the target agent's workspace and rebinds the thread to the new chat. At most one hop per incoming message, never to itself and never back to the agent that handed off. The handing-off chat ends with `NO_REPLY`; the receiving agent's first message says who passed it on. The asker's access to the target is checked first: if they cannot use it they get a private reply naming the agent and its workspace with a request-access link, and no chat is created. The message passed on is the one the calling turn is answering, with the first agent's address removed, and its sender is the person whose access is checked. A retried call reports the same hand-off without queuing it twice. Files on the original message are not re-attached.
+
+### Access
+
+Members only: an agent answers people who can start work in its workspace, today's rule. Otherwise a private reply says "<Agent> works in the <Workspace> workspace, which you don't have access to. Request access: …". An unknown `+name` gets "No agent called X. Available: +a, +b." Neither starts a chat.
+
+### Managing agents
+
+**Capabilities → Slack → Slack agents**. Admins of the target workspace create, edit and delete its agents; edit rights follow the current admins, not the creator. Anyone in the organization sees the list; instructions, Memory and creator are shown only to people who can read the agent's workspace. Intro channels are channels the app is in and that are not shared outside the Slack workspace; private ones are offered only to admins of the installation's workspace. Creating checks that the Opengeni Slack app is available in the workspace (`slack_bot_unavailable` otherwise, with an offer to turn it on). After creating, an admin can post an intro, under the agent's name, in channels the app is already in; nobody is DMed. Deleting a workspace deletes its agents and their channel settings, and the delete confirmation lists them.
+
+API: `GET|POST /v1/workspaces/:workspaceId/integrations/slack/agents`, `PATCH|DELETE …/agents/:agentId`, `GET …/agents/:agentId/channels`, `POST …/agents/:agentId/intro`. Channel routes carry `slackAgentId`.
+
+### Discoverability
+
+- App Home lists the agents the person can use at the top: icon, name, description and how to call it.
+- `/opengeni info` lists the agents the caller can use. A bare `/opengeni` replies with the same card instead of an error.
+
 ## Channel access and tools
 
 - Channel listing can discover public channels and reports whether the bot is a member.

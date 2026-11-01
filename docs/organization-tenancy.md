@@ -244,15 +244,37 @@ cross-organization visibility remains impossible.
 Workspace settings › Available here shows what agent turns in one workspace can
 use, grouped by owner: the workspace's own things, the organization's things
 that reach the workspace, and the viewer's own things. It reads the same lists
-each kind's own page reads (connector installations, Connected Machines, rigs,
+each kind's own page reads (the connector catalog, Connected Machines, rigs,
 vaults, Skills and Knowledge), so it never shows anything those pages would not:
 other people's personal resources never appear, and a kind the viewer may not
-list is left out instead of shown as an error. Each row says who manages it
+list is left out instead of shown as an error. Connectors are the workspace's
+own installations, the organization's connectors that reach the workspace (one
+the workspace turned off is left out, and one whose organization setup is
+broken is marked unavailable), and, in a Personal workspace, the owner's Only
+me connectors carried in from other workspaces. Each row says who manages it
 (workspace admins for connectors and machines, workspace members and admins for
 rigs, vaults, Skills and Knowledge, organization owners for organization things,
 only the owner for personal things) and opens the thing's own page. Model plans
 and keys stay on Organization settings › Models, which already shows each
 one's owner; the page links there for people who may open it.
+
+### Shared
+
+Organization settings › Shared, for organization owners and admins, shows
+everything the organization shares with its workspaces and where each works.
+Model plans and keys link to Organization settings › Models. The
+organization's machines, rigs, Skills and Knowledge work in every workspace,
+Personal workspaces included, so the page reads them from the lists of the
+workspace it is opened from, kept to what the organization owns. Organization
+vaults work only where their "Available in" says, so the page reads
+`GET /v1/workspaces/:workspaceId/organization-vaults`, which lists every
+organization vault wherever it works (account administrators only), and says
+for each one where it works and where it opens: in this workspace when it works
+here, else in the first workspace by name that it works in and the viewer can
+open, else nowhere. An admin who isn't an owner, or a server that has not
+granted the list yet, gets the organization vaults that work in the current
+workspace, and the page says so. The page links to Developer (webhooks and the
+credential provider) for people who manage the organization's API keys.
 
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
@@ -283,6 +305,44 @@ This runtime projection does not create user-resource authority or grant rows.
 The personal workspace still receives no `workspace_memberships` row, so
 membership CRUD and subject-membership fallback cannot discover or widen the
 owner-only projection.
+
+### One member, enforced by the database (migration 1159)
+
+Migration `1159_personal_workspace_single_member.sql` turns "a Personal
+workspace has exactly one member, its owner" from a runtime property into a
+database rule. It comes ahead of giving the owner a real membership row in a later
+release. A workspace is Personal when it carries the Personal identity:
+`external_source = 'opengeni:organization-membership'` and
+`external_id = '<organization id>:<owner subject>'`
+(`PERSONAL_WORKSPACE_EXTERNAL_SOURCE`). Triggers refuse, for every writer:
+
+- any `workspace_memberships` row there except its owner's, including an
+  organization owner's or admin's;
+- an owner row with an `owner` or `admin` role, or with `workspace:admin`,
+  `members:manage`, `api_keys:manage` or `usage_allowances:manage`, so the row
+  can never let anyone else in;
+- moving a row into, out of, or within a Personal workspace to another person,
+  workspace or organization;
+- pointing an organization membership at someone else's Personal workspace,
+  or moving it to another person while it points at one (the existing
+  `(personal_workspace_id, account_id)` foreign key already keeps it in the
+  same organization);
+- changing a Personal workspace's identity, or giving an existing workspace one.
+
+`POST /v1/workspaces` and `PUT /v1/workspaces/external` refuse that external
+source (422), so nobody can create someone's Personal workspace before they
+join.
+
+A row in a Personal workspace is never membership to the runtime. Every
+TypeScript membership reader (`getWorkspaceGrant`, workspace lists, member
+lists, the session-list, pin, draft and search fences, Slack, recordings,
+Sites, MCP OAuth and `subjectHasLiveWorkspaceAuthorityInScope`) excludes it
+through `membershipOutsidePersonalWorkspace`
+(`packages/db/src/personal-workspace-membership.ts`). A membership row admits
+whoever names its subject, so the owner keeps reaching Personal only through
+the pointer with verified owning-user proof. The previous release reads rows
+without that exclusion. The owner's row can therefore be created and backfilled
+only in a release after this one is in production.
 
 ### Session ownership at the mint (migration 0302)
 
@@ -828,6 +888,12 @@ browsers and vaults, which keep working from shared workspaces, and existing
 chats, their workers and existing schedules there keep working and stay
 reachable by link.
 
+They also choose whether members connect machines of their own
+(`membersConnectOwnMachines`, column `members_connect_own_machines`, migration
+1148, on by default). Off, only owners and admins connect new Only me machines,
+or any machine in a Personal workspace; machines already connected keep
+working. See [Connect a machine](connected-machines.md#connect-a-machine).
+
 EU-only inference is an organization setting too
 (`organization_inference_residency` and its append-only
 `organization_inference_residency_events`, migration 1060,
@@ -1262,7 +1328,11 @@ sources (`scheduled_tasks:*`), changes or deletes any bot template shared with
 the workspace, and records posts on their own social accounts. A signed-in
 Member also edits the workspace instructions
 and reviews the agent's proposed changes to them (`sessions:create`, see
-[workspace instruction policies](workspace-instruction-policies.md)).
+[workspace instruction policies](workspace-instruction-policies.md)), renames a
+shared workspace (`PATCH /v1/workspaces/:workspaceId` with `name`; its `slug`
+stays Admin-only and a Personal workspace keeps its name), and adds or removes
+its custom model entries (Gateway, OpenRouter, Opper and Claude custom models;
+the keys and subscriptions they run on stay Admin-only).
 Settings-class powers stay Admin-only:
 `workspace:admin` (workspace settings, learning settings, Insights),
 `members:manage`, `api_keys:manage`, `github:manage` (the workspace GitHub
@@ -1285,9 +1355,11 @@ external (`external_user:`) memberships are excluded too: an organization
 service key stores them as role `member` with a caller-chosen permission set,
 which a preset change must not widen.
 Organization owners and administrators may create and rename shared
-workspaces, grant or replace access, and revoke access. Ordinary organization
-members, cross-organization membership ids, and every Personal workspace fail
-closed. Organization membership role changes keep the 0263 sole-owner
+workspaces, grant or replace access, and revoke access through these
+organization routes. Ordinary organization members, cross-organization
+membership ids, and every Personal workspace fail closed here; a member who can
+start chats in a shared workspace still renames it from its own settings
+(`PATCH /v1/workspaces/:workspaceId`). Organization membership role changes keep the 0263 sole-owner
 invariant; workspace roles do not alter organization roles.
 
 That authority covers every shared workspace in the organization and every

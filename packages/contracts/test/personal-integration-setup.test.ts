@@ -212,6 +212,17 @@ describe("personal integration setup", () => {
     expect(inChatCapabilitySetup({ permissions: personal }, gmail, shared)).toEqual({
       kind: "unavailable",
     });
+    // Your GitHub is connected by the person themselves: connections:write.
+    expect(
+      inChatCapabilitySetup(
+        { permissions: [...chat, "connections:write"] },
+        "api:github-personal",
+        undefined,
+      ),
+    ).toEqual({ kind: "default" });
+    expect(
+      inChatCapabilitySetup({ permissions: personal }, "api:github-personal", undefined),
+    ).toEqual({ kind: "unavailable" });
     // Other kinds of setup are not decided here.
     expect(inChatCapabilitySetup({ permissions: chat }, "api:github-app", undefined)).toEqual({
       kind: "default",

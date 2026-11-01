@@ -127,6 +127,7 @@ import {
   resolveSessionAdminAuthority,
   sessionStartedByPerson,
   rlsContextForWorkspace,
+  SessionRepositoryRemovedError,
   withSubscriptionAccountAdministrators,
   ambientBillingOrigin,
   withBillingOriginOverride,
@@ -335,6 +336,7 @@ import { registerModelAccountChoiceRoutes } from "./routes/model-account-choice"
 import { registerSessionAdminAccessRoutes } from "./routes/session-admin-access";
 import { registerSecretRedactionRoutes } from "./routes/secret-redactions";
 import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
+import { registerOrganizationConnectorRoutes } from "./routes/organization-connectors";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerVaultProviderRoutes, vaultProviderRegistryFor } from "./routes/vault-providers";
@@ -394,6 +396,7 @@ import { registerCompanyProfileRoutes } from "./routes/company-profile";
 import { registerCompanyBrainRoutes } from "./routes/company-brain";
 import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
 import { registerSlackBotAccessRoutes } from "./routes/slack-bot-access";
+import { registerSlackAgentRoutes } from "./routes/slack-agents";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { isSiteDataFileUploadRequest, registerSiteDataRoutes } from "./routes/site-data";
@@ -2511,6 +2514,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerCompanyBrainRoutes(app, routeDeps);
   registerSlackTaskPolicyRoutes(app, routeDeps);
   registerSlackBotAccessRoutes(app, routeDeps);
+  registerSlackAgentRoutes(app, routeDeps);
   registerWorkspaceStateRoutes(app, routeDeps);
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
@@ -2570,6 +2574,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceModelProviderRoutes(app, routeDeps);
   registerClaudeSubscriptionOAuthRoutes(app, routeDeps);
   registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
+  registerOrganizationConnectorRoutes(app, routeDeps);
   registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerClaudeSubscriptionAccountRoutes(app, routeDeps);
@@ -2615,7 +2620,8 @@ export function createAppComposition(deps: AppDependencies): {
     // One central mapping for every Send/Steer/control route: a bounded
     // control-prefix wait that expired is a known, retryable, not-applied 503.
     const error =
-      rawError instanceof OrganizationIntegrationDeniedError
+      rawError instanceof OrganizationIntegrationDeniedError ||
+      rawError instanceof SessionRepositoryRemovedError
         ? new HTTPException(403, { message: rawError.message })
         : rawError instanceof PersonalWorkspacesOffError
           ? new ApiHttpError(403, {

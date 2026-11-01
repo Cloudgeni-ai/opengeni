@@ -5,7 +5,13 @@ import type {
   WorkspaceArtifactVisibility,
   Workspace,
 } from "@opengeni/contracts";
-import { getManagedUserProfilesByIds, updateFileVisibility, type Database } from "@opengeni/db";
+import {
+  getManagedUserProfilesByIds,
+  ownRecordingWorkspaces,
+  updateFileReach,
+  updateFileVisibility,
+  type Database,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
 import type { PrivacySettings } from "../application/organization-privacy";
@@ -25,6 +31,11 @@ export const FILE_PRIVATE_DISABLED_MESSAGE = "Only me is turned off for this org
 export const FILE_OWNER_REQUIRED_MESSAGE = "Only the file's owner can change who can open it.";
 export const FILE_NOT_SHAREABLE_MESSAGE =
   "Session screenshots and saved tool output stay with their chat and can't be shared.";
+export const FILE_REACH_OWNER_MESSAGE = "Only the file's owner can change where it works.";
+export const FILE_REACH_NOT_PRIVATE_MESSAGE =
+  "Only an Only me file works in other workspaces; a workspace file works in its workspace.";
+export const FILE_REACH_WORKSPACES_MESSAGE =
+  "reachWorkspaceIds must be workspaces of this organization you belong to";
 
 /** The stored audience of a file, in Site vocabulary. */
 export function fileVisibility(file: Pick<FileAsset, "scope">): WorkspaceArtifactVisibility {
@@ -137,5 +148,55 @@ export async function changeFileVisibility(input: {
       throw new HTTPException(403, { message: FILE_OWNER_REQUIRED_MESSAGE });
     case "not_changeable":
       throw new HTTPException(409, { message: FILE_NOT_SHAREABLE_MESSAGE });
+  }
+}
+
+/**
+ * The owner's change of where their Only me file works besides the workspace
+ * that stores it and their Personal workspace: the other workspaces of the
+ * organization they belong to, or all of them (null). It stays Only me in
+ * each, so only they and agent turns they start can use it there. Changed
+ * from the workspace that stores the file.
+ */
+export async function changeFileReach(input: {
+  db: Database;
+  grant: AccessGrant;
+  workspace: Pick<Workspace, "id">;
+  person: string | null;
+  fileId: string;
+  reachWorkspaceIds: readonly string[] | null;
+}): Promise<{ file: FileAsset; changed: boolean }> {
+  if (!input.person) throw new HTTPException(403, { message: FILE_REACH_OWNER_MESSAGE });
+  let reach = input.reachWorkspaceIds;
+  if (reach) {
+    const own = await ownRecordingWorkspaces(input.db, {
+      accountId: input.grant.accountId,
+      workspaceId: input.workspace.id,
+      subjectId: input.person,
+    });
+    const known = new Map(own.map((workspace) => [workspace.id, workspace]));
+    if (reach.some((id) => id !== input.workspace.id && !known.has(id)))
+      throw new HTTPException(400, { message: FILE_REACH_WORKSPACES_MESSAGE });
+    // Their Personal workspace always has it, so it isn't stored.
+    reach = reach.filter((id) => known.get(id)?.personal !== true);
+  }
+  const result = await updateFileReach(input.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.workspace.id,
+    fileId: input.fileId,
+    reachWorkspaceIds: reach,
+    actorSubjectId: input.person,
+    auditSubjectId: input.grant.subjectId,
+  });
+  switch (result.kind) {
+    case "changed":
+    case "unchanged":
+      return { file: result.file, changed: result.kind === "changed" };
+    case "not_found":
+      throw new HTTPException(404, { message: "file not found" });
+    case "not_owner":
+      throw new HTTPException(403, { message: FILE_REACH_OWNER_MESSAGE });
+    case "not_private":
+      throw new HTTPException(409, { message: FILE_REACH_NOT_PRIVATE_MESSAGE });
   }
 }

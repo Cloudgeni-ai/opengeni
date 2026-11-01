@@ -1806,51 +1806,6 @@ spec:
             user_impact: 'No user impact yet; this is an early warning of connection trouble.'
             next_step: 'Watch for real failures; check NATS and relay health if it persists.'
         # ── Worker fleet ─────────────────────────────────────────────────────
-        # Google Drive scheduled knowledge sync. Every rule is fenced to the
-        # exact namespace, Helm release, configured environment, and provider.
-        - alert: OpenGeniGoogleDriveSyncFailureRatio
-          expr: |
-            (
-              sum(increase(opengeni_knowledge_source_sync_runs_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="google_drive",outcome="failed"}[15m]))
-              /
-              clamp_min(sum(increase(opengeni_knowledge_source_sync_runs_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="google_drive"}[15m])), 1)
-            ) > 0.2
-            and on()
-            sum(increase(opengeni_knowledge_source_sync_runs_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="google_drive"}[15m])) >= 5
-          for: 15m
-          labels:
-            severity: warning
-          annotations:
-            summary: 'More than 20% of Google Drive knowledge syncs failed over 15 minutes.'
-            headline: 'Google Drive knowledge sync failing'
-            value: '{{ "{{ $value | humanizePercentage }}" }} of syncs failed (15 min)'
-            user_impact: 'Workspace knowledge from Google Drive may be out of date in agent answers.'
-            next_step: 'Check the failure reasons; reconnect-required means a user must reconnect Google Drive.'
-            description: Inspect bounded failure reasons, provider retry, reconnect-required, and explicit limit-hit series before changing retry or source budgets.
-        - alert: OpenGeniGoogleDriveReconnectRequired
-          expr: |
-            sum(increase(opengeni_knowledge_source_sync_reconnect_required_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="google_drive"}[15m])) > 0
-          labels:
-            severity: warning
-          annotations:
-            summary: 'A Google Drive knowledge source needs its connection reconnected.'
-            headline: 'Google Drive connection needs reconnecting'
-            value: '{{ "{{ printf `%.0f` $value }}" }} sync(s) blocked (15 min)'
-            user_impact: 'That Drive source stops updating until its owner reconnects it.'
-            next_step: 'Ask the connection owner to reconnect Google Drive in Opengeni; no platform fix is needed.'
-            description: Reconnect through the normal user-owned connection lifecycle; never copy tokens or provider responses into operator evidence.
-        - alert: OpenGeniGoogleDriveSyncLimitReached
-          expr: |
-            sum by (limit) (increase(opengeni_knowledge_source_sync_limit_hits_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="google_drive"}[30m])) > 0
-          labels:
-            severity: info
-          annotations:
-            summary: 'A Google Drive sync reached its {{ "{{ $labels.limit }}" }} limit.'
-            headline: 'Google Drive sync hit a size limit'
-            value: '{{ "{{ printf `%.0f` $value }}" }} time(s) (30 min)'
-            user_impact: 'Some Drive files are not being indexed for agents.'
-            next_step: 'Check the source size against the limit before raising it.'
-            description: Inspect the limit label and source size before approving any configuration increase.
         # This is telemetry completeness, NOT an autoscaling demand record.
         # `up` lacks environment/component: join only its actual scrape identity.
         # A missing ready target, monitor value, timestamp or KSM deployment

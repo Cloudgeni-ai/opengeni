@@ -16,7 +16,7 @@
 //     the super-wildcard). Connecting or changing a machine then follows its
 //     scope (../sandbox/machine-authority.ts): a signed-in teammate connects
 //     their own Only me machine; workspace machines need enrollments:manage and
-//     organization machines also account:admin.
+//     organization machines also the organization's owner or an admin.
 //
 // The cross-workspace safety of an unauthenticated start: start binds the request
 // to a workspaceId the agent supplies, and ONLY a user holding a grant in THAT
@@ -64,6 +64,7 @@ import {
   defaultConnectCommandScope,
   requireMachineAccessGrant,
   requireMachineScopeAuthority,
+  requireOwnMachineConnectAllowed,
 } from "../sandbox/machine-authority";
 import {
   approveDeviceEnrollment,
@@ -368,6 +369,8 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         : undefined;
     // No scope keeps the legacy workspace machine.
     requireMachineScopeAuthority(authorization, effectiveScope ?? "workspace", "connect");
+    // The organization may keep machines of one's own to its owners and admins.
+    await requireOwnMachineConnectAllowed(deps, authorization, effectiveScope ?? "workspace");
     const allowOrganization = effectiveScope === "organization";
     const approved = await approveDeviceEnrollment(
       { db, settings },
@@ -466,6 +469,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
           "only a person, or a credential acting as that person, can connect a machine for themselves; keys, services and agents acting as themselves can connect workspace machines",
       });
     }
+    await requireOwnMachineConnectAllowed(deps, authorization, personal ? "user" : "workspace");
     const minted = await mintEnrollToken(
       { db, settings },
       {

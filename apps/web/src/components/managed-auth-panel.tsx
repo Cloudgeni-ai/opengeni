@@ -887,7 +887,7 @@ function EmailNotAllowedNotice(props: {
         {props.invitation
           ? // A team invitation doesn't approve the address for the service, so
             // sending the person back to the link they just used can't help.
-            `Only approved email addresses can create an account here, and an invitation to ${props.invitation.organizationName} doesn't approve ${props.invitation.targetEmail} on its own. Ask whoever runs this service to allow ${props.invitation.targetEmail}, then open your invitation link again.`
+            `This email can't create an account here, and an invitation to ${props.invitation.organizationName} doesn't give ${props.invitation.targetEmail} access on its own. Ask the admin of this service to allow ${props.invitation.targetEmail}, then open your invitation link again.`
           : SIGNUP_EMAIL_NOT_ALLOWED_MESSAGE}
       </Notice>
       {props.onUseDifferentEmail ? (

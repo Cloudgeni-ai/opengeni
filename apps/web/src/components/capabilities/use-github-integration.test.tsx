@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -28,7 +28,17 @@ mock.module("@opengeni/react/app/app-context", () => ({
   },
 }));
 
+// The repository chooser is its own dialog; record what the adapter asks of it.
+const personalDialog: { current: { open: boolean; loading?: boolean } | null } = { current: null };
+mock.module("./personal-github-dialog", () => ({
+  PersonalGitHubDialog: (props: { open: boolean; loading?: boolean }) => {
+    personalDialog.current = props;
+    return null;
+  },
+}));
+
 const { useGitHubIntegration } = await import("./use-github-integration");
+const { markPersonalGitHubRepositoryChooser } = await import("@/lib/personal-github-oauth");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -93,8 +103,9 @@ async function renderAdapter(context: Record<string, unknown>, initialWorkspaceI
   mutableContext.current = context;
   let captured: IntegrationViewModel | null = null;
   function Probe({ workspaceId }: { workspaceId: string }) {
-    captured = useGitHubIntegration({ workspaceId }).model;
-    return null;
+    const adapter = useGitHubIntegration({ workspaceId });
+    captured = adapter.model;
+    return adapter.dialogs;
   }
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -414,6 +425,245 @@ describe("GitHub load failures", () => {
       expect(model.notice?.title).toBe("GitHub status could not be loaded.");
       model.notice!.action!.onClick();
       expect(refreshes).toEqual([[WORKSPACE_ID, undefined, { userInitiated: true }]]);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+});
+
+function personalConnection(status: "active" | "needs_reauth" = "active") {
+  return {
+    id: "55555555-5555-4555-8555-555555555555",
+    version: 3,
+    status,
+    providerDomain: "github.com",
+    kind: "oauth2",
+    metadata: { githubLogin: "octocat" },
+  };
+}
+
+function personalContext(
+  overrides: Record<string, unknown> = {},
+  permissions = ["github:manage", "connections:read", "connections:write"],
+) {
+  return {
+    ...appContext(
+      permissions,
+      mock(async () => ({})),
+    ),
+    personalGitHubStatus: { enabled: true, connection: null, reviewUrl: null },
+    personalGitHubSelection: null,
+    personalGitHubRepositories: [],
+    personalGitHubCatalogReady: true,
+    connectPersonalGitHub: mock(async () => {}),
+    reconnectPersonalGitHub: mock(async () => {}),
+    ...overrides,
+  };
+}
+
+function section(model: IntegrationViewModel, id: string) {
+  const found = model.sections?.find((candidate) => candidate.id === id);
+  if (!found) throw new Error(`Missing section ${id}`);
+  return found;
+}
+
+describe("GitHub connects two ways", () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+    personalDialog.current = null;
+  });
+
+  test("names each identity with one action and keeps only Disconnect in the header", async () => {
+    const context = personalContext();
+    const rendered = await renderAdapter(context);
+    try {
+      const model = rendered.model();
+      expect(model.sections?.map((entry) => entry.title)).toEqual(["Your GitHub", "Opengeni app"]);
+      const personal = section(model, "github-personal");
+      expect(personal.description).toBe(
+        "Work appears under your name. Only in chats you start, on repos you choose.",
+      );
+      expect(personal.action?.label).toBe("Connect");
+      expect(personal.action?.primary).toBe(true);
+      expect(personal.action?.connectProviderId).toBe("github-personal");
+      const app = section(model, "github-app");
+      expect(app.description).toBe("Work appears as the Opengeni bot, shared with the workspace.");
+      expect(app.status).toBe("Installed on Cloudgeni-ai");
+      expect(app.action?.label).toBe("Install on another account");
+      expect(app.action?.connectProviderId).toBe("github-app");
+      expect(model.connection).toEqual([]);
+      expect(model.access?.title).toBe("Opengeni app repositories");
+      expect(model.footer).toMatchObject({
+        kind: "actions",
+        secondary: { label: "Disconnect Opengeni app", destructive: true },
+      });
+      if (model.footer.kind === "actions") expect(model.footer.primary).toBeUndefined();
+      expect(JSON.stringify(model)).not.toContain("Connect another account");
+      personal.action?.onClick();
+      expect(context.connectPersonalGitHub).toHaveBeenCalledWith(WORKSPACE_ID);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("connected shows the login and repo count, and zero repos makes Choose repos the next step", async () => {
+    const rendered = await renderAdapter(
+      personalContext({
+        personalGitHubStatus: {
+          enabled: true,
+          connection: personalConnection(),
+          reviewUrl: null,
+        },
+        personalGitHubSelection: { repositories: [] },
+      }),
+    );
+    try {
+      const personal = section(rendered.model(), "github-personal");
+      expect(personal.status).toBe("Connected as @octocat · 0 repos");
+      expect(personal.action?.label).toBe("Choose repos");
+      expect(personal.action?.primary).toBe(true);
+      expect(personalDialog.current?.open).toBe(false);
+      await act(async () => {
+        personal.action?.onClick();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(personalDialog.current?.open).toBe(true);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("returning from GitHub opens the repository chooser directly", async () => {
+    markPersonalGitHubRepositoryChooser(WORKSPACE_ID);
+    const rendered = await renderAdapter(
+      personalContext({
+        personalGitHubStatus: {
+          enabled: true,
+          connection: personalConnection(),
+          reviewUrl: null,
+        },
+        personalGitHubSelection: { repositories: [{}, {}] },
+      }),
+    );
+    try {
+      expect(section(rendered.model(), "github-personal").status).toBe(
+        "Connected as @octocat · 2 repos",
+      );
+      expect(personalDialog.current?.open).toBe(true);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("the agent's connect link opens the chooser once connected and is removed from the URL", async () => {
+    const page = (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM;
+    page.setURL("http://localhost/workspaces/w/plugins?open=integration%3Agithub&github=personal");
+    const rendered = await renderAdapter(
+      personalContext({
+        personalGitHubStatus: {
+          enabled: true,
+          connection: personalConnection(),
+          reviewUrl: null,
+        },
+        personalGitHubSelection: { repositories: [] },
+      }),
+    );
+    try {
+      expect(personalDialog.current?.open).toBe(true);
+      expect(window.location.search).toBe("?open=integration%3Agithub");
+    } finally {
+      await rendered.unmount();
+      page.setURL("http://localhost/");
+    }
+  });
+
+  test("the connect link never opens the chooser for a viewer who can't save it", async () => {
+    const page = (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM;
+    page.setURL("http://localhost/workspaces/w/plugins?open=integration%3Agithub&github=personal");
+    const rendered = await renderAdapter(
+      personalContext(
+        {
+          personalGitHubStatus: {
+            enabled: true,
+            connection: personalConnection(),
+            reviewUrl: null,
+          },
+          personalGitHubSelection: { repositories: [] },
+        },
+        ["github:manage", "connections:read"],
+      ),
+    );
+    try {
+      expect(personalDialog.current?.open ?? false).toBe(false);
+      expect(window.location.search).toBe("?open=integration%3Agithub");
+    } finally {
+      await rendered.unmount();
+      page.setURL("http://localhost/");
+    }
+  });
+
+  test("reconnect, and notes in place of actions the viewer cannot take", async () => {
+    const rendered = await renderAdapter(
+      personalContext(
+        {
+          personalGitHubStatus: {
+            enabled: true,
+            connection: personalConnection("needs_reauth"),
+            reviewUrl: null,
+          },
+        },
+        ["connections:read"],
+      ),
+    );
+    try {
+      const model = rendered.model();
+      expect(model.chip.label).toBe("Needs attention");
+      const personal = section(model, "github-personal");
+      expect(personal.status).toBe("@octocat needs to reconnect.");
+      expect(personal.action).toBeUndefined();
+      expect(personal.note).toBeTruthy();
+      const app = section(model, "github-app");
+      expect(app.action).toBeUndefined();
+      expect(app.note).toBe("A workspace admin manages the Opengeni app.");
+      expect(model.footer).toEqual({ kind: "actions" });
+    } finally {
+      await rendered.unmount();
+    }
+    const writer = await renderAdapter(
+      personalContext({
+        personalGitHubStatus: {
+          enabled: true,
+          connection: personalConnection("needs_reauth"),
+          reviewUrl: null,
+        },
+      }),
+    );
+    try {
+      const action = section(writer.model(), "github-personal").action;
+      expect(action?.label).toBe("Reconnect");
+      action?.onClick();
+      expect(
+        (mutableContext.current.reconnectPersonalGitHub as ReturnType<typeof mock>).mock.calls,
+      ).toHaveLength(1);
+    } finally {
+      await writer.unmount();
+    }
+  });
+
+  test("without personal sign-in the sheet keeps the single App layout", async () => {
+    const rendered = await renderAdapter(
+      appContext(
+        ["github:manage"],
+        mock(async () => ({})),
+      ),
+    );
+    try {
+      const model = rendered.model();
+      expect(model.sections).toBeUndefined();
+      expect(model.description).toBe(
+        "Work on repositories, issues, and pull requests through the Opengeni app.",
+      );
+      expect(model.access?.title).toBe("Repositories");
     } finally {
       await rendered.unmount();
     }

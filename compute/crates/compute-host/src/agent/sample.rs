@@ -191,6 +191,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .collect(),
             None => Vec::new(),
         };
+        // Creates still waiting for their image or a disk reading keep the
+        // room they hold for as long as they wait.
+        batch.extend(self.held_rooms());
         // Resident sizes always, so the status can report reclaimable
         // memory; they go in before the host total so relief is planned
         // from fresh numbers. The whole sweep is one batch, so no sleep

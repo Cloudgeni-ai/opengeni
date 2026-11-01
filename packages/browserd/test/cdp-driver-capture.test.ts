@@ -10,6 +10,7 @@ import {
   CdpProtocolError,
   type BrowserCommandRunner,
 } from "../src";
+import { protectedFieldsProbeAnswer } from "./fixtures/protected-fields-probe";
 
 const jpeg = Buffer.from([
   0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0, 0xff, 0xd9,
@@ -566,6 +567,51 @@ test("a lost connection fails the live view instead of leaving a frozen subscrip
   }
 });
 
+test("a live view opened while its page is busy shows the page once it answers", async () => {
+  // Its first frame used to count timeouts toward the three-failure limit,
+  // so opening the view during a busy period failed it after about 6 s.
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    fixture.setPageBusy(true);
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    const next = frames[Symbol.asyncIterator]().next();
+    expect(await nextFrameWithin(next, 6_000)).toBe("pending");
+    fixture.setPageBusy(false);
+    expect(await nextFrameWithin(next, 3_000)).toBe("frame");
+  } finally {
+    fixture.setPageBusy(false);
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 20_000);
+
+test("a live view of a busy page keeps at most one layout read waiting on it", async () => {
+  // Each frame deadline (about 2 s) used to send one more read into a
+  // renderer that answers none of them.
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    fixture.setPageBusy(true);
+    const before = fixture.calls.length;
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    const next = frames[Symbol.asyncIterator]().next();
+    expect(await nextFrameWithin(next, 7_000)).toBe("pending");
+    const layoutReads = fixture.calls
+      .slice(before)
+      .filter((call) => call.method === "Page.getLayoutMetrics" && call.sessionId);
+    expect(layoutReads).toHaveLength(1);
+    fixture.setPageBusy(false);
+    expect(await nextFrameWithin(next, 3_000)).toBe("frame");
+  } finally {
+    fixture.setPageBusy(false);
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 20_000);
+
 test("frames that keep failing for another reason still end the live view", async () => {
   const fixture = await captureFixture();
   let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
@@ -583,6 +629,19 @@ test("frames that keep failing for another reason still end the live view", asyn
     await fixture.driver.close();
   }
 }, 20_000);
+
+test("a live view whose first frame keeps failing for another reason is refused", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.failMethod("Page.captureScreenshot", "synthetic capture failure");
+    await expect(fixture.driver.subscribeFrames("target-1", { format: "jpeg" })).rejects.toThrow(
+      "synthetic capture failure",
+    );
+  } finally {
+    await fixture.driver.close();
+  }
+});
 
 test("a screenshot of attached Chrome queued behind a frame still gives up at the stall bound", async () => {
   // The wait for the frame comes out of the screenshot's own 3 s, not on top.
@@ -1027,6 +1086,57 @@ test("a tab that never draws fails as a plain timeout and leaves the queue usabl
   }
 });
 
+// A tab a relaunched browser has just restored can report no page size for a
+// moment after it is listed; the capture waits for it to lay out.
+test("a tab that has not laid out yet is captured once it does", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.calls.length = 0;
+    fixture.reportUnlaidLayouts(3);
+    expect(await fixture.driver.captureScreenshot("target-1", { format: "jpeg" })).toMatchObject({
+      targetId: "target-1",
+      width: 3,
+      height: 2,
+    });
+    expect(
+      fixture.calls.filter((call) => call.method === "Page.getLayoutMetrics").length,
+    ).toBeGreaterThanOrEqual(4);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a tab that never lays out fails as a plain timeout and leaves the queue usable", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.reportUnlaidLayouts(Number.POSITIVE_INFINITY);
+    jest.useFakeTimers();
+    const failed = fixture.driver.captureScreenshot("target-1").catch((error: unknown) => error);
+    for (let elapsed = 0; elapsed <= 10_200; elapsed += 100) {
+      await settle();
+      jest.advanceTimersByTime(100);
+    }
+    const error = await failed;
+    expect(error).toBeInstanceOf(InteractionControllerError);
+    expect(error).toMatchObject({
+      code: "timeout",
+      retryable: true,
+      message:
+        "browser screenshot timed out: Chrome had not drawn this tab yet; retry shortly, or read it with browser_observe",
+    });
+    jest.useRealTimers();
+    fixture.reportUnlaidLayouts(0);
+    expect(await fixture.driver.captureScreenshot("target-1", { format: "jpeg" })).toMatchObject({
+      targetId: "target-1",
+    });
+  } finally {
+    jest.useRealTimers();
+    await fixture.driver.close();
+  }
+});
+
 test("other capture refusals are not repeated", async () => {
   const fixture = await captureFixture();
   try {
@@ -1182,6 +1292,8 @@ async function captureFixture(
   // Captures Chromium refuses, as it does while a tab has no drawn surface.
   let captureRefusals = 0;
   let captureRefusal = "Unable to capture screenshot";
+  // Layout reads that report no page size, as a just-restored tab does.
+  let unlaidLayouts = 0;
   let stalledMethod: string | null = null;
   let stalledWhen: ((params: Record<string, any> | undefined) => boolean) | null = null;
   let stalled: { id: number; method: string; sessionId?: string } | null = null;
@@ -1269,14 +1381,16 @@ async function captureFixture(
     if (command.method === "Accessibility.getFullAXTree") result = { nodes: [] };
     if (command.method === "DOMSnapshot.captureSnapshot") result = protectionSnapshot;
     if (command.method === "Page.getLayoutMetrics") {
+      const unlaid = unlaidLayouts > 0;
+      if (unlaid) unlaidLayouts -= 1;
       result = {
         cssVisualViewport: {
           pageX: 0,
           pageY: 0,
-          clientWidth: raster?.width ?? 3,
-          clientHeight: raster?.height ?? 2,
+          clientWidth: unlaid ? 0 : (raster?.width ?? 3),
+          clientHeight: unlaid ? 0 : (raster?.height ?? 2),
         },
-        cssContentSize: { x: 0, y: 0, width: 3, height: 2 },
+        cssContentSize: { x: 0, y: 0, width: unlaid ? 0 : 3, height: unlaid ? 0 : 2 },
       };
     }
     if (command.method === "Page.captureScreenshot") {
@@ -1305,6 +1419,7 @@ async function captureFixture(
         result = { data: data.toString("base64") };
       } else result = { data: data.toString("base64") };
     }
+    result = protectedFieldsProbeAnswer(command.method, command.params) ?? result;
     queueMicrotask(() =>
       socket.dispatchEvent(
         new MessageEvent("message", {
@@ -1395,6 +1510,9 @@ async function captureFixture(
     refuseCaptures(count: number, message = "Unable to capture screenshot") {
       captureRefusals = count;
       captureRefusal = message;
+    },
+    reportUnlaidLayouts(count: number) {
+      unlaidLayouts = count;
     },
     disconnect: () => socket.close(),
     delayNext(method: string, delayMs: number) {

@@ -7,6 +7,7 @@ import {
 } from "../../machines";
 import { useAppContext } from "../app-context";
 import { hasWorkspacePermission, isSignedInPerson } from "./permissions";
+import { canAdministerOrganization } from "./workspaces";
 
 export { isSignedInPerson };
 
@@ -19,10 +20,11 @@ const emptySeries = async (): Promise<MetricSample[]> => [];
 // Stock-console reads follow the current workspace grant. The public React
 // hook remains usable by embedding hosts with their own authorization model.
 // Anyone who can see machines connects and changes their own Only me
-// machines; workspace machines need enrollments:manage (`canManage`).
+// machines; workspace machines need enrollments:manage (`canManage`), and
+// organization machines also the organization's owner or an admin.
 export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
   const { workspaceId } = useOpenGeni();
-  const { accessContext } = useAppContext();
+  const { accessContext, clientConfig } = useAppContext();
   const targetWorkspaceId = options.workspaceId ?? workspaceId;
   const canRead =
     (!options.sessionId ||
@@ -36,9 +38,23 @@ export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
     canRead && hasWorkspacePermission(accessContext, targetWorkspaceId, "sessions:control");
   const fleet = useMachines({ ...options, enabled: canRead && options.enabled !== false });
   const machines = canRead ? fleet.machines : EMPTY_MACHINES;
-  /** Change this machine: your own Only me machine, or any with canManage. */
+  const administersOrganization = canAdministerOrganization({
+    accessContext,
+    clientConfig,
+    accountId: accessContext.workspaceGrants.find(
+      (grant) => grant.workspaceId === targetWorkspaceId,
+    )?.accountId,
+  });
+  /**
+   * Change this machine: your own Only me machine, a workspace machine with
+   * canManage, an organization machine with canManage as its owner or an admin.
+   */
   const canManageMachine = (machine: Pick<MachineView, "scope">) =>
-    machine.scope === "user" ? canConnect : canManage;
+    machine.scope === "user"
+      ? canConnect
+      : machine.scope === "organization"
+        ? canManage && administersOrganization
+        : canManage;
   const mayChange = (enrollmentId: string) => {
     const machine = machines.find((candidate) => candidate.enrollmentId === enrollmentId);
     return machine ? canManageMachine(machine) : canManage;
@@ -48,6 +64,12 @@ export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
     canRead,
     canManage,
     canConnect,
+    /**
+     * Connect a new machine of one's own (Only me, or any machine in a
+     * Personal workspace). Off when the organization keeps that to its
+     * owners and admins; machines already connected stay changeable.
+     */
+    canConnectOwnMachine: canConnect && fleet.canConnectOwnMachine,
     canManageMachine,
     canControl,
     canRemove: canConnect && fleet.canRemove,
