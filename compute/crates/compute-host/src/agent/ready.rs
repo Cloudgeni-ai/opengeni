@@ -856,6 +856,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         disk_bytes,
                     };
                     let claimed = records.claim(host, fence, claim).await;
+                    // Claimed, it is its sandbox's only copy (see
+                    // `Record::only_copy`); a mark that cannot be set
+                    // leaves it fenced like any other, which is safe.
+                    if let Ok(record) = &claimed
+                        && let Err(error) = engine.set_only_copy(&idle.live.vm, record.only_copy)
+                    {
+                        tracing::warn!(%id, %error, "the claimed VM's mark as its sandbox's only copy is not set");
+                    }
                     ClaimResult::Claimed(claimed.map(Box::new).map_err(HostError::from))
                 }
                 Ok(Fit::Stale) => ClaimResult::Stale,

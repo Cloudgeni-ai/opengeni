@@ -19,6 +19,7 @@ test("1105's session trigger fires for exactly the offered chat types", () => {
     "session.notification.withdrawn",
     "session.agentCall.ringing",
     "session.agentCall.settled",
+    "turn.superseded",
   ];
   const chatTypes = WORKSPACE_WEBHOOK_EVENT_TYPES.filter(
     (type) =>

@@ -98,23 +98,20 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * it. 0988 withholds the queued-turn
  * hold summary; until it is granted, the control worker does not publish it.
  * 1002 withheld the held-browser inventory and 1093 granted it.
- * 1060 withholds the EU-only change function; until it is granted the setting
- * cannot be changed and stays off. 1091 withholds the secret history scrub's
+ * 1060 withheld the EU-only change function and 1210 granted it. 1091
+ * withholds the secret history scrub's
  * reader and cell writer; until they are granted, a scrub reports the cells
- * only they reach as pending. 1103 withholds the subscription
- * account-administrator grant; until it is granted, only organization
- * membership administrators administer the organization's subscription
- * accounts. 1107 withholds the agent call routines and the native push v2
- * functions that carry the iOS VoIP token; until they are granted, native push
- * keeps its v1 functions, no phone takes calls and agents cannot place one.
+ * only they reach as pending. 1103 withheld the subscription
+ * account-administrator grant and 1149 granted it. 1107 withholds the agent
+ * call routines and the native push v2 functions that carry the iOS VoIP
+ * token; until they are granted, native push keeps its v1 functions, no phone
+ * takes calls and agents cannot place one.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "summarize_queued_turns_by_hold()",
-  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
-  "grant_subscription_account_administrator(jsonb)",
   "native_push_device_v2(text)",
   "register_native_push_device_v2(text, text, text, text, text, text[], text)",
   "claim_native_push_deliveries_v2(uuid, integer, integer)",

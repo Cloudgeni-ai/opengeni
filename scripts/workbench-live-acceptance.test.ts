@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 
+import { englishMessages } from "../packages/react/src/messages/en";
 import {
   createTerminalOutputProbe,
   axeManualContrastSelector,
@@ -22,6 +23,7 @@ import {
   controlCancellationTimelineMs,
   fixturePrompt,
   isExpectedBrowserCancellation,
+  LIVE_STOPPING_STATE_TEXT,
   liveStoppingStateLocator,
   maskKnownPublicEvidenceValues,
   openWorkspaceIfCollapsed,
@@ -92,11 +94,27 @@ describe("workbench live acceptance preflight", () => {
 
     expect(liveStoppingStateLocator(page, "steer")).toBe(steering as never);
     expect(liveStoppingStateLocator(page, "pause")).toBe(steering as never);
-    expect(testIds).toEqual(["session-chrome-steering", "session-chrome-steering"]);
+    expect(testIds).toEqual(["session-chrome-stopping", "session-chrome-stopping"]);
     expect(filters).toEqual([
-      { hasText: "Stopping previous work" },
-      { hasText: "Stopping current work" },
+      { hasText: "Previous work stopping" },
+      { hasText: "Current work stopping" },
     ]);
+  });
+
+  test("stays bound to the stopping chip SessionChrome actually renders", async () => {
+    // The live proof can only fail closed if its locator can match the product:
+    // a renamed test id or reworded chip must break here, not on a hosted run.
+    expect(LIVE_STOPPING_STATE_TEXT).toEqual({
+      steer: englishMessages["sessionChrome.previousWorkStopping"],
+      pause: englishMessages["sessionChrome.currentWorkStopping"],
+    });
+    const chrome = await readFile(
+      resolve(import.meta.dir, "../packages/react/src/components/session-chrome.tsx"),
+      "utf8",
+    );
+    expect(chrome).toContain('data-testid="session-chrome-stopping"');
+    expect(chrome).toContain('t("sessionChrome.currentWorkStopping")');
+    expect(chrome).toContain('t("sessionChrome.previousWorkStopping")');
   });
 
   test("observes split binary terminal output without depending on xterm DOM rows", async () => {

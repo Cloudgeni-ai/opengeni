@@ -22,7 +22,9 @@ import type {
 export function CustomApiSection({
   instances,
   connections,
+  canAdd,
   canManage,
+  canChange,
   busyKey,
   onConnect,
   onUpdate,
@@ -31,7 +33,12 @@ export function CustomApiSection({
 }: {
   instances: ApiIntegrationInstallationSummary[];
   connections: ConnectionMetadata[] | null;
+  /** Connect a new custom API (members, unless their organization keeps it for admins). */
+  canAdd: boolean;
+  /** Remove an instance. */
   canManage: boolean;
+  /** Reconnect or update an instance that is already set up (integration admins). */
+  canChange: boolean;
   busyKey: string | null;
   onConnect: () => void;
   onUpdate: (instance: ApiIntegrationInstallationSummary) => void;
@@ -66,7 +73,7 @@ export function CustomApiSection({
           size="sm"
           className="pointer-coarse:min-h-11"
           onClick={onConnect}
-          disabled={!canManage || busyKey !== null}
+          disabled={!canAdd || busyKey !== null}
         >
           Connect custom API
         </Button>
@@ -158,7 +165,7 @@ export function CustomApiSection({
                         variant="outline"
                         size="xs"
                         className="pointer-coarse:min-h-11"
-                        disabled={!canManage || busyKey !== null}
+                        disabled={!canChange || busyKey !== null}
                         onClick={() => onReconnect(instance)}
                       >
                         <RotateCwIcon />
@@ -170,7 +177,7 @@ export function CustomApiSection({
                       variant="outline"
                       size="xs"
                       className="pointer-coarse:min-h-11"
-                      disabled={!canManage || busyKey !== null}
+                      disabled={!canChange || busyKey !== null}
                       onClick={() => onUpdate(instance)}
                     >
                       <RefreshCwIcon />
@@ -217,9 +224,10 @@ function customApiInstanceStatus(
 }
 
 function StatusIcon({ status }: { status: "ready" | "attention" | "unavailable" }) {
-  if (status === "ready") return <CheckCircle2Icon className="size-4 shrink-0 text-success" />;
+  if (status === "ready")
+    return <CheckCircle2Icon className="size-4 shrink-0 text-status-success" />;
   if (status === "unavailable") return <CloudOffIcon className="size-4 shrink-0 text-fg-subtle" />;
-  return <AlertTriangleIcon className="size-4 shrink-0 text-warning" />;
+  return <AlertTriangleIcon className="size-4 shrink-0 text-status-waiting" />;
 }
 
 function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {

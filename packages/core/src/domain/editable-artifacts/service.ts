@@ -78,6 +78,7 @@ import {
   type ApplyEditableArtifactTransactionRequest,
   type ApplyEditableArtifactTransactionResult,
   type CreateEditableArtifactRequest,
+  type EditableArtifactAudience,
   type CreateEditableArtifactResult,
   type EditableArtifactOriginalImport,
   type ImportEditableArtifactRequest,
@@ -299,6 +300,7 @@ export class EditableArtifactService {
         modality: request.modality,
         title: request.title,
         createdBySubjectId: actor.subjectId,
+        ...(request.audience ? { audience: request.audience } : {}),
         genesisSnapshot,
         outbox,
       });
@@ -445,6 +447,7 @@ export class EditableArtifactService {
         modality: request.modality,
         title: request.title,
         createdBySubjectId: actor.subjectId,
+        ...(request.audience ? { audience: request.audience } : {}),
         genesisSnapshot,
         originalImport,
         outbox,
@@ -1506,10 +1509,15 @@ function normalizeCreateRequest(
   input: CreateEditableArtifactRequest,
 ): CreateEditableArtifactRequest {
   const record = plainDataRecord(input, "artifact create request");
-  rejectUnknownKeys(record, ["idempotencyKey", "modality", "title"], "artifact create request");
+  rejectUnknownKeys(
+    record,
+    ["idempotencyKey", "modality", "title", "audience"],
+    "artifact create request",
+  );
   const rawIdempotencyKey = dataProperty(record, "idempotencyKey", true);
   const modality = dataProperty(record, "modality", true);
   const title = dataProperty(record, "title", true);
+  const audience = normalizeAudience(dataProperty(record, "audience", false));
   if (
     typeof rawIdempotencyKey !== "string" ||
     typeof title !== "string" ||
@@ -1522,6 +1530,7 @@ function normalizeCreateRequest(
     idempotencyKey: editableArtifactClientTransactionId(rawIdempotencyKey),
     modality,
     title,
+    ...(audience ? { audience } : {}),
   });
 }
 
@@ -1531,7 +1540,7 @@ function normalizeImportRequest(
   const record = plainDataRecord(input, "artifact import request");
   rejectUnknownKeys(
     record,
-    ["idempotencyKey", "modality", "title", "originalImport", "snapshot"],
+    ["idempotencyKey", "modality", "title", "originalImport", "snapshot", "audience"],
     "artifact import request",
   );
   const rawIdempotencyKey = dataProperty(record, "idempotencyKey", true);
@@ -1539,6 +1548,7 @@ function normalizeImportRequest(
   const title = dataProperty(record, "title", true);
   const rawOriginalImport = dataProperty(record, "originalImport", true);
   const rawSnapshot = dataProperty(record, "snapshot", true);
+  const audience = normalizeAudience(dataProperty(record, "audience", false));
   if (
     typeof rawIdempotencyKey !== "string" ||
     typeof title !== "string" ||
@@ -1580,7 +1590,28 @@ function normalizeImportRequest(
     title,
     originalImport,
     snapshot: Object.freeze(snapshot) as ImportEditableArtifactRequest["snapshot"],
+    ...(audience ? { audience } : {}),
   });
+}
+
+function normalizeAudience(input: unknown): EditableArtifactAudience | undefined {
+  if (input === undefined) return undefined;
+  const record = plainDataRecord(input, "artifact audience");
+  rejectUnknownKeys(record, ["visibility", "ownerSubjectId"], "artifact audience");
+  const visibility = dataProperty(record, "visibility", true);
+  const ownerSubjectId = dataProperty(record, "ownerSubjectId", true);
+  if (
+    (visibility !== "workspace_shared" && visibility !== "user_private") ||
+    (ownerSubjectId !== null &&
+      (typeof ownerSubjectId !== "string" ||
+        ownerSubjectId.length < 1 ||
+        ownerSubjectId.length > 256 ||
+        ownerSubjectId.trim() !== ownerSubjectId)) ||
+    (visibility === "user_private" && ownerSubjectId === null)
+  ) {
+    throw new TypeError("Artifact audience is malformed");
+  }
+  return Object.freeze({ visibility, ownerSubjectId });
 }
 
 function normalizeOriginalImport(

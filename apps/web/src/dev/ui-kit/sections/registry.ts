@@ -88,6 +88,7 @@ export const SECTION_KEYS = [
   "list-row",
   "detail-sheet",
   "empty-state",
+  "available-here",
   // Selection
   "setting-row",
   "switch",
@@ -358,6 +359,16 @@ export const SECTIONS: readonly SectionMeta[] = [
       },
     ],
     load: () => import("./empty-state"),
+  },
+
+  {
+    key: "available-here",
+    group: "Lists",
+    title: "Available here",
+    purpose:
+      "What agents in one workspace can use, grouped by who it belongs to, with who manages each.",
+    usedOn: "Workspace settings › Available here",
+    load: () => import("./available-here"),
   },
 
   // ---------------------------------------------------------------- Selection
