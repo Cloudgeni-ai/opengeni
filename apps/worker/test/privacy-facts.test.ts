@@ -112,18 +112,15 @@ describe("Opengeni's own storage claims in the table", () => {
     expect(PROVIDER_DATA_POLICIES.codex_subscription.opengeni).toContain(
       "Opengeni asks OpenAI not to store responses",
     );
-    // Main chat turns on Azure and the OpenAI API leave `store` at its default.
+    // Main chat turns on Azure and the OpenAI platform send store:false
+    // (packages/runtime/test/responses-store.test.ts).
     expect(PROVIDER_DATA_POLICIES.openai_api.opengeni).toContain(
-      "Opengeni does not turn off Responses API storage for chat turns",
+      "Opengeni asks OpenAI not to store Responses API response data for chat turns (store: false)",
     );
     expect(PROVIDER_DATA_POLICIES.azure_openai.opengeni).toContain(
-      "Opengeni does not turn off Responses API storage on Azure chat turns",
+      "Opengeni asks Azure not to store Responses API response data for chat turns (store: false)",
     );
-    for (const family of ["openai_api", "azure_openai", "vercel_ai_gateway"] as const) {
-      expect(PROVIDER_DATA_POLICIES[family].opengeni ?? "").not.toContain(
-        "asks OpenAI not to store",
-      );
-    }
+    expect(PROVIDER_DATA_POLICIES.vercel_ai_gateway.opengeni ?? "").not.toContain("store");
     // Statements about Opengeni's own requests live only in `opengeni`.
     for (const policy of Object.values(PROVIDER_DATA_POLICIES)) {
       expect(`${policy.training} ${policy.retention} ${policy.location}`).not.toMatch(
@@ -139,7 +136,7 @@ describe("Opengeni's own storage claims in the table", () => {
       deployment: DEPLOYMENT,
     });
     expect(direct).toContain(
-      "- Opengeni's requests: Opengeni does not turn off Responses API storage for chat turns.",
+      "- Opengeni's requests: Opengeni asks OpenAI not to store Responses API response data for chat turns (store: false)",
     );
     const gateway = renderPrivacyFacts({
       route: route({ baseUrl: "https://ai-gateway.vercel.sh/v1", gatewayOnly: ["openai"] }),
@@ -148,6 +145,63 @@ describe("Opengeni's own storage claims in the table", () => {
     });
     expect(gateway).toContain("Upstream provider behind the gateway");
     expect(gateway).not.toContain("Opengeni's requests:");
+  });
+});
+
+describe("the store:false line follows the runtime's routes", () => {
+  const kept =
+    "- Opengeni's requests: Opengeni does not turn off Responses API storage on this route.";
+  const builtin = (baseUrl: string | null, wireProfile = "openai"): PrivacyFactsRoute => {
+    const value = route({ baseUrl, wireProfile });
+    return { ...value, provider: { ...value.provider!, builtin: true } };
+  };
+  test.each([
+    [
+      "workspace OpenAI key",
+      route({ kind: "direct-openai-workspace" }),
+      "asks OpenAI not to store",
+    ],
+    [
+      "organization OpenAI key",
+      route({ kind: "direct-openai-organization" }),
+      "asks OpenAI not to store",
+    ],
+    ["built-in OpenAI, default endpoint", builtin(null), "asks OpenAI not to store"],
+    [
+      "built-in OpenAI on api.openai.com",
+      builtin("https://api.openai.com/v1"),
+      "asks OpenAI not to store",
+    ],
+    ["built-in Azure", builtin(AZURE_NEU, "azure-openai"), "asks Azure not to store"],
+    [
+      "workspace Azure key",
+      route({ kind: "direct-azure-workspace", wireProfile: "azure-openai", baseUrl: AZURE_NEU }),
+      "asks Azure not to store",
+    ],
+    [
+      "operator registry provider on api.openai.com",
+      route({ baseUrl: "https://api.openai.com/v1" }),
+      kept,
+    ],
+  ])("%s", (_name, value, expected) => {
+    const text = renderPrivacyFacts({ route: value, live: LIVE_OFF, deployment: DEPLOYMENT });
+    expect(text).toContain(expected);
+  });
+
+  test("preserve mode and chat-completions routes make no store:false claim", () => {
+    const preserved = renderPrivacyFacts({
+      route: route({ kind: "direct-openai-workspace" }),
+      live: LIVE_OFF,
+      deployment: { ...DEPLOYMENT, preservesProviderItemIds: true },
+    });
+    expect(preserved).toContain(kept);
+    expect(preserved).not.toContain("store: false");
+    const chatApi = renderPrivacyFacts({
+      route: route({ api: "chat", wireProfile: "azure-openai", baseUrl: AZURE_NEU }),
+      live: LIVE_OFF,
+      deployment: DEPLOYMENT,
+    });
+    expect(chatApi).not.toContain("Opengeni's requests:");
   });
 });
 

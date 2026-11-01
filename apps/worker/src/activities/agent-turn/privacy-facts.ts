@@ -1,5 +1,10 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
-import type { ConfiguredModel, ResolvedModelProvider, Settings } from "@opengeni/config";
+import {
+  isDirectOpenAiApiBaseUrl,
+  type ConfiguredModel,
+  type ResolvedModelProvider,
+  type Settings,
+} from "@opengeni/config";
 import { COMPUTER_SCREENSHOT_RETENTION_MS, type ModelResidencyV1 } from "@opengeni/contracts";
 import { isWorkspaceEuOnly, type Database } from "@opengeni/db";
 import {
@@ -53,6 +58,11 @@ export type PrivacyFactsDeployment = {
   sandboxes: { backend: string; regions: readonly string[] | null };
   /** Idle chats move to read-only long-term storage after this many days. */
   sessionArchiveIdleDays: number | null;
+  /**
+   * `OPENGENI_OPENAI_PROVIDER_ITEM_IDS=preserve`: chat turns then keep provider
+   * ids and do not ask Azure or OpenAI to skip Responses storage.
+   */
+  preservesProviderItemIds?: boolean;
 };
 
 const SELF_HOSTED_SANDBOX_BACKENDS: ReadonlySet<string> = new Set(["docker", "local"]);
@@ -248,18 +258,59 @@ function residencyText(residency: ModelResidencyV1 | null): string {
 function policyLines(
   heading: string,
   policy: ProviderDataPolicy,
-  options: { direct: boolean },
+  opengeni: string | null,
 ): string[] {
   return [
     `${heading}: ${policy.provider}`,
     `- Trains on the data: ${policy.training}`,
     `- Keeps the data: ${policy.retention}`,
     `- Where it processes: ${policy.location}`,
-    ...(options.direct && policy.opengeni ? [`- Opengeni's requests: ${policy.opengeni}`] : []),
+    ...(opengeni ? [`- Opengeni's requests: ${opengeni}`] : []),
     policy.sources.length > 0
       ? `- Sources (checked ${policy.checkedOn}): ${policy.sources.join(" ; ")}`
       : "- Sources: none; this provider is not in Opengeni's reviewed table.",
   ];
+}
+
+const RESPONSES_STORAGE_KEPT = "Opengeni does not turn off Responses API storage on this route.";
+
+/**
+ * Whether this route's chat turns send `store: false`, mirroring the runtime:
+ * every Azure OpenAI wire route, workspace and organization OpenAI keys, and
+ * the built-in OpenAI client on api.openai.com. An operator's registry
+ * provider pointing at api.openai.com is left alone, and preserve mode keeps
+ * provider ids, so neither asks.
+ */
+export function routeSendsStorelessResponses(
+  route: PrivacyFactsRoute,
+  preservesProviderItemIds: boolean,
+): boolean {
+  const provider = route.provider;
+  if (!provider || provider.api !== "responses" || preservesProviderItemIds) return false;
+  if (provider.wireProfile === "azure-openai") return true;
+  if (provider.wireProfile !== "openai") return false;
+  if (
+    provider.kind === "direct-openai-workspace" ||
+    provider.kind === "direct-openai-organization"
+  ) {
+    return true;
+  }
+  return provider.builtin && isDirectOpenAiApiBaseUrl(provider.baseUrl ?? undefined);
+}
+
+/** The Opengeni-specific line for the provider Opengeni calls directly. */
+function opengeniRequestLine(
+  route: PrivacyFactsRoute,
+  family: ProviderDataPolicyFamily,
+  policy: ProviderDataPolicy,
+  deployment: PrivacyFactsDeployment,
+): string | null {
+  if (family !== "azure_openai" && family !== "openai_api") return policy.opengeni ?? null;
+  // A chat-completions route never creates Responses objects to keep.
+  if (route.provider?.api !== "responses") return null;
+  return routeSendsStorelessResponses(route, deployment.preservesProviderItemIds === true)
+    ? (policy.opengeni ?? null)
+    : RESPONSES_STORAGE_KEPT;
 }
 
 const RETAINED_IMAGE_DAYS = Math.round(COMPUTER_SCREENSHOT_RETENTION_MS / 86_400_000);
@@ -290,7 +341,7 @@ export function renderPrivacyFacts(input: {
         ? "EU-only: on. Every model route this workspace uses must be declared as processing in the EU."
         : "EU-only: off. Model routes may process outside the EU; only say data stays in the EU for a route declared EU above.",
     "",
-    ...policyLines("Provider", policy, { direct: true }),
+    ...policyLines("Provider", policy, opengeniRequestLine(route, family, policy, deployment)),
   ];
   if (family === "vercel_ai_gateway") {
     lines.push(
@@ -299,7 +350,7 @@ export function renderPrivacyFacts(input: {
         ? policyLines(
             "Upstream provider behind the gateway (that provider's public default for its own API customers; Vercel's agreement with it may differ)",
             PROVIDER_DATA_POLICIES[upstreamFamily],
-            { direct: false },
+            null,
           )
         : ["Upstream provider behind the gateway: not pinned by this route (unknown)."]),
     );

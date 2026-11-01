@@ -997,6 +997,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           runSettings.sessionArchiveEnabled && deps.objectStorage
             ? runSettings.sessionArchiveIdleDays
             : null,
+        preservesProviderItemIds: runSettings.openaiProviderItemIds === "preserve",
       },
       loadLive: async () =>
         await loadPrivacyFactsLive({
