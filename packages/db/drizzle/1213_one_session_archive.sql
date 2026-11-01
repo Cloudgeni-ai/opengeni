@@ -31,6 +31,7 @@ BEGIN
   RETURN NEW;
 END;
 $function$;
+REVOKE ALL ON FUNCTION opengeni_private.session_insert_not_archived() FROM PUBLIC;
 DROP TRIGGER IF EXISTS sessions_insert_not_archived ON sessions;
 CREATE TRIGGER sessions_insert_not_archived BEFORE INSERT ON sessions
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.session_insert_not_archived();
