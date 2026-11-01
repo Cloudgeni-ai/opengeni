@@ -9937,6 +9937,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "updateSkillReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/skills/content/:skillId/reach",
+    "request": [
+      "UpdateOrganizationSkillReachRequest"
+    ],
+    "response": [
+      "OrganizationSkillReach"
+    ],
+    "permission": "workspace:read"
+  },
+  {
     "id": "updateVideoGenerationPolicy",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/video-generation/policy",

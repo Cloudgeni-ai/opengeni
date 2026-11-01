@@ -226,9 +226,8 @@ describe("organization admins administer the organization", () => {
     expect(await knowledge(admin, other.workspaceId)).toBe(403);
 
     // Organization Skills (the preference registry's organization scope).
-    const skill = (person: Person, workspaceId: string) => {
-      const skillId = crypto.randomUUID();
-      return status(
+    const skill = (person: Person, workspaceId: string, skillId: string = crypto.randomUUID()) =>
+      status(
         person,
         at(workspaceId, "/skills/content/save"),
         post({
@@ -242,10 +241,22 @@ describe("organization admins administer the organization", () => {
           reason: "Organization fixture",
         }),
       );
-    };
     expect(await skill(member, acme.workspaceId)).toBe(403);
     expect(await skill(admin, other.workspaceId)).toBe(403);
-    expect(await skill(admin, acme.workspaceId)).toBe(200);
+    const adminSkillId = crypto.randomUUID();
+    expect(await skill(admin, acme.workspaceId, adminSkillId)).toBe(200);
+    // Where an organization Skill works follows the same rule.
+    const reach = (person: Person) =>
+      status(person, at(acme.workspaceId, `/skills/content/${adminSkillId}/reach`), {
+        method: "PUT",
+        body: JSON.stringify({
+          allowedWorkspaceIds: [acme.workspaceId],
+          allowPersonalWorkspaces: false,
+        }),
+      });
+    expect(await reach(member)).toBe(403);
+    expect(await reach(admin)).toBe(200);
+    expect(await reach(owner)).toBe(200);
 
     // Organization document backfills and their audit (PostgreSQL checks the stamp).
     const backfills = (workspaceId: string) =>

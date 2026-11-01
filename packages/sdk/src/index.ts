@@ -756,6 +756,7 @@ export type {
   SaveWorkspaceSkillRequest,
   RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
+  OrganizationSkillReach,
 } from "./skills";
 export type {
   ActivatePreferenceRegistryRevisionRequest,
