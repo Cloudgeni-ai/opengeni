@@ -312,11 +312,8 @@ CREATE OR REPLACE FUNCTION opengeni_private.subscription_core_acceptance_authori
         OR p_session_id IS NULL
       THEN RETURN NULL; END IF;
 
-      IF NOT EXISTS (
-        SELECT 1 FROM subscription_provider_cutovers cutover
-        JOIN opengeni_private.subscription_core_providers registry ON registry.provider = cutover.provider
-        WHERE cutover.account_id = p_account_id AND cutover.provider = p_provider
-          AND cutover.enabled
+      IF NOT coalesce(
+        opengeni_private.subscription_provider_cutover_committed(p_provider), false
       ) THEN RETURN NULL; END IF;
 
       IF p_accepting_subject_id IS NULL OR length(btrim(p_accepting_subject_id)) = 0 THEN
@@ -345,7 +342,6 @@ CREATE OR REPLACE FUNCTION opengeni_private.subscription_core_acceptance_authori
         AND p_accepting_subject_id LIKE 'user:%%'
         AND request_subject IS NOT DISTINCT FROM p_accepting_subject_id
         AND (private_session IS FALSE OR owner_subject = p_accepting_subject_id)
-        AND coalesce(opengeni_private.subscription_provider_cutover_committed(p_provider), false)
         AND coalesce((subscription_effective_settings(p_account_id, p_workspace_id)
           #>> '{values,personalConnectionsAllowed}')::boolean, false)
       THEN

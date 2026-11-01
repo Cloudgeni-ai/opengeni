@@ -124,7 +124,10 @@ describe("workspace subscription administration", () => {
             like '%workspace_membership_administers(%') as policies`;
     // The fifth policy is workspace_activity_read (1105): workspace-wide usage
     // facts reach the workspace's administrators.
-    expect(rewritten).toEqual({ routines: 6, policies: 5 });
+    // The sixth to eighth are 1166's subscription_connection_workspaces
+    // manager_share, manager_remove and receiver_remove: a workspace's
+    // administrators share its own accounts and remove them where they work.
+    expect(rewritten).toEqual({ routines: 6, policies: 8 });
   });
 
   test("the administrator predicate is executable by the application, not by every role", async () => {
