@@ -22049,6 +22049,13 @@ export const MachinesResponse = /* @__PURE__ */ defineSchema(() =>
     activeEpoch: z.number().int(),
     machines: z.array(MachineView),
     sessionMachineAccess: SessionMachineAccess.nullable().optional(),
+    /**
+     * False when the organization lets only its owners and admins connect
+     * new machines of their own: an Only me machine, or any machine in a
+     * Personal workspace. Omitted for an agent listing its own chat, and by
+     * older servers.
+     */
+    canConnectOwnMachine: z.boolean().optional(),
   }),
 );
 export type MachinesResponse = z.infer<typeof MachinesResponse>;

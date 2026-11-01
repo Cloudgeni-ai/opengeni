@@ -5205,6 +5205,12 @@ export type InferenceFeatureAvailability = {
  */
 export type OrganizationPrivacySettings = {
   organizationId: string;
+  /**
+   * Whether members can connect machines of their own (Only me machines).
+   * Off: only owners and admins can connect new ones; machines already
+   * connected keep working. Older servers omit it: members can.
+   */
+  membersConnectOwnMachines?: boolean;
   /** Who sees new chats and schedules unless the person picks otherwise. */
   defaultVisibility: "private" | "workspace";
   /** Whether people have their own Personal workspace to see and work in. */
@@ -5229,6 +5235,8 @@ export type OrganizationPrivacySettings = {
 };
 
 export type UpdateOrganizationPrivacySettingsRequest = {
+  /** Off: only owners and admins connect new machines of their own. */
+  membersConnectOwnMachines?: boolean;
   defaultVisibility?: "private" | "workspace";
   adminsSeePrivateSchedules?: boolean;
   /** Off: people no longer see or start new work in their Personal workspace. */
@@ -10979,6 +10987,12 @@ export type MachinesResponse = {
   activeEpoch: number;
   machines: MachineView[];
   sessionMachineAccess?: SessionMachineAccess | null | undefined;
+  /**
+   * False when the organization lets only its owners and admins connect new
+   * machines of their own: an Only me machine, or any machine in a Personal
+   * workspace. Omitted for an agent listing its own chat, and by older servers.
+   */
+  canConnectOwnMachine?: boolean | undefined;
 };
 
 /** GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series — the downsampled

@@ -284,6 +284,10 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
     },
     { label: "Full access for agent sessions", keywords: ["agents", "admin", "elevate"] },
     {
+      label: "Members connect their own machines",
+      keywords: ["own machines", "connected machines", "computers", "servers", "connect a machine"],
+    },
+    {
       label: "Keep a removed person's data",
       keywords: ["data retention", "retention", "delete data", "removed people", "offboarding"],
     },
