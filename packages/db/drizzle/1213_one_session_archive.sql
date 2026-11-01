@@ -118,13 +118,13 @@ $$;
 -- scheduled task or site sign-in maintenance that runs in them); those simply
 -- come back to the list. The earliest member who hid a chat is recorded as
 -- the one who archived it. The migration owner is NOSUPERUSER NOBYPASSRLS, so
--- FORCE RLS is lifted for this statement and restored before commit.
+-- FORCE RLS is lifted for this statement and restored before commit. Those
+-- ALTER TABLE locks already exclude every other reader and writer until
+-- commit, so no workspace tenancy fence is taken; the fence-checking trigger
+-- is disabled for the migration's own write and enabled again before commit.
 ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE session_pins NO FORCE ROW LEVEL SECURITY;
--- Session writes take each workspace's shared tenancy fence (see
--- require_session_tenancy_fence), in a stable order.
-SELECT pg_advisory_xact_lock_shared(hashtextextended('session-tenancy:' || W.workspace_id::text, 0))
-FROM (SELECT DISTINCT workspace_id FROM session_pins WHERE archived ORDER BY workspace_id) W;
+ALTER TABLE sessions DISABLE TRIGGER session_tenancy_workspace_fence;
 WITH hidden AS (
   SELECT DISTINCT ON (P.workspace_id, P.session_id)
     P.workspace_id, P.session_id, P.archived_at, P.subject_id
@@ -154,5 +154,6 @@ WHERE S.workspace_id = roots.workspace_id
   AND S.root_session_id = roots.session_id
   AND S.archived_at IS NULL
   AND S.imported_archive_import_id IS NULL;
+ALTER TABLE sessions ENABLE TRIGGER session_tenancy_workspace_fence;
 ALTER TABLE session_pins FORCE ROW LEVEL SECURITY;
 ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
