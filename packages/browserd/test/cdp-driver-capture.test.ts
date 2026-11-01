@@ -1086,6 +1086,57 @@ test("a tab that never draws fails as a plain timeout and leaves the queue usabl
   }
 });
 
+// A tab a relaunched browser has just restored can report no page size for a
+// moment after it is listed; the capture waits for it to lay out.
+test("a tab that has not laid out yet is captured once it does", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.calls.length = 0;
+    fixture.reportUnlaidLayouts(3);
+    expect(await fixture.driver.captureScreenshot("target-1", { format: "jpeg" })).toMatchObject({
+      targetId: "target-1",
+      width: 3,
+      height: 2,
+    });
+    expect(
+      fixture.calls.filter((call) => call.method === "Page.getLayoutMetrics").length,
+    ).toBeGreaterThanOrEqual(4);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a tab that never lays out fails as a plain timeout and leaves the queue usable", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.reportUnlaidLayouts(Number.POSITIVE_INFINITY);
+    jest.useFakeTimers();
+    const failed = fixture.driver.captureScreenshot("target-1").catch((error: unknown) => error);
+    for (let elapsed = 0; elapsed <= 10_200; elapsed += 100) {
+      await settle();
+      jest.advanceTimersByTime(100);
+    }
+    const error = await failed;
+    expect(error).toBeInstanceOf(InteractionControllerError);
+    expect(error).toMatchObject({
+      code: "timeout",
+      retryable: true,
+      message:
+        "browser screenshot timed out: Chrome had not drawn this tab yet; retry shortly, or read it with browser_observe",
+    });
+    jest.useRealTimers();
+    fixture.reportUnlaidLayouts(0);
+    expect(await fixture.driver.captureScreenshot("target-1", { format: "jpeg" })).toMatchObject({
+      targetId: "target-1",
+    });
+  } finally {
+    jest.useRealTimers();
+    await fixture.driver.close();
+  }
+});
+
 test("other capture refusals are not repeated", async () => {
   const fixture = await captureFixture();
   try {
@@ -1241,6 +1292,8 @@ async function captureFixture(
   // Captures Chromium refuses, as it does while a tab has no drawn surface.
   let captureRefusals = 0;
   let captureRefusal = "Unable to capture screenshot";
+  // Layout reads that report no page size, as a just-restored tab does.
+  let unlaidLayouts = 0;
   let stalledMethod: string | null = null;
   let stalledWhen: ((params: Record<string, any> | undefined) => boolean) | null = null;
   let stalled: { id: number; method: string; sessionId?: string } | null = null;
@@ -1328,14 +1381,16 @@ async function captureFixture(
     if (command.method === "Accessibility.getFullAXTree") result = { nodes: [] };
     if (command.method === "DOMSnapshot.captureSnapshot") result = protectionSnapshot;
     if (command.method === "Page.getLayoutMetrics") {
+      const unlaid = unlaidLayouts > 0;
+      if (unlaid) unlaidLayouts -= 1;
       result = {
         cssVisualViewport: {
           pageX: 0,
           pageY: 0,
-          clientWidth: raster?.width ?? 3,
-          clientHeight: raster?.height ?? 2,
+          clientWidth: unlaid ? 0 : (raster?.width ?? 3),
+          clientHeight: unlaid ? 0 : (raster?.height ?? 2),
         },
-        cssContentSize: { x: 0, y: 0, width: 3, height: 2 },
+        cssContentSize: { x: 0, y: 0, width: unlaid ? 0 : 3, height: unlaid ? 0 : 2 },
       };
     }
     if (command.method === "Page.captureScreenshot") {
@@ -1455,6 +1510,9 @@ async function captureFixture(
     refuseCaptures(count: number, message = "Unable to capture screenshot") {
       captureRefusals = count;
       captureRefusal = message;
+    },
+    reportUnlaidLayouts(count: number) {
+      unlaidLayouts = count;
     },
     disconnect: () => socket.close(),
     delayNext(method: string, delayMs: number) {
