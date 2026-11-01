@@ -20,10 +20,21 @@ export const PageHeaderWindowBarContext = createContext<{
 /**
  * Headers inside an overlay (a dialog or sheet) never take the window bar:
  * the overlays' content wraps its children in this.
+ *
+ * With `when`, only while it is true: a hidden page that stays mounted (the
+ * Capabilities catalog under an open capability page) lets go of the bar so
+ * the page in front of it takes it, and claims it again when shown.
  */
-export function WindowBarTitleBoundary({ children }: { children: ReactNode }) {
+export function WindowBarTitleBoundary({
+  when = true,
+  children,
+}: {
+  when?: boolean | undefined;
+  children: ReactNode;
+}) {
+  const enclosing = useContext(PageHeaderWindowBarContext);
   return (
-    <PageHeaderWindowBarContext.Provider value={null}>
+    <PageHeaderWindowBarContext.Provider value={when ? null : enclosing}>
       {children}
     </PageHeaderWindowBarContext.Provider>
   );
