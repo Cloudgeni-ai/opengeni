@@ -22,23 +22,20 @@ import {
   type SlackAgent,
 } from "@opengeni/contracts";
 import {
-  availableSlackBotConnectionMetadata,
   deleteSlackAgent,
   getAgentLearningSettings,
   getSlackAgent,
   getWorkspace,
   getWorkspaceGrant,
-  insertSlackAgent,
   listOrganizationSlackAgents,
   listSlackInstallationBindings,
-  saveKnowledgeEntry,
-  setSlackAgentKnowledgeCollection,
   updateSlackAgent,
   type SlackAgentRecord,
 } from "@opengeni/db";
 import {
   hasPermission,
   knowledgeContextForAccess,
+  requireAccountAdminAuthorizationStamp,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   type ApiRouteDeps,
@@ -56,6 +53,7 @@ import {
   SlackBotProviderError,
 } from "../integrations/slack-bot";
 import { escapeSlackMrkdwn } from "../integrations/slack-app-home";
+import { createSlackAgent } from "../integrations/slack-agent-create";
 
 const SLACK_AGENT_ADMIN_SUBJECT_ID = "service:slack-interaction";
 
@@ -128,24 +126,6 @@ async function readerAccess(
     read: hasPermission(permissions, "workspace:read"),
     admin: hasPermission(permissions, "workspace:admin"),
   };
-}
-
-/** The Slack installation a connection is, as seen from a workspace it is available in. */
-async function installationFor(
-  deps: ApiRouteDeps,
-  scope: { accountId: string; workspaceId: string },
-  connectionId: string,
-) {
-  const available = await availableSlackBotConnectionMetadata(deps.db, scope);
-  const connection = available.find(
-    (candidate) => candidate.id === connectionId && candidate.status === "active",
-  );
-  if (!connection) return null;
-  const home = { accountId: scope.accountId, workspaceId: connection.workspaceId };
-  const binding = (await listSlackInstallationBindings(deps.db, home)).find(
-    (candidate) => candidate.connectionId === connectionId && candidate.state === "active",
-  );
-  return binding ? { home, binding } : null;
 }
 
 export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -222,19 +202,20 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = CreateSlackAgentRequest.parse(
       await parseRequestJson(c, CreateSlackAgentRequest),
     );
-    const target = await getWorkspace(deps.db, workspaceId);
-    if (!target) throw new HTTPException(404, { message: "Workspace not found" });
-    if (target.kind === "personal") {
+    const outcome = await createSlackAgent(deps, {
+      grant,
+      request: payload,
+      memoryContext: () => knowledgeContextForAccess(deps, access, "documents:manage"),
+    });
+    if (outcome.kind === "workspace_not_found") {
+      throw new HTTPException(404, { message: "Workspace not found" });
+    }
+    if (outcome.kind === "personal_workspace") {
       throw new HTTPException(422, {
         message: "A Slack agent works in a shared workspace, not a personal one.",
       });
     }
-    const installation = await installationFor(
-      deps,
-      { accountId: grant.accountId, workspaceId },
-      payload.connectionId,
-    );
-    if (!installation) {
+    if (outcome.kind === "slack_bot_unavailable") {
       throw new ApiHttpError(409, {
         code: "conflict",
         message: "The Opengeni Slack app is not available in this workspace.",
@@ -242,52 +223,9 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         details: { code: "slack_bot_unavailable" },
       });
     }
-    const created = await insertSlackAgent(deps.db, installation.home, {
-      connectionId: payload.connectionId,
-      slackTeamId: installation.binding.slackTeamId,
-      targetAccountId: grant.accountId,
-      targetWorkspaceId: workspaceId,
-      name: payload.name,
-      nameKey: slackAgentNameKey(payload.name),
-      description: payload.description,
-      avatar: payload.avatar,
-      instructions: payload.instructions,
-      createdBySubjectId: grant.subjectId,
-    });
-    if (created === "name_taken") throw nameTaken();
-    // The agent's Memory: a Knowledge collection in its workspace, named after
-    // it. A failure here leaves the agent without Memory rather than failing
-    // the create; the agent still works and the collection can be retried.
-    let agent = created;
-    try {
-      const operationId = deterministicUuid(`slack-agent-memory:${created.id}`);
-      const receipt = await withAccessGrantSessionRlsContext(deps, grant, async () =>
-        saveKnowledgeEntry(
-          deps.db,
-          await knowledgeContextForAccess(deps, access, "documents:manage"),
-          {
-            operationId,
-            expectedVersion: 0,
-            scope: "workspace",
-            entry: {
-              title: created.name,
-              kind: "group",
-              content: `Memory of the Slack agent ${created.name}: lasting facts, decisions and preferences people shared with it.`,
-            },
-          },
-        ),
-      );
-      const entryId = z.object({ entryId: z.string().uuid() }).safeParse(receipt);
-      if (entryId.success) {
-        agent =
-          (await setSlackAgentKnowledgeCollection(deps.db, installation.home, {
-            agentId: created.id,
-            knowledgeCollectionId: entryId.data.entryId,
-          })) ?? created;
-      }
-    } catch {
-      // Reported by the missing Memory on the agent, not by failing the create.
-    }
+    if (outcome.kind === "name_taken") throw nameTaken();
+    const { agent, installation } = outcome;
+    const target = { name: outcome.targetWorkspaceName };
     return c.json(
       SlackAgentResponse.parse({
         agent: agentView(agent, {
@@ -318,11 +256,29 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return { grant, agent };
   };
 
+  /**
+   * Opening an agent to anyone in Slack lets people outside its workspace use
+   * what the workspace shares, so it takes the request's verified
+   * organization admin proof (`account:admin` for the agent's organization).
+   * Turning it off only needs the workspace admin every edit already needs.
+   */
+  const requireOrganizationAdmin = async (
+    c: Parameters<typeof requireAccessGrantAuthorization>[0],
+    workspaceId: string,
+  ) => {
+    requireAccountAdminAuthorizationStamp(
+      await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin"),
+    );
+  };
+
   app.patch(`${base}/:agentId`, async (c) => {
     const { agent } = await requireManagedAgent(c);
     const payload = UpdateSlackAgentRequest.parse(
       await parseRequestJson(c, UpdateSlackAgentRequest),
     );
+    if (payload.open === true && !agent.open) {
+      await requireOrganizationAdmin(c, agent.targetWorkspaceId);
+    }
     const updated = await updateSlackAgent(
       deps.db,
       { accountId: agent.accountId, workspaceId: agent.workspaceId },
@@ -336,6 +292,7 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
           ...(payload.description !== undefined ? { description: payload.description } : {}),
           ...(payload.avatar !== undefined ? { avatar: payload.avatar } : {}),
           ...(payload.instructions !== undefined ? { instructions: payload.instructions } : {}),
+          ...(payload.open !== undefined ? { open: payload.open } : {}),
         },
       },
     );

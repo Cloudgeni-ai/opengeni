@@ -10,8 +10,10 @@ import {
   SLACK_AGENT_INSTRUCTIONS_MAX_LENGTH,
   SLACK_AGENT_INTRO_CHANNELS_MAX,
   SLACK_AGENT_NAME_MAX_LENGTH,
+  SLACK_AGENT_OPEN_LABEL,
   slackAgentHandle,
   slackAgentNameProblem,
+  slackAgentOpenDisclosure,
 } from "@opengeni/contracts";
 import type {
   SessionAvatar as SessionAvatarValue,
@@ -131,11 +133,21 @@ export function SlackAgentFormPage({
   }>({});
   const [unavailable, setUnavailable] = useState<ConnectionMetadata | null>(null);
   const [turningOn, setTurningOn] = useState(false);
+  const [open, setOpen] = useState(agent?.open ?? false);
   const avatar = sessionAvatarFromDraft(draft, name, null);
   const connection = connections.find((row) => row.id === connectionId) ?? null;
   const reviewFirst = agent ? agent.memoryReviewFirst : memoryReviewFirst;
   const agentWorkspaceName = agent ? (agent.targetWorkspaceName ?? workspaceName) : workspaceName;
   const handle = name.trim() ? slackAgentHandle(name) : null;
+  // Opening an agent to anyone in Slack is an organization admin's call; any
+  // admin of the workspace can close it again. The API enforces both.
+  const agentAccountId = agent
+    ? accessContext?.workspaceGrants.find((grant) => grant.workspaceId === agent.targetWorkspaceId)
+        ?.accountId
+    : undefined;
+  const canOpen = Boolean(
+    agentAccountId && hasAccountPermission(accessContext, agentAccountId, "account:admin"),
+  );
 
   function validate(): boolean {
     const next = {
@@ -186,6 +198,7 @@ export function SlackAgentFormPage({
     if (instructions.trim() !== (current.instructions ?? ""))
       change.instructions = instructions.trim();
     if (JSON.stringify(avatar) !== JSON.stringify(current.avatar)) change.avatar = avatar;
+    if (open !== current.open) change.open = open;
     if (Object.keys(change).length === 1) {
       onClose();
       return true;
@@ -383,6 +396,16 @@ export function SlackAgentFormPage({
             {reviewFirst ? " New Memory is saved for review first." : ""}
           </p>
         </Field>
+        {agent ? (
+          <CheckboxField
+            label={SLACK_AGENT_OPEN_LABEL}
+            description={slackAgentOpenDisclosure(name.trim() || agent.name, agentWorkspaceName)}
+            disabledReason="Only an organization admin can turn this on."
+            checked={open}
+            disabled={!open && !canOpen}
+            onCheckedChange={setOpen}
+          />
+        ) : null}
       </FieldStack>
     </FlushFormPage>
   );

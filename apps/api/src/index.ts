@@ -69,6 +69,7 @@ import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-in
 import { createAutomaticAgentUpdater } from "./sandbox/agent-update";
 import { startTeamsBotPump } from "./integrations/teams-bot";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
+import { startSlackAgentUpdatePump } from "./integrations/slack-agent-updates";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
 import { closeNativeExternalVaultProviders } from "./integrations/external-vault-providers";
@@ -691,6 +692,9 @@ export async function startApi(options: StartApiOptions = {}) {
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
+  const stopSlackAgentUpdatePump = settings.slackSigningSecret
+    ? startSlackAgentUpdatePump(routeDeps)
+    : undefined;
   const stopTeamsBotPump = startTeamsBotPump(routeDeps);
   const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
   const stopWorkspaceWebhookDispatchPump = startWorkspaceWebhookDispatchPump({
@@ -807,6 +811,7 @@ export async function startApi(options: StartApiOptions = {}) {
       const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
       metricsServer?.stop(true);
       stopSlackInteractionPump?.();
+      await stopSlackAgentUpdatePump?.();
       stopTeamsBotPump();
       await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();

@@ -2474,6 +2474,8 @@ export const slackAgentUserStates = pgTable(
       .references(() => slackAgents.id, { onDelete: "cascade" }),
     slackUserId: text("slack_user_id").notNull(),
     hintInteractionId: uuid("hint_interaction_id"),
+    /** The open-agent chat that showed this person the visibility notice. */
+    openNoticeInteractionId: uuid("open_notice_interaction_id"),
     firstUsedAt: timestamp("first_used_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2493,6 +2495,270 @@ export const slackAgentUserStates = pgTable(
       "slack_agent_user_states_bounds_check",
       sql`octet_length(${table.slackUserId}) between 1 and 64`,
     ),
+  }),
+);
+
+/** A Slack agent a chat proposed from Slack; a workspace admin confirms it on the card. */
+export const slackAgentProposals = pgTable(
+  "slack_agent_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    targetAccountId: uuid("target_account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    targetWorkspaceId: uuid("target_workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    proposedBySessionId: uuid("proposed_by_session_id").notNull(),
+    proposedBySlackUserId: text("proposed_by_slack_user_id"),
+    slackChannelId: text("slack_channel_id").notNull(),
+    slackThreadTs: text("slack_thread_ts").notNull(),
+    slackMessageTs: text("slack_message_ts"),
+    messageOperationId: uuid("message_operation_id").notNull(),
+    name: text("name").notNull(),
+    nameKey: text("name_key").notNull(),
+    description: text("description").notNull(),
+    avatar: jsonb("avatar").$type<SessionAvatar>().notNull(),
+    instructions: text("instructions").notNull().default(""),
+    status: text("status")
+      .$type<"pending" | "creating" | "created" | "cancelled">()
+      .notNull()
+      .default("pending"),
+    createdSlackAgentId: uuid("created_slack_agent_id").references(() => slackAgents.id, {
+      onDelete: "set null",
+    }),
+    decidedBySubjectId: text("decided_by_subject_id"),
+    decidedBySlackUserId: text("decided_by_slack_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "slack_agent_proposals_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    targetWorkspaceAccount: foreignKey({
+      name: "slack_agent_proposals_target_workspace_account_fk",
+      columns: [table.targetWorkspaceId, table.targetAccountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspace: index("slack_agent_proposals_workspace_idx").on(table.workspaceId),
+    target: index("slack_agent_proposals_target_idx").on(table.targetWorkspaceId),
+    createdAgent: index("slack_agent_proposals_created_agent_idx")
+      .on(table.createdSlackAgentId)
+      .where(sql`${table.createdSlackAgentId} is not null`),
+    sameAccount: check(
+      "slack_agent_proposals_same_account_check",
+      sql`${table.targetAccountId} = ${table.accountId}`,
+    ),
+    status: check(
+      "slack_agent_proposals_status_check",
+      sql`${table.status} in ('pending', 'creating', 'created', 'cancelled')`,
+    ),
+    bounded: check(
+      "slack_agent_proposals_bounds_check",
+      sql`octet_length(${table.slackTeamId}) between 1 and 64
+        and (${table.proposedBySlackUserId} is null or octet_length(${table.proposedBySlackUserId}) between 1 and 64)
+        and octet_length(${table.slackChannelId}) between 1 and 64
+        and octet_length(${table.slackThreadTs}) between 1 and 64
+        and (${table.slackMessageTs} is null or octet_length(${table.slackMessageTs}) between 1 and 64)
+        and char_length(btrim(${table.name})) between 1 and 80
+        and char_length(${table.nameKey}) between 1 and 80
+        and char_length(btrim(${table.description})) between 1 and 200
+        and jsonb_typeof(${table.avatar}) = 'object'
+        and pg_column_size(${table.avatar}) <= 4096
+        and char_length(${table.instructions}) <= 8000
+        and (${table.decidedBySubjectId} is null or octet_length(${table.decidedBySubjectId}) between 1 and 1024)
+        and (${table.decidedBySlackUserId} is null or octet_length(${table.decidedBySlackUserId}) between 1 and 64)`,
+    ),
+  }),
+);
+
+/** The message an open Ask form came from (message shortcut), until it is submitted. */
+export const slackAskForms = pgTable(
+  "slack_ask_forms",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackUserId: text("slack_user_id").notNull(),
+    slackChannelId: text("slack_channel_id").notNull(),
+    slackMessageTs: text("slack_message_ts").notNull(),
+    slackThreadTs: text("slack_thread_ts"),
+    providerEventId: text("provider_event_id").notNull(),
+    messageText: text("message_text").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "slack_ask_forms_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    expiry: index("slack_ask_forms_expiry_idx").on(table.connectionId, table.expiresAt),
+    bounded: check(
+      "slack_ask_forms_bounds_check",
+      sql`octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackUserId}) between 1 and 64
+        and octet_length(${table.slackChannelId}) between 1 and 64
+        and octet_length(${table.slackMessageTs}) between 1 and 64
+        and (${table.slackThreadTs} is null or octet_length(${table.slackThreadTs}) between 1 and 64)
+        and octet_length(${table.providerEventId}) between 1 and 300
+        and octet_length(${table.messageText}) between 1 and 32000`,
+    ),
+  }),
+);
+
+/** Per Slack installation (HOME tenancy): the organization admin's update-message choices. */
+export const slackAgentUpdateSettings = pgTable(
+  "slack_agent_update_settings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    updatesEnabled: boolean("updates_enabled").notNull().default(false),
+    channelPostsOnly: boolean("channel_posts_only").notNull().default(false),
+    updatesEnabledAt: timestamp("updates_enabled_at", { withTimezone: true }),
+    updatedBySubjectId: text("updated_by_subject_id"),
+    sweepHolder: uuid("sweep_holder"),
+    sweepLeaseUntil: timestamp("sweep_lease_until", { withTimezone: true }),
+    lastSweptAt: timestamp("last_swept_at", { withTimezone: true }),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    connection: unique("slack_agent_update_settings_connection_uq").on(table.connectionId),
+    workspaceAccount: foreignKey({
+      name: "slack_agent_update_settings_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    account: index("slack_agent_update_settings_account_idx").on(table.accountId),
+    bounded: check(
+      "slack_agent_update_settings_bounds_check",
+      sql`(${table.updatedBySubjectId} is null or octet_length(${table.updatedBySubjectId}) between 1 and 1024) and ${table.version} > 0`,
+    ),
+  }),
+);
+
+/** Per Slack person: cached profile facts and which update messages they were sent. */
+export const slackAgentUpdateRecipients = pgTable(
+  "slack_agent_update_recipients",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackUserId: text("slack_user_id").notNull(),
+    tz: text("tz"),
+    tzOffset: integer("tz_offset"),
+    profileState: text("profile_state").$type<
+      "eligible" | "guest" | "external" | "deactivated" | "bot"
+    >(),
+    profileCheckedAt: timestamp("profile_checked_at", { withTimezone: true }),
+    lastSentAt: timestamp("last_sent_at", { withTimezone: true }),
+    lastKind: text("last_kind").$type<"welcome" | "update" | "dormant">(),
+    welcomeSentAt: timestamp("welcome_sent_at", { withTimezone: true }),
+    dormantSentAt: timestamp("dormant_sent_at", { withTimezone: true }),
+    announcedAgentIds: uuid("announced_agent_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    user: unique("slack_agent_update_recipients_user_uq").on(table.connectionId, table.slackUserId),
+    workspaceAccount: foreignKey({
+      name: "slack_agent_update_recipients_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
+/** Each update message: what went to whom, under a deterministic post operation id. */
+export const slackAgentUpdateDeliveries = pgTable(
+  "slack_agent_update_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackUserId: text("slack_user_id").notNull(),
+    kind: text("kind").$type<"welcome" | "update" | "dormant">().notNull(),
+    dedupeKey: text("dedupe_key").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    agentIds: uuid("agent_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
+    text: text("text").notNull(),
+    blocks: jsonb("blocks").$type<unknown[]>().notNull(),
+    state: text("state").$type<"pending" | "sent" | "failed">().notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    slackChannelId: text("slack_channel_id"),
+    slackMessageTs: text("slack_message_ts"),
+    errorCode: text("error_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+  },
+  (table) => ({
+    dedupe: unique("slack_agent_update_deliveries_dedupe_uq").on(
+      table.connectionId,
+      table.dedupeKey,
+    ),
+    operation: unique("slack_agent_update_deliveries_operation_uq").on(table.operationId),
+    workspaceAccount: foreignKey({
+      name: "slack_agent_update_deliveries_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    pending: index("slack_agent_update_deliveries_pending_idx")
+      .on(table.connectionId, table.nextAttemptAt)
+      .where(sql`state = 'pending'`),
   }),
 );
 

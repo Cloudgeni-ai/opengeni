@@ -9,6 +9,8 @@ export type SlackRoutingAgent = {
   targetWorkspaceId: string;
   /** The target workspace's name, for refusals. */
   targetWorkspaceLabel: string | null;
+  /** Anyone in Slack can use it, not only members of its workspace. */
+  open?: boolean;
 };
 
 export type SlackAgentAddress =

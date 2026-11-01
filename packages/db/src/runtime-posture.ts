@@ -59,8 +59,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * account:admin proof for one transaction, agent calls' device lookup,
  * register, claim, device count, busy check and ring (1107), the lock-free
  * read of a known external identity (1172), the list of every
- * organization vault wherever it works (1218), and the organization's
- * names-only member list (1211). Each is
+ * organization vault wherever it works (1218), the organization's
+ * names-only member list (1211) and the Slack agent update sweeper's
+ * ids-only inventory of installations that send updates (1153). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -89,6 +90,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "read_external_identity_v1(uuid, text, text)",
   "list_organization_vaults_v1(uuid, jsonb)",
   "list_organization_member_names_v1(uuid)",
+  "list_due_slack_agent_update_installations_v1(integer)",
 ] as const;
 
 /**
@@ -120,6 +122,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * the list is incomplete.
  * 1211 withholds the names-only member list; until it is granted, members
  * get no names (as before).
+ * 1153 withholds the Slack agent update sweeper's inventory; until it is
+ * granted, the sweeper finds nothing and sends no update messages.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -135,6 +139,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "read_external_identity_v1(uuid, text, text)",
   "list_organization_vaults_v1(uuid, jsonb)",
   "list_organization_member_names_v1(uuid)",
+  "list_due_slack_agent_update_installations_v1(integer)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -226,6 +231,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   ],
   "list_organization_vaults_v1(uuid, jsonb)": ["vaults", "vault_items"],
   "list_organization_member_names_v1(uuid)": ["organization_memberships", "auth_users"],
+  "list_due_slack_agent_update_installations_v1(integer)": ["slack_agent_update_settings"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -2319,9 +2325,14 @@ export const FORCE_RLS_TABLES = [
   "skill_config_conversion_receipts",
   "skill_source_bindings",
   "skill_write_receipts",
+  "slack_agent_proposals",
+  "slack_agent_update_deliveries",
+  "slack_agent_update_recipients",
+  "slack_agent_update_settings",
   "slack_agent_user_states",
   "slack_agents",
   "slack_app_home_refreshes",
+  "slack_ask_forms",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
   "slack_bot_update_operations",
@@ -2671,10 +2682,15 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_sql_usage",
   "site_tool_allowances",
   "site_viewer_sessions",
+  "slack_agent_proposals",
+  "slack_agent_update_deliveries",
+  "slack_agent_update_recipients",
+  "slack_agent_update_settings",
   "slack_agent_user_states",
   "slack_agents",
   "slack_api_rate_limits",
   "slack_app_home_refreshes",
+  "slack_ask_forms",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
   "slack_bot_update_operations",

@@ -194,6 +194,7 @@ export * from "./event-triggers";
 export * from "./automation-templates";
 export * from "./bots";
 export * from "./slack-agents";
+export * from "./slack-agent-updates";
 export * from "./mcp-elicitation";
 import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
 import {
@@ -1203,6 +1204,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_send_prepared_message",
   "slack_agent_handoff",
   "slack_agent_chats",
+  "slack_agent_propose",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",

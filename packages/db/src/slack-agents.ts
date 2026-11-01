@@ -140,6 +140,8 @@ export async function insertSlackAgent(
   db: Database,
   home: SlackAgentHome,
   input: SlackAgentWriteFields & {
+    /** A fixed id makes a retried create find the agent it already made. */
+    id?: string;
     connectionId: string;
     slackTeamId: string;
     targetAccountId: string;
@@ -152,6 +154,7 @@ export async function insertSlackAgent(
       const [row] = await scopedDb
         .insert(schema.slackAgents)
         .values({
+          ...(input.id ? { id: input.id } : {}),
           accountId: home.accountId,
           workspaceId: home.workspaceId,
           connectionId: input.connectionId,
@@ -311,6 +314,44 @@ export async function touchSlackAgentUserState(
       showHint:
         input.hintInteractionId !== null && row?.hintInteractionId === input.hintInteractionId,
     };
+  });
+}
+
+/**
+ * Claim the one-time open-agent notice for a person and agent: true only for
+ * the chat that claims it (and repairs of that chat), never again after.
+ * Records first use too, like `touchSlackAgentUserState`.
+ */
+export async function claimSlackAgentOpenNotice(
+  db: Database,
+  home: SlackAgentHome,
+  input: {
+    connectionId: string;
+    slackAgentId: string;
+    slackUserId: string;
+    interactionId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const [row] = await scopedDb
+      .insert(schema.slackAgentUserStates)
+      .values({
+        accountId: home.accountId,
+        workspaceId: home.workspaceId,
+        connectionId: input.connectionId,
+        slackAgentId: input.slackAgentId,
+        slackUserId: input.slackUserId,
+        openNoticeInteractionId: input.interactionId,
+      })
+      .onConflictDoUpdate({
+        target: [schema.slackAgentUserStates.slackAgentId, schema.slackAgentUserStates.slackUserId],
+        set: {
+          openNoticeInteractionId: sql`coalesce(${schema.slackAgentUserStates.openNoticeInteractionId}, excluded.open_notice_interaction_id)`,
+          updatedAt: sql`now()`,
+        },
+      })
+      .returning({ openNoticeInteractionId: schema.slackAgentUserStates.openNoticeInteractionId });
+    return row?.openNoticeInteractionId === input.interactionId;
   });
 }
 
