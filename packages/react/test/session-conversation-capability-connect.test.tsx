@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { Permission, SessionEvent } from "@opengeni/sdk";
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
-import { flush, registerDom, renderComponent } from "./render-hook";
+import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 const { SessionConversation } = await import("../src/components/session-conversation");
@@ -361,7 +361,7 @@ test("your login added in another workspace is offered here with one standing ch
     expect(document.body.textContent).toContain("You added me@mail.example in another workspace.");
     expect(document.body.textContent).not.toContain("Review access before signing in");
     expect(connectButton()).toBeUndefined();
-    useItHere()!.click();
+    await actRun(() => useItHere()!.click());
     await waitFor(() => issued.length === 1, "Use it here did not turn the login on");
     expect(issued[0]).toEqual({
       workspaceId: WORKSPACE_ID,
