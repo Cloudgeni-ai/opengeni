@@ -4464,8 +4464,8 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = GOOGLE_DRIVE_AUTHORITY_TABLES.map((tableName) =>
-          tableByName.get(tableName)!,
+        const authorityTables = GOOGLE_DRIVE_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
@@ -4525,8 +4525,8 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.map((tableName) =>
-          tableByName.get(tableName)!,
+        const authorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
@@ -4613,8 +4613,8 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.map((tableName) =>
-          tableByName.get(tableName)!,
+        const authorityTables = GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
@@ -4641,8 +4641,8 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.map((name) =>
-          tableByName.get(name)!,
+        const authorityTables = GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.map(
+          (name) => tableByName.get(name)!,
         );
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1 || routine.owner !== authorityTables[0]!.owner) {
@@ -4667,8 +4667,8 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.map((tableName) =>
-          tableByName.get(tableName)!,
+        const authorityTables = GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
@@ -4694,8 +4694,8 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = COMPANY_PROFILE_AGENT_ADMIN_AUTHORITY_TABLES.map((tableName) =>
-          tableByName.get(tableName)!,
+        const authorityTables = COMPANY_PROFILE_AGENT_ADMIN_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
@@ -4717,8 +4717,8 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES.map((tableName) =>
-          tableByName.get(tableName)!,
+        const authorityTables = ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
@@ -4824,8 +4824,8 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.map((tableName) =>
-          tableByName.get(tableName)!,
+        const authorityTables = PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
         );
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {

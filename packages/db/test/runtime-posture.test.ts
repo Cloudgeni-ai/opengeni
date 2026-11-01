@@ -828,10 +828,7 @@ describe("runtime database posture evaluator", () => {
         { configuration: ["search_path=public"] },
       ]) {
         const posture = safePosture();
-        Object.assign(
-          posture.privateRoutines.find((routine) => routine.name === name)!,
-          unsafe,
-        );
+        Object.assign(posture.privateRoutines.find((routine) => routine.name === name)!, unsafe);
         expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
           `subscription M3 precursor private routine ${name} is missing or unsafe`,
         );
@@ -1135,10 +1132,7 @@ describe("runtime database posture evaluator", () => {
         { owner: "another_owner" },
       ]) {
         const posture = modelFactPosture();
-        Object.assign(
-          posture.privateRoutines.find((routine) => routine.name === name)!,
-          unsafe,
-        );
+        Object.assign(posture.privateRoutines.find((routine) => routine.name === name)!, unsafe);
         for (const contract of [options, { ...options, modelFactCapabilityRoutines: [] }]) {
           expect(evaluateRuntimeDatabasePosture(posture, contract)).toContain(violation);
         }
@@ -4253,10 +4247,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       ];
       for (const [unsafe, expected] of cases) {
         const posture = eventPosture(true);
-        Object.assign(
-          posture.privateRoutines.find((entry) => entry.name === name)!,
-          unsafe,
-        );
+        Object.assign(posture.privateRoutines.find((entry) => entry.name === name)!, unsafe);
         expect(eventViolations(posture)).toContain(expected);
       }
     }
