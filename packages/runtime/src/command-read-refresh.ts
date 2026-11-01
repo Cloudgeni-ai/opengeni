@@ -39,8 +39,11 @@ export async function executeCommandReadWithRefresh(input: {
   const waitFor = input.args.waitFor === "any" ? "any" : "all";
   const started = Date.now();
   const deadline = started + seconds * 1000;
-  const finish = (result: AttemptToolResult, unavailable: ReadonlySet<string> = new Set()) =>
-    finishReceipt(result, started, seconds, waitFor, unavailable);
+  const finish = (
+    result: AttemptToolResult,
+    unavailable: ReadonlySet<string> = new Set(),
+    deadlineReached = false,
+  ) => finishReceipt(result, started, seconds, waitFor, unavailable, deadlineReached);
   let result = await input.call({ ...input.args, waitSeconds: 0 });
   while (true) {
     const snapshot = commandSnapshot(result, waitFor);
@@ -79,9 +82,11 @@ export async function executeCommandReadWithRefresh(input: {
     });
     const refreshed = commandSnapshot(result, waitFor);
     if (!refreshed) return result;
-    if (refreshed.settled || refreshed.yielded || Date.now() >= deadline || input.signal?.aborted) {
+    if (refreshed.settled || refreshed.yielded || input.signal?.aborted) {
       return finish(result, unavailable);
     }
+    // Under a second left: that read was the last, not the start of a burst.
+    if (Date.now() >= deadline - 1000) return finish(result, unavailable, true);
   }
 }
 
@@ -163,6 +168,7 @@ function finishReceipt(
   seconds: number,
   waitFor: "all" | "any",
   unavailable: ReadonlySet<string>,
+  deadlineReached = false,
 ): AttemptToolResult {
   const snapshot = commandSnapshot(result, waitFor);
   if (!snapshot) return result;
@@ -177,7 +183,11 @@ function finishReceipt(
     : stale(snapshot.value as CommandReceipt);
   const fields = {
     waitedMs,
-    timedOut: seconds > 0 && waitedMs >= seconds * 1000 && !snapshot.settled && !snapshot.yielded,
+    timedOut:
+      seconds > 0 &&
+      (deadlineReached || waitedMs >= seconds * 1000) &&
+      !snapshot.settled &&
+      !snapshot.yielded,
   };
   const patched = { ...value, ...fields };
   return {

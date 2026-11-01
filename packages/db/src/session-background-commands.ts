@@ -2048,11 +2048,14 @@ async function readCommandOutputWindow(
       return row ? commandOutputRowText(row).text : "";
     };
     let omittedBytes: number;
+    // True only when nothing at all lies between head and tail.
+    let contiguous = false;
     if (headEnd.sequence === tail.start.sequence) {
       omittedBytes = Buffer.byteLength(
         textAt(headEnd.sequence).slice(headEnd.offset, tail.start.offset),
         "utf8",
       );
+      contiguous = omittedBytes === 0;
     } else {
       // The rest of the head's last row and the start of the tail's first row
       // are exact; whole rows in between are estimated from the average size
@@ -2069,13 +2072,15 @@ async function readCommandOutputWindow(
         headEnd.sequence,
         tail.start.sequence,
       );
-      omittedBytes =
+      const boundaryBytes =
         Buffer.byteLength(textAt(headEnd.sequence).slice(headEnd.offset), "utf8") +
-        Buffer.byteLength(textAt(tail.start.sequence).slice(0, tail.start.offset), "utf8") +
-        Math.round(between * average);
+        Buffer.byteLength(textAt(tail.start.sequence).slice(0, tail.start.offset), "utf8");
+      omittedBytes = boundaryBytes + Math.round(between * average);
+      contiguous = between === 0 && boundaryBytes === 0;
     }
-    // Only empty rows separate head and tail: return them as one window.
-    if (omittedBytes === 0) return merged();
+    // Nothing separates head and tail: return them as one window. An estimate
+    // of zero over rows that exist (such as gap rows) still pages them.
+    if (contiguous) return merged();
     return {
       ...head,
       hasMore: true,

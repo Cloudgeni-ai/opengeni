@@ -195,6 +195,31 @@ test("command_wait reports refresh_unavailable only when no refresh succeeds bef
   });
 });
 
+test("the last read under a second before the deadline ends the wait without a burst", async () => {
+  const waits: unknown[] = [];
+  let refreshes = 0;
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_read",
+    args: { commandId, waitSeconds: 2 },
+    call: async (readArgs) => {
+      waits.push(readArgs.waitSeconds);
+      // A one-second API wait that never sees the finish.
+      if (readArgs.waitSeconds === 1) await Bun.sleep(1_000);
+      return receipt(false);
+    },
+    refresh: async () => {
+      refreshes++;
+      return true;
+    },
+  });
+  // The first one-second read leaves about a second, the next leaves none:
+  // no run of zero-second reads follows.
+  expect(waits.filter((wait) => wait === 0)).toHaveLength(1);
+  expect(waits.length).toBeLessThanOrEqual(3);
+  expect(refreshes).toBeLessThanOrEqual(2);
+  expect(snapshot(result)).toMatchObject({ terminal: false, timedOut: true });
+});
+
 test("integrity, consent, fencing, unsupported and unknown refresh errors still fail closed", async () => {
   for (const error of [
     new Error("provider temporarily offline"),
