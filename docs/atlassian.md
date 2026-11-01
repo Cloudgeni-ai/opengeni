@@ -61,10 +61,11 @@ active tool catalogs and cannot acquire or inherit native execution authority.
 
 Existing native source schedules show **Sync retired** and do not admit new
 agent runs. New native source schedules, manual triggering and resume are
-refused. Queued historical runs settle before session dispatch; already accepted
-source attempts cannot advertise or invoke the native fetch adapter. The checks
-match the native `api.atlassian.com` source identity, preserving hosted MCP and
-Google Drive schedules.
+refused. Queued historical runs settle before session dispatch; the worker no
+longer contains a source fetch adapter. The `api.atlassian.com` source identity
+only selects the Atlassian-specific retirement copy: every integration Knowledge
+sync is retired (see [Knowledge](knowledge.md)), while hosted MCP schedules run
+normally.
 
 No migration deletes or transforms connections, grants, schedules, imported
 Documents, source provenance, ACL records or audit history. Imported content
@@ -76,11 +77,11 @@ hosted MCP.
 
 Canonical implementation:
 
-- Retirement identity/reason: `packages/contracts/src/atlassian-native-retirement.ts`
+- Retirement identity/reason: `packages/contracts/src/atlassian-native-retirement.ts` and `packages/contracts/src/knowledge-source-sync-retirement.ts`
 - Historical native routes and cleanup: `apps/api/src/integrations/atlassian.ts`
 - Connect providers and accounts: `apps/api/src/routes/connect.ts`
 - Hosted OAuth: `apps/api/src/integrations/oauth-client.ts`
 - Active first-party catalog: `apps/api/src/mcp/server.ts`
 - Native authority retirement: `packages/core/src/domain/personal-connection-delegations.ts`
-- Schedule admission and retained-run guards: `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts`, and `apps/worker/src/activities/knowledge-source-sync.ts`
+- Schedule admission and retained-run guards: `packages/core/src/domain/scheduled-tasks.ts`, and `apps/worker/src/activities/scheduled-tasks.ts`
 - Historical account UX: `apps/web/src/components/capabilities/use-atlassian-integration.tsx`

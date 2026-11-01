@@ -1,19 +1,7 @@
-import {
-  getExternalWorkflowHandle,
-  deprecatePatch,
-  ParentClosePolicy,
-  startChild,
-  workflowInfo,
-  WorkflowIdReusePolicy,
-} from "@temporalio/workflow";
+import { deprecatePatch, workflowInfo } from "@temporalio/workflow";
 import type { TurnInitiator } from "@opengeni/contracts";
 import type { DispatchScheduledTaskRunInput } from "../activities/types";
 import { scheduledTaskActivity } from "./activities";
-import {
-  knowledgeSourceSyncWake,
-  knowledgeSourceSyncWorkflow,
-  knowledgeSourceSyncWorkflowId,
-} from "./knowledge-source-sync";
 
 type ScheduledTaskFireWorkflowBase = {
   accountId: string;
@@ -77,31 +65,9 @@ export async function scheduledTaskFireWorkflow(
   // manual histories is retired. Remove this call once no open run carries
   // the non-deprecated marker.
   deprecatePatch("scheduled-task-manual-initiator-v1");
-  const result = await scheduledTaskActivity.dispatchScheduledTaskRun(
+  // Dispatch settles every outcome itself. Retired Knowledge-source tasks
+  // return a blocked result, so no source-sync child workflow is started.
+  await scheduledTaskActivity.dispatchScheduledTaskRun(
     scheduledTaskDispatchInput(input, workflowInfo().workflowId),
   );
-  if (result.action !== "knowledge_source_sync") return;
-
-  const workflowId = knowledgeSourceSyncWorkflowId(result.sourceId);
-  try {
-    await startChild(knowledgeSourceSyncWorkflow, {
-      workflowId,
-      workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE,
-      parentClosePolicy: ParentClosePolicy.ABANDON,
-      args: [result],
-    });
-  } catch (error) {
-    if (!alreadyRunningWorkflow(error)) throw error;
-    await getExternalWorkflowHandle(workflowId).signal(knowledgeSourceSyncWake, result);
-  }
-}
-
-function alreadyRunningWorkflow(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
-    const record = current as { name?: unknown; cause?: unknown };
-    if (record.name === "WorkflowExecutionAlreadyStartedError") return true;
-    current = record.cause;
-  }
-  return false;
 }

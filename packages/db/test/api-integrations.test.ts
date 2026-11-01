@@ -1493,7 +1493,7 @@ describe("API Integration persistence", () => {
         ),
       },
     };
-    await installApiIntegration(client.db, microsoftInput);
+    const microsoftInstalled = await installApiIntegration(client.db, microsoftInput);
     const microsoftFeature = await configureIntegrationFacet(client.db, {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
@@ -1509,6 +1509,36 @@ describe("API Integration persistence", () => {
       kind: "knowledge_source",
       connectionId: microsoftConnection.id,
       config: { sourceId: "library:legal", sourceKind: "shared_library" },
+    });
+    // Knowledge-source facets are retired. A revision that no longer publishes
+    // one keeps the configured binding readable on its historical definition
+    // instead of refusing the upgrade or dropping user data.
+    await installApiIntegration(client.db, {
+      ...microsoftInput,
+      facetDefinitions: [],
+      expectedInstanceVersion: microsoftInstalled.instanceVersion,
+      revision: {
+        ...microsoftInput.revision,
+        id: "openapi:444444444444444444444444",
+        contentSha256: "4".repeat(64),
+      },
+    });
+    const retiredSource = (
+      await listIntegrationInstanceFacets(
+        client.db,
+        first.workspaceId,
+        first.subjectId,
+        microsoftInput.capabilityId,
+        "legal",
+      )
+    ).facets.find((facet) => facet.definition.facetKey === "drive-content");
+    expect(retiredSource).toMatchObject({
+      definition: { facetKey: "drive-content", kind: "knowledge_source" },
+      binding: {
+        id: microsoftFeature.binding.id,
+        status: "active",
+        config: { sourceId: "library:legal", sourceKind: "shared_library" },
+      },
     });
     await expect(
       listIntegrationInstanceFacets(
