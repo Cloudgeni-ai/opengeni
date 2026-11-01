@@ -65,6 +65,7 @@ import { PlanSeats, SeatLimitNotice } from "./plan-seats";
 import type {
   OrganizationInvitation,
   OrganizationMember,
+  OrganizationMemberName,
   OrganizationMembershipRole,
   OrganizationWorkspaceAccess,
 } from "@opengeni/react/app/types";
@@ -127,6 +128,9 @@ export function OrganizationPeoplePage({
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const billing = canManageBilling ?? directory.actorRole === "owner";
   const actions = usePeopleActions(directory, setConfirm, billing);
+
+  // Members who aren't owners or admins see who is here by name, nothing more.
+  if (!directory.canAdminister) return <MemberNamesList />;
 
   let page;
   if (view === "invite") {
@@ -671,6 +675,96 @@ function PeopleList({ nav, actions }: { nav: OrganizationNavigation; actions: Pe
           action={<EmptyStateLink onClick={nav.openInvite}>Invite people</EmptyStateLink>}
         />
       ) : null}
+    </div>
+  );
+}
+
+/* ------------------------------------------------- names, for members */
+
+/**
+ * Everyone in the organization by name, for a member who isn't an owner or
+ * admin: exactly what the server returns, with no email, role, status or
+ * workspace access.
+ */
+function MemberNamesList() {
+  const directory = useOrganizationDirectory();
+  const [query, setQuery] = useState("");
+  const { value, loading: reading, error } = directory.memberNames;
+  const loading = reading && value.members.length === 0 && !error;
+  const nameOf = (member: OrganizationMemberName) =>
+    member.name ?? (member.you && directory.youLabel ? directory.youLabel : "Unnamed person");
+
+  if (error) {
+    return (
+      <ErrorMessage
+        variant="inline"
+        title="Couldn't load the people in this organization."
+        action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+        {...apiErrorDetails(error)}
+      >
+        {userErrorTextWithoutReference(error)}
+      </ErrorMessage>
+    );
+  }
+  if (!loading && !value.available) {
+    return (
+      <EmptyState
+        variant="inline"
+        title="Only owners and admins can see who's in this organization."
+      />
+    );
+  }
+
+  const needle = query.trim().toLocaleLowerCase();
+  const shown = value.members
+    .filter((member) => !needle || nameOf(member).toLocaleLowerCase().includes(needle))
+    .sort((a, b) => (a.you === b.you ? 0 : a.you ? -1 : 1));
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      <Toolbar>
+        <ToolbarSearch
+          value={query}
+          onValueChange={setQuery}
+          placeholder="Search people"
+          aria-label="Search people"
+          disabled={loading}
+        />
+      </Toolbar>
+      {needle && !loading ? (
+        <ToolbarSummary>
+          {shown.length} of {value.members.length}{" "}
+          {value.members.length === 1 ? "person" : "people"}
+        </ToolbarSummary>
+      ) : null}
+      {loading ? (
+        <RowList label="People" busy flush>
+          <ListRowSkeleton count={4} />
+        </RowList>
+      ) : shown.length === 0 ? (
+        <EmptyState
+          variant="inline"
+          title={needle ? `No one matches "${query.trim()}".` : "No one here yet."}
+          action={
+            needle ? (
+              <EmptyStateLink onClick={() => setQuery("")}>Clear search</EmptyStateLink>
+            ) : undefined
+          }
+        />
+      ) : (
+        <RowList label="People" nameLabel="Person" flush>
+          {shown.map((member) => {
+            const name = nameOf(member);
+            return (
+              <ListRow
+                key={member.id}
+                leading={<PersonAvatar name={name} />}
+                title={name}
+                titleAddon={member.you ? <MetaChip variant="outline">You</MetaChip> : undefined}
+              />
+            );
+          })}
+        </RowList>
+      )}
     </div>
   );
 }

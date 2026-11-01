@@ -1227,9 +1227,9 @@ export async function acquireSharedTestDatabase(
  * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES):
  * EXECUTE on the personal-machine owner lookup (0978), the queued-turn hold
  * summary (0988), the held browser
- * routines (1002), the secret history scrub's reader and cell writer (1091)
- * and the agent call and native push v2 routines (1107). Tests that exercise
- * them run as they will once they are granted.
+ * routines (1002), the secret history scrub's reader and cell writer (1091),
+ * the agent call and native push v2 routines (1107) and the names-only member
+ * list (1211). Tests that exercise them run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
@@ -1252,6 +1252,8 @@ export async function grantDeferredRuntimeAccess(
       opengeni_private.agent_call_device_count_v1(text, boolean),
       opengeni_private.agent_call_ringing_v1(text),
       opengeni_private.ring_agent_call_v1(uuid, boolean)
+      TO ${grantee};
+    GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_member_names_v1(uuid)
       TO ${grantee};
   `);
 }

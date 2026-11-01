@@ -57,7 +57,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * scrub's reader and cell writer (1091), the subscription
  * account-administrator grant (1103), which records a request's verified
  * account:admin proof for one transaction, and agent calls' device lookup,
- * register, claim, device count, busy check and ring (1107). Each is
+ * register, claim, device count, busy check and ring (1107), and the
+ * organization's names-only member list (1211). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -83,6 +84,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "agent_call_device_count_v1(text, boolean)",
   "agent_call_ringing_v1(text)",
   "ring_agent_call_v1(uuid, boolean)",
+  "list_organization_member_names_v1(uuid)",
 ] as const;
 
 /**
@@ -105,7 +107,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * account-administrator grant and 1149 granted it. 1107 withholds the agent
  * call routines and the native push v2 functions that carry the iOS VoIP
  * token; until they are granted, native push keeps its v1 functions, no phone
- * takes calls and agents cannot place one.
+ * takes calls and agents cannot place one. 1211 withholds the names-only
+ * member list; until it is granted, members get no names (as before).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -118,6 +121,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "agent_call_device_count_v1(text, boolean)",
   "agent_call_ringing_v1(text)",
   "ring_agent_call_v1(uuid, boolean)",
+  "list_organization_member_names_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -203,6 +207,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "opengeni_private.native_push_devices",
     "auth_sessions",
   ],
+  "list_organization_member_names_v1(uuid)": ["organization_memberships", "auth_users"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =

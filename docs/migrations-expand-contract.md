@@ -255,7 +255,9 @@ created the secret history scrub's reader and cell
 writer withheld; the scrub checks the grant once per run and reports the
 cells only they reach as pending until then. 1103 created the subscription
 account-administrator grant withheld, with the same caller check, and 1149
-granted it and removed the check.
+granted it and removed the check. 1211 created the names-only organization
+member list withheld, with the same caller check; until it is granted the API
+reports the list as unavailable.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

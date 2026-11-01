@@ -4045,7 +4045,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 1103 and 1060 withheld; 0978's, 0984's, 0988's, 1002's, 1091's and 1107's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 1103 and 1060 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1107's and 1211's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4102,6 +4102,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
     "session_system_updates",
     "task_note_write_capabilities",
     "auth_sessions",
+    "auth_users",
     "agent_calls",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
@@ -4169,6 +4170,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "agent_call_device_count_v1(text, boolean)",
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
+      "list_organization_member_names_v1(uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4181,6 +4183,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "agent_call_device_count_v1(text, boolean)",
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
+      "list_organization_member_names_v1(uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4244,6 +4247,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "claim_native_push_deliveries_v2(uuid, integer, integer)",
       "ring_agent_call_v1(uuid, boolean)",
+      "list_organization_member_names_v1(uuid)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

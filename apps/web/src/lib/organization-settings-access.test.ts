@@ -70,15 +70,29 @@ describe("organization settings access", () => {
     );
   });
 
-  test("members see only what they can use: identity (read-only), Models, their agents and security", () => {
+  test("members see only what they can use: identity (read-only), Models, their agents, People (names only) and security", () => {
     // Models shows a member their own Personal workspace's default and allowed models.
     // Every member connects their own coding agents to the organization MCP server.
+    // People shows a member who is in the organization, by name only.
     expect(visible("member", ["account:read"])).toEqual([
       "agents",
       "identity",
       "models",
+      "people",
       "security",
     ]);
+    // Single-user local mode has no people, and a key or service is no member.
+    expect(visible("member", ["account:read"], local)).not.toContain("people");
+    expect([
+      ...organizationSettingsAccess({
+        accessContext: {
+          ...context("member", ["account:read"]),
+          subjectId: "api_key:k1",
+        } as AccessContext,
+        clientConfig: managed as never,
+        accountId: "acme",
+      }).visibleSections,
+    ]).not.toContain("people");
   });
 
   test("a session without an organization membership gets no Models page", () => {
@@ -162,6 +176,7 @@ describe("organization settings access", () => {
       "agents",
       "identity",
       "models",
+      "people",
       "security",
     ]);
     expect(

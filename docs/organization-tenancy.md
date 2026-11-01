@@ -577,6 +577,16 @@ The managed-human API surface is:
   operational access;
 - `GET /v1/organizations/:organizationId/members` and
   `PATCH /v1/organizations/:organizationId/members/:membershipId`; and
+- `GET /v1/organizations/:organizationId/member-names` for any active owner,
+  administrator, or member of that organization, acting as themselves. It
+  returns only each active person's membership id, display name, and whether
+  it is the caller, through the `list_organization_member_names_v1` definer
+  (1211). Emails, roles, status, invitations, workspace access, and usage stay
+  with `/members`. External (`external_user:`) and service subjects, suspended
+  and offboarded people, and other organizations never appear; outsiders get
+  `403`. Until the deployment grants the definer it answers
+  `{ "available": false, "members": [] }`, and the People page tells members
+  only owners and admins can see who is there;
 - `PATCH /v1/organizations/:organizationId/workspaces/:workspaceId` plus its
   `/settings` route, `PUT
 /v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
