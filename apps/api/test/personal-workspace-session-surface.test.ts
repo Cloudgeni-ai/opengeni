@@ -1723,6 +1723,65 @@ describe("the personal-workspace exception stays owner-only", () => {
     );
     expect(list.status).toBe(401);
   }, 180_000);
+
+  // Migration 1159 lets the owner's own row exist in their Personal workspace.
+  // The row must not let anyone who merely names the owner in: only verified
+  // owning-user proof reaches Personal, with or without the row.
+  test("the owner's own membership row gives a delegated bearer naming the owner nothing", async () => {
+    if (!shared || !client) return;
+    const owner = await provisionManagedHuman();
+    await shared.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+      values (${owner.accountId}, ${owner.personalWorkspaceId}, ${owner.subjectId}, 'member',
+        ${JSON.stringify(managedPersonalWorkspacePermissions)}::text::jsonb)`;
+
+    // A token for the Personal workspace itself, and one for the owner's
+    // shared workspace that then asks for Personal.
+    for (const workspaceId of [owner.personalWorkspaceId, owner.legacyWorkspaceId]) {
+      const token = await signDelegatedAccessToken(delegationSecret, {
+        accountId: owner.accountId,
+        workspaceId,
+        subjectId: owner.subjectId,
+        permissions: ["workspace:read", "sessions:read", "sessions:control"],
+        principalKind: "human_session",
+        exp: Math.floor(Date.now() / 1_000) + 3_600,
+      });
+      await expectAllPersonalSessionSurfacesDenied(owner, { authorization: `Bearer ${token}` });
+    }
+
+    // The owner's own cookie keeps working.
+    const list = await owner.app.request(
+      `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions`,
+      { headers: { cookie: owner.cookie } },
+    );
+    expect(list.status).toBe(200);
+  }, 180_000);
+
+  test("nobody can create a workspace that claims a Personal workspace's identity", async () => {
+    if (!shared || !client) return;
+    const owner = await provisionManagedHuman();
+    const json = { cookie: owner.cookie, "content-type": "application/json" };
+    const claimed = {
+      externalSource: "opengeni:organization-membership",
+      externalId: `${owner.accountId}:user:not-yet-a-member-${crypto.randomUUID()}`,
+    };
+    const created = await owner.app.request("http://x/v1/workspaces", {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ accountId: owner.accountId, name: "Claimed", ...claimed }),
+    });
+    expect(created.status).toBe(422);
+    const ensured = await owner.app.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: json,
+      body: JSON.stringify({ accountId: owner.accountId, name: "Claimed", ...claimed }),
+    });
+    expect(ensured.status).toBe(422);
+    const [count] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from workspaces
+      where account_id = ${owner.accountId} and external_id = ${claimed.externalId}`;
+    expect(count).toEqual({ count: 0 });
+  }, 180_000);
 });
 
 /**

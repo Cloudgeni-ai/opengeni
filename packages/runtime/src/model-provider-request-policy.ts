@@ -159,7 +159,59 @@ export function normalizeVercelGatewayRequestBody(
   }
 }
 
-export function azureModelRequestPolicy({
+/**
+ * Opengeni keeps each chat's history itself and sends it in full with every
+ * request: provider item ids are stripped and reasoning round-trips encrypted,
+ * so nothing reads a provider-stored response back. Responses `store` defaults
+ * to true, which keeps every response object for 30 days, so ask the provider
+ * not to keep one. A request is left alone when its caller chose `store`, or
+ * when it points at stored state: `previous_response_id`, `conversation`, or
+ * input items that still carry provider ids (`openaiProviderItemIds=preserve`).
+ * Returns the storeless body, or null when nothing changes.
+ */
+export function storelessResponsesBody(
+  path: string,
+  body: Readonly<Record<string, unknown>>,
+): Record<string, unknown> | null {
+  if (!(path.split("?", 1)[0] ?? path).endsWith("/responses")) return null;
+  if (body.input === undefined || body.store !== undefined) return null;
+  if (body.previous_response_id != null || body.conversation != null) return null;
+  const referencesStoredItems =
+    Array.isArray(body.input) &&
+    body.input.some(
+      (item) =>
+        item !== null &&
+        typeof item === "object" &&
+        typeof (item as Record<string, unknown>).id === "string",
+    );
+  return referencesStoredItems ? null : { ...body, store: false };
+}
+
+/** Applies {@link storelessResponsesBody} after another policy's projection. */
+export function withStorelessResponses(policy: ModelJsonRequestPolicy): ModelJsonRequestPolicy {
+  return (request) => {
+    const result = policy(request);
+    const storeless = storelessResponsesBody(request.path, result?.body ?? request.body);
+    return storeless ? { ...result, body: storeless } : result;
+  };
+}
+
+/**
+ * A workspace or organization OpenAI key, which always calls the OpenAI
+ * platform. The built-in provider never reaches this policy: its client is
+ * built from settings (`buildOpenAIClientFromSettings`), which checks the
+ * endpoint itself. An operator's registry provider is left alone even when it
+ * points at api.openai.com, as are OpenAI-compatible servers and gateways.
+ */
+export function isOpenAIPlatformResponsesProvider(provider: ResolvedModelProvider): boolean {
+  return (
+    provider.api === "responses" &&
+    provider.wireProfile === "openai" &&
+    (provider.kind === "direct-openai-workspace" || provider.kind === "direct-openai-organization")
+  );
+}
+
+function azureModelRequestProjection({
   body,
 }: {
   body: Readonly<Record<string, unknown>>;
@@ -227,6 +279,11 @@ export function azureModelRequestPolicy({
       ? undefined
       : { body: projectedBody };
 }
+
+/** Azure's request projection, then storeless Responses (Azure accepts `store: false`). */
+export const azureModelRequestPolicy: ModelJsonRequestPolicy = withStorelessResponses(
+  azureModelRequestProjection,
+);
 
 /**
  * Opper ids name Claude as a pool (`claude-sonnet-4-6`), a pinned route
@@ -327,7 +384,7 @@ export function modelRequestPolicyForProvider(
       return projected === body ? undefined : { body: projected };
     }
     if (provider.wireProfile === "azure-openai") {
-      return azureModelRequestPolicy({ body });
+      return azureModelRequestPolicy({ path, body });
     }
     if (provider.kind === "codex-subscription") {
       if (!(path.split("?", 1)[0] ?? path).endsWith("/responses")) {
@@ -394,6 +451,10 @@ export function modelRequestPolicyForProvider(
         body: projectedBody,
         headers: { [GATEWAY_REQUEST_BODY_NORMALIZED_HEADER]: "1" },
       };
+    }
+    if (isOpenAIPlatformResponsesProvider(provider)) {
+      const storeless = storelessResponsesBody(path, body);
+      return storeless ? { body: storeless } : undefined;
     }
     return undefined;
   };

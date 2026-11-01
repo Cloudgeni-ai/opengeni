@@ -1319,7 +1319,7 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "set_session_title",
       {
-        description: `Name this chat. Give a new chat a concise 3-7 word topic label: a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. After that, rename it only when the topic materially changes or the person asks, never as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
+        description: `Name this chat. Once a new chat has a task, question or subject (not while it holds only a greeting or small talk), give it a concise 3-7 word topic label in the language the person writes in: a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. After that, rename it only when the topic materially changes or the person asks, never as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. ${SESSION_PROFILE_TOOL_GUIDANCE}`,
         inputSchema: {
           title: z4.string().min(1).max(200).optional(),
           ...sessionProfileToolInputShape,

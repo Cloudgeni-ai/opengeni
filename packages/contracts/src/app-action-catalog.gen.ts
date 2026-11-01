@@ -1196,6 +1196,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createOrganizationConnector",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/connectors",
+    "request": [
+      "CreateOrganizationConnectorRequest"
+    ],
+    "response": [
+      "OrganizationConnector"
+    ],
+    "secretFields": [
+      "request.headers"
+    ]
+  },
+  {
     "id": "createOrganizationInvitation",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/invitations",
@@ -1736,6 +1750,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ApiKey"
     ]
+  },
+  {
+    "id": "deleteOrganizationConnector",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/connectors/:connectorId",
+    "request": [],
+    "response": []
   },
   {
     "id": "deleteOrganizationCredentialProvider",
@@ -5478,6 +5499,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ClaudeSubscriptionAccountsResponse"
+    ]
+  },
+  {
+    "id": "listOrganizationConnectors",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/connectors",
+    "request": [],
+    "response": [
+      "ListOrganizationConnectorsResponse",
+      "OrganizationConnector"
     ]
   },
   {
@@ -9339,6 +9370,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateFileReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/files/:fileId/reach",
+    "request": [
+      "UpdateFileReachRequest"
+    ],
+    "response": [
+      "UpdateFileReachResponse"
+    ],
+    "permission": "files:upload"
+  },
+  {
     "id": "updateFileVisibility",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/files/:fileId/visibility",
@@ -9494,6 +9537,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "ApiKey"
+    ]
+  },
+  {
+    "id": "updateOrganizationConnector",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/connectors/:connectorId",
+    "request": [
+      "UpdateOrganizationConnectorRequest"
+    ],
+    "response": [
+      "OrganizationConnector"
+    ],
+    "secretFields": [
+      "request.headers"
     ]
   },
   {
@@ -9878,6 +9935,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SiteSqlSettingsRequest"
     ],
     "response": []
+  },
+  {
+    "id": "updateSkillReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/skills/content/:skillId/reach",
+    "request": [
+      "UpdateOrganizationSkillReachRequest"
+    ],
+    "response": [
+      "OrganizationSkillReach"
+    ],
+    "permission": "workspace:read"
   },
   {
     "id": "updateVideoGenerationPolicy",

@@ -1,6 +1,7 @@
 import type {
   IntegrationEndpointTestResult,
   IntegrationWorkspaceFilter,
+  OrganizationAdministrationOverview,
   UpdateOrganizationWebhookRequest,
   WorkspaceInheritedIntegrationsResponse,
   WorkspaceWebhookDelivery,
@@ -45,6 +46,8 @@ export type IntegrationWebhook = {
   createdAt: string;
   updatedAt: string;
   workspaceFilter?: IntegrationWorkspaceFilter | null;
+  /** Organization only: the shared workspaces it covers; null is every one. */
+  allowedWorkspaceIds?: string[] | null;
 };
 
 export type IntegrationProvider = {
@@ -56,6 +59,8 @@ export type IntegrationProvider = {
   workspaceFilter?: IntegrationWorkspaceFilter | null;
   /** Organization only: members' Personal workspaces use it too. */
   allowPersonalWorkspaces?: boolean;
+  /** Organization only: the shared workspaces it serves; null is every one. */
+  allowedWorkspaceIds?: string[] | null;
 };
 
 export type ProviderTest = {
@@ -68,6 +73,7 @@ export type WebhookInput = {
   url: string;
   eventTypes: WorkspaceWebhookEventType[];
   workspaceFilter?: IntegrationWorkspaceFilter | null;
+  allowedWorkspaceIds?: string[] | null;
 };
 
 export type ProviderInput = {
@@ -76,6 +82,8 @@ export type ProviderInput = {
   timeoutMs: number;
   workspaceFilter?: IntegrationWorkspaceFilter | null;
   allowPersonalWorkspaces?: boolean;
+  /** Omitted keeps the stored list. */
+  allowedWorkspaceIds?: string[] | null;
 };
 
 export interface DeveloperIntegrationsApi {
@@ -100,6 +108,8 @@ export interface DeveloperIntegrationsApi {
   testProvider?: () => Promise<ProviderTest>;
   /** Workspace only: organization registrations that reach this workspace. */
   inherited?: () => Promise<WorkspaceInheritedIntegrationsResponse>;
+  /** Organization only: its shared workspaces, for "Selected workspaces". */
+  listSharedWorkspaces?: () => Promise<{ id: string; name: string }[]>;
 }
 
 export type WorkspaceIntegrationsClient = Pick<
@@ -157,18 +167,20 @@ export function organizationIntegrationsApi(
   return {
     scope: "organization",
     listWebhooks: async () => (await listOrganizationWebhooks(client, organizationId)).webhooks,
-    createWebhook: async ({ url, eventTypes, workspaceFilter }) =>
+    createWebhook: async ({ url, eventTypes, workspaceFilter, allowedWorkspaceIds }) =>
       await createOrganizationWebhook(client, organizationId, {
         url,
         eventTypes: eventTypes as OrganizationEventTypes,
         workspaceFilter: workspaceFilter ?? null,
+        allowedWorkspaceIds: allowedWorkspaceIds ?? null,
       }),
     // Every organization update restates its filter, so keep the current one.
-    updateWebhook: async (id, { url, eventTypes, enabled, workspaceFilter }) =>
+    updateWebhook: async (id, { url, eventTypes, enabled, workspaceFilter, allowedWorkspaceIds }) =>
       await updateOrganizationWebhook(client, organizationId, id, {
         ...(url !== undefined ? { url } : {}),
         ...(eventTypes !== undefined ? { eventTypes: eventTypes as OrganizationEventTypes } : {}),
         ...(enabled !== undefined ? { enabled } : {}),
+        ...(allowedWorkspaceIds !== undefined ? { allowedWorkspaceIds } : {}),
         workspaceFilter:
           workspaceFilter !== undefined
             ? workspaceFilter
@@ -183,17 +195,33 @@ export function organizationIntegrationsApi(
       (await rotateOrganizationWebhookSecret(client, organizationId, id)).secret,
     getProvider: async () =>
       (await getOrganizationCredentialProvider(client, organizationId)).provider,
-    // PUT replaces the configuration, so every write restates both reach choices.
-    putProvider: async ({ url, enabled, timeoutMs, workspaceFilter, allowPersonalWorkspaces }) =>
+    // PUT replaces the configuration, so every write restates the filter and
+    // the Personal switch. The workspace list is kept when it isn't passed.
+    putProvider: async ({
+      url,
+      enabled,
+      timeoutMs,
+      workspaceFilter,
+      allowPersonalWorkspaces,
+      allowedWorkspaceIds,
+    }) =>
       await putOrganizationCredentialProvider(client, organizationId, {
         url,
         enabled,
         timeoutMs,
         workspaceFilter: workspaceFilter ?? null,
         allowPersonalWorkspaces: allowPersonalWorkspaces ?? false,
+        ...(allowedWorkspaceIds !== undefined ? { allowedWorkspaceIds } : {}),
       }),
     deleteProvider: async () => await deleteOrganizationCredentialProvider(client, organizationId),
     rotateProviderSecret: async () =>
       (await rotateOrganizationCredentialProviderSecret(client, organizationId)).secret,
+    listSharedWorkspaces: async () =>
+      (
+        await client.requestJson<OrganizationAdministrationOverview>(
+          "GET",
+          `/v1/organizations/${encodeURIComponent(organizationId)}/overview`,
+        )
+      ).workspaces.map(({ id, name }) => ({ id, name })),
   };
 }

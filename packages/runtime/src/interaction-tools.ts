@@ -5059,8 +5059,10 @@ function lockedScreenText(message: string): string {
  * or launch it. A macOS launch finds a running app exactly, so there it is
  * always launched. Windows and Linux start another copy, so a listed window of
  * the app is observed instead. A launch acts on no window's contents, so any listed
- * target carries it: the screen when there is one. Its receipt observes the
- * app's window. A launch that cannot run is a note on the opened result, never
+ * target carries it (see launchCarrier). Its receipt observes the app's window,
+ * and names that window as its target: the carrier is an implementation detail,
+ * and naming another app's window would read as having acted on it. A launch
+ * that cannot run is a note on the opened result, never
  * an error that would hide the open computer. A retried call sends the same
  * operation ID; when the computer refuses it because the launch already ran
  * (with another fence) or the reply was lost, the recorded receipt answers.
@@ -5090,7 +5092,7 @@ async function launchOpenedComputerApp(
     // A window that cannot be read (closed meanwhile) is launched as usual.
     if (existing) return { existing };
   }
-  const carrier = opened.targets.find((target) => target.kind === "screen") ?? opened.targets[0];
+  const carrier = launchCarrier(opened.targets);
   if (!carrier)
     return {
       note: `The computer opened, but it has no screen or window to launch ${applicationId} from.`,
@@ -5102,20 +5104,22 @@ async function launchOpenedComputerApp(
   );
   try {
     return {
-      launch: await transport.actInComputer(workspaceId, opened.session.id, {
-        operationId,
-        targetId: carrier.id,
-        expectedTargetGeneration: carrier.targetGeneration,
-        expectedObservationId: null,
-        expectedFrameId: null,
-        action: { type: "launch", applicationId },
-      }),
+      launch: launchReceiptOnAppWindow(
+        await transport.actInComputer(workspaceId, opened.session.id, {
+          operationId,
+          targetId: carrier.id,
+          expectedTargetGeneration: carrier.targetGeneration,
+          expectedObservationId: null,
+          expectedFrameId: null,
+          action: { type: "launch", applicationId },
+        }),
+      ),
     };
   } catch (error) {
     const recorded = await Promise.resolve()
       .then(() => transport.getComputerActionReceipt(workspaceId, opened.session.id, operationId))
       .catch(() => null);
-    if (recorded) return { launch: recorded };
+    if (recorded) return { launch: launchReceiptOnAppWindow(recorded) };
     if (error instanceof OpenGeniApiError && error.outcomeUnknown)
       return {
         note: `${launchMayHaveRunNote(applicationId)} (${screenshotFailureReason(error)})`,
@@ -5128,6 +5132,38 @@ async function launchOpenedComputerApp(
 
 function launchMayHaveRunNote(applicationId: string): string {
   return `The computer opened, but the launch of ${applicationId} has no known outcome: it may have started. Check computer_targets for its window before launching it again.`;
+}
+
+/**
+ * The listed target a launch is sent through. A launch acts on no target's
+ * contents, but the computer starts it from a target and, when that target is
+ * one of the launched app's windows, observes that window rather than another
+ * of the app's (an app may already show windows other agents work in). So:
+ * the screen when there is one, else the target this computer was last
+ * observed or acted on in, else the focused window, else any readable one.
+ */
+export function launchCarrier(targets: readonly ComputerTarget[]): ComputerTarget | null {
+  const readable = targets.filter((target) => !target.offScreen);
+  return (
+    targets.find((target) => target.kind === "screen") ??
+    readable.find((target) => target.current) ??
+    readable.find((target) => target.kind === "window" && target.focused) ??
+    readable.find((target) => target.kind === "window") ??
+    readable[0] ??
+    targets[0] ??
+    null
+  );
+}
+
+/** A launch receipt naming the app window it observed as its target, rather
+ * than the target it was sent through. */
+export function launchReceiptOnAppWindow<T extends z.input<typeof ComputerActionReceipt>>(
+  receipt: T,
+): T {
+  const observed = receipt.observation?.target;
+  return observed && observed.kind === "window" && observed.id !== receipt.targetId
+    ? { ...receipt, targetId: observed.id }
+    : receipt;
 }
 
 /** A mutation whose request was sent but whose answer never arrived (the

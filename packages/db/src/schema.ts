@@ -4110,6 +4110,8 @@ export const organizationCredentialProviders = pgTable(
     workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
     /** Personal workspaces; the workspace filter applies to shared ones only. */
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(false),
+    /** Shared workspaces it serves; null is every one. The filter applies on top. */
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     createdBySubjectId: text("created_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4132,6 +4134,8 @@ export const organizationWebhooks = pgTable(
     enabled: boolean("enabled").notNull().default(true),
     description: text("description"),
     workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
+    /** Shared workspaces whose events it receives; null is every one. Never Personal ones. */
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     createdBySubjectId: text("created_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4621,6 +4625,8 @@ export const organizationPrivacyPreferences = pgTable("organization_privacy_pref
     .$type<"workspace_shared" | "user_private">()
     .notNull()
     .default("workspace_shared"),
+  // Off: only owners and admins connect new machines of their own (1148).
+  membersConnectOwnMachines: boolean("members_connect_own_machines").notNull().default(true),
   adminsSeePrivateSchedules: boolean("admins_see_private_schedules").notNull().default(true),
   personalWorkspacesEnabled: boolean("personal_workspaces_enabled").notNull().default(true),
   // The most each person spends from the organization's credits in their own
@@ -5966,6 +5972,12 @@ export const files = pgTable(
     ownerSubjectId: text("owner_subject_id").default(sql`coalesce(
       nullif(current_setting('opengeni.private_file_owner',true),''),
       nullif(current_setting('opengeni.initiating_human_subject_id',true),''))`),
+    // Migration 1186. An Only me file's other workspaces of the organization
+    // where it also works, besides this one and its owner's Personal
+    // workspace; null for every workspace (files from before 1186).
+    reachWorkspaceIds: uuid("reach_workspace_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`),
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
       .notNull()
@@ -13615,6 +13627,51 @@ export const capabilityInstallations = pgTable(
     status: index("capability_installations_workspace_status_idx").on(
       table.workspaceId,
       table.status,
+    ),
+  }),
+);
+
+/**
+ * An organization's MCP connector, added once by an organization owner or
+ * admin and served to the workspaces its reach selects: every shared workspace
+ * (`allowedWorkspaceIds` null) or the listed ones, plus members' Personal
+ * workspaces when `allowPersonalWorkspaces` is on. `config` has the shape of a
+ * workspace installation's config; `customDefinition` holds a custom server's
+ * name and endpoint and is null for a catalog connector. A workspace's own
+ * installation of the same capability, on or off, wins (resolved by readers).
+ */
+export const organizationConnectors = pgTable(
+  "organization_connectors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    capabilityId: text("capability_id").notNull(),
+    customDefinition: jsonb("custom_definition").$type<{
+      name: string;
+      description?: string | null;
+      endpointUrl: string;
+    }>(),
+    config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status").$type<"active" | "disabled">().notNull().default("active"),
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(false),
+    generation: integer("generation").notNull().default(1),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    capability: unique("organization_connectors_capability_key").on(
+      table.accountId,
+      table.capabilityId,
+    ),
+    statusCheck: check(
+      "organization_connectors_status_chk",
+      sql`${table.status} in ('active', 'disabled')`,
     ),
   }),
 );

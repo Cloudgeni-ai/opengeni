@@ -32,6 +32,7 @@ import {
   UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
 } from "@opengeni/contracts";
+import type { AccessGrant } from "@opengeni/contracts";
 import {
   changeMachineAudience,
   continueSessionWaitingWork,
@@ -49,11 +50,12 @@ import { HTTPException } from "hono/http-exception";
 import {
   grantHasAgentAttemptAuthority,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
-import type { ApiRouteDeps } from "@opengeni/core";
+import type { AccessGrantAuthorization, ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
 import {
   isAgentAttemptOnOwnSession,
@@ -78,6 +80,7 @@ import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../san
 import { parseRequestBody, parseRequestJson } from "../http/request-body";
 import { requireFullAccessIfAgent } from "../http/acting-person";
 import {
+  canConnectOwnMachine,
   requireMachineAccessGrant,
   requireMachineAudienceAuthority,
   requireMachineScopeAuthority,
@@ -132,10 +135,22 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionGrant = sessionId
       ? await requireAccessGrant(c, deps, workspaceId, "sessions:read")
       : null;
-    const grant =
-      sessionGrant && sessionId && isAgentAttemptOnOwnSession(sessionGrant, sessionId)
-        ? sessionGrant
-        : await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
+    // A person (or a credential acting for one) also learns whether their
+    // organization lets them connect a machine of their own; an agent's
+    // listing of its own chat doesn't.
+    let grant: AccessGrant;
+    let personAuthorization: AccessGrantAuthorization | null = null;
+    if (sessionGrant && sessionId && isAgentAttemptOnOwnSession(sessionGrant, sessionId)) {
+      grant = sessionGrant;
+    } else {
+      personAuthorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "enrollments:read",
+      );
+      grant = personAuthorization.grant;
+    }
     assertSelfhostedEnabled();
     if (sessionId !== null && !z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(400, { message: "sessionId must be a UUID" });
@@ -173,7 +188,16 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         sessionId,
       },
     );
-    return c.json(MachinesResponse.parse(response));
+    return c.json(
+      MachinesResponse.parse(
+        personAuthorization
+          ? {
+              ...response,
+              canConnectOwnMachine: await canConnectOwnMachine(deps, personAuthorization),
+            }
+          : response,
+      ),
+    );
   });
 
   // ── GET /workspaces/:ws/machines/:enrollmentId/metrics/series ───────────────

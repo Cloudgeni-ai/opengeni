@@ -1,6 +1,6 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { WorkspaceArtifact } from "@opengeni/sdk";
-import { ChevronDownIcon, Loader2Icon, LockKeyholeIcon, UsersIcon } from "lucide-react";
+import { ChevronDownIcon, LayersIcon, Loader2Icon, LockKeyholeIcon, UsersIcon } from "lucide-react";
 import { useRef, useState, type ReactNode } from "react";
 import { toast } from "../../lib/toast";
 import { useCanLimitToMe } from "../../lib/use-can-limit-to-me";
@@ -110,6 +110,7 @@ export function useArtifactAudience({
   copy,
   update,
   canLimitToMe: knownCanLimitToMe,
+  onChooseWhere,
 }: {
   client: OpenGeniBrowserClient;
   workspaceId: string;
@@ -126,6 +127,11 @@ export function useArtifactAudience({
    * ask) and offer Limit to me; the server still refuses it when it is off.
    */
   canLimitToMe?: boolean | undefined;
+  /**
+   * Opens where the owner's Only me item works ("Available in…"), for kinds
+   * that can work in their other workspaces too. Offered only while Only me.
+   */
+  onChooseWhere?: (() => void) | undefined;
 }): AudienceControls {
   const onlyMe = visibility === "private";
   const fetchedCanLimitToMe = useCanLimitToMe(
@@ -202,10 +208,23 @@ export function useArtifactAudience({
         </div>
         <DropdownMenuSeparator />
         {onlyMe ? (
-          <DropdownMenuItem onSelect={() => setConfirming("workspace")}>
-            <UsersIcon />
-            Share with workspace…
-          </DropdownMenuItem>
+          <>
+            <DropdownMenuItem onSelect={() => setConfirming("workspace")}>
+              <UsersIcon />
+              Share with workspace…
+            </DropdownMenuItem>
+            {onChooseWhere ? (
+              <DropdownMenuItem onSelect={onChooseWhere}>
+                <LayersIcon />
+                <span className="flex min-w-0 flex-col">
+                  Available in…
+                  <span className="text-xs text-fg-muted">
+                    Your other workspaces, still only for you.
+                  </span>
+                </span>
+              </DropdownMenuItem>
+            ) : null}
+          </>
         ) : (
           <DropdownMenuItem disabled={!canLimitToMe} onSelect={() => setConfirming("private")}>
             <LockKeyholeIcon />

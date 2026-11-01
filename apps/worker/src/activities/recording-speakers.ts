@@ -18,7 +18,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RECORDING_TIMELINE_FILTER } from "./recording-audio";
-import { readTail, trackRecordingProcesses } from "./recording-usage";
+import { readTail, stoppedBySignal, trackRecordingProcesses } from "./recording-usage";
 
 export type RecordingSpeakersConfig = {
   binaryPath: string;
@@ -31,6 +31,13 @@ export type RecordingSpeakersConfig = {
 
 export class RecordingSpeakersError extends Error {
   readonly name = "RecordingSpeakersError";
+  constructor(
+    message: string,
+    /** Stopped from outside (the worker is stopping), not a failure of the models. */
+    readonly interrupted = false,
+  ) {
+    super(message);
+  }
 }
 
 /** An hour of audio takes a few CPU-minutes; this only bounds a hang. */
@@ -138,7 +145,11 @@ async function runSpeakers(
       speakers.kill("SIGKILL");
     };
     signal?.addEventListener("abort", kill, { once: true });
-    const timer = setTimeout(kill, SPEAKERS_TIMEOUT_MS);
+    let hung = false;
+    const timer = setTimeout(() => {
+      hung = true;
+      kill();
+    }, SPEAKERS_TIMEOUT_MS);
     try {
       const [decoderCode, code, stdout, speakersError, decoderError] = await Promise.all([
         decoder.exited,
@@ -147,6 +158,15 @@ async function runSpeakers(
         readTail(speakers.stderr, 8_192),
         readTail(decoder.stderr, 8_192),
       ]);
+      if (
+        !hung &&
+        (code !== 0 || decoderCode !== 0) &&
+        (signal?.aborted ||
+          stoppedBySignal(speakers, speakersError) ||
+          stoppedBySignal(decoder, decoderError))
+      ) {
+        throw new RecordingSpeakersError("speaker detection was stopped", true);
+      }
       if (code === 0 && decoderCode !== 0) {
         throw new RecordingSpeakersError(
           `ffmpeg could not decode the audio: ${decoderError.trim().slice(0, 400)}`,

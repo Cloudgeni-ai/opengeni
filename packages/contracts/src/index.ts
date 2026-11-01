@@ -63,6 +63,7 @@ export * from "./opening-tools";
 import { SessionUsageLimit, SessionUsageLimitMicros } from "./session-usage-limits";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
+export * from "./organization-connectors";
 import { SkillReviewReference, skillReviewHumanInput } from "./skills";
 import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
@@ -7086,6 +7087,14 @@ export const FileAsset = /* @__PURE__ */ defineSchema(() =>
      * themselves. Null for older shared files and output made without a person.
      */
     ownerSubjectId: z.string().min(1).max(1024).nullable().optional(),
+    /**
+     * An Only me file's other workspaces of the organization where it also
+     * works, besides the one that stores it and its owner's Personal
+     * workspace; null for every workspace (files from before this list
+     * existed). Absent for workspace files, which work only in their
+     * workspace.
+     */
+    reachWorkspaceIds: z.array(primitives.uuid).nullable().optional(),
     id: primitives.uuid,
     workspaceId: primitives.uuid,
     status: FileStatus,
@@ -7180,6 +7189,13 @@ export const UpdateFileVisibilityResponse = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 export type UpdateFileVisibilityResponse = z.infer<typeof UpdateFileVisibilityResponse>;
+
+export const UpdateFileReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    file: FileAsset,
+  }),
+);
+export type UpdateFileReachResponse = z.infer<typeof UpdateFileReachResponse>;
 
 export const FileDownloadUrlResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -14670,7 +14686,11 @@ export const CapabilityLifecycle = /* @__PURE__ */ defineSchema(() =>
     status: CapabilityLifecycleStatus,
     readiness: CapabilityReadiness,
     detail: primitives.nullableString.default(null),
-    managedBy: z.enum(["deployment", "platform", "workspace"]).nullable().default(null),
+    /** `organization`: an organization connector that reaches this workspace (OR-11). */
+    managedBy: z
+      .enum(["deployment", "platform", "workspace", "organization"])
+      .nullable()
+      .default(null),
   }),
 );
 export type CapabilityLifecycle = z.infer<typeof CapabilityLifecycle>;
@@ -22044,6 +22064,13 @@ export const MachinesResponse = /* @__PURE__ */ defineSchema(() =>
     activeEpoch: z.number().int(),
     machines: z.array(MachineView),
     sessionMachineAccess: SessionMachineAccess.nullable().optional(),
+    /**
+     * False when the organization lets only its owners and admins connect
+     * new machines of their own: an Only me machine, or any machine in a
+     * Personal workspace. Omitted for an agent listing its own chat, and by
+     * older servers.
+     */
+    canConnectOwnMachine: z.boolean().optional(),
   }),
 );
 export type MachinesResponse = z.infer<typeof MachinesResponse>;

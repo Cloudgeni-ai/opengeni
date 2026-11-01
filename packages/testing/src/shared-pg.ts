@@ -1227,9 +1227,10 @@ export async function acquireSharedTestDatabase(
  * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES):
  * EXECUTE on the personal-machine owner lookup (0978), the queued-turn hold
  * summary (0988), the held browser
- * routines (1002), the secret history scrub's reader and cell writer (1091)
- * and the agent call and native push v2 routines (1107). Tests that exercise
- * them run as they will once they are granted.
+ * routines (1002), the secret history scrub's reader and cell writer (1091),
+ * the agent call and native push v2 routines (1107) and the lock-free external
+ * identity read (1172). Tests that exercise them run as they will once they
+ * are granted.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
@@ -1244,6 +1245,8 @@ export async function grantDeferredRuntimeAccess(
     GRANT EXECUTE ON FUNCTION opengeni_private.session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.redact_session_secret_cells_v1(uuid, text, jsonb)
+      TO ${grantee};
+    GRANT EXECUTE ON FUNCTION opengeni_private.read_external_identity_v1(uuid, text, text)
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION
       opengeni_private.native_push_device_v2(text),

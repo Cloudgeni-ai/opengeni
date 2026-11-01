@@ -57,6 +57,7 @@ import {
   listRecordingPeople,
   listRecordingsWithOwnElsewhere,
   ownRecordingHome,
+  ownMeetingsReaching,
   ownRecordingWorkspaces,
   recordingVisible,
   listRecordingTranscriptVersions,
@@ -131,6 +132,30 @@ function storedTranscription(
   return { ...rest, ...(language ? { language } : {}) };
 }
 
+/** A request takes at most this many keyterms, as the contract allows. */
+const MAX_KEYTERMS = 100;
+
+/**
+ * The words a meeting transcript listens for: the recording's own first,
+ * then the workspace's, each once whatever its case, cut at what one
+ * request takes.
+ */
+export function meetingKeyterms(
+  own: readonly string[] | undefined,
+  workspace: readonly string[] | undefined,
+): string[] {
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const term of [...(own ?? []), ...(workspace ?? [])]) {
+    const key = term.toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    terms.push(term);
+    if (terms.length === MAX_KEYTERMS) break;
+  }
+  return terms;
+}
+
 /** The billing code a credit refusal carries (insufficient_credits, allowance_exhausted, ...). */
 function refusalCode(refused: ApiHttpError): string {
   const code = refused.details?.code;
@@ -195,6 +220,7 @@ export function registerRecordingRoutes(
       subjectId: actor.subjectId,
       recordingId,
       workspaces: await ownRecordingWorkspaces(db, actor),
+      reachingWorkspaceId: await ownMeetingsReaching(db, actor),
     });
     const there = home ? await sameGrantIn(c, home.id, permission, actor) : null;
     if (!home || !there) return actor;
@@ -351,12 +377,22 @@ export function registerRecordingRoutes(
         details: { code: "unknown_model", providerId, model: model ?? null },
       });
     }
-    const { providerId: _provider, model: _model, ...rest } = storedTranscription(requested);
+    const {
+      providerId: _provider,
+      model: _model,
+      keyterms: ownKeyterms,
+      ...rest
+    } = storedTranscription(requested);
     const diarizer = rest.diarizer ?? settings.diarizer;
+    const keyterms = meetingKeyterms(ownKeyterms, settings.keyterms);
     return {
       providerId,
       model: found.spec.model,
-      options: { ...rest, ...(diarizer ? { diarizer } : {}) },
+      options: {
+        ...rest,
+        ...(diarizer ? { diarizer } : {}),
+        ...(keyterms.length > 0 ? { keyterms } : {}),
+      },
       automatic: !requested.providerId && !settings.transcription && deployment.pinned === null,
     };
   }
@@ -744,6 +780,7 @@ export function registerRecordingRoutes(
         (purpose.data ?? "meeting") === "meeting" && !externalRef
           ? await ownListableElsewhere(c, actor)
           : [],
+      reachingWorkspaceId: await ownMeetingsReaching(db, actor),
       workspaceId: actor.workspaceId,
       subjectId: actor.subjectId,
       query: query || undefined,
@@ -918,8 +955,31 @@ export function registerRecordingRoutes(
         retryable: false,
       });
     }
+    // Where an Only me meeting works: the owner's own other workspaces of the
+    // organization. Its own workspace and their Personal workspace always
+    // have it, so they aren't stored.
+    let reachWorkspaceIds = body.reachWorkspaceIds;
+    if (reachWorkspaceIds) {
+      const own = await ownRecordingWorkspaces(db, actor);
+      const known = new Map(own.map((workspace) => [workspace.id, workspace]));
+      const unknown = reachWorkspaceIds.filter((id) => id !== actor.workspaceId && !known.has(id));
+      if (unknown.length > 0) {
+        throw invalid("reachWorkspaceIds must be workspaces of this organization you belong to");
+      }
+      reachWorkspaceIds = reachWorkspaceIds.filter((id) => known.get(id)?.personal !== true);
+    }
     return c.json(
-      shownHere(await guard(() => updateRecording(db, { ...actor, recordingId, ...body })), actor),
+      shownHere(
+        await guard(() =>
+          updateRecording(db, {
+            ...actor,
+            recordingId,
+            ...body,
+            ...(reachWorkspaceIds === undefined ? {} : { reachWorkspaceIds }),
+          }),
+        ),
+        actor,
+      ),
     );
   });
 

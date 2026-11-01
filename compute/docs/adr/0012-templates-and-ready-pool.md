@@ -94,6 +94,20 @@ sandboxes created at once all pay it at the same time.
   are rare (one per shape and base image). Its disk is booked at its full
   length, since its guest writes to its copy while it boots, with its kernel
   copy and snapshot.
+- Creates the host took come before builds and fills. A create that finds
+  no template asks for its build, which starts only once the create has
+  booked its own first wake, in the room left; without room the sandbox
+  boots cold and the build waits, as after a failed one. A create waiting
+  for its image or for a disk reading keeps its first wake's memory and
+  processor time booked meanwhile, so no build, fill or later create takes
+  them. The hold is renewed while the create still waits, however long its
+  image takes, and only while it still fits; it lapses on its own only for
+  a create the agent lost track of. It counts as taken memory, like any
+  booked first wake: ready sandboxes make way for it and a wake of an
+  existing sandbox that would not fit beside it waits, from the moment the
+  host takes the create rather than once its VM starts. (Booked ahead of
+  the create that asked for it, a build once had that create refused on an
+  otherwise empty host.)
 - A create claims a ready clone whenever it asks for the clone's processors
   and memory, whatever its request: before the claim is recorded, the
   clone's VM is given the request's guarantees (`cpu.weight` at once,

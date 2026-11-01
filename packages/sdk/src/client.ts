@@ -27,8 +27,12 @@ import type {
   ClaudeSubscriptionAccount,
   ClaudeSubscriptionOAuthStartRequest,
   ClaudeSubscriptionSetupTokenRequest,
+  CreateOrganizationConnectorRequest,
+  ListOrganizationConnectorsResponse,
+  OrganizationConnector,
   SubscriptionPoolSettings,
   SubscriptionUsagePoolsResponse,
+  UpdateOrganizationConnectorRequest,
 } from "@opengeni/contracts";
 import {
   insightsUsageQueryString,
@@ -207,6 +211,7 @@ import {
   type ReadRetryPolicy,
 } from "./read-retry";
 import type {
+  OrganizationSkillReach,
   SkillRecord,
   SkillSummary,
   SkillWriteReceipt,
@@ -450,6 +455,8 @@ import type {
   UserMessageEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
+  UpdateFileReachRequest,
+  UpdateFileReachResponse,
   UpdateFileVisibilityRequest,
   UpdateFileVisibilityResponse,
   ConnectionMetadata,
@@ -3373,10 +3380,21 @@ export class OpenGeniClient {
 
   // --- Turn queue ------------------------------------------------------------
 
-  async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
+  /**
+   * Read the session's prompt queue. Concurrent reads share one request; pass
+   * `fresh` after a change you observed so the read starts no earlier than
+   * this call instead of joining an older one still in flight.
+   */
+  async getQueue(
+    workspaceId: string,
+    sessionId: string,
+    options: GetSessionOptions = {},
+  ): Promise<SessionQueueSnapshot> {
     const path = `${sessionPath(workspaceId, sessionId)}/queue`;
-    return await this.sharedRead(path, () =>
-      this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
+    return await this.sharedRead(
+      path,
+      () => this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
+      options,
     );
   }
 
@@ -6084,6 +6102,48 @@ export class OpenGeniClient {
     );
   }
 
+  /** The organization's connectors and where each works (organization owners and admins). */
+  async listOrganizationConnectors(organizationId: string): Promise<OrganizationConnector[]> {
+    const response = await this.requestJson<ListOrganizationConnectorsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/connectors`,
+    );
+    return response.connectors;
+  }
+
+  /** Add a catalog connector or a custom MCP server for the workspaces its availability selects. */
+  async createOrganizationConnector(
+    organizationId: string,
+    request: CreateOrganizationConnectorRequest,
+  ): Promise<OrganizationConnector> {
+    return await this.requestJson<OrganizationConnector>(
+      "POST",
+      `/v1/organizations/${organizationId}/connectors`,
+      request,
+    );
+  }
+
+  /** Change where it works, its tools, whether it is on, or its organization key. */
+  async updateOrganizationConnector(
+    organizationId: string,
+    connectorId: string,
+    request: UpdateOrganizationConnectorRequest,
+  ): Promise<OrganizationConnector> {
+    return await this.requestJson<OrganizationConnector>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/connectors/${connectorId}`,
+      request,
+    );
+  }
+
+  /** Remove it; every workspace stops serving it at once. */
+  async deleteOrganizationConnector(organizationId: string, connectorId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/connectors/${connectorId}`,
+    );
+  }
+
   /** List workspace-owned Claude model slugs. */
   async listWorkspaceClaudeCustomModels(
     workspaceId: string,
@@ -8228,6 +8288,27 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Change where your Only me file works besides the workspace that stores it
+   * and your Personal workspace: your other workspaces of this organization,
+   * or all of them (null). It stays Only me in each. Only the file's owner
+   * can, from the workspace that stores it.
+   */
+  async updateFileReach(
+    workspaceId: string,
+    fileId: string,
+    request: UpdateFileReachRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<UpdateFileReachResponse> {
+    return await this.requestJson<UpdateFileReachResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/files/${encodeURIComponent(fileId)}/reach`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
   async getFile(
     workspaceId: string,
     fileId: string,
@@ -10234,6 +10315,21 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/reject`,
       request,
+    );
+  }
+
+  /** Choose where an organization Skill works: every shared workspace (`null`)
+   * or the listed ones, plus members' Personal workspaces when switched on.
+   * Whoever may change the organization's Skills only. */
+  async updateSkillReach(
+    workspaceId: string,
+    skillId: string,
+    reach: OrganizationSkillReach,
+  ): Promise<{ reach: OrganizationSkillReach }> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/reach`,
+      reach,
     );
   }
 
