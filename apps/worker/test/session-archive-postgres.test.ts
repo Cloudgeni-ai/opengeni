@@ -31,18 +31,21 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function idleSession() {
+async function idleSession(into?: { accountId: string; workspaceId: string; subjectId: string }) {
   const suffix = crypto.randomUUID();
-  const access = await bootstrapWorkspace(client.db, {
-    accountExternalSource: "test",
-    accountExternalId: suffix,
-    accountName: "Worker archive",
-    workspaceExternalSource: "test",
-    workspaceExternalId: suffix,
-    workspaceName: "Worker archive",
-    subjectId: `subject-${suffix}`,
-  });
-  const grant = access.workspaceGrants[0]!;
+  const grant =
+    into ??
+    (
+      await bootstrapWorkspace(client.db, {
+        accountExternalSource: "test",
+        accountExternalId: suffix,
+        accountName: "Worker archive",
+        workspaceExternalSource: "test",
+        workspaceExternalId: suffix,
+        workspaceName: "Worker archive",
+        subjectId: `subject-${suffix}`,
+      })
+    ).workspaceGrants[0]!;
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
@@ -57,6 +60,7 @@ async function idleSession() {
   const scope = {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
+    subjectId: grant.subjectId,
     sessionId: session.id,
   };
   await withWorkspaceSessionActivityRls(client.db, scope.workspaceId, (db) =>
@@ -248,6 +252,152 @@ describe("idle-session archive worker", () => {
     const second = await activities.archiveIdleSessions();
     expect(second.failed).toBe(0);
     const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
+    expect(session?.retention?.archive?.state).toBe("archived");
+  }, 120_000);
+
+  test("stopping an archived chat skips its sub-chats that are already stored", async () => {
+    const activities = createSessionArchiveActivities(
+      async () =>
+        ({
+          db: client.db,
+          bus: { publish: async () => undefined },
+          objectStorage: { deleteObject: async () => undefined } as never,
+          observability: { info: () => undefined, warn: () => undefined } as never,
+          settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: 30 }),
+        }) as unknown as ActivityServices,
+      { upload: async () => undefined },
+    );
+    // A sub-chat stored on its own earlier...
+    const child = await idleSession();
+    expect((await activities.archiveIdleSessions()).failed).toBe(0);
+    expect(
+      (await getSession(client.db, child.workspaceId, child.sessionId))?.retention?.archive?.state,
+    ).toBe("archived");
+    // ...under a chat that was archived later while it still had work.
+    const scope = await idleSession(child);
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`update sessions set parent_session_id = ${scope.sessionId},
+          root_session_id = ${scope.sessionId}
+        where workspace_id = ${scope.workspaceId} and id = ${child.sessionId}`;
+    });
+    // It still had a queued message when it was archived, so the pass must
+    // cancel its work.
+    await withWorkspaceSessionActivityRls(client.db, scope.workspaceId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          sessionId: scope.sessionId,
+          subjectId: scope.subjectId,
+          actor: { type: "human", subjectId: scope.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "One more thing",
+          resources: [],
+          source: "user",
+          reasoningEffortFallback: "medium",
+        }),
+      ),
+    );
+
+    await shared.admin`update sessions set archived_at = now() - interval '1 minute',
+        archive_requested_by = 'subject-archiver'
+      where workspace_id = ${scope.workspaceId} and id = ${scope.sessionId}`;
+
+    const first = await activities.archiveIdleSessions();
+    expect(first.failed).toBe(0);
+
+    const second = await activities.archiveIdleSessions();
+    expect(second.failed).toBe(0);
+    const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
+    expect(session?.retention?.archive?.state).toBe("archived");
+  }, 120_000);
+
+  test("an archived chat held back only by an undelivered update is stopped, then stored", async () => {
+    const scope = await idleSession();
+    // A failed chat with a notice it never got to read: it will never run
+    // again, so the notice is cancelled with its work.
+    await shared.admin`insert into session_system_updates (
+        account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload
+      ) values (${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId},
+        'agent_message', ${crypto.randomUUID()}, ${`archive-${crypto.randomUUID()}`},
+        'late notice', ${shared.admin.json({ type: "agent_message", text: "late" })})`;
+    await shared.admin`update sessions set status = 'failed',
+        archived_at = now() - interval '1 minute', archive_requested_by = 'subject-archiver'
+      where workspace_id = ${scope.workspaceId} and id = ${scope.sessionId}`;
+    const activities = createSessionArchiveActivities(
+      async () =>
+        ({
+          db: client.db,
+          bus: { publish: async () => undefined },
+          objectStorage: { deleteObject: async () => undefined } as never,
+          observability: { info: () => undefined, warn: () => undefined } as never,
+          settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: 30 }),
+        }) as unknown as ActivityServices,
+      { upload: async () => undefined },
+    );
+    expect((await activities.archiveIdleSessions()).failed).toBe(0);
+    const [update] = await shared.admin`select state from session_system_updates
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
+    expect(update!.state).toBe("cancelled");
+    expect((await activities.archiveIdleSessions()).failed).toBe(0);
+    const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
+    expect(session?.retention?.archive?.state).toBe("archived");
+  }, 120_000);
+
+  test("an archived sub-chat still at work under a stored chat is stopped, then stored", async () => {
+    const activities = createSessionArchiveActivities(
+      async () =>
+        ({
+          db: client.db,
+          bus: { publish: async () => undefined },
+          objectStorage: { deleteObject: async () => undefined } as never,
+          observability: { info: () => undefined, warn: () => undefined } as never,
+          settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: 30 }),
+        }) as unknown as ActivityServices,
+      { upload: async () => undefined },
+    );
+    const parent = await idleSession();
+    expect((await activities.archiveIdleSessions()).failed).toBe(0);
+    const child = await idleSession(parent);
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`update sessions set parent_session_id = ${parent.sessionId},
+          root_session_id = ${parent.sessionId}
+        where workspace_id = ${child.workspaceId} and id = ${child.sessionId}`;
+    });
+    // It still had a queued message, so stopping it also cancels work.
+    await withWorkspaceSessionActivityRls(client.db, child.workspaceId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: child.accountId,
+          workspaceId: child.workspaceId,
+          sessionId: child.sessionId,
+          subjectId: child.subjectId,
+          actor: { type: "human", subjectId: child.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "One more thing",
+          resources: [],
+          source: "user",
+          reasoningEffortFallback: "medium",
+        }),
+      ),
+    );
+    await shared.admin`update sessions set archived_at = now() - interval '1 minute',
+        archive_requested_by = 'subject-archiver'
+      where workspace_id = ${child.workspaceId} and id = ${child.sessionId}`;
+    await shared.admin`insert into session_goals (account_id, workspace_id, session_id, text, status)
+      values (${child.accountId}, ${child.workspaceId}, ${child.sessionId}, 'keep going', 'active')`;
+
+    const first = await activities.archiveIdleSessions();
+    expect(first.failed).toBe(0);
+    const [goal] = await shared.admin`select status from session_goals
+      where workspace_id = ${child.workspaceId} and session_id = ${child.sessionId}`;
+    expect(goal!.status).toBe("paused");
+    await activities.archiveIdleSessions();
+    const session = await getSession(client.db, child.workspaceId, child.sessionId);
     expect(session?.retention?.archive?.state).toBe("archived");
   }, 120_000);
 });
