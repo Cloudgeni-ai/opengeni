@@ -63,6 +63,7 @@ export * from "./opening-tools";
 import { SessionUsageLimit, SessionUsageLimitMicros } from "./session-usage-limits";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
+export * from "./organization-connectors";
 import { SkillReviewReference, skillReviewHumanInput } from "./skills";
 import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
@@ -6618,6 +6619,22 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
      * whole plan credit. Absent means none.
      */
     apiDebtMicros: primitives.nonnegativeInteger.optional(),
+    /**
+     * Paid credit the bring-your-own-key platform fee may draw: an active
+     * paid plan's remaining credit (app use only) and credits that were paid
+     * for (top-ups and operator grants) and not yet spent, never Free,
+     * signup or promotional credit. Ordinary spending draws promotional
+     * credits first. `paidCreditsMicros` is present only on fee reads.
+     */
+    paidPlanCreditMicros: primitives.nonnegativeInteger.optional(),
+    paidCreditsMicros: primitives.nonnegativeInteger.optional(),
+    /** Own-key platform fees charged this calendar month (UTC). Absent means none. */
+    byokPlatformFeeMonthMicros: primitives.nonnegativeInteger.optional(),
+    /**
+     * Own-key fees that ran past paid credit (parallel calls settle after
+     * use). The next top-up repays it; promotional credit never does.
+     */
+    byokFeeDebtMicros: primitives.nonnegativeInteger.optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
     heldCreditMicros: primitives.nonnegativeInteger.optional(),
     heldGeneralCreditMicros: primitives.nonnegativeInteger.optional(),
@@ -14654,7 +14671,11 @@ export const CapabilityLifecycle = /* @__PURE__ */ defineSchema(() =>
     status: CapabilityLifecycleStatus,
     readiness: CapabilityReadiness,
     detail: primitives.nullableString.default(null),
-    managedBy: z.enum(["deployment", "platform", "workspace"]).nullable().default(null),
+    /** `organization`: an organization connector that reaches this workspace (OR-11). */
+    managedBy: z
+      .enum(["deployment", "platform", "workspace", "organization"])
+      .nullable()
+      .default(null),
   }),
 );
 export type CapabilityLifecycle = z.infer<typeof CapabilityLifecycle>;

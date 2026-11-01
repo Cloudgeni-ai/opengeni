@@ -47,7 +47,8 @@ import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   requireAccessGrant,
-  requireAccountAdminAuthorizationStamp,
+  requireOrganizationAdministrationStamp,
+  authorizationHoldsOrganizationAdministration,
   requireAccessGrantAuthorization,
   knowledgeContextForAccess,
 } from "@opengeni/core";
@@ -140,7 +141,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!hasAccountAdminAuthority(authorization)) {
       throw new MissingPermissionRefusal("account:admin");
     }
-    const accountAdminAuthorization = requireAccountAdminAuthorizationStamp(authorization);
+    const accountAdminAuthorization = requireOrganizationAdministrationStamp(authorization);
     const payload = await parseRequestJson(c, RunDocumentDefaultCollectionBackfillRequest);
     try {
       return c.json(
@@ -181,7 +182,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: authorization.grant.accountId,
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
-            accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
+            accountAdminAuthorization: requireOrganizationAdministrationStamp(authorization),
             ...query,
           }),
         ),
@@ -219,7 +220,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: authorization.grant.accountId,
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
-            accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
+            accountAdminAuthorization: requireOrganizationAdministrationStamp(authorization),
             runId: runId.data,
             ...query,
           }),
@@ -252,7 +253,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: authorization.grant.accountId,
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
-            accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
+            accountAdminAuthorization: requireOrganizationAdministrationStamp(authorization),
             ...query,
           }),
         ),
@@ -276,8 +277,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       quantity: 0,
     });
     const payload = await parseRequestJson(c, AddDocumentRequest);
-    const organizationAuthorityGranted =
-      access.accountGrant?.permissions.includes("account:admin") === true;
+    const organizationAuthorityGranted = hasAccountAdminAuthority(access);
     if (payload.authorityKind === "organization" && !organizationAuthorityGranted) {
       throw new MissingPermissionRefusal("account:admin");
     }
@@ -348,7 +348,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       const payload = await parseRequestJson(c, ReclassifyDocumentAuthorityRequest);
       const accountAdminAuthorized = hasAccountAdminAuthority(authorization);
       const accountAdminAuthorization = accountAdminAuthorized
-        ? requireAccountAdminAuthorizationStamp(authorization)
+        ? requireOrganizationAdministrationStamp(authorization)
         : null;
       try {
         const document = await getDocument(db, workspaceId, c.req.param("documentId"), {
@@ -598,8 +598,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(403, {
         message: "Personal source retention requires verified ownership",
       });
-    const organizationAuthorityGranted =
-      access.accountGrant?.permissions.includes("account:admin") === true;
+    const organizationAuthorityGranted = hasAccountAdminAuthority(access);
     if (payload.authorityKind === "organization" && !organizationAuthorityGranted) {
       throw new MissingPermissionRefusal("account:admin");
     }
@@ -909,10 +908,11 @@ function documentDomainErrorMessage(error: unknown): string {
   return message;
 }
 
+/** The organization's owner or admins (organization administration). */
 function hasAccountAdminAuthority(
   authorization: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>,
 ): boolean {
-  return authorization.accountGrant?.permissions.includes("account:admin") === true;
+  return authorizationHoldsOrganizationAdministration(authorization);
 }
 
 function requireOrganizationDocumentAuthority(

@@ -323,6 +323,12 @@ export type ProviderConnectionProps = {
   workspaceId: string;
   canManageConnection: boolean;
   canManageCustomModels: boolean;
+  /**
+   * Change which models the key may serve ("Models it can serve"), a workspace
+   * setting. Defaults to `canManageCustomModels`; a member who adds custom
+   * models but doesn't manage settings passes false.
+   */
+  canManageAccess?: boolean | undefined;
   onConnectionChange?: (() => void) | undefined;
   enabled?: boolean;
   /** Reuse model management with an independently managed subscription pool. */
@@ -401,6 +407,8 @@ export interface ProviderConnectionView {
   accessTarget: ConnectionAccessTarget;
   canManageConnection: boolean;
   canManageCustomModels: boolean;
+  /** Change "Models it can serve". */
+  canManageAccess: boolean;
   connected: boolean;
   settled: boolean;
   hidden: boolean;
@@ -984,6 +992,7 @@ export function useProviderConnection(
     },
     canManageConnection: enabled && !props.catalogConnection && props.canManageConnection,
     canManageCustomModels: enabled && props.canManageCustomModels,
+    canManageAccess: enabled && (props.canManageAccess ?? props.canManageCustomModels),
     connection,
     connected,
     loaded: connectionLoaded,
@@ -1932,7 +1941,7 @@ export function ProviderConnectionPage({
               <ConnectionAccessRows
                 access={access}
                 organization={state.organization}
-                canManage={state.canManageCustomModels}
+                canManage={state.canManageAccess}
                 onEdit={onEditAccess}
               />
             </SettingRowGroup>
@@ -2071,7 +2080,7 @@ export function ProviderAccessPage({
       access={access}
       organization={state.organization}
       organizationName={organizationName}
-      canManage={state.canManageCustomModels}
+      canManage={state.canManageAccess}
       name={state.config.title}
       onClose={onClose}
     />

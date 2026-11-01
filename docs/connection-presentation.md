@@ -119,7 +119,8 @@ Identity comes from the first of these that applies to the connection:
   | Service | Read | Identity | Label |
   | --- | --- | --- | --- |
   | Google Drive | Drive About | `googleDriveEmail` | email |
-  | Atlassian Rovo (`/v1/mcp/authv2`, `/v1/mcp`) | `atlassianUserInfo` tool | `atlassianAccountId` | email, name |
+  | Atlassian v2 (`/v2/mcp?tools=all`, `/v2/mcp`) | `https://api.atlassian.com/me` with the MCP token | `atlassianAccountId` | email, name |
+  | Atlassian v1 (`/v1/mcp/authv2`, `/v1/mcp`) | `atlassianUserInfo` tool (v1 `account_id` or v2 `data.accountId` shape) | `atlassianAccountId` | email, name (v1 shape only) |
   | Linear | `get_user` with `query: "me"`; optional `get_workspace` | `linearUserId` | email, name, workspace |
   | Notion | token response `workspace_id` and `user_id`; else a person from `notion-get-self` | `notionWorkspaceId`, `notionUserId` | email, name, workspace |
   | Asana (`/v2/mcp`) | `get_me` tool | `asanaUserId` | email, name |

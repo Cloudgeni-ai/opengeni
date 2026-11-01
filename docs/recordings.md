@@ -365,10 +365,161 @@ Opengeni, and the workspace's provider key never reaches the device:
 3. Finished stretches of text are saved with `POST …/live-segments`
    (`{ trackNumber, streamedMilliseconds, segments }`, at most 100 per call).
    A segment number sent again keeps its first copy, and the streamed time
-   (only ever raised) prices the track's `live.costUsd`.
+   (only ever raised) prices the track's `live.costUsd` at list price.
 4. Other viewers read them with `GET …/live-segments?after=<sequence>`, which
    returns the new segments, the `after` to pass next time, and `ended` once
    the transcript is ready. The saved live text is deleted then.
+
+### Live transcripts charged in credits
+
+A live model the deployment pays for (OpenAI or Azure OpenAI Realtime on the
+deployment's key) costs credits while credit billing is active. The payer is
+admitted before the grant is minted, so without credits `live-session`
+answers 402 ("Live transcript needs credits. Add credits to continue."), a
+usage limit 402 or 429, and credits turned off or an unidentified payer 403
+`policy_blocked`; the recorder stops asking. A live model with no credit
+price is listed `available: false` with `unavailableReason: "unpriced"`, and
+`live-session` answers 503 `model_unavailable` with `retryable: false`.
+Accounts on legacy billing (`OPENGENI_BILLING_LEGACY_ACCOUNT_IDS`) are
+neither admitted nor charged, and see no price for live-only models.
+
+Each `live-segments` save charges the track's audio from its charged mark
+(`recording_tracks.live_charged_milliseconds`) to its stored streamed total,
+at the model's voice price, as one unit named by both ends. The unit's usage
+receipt is recorded and the mark moved in the save's own transaction, with
+the text: overlapping saves (a retry after a lost response) wait on the
+recording's lock and charge only what the one before left, and a receipt
+that fails fails the save, which the recorder retries. The credit debit
+follows the commit with the same idempotency key; one that fails is applied
+from its receipt when the meeting is finalized, or by the workspace's next
+voice admission (dictation, voice input or another live session), within 3
+days. When the recorder stops, its last save is retried a few times, so the
+end of a meeting is charged too.
+
+`live.costUsd` is the list price of everything streamed, and
+`live_charged_cost_usd_micros` the list price of the part charged in credits;
+a usage allowance that prices unbilled use counts only the rest, so charged
+audio never counts twice (also when a track switches to a model not charged
+in credits). Audio streamed to a model not charged in credits moves the mark
+too.
+
+The audio goes from the device straight to the provider, so the charged
+duration is the recorder's own `streamedMilliseconds`, not something the
+server measured. The ledger records it with basis `client_reported_duration`.
+The server only lets the total grow, so retries and late saves never charge
+twice. The recorder reports its total about every minute while streaming
+(text or silence), when it pauses and resumes, and before asking for another
+session. A track charged in credits is bounded by those reports, with time
+measured between them so a pause never counts:
+
+- Of the time up to a report of more audio, at most that audio plus a minute
+  counts against the track (and at most 3 minutes), so a pause the recorder
+  didn't report doesn't count either; the time up to a report of no more
+  audio (a pause, or a session that never connected) doesn't, and a session
+  never reported on before the next request counts all its time up to that
+  request.
+- A track gets no more sessions once that time is ahead of its reported
+  audio by more than 10 minutes plus a quarter of it, once 4 of its sessions
+  went unreported, or after 20 sessions plus one for every 5 minutes it
+  reported (at most 100).
+- A provider session runs at most an hour (OpenAI and Azure end it then), so
+  time counts only within an hour of the latest session's start, and the
+  recorder asks for no new session while paused: a long pause counts at most
+  what is left of that hour, however long it lasts.
+- A session counts all it could run (its hour) up front against the
+  person's day. Each report, or the next request, swaps that for the time
+  the session actually left unaccounted plus what it could still run, so a
+  session nobody reports on, or one abandoned with a new recording, costs its
+  whole hour; a refusal leaves it counted, and a session the provider never
+  started gives it back. When a meeting ends, what its sessions could still
+  run stays counted, as the server can't tell a stopped recorder from one
+  still streaming.
+- The rest of the time between reports, which no reported audio accounts
+  for (pauses, sessions never reported on, and every minute beyond the
+  audio reported: the minute of slack is the track's alone, so a recorder
+  reporting a trickle of audio doesn't cover the time), adds up per person
+  and workspace, by the hour. A session is granted only if the person's
+  time in the last 24 hours, with the new session's hour counted, stays
+  within 4 hours plus six times the live audio charged in credits in those
+  hours; otherwise none of their tracks gets another session until older
+  hours drop out of the day. The charged audio keeps an honest day of
+  meetings going: a 10-minute meeting on two tracks leaves about 100
+  minutes of its sessions counted and charges 20 minutes, which allow 120
+  more, so meetings of about 9 minutes or longer never use the day up.
+  Session requests of the same person and workspace are handled one at a
+  time (as are saves on a session a previous release started, which has no
+  hour counted up front), so requests at the same moment can't run over the
+  bound. New
+  recordings don't reset it. The person is the human behind the request; a
+  personal API key or a delegated session acts as them. Organization and
+  workspace API keys record no person, so all of a workspace's keys share
+  one bound and a new key doesn't reset it (an integration that records for
+  its users should act as each user to get each their own). Pauses inside a session count, as the server can't tell
+  a pause from audio nobody reported while the provider session is open, so
+  a day with more of such pauses than the bound allows (for example a dozen
+  20-minute pauses, each shorter than the session's hour, with little audio
+  between them) loses the live preview for the rest of it; the recordings
+  and their transcripts are unaffected.
+
+A refused grant is a 409 (`live_grant_limit` or `live_streamed_behind`, "The
+live transcript stopped for this track. The recording continues and is
+transcribed when it ends."); the recording carries on. A session the
+provider fails to start isn't counted. An honest recorder isn't refused for
+silence, pauses (up to the daily bound) or quick pause and resume cycles.
+Accounts on legacy billing, and workspaces with credit billing off, aren't
+bounded.
+
+Residual risk, accepted for now: each grant still opens one provider
+session (up to the provider's hour) whose audio is only as metered as the
+recorder reports.
+
+- A modified client that reports its audio as paused (no more audio) while it
+  streams gets at most 4 hours of unpaid audio a day per person and
+  workspace (plus six times any audio it paid for) before the daily bound
+  stops it.
+- The bound is per person and workspace, not per billing account: other
+  people of the account (including each external user an organization key
+  acts as), and the same person's other workspaces, each have their own 4
+  hours, about $1.44 a day each at 6000 µ$ a minute. An account-wide sum
+  needs a SECURITY DEFINER database function, which a later release can add
+  (granting a new definer function to the runtime takes two releases).
+- Pauses inside an open session (shorter than its hour) count, as the server
+  can't tell them from audio nobody reported: a day with more of them than
+  the bound allows, for example a dozen 20-minute pauses with little audio
+  between them, loses the live preview; the recordings and their
+  transcripts are unaffected.
+- A client that asks for a new session while its earlier ones still run keeps
+  each running up to the provider's hour, counted only until the next
+  request, so parallel sessions are bounded only by a track's session limits
+  (20, plus one per 5 minutes reported).
+- The day grows by six times the audio charged in credits, so a client that
+  pays for some audio gets six times as much unaccounted: free provider time
+  is at most 4 hours plus six times what was paid. Meetings shorter than
+  about 9 minutes still leave more of their sessions counted than their
+  charged audio allows (a 5-minute meeting on two tracks nets about 50
+  minutes), so a day of many very short live meetings can still lose the
+  live preview.
+- Only time of tracks charged in credits is stored per hour. A session's
+  time stays in the hour it began in, so a report or request a day later
+  adds nothing to today for it, and a session that runs into the next hour
+  leaves the 24-hour window up to an hour early (slightly looser than
+  counting each minute in its own hour). Hours older than two days are removed on the
+  person's next write in that workspace (skipped while another request holds
+  them), not otherwise; they no longer count after a day either way.
+
+Telling an honest pause from a fake one needs a meter the client doesn't
+control, for example the server holding each provider session (and hanging
+it up on a pause or a new request) or reading the provider's own usage; that
+is follow-up work. A modified client that reports invented audio is charged
+for it. A save whose receipt never commits, after the recorder's last
+retries, leaves that last stretch unpaid, and a debit not reconciled within
+3 days stays a receipt without a ledger entry.
+
+Rollout: while pods of the previous release still serve during a deploy,
+a live save they handle stores the track's list-price total without moving
+the charged mark, so a usage allowance counts that audio at list price, and
+the next save on the new release charges it in credits as well. The overlap
+is limited to audio saved through old pods during the rollout.
 
 With a `system` track, the microphone's live text is under the recording
 owner's name (the person recording sees their own; others see the owner's
@@ -792,7 +943,8 @@ version never starts two (the chat is keyed by the version).
   has to ask.
 - **What it may do.** Only read that one meeting and save that meeting's
   notes. The chat has no sandbox, resources, Skills or other servers, and
-  its only tools are `meeting_read` and `meeting_notes_save`. Session
+  its only meeting tools are `meeting_read` and `meeting_notes_save`, plus
+  the runtime's `wait_for_input` and `privacy_facts`. Session
   creation refuses any other chat that claims to be a meeting summary, and
   the database's private-chat guard (migration 1005) accepts an Only me one
   only for the owner of that Only me meeting. It keeps that shape for its

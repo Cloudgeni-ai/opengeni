@@ -132,6 +132,11 @@ import {
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
+import {
+  createPrivacyFactsAttemptToolDefinition,
+  loadPrivacyFactsLive,
+  privacyFactsRouteForTurn,
+} from "./privacy-facts";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
 import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
@@ -145,7 +150,7 @@ import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
 import {
   attemptSecretResolver,
-  secretsCapabilityEnabled,
+  taskVaultSecretCaptureEnabled,
   type AttemptVaultAccess,
 } from "./secret-resolver";
 import {
@@ -971,6 +976,36 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         };
       },
     }),
+    createPrivacyFactsAttemptToolDefinition({
+      route: privacyFactsRouteForTurn({
+        settings: runSettings,
+        policy: turnExecutionPolicy,
+        resolved: resolvedModel,
+      }),
+      deployment: {
+        privacyPolicyUrl: runSettings.legalPrivacyPolicyUrl ?? null,
+        termsOfServiceUrl: runSettings.legalTermsOfServiceUrl ?? null,
+        supportEmail: runSettings.supportEmail ?? null,
+        subprocessorsUrl: runSettings.legalSubprocessorsUrl ?? null,
+        dataHostingLocation: runSettings.dataHostingLocation ?? null,
+        sandboxes: {
+          backend: runSettings.sandboxBackend,
+          regions: runSettings.modalRegions ?? null,
+        },
+        // Archiving needs object storage; without it the worker never archives.
+        sessionArchiveIdleDays:
+          runSettings.sessionArchiveEnabled && deps.objectStorage
+            ? runSettings.sessionArchiveIdleDays
+            : null,
+      },
+      loadLive: async () =>
+        await loadPrivacyFactsLive({
+          db,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          deploymentEuOnly: runSettings.requiredModelGeography === "eu",
+        }),
+    }),
     ...(titleToolPlan.promoteTitleTool
       ? [
           createSessionTitleAttemptToolDefinition({
@@ -1124,7 +1159,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     db,
     encryptionKey: maskingKey,
     principal: maskingPrincipal,
-    enabled: secretsCapabilityEnabled(session.agent),
+    enabled: taskVaultSecretCaptureEnabled(session.agent, session.firstPartyMcpPermissions),
     observability,
   });
   try {

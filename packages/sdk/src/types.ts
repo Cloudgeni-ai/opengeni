@@ -9296,7 +9296,7 @@ export type CapabilityLifecycle = {
   status: CapabilityLifecycleStatus;
   readiness: CapabilityReadiness;
   detail: string | null;
-  managedBy: "deployment" | "platform" | "workspace" | null;
+  managedBy: "deployment" | "platform" | "workspace" | "organization" | null;
 };
 
 export type CapabilityRuntime = {

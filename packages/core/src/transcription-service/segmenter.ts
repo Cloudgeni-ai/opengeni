@@ -125,6 +125,15 @@ export function createFfmpegTranscriptionSegmenter(input: {
             true,
           );
         }
+        // Killed by a signal, or ffmpeg's own "received signal" exit: the
+        // worker is stopping, so the dictation is retried, not failed.
+        if (result.exitCode === null || /received signal \d+/u.test(result.stderr)) {
+          throw new TranscriptionSegmenterError(
+            "Audio segmentation was stopped",
+            "cancelled",
+            true,
+          );
+        }
         if (result.exitCode !== 0) {
           throw new TranscriptionSegmenterError(
             result.stderr || "Audio could not be decoded",

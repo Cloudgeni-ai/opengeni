@@ -22,8 +22,11 @@ import {
   controlCancellationDurationMs,
   controlCancellationTimelineMs,
   fixturePrompt,
+  fixtureSetupScript,
+  isDormantSandboxLiveness,
   isExpectedBrowserCancellation,
-  LIVE_STOPPING_STATE_TEXT,
+  LIVE_STOPPING_STATE_PATTERN,
+  LIVE_STOPPING_SURFACES,
   liveStoppingStateLocator,
   maskKnownPublicEvidenceValues,
   openWorkspaceIfCollapsed,
@@ -38,12 +41,24 @@ import {
   waitForInteractiveTerminal,
   waitForSandboxLiveness,
   waitForSandboxFileViewerText,
+  workbenchAcceptanceOwnership,
   waitForWarm,
   type CaptureApiRegionalProbeRequest,
 } from "./workbench-live-acceptance";
 import { errorMessage } from "@opengeni/contracts/values";
 
 describe("workbench live acceptance preflight", () => {
+  test("declares source ownership so release acceptance runs this script as committed", async () => {
+    // Without this exact line, release acceptance falls back to its legacy
+    // preparation, which refuses any script it doesn't recognise.
+    const source = await readFile(resolve(import.meta.dir, "workbench-live-acceptance.ts"), "utf8");
+    const declaration =
+      'export const workbenchAcceptanceOwnership = "opengeni-workbench-acceptance-source-owned-v1";';
+    expect(source.split("\n").filter((line) => line === declaration)).toHaveLength(1);
+    expect(source.split("opengeni-workbench-acceptance-source-owned-v1")).toHaveLength(2);
+    expect(workbenchAcceptanceOwnership).toBe("opengeni-workbench-acceptance-source-owned-v1");
+  });
+
   test("accepts only a marker from a still-running agent command", () => {
     const marker = "CONTROL_READY_EXACT";
     const event = (output: string, type = "agent.toolCall.output") =>
@@ -78,36 +93,54 @@ describe("workbench live acceptance preflight", () => {
 
   test("matches authoritative SessionChrome stopping copy, not optimistic Steer copy", () => {
     const filters: unknown[] = [];
-    const steering = {
+    const selectors: string[] = [];
+    const last = {};
+    const matches = {
       filter: (options: unknown) => {
         filters.push(options);
-        return steering;
+        return { last: () => last };
       },
     };
-    const testIds: string[] = [];
     const page = {
-      getByTestId: (testId: string) => {
-        testIds.push(testId);
-        return steering;
+      locator: (selector: string) => {
+        selectors.push(selector);
+        return matches;
       },
     } as never;
 
-    expect(liveStoppingStateLocator(page, "steer")).toBe(steering as never);
-    expect(liveStoppingStateLocator(page, "pause")).toBe(steering as never);
-    expect(testIds).toEqual(["session-chrome-stopping", "session-chrome-stopping"]);
+    expect(liveStoppingStateLocator(page, "steer")).toBe(last as never);
+    expect(liveStoppingStateLocator(page, "pause")).toBe(last as never);
+    expect(selectors).toEqual([LIVE_STOPPING_SURFACES, LIVE_STOPPING_SURFACES]);
     expect(filters).toEqual([
-      { hasText: "Previous work stopping" },
-      { hasText: "Current work stopping" },
+      { hasText: LIVE_STOPPING_STATE_PATTERN.steer },
+      { hasText: LIVE_STOPPING_STATE_PATTERN.pause },
     ]);
+    const changingDirection = englishMessages["queueSurfaceImplementation.changingDirection"];
+    expect(LIVE_STOPPING_STATE_PATTERN.steer.test(changingDirection)).toBe(false);
+    expect(LIVE_STOPPING_STATE_PATTERN.pause.test(changingDirection)).toBe(false);
   });
 
-  test("stays bound to the stopping chip SessionChrome actually renders", async () => {
+  test("stays bound to the stopping surfaces the product actually renders", async () => {
     // The live proof can only fail closed if its locator can match the product:
-    // a renamed test id or reworded chip must break here, not on a hosted run.
-    expect(LIVE_STOPPING_STATE_TEXT).toEqual({
-      steer: englishMessages["sessionChrome.previousWorkStopping"],
-      pause: englishMessages["sessionChrome.currentWorkStopping"],
-    });
+    // a renamed test id or reworded status must break here, not on a hosted run.
+    const copy = {
+      steer: [
+        englishMessages["sessionChrome.previousWorkStopping"],
+        englishMessages["queueSurfaceState.stoppingPreviousAttempt"],
+      ],
+      pause: [
+        englishMessages["sessionChrome.currentWorkStopping"],
+        englishMessages["queueSurfaceState.stoppingCurrentAttempt"],
+      ],
+    };
+    for (const text of copy.steer) {
+      expect(LIVE_STOPPING_STATE_PATTERN.steer.test(text)).toBe(true);
+      expect(LIVE_STOPPING_STATE_PATTERN.pause.test(text)).toBe(false);
+    }
+    for (const text of copy.pause) {
+      expect(LIVE_STOPPING_STATE_PATTERN.pause.test(text)).toBe(true);
+      expect(LIVE_STOPPING_STATE_PATTERN.steer.test(text)).toBe(false);
+    }
     const chrome = await readFile(
       resolve(import.meta.dir, "../packages/react/src/components/session-chrome.tsx"),
       "utf8",
@@ -115,6 +148,13 @@ describe("workbench live acceptance preflight", () => {
     expect(chrome).toContain('data-testid="session-chrome-stopping"');
     expect(chrome).toContain('t("sessionChrome.currentWorkStopping")');
     expect(chrome).toContain('t("sessionChrome.previousWorkStopping")');
+    const queueState = await readFile(
+      resolve(import.meta.dir, "../packages/react/src/components/queue-surface-state.tsx"),
+      "utf8",
+    );
+    expect(queueState).toContain('data-testid="stopping-previous-attempt"');
+    expect(queueState).toContain('t("queueSurfaceState.stoppingCurrentAttempt")');
+    expect(queueState).toContain('t("queueSurfaceState.stoppingPreviousAttempt")');
   });
 
   test("observes split binary terminal output without depending on xterm DOM rows", async () => {
@@ -326,19 +366,12 @@ describe("workbench live acceptance preflight", () => {
   test("observes the Changes default before requiring its layout to be visible", async () => {
     const calls: string[] = [];
     const page = {
-      getByRole() {
+      getByRole(_role: string, options: { selected?: boolean }) {
         return {
-          waitFor: async () => calls.push("tab.wait"),
+          waitFor: async () => calls.push(options.selected ? "selected-changes.wait" : "tab.wait"),
         };
       },
       locator(selector: string) {
-        if (selector === '[role="tab"][aria-selected="true"]') {
-          return {
-            filter: () => ({
-              waitFor: async () => calls.push("selected-changes.wait"),
-            }),
-          };
-        }
         expect(selector).toBe("[data-workbench-changes-layout]");
         return {
           waitFor: async (options: { state?: string; timeout?: number }) => {
@@ -944,7 +977,7 @@ describe("workbench live acceptance preflight", () => {
     expect(signals).toHaveLength(2);
   });
 
-  test("does not call a draining lease cold before teardown completes", async () => {
+  test("treats a draining lease as dormant once the cold wait sees it", async () => {
     let calls = 0;
     const client = {
       async getStreamCapabilities() {
@@ -962,7 +995,10 @@ describe("workbench live acceptance preflight", () => {
       50,
     );
 
-    expect(calls).toBe(2);
+    expect(calls).toBe(1);
+    expect(isDormantSandboxLiveness("draining")).toBe(true);
+    expect(isDormantSandboxLiveness("cold")).toBe(true);
+    expect(isDormantSandboxLiveness("running")).toBe(false);
   });
 
   test("does not call a draining lease warm before deliberate wake completes", async () => {
@@ -1030,7 +1066,8 @@ describe("workbench live acceptance preflight", () => {
 
   test("the fixture and its verifier fail closed across the documented boundary matrix", () => {
     const marker = "OPENGENI_WORKBENCH_ACCEPTANCE_001";
-    const prompt = fixturePrompt(marker);
+    // The harness creates the repositories; the model only patches one file.
+    const setup = fixtureSetupScript(marker);
     for (const required of [
       "web-linked",
       "nested/deep/repo",
@@ -1041,8 +1078,12 @@ describe("workbench live acceptance preflight", () => {
       "node_modules",
       "chmod +x",
     ]) {
-      expect(prompt).toContain(required);
+      expect(setup).toContain(required);
     }
+    const prompt = fixturePrompt(marker);
+    expect(prompt).toContain("apply_patch");
+    expect(prompt).toContain(marker);
+    expect(prompt).not.toContain("web-linked");
 
     const manifest = fixtureManifest(marker);
     expect(() => assertFixtureCapture(manifest, marker)).not.toThrow();

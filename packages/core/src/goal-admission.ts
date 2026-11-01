@@ -139,6 +139,14 @@ export async function goalRunBudgetBlocked(
       pausedReason: "credits",
       message: `${API_CREDITS_REQUIRED_MESSAGE} Add credits before resuming.`,
     },
+    byok_paid_credit_required: {
+      pausedReason: "credits",
+      message: "Add credits to use your own key, then resume.",
+    },
+    byok_upgrade_required: {
+      pausedReason: "credits",
+      message: "Upgrade to Pro to use your own key, then resume.",
+    },
     allowance_exhausted: {
       pausedReason: "allowance",
       message: "Usage allowance exhausted. Resume when your allowance is available.",

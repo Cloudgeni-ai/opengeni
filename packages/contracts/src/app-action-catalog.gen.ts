@@ -1196,6 +1196,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createOrganizationConnector",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/connectors",
+    "request": [
+      "CreateOrganizationConnectorRequest"
+    ],
+    "response": [
+      "OrganizationConnector"
+    ],
+    "secretFields": [
+      "request.headers"
+    ]
+  },
+  {
     "id": "createOrganizationInvitation",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/invitations",
@@ -1413,7 +1427,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceGatewayCustomModel"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "createWorkspaceInstructionPolicyDraft",
@@ -1449,7 +1463,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceOpenRouterCustomModel"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "createWorkspaceOpperCustomModel",
@@ -1459,7 +1473,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "CreateWorkspaceOpperCustomModelRequest"
     ],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "createWorkspaceWebhook",
@@ -1738,6 +1752,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "deleteOrganizationConnector",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/connectors/:connectorId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "deleteOrganizationCredentialProvider",
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/credential-provider",
@@ -1890,7 +1911,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "DeleteWorkspaceGatewayCustomModelRequest"
     ],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "deleteWorkspaceModelAccessPolicy",
@@ -1908,7 +1929,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "DeleteWorkspaceOpenRouterCustomModelRequest"
     ],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "deleteWorkspaceOpperCustomModel",
@@ -1918,7 +1939,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "DeleteWorkspaceOpperCustomModelRequest"
     ],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "deleteWorkspaceWebhook",
@@ -5478,6 +5499,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ClaudeSubscriptionAccountsResponse"
+    ]
+  },
+  {
+    "id": "listOrganizationConnectors",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/connectors",
+    "request": [],
+    "response": [
+      "ListOrganizationConnectorsResponse",
+      "OrganizationConnector"
     ]
   },
   {
@@ -9497,6 +9528,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateOrganizationConnector",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/connectors/:connectorId",
+    "request": [
+      "UpdateOrganizationConnectorRequest"
+    ],
+    "response": [
+      "OrganizationConnector"
+    ],
+    "secretFields": [
+      "request.headers"
+    ]
+  },
+  {
     "id": "updateOrganizationInferenceResidency",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/inference-residency",
@@ -9916,7 +9961,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultSummary",
       "Workspace"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "updateWorkspaceArtifactVisibility",
