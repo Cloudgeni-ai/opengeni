@@ -745,7 +745,7 @@ export function SkillsPanelContent({
           reach={record.reach}
           organizationId={organizationId}
           organizationName={organizationName}
-          managedBy="Organization owners manage it."
+          managedBy="Organization owners and admins manage it."
           hereId={workspaceId}
           save={async (next) => (await client.updateSkillReach(workspaceId, record.id, next)).reach}
           onSaved={(reach) => {

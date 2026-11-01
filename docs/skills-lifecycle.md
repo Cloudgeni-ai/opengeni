@@ -33,7 +33,7 @@ members' Personal workspaces until someone who may change the organization's
 Skills picks otherwise. `PUT /v1/workspaces/:workspaceId/skills/content/:skillId/reach`
 takes `{ allowedWorkspaceIds, allowPersonalWorkspaces }`: `null` means every
 shared workspace, new ones too, and a list names the ones it works in. It uses
-the same `account:admin` gate as changing the organization's Skills, works from
+the same gate as changing the organization's Skills (its owner or admins), works from
 any workspace, and refuses workspaces outside the organization's shared ones
 (422) and workspace or personal Skills (409). SDK: `updateSkillReach`.
 
