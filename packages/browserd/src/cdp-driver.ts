@@ -7124,12 +7124,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.sendActionTarget(state, "Input.insertText", {
             text: action.value,
           });
-        const confirmed = await this.callOnNode(
-          state,
-          node.backendDOMNodeId,
-          CONFIRM_EDITABLE_VALUE_FUNCTION,
-          [{ value: action.value }],
-        );
+        let confirmed: unknown;
+        try {
+          confirmed = await this.callOnNode(
+            state,
+            node.backendDOMNodeId,
+            CONFIRM_EDITABLE_VALUE_FUNCTION,
+            [{ value: action.value }],
+          );
+        } catch (error) {
+          // The input navigated the page or replaced its document (a
+          // one-time-code form that submits itself once complete) before the
+          // field could be read back. Chrome took the text, so the fill is
+          // done; the observation that follows shows the page it led to.
+          if (error instanceof CdpProtocolError && FILLED_DOCUMENT_GONE.test(error.message)) return;
+          throw error;
+        }
+        if (confirmed === "removed") return;
         if (confirmed !== true) {
           throw new InteractionOutcomeUnknownDriverError(
             "outcome_unknown",
@@ -13077,6 +13088,10 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
 
 // Chromium's replies when a remote object's execution context is gone: the
 // document that held the click guard was replaced or detached.
+/** A fill's read-back found its field's document gone: the input navigated
+ * the page or replaced the document. */
+const FILLED_DOCUMENT_GONE =
+  /Cannot find context with specified id|Could not find object with given id|Execution context was destroyed|Inspected target navigated or closed|Node with given id does not belong to the document|No node with given id found/i;
 const GUARD_DOCUMENT_GONE =
   /Cannot find context with specified id|Could not find object with given id|Execution context was destroyed|Inspected target navigated or closed/i;
 
@@ -14416,7 +14431,10 @@ const SET_RANGE_VALUE_FUNCTION = `async function(expected) {
 
 const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   await Promise.resolve();
-  if (!(this instanceof Element) || !this.isConnected) return false;
+  if (!(this instanceof Element)) return false;
+  // The page removed the field in reaction to the input (a one-time-code
+  // form that submits itself and re-renders): the input arrived.
+  if (!this.isConnected) return "removed";
   const tag = String(this.tagName || "").toLowerCase();
   if (tag === "input" || tag === "textarea") {
     const actual = String(this.value);
