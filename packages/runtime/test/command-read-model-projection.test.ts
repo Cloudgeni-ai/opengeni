@@ -85,7 +85,7 @@ describe("plain-text command reads for the model", () => {
       [
         `Command ${id} is still running after waiting 30 s.`,
         "Output:",
-        `first line\n[... about 52000 bytes omitted; to read them, call command_read with cursor ${id}:2:0 ...]\nlast line\n`,
+        `first line\n[... about 52000 bytes omitted; to read them, call command_read with cursor ${id}:2:0 and waitSeconds 0 ...]\nlast line\n`,
         `For output after this, read with cursor ${id}:91:0.`,
         "Some output is not retained (cursor_output_no_longer_retained).",
       ].join("\n"),

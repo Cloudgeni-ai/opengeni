@@ -963,6 +963,51 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
         attemptServer,
       ),
     ).rejects.toThrow("cursor");
+    // Each cursor reaches its own command, and cursors alone select the
+    // several-command path even with a single commandId.
+    const ownCursor = `${multiIds[1]}:999999:0`;
+    const withCursor = (await callCommandWait(
+      { commandIds: multiIds, cursors: [ownCursor], waitSeconds: 0 },
+      {},
+      attemptServer,
+    )) as unknown as CommandWaitManyResult;
+    expect(withCursor.commands[1]!.nextCursor).toBe(ownCursor);
+    expect(withCursor.commands[0]!.nextCursor).not.toBe(ownCursor);
+    const single = (await callCommandWait(
+      { commandId: multiIds[1], cursors: [ownCursor], waitSeconds: 0 },
+      {},
+      attemptServer,
+    )) as unknown as CommandWaitManyResult;
+    expect(single.commands.map((command) => command.nextCursor)).toEqual([ownCursor]);
+    // A malformed cursor fails before the default wait on a running command.
+    const runningId = crypto.randomUUID();
+    await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: claimSessionId,
+      turnId: turnId,
+      executionGeneration,
+      attemptId,
+      commandId: runningId,
+      controlWorkspaceId: workspaceId,
+      enrollmentId,
+      connectionInstanceId,
+      opId: "session-wait-malformed-cursor-op",
+      command: "sleep 600",
+    });
+    const malformedStarted = Date.now();
+    await expect(
+      callCommandWait(
+        { commandId: runningId, cursor: `${runningId}:x` },
+        {},
+        attemptServer,
+        "command_read",
+      ),
+    ).rejects.toThrow();
+    await expect(
+      callCommandWait({ commandIds: [runningId], cursors: [`${runningId}:x`] }, {}, attemptServer),
+    ).rejects.toThrow();
+    expect(Date.now() - malformedStarted).toBeLessThan(2_000);
 
     let authorizationCalls = 0;
     const revokingDeps = fakeDeps(attemptBus);

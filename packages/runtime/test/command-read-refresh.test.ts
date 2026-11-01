@@ -168,7 +168,7 @@ test("command_wait keeps its requested wait through a failed refresh", async () 
       return true;
     },
   });
-  expect(calls).toEqual(["api:0", "refresh", "api:0", "api:1", "refresh", "api:0"]);
+  expect(calls).toEqual(["api:0", "refresh", "api:1", "refresh", "api:1"]);
   expect(snapshot(result)).toMatchObject({ terminal: true, chunks: ["tail"] });
   expect(snapshot(result).freshness).toBeUndefined();
 });
@@ -432,7 +432,7 @@ test("command_wait refreshes throughout the bounded API wait", async () => {
     },
   });
   expect(refreshes).toBe(3);
-  expect(waits).toEqual([0, 0, 1, 0, 1, 0]);
+  expect(waits).toEqual([0, 1, 1, 1]);
 });
 
 test("API rejection and malformed receipts cannot trigger provider reads", async () => {
@@ -486,7 +486,7 @@ test("command_read waits by default; new output alone does not end an owned wait
     },
   });
   expect(refreshes).toBe(3);
-  expect(waits).toEqual([0, 0, 1, 0, 1, 0]);
+  expect(waits).toEqual([0, 1, 1, 1]);
   expect(snapshot(result)).toMatchObject({ terminal: true, timedOut: false });
 });
 
@@ -509,7 +509,7 @@ test("an API yield ends an owned wait at once", async () => {
     },
     refresh: async () => true,
   });
-  expect(waits).toEqual([0, 0, 1]);
+  expect(waits).toEqual([0, 1]);
   expect(snapshot(result)).toMatchObject({ yielded: true, timedOut: false });
 });
 

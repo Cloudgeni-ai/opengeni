@@ -70,15 +70,18 @@ export async function executeCommandReadWithRefresh(input: {
         }),
       );
     }
-    result = await input.call({ ...input.args, waitSeconds: 0 });
+    // One reread per refresh: the API's one-second wait checks for the finish
+    // before it sleeps, reauthorizes, and returns at once when the command
+    // settled; under a second before the deadline it reads without waiting.
+    result = await input.call({
+      ...input.args,
+      waitSeconds: deadline - Date.now() >= 1000 ? 1 : 0,
+    });
     const refreshed = commandSnapshot(result, waitFor);
     if (!refreshed) return result;
     if (refreshed.settled || refreshed.yielded || Date.now() >= deadline || input.signal?.aborted) {
       return finish(result, unavailable);
     }
-    // Reuse the API's existing one-second durable recheck wait. Each iteration
-    // reauthorizes, and the next owner refresh happens before any long wait.
-    result = await input.call({ ...input.args, waitSeconds: 1 });
   }
 }
 

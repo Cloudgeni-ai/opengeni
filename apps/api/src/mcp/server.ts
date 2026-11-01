@@ -358,6 +358,7 @@ import {
 } from "@opengeni/core";
 import {
   getSessionBackgroundCommand,
+  parseCommandOutputCursor,
   readSessionBackgroundCommandOutput,
   COMMAND_OUTPUT_MAX_BYTES,
 } from "@opengeni/db/session-background-commands";
@@ -6346,7 +6347,7 @@ function registerWorkspaceOrchestrationTools(
 
     if (callerSessionId !== null) {
       const commandReadNotes =
-        "Output larger than maxOutputBytes (default 16384) returns its start and its end, with the size of the omitted middle and a cursor to read it; pass the end cursor to continue after the newest output. Output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.";
+        "Output larger than maxOutputBytes (default 16384) returns its start and its end, with the size of the omitted middle and a cursor to read it; a read with a cursor pages on from there (pass waitSeconds 0 to page without waiting), and the end cursor continues after the newest output. Output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.";
       for (const toolName of ["command_read", "command_wait"] as const) {
         const multi = toolName === "command_wait";
         server.registerTool(
@@ -6394,17 +6395,14 @@ function registerWorkspaceOrchestrationTools(
               workspaceId: grant.workspaceId,
               sessionId: callerSessionId,
             };
-            // Every durable check after the first reauthorizes, so a revoked
-            // caller stops waiting at its next recheck.
-            let checks = 0;
+            // Durable checks after the first reauthorize at most once a
+            // second, so a revoked caller stops waiting at its next recheck
+            // however many commands it waits on.
+            let authorizedAt = Date.now();
             const reauthorize = async () => {
-              if (checks++ > 0)
-                await authorizeFirstPartySession(
-                  deps,
-                  grant,
-                  callerSessionId,
-                  "session.events.read",
-                );
+              if (Date.now() - authorizedAt < 900) return;
+              await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
+              authorizedAt = Date.now();
             };
             const isTerminal = async (id: string) => {
               await reauthorize();
@@ -6425,7 +6423,10 @@ function registerWorkspaceOrchestrationTools(
                 commandId: id,
                 ...(idCursor === undefined ? {} : { cursor: idCursor }),
                 ...(budget === undefined ? {} : { maxOutputBytes: budget }),
-                headAndTail: true,
+                // A read from the start returns the start and end of the
+                // output; an explicit cursor pages on from there, so paging
+                // through an omitted middle does not repeat the tail.
+                headAndTail: idCursor === undefined,
               });
             const controls = {
               waitSeconds:
@@ -6437,8 +6438,10 @@ function registerWorkspaceOrchestrationTools(
                 deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
               yieldTo: async () => await callerTurnSteerPending(callerSessionId),
             };
-            if (commandIds === undefined) {
+            if (commandIds === undefined && cursors === undefined) {
               if (commandId === undefined) throw new Error("Pass commandId or commandIds");
+              // A malformed cursor fails before any wait.
+              parseCommandOutputCursor(cursor, commandId);
               return json(
                 await readCommandWithWait({
                   ...controls,
@@ -6452,14 +6455,16 @@ function registerWorkspaceOrchestrationTools(
               );
             }
             const ids = [
-              ...new Set([...(commandId === undefined ? [] : [commandId]), ...commandIds]),
+              ...new Set([...(commandId === undefined ? [] : [commandId]), ...(commandIds ?? [])]),
             ];
+            if (ids.length === 0) throw new Error("Pass commandId or commandIds");
             // Each cursor names its own command; match them up by that prefix.
             const cursorById = new Map<string, string>();
             for (const value of [...(cursor === undefined ? [] : [cursor]), ...(cursors ?? [])]) {
               const owner = ids.find((id) => value.startsWith(`${id}:`));
               if (owner === undefined)
                 throw new Error("Each cursor must belong to one of the listed commands");
+              parseCommandOutputCursor(value, owner);
               cursorById.set(owner, value);
             }
             return json(

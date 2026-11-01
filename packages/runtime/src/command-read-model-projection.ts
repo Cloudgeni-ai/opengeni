@@ -86,13 +86,15 @@ function commandBlock(command: JsonRecord, wait?: JsonRecord): string {
     let output = head;
     if (omitted !== null) {
       if (output !== "" && !output.endsWith("\n")) output += "\n";
-      output += `[... ${omittedSize(omitted.bytes)} omitted; to read them, call command_read with cursor ${String(omitted.cursor)} ...]\n`;
+      output += `[... ${omittedSize(omitted.bytes)} omitted; to read them, call command_read with cursor ${String(omitted.cursor)}${command.terminal === true ? "" : " and waitSeconds 0"} ...]\n`;
       output += tail;
     }
     lines.push(output);
   }
   if (omitted === null && command.hasMore === true && typeof command.nextCursor === "string") {
-    lines.push(`More output follows; continue with cursor ${command.nextCursor}.`);
+    lines.push(
+      `More output follows; continue with cursor ${command.nextCursor}${command.terminal === true ? "" : " and waitSeconds 0"}.`,
+    );
   }
   if (command.terminal !== true) {
     const cursor = typeof command.endCursor === "string" ? command.endCursor : command.nextCursor;

@@ -478,9 +478,12 @@ test("a head-and-tail read returns the start and end of large output, and paging
   expect(tail.endsWith(`line 299 ${"x".repeat(60)}\n`)).toBe(true);
   expect(Buffer.byteLength(head) + Buffer.byteLength(tail)).toBeLessThanOrEqual(4096);
   expect(Buffer.byteLength(head) + Buffer.byteLength(tail)).toBeGreaterThan(4000);
-  expect(omitted.bytes).toBe(
-    Buffer.byteLength(full) - Buffer.byteLength(head) - Buffer.byteLength(tail),
-  );
+  // Whole rows in the middle are estimated from the average fetched row.
+  const exactOmitted = Buffer.byteLength(full) - Buffer.byteLength(head) - Buffer.byteLength(tail);
+  expect(Math.abs(omitted.bytes - exactOmitted)).toBeLessThan(exactOmitted * 0.02);
+  expect(
+    read.chunks.length + (read as { tail?: { chunks: unknown[] } }).tail!.chunks.length,
+  ).toBeLessThanOrEqual(64);
   expect(read.hasMore).toBe(true);
   expect(read.nextCursor).toBe(omitted.cursor);
   expect(read.terminal).toBe(false);
@@ -523,6 +526,54 @@ test("a head-and-tail read returns the start and end of large output, and paging
   });
   expect(fresh.chunks.map((item) => item.chunk).join("")).toBe("fresh\n");
   expect(fresh.hasMore).toBe(false);
+});
+
+test("many small frames, interleaved with another command, stay within one page of chunks", async () => {
+  const identity = await connected();
+  const other = await connected();
+  const frames = Array.from(
+    { length: 100 },
+    (_, index) => `${String(index % 1000).padStart(3, "0")}\n`,
+  );
+  for (const [index, frame] of frames.entries()) {
+    await appendSessionCommandOutput(client.db, {
+      ...identity,
+      chunkId: `op-frame:${index}`,
+      stream: "stdout",
+      chunk: frame,
+    });
+    await appendSessionCommandOutput(client.db, {
+      ...other,
+      chunkId: `op-frame:${index}`,
+      stream: "stdout",
+      chunk: "other\n",
+    });
+  }
+  const read = await readSessionBackgroundCommandOutput(client.db, {
+    ...identity,
+    headAndTail: true,
+  });
+  const parsed = CommandReadResult.safeParse({
+    ...read,
+    waitedMs: 0,
+    timedOut: false,
+    aborted: false,
+    liveFanout: true,
+  });
+  expect(parsed.success).toBe(true);
+  const tail = (read as { tail?: { chunks: Array<{ chunk: string }> } }).tail!;
+  expect(read.chunks.length + tail.chunks.length).toBeLessThanOrEqual(64);
+  expect(read.chunks.map((item) => item.chunk)).toEqual(frames.slice(0, 32));
+  expect(tail.chunks.map((item) => item.chunk)).toEqual(frames.slice(68));
+  // Uniform frames make the estimate exact, and it is never zero.
+  expect((read as { omitted?: { bytes: number } }).omitted!.bytes).toBe(36 * 4);
+  expect(read.hasMore).toBe(true);
+  // Paging the middle from nextCursor without the tail recovers it in order.
+  const middle = await readSessionBackgroundCommandOutput(client.db, {
+    ...identity,
+    cursor: read.nextCursor,
+  });
+  expect(middle.chunks.map((item) => item.chunk).slice(0, 36)).toEqual(frames.slice(32, 68));
 });
 
 test("a head-and-tail read of one oversized frame keeps both ends of that frame", async () => {

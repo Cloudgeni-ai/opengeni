@@ -151,15 +151,34 @@ describe("command output tail", () => {
     });
     expect(tail.chunks.map((item) => item.chunk)).toEqual(["ipme", "end"]);
     expect(tail.reachedFrom).toBe(true);
-    // A full fetched window that does not reach `from` is never reported as complete.
-    const rows = Array.from({ length: 64 }, (_, index) => row(200 - index, "a"));
-    expect(
-      projectCommandOutputTail({
-        commandId,
-        from: { sequence: 1, offset: 0 },
-        maxOutputBytes: 1000,
-        rows,
-      }).reachedFrom,
-    ).toBe(false);
+    // A row beyond the limit proves older output remains, whatever the gaps
+    // between sequences; exactly the limit, with no extra row, is complete.
+    const rows = Array.from({ length: 65 }, (_, index) => row(200 - index * 2, "a"));
+    const limited = projectCommandOutputTail({
+      commandId,
+      from: { sequence: 1, offset: 0 },
+      maxOutputBytes: 1000,
+      rows,
+    });
+    expect(limited.reachedFrom).toBe(false);
+    expect(limited.chunks).toHaveLength(64);
+    expect(limited.startCursor).toBe(`${commandId}:74:0`);
+    const exact = projectCommandOutputTail({
+      commandId,
+      from: { sequence: 1, offset: 0 },
+      maxOutputBytes: 1000,
+      rows: rows.slice(0, 64),
+    });
+    expect(exact.reachedFrom).toBe(true);
+    // A smaller row limit applies the same way.
+    const few = projectCommandOutputTail({
+      commandId,
+      from: { sequence: 1, offset: 0 },
+      maxOutputBytes: 1000,
+      rows: rows.slice(0, 11),
+      rowLimit: 10,
+    });
+    expect(few.chunks).toHaveLength(10);
+    expect(few.reachedFrom).toBe(false);
   });
 });

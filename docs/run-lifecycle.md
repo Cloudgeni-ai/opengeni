@@ -3733,14 +3733,20 @@ them. A wait ends when the commands settle, at its deadline, on a pending Steer
 for the caller's turn, or on abort, never on new output alone; finish events are
 live hints rather than command-state authority, and waits recheck durable
 command state (reauthorizing) once a second if a hint is missed. The output is
-read once at the end: when it exceeds the byte budget, the read returns its
-start (half the budget) as `chunks`, its end as `tail`, and the size and cursor
-of the omitted middle as `omitted`. `nextCursor` then points at that middle, so
-callers that page from it still receive every byte, and `endCursor` follows the
-newest output for later reads of new output only. The model receives these
-reads as plain text (state, exit code, output with an omitted-middle marker,
-and the cursor for newer output); Codemode, SDK and REST callers keep the
-structured receipt. Sending
+read once at the end. A read without a cursor that exceeds the byte budget
+returns its start (half the budget) as `chunks`, its end as `tail`, and the
+approximate size and cursor of the omitted middle as `omitted`; head and tail
+together stay within one 64-row page, so very many small frames show at most
+64 of them. The size counts the exact parts of the boundary rows plus the
+other rows in between at the average size of the rows the read fetched, from
+the event index alone. `nextCursor` then points at that middle, and a read with
+an explicit cursor pages on from it without repeating the tail, so callers that
+page still receive every byte; `endCursor` follows the newest output for later
+reads of new output only. A malformed cursor fails before any wait. The model
+receives these reads as plain text (state, exit code, output with an
+omitted-middle marker, and the cursor for newer output, with a hint to pass
+`waitSeconds: 0` when paging a running command); Codemode and other
+programmatic callers keep the structured receipt. Sending
 stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
