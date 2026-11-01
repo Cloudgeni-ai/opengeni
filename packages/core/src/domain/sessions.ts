@@ -764,6 +764,17 @@ export function settingsWithSessionMcpServerMetadata(
   return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromMetadata));
 }
 
+/**
+ * Settings that include the servers a chat will attach, so its tool selection
+ * may name them, as a session create's does. Validate the servers separately.
+ */
+export function settingsWithSessionMcpServerInputs(
+  settings: Settings,
+  servers: Array<Omit<SessionMcpServerInput, "headers">>,
+): Settings {
+  return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromInput));
+}
+
 /** Session-create MCP server validation, shared by automations that start chats. */
 export function validateSessionMcpServersForCreate(
   settings: Settings,
