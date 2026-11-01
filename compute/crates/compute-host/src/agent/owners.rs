@@ -370,9 +370,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // claimed the wake is checked and booked without it; its disk is
         // judged by the copy's own then (see `Self::adopted_room`).
         let unclaimed = self.size(&config, Some(0));
-        match self.can_create(id, &config, unclaimed, true) {
-            Ok(Room::Now) => {}
-            Ok(Room::AfterReading) => {
+        let policy = match self.can_create(id, &config, unclaimed, true) {
+            Ok((Room::Now, policy)) => policy,
+            Ok((Room::AfterReading, _)) => {
                 let waiting = AfterReading::Adopt(id, Box::new(config), owner, from_files, reply);
                 self.after_reading(waiting);
                 return;
@@ -381,7 +381,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let _ = reply.send(Err(error));
                 return;
             }
-        }
+        };
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
             Err(problem) => {
@@ -399,7 +399,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         self.preparing.insert(id.0);
         let by_ms = first_wake_by_ms();
-        self.input(self.first_wake(id, unclaimed, true, by_ms));
+        self.input(self.first_wake(id, unclaimed, policy, true, by_ms));
         let mut record = Record::new(id, ordinal, allocation, config);
         record.first_wake_by_ms = Some(by_ms);
         self.claim_copy(id, record, owner, from_files, reply);
@@ -599,9 +599,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;
         }
-        if let Err(error) = self.request_sleep(id, Level::Archived) {
-            let _ = reply.send(Err(error));
-            return;
+        match self.request_sleep(id, Level::Archived) {
+            Ok(Room::Now) => {}
+            Ok(Room::AfterReading) => {
+                // Only the next disk reading can tell whether its save
+                // fits: nothing of it has changed, and the hand-off is
+                // asked again then.
+                self.after_reading(AfterReading::HandOff(id, owner, awake, reply));
+                return;
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
         }
         if wanted {
             // Whoever waits for it to wake here asks again and finds it on
