@@ -3065,7 +3065,8 @@ describe("CUA desktop boundary", () => {
       }
     }
 
-    // An app that opens no window leaves the action's own target observed.
+    // An app that opens no window observes nothing: the action's own target
+    // (another app's window) is never passed off as the launched app's.
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);
     fixture.callTool = async (name, json) =>
@@ -3079,7 +3080,7 @@ describe("CUA desktop boundary", () => {
         ...command(observation),
         action: { type: "launch", applicationId: "Menu Bar Helper" },
       });
-      expect(launched?.target.id).toBe(target.id);
+      expect(launched).toBeNull();
       // It waits out the window wait, and no longer.
       expect(Date.now() - started).toBeGreaterThanOrEqual(300);
       expect(Date.now() - started).toBeLessThan(2_000);
@@ -3112,6 +3113,52 @@ describe("CUA desktop boundary", () => {
       await waiting.close();
     }
   }, 20_000);
+
+  test("a launch from one of the app's windows observes that window", async () => {
+    // An app already running shows a window someone else works in (9), which
+    // launch_app reports first, and the caller's own window (10).
+    const theirs = { pid: 77, window_id: 9, title: "Theirs", app_name: "Editor" };
+    const mine = { pid: 77, window_id: 10, title: "Mine", app_name: "Editor" };
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    fixture.callTool = async (name, json) => {
+      const args = JSON.parse(json) as Record<string, unknown>;
+      if (name === "launch_app") return result({ pid: 77, windows: [theirs] });
+      const response = await original(name, json);
+      if (name === "list_windows") {
+        const data = JSON.parse(response.structuredJson!);
+        data.windows.push(
+          { ...theirs, bounds: { x: 400, y: 50, width: 200, height: 100 } },
+          { ...mine, bounds: { x: 700, y: 50, width: 200, height: 100 } },
+        );
+        response.structuredJson = JSON.stringify(data);
+      }
+      if (name === "get_window_state" && args.pid === 77) {
+        const data = JSON.parse(response.structuredJson!);
+        Object.assign(data, { pid: 77, window_id: args.window_id });
+        response.structuredJson = JSON.stringify(data);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const own = await backend.observe("cua:window:77:10");
+      const fromOwn = await backend.dispatch({
+        ...command(own),
+        action: { type: "launch", applicationId: "com.example.Editor" },
+      });
+      expect(fromOwn?.target.id).toBe("cua:window:77:10");
+      // From another app's window, the window the launch reported comes first.
+      const other = await backend.observe("cua:window:42:1");
+      const fromOther = await backend.dispatch({
+        ...command(other),
+        action: { type: "launch", applicationId: "com.example.Editor" },
+      });
+      expect(fromOther?.target.id).toBe("cua:window:77:9");
+    } finally {
+      await backend.close();
+    }
+  });
 
   test("a launch observes the app's own window before a window lying within it", async () => {
     // A document app launching to its Open panel reports the panel's

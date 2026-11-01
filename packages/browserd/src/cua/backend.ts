@@ -2560,7 +2560,11 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   /** Launch an app, then observe its window, so the caller can act on it
-   * directly, or the action's own target when no window of the app is found.
+   * directly; no observation when no window of the app is found.
+   * When the action's own target is one of the app's windows (the window the
+   * caller already works in), that window is observed: an app that is already
+   * running may show windows other callers work in, and the window launch_app
+   * reports first can be any of them.
    * Once the app runs, the launch succeeded whatever happens next. A cold app
    * can take seconds to show its first window, so its windows are searched
    * until one appears or the wait runs out. Each search is its own step in the
@@ -2588,7 +2592,7 @@ export class CuaComputerBackend implements ComputerBackend {
       for (let attempt = 0; ; attempt++) {
         const current = launched;
         const found = await this.run(async () => {
-          const windows = await this.launchedWindows(current);
+          const windows = await this.launchedWindows(current, command.targetId);
           for (const windowTarget of windows) {
             const reading = await this.observeTarget(windowTarget).catch(() => null);
             if (reading) return { windows: windows.length, reading };
@@ -2615,20 +2619,24 @@ export class CuaComputerBackend implements ComputerBackend {
           setTimeout(resolve, Math.min(pause, remaining, Math.max(0, reopenAt - now))),
         );
       }
-      return await this.run(() => this.observeTarget(command.targetId));
+      // No window of the app: the action's own target is not the app's (it
+      // would have been found), so observing it would pass another app's
+      // window off as the launched one.
+      return null;
     } catch {
       return null;
     }
   }
 
-  /** The targets of the launched app's windows, best first: the windows the
-   * launch reported, then the listed windows of its process. On Linux the app
+  /** The targets of the launched app's windows, best first: `preferred` when
+   * it is one of them, then the windows the launch reported, then the listed
+   * windows of its process. On Linux the app
    * may run as a child of the launcher process CUA reports, so a window of a
    * descendant counts too. A window that cannot be tied to the launch is never
    * guessed. A window lying within another of the app's windows (part of a
    * panel, such as an Open panel's accessory view) comes after the windows it
    * lies in. */
-  private async launchedWindows(launched: LaunchedApp): Promise<string[]> {
+  private async launchedWindows(launched: LaunchedApp, preferred: string): Promise<string[]> {
     const ownsWindow = (processId: number | null): boolean => {
       if (processId === null) return false;
       if (processId === launched.pid || processId === launched.launcherPid) return true;
@@ -2648,7 +2656,10 @@ export class CuaComputerBackend implements ComputerBackend {
     const owned = targets
       .filter((target) => ownsWindow(target.processId))
       .map((target) => target.id);
-    const candidates = [...new Set([...reported, ...owned])];
+    const found = new Set([...reported, ...owned]);
+    const candidates = found.has(preferred)
+      ? [preferred, ...[...found].filter((id) => id !== preferred)]
+      : [...found];
     const inner = (id: string) => this.sheetHosts(this.targetsById.get(id)!).length > 0;
     return [...candidates.filter((id) => !inner(id)), ...candidates.filter((id) => inner(id))];
   }
