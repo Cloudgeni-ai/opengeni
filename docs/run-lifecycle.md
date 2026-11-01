@@ -4873,6 +4873,18 @@ are unchanged for every requester: a missing row is still `deleted`, a
 non-ready or expired row still fails as before, and bytes that do not match the
 recorded size, SHA-256 or dimensions still fail closed as `invalid_content`.
 
+Only the newest tool-result images reach the model with their pixels. When a
+turn attempt prepares its history, images older than the newest three are
+replaced, in batches of three, by a short text note: for `view_image` it names
+the path to view again (showing the file as it is now), and for other tools it
+names the tool to call again. The history therefore carries three to five
+images. The note is computed from the stored history once per attempt, so every
+model call of a turn sees the same prefix, and the omitted set only grows, so the
+provider's prompt cache stays valid between batches. Omitted images are not read
+from storage, canonical history keeps their markers, and computer-call
+screenshots and user attachments are not affected
+(`omitOlderHistoryImages` in `apps/worker/src/activities/retained-screenshots.ts`).
+
 Generated images have a separate permanent workspace-file lifecycle. Adapter
 provider calls first cross a durable prepared/provider-started fence; after the
 provider may have run, recovery may finish an existing deterministic upload but

@@ -6,7 +6,10 @@ import {
   compactRetainedScreenshotHistory,
   compactRetainedScreenshotRunState,
   collectRetainedScreenshotReceipts,
+  historyImagesToOmit,
   inlineImagesFromToolResultItem,
+  materializeRetainedScreenshotHistory,
+  omitOlderHistoryImages,
   retainedScreenshotIdentity,
   retainedToolImagesEventOutput,
   sdkEventContainsInlineImage,
@@ -525,5 +528,141 @@ describe("images returned by any tool", () => {
       ],
     });
     expect(retainedToolImagesEventOutput(output, [null, null, null])).toBe(output);
+  });
+});
+
+describe("older images in the model history", () => {
+  const marker = (index: number) => ({
+    type: "retained_artifact",
+    artifact: receiptFor(
+      `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      PNG,
+      "image/png",
+    ),
+  });
+  const viewImage = (index: number) => [
+    {
+      type: "function_call",
+      callId: `call-${index}`,
+      name: "view_image",
+      arguments: JSON.stringify({ path: `/workspace/shots/${index}.png` }),
+    },
+    { type: "function_call_result", callId: `call-${index}`, output: marker(index) },
+  ];
+  const history = (images: number) => [
+    { role: "user", content: "look at these" },
+    ...Array.from({ length: images }, (_, index) => viewImage(index)).flat(),
+  ];
+  const outputs = (items: Array<Record<string, unknown>>) =>
+    items.filter((item) => item.type === "function_call_result").map((item) => item.output);
+
+  test("omits whole batches of the oldest images and keeps the newest three to five", () => {
+    expect([0, 1, 3, 4, 5, 6, 7, 8, 9, 12].map((total) => historyImagesToOmit(total))).toEqual([
+      0, 0, 0, 0, 0, 3, 3, 3, 6, 9,
+    ]);
+  });
+
+  test("replaces older view_image results with a note naming the path to view again", () => {
+    const original = history(7);
+    const before = JSON.stringify(original);
+    const projected = omitOlderHistoryImages(original);
+    expect(JSON.stringify(original)).toBe(before);
+    const shown = outputs(projected);
+    expect(shown.slice(0, 3)).toEqual(
+      [0, 1, 2].map(
+        (index) =>
+          `[An earlier image was omitted from the conversation to save context. To see it again, call view_image with path "/workspace/shots/${index}.png"; it shows the file as it is now.]`,
+      ),
+    );
+    expect(shown.slice(3)).toEqual([3, 4, 5, 6].map((index) => marker(index)));
+    // Everything except the omitted outputs is the same object.
+    expect(projected.filter((item) => item.type !== "function_call_result")).toEqual(
+      original.filter((item) => item.type !== "function_call_result"),
+    );
+    // Below the first batch: the very same array.
+    const five = history(5);
+    expect(omitOlderHistoryImages(five)).toBe(five);
+  });
+
+  test("the projected prefix stays identical between omission batches", () => {
+    const sixth = JSON.stringify(omitOlderHistoryImages(history(6)));
+    const seventh = omitOlderHistoryImages(history(7));
+    const eighth = omitOlderHistoryImages(history(8));
+    // Turns that add the seventh and eighth image only append to the prefix
+    // the provider cached for the sixth.
+    expect(JSON.stringify(seventh).startsWith(sixth.slice(0, -1))).toBe(true);
+    expect(JSON.stringify(eighth).startsWith(JSON.stringify(seventh).slice(0, -1))).toBe(true);
+    // The ninth image starts the next batch.
+    expect(
+      outputs(omitOlderHistoryImages(history(9))).filter((output) => typeof output === "string"),
+    ).toHaveLength(6);
+  });
+
+  test("content images of any tool are replaced slot by slot; computer screenshots are kept", () => {
+    const pngData = Buffer.from(PNG).toString("base64");
+    const items: Array<Record<string, unknown>> = [
+      {
+        type: "function_call",
+        callId: "call-browser",
+        name: "interaction__browser_screenshot",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_result",
+        callId: "call-browser",
+        output: {
+          content: [
+            { type: "text", text: "page" },
+            { type: "input_image", image: marker(1) },
+            { type: "image", data: pngData, mimeType: "image/png" },
+          ],
+        },
+      },
+      { type: "computer_call_result", callId: "call-computer", output: marker(2) },
+      {
+        type: "function_call_result",
+        callId: "call-unknown",
+        output: [{ type: "input_image", image: marker(3) }],
+      },
+      ...viewImage(4),
+      ...viewImage(5),
+      ...viewImage(6),
+    ];
+    const projected = omitOlderHistoryImages(items);
+    const browser = (projected[1]!.output as { content: unknown[] }).content;
+    expect(browser[0]).toEqual({ type: "text", text: "page" });
+    expect(browser[1]).toEqual({
+      type: "input_text",
+      text: "[An earlier image was omitted from the conversation to save context. It came from interaction__browser_screenshot; call it again to see the current state.]",
+    });
+    expect((browser[2] as { type: string }).type).toBe("input_text");
+    expect(projected[2]).toBe(items[2]);
+    expect(projected[3]!.output).toEqual([
+      {
+        type: "input_text",
+        text: "[An earlier image was omitted from the conversation to save context.]",
+      },
+    ]);
+    expect(outputs(projected).slice(-3)).toEqual([marker(4), marker(5), marker(6)]);
+  });
+
+  test("omitted images are never read from storage", async () => {
+    const forbidden = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("storage must not be read for omitted images");
+        },
+      },
+    );
+    const materialized = await materializeRetainedScreenshotHistory({
+      db: forbidden as never,
+      objectStorage: forbidden as never,
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sessionId: "33333333-3333-4333-8333-333333333333",
+      history: omitOlderHistoryImages(history(3), 0, 1),
+    });
+    expect(outputs(materialized).every((output) => typeof output === "string")).toBe(true);
+    expect(JSON.stringify(materialized)).not.toContain("retained_artifact");
   });
 });
