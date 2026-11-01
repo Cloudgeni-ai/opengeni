@@ -3431,6 +3431,19 @@ export const englishMessages = {
   "native.presentation.youAnswered": "You answered",
   "native.presentation.youLetTheAgentDecide": "You let the agent decide",
   "native.presentation.yourInputIsNeeded": "Your input is needed",
+  /** Heads the alert when an audio file shared to the app or picked with Import doesn't become a meeting. */
+  "native.meetings.audioImport.couldntImport": "Couldn't import the recording",
+  /** The Import button on the phone's meetings screen, under Record a meeting. */
+  "native.meetings.audioImport.importARecording": "Import a recording",
+  "native.meetings.audioImport.importHint":
+    "Recorded a phone call or a voice memo? Share it to this app, or import it here, for a transcript and notes.",
+  "native.meetings.audioImport.importing": "Importing…",
+  "native.meetings.audioImport.unreadable": "The file couldn't be read. Share it to the app again.",
+  "native.meetings.audioImport.unsupported":
+    "This kind of audio can't be imported. Phone call recordings and voice memos (M4A) can, as can AAC, WebM and Ogg files.",
+  /** While imported recordings upload, before they show in the list. */
+  "native.meetings.audioImport.uploading_one": "Uploading the imported recording…",
+  "native.meetings.audioImport.uploading_other": "Uploading {count} imported recordings…",
   "native.meetings.meetingView.aNewTranscriptIsMadeFromTheFullAudio":
     "Makes a new transcript from the audio. Speaker names carry over.",
   "native.meetings.meetingView.delete": "Delete",

@@ -70,8 +70,10 @@ import {
 } from "./recording-live";
 import { errorMessage } from "@opengeni/contracts/values";
 import { ownerNameField } from "./recording-owner";
+import { audioFileCreatedAt, audioFileDurationMilliseconds } from "./recording-audio-duration";
 
 export * from "./recording-live";
+export { audioFileCreatedAt, audioFileDurationMilliseconds } from "./recording-audio-duration";
 
 /** What {@link OpenGeniRecordingsClient} needs from the core client. */
 export type OpenGeniRecordingsTransport = Pick<OpenGeniClient, "requestJson">;
@@ -1204,7 +1206,7 @@ export type UploadRecordingAudioOptions = {
   audio: Blob;
   /** Its type; the blob's own type by default. */
   mimeType?: string;
-  /** How long it plays, when known; 0 otherwise. */
+  /** How long it plays. Read from an MP4 (M4A) file when omitted; 0 otherwise. */
   durationMilliseconds?: number;
   /** A new id by default. */
   recordingId?: string;
@@ -1214,6 +1216,12 @@ export type UploadRecordingAudioOptions = {
   };
   /** What the audio was recorded from. Default: the microphone. */
   source?: RecordingCaptureSource;
+  /**
+   * Called once every piece is saved on the device, before the upload is
+   * waited for. From then on the recording survives the app closing: the
+   * uploader's resume finishes it on the next start.
+   */
+  onStored?: (recordingId: string) => void;
   /** Stop waiting for the upload (it continues in the background). */
   signal?: AbortSignal;
 };
@@ -1233,15 +1241,31 @@ export async function uploadRecordingAudio(
   const bytes = new Uint8Array(await options.audio.arrayBuffer());
   if (bytes.byteLength === 0) throw new TypeError("uploadRecordingAudio needs audio.");
   const recordingId = options.recordingId ?? crypto.randomUUID();
-  const duration = Math.max(0, Math.round(options.durationMilliseconds ?? 0));
+  const duration = Math.max(
+    0,
+    Math.round(options.durationMilliseconds ?? audioFileDurationMilliseconds(bytes) ?? 0),
+  );
   const { startedAt, ...create } = options.create ?? {};
+  // A given start, else the date the file says it was recorded, else it ended
+  // just now. Either way it lasts as long as the audio plays, not as long as
+  // it took to bring in.
+  const now = Date.now();
+  const recorded = audioFileCreatedAt(bytes)?.getTime();
+  const startedAtMilliseconds = startedAt
+    ? Date.parse(startedAt)
+    : recorded !== undefined && recorded + duration <= now + 60_000
+      ? recorded
+      : now - duration;
+  if (!Number.isFinite(startedAtMilliseconds)) {
+    throw new TypeError("uploadRecordingAudio needs a valid startedAt.");
+  }
   await options.uploader.begin({
     workspaceId: options.workspaceId,
     recordingId,
     create: {
       ...create,
       recordingId,
-      startedAt: startedAt ?? new Date(Date.now() - duration).toISOString(),
+      startedAt: new Date(startedAtMilliseconds).toISOString(),
       tracks: [{ trackNumber: 0, source: options.source ?? "microphone", mimeType }],
     },
   });
@@ -1265,8 +1289,9 @@ export async function uploadRecordingAudio(
       durationMilliseconds: end - start,
     });
   }
+  options.onStored?.(recordingId);
   return await options.uploader.finish(recordingId, {
-    endedAt: new Date(),
+    endedAt: new Date(startedAtMilliseconds + duration),
     ...(options.signal ? { signal: options.signal } : {}),
   });
 }
@@ -1980,7 +2005,10 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
   };
 
   const fail = (code: RecorderErrorCode, message: string, reason?: DesktopSystemAudioErrorCode) => {
-    emit({ state: "failed", error: { code, message, ...(reason ? { reason } : {}) } });
+    emit({
+      state: "failed",
+      error: { code, message, ...(reason ? { reason } : {}) },
+    });
   };
 
   const liveSnapshot = () =>
