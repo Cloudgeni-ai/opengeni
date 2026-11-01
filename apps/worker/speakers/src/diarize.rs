@@ -23,8 +23,9 @@ pub struct Options {
     pub step_seconds: f32,
     /// Cosine distance below which voices are one speaker.
     pub threshold: f32,
-    /// Cosine distance between speaker centres below which the clusters are
-    /// one voice that the noisy single-window embeddings split apart.
+    /// Cosine distance between speaker centres, measured from the mean
+    /// embedding of the recording, below which the clusters are one voice
+    /// that the noisy single-window embeddings split apart.
     pub merge_threshold: f32,
     pub min_speakers: usize,
     pub max_speakers: usize,
@@ -44,7 +45,7 @@ impl Default for Options {
         Self {
             step_seconds: 2.0,
             threshold: 0.55,
-            merge_threshold: 0.4,
+            merge_threshold: 0.8,
             min_speakers: 1,
             max_speakers: usize::MAX,
             min_cluster_size: 12,
@@ -452,8 +453,15 @@ pub fn diarize(
             sum
         })
         .collect();
+    // Every embedding of one recording shares its microphone and room, which
+    // pulls all cluster centres toward their common mean: on a phone in the
+    // middle of the table, different people sit as close as fragments of one
+    // voice do on a laptop. Centres measured from that mean compare the voices
+    // themselves, so one join threshold holds for both.
+    let members: Vec<usize> = keep.iter().map(|&cluster| sizes[cluster]).collect();
+    let centred = cluster::centred_sums(&sums, &members, &cluster::mean(&vectors));
     let groups = cluster::merge_centroids(
-        &sums,
+        &centred,
         options.merge_threshold,
         options.min_speakers.min(sums.len()),
     );
