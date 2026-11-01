@@ -65,6 +65,8 @@ export function SlackConnectionsPage(props: {
   const [available, setAvailable] = useState<ConnectionMetadata[]>([]);
   const [sharedIds, setSharedIds] = useState<string[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // The bots shared with this workspace by the organization arrive separately.
+  const [availableLoaded, setAvailableLoaded] = useState(false);
   const [revision, setRevision] = useState(0);
   const [installFailure, setInstallFailure] = useState(() => {
     const params = new URLSearchParams(window.location.search);
@@ -81,6 +83,7 @@ export function SlackConnectionsPage(props: {
     setAvailable([]);
     setSharedIds([]);
     setLoadError(null);
+    setAvailableLoaded(false);
     void client
       .listAvailableOpenGeniSlackBots(props.workspaceId)
       .then((result) => {
@@ -90,6 +93,9 @@ export function SlackConnectionsPage(props: {
       })
       .catch((error) => {
         if (live) setLoadError(userErrorText(error));
+      })
+      .finally(() => {
+        if (live) setAvailableLoaded(true);
       });
     return () => {
       live = false;
@@ -130,8 +136,7 @@ export function SlackConnectionsPage(props: {
   // With none available here, creating still tries the organization's bot and
   // offers to turn it on for this workspace when the API says it is off.
   const agentConnections = botsHere.length > 0 ? botsHere : activeBots;
-  const botsLoaded = props.connections !== null && !discovery.loading;
-  const agentMemoryReviewFirst = slackAgents.agents ? slackAgents.memoryReviewFirst : null;
+  const botsLoaded = props.connections !== null && !discovery.loading && availableLoaded;
   // "Use in Slack" on a bot template lands here with the template to copy.
   const templateParamHandled = useRef(false);
   useEffect(() => {
@@ -218,7 +223,7 @@ export function SlackConnectionsPage(props: {
         workspaceId={props.workspaceId}
         workspaceName={workspaceName}
         connections={agentConnections}
-        memoryReviewFirst={agentMemoryReviewFirst}
+        connectionsLoaded={botsLoaded}
         onClose={() => setAgentPage(null)}
         onSaved={(saved, created) => {
           slackAgents.replace((current) =>

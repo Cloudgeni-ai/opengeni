@@ -26,14 +26,12 @@ import { toast } from "sonner";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { useNavigate } from "@opengeni/react/app/lib/navigation";
 import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import type { ConnectionMetadata } from "@opengeni/react/app/types";
+import { sessionAvatarFallbackHue } from "@opengeni/react/app/components/session/session-avatar";
 import {
-  SessionAvatar,
-  sessionAvatarFallbackHue,
-} from "@opengeni/react/app/components/session/session-avatar";
-import {
-  SessionAvatarPicker,
+  SessionAvatarPickerButton,
   sessionAvatarDraft,
   sessionAvatarDraftErrors,
   sessionAvatarFromDraft,
@@ -47,7 +45,8 @@ import {
 import { Button } from "@opengeni/react/ui/button";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
-import { FlushFormPage } from "@opengeni/react/ui/flush-form-page";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
+import { inAppClick } from "@opengeni/react/ui/in-app-click";
 import { Notice } from "@opengeni/react/ui/notice";
 import { SelectMenu } from "@opengeni/react/ui/select-menu";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
@@ -75,8 +74,45 @@ function nameError(name: string): string | null {
   return null;
 }
 
+/** "Works in the Platform workspace.", or "Works in this workspace." when the name already says it. */
+function worksIn(workspaceName: string): string {
+  return /workspace$/i.test(workspaceName.trim())
+    ? `Works in ${workspaceName}.`
+    : `Works in the ${workspaceName} workspace.`;
+}
+
 function installationName(connection: ConnectionMetadata): string {
   return openGeniSlackBotUiMetadata(connection)?.slackTeamName ?? "Slack workspace";
+}
+
+/** The agent's Memory: its Knowledge collection, opened on the Knowledge page. */
+function MemoryField({
+  workspaceId,
+  collectionId,
+  reviewFirst,
+}: {
+  workspaceId: string;
+  collectionId: string;
+  reviewFirst: boolean;
+}) {
+  const navigate = useNavigate();
+  const href = `/workspaces/${workspaceId}/state?entry=${encodeURIComponent(collectionId)}`;
+  return (
+    <Field
+      label="Memory"
+      group
+      hint={reviewFirst ? "New Memory is saved for review first." : undefined}
+    >
+      <a
+        href={href}
+        onClick={inAppClick(() => void navigate({ href }))}
+        className="w-fit rounded-[4px] text-sm text-fg underline decoration-fg/25 underline-offset-2 hover:decoration-fg"
+        data-slack-agent-memory=""
+      >
+        Open in Knowledge
+      </a>
+    </Field>
+  );
 }
 
 export function SlackAgentFormPage({
@@ -85,7 +121,7 @@ export function SlackAgentFormPage({
   workspaceId,
   workspaceName,
   connections,
-  memoryReviewFirst,
+  connectionsLoaded = true,
   onClose,
   onSaved,
 }: {
@@ -97,8 +133,8 @@ export function SlackAgentFormPage({
   workspaceName: string;
   /** Opengeni bots a new agent can be called through. */
   connections: ConnectionMetadata[];
-  /** New Memory waits for review in the agent's workspace; null when unknown. */
-  memoryReviewFirst: boolean | null;
+  /** False while the bots are still loading; the form can open before them. */
+  connectionsLoaded?: boolean | undefined;
   onClose: () => void;
   /** After a create or an edit. */
   onSaved: (agent: SlackAgent, created: boolean) => void;
@@ -124,7 +160,8 @@ export function SlackAgentFormPage({
       "icon",
     ),
   );
-  const [connectionId, setConnectionId] = useState(connections[0]?.id ?? "");
+  // Empty until someone picks one: the bots can arrive after the form opens.
+  const [connectionId, setConnectionId] = useState("");
   const [errors, setErrors] = useState<{
     name?: string | null;
     description?: string | null;
@@ -134,9 +171,9 @@ export function SlackAgentFormPage({
   const [unavailable, setUnavailable] = useState<ConnectionMetadata | null>(null);
   const [turningOn, setTurningOn] = useState(false);
   const [open, setOpen] = useState(agent?.open ?? false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const avatar = sessionAvatarFromDraft(draft, name, null);
-  const connection = connections.find((row) => row.id === connectionId) ?? null;
-  const reviewFirst = agent ? agent.memoryReviewFirst : memoryReviewFirst;
+  const connection = connections.find((row) => row.id === connectionId) ?? connections[0] ?? null;
   const agentWorkspaceName = agent ? (agent.targetWorkspaceName ?? workspaceName) : workspaceName;
   const handle = name.trim() ? slackAgentHandle(name) : null;
   // Opening an agent to anyone in Slack is an organization admin's call; any
@@ -156,6 +193,8 @@ export function SlackAgentFormPage({
       ...sessionAvatarDraftErrors(draft, name, null),
     };
     setErrors(next);
+    // Name and description first; then the picker opens on the icon's error.
+    if (!next.name && !next.description && (next.emoji || next.letters)) setPickerOpen(true);
     return !next.name && !next.description && !next.emoji && !next.letters && avatar !== null;
   }
 
@@ -264,18 +303,21 @@ export function SlackAgentFormPage({
   }
 
   return (
-    <FlushFormPage
+    <FormPage
       title={agent ? `Edit ${agent.name}` : "New Slack agent"}
-      description={
-        agent
-          ? `Works in ${agentWorkspaceName}.`
-          : `Works in ${workspaceName}. This can't change later.`
-      }
-      backLabel="Slack"
-      onClose={onClose}
+      description={worksIn(agentWorkspaceName)}
+      back={{ label: "Slack", onClick: onClose }}
+      onCancel={onClose}
       submitLabel={agent ? "Save" : "Create agent"}
       pendingLabel={agent ? "Saving…" : "Creating…"}
       pending={turningOn ? true : undefined}
+      // Until every bot is in, the bot shared with this workspace may still be missing.
+      submitDisabled={!agent && (!connection || !connectionsLoaded)}
+      disabledReason={
+        !agent && !connection && connectionsLoaded
+          ? "Add a Slack workspace to create Slack agents."
+          : undefined
+      }
       onSubmit={async () => {
         if (!validate()) return false;
         return agent ? await update(agent) : await create();
@@ -305,22 +347,22 @@ export function SlackAgentFormPage({
           </Notice>
         ) : null}
         <div className="flex items-start gap-4">
-          <div className="flex size-12 shrink-0 items-center justify-center">
-            {avatar ? (
-              <SessionAvatar
-                avatar={avatar}
-                name={name || "Agent"}
-                workspaceId={agent?.targetWorkspaceId ?? workspaceId}
-                seed={seedKey}
-                size="lg"
-              />
-            ) : (
-              <span
-                aria-hidden="true"
-                className="flex size-12 items-center justify-center rounded-lg border border-dashed border-border-strong"
-              />
-            )}
-          </div>
+          <SessionAvatarPickerButton
+            label="Icon"
+            allowNone={false}
+            draft={draft}
+            onChange={(next) => {
+              setDraft(next);
+              setErrors((current) => ({ name: current.name, description: current.description }));
+            }}
+            name={name}
+            image={null}
+            errors={errors}
+            workspaceId={agent?.targetWorkspaceId ?? workspaceId}
+            seed={seedKey}
+            open={pickerOpen}
+            onOpenChange={setPickerOpen}
+          />
           <div className="min-w-0 flex-1">
             <Field
               label="Name"
@@ -352,18 +394,6 @@ export function SlackAgentFormPage({
             }}
           />
         </Field>
-        <SessionAvatarPicker
-          label="Icon"
-          allowNone={false}
-          draft={draft}
-          onChange={(next) => {
-            setDraft(next);
-            setErrors((current) => ({ name: current.name, description: current.description }));
-          }}
-          name={name}
-          image={null}
-          errors={errors}
-        />
         <Field
           label="Instructions"
           optional
@@ -381,7 +411,7 @@ export function SlackAgentFormPage({
           <Field label="Slack workspace" group>
             <SelectMenu
               aria-label="Slack workspace"
-              value={connectionId}
+              value={connection?.id ?? ""}
               onValueChange={(value) => {
                 setConnectionId(value);
                 setUnavailable(null);
@@ -390,12 +420,13 @@ export function SlackAgentFormPage({
             />
           </Field>
         ) : null}
-        <Field label="Memory" group>
-          <p className="m-0 text-sm leading-5 text-fg-muted" data-slack-agent-memory="">
-            {`A Knowledge collection named after the agent in ${agentWorkspaceName}, created automatically.`}
-            {reviewFirst ? " New Memory is saved for review first." : ""}
-          </p>
-        </Field>
+        {agent?.knowledgeCollectionId ? (
+          <MemoryField
+            workspaceId={agent.targetWorkspaceId}
+            collectionId={agent.knowledgeCollectionId}
+            reviewFirst={agent.memoryReviewFirst}
+          />
+        ) : null}
         {agent ? (
           <CheckboxField
             label={SLACK_AGENT_OPEN_LABEL}
@@ -407,7 +438,7 @@ export function SlackAgentFormPage({
           />
         ) : null}
       </FieldStack>
-    </FlushFormPage>
+    </FormPage>
   );
 }
 
@@ -471,15 +502,15 @@ export function SlackAgentIntroPage({
   const full = selected.length >= SLACK_AGENT_INTRO_CHANNELS_MAX;
   const empty = channels !== null && channels.length === 0;
   return (
-    <FlushFormPage
+    <FormPage
       title={`Introduce ${agent.name}`}
       description={
         justCreated
           ? `${agent.name} is ready. Post a short intro so people know to call ${slackAgentCall(agent)}.`
           : `Post a short intro so people know to call ${slackAgentCall(agent)}.`
       }
-      backLabel="Slack"
-      onClose={onClose}
+      back={{ label: "Slack", onClick: onClose }}
+      onCancel={onClose}
       cancelLabel={justCreated ? "Skip" : "Cancel"}
       submitLabel="Post intro"
       pendingLabel="Posting…"
@@ -566,6 +597,6 @@ export function SlackAgentIntroPage({
           ) : null}
         </fieldset>
       )}
-    </FlushFormPage>
+    </FormPage>
   );
 }

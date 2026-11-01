@@ -1025,6 +1025,9 @@
 :where(.og-root).right-12,:where(.og-root) .right-12 {
     right: calc(var(--spacing) * 12);
   }
+:where(.og-root).-bottom-1,:where(.og-root) .-bottom-1 {
+    bottom: calc(var(--spacing) * -1);
+  }
 :where(.og-root).bottom-0,:where(.og-root) .bottom-0 {
     bottom: calc(var(--spacing) * 0);
   }
@@ -1729,6 +1732,9 @@
 :where(.og-root).max-h-\(--radix-dropdown-menu-content-available-height\),:where(.og-root) .max-h-\(--radix-dropdown-menu-content-available-height\) {
     max-height: var(--radix-dropdown-menu-content-available-height);
   }
+:where(.og-root).max-h-\(--radix-popover-content-available-height\),:where(.og-root) .max-h-\(--radix-popover-content-available-height\) {
+    max-height: var(--radix-popover-content-available-height);
+  }
 :where(.og-root).max-h-\(--radix-select-content-available-height\),:where(.og-root) .max-h-\(--radix-select-content-available-height\) {
     max-height: var(--radix-select-content-available-height);
   }
@@ -2133,6 +2139,9 @@
   }
 :where(.og-root).w-\[min\(24rem\,calc\(100vw-1\.5rem\)\)\],:where(.og-root) .w-\[min\(24rem\,calc\(100vw-1\.5rem\)\)\] {
     width: min(24rem, calc(100vw - 1.5rem));
+  }
+:where(.og-root).w-\[min\(24rem\,calc\(100vw-24px\)\)\],:where(.og-root) .w-\[min\(24rem\,calc\(100vw-24px\)\)\] {
+    width: min(24rem, calc(100vw - 24px));
   }
 :where(.og-root).w-\[min\(25rem\,calc\(100vw-1\.5rem\)\)\],:where(.og-root) .w-\[min\(25rem\,calc\(100vw-1\.5rem\)\)\] {
     width: min(25rem, calc(100vw - 1.5rem));
@@ -6194,6 +6203,13 @@
       }
     }
   }
+:where(.og-root).group-hover\/avatar\:text-fg,:where(.og-root) .group-hover\/avatar\:text-fg {
+    &:is(:where(.group\/avatar):hover *) {
+      @media (hover: hover) {
+        color: var(--color-fg);
+      }
+    }
+  }
 :where(.og-root).group-hover\/copy\:opacity-100,:where(.og-root) .group-hover\/copy\:opacity-100 {
     &:is(:where(.group\/copy):hover *) {
       @media (hover: hover) {
@@ -9050,6 +9066,20 @@
       }
     }
   }
+:where(.og-root).data-invalid\:ring-2,:where(.og-root) .data-invalid\:ring-2 {
+    &[data-invalid] {
+      --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
+      box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    }
+  }
+:where(.og-root).data-invalid\:ring-danger\/60,:where(.og-root) .data-invalid\:ring-danger\/60 {
+    &[data-invalid] {
+      --tw-ring-color: var(--color-danger);
+      @supports (color: color-mix(in lab, red, red)) {
+        --tw-ring-color: color-mix(in oklab, var(--color-danger) 60%, transparent);
+      }
+    }
+  }
 :where(.og-root).data-\[active\=true\]\:bg-selection,:where(.og-root) .data-\[active\=true\]\:bg-selection {
     &[data-active="true"] {
       background-color: var(--color-selection);
@@ -11637,6 +11667,11 @@
       flex-shrink: 0;
     }
   }
+:where(.og-root).pointer-coarse\:grid-cols-6,:where(.og-root) .pointer-coarse\:grid-cols-6 {
+    @media (pointer: coarse) {
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+    }
+  }
 :where(.og-root).pointer-coarse\:items-start,:where(.og-root) .pointer-coarse\:items-start {
     @media (pointer: coarse) {
       align-items: flex-start;
@@ -11962,6 +11997,13 @@
     @media (width < 40rem) {
       @media (pointer: coarse) {
         min-width: calc(var(--spacing) * 11);
+      }
+    }
+  }
+:where(.og-root).max-\[22rem\]\:pointer-coarse\:grid-cols-5,:where(.og-root) .max-\[22rem\]\:pointer-coarse\:grid-cols-5 {
+    @media (width < 22rem) {
+      @media (pointer: coarse) {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
       }
     }
   }
