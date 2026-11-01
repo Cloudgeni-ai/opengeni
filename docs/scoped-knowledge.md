@@ -82,6 +82,10 @@ The source side records:
 - `knowledge_lifecycle_events`: append-only delete, revoke, restore, ACL, sync,
   and version-pointer evidence.
 
+Integration Knowledge sync is retired (see [Knowledge](knowledge.md)), so no
+provider writes new source or sync rows. The ledgers stay so imported
+documents keep their provenance, ACL evidence and lifecycle history.
+
 Mutable heads are not directly updateable by `opengeni_app`. Target-schema
 security-definer functions lock the exact row, recheck live GUC authority,
 apply expected-generation compare-and-swap, and append the lifecycle evidence in

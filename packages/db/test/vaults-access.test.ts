@@ -1,10 +1,15 @@
 // Vault access (0739): the reach matrix (AX-1), narrowing (AX-2), schedule
 // owners rechecked per run (AX-3), "available in" (AX-4), Only-me privacy
-// (AX-7), stale attempts (AX-8), integrity rules (DM-7) and limits (DM-8),
-// all through the SECURITY DEFINER routines as the application role.
+// (AX-7), stale attempts (AX-8), every organization vault for the people who
+// manage them (AX-9, 1218), integrity rules (DM-7) and limits (DM-8), all
+// through the SECURITY DEFINER routines as the application role.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { SecretPrincipal } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   claimSessionWorkForAttempt,
@@ -23,6 +28,7 @@ import {
   isVaultError,
   listVaultFieldVersions,
   listVaultItems,
+  listOrganizationVaults,
   listVaultsForSubject,
   readVaultFieldCiphertext,
   resolveSecretReferenceCandidates,
@@ -1080,6 +1086,58 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       } finally {
         await app.end();
       }
+    });
+
+    test("AX-9: every organization vault is listed wherever it works, never to an agent run", async () => {
+      if (!client) return;
+      const asOwner = world.subject(world.owner.subjectId);
+      const here = { workspaceId: world.workspaceId };
+      const fixtures = [
+        world.vaults.orgAvailable,
+        world.vaults.orgElsewhere,
+        world.vaults.orgNoPersonal,
+      ].map((vault) => vault.id);
+
+      // The workspace's own list holds only what reaches it.
+      const reachable = (await listVaultsForSubject(world.db, asOwner, here)).map(
+        (vault) => vault.id,
+      );
+      expect(reachable).not.toContain(world.vaults.orgElsewhere.id);
+
+      // Withheld for one release: the caller learns it is not there yet.
+      expect(await listOrganizationVaults(world.db, asOwner, here)).toBeNull();
+
+      await grantDeferredRuntimeAccess(shared!.admin);
+      const everywhere = (await listOrganizationVaults(world.db, asOwner, here))!;
+      expect(everywhere.map((vault) => vault.id)).toEqual(expect.arrayContaining(fixtures));
+      expect(new Set(everywhere.map((vault) => vault.ownerKind))).toEqual(
+        new Set(["organization"]),
+      );
+      const names = everywhere.map((vault) => vault.name.toLowerCase());
+      expect(names).toEqual([...names].sort());
+      const elsewhere = everywhere.find((vault) => vault.id === world.vaults.orgElsewhere.id)!;
+      expect(elsewhere.availability).toEqual({
+        allowedWorkspaceIds: [world.personalWorkspaceId],
+        allowPersonalWorkspaces: true,
+      });
+
+      // The same list from a Personal workspace: ownership, not reach, decides
+      // (the route admits only account administrators).
+      const fromPersonal = await listOrganizationVaults(
+        world.db,
+        world.subject(world.member.subjectId, world.member.personalWorkspaceId),
+        { workspaceId: world.member.personalWorkspaceId },
+      );
+      expect(fromPersonal!.map((vault) => vault.id)).toEqual(expect.arrayContaining(fixtures));
+
+      // An agent run sees only what reaches its workspace.
+      const turn = await startTurn(world, {
+        createdBy: { kind: "subject", subjectId: world.member.subjectId },
+      });
+      await expectVaultError(
+        listOrganizationVaults(world.db, { kind: "principal", principal: turn.principal }, here),
+        "vault_permission_denied",
+      );
     });
   },
 );

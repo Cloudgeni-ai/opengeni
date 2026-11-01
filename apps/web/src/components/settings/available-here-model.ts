@@ -1,12 +1,15 @@
 import {
   asVaultClient,
   vaultsApi,
+  type CapabilityCatalogItem,
   type MachineState,
   type ResourceAuthorityScope,
   type VaultSummary,
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { isPermissionDenied, userErrorText } from "@opengeni/react/ui/api-error";
+
+import { personalExtensionOrigin } from "@/components/capabilities/catalog-presentation";
 
 /* ----------------------------------------------------------------------------
    Available here: what agents in one workspace can use, read from the same
@@ -37,7 +40,8 @@ export type AvailableLocation =
   | { page: "plugins"; section?: "skills" | undefined }
   | { page: "machines" }
   | { page: "rig"; rigId: string }
-  | { page: "vault"; vaultId: string }
+  /** In the workspace the page is anchored on, or in `workspaceId` when it works only elsewhere. */
+  | { page: "vault"; vaultId: string; workspaceId?: string | undefined }
   /** No scope: every scope's Knowledge (a Personal workspace's own and yours). */
   | { page: "knowledge"; scope?: "organization" | "workspace" | "personal" | undefined };
 
@@ -76,7 +80,7 @@ const MACHINE_STATES: Partial<Record<MachineState, string>> = {
   enrolling: "Setting up",
 };
 
-function vaultState(vault: VaultSummary): string | null {
+export function vaultState(vault: VaultSummary): string | null {
   if (vault.syncStatus === "auth_expired") return "Sign-in expired";
   if (vault.syncStatus === "error") return "Sync failed";
   return null;
@@ -96,16 +100,44 @@ function vaultOwner(vault: VaultSummary): AvailableOwner | null {
   }
 }
 
+/**
+ * How people sign in to an organization connector that reaches this workspace,
+ * or undefined when the item is not the organization's: each person with their
+ * own account, all with the organization's key, or no sign-in at all.
+ */
+function organizationConnectorLogin(
+  item: CapabilityCatalogItem,
+): AvailableThing["login"] | undefined {
+  const connector = item.metadata.organizationConnector;
+  if (item.lifecycle.managedBy !== "organization" || !connector || typeof connector !== "object")
+    return undefined;
+  const login = (connector as { login?: unknown }).login;
+  if (login === "each_person") return "own";
+  if (login === "organization_key") return "shared";
+  return null;
+}
+
+/**
+ * The workspace's own connectors are its installations. Two more kinds have
+ * no installation here and arrive as catalog items: the organization's
+ * connectors that reach this workspace, and, in a Personal workspace, the
+ * owner's Only me connectors carried in from the workspaces they were set up
+ * in. An organization connector the workspace turned off is left out; one
+ * whose organization setup is broken is shown as unavailable, like an offline
+ * machine.
+ */
 async function connectors(client: AvailableHereClient, workspaceId: string) {
   const catalog = await client.listCapabilities(workspaceId);
   const items = new Map(catalog.items.map((item) => [item.id, item]));
   const things: AvailableThing[] = [];
+  const listed = new Set<string>();
   for (const installation of catalog.installations) {
     // Skills are counted from the Skills list, which also holds authored ones.
     if (installation.status !== "active" || installation.kind === "skill") continue;
     const item = items.get(installation.capabilityId);
     if (!item) continue;
     const scope = item.connectionRef?.subjectScope;
+    listed.add(item.id);
     things.push({
       key: `connector:${installation.id}`,
       kind: "connector",
@@ -116,6 +148,35 @@ async function connectors(client: AvailableHereClient, workspaceId: string) {
       count: null,
       open: { page: "plugins" },
     });
+  }
+  for (const item of catalog.items) {
+    if (item.kind !== "mcp" || listed.has(item.id)) continue;
+    const login = organizationConnectorLogin(item);
+    if (login !== undefined) {
+      const unavailable = item.lifecycle.status === "unavailable";
+      if (!item.enabled && !unavailable) continue;
+      things.push({
+        key: `connector:organization:${item.id}`,
+        kind: "connector",
+        owner: "organization",
+        name: item.name,
+        state: unavailable ? "Unavailable" : null,
+        login,
+        count: null,
+        open: { page: "plugins" },
+      });
+    } else if (item.enabled && personalExtensionOrigin(item)) {
+      things.push({
+        key: `connector:carried:${item.id}`,
+        kind: "connector",
+        owner: "you",
+        name: item.name,
+        state: null,
+        login: "own",
+        count: null,
+        open: { page: "plugins" },
+      });
+    }
   }
   return things;
 }
@@ -188,7 +249,9 @@ async function skills(client: AvailableHereClient, workspaceId: string) {
       ...(cursor ? { cursor } : {}),
     });
     for (const skill of listed.skills) {
-      if (skill.status !== "active") continue;
+      // People's Skills list also holds organization Skills that don't work
+      // here, so their managers can change that; agents here never use them.
+      if (skill.status !== "active" || skill.availableHere === false) continue;
       const owner = ownerOfScope(skill.scope);
       counts.set(owner, (counts.get(owner) ?? 0) + 1);
     }
@@ -210,10 +273,15 @@ async function skills(client: AvailableHereClient, workspaceId: string) {
 }
 
 const KNOWLEDGE_SCOPES = ["workspace", "organization", "personal"] as const;
+type KnowledgeScope = (typeof KNOWLEDGE_SCOPES)[number];
 
-async function knowledge(client: AvailableHereClient, workspaceId: string) {
+async function knowledge(
+  client: AvailableHereClient,
+  workspaceId: string,
+  scopes: readonly KnowledgeScope[] = KNOWLEDGE_SCOPES,
+) {
   const found = await Promise.all(
-    KNOWLEDGE_SCOPES.map(async (scope) => {
+    scopes.map(async (scope) => {
       const listed = await client.listKnowledgeEntries(workspaceId, {
         scope,
         mode: "keyword",
@@ -223,7 +291,7 @@ async function knowledge(client: AvailableHereClient, workspaceId: string) {
     }),
   );
   return found
-    .filter((scope): scope is (typeof KNOWLEDGE_SCOPES)[number] => scope !== null)
+    .filter((scope): scope is KnowledgeScope => scope !== null)
     .map(
       (scope): AvailableThing => ({
         key: `knowledge:${scope}`,
@@ -238,12 +306,23 @@ async function knowledge(client: AvailableHereClient, workspaceId: string) {
     );
 }
 
-const LOADERS: Readonly<
+/**
+ * Each kind's loader. Organization settings › Shared reuses them for the
+ * organization's own things, which reach every workspace, so one workspace's
+ * lists hold them all.
+ */
+export const AVAILABLE_LOADERS: Readonly<
   Record<
     AvailableKind,
     (client: AvailableHereClient, workspaceId: string) => Promise<AvailableThing[]>
   >
-> = {
+> & {
+  knowledge: (
+    client: AvailableHereClient,
+    workspaceId: string,
+    scopes?: readonly KnowledgeScope[],
+  ) => Promise<AvailableThing[]>;
+} = {
   connector: connectors,
   machine: machines,
   rig: rigs,
@@ -266,7 +345,7 @@ export async function loadAvailableHere(
   workspaceId: string,
 ): Promise<AvailableHereResult> {
   const settled = await Promise.allSettled(
-    AVAILABLE_KINDS.map((kind) => LOADERS[kind](client, workspaceId)),
+    AVAILABLE_KINDS.map((kind) => AVAILABLE_LOADERS[kind](client, workspaceId)),
   );
   const things: AvailableThing[] = [];
   const failed: AvailableKind[] = [];
@@ -303,7 +382,7 @@ export type AvailableNames = {
 
 const KIND_ORDER = new Map(AVAILABLE_KINDS.map((kind, index) => [kind, index]));
 
-const KIND_LABELS: Readonly<Record<AvailableKind, string>> = {
+export const KIND_LABELS: Readonly<Record<AvailableKind, string>> = {
   connector: "Connector",
   machine: "Machine",
   rig: "Rig",
@@ -342,7 +421,7 @@ export function availableDescription(thing: AvailableThing, names: AvailableName
   return parts.join(" ");
 }
 
-function sortThings(things: AvailableThing[]): AvailableThing[] {
+export function sortThings(things: AvailableThing[]): AvailableThing[] {
   return [...things].sort(
     (a, b) =>
       (KIND_ORDER.get(a.kind) ?? 0) - (KIND_ORDER.get(b.kind) ?? 0) ||

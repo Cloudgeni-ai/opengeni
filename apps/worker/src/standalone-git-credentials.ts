@@ -14,9 +14,23 @@ import { createGitHubAppInstallationTokenWithExpiry } from "@opengeni/github";
 export function createStandaloneConnectionCredentialsPort(
   settings: Settings,
 ): ConnectionCredentialsPort {
-  return {
+  const port: ConnectionCredentialsPort = {
     gitCredentials: async (request) => await resolveStandaloneGitCredentials(settings, request),
   };
+  standalonePorts.add(port);
+  return port;
+}
+
+const standalonePorts = new WeakSet<ConnectionCredentialsPort>();
+
+/**
+ * True when Git tokens come from Opengeni's own GitHub App (the standalone
+ * port, or no port at all), not from a host credential callback.
+ */
+export function gitTokensMintedByOpengeni(
+  port: ConnectionCredentialsPort | null | undefined,
+): boolean {
+  return !port?.gitCredentials || standalonePorts.has(port);
 }
 
 async function resolveStandaloneGitCredentials(

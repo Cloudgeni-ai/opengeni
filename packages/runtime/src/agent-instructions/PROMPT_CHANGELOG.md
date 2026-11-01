@@ -1,5 +1,19 @@
 # Modular prompt changelog
 
+Automatic chat titles are written in the language the person writes in, and
+a chat that has only a greeting, thanks or small talk stays untitled until it
+has a task, question or subject. The title request's instructions
+(`SESSION_TITLE_GENERATION_INSTRUCTIONS`, a separate single call outside the
+agent's conversation) say so and answer exactly `NO_TITLE` when there is
+nothing to name yet. That answer saves no title, so a later turn titles the
+chat. On a later turn the title request also receives that turn's message
+after the chat's first message. The descriptions of the agent's
+`opengeni__set_session_title` tool and the first-party MCP `set_session_title`
+tool gain the same two rules: write the label in the person's language, and
+call it once the chat has a task, question or subject, not while it holds only
+a greeting or small talk. Nothing else in the instructions or tool list
+changes.
+
 Privacy questions are answered from server facts. One bullet joins "Rules for
 getting work done" in both the legacy CORE and the modular base behavior (about
 210 bytes): answer questions about privacy, retention, training, the model or

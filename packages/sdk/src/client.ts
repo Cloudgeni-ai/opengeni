@@ -767,6 +767,7 @@ import type {
   ContinueAfterCapabilitySetupResponse,
   UpdateSessionAgentRequest,
   UpdateSessionSkillsRequest,
+  RemoveSessionResourcesRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceModelAccessPolicyRequest,
@@ -1899,6 +1900,24 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `${sessionPath(workspaceId, sessionId)}/skills`,
+      request,
+    );
+  }
+
+  /**
+   * Remove attached repositories from a session and its child sessions. The
+   * agent loses Git and GitHub access to them on its next call, and the next
+   * turn removes their folders from the sandbox. Only a person or an API
+   * caller can remove repositories.
+   */
+  async removeSessionResources(
+    workspaceId: string,
+    sessionId: string,
+    request: RemoveSessionResourcesRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "POST",
+      `${sessionPath(workspaceId, sessionId)}/resources/remove`,
       request,
     );
   }

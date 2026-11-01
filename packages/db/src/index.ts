@@ -28,6 +28,8 @@ export {
 } from "./scheduled-task-lifecycle";
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
+export * from "./session-resource-removal";
+import { admitRequestedRepositories } from "./session-resource-removal";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
@@ -177,6 +179,8 @@ import {
   sessionMetadataUnattended,
   withSessionUnattendedMetadata,
   type SessionUnattendedSetting,
+  parseSessionRemovedRepositories,
+  type SessionRemovedRepository,
 } from "@opengeni/contracts";
 import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
@@ -31674,6 +31678,36 @@ function mapSessionSpawnDenial(
   };
 }
 
+/**
+ * A child inherits its parent's repository removal records, read from the
+ * parent row the depth decision already holds FOR SHARE: a removal either
+ * commits first and is seen here, or waits for this create and then narrows
+ * the new child too. An agent cannot give a child a removed repository; a
+ * person (or API caller) creating the child with one attaches it again there.
+ */
+async function childSessionRemovedRepositories(
+  tx: Database,
+  input: SessionCreateInput,
+  parentSessionId: string,
+): Promise<SessionRemovedRepository[]> {
+  const [parent] = await tx
+    .select({ removedRepositories: schema.sessions.removedRepositories })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, parentSessionId),
+      ),
+    )
+    .for("share")
+    .limit(1);
+  return admitRequestedRepositories({
+    removedRepositories: parseSessionRemovedRepositories(parent?.removedRepositories),
+    requested: input.resources,
+    requester: input.createdByActor ? "agent" : "person",
+  }).removedRepositories;
+}
+
 async function parentSessionCodeSearchEnabled(
   tx: Database,
   workspaceId: string,
@@ -32457,6 +32491,9 @@ async function createSessionInTransaction(
     input.channelId == null && !input.parentSessionId
       ? await siteHomeChannelId(tx as unknown as Database, input.workspaceId, sessionMetadata)
       : (input.channelId ?? null);
+  const removedRepositories = input.parentSessionId
+    ? await childSessionRemovedRepositories(tx as unknown as Database, input, input.parentSessionId)
+    : [];
   try {
     const insertValues: typeof schema.sessions.$inferInsert = withLosslessContentWriteVersion(
       {
@@ -32468,6 +32505,7 @@ async function createSessionInTransaction(
         title: AUTOMATIC_SESSION_TITLE_FALLBACK,
         titleSource: "agent",
         resources: input.resources,
+        removedRepositories,
         skills: input.skills ?? [],
         tools: input.tools ?? [],
         toolPolicy: input.toolPolicy ?? {
@@ -32566,9 +32604,11 @@ async function createSessionInTransaction(
       // continuations) are included. SQL rechecks it against the locked turn
       // and the request's verified claims; another person never matches.
       const columns = getTableColumns(schema.sessions);
+      // The creation seam's column allow-list predates removal records; the
+      // inherited records are written right after, in this transaction.
       const valuesByColumn = Object.fromEntries(
         Object.entries(insertValues)
-          .filter(([, value]) => value !== undefined)
+          .filter(([key, value]) => value !== undefined && key !== "removedRepositories")
           .map(([key, value]) => {
             const column = columns[key as keyof typeof columns];
             return [column.name, agentChildCreationColumnValue(column, value)];
@@ -32582,9 +32622,15 @@ async function createSessionInTransaction(
         ${actor.turnId}::uuid, ${actor.attemptId}::uuid, ${actor.executionGeneration}::integer,
         ${JSON.stringify(valuesByColumn)}::jsonb
       )`);
-      insertedRows = created.length
-        ? await tx.select().from(schema.sessions).where(eq(schema.sessions.id, created[0]!.id))
-        : [];
+      insertedRows = !created.length
+        ? []
+        : removedRepositories.length > 0
+          ? await tx
+              .update(schema.sessions)
+              .set({ removedRepositories })
+              .where(eq(schema.sessions.id, created[0]!.id))
+              .returning()
+          : await tx.select().from(schema.sessions).where(eq(schema.sessions.id, created[0]!.id));
     } else {
       // Non-agent creates, unscoped legacy creates and turns with no initiating
       // human retain their original path. Never infer the request subject from
@@ -37050,13 +37096,13 @@ async function readSessionListForSubject(
           tx,
           workspaceId,
           [...pinnedRows, ...pageRows].map((row) => row.session),
-          !summary,
+          false,
         );
-        // Compact rows skip the unbounded effective-policy walk but still name
-        // the model with two fixed index probes per row.
-        const canonicalSessions = summary
-          ? await withSessionListModelPolicy(tx, workspaceId, canonicalRows)
-          : canonicalRows;
+        // Every list page names each row's model with two fixed index probes
+        // per row. The effective-policy walk can scan back over every turn
+        // started since the last settings write, which took seconds on long
+        // sessions; a single-session read still uses it.
+        const canonicalSessions = await withSessionListModelPolicy(tx, workspaceId, canonicalRows);
         const canonicalSessionById = new Map(
           canonicalSessions.map((session) => [session.id, session]),
         );
@@ -91464,6 +91510,7 @@ function sessionEventTypesAdvanceActivity(inputs: ReadonlyArray<{ type: string }
 
 function sessionMutationAdvancesActivity(update: {
   resources?: ResourceRef[];
+  removedRepositories?: SessionRemovedRepository[];
   tools?: ToolRef[];
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   agentConfig?: ResolvedAgentConfig | null;
@@ -93524,6 +93571,8 @@ type LockedSessionUpdateResult = {
   events: AppendEventInput[];
   update?: {
     resources?: ResourceRef[];
+    /** Repository removal records (migration 1140), written with `resources`. */
+    removedRepositories?: SessionRemovedRepository[];
     tools?: ToolRef[];
     firstPartyMcpTools?: FirstPartyMcpToolName[];
     /** Trusted host normalization; never accepted directly from a public update body. */
@@ -93704,6 +93753,9 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           .set({
             lastSequence: sequence,
             ...(update.resources !== undefined ? { resources: update.resources } : {}),
+            ...(update.removedRepositories !== undefined
+              ? { removedRepositories: update.removedRepositories }
+              : {}),
             ...(update.tools !== undefined ? { tools: update.tools } : {}),
             ...(update.firstPartyMcpTools !== undefined
               ? { firstPartyMcpTools: update.firstPartyMcpTools }
@@ -93934,6 +93986,7 @@ function mapSession(
     scopeSubjectId: sessionEndUserFromRow(row),
     memoryScope: sessionMemoryScopeFromRow(row),
     resources: row.resources as ResourceRef[],
+    ...sessionRemovedRepositoriesProjection(row.removedRepositories),
     skills: StoredSessionSkills.parse(row.skills ?? []),
     ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     tools: row.tools as ToolRef[],
@@ -94055,6 +94108,14 @@ function mapProjectedEvent(row: SessionEventProjectionRow): SessionEvent {
 
 function utf8JsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+/** Present only when the session has removal records, so other sessions read unchanged. */
+function sessionRemovedRepositoriesProjection(
+  value: unknown,
+): Pick<Session, "removedRepositories"> {
+  const removedRepositories = parseSessionRemovedRepositories(value);
+  return removedRepositories.length > 0 ? { removedRepositories } : {};
 }
 
 function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTurn {
