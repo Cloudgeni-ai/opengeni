@@ -6,6 +6,11 @@ export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-m
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
+export * from "./organization-connectors";
+import {
+  organizationConnectorLogin,
+  type OrganizationConnectorRow,
+} from "./organization-connectors";
 import { siteSessionAccessFilter } from "./site-session-access";
 import {
   decodeActivityXid,
@@ -11800,6 +11805,101 @@ export async function disableCapabilityInstallation(
   });
 }
 
+/** Marks the turned-off installation that switches an organization connector off in one workspace. */
+export const ORGANIZATION_CONNECTOR_OVERRIDE_METADATA_KEY = "organizationOverride";
+
+export function isOrganizationConnectorOverride(
+  installation: Pick<CapabilityInstallation, "status" | "metadata">,
+): boolean {
+  return (
+    installation.status === "disabled" &&
+    installation.metadata[ORGANIZATION_CONNECTOR_OVERRIDE_METADATA_KEY] === true
+  );
+}
+
+/**
+ * Turns the organization's connector off in this workspace: a turned-off
+ * installation of the same capability, which wins over the organization's
+ * setup. An existing installation is returned unchanged.
+ */
+export async function turnOffOrganizationConnectorInWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; capabilityId: string },
+): Promise<CapabilityInstallation> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .insert(schema.capabilityInstallations)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          capabilityId: input.capabilityId,
+          kind: "mcp",
+          status: "disabled",
+          config: {},
+          metadata: { [ORGANIZATION_CONNECTOR_OVERRIDE_METADATA_KEY]: true },
+        })
+        .onConflictDoNothing();
+      const current = await getCapabilityInstallation(
+        scopedDb,
+        input.workspaceId,
+        input.capabilityId,
+      );
+      if (!current) throw new Error("Failed to turn the organization connector off");
+      return current;
+    },
+  );
+}
+
+/**
+ * Removes this workspace's turned-off override, so the organization's
+ * connector applies again. Any other installation is left alone (false).
+ */
+export async function restoreOrganizationConnectorInWorkspace(
+  db: Database,
+  workspaceId: string,
+  capabilityId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const deleted = await scopedDb
+      .delete(schema.capabilityInstallations)
+      .where(
+        and(
+          eq(schema.capabilityInstallations.workspaceId, workspaceId),
+          eq(schema.capabilityInstallations.capabilityId, capabilityId),
+          eq(schema.capabilityInstallations.status, "disabled"),
+          sql`${schema.capabilityInstallations.metadata} -> ${ORGANIZATION_CONNECTOR_OVERRIDE_METADATA_KEY} = 'true'::jsonb`,
+        ),
+      )
+      .returning({ id: schema.capabilityInstallations.id });
+    return deleted.length > 0;
+  });
+}
+
+/**
+ * An organization connector reaching this workspace, shaped as the
+ * installation a workspace setup of it would be (header names only).
+ */
+export function organizationConnectorAsInstallation(
+  connector: OrganizationConnectorRow,
+  workspaceId: string,
+): CapabilityInstallation {
+  return {
+    id: connector.id,
+    accountId: connector.accountId,
+    workspaceId,
+    capabilityId: connector.capabilityId,
+    kind: "mcp",
+    status: "active",
+    config: projectInstallationConfig(connector.config),
+    metadata: { ...connector.metadata, organizationConnectorId: connector.id },
+    enabledAt: connector.updatedAt.toISOString(),
+    updatedAt: connector.updatedAt.toISOString(),
+  };
+}
+
 export async function listCapabilityInstallations(
   db: Database,
   workspaceId: string,
@@ -11912,43 +12012,40 @@ async function listEnabledMcpCapabilityRows(
   only?: { capabilityIds: readonly string[]; serverIds: readonly string[] },
 ): Promise<EnabledMcpCapabilityRow[]> {
   if (only && only.capabilityIds.length === 0 && only.serverIds.length === 0) return [];
-  const rows = await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb
-        .select({
-          item: schema.capabilityCatalogItems,
-          installation: schema.capabilityInstallations,
-        })
-        .from(schema.capabilityInstallations)
-        .innerJoin(
-          schema.capabilityCatalogItems,
-          and(
-            or(
-              eq(
-                schema.capabilityInstallations.workspaceId,
-                schema.capabilityCatalogItems.workspaceId,
-              ),
-              isNull(schema.capabilityCatalogItems.workspaceId),
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        item: schema.capabilityCatalogItems,
+        installation: schema.capabilityInstallations,
+      })
+      .from(schema.capabilityInstallations)
+      .innerJoin(
+        schema.capabilityCatalogItems,
+        and(
+          or(
+            eq(
+              schema.capabilityInstallations.workspaceId,
+              schema.capabilityCatalogItems.workspaceId,
             ),
-            eq(schema.capabilityInstallations.capabilityId, schema.capabilityCatalogItems.id),
+            isNull(schema.capabilityCatalogItems.workspaceId),
           ),
-        )
-        .where(
-          and(
-            eq(schema.capabilityInstallations.workspaceId, workspaceId),
-            eq(schema.capabilityInstallations.kind, "mcp"),
-            eq(schema.capabilityInstallations.status, "active"),
-            eq(schema.capabilityCatalogItems.stale, false),
-            only
-              ? sql`(${schema.capabilityInstallations.capabilityId} = any(${capabilityTextArray(only.capabilityIds)})
+          eq(schema.capabilityInstallations.capabilityId, schema.capabilityCatalogItems.id),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.capabilityInstallations.workspaceId, workspaceId),
+          eq(schema.capabilityInstallations.kind, "mcp"),
+          eq(schema.capabilityInstallations.status, "active"),
+          eq(schema.capabilityCatalogItems.stale, false),
+          only
+            ? sql`(${schema.capabilityInstallations.capabilityId} = any(${capabilityTextArray(only.capabilityIds)})
                   or exists (
                     select 1 from unnest(${capabilityTextArray(only.serverIds)}) as target(id)
                     where strpos(coalesce(${schema.capabilityCatalogItems.metadata} ->> 'mcpServerId', ''), target.id) > 0
                   ))`
-              : undefined,
-            sql`(
+            : undefined,
+          sql`(
               ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId' is null
               or exists (
                 select 1
@@ -11957,23 +12054,211 @@ async function listEnabledMcpCapabilityRows(
                   and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
               )
             )`,
-          ),
-        )
-        .orderBy(asc(schema.capabilityCatalogItems.name)),
-  );
+        ),
+      )
+      .orderBy(asc(schema.capabilityCatalogItems.name));
 
-  // A workspace-scoped catalog row and a global registry row can share the
-  // same capability id; the join then matches one installation twice. Keep
-  // one row per installation, preferring the workspace-scoped catalog row
-  // (same precedence as getCapabilityCatalogItem).
-  const preferredByInstallation = new Map<string, (typeof rows)[number]>();
-  for (const row of rows) {
-    const existing = preferredByInstallation.get(row.installation.id);
-    if (!existing || (existing.item.workspaceId === null && row.item.workspaceId !== null)) {
-      preferredByInstallation.set(row.installation.id, row);
+    // A workspace-scoped catalog row and a global registry row can share the
+    // same capability id; the join then matches one installation twice. Keep
+    // one row per installation, preferring the workspace-scoped catalog row
+    // (same precedence as getCapabilityCatalogItem).
+    const preferredByInstallation = new Map<string, (typeof rows)[number]>();
+    for (const row of rows) {
+      const existing = preferredByInstallation.get(row.installation.id);
+      if (!existing || (existing.item.workspaceId === null && row.item.workspaceId !== null)) {
+        preferredByInstallation.set(row.installation.id, row);
+      }
     }
-  }
-  return [...preferredByInstallation.values()];
+    const own = [...preferredByInstallation.values()];
+    const organization = (await organizationConnectorCapabilityRows(scopedDb, workspaceId)).filter(
+      ({ item }) => !only || capabilityRowMatchesOnly(item, only),
+    );
+    if (organization.length === 0) return own;
+    return await inCatalogNameOrder(scopedDb, [...own, ...organization]);
+  });
+}
+
+/** The same narrowing as the installation query's `only` filter, for an organization row. */
+function capabilityRowMatchesOnly(
+  item: EnabledMcpCapabilityRow["item"],
+  only: { capabilityIds: readonly string[]; serverIds: readonly string[] },
+): boolean {
+  if (only.capabilityIds.includes(item.id)) return true;
+  const explicit = typeof item.metadata.mcpServerId === "string" ? item.metadata.mcpServerId : "";
+  return only.serverIds.some((id) => explicit.includes(id));
+}
+
+/**
+ * Rows in the order the installation query gives (`order by name`, ties kept
+ * as listed), so a connector the organization serves sits where the
+ * workspace's own setup of it would. The database sorts, with its collation.
+ */
+async function inCatalogNameOrder(
+  scopedDb: Database,
+  rows: readonly EnabledMcpCapabilityRow[],
+): Promise<EnabledMcpCapabilityRow[]> {
+  const order = await rawRows<{ position: number }>(
+    scopedDb,
+    sql`select (entry.position - 1)::int as position
+      from unnest(${capabilityTextArray(rows.map(({ item }) => item.name))}) with ordinality as entry(name, position)
+      order by entry.name, entry.position`,
+  );
+  return order.map(({ position }) => rows[position]!);
+}
+
+/**
+ * The organization's connectors that reach this workspace (row security
+ * decides reach), as the rows a workspace installation of each would give:
+ * the global catalog item for a catalog connector, or a definition of this
+ * workspace's own for a custom server, so a custom server gets no catalog
+ * approval floor, exactly like a workspace's custom server. Any installation
+ * of the same capability in this workspace, on or off, wins: a turned-off
+ * row is how a workspace turns the organization's connector off.
+ */
+async function organizationConnectorCapabilityRows(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<EnabledMcpCapabilityRow[]> {
+  const connectors = await scopedDb
+    .select()
+    .from(schema.organizationConnectors)
+    .where(
+      and(
+        eq(schema.organizationConnectors.status, "active"),
+        sql`not exists (
+          select 1 from ${schema.capabilityInstallations} installation
+          where installation.workspace_id = ${workspaceId}::uuid
+            and installation.capability_id = ${schema.organizationConnectors.capabilityId}
+        )`,
+      ),
+    )
+    .orderBy(asc(schema.organizationConnectors.capabilityId));
+  if (connectors.length === 0) return [];
+  const catalogIds = connectors
+    .filter((connector) => connector.customDefinition === null)
+    .map((connector) => connector.capabilityId);
+  const catalogItems =
+    catalogIds.length === 0
+      ? []
+      : await scopedDb
+          .select()
+          .from(schema.capabilityCatalogItems)
+          .where(
+            and(
+              isNull(schema.capabilityCatalogItems.workspaceId),
+              eq(schema.capabilityCatalogItems.kind, "mcp"),
+              eq(schema.capabilityCatalogItems.stale, false),
+              inArray(schema.capabilityCatalogItems.id, catalogIds),
+            ),
+          );
+  const catalogItemById = new Map(catalogItems.map((item) => [item.id, item]));
+  return connectors.flatMap((connector) => {
+    const item = connector.customDefinition
+      ? organizationCustomCatalogItem(connector, workspaceId)
+      : catalogItemById.get(connector.capabilityId);
+    if (!item) return [];
+    return [
+      {
+        item,
+        installation: {
+          id: connector.id,
+          accountId: connector.accountId,
+          workspaceId,
+          capabilityId: connector.capabilityId,
+          kind: "mcp",
+          status: "active",
+          config: connector.config,
+          metadata: connector.metadata,
+          enabledAt: connector.updatedAt,
+          updatedAt: connector.updatedAt,
+        },
+      },
+    ];
+  });
+}
+
+/** A custom organization server, defined for the reading workspace. */
+function organizationCustomCatalogItem(
+  connector: Pick<
+    OrganizationConnectorRow,
+    "capabilityId" | "accountId" | "customDefinition" | "config" | "createdAt" | "updatedAt"
+  >,
+  workspaceId: string | null,
+): EnabledMcpCapabilityRow["item"] {
+  const definition = connector.customDefinition!;
+  return {
+    id: connector.capabilityId,
+    accountId: connector.accountId,
+    workspaceId,
+    kind: "mcp",
+    source: "manual",
+    name: definition.name,
+    description: definition.description ?? null,
+    category: "custom",
+    tags: [],
+    homepageUrl: null,
+    endpointUrl: definition.endpointUrl,
+    installUrl: null,
+    authModel: null,
+    providerDomain: null,
+    surfaceType: null,
+    transport: null,
+    mcpUrl: null,
+    authKind: organizationConnectorLogin(connector.config) === "each_person" ? "oauth2" : null,
+    credentialFacts: [],
+    tier: null,
+    provenance: null,
+    logoAssetPath: null,
+    importBatchId: null,
+    stale: false,
+    staleAt: null,
+    metadata: {},
+    createdAt: connector.createdAt,
+    updatedAt: connector.updatedAt,
+  };
+}
+
+/**
+ * The catalog item a custom organization server is listed as in
+ * `workspaceId`, or as the organization defines it (`null`, for
+ * administration and checks before it is saved).
+ */
+export function organizationConnectorCatalogItem(
+  connector: Pick<
+    OrganizationConnectorRow,
+    "capabilityId" | "accountId" | "customDefinition" | "config" | "createdAt" | "updatedAt"
+  >,
+  workspaceId: string | null,
+): CapabilityCatalogItem {
+  return mapCapabilityCatalogItem(organizationCustomCatalogItem(connector, workspaceId), "trusted");
+}
+
+/**
+ * Curated and registry catalog connectors (no workspace) trusted for
+ * exposure, by id: the catalog an organization can add connectors from.
+ */
+export async function listTrustedGlobalMcpCatalogItems(
+  db: Database,
+  accountId: string,
+  ids: readonly string[],
+): Promise<CapabilityCatalogItem[]> {
+  if (ids.length === 0) return [];
+  const rows = await withRlsContext(db, { accountId, workspaceId: null }, async (scopedDb) =>
+    scopedDb
+      .select()
+      .from(schema.capabilityCatalogItems)
+      .where(
+        and(
+          isNull(schema.capabilityCatalogItems.workspaceId),
+          eq(schema.capabilityCatalogItems.kind, "mcp"),
+          eq(schema.capabilityCatalogItems.stale, false),
+          inArray(schema.capabilityCatalogItems.id, [...ids]),
+        ),
+      ),
+  );
+  return rows.flatMap((row) =>
+    catalogExposureState(row, null) === "trusted" ? [mapCapabilityCatalogItem(row, "trusted")] : [],
+  );
 }
 
 /**
@@ -12140,34 +12425,171 @@ export async function listEnabledMcpCapabilityServerIds(
     }
   }
 
-  return [...preferredByInstallation.values()].flatMap((row) => {
-    const metadata = row.itemMcpServerId !== null ? { mcpServerId: row.itemMcpServerId } : {};
-    const trusted =
-      row.itemSource !== registryCapabilitySource ||
-      (row.itemMcpProbePresent &&
-        row.itemMcpProbeStatus === "real" &&
-        row.itemAuthKind !== null &&
-        row.itemAuthKind !== "unknown" &&
-        (row.itemAuthKind !== "api_key" || row.itemRegistryApiKeyContractValid));
-    const connectivityOk =
-      row.mcpConnectivityStatus === "ok" || row.mcpConnectivityStatus === "auth_deferred";
-    const legacyActive =
-      !trusted &&
-      row.itemSource === registryCapabilitySource &&
-      !row.itemMcpProbePresent &&
+  const own = [...preferredByInstallation.values()].flatMap(runnableMcpServerIdFromMetadata);
+  const organization = (await organizationConnectorServerIdRows(db, workspaceId)).flatMap(
+    runnableMcpServerIdFromMetadata,
+  );
+  return organization.length === 0 ? own : [...own, ...organization];
+}
+
+type McpServerIdMetadataRow = {
+  itemId: string;
+  itemSource: string;
+  itemAuthKind: string | null;
+  itemAuthModel: string | null;
+  itemMcpProbePresent: boolean;
+  itemMcpProbeStatus: string | null;
+  itemRegistryApiKeyContractValid: boolean;
+  itemMcpServerId: string | null;
+  endpointPresent: boolean;
+  mcpConnectivityStatus: string | null;
+  hasEncryptedHeaders: boolean;
+  hasConnectionRef: boolean;
+};
+
+function runnableMcpServerIdFromMetadata(row: McpServerIdMetadataRow): string[] {
+  const metadata = row.itemMcpServerId !== null ? { mcpServerId: row.itemMcpServerId } : {};
+  const trusted =
+    row.itemSource !== registryCapabilitySource ||
+    (row.itemMcpProbePresent &&
+      row.itemMcpProbeStatus === "real" &&
       row.itemAuthKind !== null &&
       row.itemAuthKind !== "unknown" &&
-      connectivityOk &&
-      (!row.itemAuthModel || row.hasEncryptedHeaders || row.hasConnectionRef);
-    if (
-      (!trusted && !legacyActive) ||
-      !row.endpointPresent ||
-      !connectivityOk ||
-      (row.itemAuthModel && !row.hasEncryptedHeaders && !row.hasConnectionRef)
-    ) {
-      return [];
-    }
-    return [mcpServerIdForCapability(row.itemId, metadata)];
+      (row.itemAuthKind !== "api_key" || row.itemRegistryApiKeyContractValid));
+  const connectivityOk =
+    row.mcpConnectivityStatus === "ok" || row.mcpConnectivityStatus === "auth_deferred";
+  const legacyActive =
+    !trusted &&
+    row.itemSource === registryCapabilitySource &&
+    !row.itemMcpProbePresent &&
+    row.itemAuthKind !== null &&
+    row.itemAuthKind !== "unknown" &&
+    connectivityOk &&
+    (!row.itemAuthModel || row.hasEncryptedHeaders || row.hasConnectionRef);
+  if (
+    (!trusted && !legacyActive) ||
+    !row.endpointPresent ||
+    !connectivityOk ||
+    (row.itemAuthModel && !row.hasEncryptedHeaders && !row.hasConnectionRef)
+  ) {
+    return [];
+  }
+  return [mcpServerIdForCapability(row.itemId, metadata)];
+}
+
+/**
+ * `listEnabledMcpCapabilityServerIds` for the organization's connectors that
+ * reach the workspace and that no installation here overrides: the same
+ * credential-presence booleans, computed in PostgreSQL, never the stored
+ * header ciphertext or connection reference.
+ */
+async function organizationConnectorServerIdRows(
+  db: Database,
+  workspaceId: string,
+): Promise<McpServerIdMetadataRow[]> {
+  const connector = schema.organizationConnectors;
+  const rows = await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb
+        .select({
+          itemId: connector.capabilityId,
+          custom: sql<boolean>`${connector.customDefinition} is not null`,
+          customEndpointPresent: sql<boolean>`coalesce(length(${connector.customDefinition} ->> 'endpointUrl'), 0) > 0`,
+          catalogItemPresent: sql<boolean>`${schema.capabilityCatalogItems.id} is not null`,
+          itemSource: schema.capabilityCatalogItems.source,
+          itemAuthKind: schema.capabilityCatalogItems.authKind,
+          itemAuthModel: schema.capabilityCatalogItems.authModel,
+          itemMcpProbePresent: sql<boolean>`coalesce(${schema.capabilityCatalogItems.metadata} ? 'mcpProbe', false)`,
+          itemMcpProbeStatus: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} -> 'mcpProbe' ->> 'status'`,
+          itemRegistryApiKeyContractValid: registryApiKeyContractValidSql,
+          itemMcpServerId: sql<
+            string | null
+          >`${schema.capabilityCatalogItems.metadata} ->> 'mcpServerId'`,
+          catalogEndpointPresent: sql<boolean>`coalesce(length(${schema.capabilityCatalogItems.endpointUrl}), 0) > 0`,
+          mcpConnectivityStatus: sql<
+            string | null
+          >`${connector.metadata} -> 'mcpConnectivity' ->> 'status'`,
+          hasEncryptedHeaders: sql<boolean>`exists (
+            select 1
+            from jsonb_each_text(
+              case
+                when jsonb_typeof(${connector.config} -> 'headersEncrypted') = 'object'
+                  then ${connector.config} -> 'headersEncrypted'
+                else '{}'::jsonb
+              end
+            ) header
+            where length(header.value) > 0
+          )`,
+          hasConnectionRef: sql<boolean>`(
+            jsonb_typeof(${connector.config} -> 'connectionRef') = 'object'
+            and jsonb_typeof(${connector.config} -> 'connectionRef' -> 'providerDomain') = 'string'
+            and length(${connector.config} -> 'connectionRef' ->> 'providerDomain') > 0
+          )`,
+        })
+        .from(connector)
+        .leftJoin(
+          schema.capabilityCatalogItems,
+          and(
+            isNull(connector.customDefinition),
+            isNull(schema.capabilityCatalogItems.workspaceId),
+            eq(schema.capabilityCatalogItems.kind, "mcp"),
+            eq(schema.capabilityCatalogItems.stale, false),
+            eq(schema.capabilityCatalogItems.id, connector.capabilityId),
+          ),
+        )
+        .where(
+          and(
+            eq(connector.status, "active"),
+            sql`not exists (
+              select 1 from ${schema.capabilityInstallations} installation
+              where installation.workspace_id = ${workspaceId}::uuid
+                and installation.capability_id = ${connector.capabilityId}
+            )`,
+          ),
+        )
+        .orderBy(asc(connector.capabilityId)),
+  );
+  return rows.flatMap((row) => {
+    if (row.custom)
+      // A custom organization server is defined like a workspace's own custom
+      // server: a manual source with no catalog credential contract.
+      return [
+        {
+          itemId: row.itemId,
+          itemSource: "manual",
+          itemAuthKind: null,
+          itemAuthModel: null,
+          itemMcpProbePresent: false,
+          itemMcpProbeStatus: null,
+          itemRegistryApiKeyContractValid: false,
+          itemMcpServerId: null,
+          endpointPresent: row.customEndpointPresent,
+          mcpConnectivityStatus: row.mcpConnectivityStatus,
+          hasEncryptedHeaders: row.hasEncryptedHeaders,
+          hasConnectionRef: row.hasConnectionRef,
+        },
+      ];
+    if (!row.catalogItemPresent || row.itemSource === null) return [];
+    return [
+      {
+        itemId: row.itemId,
+        itemSource: row.itemSource,
+        itemAuthKind: row.itemAuthKind,
+        itemAuthModel: row.itemAuthModel,
+        itemMcpProbePresent: row.itemMcpProbePresent,
+        itemMcpProbeStatus: row.itemMcpProbeStatus,
+        itemRegistryApiKeyContractValid: row.itemRegistryApiKeyContractValid,
+        itemMcpServerId: row.itemMcpServerId,
+        endpointPresent: row.catalogEndpointPresent,
+        mcpConnectivityStatus: row.mcpConnectivityStatus,
+        hasEncryptedHeaders: row.hasEncryptedHeaders,
+        hasConnectionRef: row.hasConnectionRef,
+      },
+    ];
   });
 }
 

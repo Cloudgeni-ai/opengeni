@@ -2057,6 +2057,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1175 organization connectors: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2123,6 +2129,7 @@ describe("runtime database posture evaluator", () => {
         1 + // 1061 credential profiles: full-DML, FORCE-RLS.
         1 + // 1071 shared Site project placements: full-DML, FORCE-RLS.
         1 + // 1090 personal default machines: full-DML, FORCE-RLS.
+        1 + // 1175 organization connectors: full-DML, FORCE-RLS.
         1 + // 1105 workspace activity facts: read and insert, FORCE-RLS.
         1 + // 1107 agent calls: read, insert and update, FORCE-RLS.
         1 + // 1131 hourly live transcript time per person: full-DML, FORCE-RLS.

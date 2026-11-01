@@ -335,6 +335,7 @@ import { registerModelAccountChoiceRoutes } from "./routes/model-account-choice"
 import { registerSessionAdminAccessRoutes } from "./routes/session-admin-access";
 import { registerSecretRedactionRoutes } from "./routes/secret-redactions";
 import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
+import { registerOrganizationConnectorRoutes } from "./routes/organization-connectors";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerVaultProviderRoutes, vaultProviderRegistryFor } from "./routes/vault-providers";
@@ -2570,6 +2571,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceModelProviderRoutes(app, routeDeps);
   registerClaudeSubscriptionOAuthRoutes(app, routeDeps);
   registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
+  registerOrganizationConnectorRoutes(app, routeDeps);
   registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerClaudeSubscriptionAccountRoutes(app, routeDeps);
