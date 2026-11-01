@@ -43,7 +43,20 @@ export type OrganizationSettingsAccess = {
   canManageBilling: boolean;
   canManageOrganizationKnowledge: boolean;
   canManageCompanyProfileAgentPolicy: boolean;
+  /**
+   * Organization API keys and service accounts: a literal `api_keys:manage`
+   * (the owner), or an organization admin who manages only member-level ones.
+   */
   canManageOrganizationApiKeys: boolean;
+  /** Keys and service accounts that manage people, keys or billing: the owner only. */
+  canManageOwnerLevelApiKeys: boolean;
+  /**
+   * Organization webhooks and the credential provider: the owner or an admin
+   * signed in as themselves (or the single local user), as the server allows.
+   */
+  canManageOrganizationIntegrations: boolean;
+  /** Only a literal `account:admin` (the owner) makes a service account an admin. */
+  canMakeServiceAccountAdmin: boolean;
   /** Pages this person can use. The rest are hidden. */
   visibleSections: ReadonlySet<OrganizationAdminSection>;
 };
@@ -66,7 +79,7 @@ export function organizationSettingsAccess(input: {
   const canManageCompanyProfileAgentPolicy =
     canManageOrganizationKnowledge &&
     (accountGrant?.role === "owner" || accountGrant?.role === "admin");
-  const canManageOrganizationApiKeys = hasAccountPermission(
+  const canManageOwnerLevelApiKeys = hasAccountPermission(
     accessContext,
     accountId,
     "api_keys:manage",
@@ -80,6 +93,13 @@ export function organizationSettingsAccess(input: {
   const singleUser = input.clientConfig.productAccessMode === "local";
   const managedHumanSession = input.clientConfig.auth.mode === "managedSession";
   const organizationAdministratorSession = managedHumanSession || singleUser;
+  const canManageOrganizationIntegrations =
+    organizationAdministratorSession && canAdministerOrganization(input);
+  const canManageOrganizationApiKeys =
+    canManageOwnerLevelApiKeys || canManageOrganizationIntegrations;
+  const canMakeServiceAccountAdmin =
+    organizationAdministratorSession &&
+    hasAccountPermission(accessContext, accountId, "account:admin");
   // The one rule the rail's picker also uses to tell administrators from a key that creates by name.
   const administrator = administersOrganization(input);
   // Subscription accounts keep their own rule: an owner-or-admin session or a
@@ -158,6 +178,9 @@ export function organizationSettingsAccess(input: {
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
+    canManageOwnerLevelApiKeys,
+    canManageOrganizationIntegrations,
+    canMakeServiceAccountAdmin,
     visibleSections: visible,
   };
 }

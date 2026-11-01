@@ -473,7 +473,7 @@ export function availableGroups(
         {
           owner: "organization",
           title: `Shared by ${names.organization}`,
-          description: `${names.organization} shares these with your Personal workspace. Organization owners manage them.`,
+          description: `${names.organization} shares these with your Personal workspace. Organization owners and admins manage them.`,
           things: of("organization"),
         },
       ]
@@ -487,7 +487,7 @@ export function availableGroups(
         {
           owner: "organization",
           title: `Shared by ${names.organization}`,
-          description: `${names.organization} shares these with ${names.workspace}. Any message here can use them. Organization owners manage them.`,
+          description: `${names.organization} shares these with ${names.workspace}. Any message here can use them. Organization owners and admins manage them.`,
           things: of("organization"),
         },
         {

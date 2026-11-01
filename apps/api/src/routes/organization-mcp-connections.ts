@@ -18,13 +18,15 @@ import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-
 import { z } from "zod";
 
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { othersAnAdministratorMayManage } from "../http/organization-owner-protection";
 import { parseRequestBody } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 
 /* ----------------------------------------------------------------------------
    Connected agents: outside MCP clients people signed in to the organization
    server with. Everyone sees and manages their own; owners and admins see and
-   can disconnect everyone's. Only the person who connected an agent changes
+   can disconnect everyone's, except that only an owner disconnects an owner's.
+   Only the person who connected an agent changes
    what it can do. An agent with the person's full access can do this as them;
    an agent with less can't use these routes, so it can never widen its own
    access.
@@ -37,9 +39,17 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
       accountId: organizationId,
       ...(admin ? {} : { subjectId: context.subjectId }),
     });
+    const mayManage = admin
+      ? await othersAnAdministratorMayManage(deps, context, organizationId)
+      : () => false;
     c.header("cache-control", "no-store");
     return c.json({
-      connections: await projectConnections(deps, connections),
+      connections: (await projectConnections(deps, connections)).map((connection) => ({
+        ...connection,
+        canDisconnect:
+          connection.connectedBy.subjectId === context.subjectId ||
+          mayManage(connection.connectedBy.subjectId),
+      })),
       canManageAll: admin,
     });
   });
@@ -92,6 +102,14 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
     if (connection.subjectId !== context.subjectId && !admin) {
       throw new HTTPException(403, {
         message: "Only the person who connected this agent, or an admin, can disconnect it.",
+      });
+    }
+    if (
+      connection.subjectId !== context.subjectId &&
+      !(await othersAnAdministratorMayManage(deps, context, organizationId))(connection.subjectId)
+    ) {
+      throw new HTTPException(403, {
+        message: "Only the organization owner can disconnect the owner's agents.",
       });
     }
     await revokeOrganizationMcpConnection(deps.db, {

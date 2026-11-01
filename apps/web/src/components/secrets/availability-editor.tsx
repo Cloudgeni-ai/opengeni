@@ -6,7 +6,7 @@ import { WorkspaceReachFields } from "@opengeni/react/app/components/workspace-r
    "Available in" (S6): which workspaces can use a vault, with the shared
    control. An organization vault: all of the organization's workspaces (new
    ones too) or a selection, plus whether members' Personal workspaces may use
-   it; organization owners manage it. An Only-me vault: every workspace its
+   it; organization owners and admins manage it. An Only-me vault: every workspace its
    owner uses or a selection; their Personal workspace always has it.
    -------------------------------------------------------------------------- */
 
@@ -52,8 +52,8 @@ export function AvailabilityEditor({
     <WorkspaceReachFields
       owner={personal ? { kind: "person" } : { kind: "organization", name: organizationName }}
       organizationName={organizationName}
-      // Organization vaults need account administration, which only owners have.
-      {...(personal ? {} : { managedBy: "Organization owners manage it." })}
+      // Organization vaults need organization administration: the owner or an admin.
+      {...(personal ? {} : { managedBy: "Organization owners and admins manage it." })}
       showOwner={showOwner}
       labelHidden={labelHidden}
       value={{

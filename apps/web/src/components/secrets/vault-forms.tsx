@@ -78,7 +78,7 @@ export function NewVaultPage({
       ? "Only you can see it, and only work you start can use it."
       : owner === "workspace"
         ? "Everyone in this workspace can use it. Members can add items."
-        : `Belongs to ${organizationName}. Organization owners manage it.`;
+        : `Belongs to ${organizationName}. Organization owners and admins manage it.`;
 
   return (
     <FlushFormPage

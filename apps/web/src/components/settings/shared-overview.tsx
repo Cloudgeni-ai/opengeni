@@ -105,7 +105,7 @@ export function SharedOverview({
     </Section>
   ) : null;
   const everywhereTitle = "In every workspace";
-  const everywhereDescription = `${organizationName}'s machines, rigs, Skills and Knowledge work in every workspace, Personal workspaces included. Organization owners manage them.`;
+  const everywhereDescription = `${organizationName}'s machines, rigs, Skills and Knowledge work in every workspace, Personal workspaces included. Organization owners and admins manage them.`;
 
   if (state.status === "loading") {
     return (

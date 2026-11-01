@@ -39,7 +39,7 @@ export type SharedVault = {
 
 /**
  * Which organization vaults the list holds: all of them; only the ones that
- * work here because only organization owners may list them all; or only the
+ * work here because only organization owners and admins may list them all; or only the
  * ones that work here because the server can't list the rest yet.
  */
 export type VaultCoverage = "all" | "here-owners-see-all" | "here";
@@ -249,11 +249,11 @@ export function vaultsDescription(coverage: VaultCoverage, place: SharedPlace): 
   const reach = "Each works only where its Available in says.";
   switch (coverage) {
     case "all":
-      return `${reach} Organization owners manage them.`;
+      return `${reach} Organization owners and admins manage them.`;
     case "here":
-      return `${reach} Organization owners manage them. Here are the ones that work in ${here}.`;
+      return `${reach} Organization owners and admins manage them. Here are the ones that work in ${here}.`;
     case "here-owners-see-all":
-      return `${reach} Organization owners manage them and see every one; here are the ones that work in ${here}.`;
+      return `${reach} Organization owners and admins manage them and see every one; here are the ones that work in ${here}.`;
   }
 }
 

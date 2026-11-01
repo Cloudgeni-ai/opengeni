@@ -53,7 +53,6 @@ import type { DeveloperLocation } from "@/lib/developer-route";
 import { openSettingsDestination } from "@/lib/open-settings-destination";
 import type { SharedPlace } from "@/components/settings/shared-overview-model";
 import { hiddenPersonalWorkspaceIds } from "@opengeni/react/app/lib/managed-self-context";
-import { hasAccountPermission } from "@opengeni/react/app/lib/permissions";
 import {
   completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
@@ -184,6 +183,9 @@ export function OrgSettingsRoute({
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
+    canManageOwnerLevelApiKeys,
+    canManageOrganizationIntegrations,
+    canMakeServiceAccountAdmin,
     administrator,
     modelsAdministrator,
     administeredWorkspaceIds,
@@ -314,10 +316,6 @@ export function OrgSettingsRoute({
     [accessibleWorkspaceIds, accountId, client, context, navigate, singleUser, workspaceId],
   );
 
-  const canManageOrganizationIntegrations =
-    organizationAdministratorSession &&
-    Boolean(accountId) &&
-    hasAccountPermission(context.accessContext, accountId, "account:admin");
   // A webhook or provider page, or a form, brings its own back link and title.
   // Create API key may name a service account to hold the key; that is the key
   // form, not the service account's page.
@@ -587,7 +585,8 @@ export function OrgSettingsRoute({
                 key={`${identityKey}:service-accounts`}
                 client={client}
                 organizationId={accountId}
-                canMakeAdmin={canManageOrganizationIntegrations}
+                canMakeAdmin={canMakeServiceAccountAdmin}
+                memberLevelOnly={!canManageOwnerLevelApiKeys}
                 location={serviceAccountsLocation}
                 onNavigate={navigateDeveloper}
                 onCreateKey={(serviceAccount) =>
@@ -630,7 +629,8 @@ export function OrgSettingsRoute({
                     key={`${identityKey}:service-accounts`}
                     client={client}
                     organizationId={accountId}
-                    canMakeAdmin={canManageOrganizationIntegrations}
+                    canMakeAdmin={canMakeServiceAccountAdmin}
+                    memberLevelOnly={!canManageOwnerLevelApiKeys}
                     location={{}}
                     onNavigate={navigateDeveloper}
                     onCreateKey={(serviceAccount) =>
@@ -648,6 +648,7 @@ export function OrgSettingsRoute({
                   key={`${identityKey}:organization-api-keys`}
                   organizationId={accountId}
                   canManage={canManageOrganizationApiKeys && Boolean(accountId)}
+                  memberLevelOnly={!canManageOwnerLevelApiKeys}
                   view={organizationView === "new-key" ? "new-key" : undefined}
                   onViewChange={(view) =>
                     void navigate({

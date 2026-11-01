@@ -5084,6 +5084,11 @@ export const PersonalApiKey = /* @__PURE__ */ defineSchema(() =>
     expiresAt: primitives.nullableString,
     lastUsedAt: primitives.nullableString,
     createdAt: primitives.string,
+    /**
+     * Listed keys: whether the caller can revoke this one. Everyone revokes
+     * their own; owners and admins anyone's, except only an owner an owner's.
+     */
+    canRevoke: primitives.boolean.optional(),
   }),
 );
 export type PersonalApiKey = z.infer<typeof PersonalApiKey>;

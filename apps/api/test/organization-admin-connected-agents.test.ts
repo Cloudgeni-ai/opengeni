@@ -16,7 +16,8 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 /* End to end through the real app and PostgreSQL: an organization admin, like
-   the owner, sees everyone's connected agents and can disconnect any of them,
+   the owner, sees everyone's connected agents and can disconnect them (except
+   the owner's, which organization-admin-integration-administration covers),
    but only the person who connected an agent changes what it can do. A member
    sees only their own, and being an admin in one organization grants nothing
    in another where the same person is a member. */

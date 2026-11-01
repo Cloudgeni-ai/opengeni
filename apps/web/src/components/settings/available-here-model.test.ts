@@ -278,7 +278,7 @@ describe("availableGroups", () => {
     // Kinds in a fixed order: connectors before machines.
     expect(groups[0]!.things.map((each) => each.name)).toEqual(["Gmail", "build-box"]);
     expect(groups[1]!.description).toBe(
-      "Acme shares these with Design. Any message here can use them. Organization owners manage them.",
+      "Acme shares these with Design. Any message here can use them. Organization owners and admins manage them.",
     );
     expect(groups[2]!.description).toBe(
       "Only your own messages here use these, never anyone else's. Only you manage them.",
@@ -317,7 +317,7 @@ describe("availableGroups", () => {
     );
     expect(groups.map((group) => group.title)).toEqual(["Yours", "Shared by Acme"]);
     expect(groups[1]!.description).toBe(
-      "Acme shares these with your Personal workspace. Organization owners manage them.",
+      "Acme shares these with your Personal workspace. Organization owners and admins manage them.",
     );
     const yours = groups[0]!.things;
     expect(yours.map((each) => `${each.kind}:${each.name}`)).toEqual([

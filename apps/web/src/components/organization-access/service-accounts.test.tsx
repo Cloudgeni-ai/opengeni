@@ -196,4 +196,66 @@ describe("service accounts", () => {
     expect(navigate).toHaveBeenLastCalledWith({});
     await view.unmount();
   });
+
+  test("an organization admin who isn't the owner sees an admin service account read-only", async () => {
+    const createKey = mock((_id: string) => undefined);
+    const view = render(
+      <ServiceAccounts
+        api={{
+          list: async () => [bot],
+          get: async () => bot,
+          create: async () => bot,
+          update: async () => bot,
+          remove: async () => undefined,
+          listKeys: async () => [heldKey],
+        }}
+        canMakeAdmin={false}
+        memberLevelOnly
+        location={{ serviceAccount: bot.id }}
+        onNavigate={() => undefined}
+        onCreateKey={createKey}
+      />,
+    );
+    await view.mount();
+    expect(view.container.textContent).toContain("Release key");
+    expect(view.container.textContent).toContain(
+      "Only the organization owner can change an admin service account.",
+    );
+    // No Delete, no Create key, and its fields can't be edited.
+    expect(view.container.querySelector(`button[aria-label="More for ${bot.name}"]`)).toBeNull();
+    expect(
+      Array.from(view.container.querySelectorAll("button")).some(
+        (each) => each.textContent?.trim() === "Create key",
+      ),
+    ).toBe(false);
+    expect(view.container.querySelector<HTMLInputElement>("input")?.disabled).toBe(true);
+    await view.unmount();
+
+    // A member service account stays theirs to manage.
+    const member = { ...bot, role: "member" as const };
+    const memberView = render(
+      <ServiceAccounts
+        api={{
+          list: async () => [member],
+          get: async () => member,
+          create: async () => member,
+          update: async () => member,
+          remove: async () => undefined,
+          listKeys: async () => [],
+        }}
+        canMakeAdmin={false}
+        memberLevelOnly
+        location={{ serviceAccount: member.id }}
+        onNavigate={() => undefined}
+        onCreateKey={createKey}
+      />,
+    );
+    await memberView.mount();
+    expect(
+      memberView.container.querySelector(`button[aria-label="More for ${member.name}"]`),
+    ).not.toBeNull();
+    await act(async () => button(memberView.container, "Create key").click());
+    expect(createKey).toHaveBeenCalledWith(member.id);
+    await memberView.unmount();
+  });
 });

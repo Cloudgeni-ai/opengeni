@@ -360,6 +360,7 @@ import {
 export {
   createOrganizationServiceAccount,
   deleteOrganizationServiceAccount,
+  effectiveKeyPermissions,
   getOrganizationServiceAccount,
   listOrganizationServiceAccounts,
   OrganizationServiceAccountNotFoundError,

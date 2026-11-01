@@ -23579,6 +23579,7 @@
       "shape": {
         "$": "object",
         "$.access": "unknown!",
+        "$.canRevoke": "boolean?",
         "$.createdAt": "string!",
         "$.description": "string! null",
         "$.expiresAt": "string! null",
