@@ -16,7 +16,10 @@ import { useEffect, useRef, useState } from "react";
 import { ConnectCardMessage } from "../connect-card-message";
 import { attemptHint, type ConnectWindowHost } from "../connect-window-host";
 import { useConnect, type ConnectView } from "../hooks/use-connect";
-import { matchingActiveMcpConnections } from "../mcp-connection-status";
+import {
+  matchingActiveMcpConnections,
+  reconnectablePersonalMcpConnections,
+} from "../mcp-connection-status";
 import { useOpenGeniText } from "../messages/runtime";
 import {
   attachSessionCapability,
@@ -408,11 +411,9 @@ export function useMcpCapabilityConnect({
         // stays on its exact native connection ID.
         let reconnectAccountId = resolved.connectionRef?.connectionId ?? undefined;
         if (resolved.connectionRef?.subjectScope === "subject") {
-          const connections = (await client.listConnections(workspaceId)).filter(
-            (entry) =>
-              entry.subjectId !== null &&
-              entry.kind === "oauth2" &&
-              entry.metadata.mcpUrl === mcpUrl,
+          const connections = reconnectablePersonalMcpConnections(
+            await client.listConnections(workspaceId),
+            mcpUrl,
           );
           if (!active()) return;
           if (connections.length > 1)

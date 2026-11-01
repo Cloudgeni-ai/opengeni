@@ -664,15 +664,23 @@ export function connectionHealth(
       ? { state: "connected", connection }
       : { state: "attention", connection };
   }
-  const connection =
+  // A removed (revoked) personal account is history: it is neither the account
+  // to show nor the one to reauthorize, so a person with only removed accounts
+  // is offered a fresh connect instead of a reconnect to the removed identity.
+  const personal =
     ref.subjectScope === "subject"
-      ? (connections.find(
+      ? connections.filter(
           (candidate) =>
             candidate.subjectId !== null &&
+            candidate.status !== "revoked" &&
             normalizeProviderDomain(candidate.providerDomain) ===
               normalizeProviderDomain(ref.providerDomain) &&
             candidate.kind === ref.kind,
-        ) ?? null)
+        )
+      : [];
+  const connection =
+    ref.subjectScope === "subject"
+      ? (personal.find((candidate) => candidate.status === "active") ?? personal[0] ?? null)
       : (connections.find((candidate) => candidate.id === ref.connectionId) ?? null);
   if (!connection || connection.status !== "active") return { state: "attention", connection };
   return { state: "connected", connection };

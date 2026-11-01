@@ -738,6 +738,35 @@ describe("connectionHealth", () => {
     expect(subjectRef).not.toHaveProperty("connectionId");
   });
 
+  test("removed personal rows never become the account to reconnect", () => {
+    const subjectRef = {
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+    const removed = connection({
+      id: "removed-personal-row",
+      subjectId: "current-user",
+      providerDomain: "gmailmcp.googleapis.com",
+      status: "revoked",
+    });
+    const enabled = item({ enabled: true, connectionRef: subjectRef });
+    const health = connectionHealth(enabled, [removed], true);
+    expect(health).toEqual({ state: "attention", connection: null });
+    expect(capabilityReconnectPlan(enabled, health)?.connectionId).toBeNull();
+
+    const live = connection({
+      id: "live-personal-row",
+      subjectId: "current-user",
+      providerDomain: "gmailmcp.googleapis.com",
+      status: "active",
+    });
+    expect(connectionHealth(enabled, [removed, live], true)).toEqual({
+      state: "connected",
+      connection: live,
+    });
+  });
+
   test("a workspace-shared row never satisfies a generic subject binding", () => {
     const subjectRef = {
       providerDomain: "slack.com",
