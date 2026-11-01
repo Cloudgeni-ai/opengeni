@@ -32,6 +32,7 @@ import {
   SwapActiveSandboxResponse,
   UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
+  UpdateOrganizationComputeReachRequest,
 } from "@opengeni/contracts";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
@@ -44,6 +45,7 @@ import {
   readMachineMetricsSeries,
   requireSession,
   updateEnrollmentOperationPolicy,
+  updateOrganizationMachineReach,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
@@ -86,6 +88,11 @@ import {
   requireMachineAudienceAuthority,
   requireMachineScopeAuthority,
 } from "../sandbox/machine-authority";
+import {
+  organizationComputeReachResponse,
+  requireComputeReachCaller,
+  requireOrganizationCompute,
+} from "../http/organization-compute-reach";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
 // to 1h (the default). Bounded so a caller cannot request an unbounded
@@ -328,6 +335,33 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       expectedGeneration: body.expectedGeneration,
     });
     return c.json(machineAudienceChangeResponse(changed));
+  });
+
+  // ── Where an organization machine works ──────────────────────────────────────
+  // PUT .../reach: every shared workspace of the organization or chosen ones,
+  // and members' Personal workspaces when switched on. The workspace it was
+  // connected from always has it. The organization's owner or an admin decides this; chats and
+  // schedules in a workspace it no longer works in stop using it at their next
+  // attach or attempt.
+  app.put("/v1/workspaces/:workspaceId/machines/:enrollmentId/reach", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
+    const grant = authorization.grant;
+    assertSelfhostedEnabled();
+    const enrollmentId = c.req.param("enrollmentId");
+    const body = await parseRequestJson(c, UpdateOrganizationComputeReachRequest);
+    const machine = await requireScopedEnrollment(grant, enrollmentId);
+    requireMachineScopeAuthority(authorization, machine.scope, "change");
+    requireOrganizationCompute(machine.scope, "machine");
+    requireComputeReachCaller(c, grant, "machine");
+    const result = await updateOrganizationMachineReach(db, enrollmentId, {
+      accountId: grant.accountId,
+      homeWorkspaceId: machine.workspaceId,
+      allowedWorkspaceIds: body.allowedWorkspaceIds,
+      allowPersonalWorkspaces: body.allowPersonalWorkspaces,
+      subjectId: grant.subjectId,
+    });
+    return c.json(organizationComputeReachResponse(result, "machine"));
   });
 
   // ── POST /workspaces/:ws/machines/:enrollmentId/screen-control ─────────────

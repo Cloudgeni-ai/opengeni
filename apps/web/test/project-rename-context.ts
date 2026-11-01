@@ -121,7 +121,7 @@ const context = {
   client,
   session: null,
   // Rows read the viewer's workspace grants to label their archive action.
-  accessContext: { subjectId: "rename-qa", workspaceGrants: [] },
+  accessContext: { subjectId: "rename-qa", accountGrants: [], workspaceGrants: [] },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
   clientConfig: {},
   setSession: () => {},

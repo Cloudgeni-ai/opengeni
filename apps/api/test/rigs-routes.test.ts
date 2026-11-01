@@ -680,4 +680,65 @@ describe("rig route permission matrix", () => {
     });
     expect(collision.status).toBe(409);
   });
+
+  test("organization owners and admins pick where an organization rig works", async () => {
+    if (!available) return;
+    const origin = await freshWorkspace();
+    const target = await freshWorkspace(origin.accountId);
+    const third = await freshWorkspace(origin.accountId);
+    const subjectId = `user:${crypto.randomUUID()}`;
+    await organizationMember([origin, target, third], subjectId);
+    const rig = await createRig(client.db, {
+      ...origin,
+      subjectId,
+      scope: "organization",
+      allowOrganization: true,
+      name: "organization-reach",
+    });
+    const http = app();
+    const putReach = async (permissions: Permission[], rigId: string, body: unknown) =>
+      await http.request(`/v1/workspaces/${target.workspaceId}/rigs/${rigId}/reach`, {
+        method: "PUT",
+        headers: {
+          authorization: await bearer(target, subjectId, permissions),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+    const admin = ["rigs:manage", "rigs:use", "account:admin"] as Permission[];
+    const onlyTarget = {
+      allowedWorkspaceIds: [target.workspaceId],
+      allowPersonalWorkspaces: false,
+    };
+
+    expect((await putReach(["rigs:manage", "rigs:use"], rig.id, onlyTarget)).status).toBe(403);
+    const changed = await putReach(admin, rig.id, onlyTarget);
+    expect(changed.status).toBe(200);
+    expect(await changed.json()).toEqual({
+      reach: {
+        homeWorkspaceId: origin.workspaceId,
+        allowedWorkspaceIds: [target.workspaceId],
+        allowPersonalWorkspaces: false,
+      },
+    });
+    expect(await auditActions(origin.workspaceId, rig.id)).toContain("rig.reach.changed");
+
+    const read = async (workspace: { accountId: string; workspaceId: string }) =>
+      await http.request(`/v1/workspaces/${workspace.workspaceId}/rigs/${rig.id}`, {
+        headers: { authorization: await bearer(workspace, subjectId, ["rigs:use"]) },
+      });
+    const inTarget = await read(target);
+    expect(inTarget.status).toBe(200);
+    expect((await inTarget.json()).reach.allowedWorkspaceIds).toEqual([target.workspaceId]);
+    expect((await read(third)).status).toBe(404);
+    expect((await read(origin)).status).toBe(200);
+
+    const workspaceRig = await createRig(client.db, {
+      ...target,
+      subjectId,
+      scope: "workspace",
+      name: "workspace-reach",
+    });
+    expect((await putReach(admin, workspaceRig.id, onlyTarget)).status).toBe(409);
+  });
 });

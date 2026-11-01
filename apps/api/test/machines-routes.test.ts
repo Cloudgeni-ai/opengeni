@@ -1307,6 +1307,114 @@ describe("Connected Machine command policy", () => {
   }, 90_000);
 });
 
+describe("Where an organization machine works", () => {
+  test("organization owners and admins pick the workspaces; elsewhere it disappears", async () => {
+    if (!available) return;
+    const putReach = async (
+      machine: Awaited<ReturnType<typeof seedCrossWorkspaceScopedMachine>>,
+      permissions: Permission[],
+      body: unknown,
+    ) =>
+      await appFor(new MemoryEventBus()).request(
+        `/v1/workspaces/${machine.targetWorkspaceId}/machines/${machine.enrollmentId}/reach`,
+        {
+          method: "PUT",
+          headers: {
+            authorization: `Bearer ${await bearer(
+              machine.accountId,
+              machine.targetWorkspaceId,
+              permissions,
+            )}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(body),
+        },
+      );
+    const reachAdmin = ["enrollments:read", "enrollments:manage", "account:admin"] as Permission[];
+    const machine = await seedCrossWorkspaceScopedMachine("organization");
+
+    const listed = await appFor(new MemoryEventBus()).request(
+      `/v1/workspaces/${machine.targetWorkspaceId}/machines`,
+      {
+        headers: {
+          authorization: `Bearer ${await bearer(machine.accountId, machine.targetWorkspaceId, [
+            "enrollments:read",
+          ])}`,
+        },
+      },
+    );
+    expect(listed.status).toBe(200);
+    const listedBody = (await listed.json()) as {
+      machines: Array<{ enrollmentId: string | null; reach: unknown }>;
+    };
+    expect(
+      listedBody.machines.find((candidate) => candidate.enrollmentId === machine.enrollmentId)
+        ?.reach,
+    ).toEqual({
+      homeWorkspaceId: machine.originWorkspaceId,
+      allowedWorkspaceIds: null,
+      allowPersonalWorkspaces: true,
+    });
+
+    const onlyHome = { allowedWorkspaceIds: [], allowPersonalWorkspaces: false };
+    expect(
+      (await putReach(machine, ["enrollments:read", "enrollments:manage"], onlyHome)).status,
+    ).toBe(403);
+    const unknown = await putReach(machine, reachAdmin, {
+      allowedWorkspaceIds: [crypto.randomUUID()],
+      allowPersonalWorkspaces: true,
+    });
+    expect(unknown.status).toBe(400);
+    expect(
+      (
+        await putReach(machine, reachAdmin, {
+          allowedWorkspaceIds: "all",
+          allowPersonalWorkspaces: true,
+        })
+      ).status,
+    ).toBe(400);
+
+    const kept = await putReach(machine, reachAdmin, {
+      allowedWorkspaceIds: [machine.targetWorkspaceId],
+      allowPersonalWorkspaces: false,
+    });
+    expect(kept.status).toBe(200);
+    expect(await kept.json()).toEqual({
+      reach: {
+        homeWorkspaceId: machine.originWorkspaceId,
+        allowedWorkspaceIds: [machine.targetWorkspaceId],
+        allowPersonalWorkspaces: false,
+      },
+    });
+
+    const narrowed = await putReach(machine, reachAdmin, onlyHome);
+    expect(narrowed.status).toBe(200);
+    // It no longer works in the target workspace, so it is not found there.
+    expect((await putReach(machine, reachAdmin, onlyHome)).status).toBe(404);
+  }, 90_000);
+
+  test("only an organization machine works in chosen workspaces", async () => {
+    if (!available) return;
+    const machine = await seedCrossWorkspaceScopedMachine("user");
+    const response = await appFor(new MemoryEventBus()).request(
+      `/v1/workspaces/${machine.targetWorkspaceId}/machines/${machine.enrollmentId}/reach`,
+      {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${await bearer(machine.accountId, machine.targetWorkspaceId, [
+            "enrollments:read",
+            "enrollments:manage",
+            "account:admin",
+          ])}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ allowedWorkspaceIds: null, allowPersonalWorkspaces: true }),
+      },
+    );
+    expect(response.status).toBe(409);
+  }, 90_000);
+});
+
 describe("Connected Machine signed self-update orchestration", () => {
   test("organization update requires account admin before any runner dispatch", async () => {
     if (!available) return;

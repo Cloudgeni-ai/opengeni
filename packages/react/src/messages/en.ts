@@ -2280,8 +2280,12 @@ export const englishMessages = {
   "machines.machineDetail.backToMachines": "Back to machines",
   "machines.machineDetail.everyoneInThisWorkspaceCan":
     "Everyone in this workspace can run chats on it.",
-  "machines.machineDetail.everyWorkspaceInTheOrganization":
-    "Every workspace in the organization can use it.",
+  "machines.machineDetail.availableIn": "Available in",
+  "machines.machineDetail.availableInNameLabel": "Where {name} is available: {summary}",
+  "machines.machineDetail.membersCanUseItWhere":
+    "Members can use it in the workspaces it's available in.",
+  "machines.machineDetail.organizationOwnersChooseWhere":
+    "Organization owners and admins choose the workspaces it works in.",
   "machines.machineDetail.justNow": "just now",
   "machines.machineDetail.keptOutExtraCopiesOf_one": "Kept out {count} extra copy of the agent",
   "machines.machineDetail.keptOutExtraCopiesOf_other": "Kept out {count} extra copies of the agent",

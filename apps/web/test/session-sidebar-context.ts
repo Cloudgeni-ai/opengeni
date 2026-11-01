@@ -1090,6 +1090,7 @@ const context = {
   },
   accessContext: {
     subjectId,
+    accountGrants: [],
     workspaceGrants: [
       {
         workspaceId,
