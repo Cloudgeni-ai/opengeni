@@ -36958,6 +36958,16 @@ export async function setSessionPin(
               pinned: input.pinned,
               pinnedAt: input.pinned ? new Date() : null,
               version: sql`${schema.sessionPins.version} + 1`,
+              // Archiving unpins, and pinning restores: a chat is never both,
+              // because the Pinned list shows active chats only. Pinning an
+              // archived chat (opened from search) means keep it at hand.
+              ...(input.pinned && existing.archived
+                ? {
+                    archived: false,
+                    archivedAt: null,
+                    archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
+                  }
+                : {}),
             })
             .where(
               and(
