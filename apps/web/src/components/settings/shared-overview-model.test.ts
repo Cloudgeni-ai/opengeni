@@ -303,10 +303,10 @@ describe("where a vault works", () => {
 
   test("says when the list is only the ones that work here", () => {
     expect(vaultsDescription("all", place())).toBe(
-      "Each works only where its Available in says. Organization owners manage them.",
+      "Each works only where its Available in says. Organization owners and admins manage them.",
     );
     expect(vaultsDescription("here", place())).toBe(
-      "Each works only where its Available in says. Organization owners manage them. Here are the ones that work in Design preview.",
+      "Each works only where its Available in says. Organization owners and admins manage them. Here are the ones that work in Design preview.",
     );
     expect(
       vaultsDescription(
@@ -314,7 +314,7 @@ describe("where a vault works", () => {
         place({ personal: true, workspaceName: "Personal" }),
       ),
     ).toBe(
-      "Each works only where its Available in says. Organization owners manage them and see every one; here are the ones that work in your Personal workspace.",
+      "Each works only where its Available in says. Organization owners and admins manage them and see every one; here are the ones that work in your Personal workspace.",
     );
   });
 

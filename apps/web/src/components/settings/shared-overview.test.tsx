@@ -189,7 +189,7 @@ describe("Shared", () => {
   test("an admin who isn't an owner sees the vaults that work here, and is told owners see all", async () => {
     const { container } = await render("admin", false);
     expect(container.textContent).toContain(
-      "Organization owners manage them and see every one; here are the ones that work in Design.",
+      "Organization owners and admins manage them and see every one; here are the ones that work in Design.",
     );
     expect(container.textContent).toContain("Company accounts");
     expect(container.textContent).not.toContain("Sales logins");
