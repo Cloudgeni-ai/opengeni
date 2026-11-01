@@ -401,11 +401,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Refuses with `error` the work that waits for a disk reading, none of
     /// which has started: its creates and adopts, and those waiting for
     /// its fetches, sleeps and hand-offs. It frees the ids of the creates
-    /// and adopts.
+    /// and adopts, and the room its creates held.
     pub(super) fn refuse_after_reading(&mut self, error: &HostError) {
         for work in std::mem::take(&mut self.after_reading) {
             match work {
-                AfterReading::Create(id, _, _, reply) | AfterReading::Adopt(id, _, _, _, reply) => {
+                AfterReading::Create(id, _, _, reply) => {
+                    self.preparing.remove(&id.0);
+                    self.first_wake_unbooked(id);
+                    let _ = reply.send(Err(error.clone()));
+                }
+                AfterReading::Adopt(id, _, _, _, reply) => {
                     self.preparing.remove(&id.0);
                     let _ = reply.send(Err(error.clone()));
                 }

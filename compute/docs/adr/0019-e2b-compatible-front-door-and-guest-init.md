@@ -152,7 +152,10 @@ an init system of its own.
   host kept across a restart is checked against its digest and used
   without asking the store. A create on a host that has not got its
   image yet waits for the fetch: the service waits up to nine minutes
-  for the host's answer, inside the ten a create may take. An E2B
+  for the host's answer, inside the ten a create may take. A create
+  waiting for its image's fetch keeps its first wake's memory and
+  processor time booked, so nothing the host takes meanwhile gets its
+  room. An E2B
   template id names one of these images.
 - **Images that follow releases.** The service can be told the OCI image,
   pinned by digest, that a release's sandboxes of an image name start
