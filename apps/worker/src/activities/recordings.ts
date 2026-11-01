@@ -112,6 +112,7 @@ import {
   createLocalDiarizer,
   recordingAlignerConfig,
   recordingSpeakersConfig,
+  RecordingSpeakersError,
 } from "./recording-speakers";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -246,6 +247,14 @@ class PermanentRecordingFailure extends Error {
     super(code);
     this.code = code;
   }
+}
+
+/** A step's program was stopped from outside, so the attempt is retried. */
+function isInterruption(error: unknown): boolean {
+  return (
+    (error instanceof RecordingAudioError && error.code === "interrupted") ||
+    (error instanceof RecordingSpeakersError && error.interrupted)
+  );
 }
 
 function shiftWords(
@@ -836,7 +845,10 @@ export function createRecordingActivities(
               ? measureRecordingStage("diarize", () =>
                   ourDiarizer.diarize(trackAudio, { maxSpeakers: requested.maxSpeakers, signal }),
                 ).catch((error: unknown) => {
+                  // Stopped with the worker: the retry runs it again, so the
+                  // transcript never silently loses our speakers.
                   if (signal?.aborted) throw error;
+                  if (error instanceof RecordingSpeakersError && error.interrupted) throw error;
                   telemetry.ourDiarizerFailed = true;
                   observability.warn("our diarizer failed; using the model's speakers", {
                     workspaceId: input.workspaceId,
@@ -1011,6 +1023,16 @@ export function createRecordingActivities(
         // those retries leaves it to Temporal; past the budget that retry
         // fails it as timed_out. The charge is settled once by its source id.
         if (budget.signal.aborted && !finishing) return await fail("timed_out", error);
+        // The worker is stopping (a deploy or a lost pod) and cancelled this
+        // attempt, which kills its ffmpeg and model processes. That is never
+        // the recording's fault: another worker retries it from the start,
+        // reusing whatever audio and transcripts were already saved.
+        if (cancellation()?.aborted || isInterruption(error)) {
+          throw ApplicationFailure.retryable(
+            `Processing was interrupted: ${errorMessage(error)}`,
+            "interrupted",
+          );
+        }
         // EU-only refused the route before any audio was sent; a retry gets
         // the same answer, and the job never moves to another provider.
         if (findInferenceRegionRestrictedError(error))

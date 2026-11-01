@@ -2,7 +2,7 @@ import { mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordingAudioContainer, type RecordingAudioContainer } from "@opengeni/contracts";
-import { readTail, trackRecordingProcesses } from "./recording-usage";
+import { readTail, stoppedBySignal, trackRecordingProcesses } from "./recording-usage";
 
 export { recordingAudioContainer, type RecordingAudioContainer };
 
@@ -137,7 +137,8 @@ export class RecordingAudioError extends Error {
   readonly name = "RecordingAudioError";
   constructor(
     message: string,
-    readonly code: "invalid_audio" | "missing_chunk" | "ffmpeg_failed",
+    /** `interrupted`: ffmpeg was stopped from outside, so the step is retried. */
+    readonly code: "invalid_audio" | "missing_chunk" | "ffmpeg_failed" | "interrupted",
   ) {
     super(message);
   }
@@ -158,14 +159,22 @@ async function runFfmpeg(
   trackRecordingProcesses([child]);
   const abort = () => child.kill("SIGKILL");
   signal?.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(abort, FFMPEG_TIMEOUT_MS);
+  let hung = false;
+  const timer = setTimeout(() => {
+    hung = true;
+    abort();
+  }, FFMPEG_TIMEOUT_MS);
   try {
     const [code, stderr] = await Promise.all([child.exited, readTail(child.stderr, 16_384)]);
     if (code === 0) return { stderr };
-    throw new RecordingAudioError(
-      `ffmpeg could not prepare the audio: ${stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400) || `exit ${code}`}`,
-      "ffmpeg_failed",
-    );
+    const detail = stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400) || `exit ${code}`;
+    if (hung) {
+      throw new RecordingAudioError(`ffmpeg hung preparing the audio: ${detail}`, "ffmpeg_failed");
+    }
+    if (signal?.aborted || stoppedBySignal(child, stderr)) {
+      throw new RecordingAudioError(`ffmpeg was stopped: ${detail}`, "interrupted");
+    }
+    throw new RecordingAudioError(`ffmpeg could not prepare the audio: ${detail}`, "ffmpeg_failed");
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", abort);

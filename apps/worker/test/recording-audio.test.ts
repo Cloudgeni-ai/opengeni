@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   ffmpegReportedMilliseconds,
   prepareRecordingTrackAudio,
@@ -245,6 +248,52 @@ describe("recording audio", () => {
       }),
     ).rejects.toMatchObject({ code: "missing_chunk" });
   });
+
+  test.skipIf(!hasFfmpeg)(
+    "ffmpeg stopped from outside is an interruption, not bad audio",
+    async () => {
+      // A deploy stops the worker mid-prepare: ffmpeg is killed by a signal,
+      // or exits saying it received one. The attempt is retried; only ffmpeg
+      // failing on its own means the audio can't be prepared.
+      const directory = await mkdtemp(join(tmpdir(), "fake-ffmpeg-"));
+      try {
+        const fakes = {
+          killed: "kill -TERM $$",
+          signalled: "echo 'Exiting normally, received signal 15.' >&2; exit 255",
+          broken: "echo 'Invalid data found when processing input' >&2; exit 1",
+        };
+        const codes: Record<string, string> = {};
+        for (const [name, body] of Object.entries(fakes)) {
+          const path = join(directory, name);
+          await writeFile(path, `#!/bin/sh\n${body}\n`);
+          await chmod(path, 0o755);
+          const bytes = opusWebm(1);
+          const error = await prepareRecordingTrackAudio({
+            chunks: [
+              {
+                chunkNumber: 0,
+                startMilliseconds: 0,
+                durationMilliseconds: 1_000,
+                objectKey: "k0",
+              },
+            ],
+            mimeType: "audio/webm",
+            ffmpegPath: path,
+            readChunk: async () => bytes,
+          }).catch((caught: unknown) => caught);
+          expect(error).toBeInstanceOf(RecordingAudioError);
+          codes[name] = (error as RecordingAudioError).code;
+        }
+        expect(codes).toEqual({
+          killed: "interrupted",
+          signalled: "interrupted",
+          broken: "ffmpeg_failed",
+        });
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   test.skipIf(!hasFfmpeg)(
     "a capture with holes in its timestamps is prepared on its own timeline",

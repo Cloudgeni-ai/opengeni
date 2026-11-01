@@ -41,6 +41,7 @@ import {
   recordingTranscriptBudgetMilliseconds,
   type RecordingActivityOptions,
 } from "../src/activities/recordings";
+import { RecordingSpeakersError } from "../src/activities/recording-speakers";
 import type { ControlActivityServices } from "../src/activities/types";
 import { ffmpegPath, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
 
@@ -1144,6 +1145,67 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       recordingId: recording.input.recordingId,
     });
     expect(version).toMatchObject({ state: "failed", errorCode: "missing_provider_key" });
+  });
+
+  test("a worker stopping mid-transcript is retried, never failed", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      options: { language: "en", diarizer: "ours" },
+    });
+    const provider = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 1_000,
+      diarized: false,
+      words: [],
+    }));
+    // The speaker models killed with the worker: our speakers aren't
+    // quietly dropped for the model's, the attempt is run again.
+    const killed: RecordingDiarizer = {
+      id: "test-cpu",
+      diarize: async () => {
+        throw new RecordingSpeakersError("speaker detection was stopped", true);
+      },
+    };
+    await expect(
+      activities(storage, provider, "key", killed).activities.transcribeRecordingVersion(
+        recording.input,
+      ),
+    ).rejects.toMatchObject({ type: "interrupted", nonRetryable: false });
+    // Temporal cancelled the attempt for the worker's shutdown: whatever that
+    // broke (here the provider call), it is an interruption.
+    const stopping = new AbortController();
+    stopping.abort(new Error("WORKER_SHUTDOWN"));
+    const services = async () =>
+      ({
+        db: client!.db,
+        objectStorage: storage.storage,
+        settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
+        observability: { warn: () => undefined, info: () => undefined },
+        startRecordingWorkflow: null,
+      }) as unknown as ControlActivityServices;
+    const cancelled = createRecordingActivities(services, {
+      registry: createRecordingTranscriptionProviderRegistry([
+        fakeProvider(async () => {
+          throw new RecordingTranscriptionError("aborted", "invalid_audio", false);
+        }),
+      ]),
+      loadApiKey: async () => "key",
+      heartbeat: () => undefined,
+      cancellationSignal: () => stopping.signal,
+      diarizer: () => null,
+      aligner: () => null,
+    });
+    await expect(cancelled.transcribeRecordingVersion(recording.input)).rejects.toMatchObject({
+      type: "interrupted",
+    });
+    const versions = await listRecordingTranscriptVersions(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(versions.map((version) => version.state)).not.toContain("failed");
   });
 
   test("a retry asks the provider afresh, under a request identity no attempt used", async () => {
