@@ -787,9 +787,9 @@ check(
     const marker = `bg-${rand()}`;
     const turn = await say(
       "Do these two things with your shell tools, then reply with only the two command IDs.\n" +
-        `1. Start \`sh -c 'echo ${done}-start; sleep 5; echo ${done}-end; exit 3'\` with exec_command and yield_time_ms 1000, ` +
+        `1. Start \`sh -c 'echo ${done}-start; sleep 5; echo ${done}-end; exit 3'\` with exec_command, yield_time_ms 1000 and background true (if exec_command offers it), ` +
         "then wait for that command by its command ID with your command wait or read tool until it has exited.\n" +
-        `2. Start \`sh -c 'echo ${marker}; sleep 900'\` with exec_command and yield_time_ms 1000, so that it keeps running ` +
+        `2. Start \`sh -c 'echo ${marker}; sleep 900'\` with exec_command, yield_time_ms 1000 and background true (if exec_command offers it), so that it keeps running ` +
         "in the background; do not wait for it or stop it.",
     );
     // The finished command, through the agent's own reads by its id.
