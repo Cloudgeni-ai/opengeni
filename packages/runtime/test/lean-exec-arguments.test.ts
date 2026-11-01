@@ -5,7 +5,9 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   LEAN_EXEC_COMMAND_DEFAULTS,
   LEAN_EXEC_COMMAND_PARAMETERS,
+  LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_FINISH_FLOOR,
   LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN,
+  LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN_OR_FINISH_FLOOR,
   canonicalizeLeanExecCommandInput,
   withLeanExecCommandArguments,
 } from "../src/sandbox/lean-exec-arguments";
@@ -143,6 +145,39 @@ describe("withLeanExecCommandArguments", () => {
 });
 
 describe("composed shell capability", () => {
+  test("the finish-floor variant describes the floor and offers background; the other keeps today's schema", () => {
+    expect(LEAN_EXEC_COMMAND_PARAMETERS.properties.yield_time_ms.description).toContain(
+      "Without `tty` or `background` the wait is at least 60000.",
+    );
+    expect(LEAN_EXEC_COMMAND_PARAMETERS.properties).toHaveProperty("background");
+    expect(LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN.properties).toHaveProperty(
+      "background",
+    );
+    for (const parameters of [
+      LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_FINISH_FLOOR,
+      LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN_OR_FINISH_FLOOR,
+    ]) {
+      expect(parameters.properties).not.toHaveProperty("background");
+      expect(parameters.properties.yield_time_ms.description).toBe(
+        "How long to wait (in milliseconds) for output before yielding. Omit for the default of 10000.",
+      );
+    }
+    const exec = {
+      type: "function",
+      name: "exec_command",
+      description: "original",
+      parameters: { type: "object", properties: {}, required: [] },
+      strict: true,
+      invoke: async () => "ok",
+    } as unknown as Tool<unknown>;
+    const [withoutFloor] = withLeanExecCommandArguments([exec], {
+      finishFloor: false,
+    }) as FunctionTool[];
+    expect(withoutFloor!.parameters as unknown).toBe(
+      LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN_OR_FINISH_FLOOR,
+    );
+  });
+
   async function shellTools(
     lean: boolean,
     options: Parameters<typeof buildAgentCapabilities>[2] = {},

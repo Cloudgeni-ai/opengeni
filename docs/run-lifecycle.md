@@ -2731,9 +2731,21 @@ REPL does not hold the turn for minutes, the call still returns once output it
 produced has been quiet for 5 seconds after the ordinary 30-second window, or
 after 2 seconds when that output ends in an input prompt
 (`looksLikeInputPrompt`). A call that produced no output waits for exit or its
-requested window. `OPENGENI_EXPERIMENT_CUT_POLLING=false` restores the
-30-second cap. Connected Machine (op-stream) commands keep their own 30-second
-background yield and are unaffected. Live output still streams to the command card while the call
+requested window. With the same setting, an `exec_command` without a TTY that
+the model did not mark `background: true` waits at least 60 seconds
+(`COMMAND_FINISH_FLOOR_MS`) however short a wait it asked for, still returning
+the moment the command exits; its quiet-output return applies only after those
+60 seconds, while the input-prompt return still applies at once. Models often
+ask for a yield of a second or less and then poll the handle with
+`command_read`, although most such commands finish within a minute. Servers,
+watchers and deliberate parallel runs pass `background: true` (or use a TTY)
+to keep the requested short wait; the turn-cancellation layer removes the flag
+before the SDK and providers see the arguments, and the lean schema offers it
+only while the floor is active. `OPENGENI_EXPERIMENT_CUT_POLLING=false` restores
+the 30-second cap and removes the floor. Connected Machine (op-stream) commands
+keep their own 30-second background yield ceiling; the floor is sent to them as
+the requested yield, so a tiny requested yield there waits up to 30 seconds.
+Live output still streams to the command card while the call
 waits, and Pause/Steer cancellation is still checked between slices. The
 model-facing `exec_command` schema is non-strict and requires only `cmd` and
 `max_output_tokens` (settings.experimentOutputCost, on by default;

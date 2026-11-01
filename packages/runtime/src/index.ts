@@ -5277,13 +5277,15 @@ function buildAgentCapabilitiesFromComposition(
   // Lean non-strict `exec_command` schema (settings.experimentOutputCost, on by
   // default; OPENGENI_EXPERIMENT_OUTPUT_COST=false disables). Outermost, so every
   // inner layer (SDK parser, turn cancellation, routing fence) sees canonical
-  // arguments.
+  // arguments. Its wait text and `background` flag describe the finish floor,
+  // which the turn-cancellation controller applies with cut polling.
   if (settings.experimentOutputCost) {
+    const finishFloor = settings.experimentCutPolling && toolCancellation !== null;
     for (const capability of caps) {
       const target = capability as unknown as { tools(): Tool<unknown>[] };
       const original = target.tools;
       target.tools = function () {
-        return withLeanExecCommandArguments(original.call(this));
+        return withLeanExecCommandArguments(original.call(this), { finishFloor });
       };
     }
   }

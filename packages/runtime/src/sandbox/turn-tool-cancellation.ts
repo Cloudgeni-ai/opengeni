@@ -78,6 +78,22 @@ const TURN_MAX_MODEL_WAIT_MS = 30_000;
  */
 const CUT_POLLING_MAX_MODEL_WAIT_MS = 240_000;
 /**
+ * Finish floor (part of cut polling): an `exec_command` without a TTY that the
+ * model did not explicitly background waits at least this long for its exit,
+ * however short a wait it asked for, and still returns the moment it exits.
+ * Models often ask for a wait of a second or less and then poll the
+ * background handle with `command_read`, each poll a full-context model
+ * request, although most such commands (tests, builds, lint) finish within a
+ * minute. Servers, watchers and deliberate parallel runs pass
+ * `background: true` (or use a TTY) to get the requested short wait. A
+ * floored command that printed and then went quiet returns only once the floor
+ * has passed (CUT_POLLING_OUTPUT_QUIET_MS): test runners commonly print a
+ * header and then stay silent for tens of seconds. Output that ends in an input
+ * prompt still returns after a short silence, and a waiting Steer, Pause or
+ * turn cancellation ends the wait at the next slice as before.
+ */
+export const COMMAND_FINISH_FLOOR_MS = 60_000;
+/**
  * With cut polling a long wait must not hold a dev server, watcher, tail or
  * REPL for minutes after it printed what the model needs. Once the ordinary
  * (30-second) window has passed, a command that produced output during this
@@ -437,9 +453,31 @@ export function looksLikeInputPrompt(output: string): boolean {
 function foregroundWait(
   value: unknown,
   cutPolling: boolean,
+  options: { finishFloor?: boolean } = {},
 ): { waitMs: number; quietReturnAfterMs?: number } {
   if (!cutPolling) return { waitMs: modelWaitMs(value, false) };
+  if (options.finishFloor === true) {
+    return {
+      waitMs: Math.max(modelWaitMs(value, true), COMMAND_FINISH_FLOOR_MS),
+      quietReturnAfterMs: COMMAND_FINISH_FLOOR_MS,
+    };
+  }
   return { waitMs: modelWaitMs(value, true), quietReturnAfterMs: modelWaitMs(value, false) };
+}
+
+/**
+ * The model-facing wait of one `exec_command` call. A command without a TTY
+ * that is not explicitly backgrounded gets the finish floor
+ * (COMMAND_FINISH_FLOOR_MS); `tty: true` and `background: true` keep the
+ * requested wait.
+ */
+export function execCommandForegroundWait(
+  args: { yield_time_ms?: unknown; tty?: unknown; background?: unknown },
+  cutPolling: boolean,
+): { waitMs: number; quietReturnAfterMs?: number } {
+  return foregroundWait(args.yield_time_ms, cutPolling, {
+    finishFloor: args.tty === false && args.background !== true,
+  });
 }
 
 function execOutput(raw: string): string {
@@ -1748,6 +1786,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     if (!parsed || typeof parsed.cmd !== "string") {
       return await this.correlatedInvoke(tool.invoke, runContext, input, details);
     }
+    // `background` only selects this call's model-facing wait; no inner layer
+    // reads it, so it is removed before the arguments are forwarded.
+    const execWait = execCommandForegroundWait(parsed, this.cutPolling);
+    const backgroundArgumentPresent = Object.hasOwn(parsed, "background");
+    delete parsed.background;
     const token = crypto.randomUUID();
     const correlationId = details?.toolCall?.callId ?? `turn_exec_${token}`;
     const cancelExecCommand = cancellationSession?.cancelExecCommand;
@@ -1799,9 +1842,19 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       wrappedCommand ?? commandText,
     );
     const cancellableInput = useRemoteOpCancellation
-      ? commandText === parsed.cmd
+      ? commandText === parsed.cmd &&
+        !backgroundArgumentPresent &&
+        execWait.waitMs <= modelWaitMs(parsed.yield_time_ms, this.cutPolling)
         ? input
-        : JSON.stringify({ ...parsed, cmd: commandText })
+        : JSON.stringify({
+            ...parsed,
+            cmd: commandText,
+            // A remote operation waits in the provider for its own yield
+            // (Connected Machines cap it), so a finish floor is sent there.
+            ...(execWait.waitMs > modelWaitMs(parsed.yield_time_ms, this.cutPolling)
+              ? { yield_time_ms: execWait.waitMs }
+              : {}),
+          })
       : JSON.stringify({
           ...parsed,
           cmd: wrappedCommand,
@@ -1950,7 +2003,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         state,
         initialOutput: output,
         startedAt,
-        ...foregroundWait(parsed.yield_time_ms, this.cutPolling),
+        ...execWait,
         maxOutputTokens:
           typeof parsed.max_output_tokens === "number" ? parsed.max_output_tokens : 20_000,
       });
