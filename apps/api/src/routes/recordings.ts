@@ -57,6 +57,7 @@ import {
   listRecordingPeople,
   listRecordingsWithOwnElsewhere,
   ownRecordingHome,
+  ownMeetingsReaching,
   ownRecordingWorkspaces,
   recordingVisible,
   listRecordingTranscriptVersions,
@@ -219,6 +220,7 @@ export function registerRecordingRoutes(
       subjectId: actor.subjectId,
       recordingId,
       workspaces: await ownRecordingWorkspaces(db, actor),
+      reachingWorkspaceId: await ownMeetingsReaching(db, actor),
     });
     const there = home ? await sameGrantIn(c, home.id, permission, actor) : null;
     if (!home || !there) return actor;
@@ -778,6 +780,7 @@ export function registerRecordingRoutes(
         (purpose.data ?? "meeting") === "meeting" && !externalRef
           ? await ownListableElsewhere(c, actor)
           : [],
+      reachingWorkspaceId: await ownMeetingsReaching(db, actor),
       workspaceId: actor.workspaceId,
       subjectId: actor.subjectId,
       query: query || undefined,
@@ -952,8 +955,31 @@ export function registerRecordingRoutes(
         retryable: false,
       });
     }
+    // Where an Only me meeting works: the owner's own other workspaces of the
+    // organization. Its own workspace and their Personal workspace always
+    // have it, so they aren't stored.
+    let reachWorkspaceIds = body.reachWorkspaceIds;
+    if (reachWorkspaceIds) {
+      const own = await ownRecordingWorkspaces(db, actor);
+      const known = new Map(own.map((workspace) => [workspace.id, workspace]));
+      const unknown = reachWorkspaceIds.filter((id) => id !== actor.workspaceId && !known.has(id));
+      if (unknown.length > 0) {
+        throw invalid("reachWorkspaceIds must be workspaces of this organization you belong to");
+      }
+      reachWorkspaceIds = reachWorkspaceIds.filter((id) => known.get(id)?.personal !== true);
+    }
     return c.json(
-      shownHere(await guard(() => updateRecording(db, { ...actor, recordingId, ...body })), actor),
+      shownHere(
+        await guard(() =>
+          updateRecording(db, {
+            ...actor,
+            recordingId,
+            ...body,
+            ...(reachWorkspaceIds === undefined ? {} : { reachWorkspaceIds }),
+          }),
+        ),
+        actor,
+      ),
     );
   });
 

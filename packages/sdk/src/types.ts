@@ -8565,6 +8565,12 @@ export type FileAsset = {
   scope?: "workspace" | "personal" | undefined;
   /** The person who alone can share the file or limit it to themselves. */
   ownerSubjectId?: string | null | undefined;
+  /**
+   * An Only me file's other workspaces of the organization where it also
+   * works, besides the one that stores it and its owner's Personal workspace;
+   * null for every workspace. Absent for workspace files.
+   */
+  reachWorkspaceIds?: string[] | null | undefined;
   id: string;
   workspaceId: string;
   status: FileStatus;
@@ -8587,6 +8593,13 @@ export type UpdateFileVisibilityRequest = {
   visibility: "private" | "workspace";
 };
 export type UpdateFileVisibilityResponse = { file: FileAsset };
+
+/** Where an Only me file works besides its own workspace and its owner's Personal workspace. */
+export type UpdateFileReachRequest = {
+  /** The owner's other workspaces of this organization; null for all of them. */
+  reachWorkspaceIds: string[] | null;
+};
+export type UpdateFileReachResponse = { file: FileAsset };
 
 /** Mirrors the closed, provider-neutral retained-output contract. */
 export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;

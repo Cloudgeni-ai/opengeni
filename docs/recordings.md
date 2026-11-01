@@ -20,11 +20,26 @@ share, unshare or delete it.
 
 A recording is stored in the workspace it was recorded in, and a shared one
 stays there. A signed-in person's (`user:`) own Only me meetings are theirs
-across their organization: every workspace of the same organization they
-belong to, their Personal workspace included, lists them in
-`GET …/recordings` (and agents acting for them find them with
-`meetings_search`), each marked with `sourceWorkspace` (`{ id, name }`, the
-storing workspace; `recordedIn` for agents). They open in place: every
+across their organization, where they turn them on. An Only me meeting always
+works in the workspace that stores it and in its owner's Personal workspace;
+`reachWorkspaceIds` lists the owner's other workspaces of the same
+organization where it also works, and `null` means every workspace they
+belong to, new ones included. A new meeting starts with an empty list;
+meetings recorded before the list existed are `null`, so they keep showing
+everywhere they did. Only the owner changes it, with
+`PATCH …/recordings/:recordingId` and `{ reachWorkspaceIds }`, from any
+workspace where they can change the meeting; each id must be a workspace of
+the organization they belong to (400 otherwise), and the storing workspace and
+their Personal workspace are dropped from the stored list. In the React
+Meetings page this is **Available in…** in the meeting's menu, when the host
+passes `reachWorkspaces`. Turning it on somewhere never shares it: there too,
+only its owner and agent turns they start can use it. Shared meetings ignore
+the list.
+
+Every workspace where a person's Only me meeting works lists it in
+`GET …/recordings` (and agents acting for them find it with
+`meetings_search`), marked with `sourceWorkspace` (`{ id, name }`, the
+storing workspace; `recordedIn` for agents). It opens in place: every
 `…/recordings/:recordingId` route reads and changes them in the storing
 workspace, as the person, so transcript, notes, speakers and re-runs work from
 any of those workspaces, and the React Meetings pages label them with where

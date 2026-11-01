@@ -86,6 +86,12 @@ export const recordings = pgTable(
     visibility: text("visibility", { enum: recordingVisibilityValues })
       .notNull()
       .default("user_private"),
+    // Migration 1186. An Only me meeting's other workspaces where it also
+    // works, besides this one and its owner's Personal workspace; null for
+    // every workspace the owner belongs to (meetings from before 1186).
+    reachWorkspaceIds: uuid("reach_workspace_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`),
     title: text("title").notNull(),
     // Migration 1132. Rows from before it are "person": nothing replaces their titles.
     titleSource: text("title_source", { enum: recordingTitleSourceValues })
