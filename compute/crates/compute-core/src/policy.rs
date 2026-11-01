@@ -247,6 +247,17 @@ impl SleepPolicy {
         self.rules.pause_after.is_some()
     }
 
+    /// Whether the host may save the sandbox's VM without being asked: to
+    /// put it to sleep, to relieve memory or to checkpoint it. A policy
+    /// that only checkpoints never saves unasked, but books a save all the
+    /// same, since its checkpoints' memory images land in that booking.
+    /// One the host never saves so, such as a CI runner's, is saved only by
+    /// an [`crate::Input::Sleep`] request, as a hand-off makes.
+    #[must_use]
+    pub const fn saves(&self) -> bool {
+        self.rules.save_after.is_some() || self.rules.checkpoint_every.is_some()
+    }
+
     /// The next step that moves an unneeded sandbox in `state`, idle for
     /// `idle`, toward where its rules want it. `floor` is the least depth
     /// demanded regardless of the rules, by memory pressure or an explicit

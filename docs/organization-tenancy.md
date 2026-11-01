@@ -1262,7 +1262,11 @@ sources (`scheduled_tasks:*`), changes or deletes any bot template shared with
 the workspace, and records posts on their own social accounts. A signed-in
 Member also edits the workspace instructions
 and reviews the agent's proposed changes to them (`sessions:create`, see
-[workspace instruction policies](workspace-instruction-policies.md)).
+[workspace instruction policies](workspace-instruction-policies.md)), renames a
+shared workspace (`PATCH /v1/workspaces/:workspaceId` with `name`; its `slug`
+stays Admin-only and a Personal workspace keeps its name), and adds or removes
+its custom model entries (Gateway, OpenRouter, Opper and Claude custom models;
+the keys and subscriptions they run on stay Admin-only).
 Settings-class powers stay Admin-only:
 `workspace:admin` (workspace settings, learning settings, Insights),
 `members:manage`, `api_keys:manage`, `github:manage` (the workspace GitHub
@@ -1285,9 +1289,11 @@ external (`external_user:`) memberships are excluded too: an organization
 service key stores them as role `member` with a caller-chosen permission set,
 which a preset change must not widen.
 Organization owners and administrators may create and rename shared
-workspaces, grant or replace access, and revoke access. Ordinary organization
-members, cross-organization membership ids, and every Personal workspace fail
-closed. Organization membership role changes keep the 0263 sole-owner
+workspaces, grant or replace access, and revoke access through these
+organization routes. Ordinary organization members, cross-organization
+membership ids, and every Personal workspace fail closed here; a member who can
+start chats in a shared workspace still renames it from its own settings
+(`PATCH /v1/workspaces/:workspaceId`). Organization membership role changes keep the 0263 sole-owner
 invariant; workspace roles do not alter organization roles.
 
 That authority covers every shared workspace in the organization and every

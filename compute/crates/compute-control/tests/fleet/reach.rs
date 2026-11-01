@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use compute_protocol::host::Request;
 use serde_json::json;
 
-use super::support::{Fleet, OTHER_KEY, TEAM};
+use super::support::{Fleet, OPERATOR_KEY, OTHER_KEY, TEAM, until};
 
 async fn fleet() -> Fleet {
     Fleet::start_with(None, |settings| {
@@ -112,4 +112,40 @@ async fn reach_a_team_was_not_given_or_no_host_offers_is_refused_before_any_host
     assert!(offering.ops().is_empty(), "{:?}", offering.ops());
     let (_, list) = fleet.get("/v1/sandboxes").await;
     assert_eq!(list, json!([]), "{list}");
+}
+
+/// An agent restarted in place keeps its registration while what it is
+/// configured with may have changed: placement goes by what it says it is
+/// now, under the name it registered with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_restarted_in_place_is_placed_on_by_what_it_is_now() {
+    let fleet = fleet().await;
+    let host = fleet.host("host-a.example").await;
+    let (status, body) = fleet.post("/v1/sandboxes", asking(&["previews"])).await;
+    assert_eq!(status, 503, "{body}");
+
+    host.restarts_in_place_as(|info| {
+        info.name = "renamed.example".into();
+        info.memory_mib = 96 * 1024;
+        info.offers = vec!["previews".into()];
+    });
+    until(
+        std::time::Duration::from_secs(10),
+        "the host is known as it is now",
+        async || {
+            let (_, hosts) = fleet
+                .call(reqwest::Method::GET, "/v1/hosts", Some(OPERATOR_KEY), None)
+                .await;
+            hosts[0]["memory_mib"] == 96 * 1024
+        },
+    )
+    .await;
+    let (_, hosts) = fleet
+        .call(reqwest::Method::GET, "/v1/hosts", Some(OPERATOR_KEY), None)
+        .await;
+    assert_eq!(hosts[0]["name"], "host-a.example", "{hosts}");
+    let (status, row) = fleet.post("/v1/sandboxes", asking(&["previews"])).await;
+    assert_eq!(status, 201, "{row}");
+    assert_eq!(row["host"], "host-a.example", "{row}");
+    assert!(host.ops().contains(&"create"), "{:?}", host.ops());
 }

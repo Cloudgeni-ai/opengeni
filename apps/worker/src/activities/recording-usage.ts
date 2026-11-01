@@ -254,6 +254,8 @@ export type RecordingProcessingReport = RecordingUsageLabels & {
   outcome: "complete" | "failed" | "retry" | "skipped";
   errorCode: string | null;
   audioSeconds: number;
+  /** Of the audio, what was sent to the model; less when long quiet stretches were left out. */
+  sentAudioSeconds: number | null;
   wallSeconds: number;
   queueSeconds: number | null;
   preparedBytes: number;
@@ -355,6 +357,14 @@ export function reportRecordingProcessing(
         labels,
         amount: report.audioSeconds,
       });
+      if (report.sentAudioSeconds !== null) {
+        observability.incrementCounter({
+          name: "opengeni_recording_sent_audio_seconds_total",
+          help: "Seconds of audio sent to the transcription model, without the quiet left out.",
+          labels,
+          amount: report.sentAudioSeconds,
+        });
+      }
       observability.observeHistogram({
         name: "opengeni_recording_audio_duration_seconds",
         help: "Length of the audio of each transcribed version.",
@@ -452,6 +462,9 @@ export function reportRecordingProcessing(
       outcome: report.outcome,
       ...(report.errorCode ? { errorCode: report.errorCode } : {}),
       audioSeconds: round(report.audioSeconds),
+      ...(report.sentAudioSeconds !== null
+        ? { sentAudioSeconds: round(report.sentAudioSeconds) }
+        : {}),
       wallSeconds: round(report.wallSeconds),
       ...(report.queueSeconds !== null ? { queueSeconds: round(report.queueSeconds) } : {}),
       ...stages,

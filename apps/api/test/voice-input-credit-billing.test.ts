@@ -314,6 +314,22 @@ test("missing usage never charges a duration ceiling", () => {
   });
 });
 
+test("a duration only the client reported bills under its own name, after any the server measured", () => {
+  // The live transcript streams from the device to the provider, so the
+  // recorder's streamed time is all the server has; the ledger says so.
+  expect(
+    voiceInputBillableUsage({ pricing, usage: null, clientReportedDurationSeconds: 15 }),
+  ).toEqual({ usage: { kind: "duration", seconds: 15 }, basis: "client_reported_duration" });
+  expect(
+    voiceInputBillableUsage({
+      pricing,
+      usage: null,
+      trustedDurationSeconds: 5,
+      clientReportedDurationSeconds: 15,
+    }),
+  ).toEqual({ usage: { kind: "duration", seconds: 5 }, basis: "server_duration" });
+});
+
 test("built-in GPT-4o transcribe prices name the audio token rate explicitly", () => {
   // developers.openai.com/api/docs/models/*: audio tokens, per 1M.
   expect(defaultVoiceInputPricing["gpt-4o-transcribe"]).toMatchObject({

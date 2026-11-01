@@ -1413,7 +1413,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceGatewayCustomModel"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "createWorkspaceInstructionPolicyDraft",
@@ -1449,7 +1449,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceOpenRouterCustomModel"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "createWorkspaceOpperCustomModel",
@@ -1459,7 +1459,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "CreateWorkspaceOpperCustomModelRequest"
     ],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "createWorkspaceWebhook",
@@ -1890,7 +1890,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "DeleteWorkspaceGatewayCustomModelRequest"
     ],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "deleteWorkspaceModelAccessPolicy",
@@ -1908,7 +1908,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "DeleteWorkspaceOpenRouterCustomModelRequest"
     ],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "deleteWorkspaceOpperCustomModel",
@@ -1918,7 +1918,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "DeleteWorkspaceOpperCustomModelRequest"
     ],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "deleteWorkspaceWebhook",
@@ -9928,7 +9928,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultSummary",
       "Workspace"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "updateWorkspaceArtifactVisibility",

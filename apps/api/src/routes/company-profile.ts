@@ -15,6 +15,7 @@ import {
   UpdateCompanyProfileAgentPolicyRequest,
 } from "@opengeni/contracts";
 import {
+  authorizationHoldsOrganizationAdministration,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   type AccessGrantAuthorization,
@@ -65,7 +66,8 @@ export function requireDirectAccountAdmin(access: AccessGrantAuthorization): voi
       message: "Company-profile administration requires a direct human-authorized request",
     });
   }
-  if (!access.accountGrant?.permissions.includes("account:admin")) {
+  // The organization's owner or admins administer its identity.
+  if (!authorizationHoldsOrganizationAdministration(access)) {
     throw new MissingPermissionRefusal("account:admin");
   }
 }

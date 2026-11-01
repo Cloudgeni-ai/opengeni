@@ -1948,6 +1948,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1131 hourly live transcript time per person: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -2125,6 +2131,7 @@ describe("runtime database posture evaluator", () => {
         1 + // 1090 personal default machines: full-DML, FORCE-RLS.
         1 + // 1105 workspace activity facts: read and insert, FORCE-RLS.
         1 + // 1107 agent calls: read, insert and update, FORCE-RLS.
+        1 + // 1131 hourly live transcript time per person: full-DML, FORCE-RLS.
         1; // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
@@ -2141,6 +2148,8 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_project_placements");
       expect(FORCE_RLS_TABLES).toContain("workspace_member_execution_defaults");
       expect(RUNTIME_FULL_DML_TABLES).toContain("workspace_member_execution_defaults");
+      expect(FORCE_RLS_TABLES).toContain("recording_live_unbacked_hours");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("recording_live_unbacked_hours");
       expect(FORCE_RLS_TABLES).toContain("secret_approval_rules");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_approval_rules");
       expect(FORCE_RLS_TABLES).toContain("automation_templates");
