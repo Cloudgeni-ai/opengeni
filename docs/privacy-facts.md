@@ -94,7 +94,7 @@ provider sits behind a gateway such as Vercel AI Gateway. For Azure OpenAI and
 the OpenAI API the line follows the route: it says Opengeni sends
 `store: false` only where the runtime does (every Azure OpenAI Responses route,
 workspace and organization OpenAI keys, and the built-in client on
-api.openai.com), and otherwise that Opengeni does not turn storage off (an
+api.openai.com), and otherwise that storage is not turned off for every request (an
 operator's own provider for api.openai.com, or
 `OPENGENI_OPENAI_PROVIDER_ITEM_IDS=preserve`).
 
