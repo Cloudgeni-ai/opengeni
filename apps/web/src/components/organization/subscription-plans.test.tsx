@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import type { Root } from "react-dom/client";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useSubscriptionCatalog } from "./use-subscription-catalog";
@@ -15,6 +15,8 @@ import {
 
 GlobalRegistrator.register();
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+// React's input-event detection needs a document when react-dom is imported.
+const { createRoot } = await import("react-dom/client");
 const { SubscriptionPlans } = await import("./subscription-plans");
 const { SeatLimitNotice } = await import("./plan-seats");
 const { OrganizationCreditBalance } = await import("@/components/organization-credit-balance");
@@ -137,6 +139,38 @@ test("checkout retries retain one UUID even after closing and reopening confirma
     planKey: "pro",
     successUrl: "https://console.example.test/workspaces/a/organization?section=billing",
   });
+});
+
+test("checkout sends a typed promo code, trimmed, and only checkout asks for one", async () => {
+  const client = clientFixture();
+  client.createSubscriptionCheckout.mockImplementation(async () => {
+    throw new Error("This code can't be used for this plan.");
+  });
+  await mount(plans(client, "free"));
+  await click("Get Pro");
+  const input = document.querySelector<HTMLInputElement>("[role=dialog] input");
+  expect(input).not.toBeNull();
+  await submit();
+  expect(client.createSubscriptionCheckout.mock.calls[0]![0]).not.toHaveProperty("promotionCode");
+
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+      input,
+      " PLAN100 ",
+    );
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await submit();
+  expect(client.createSubscriptionCheckout.mock.calls[1]![0]).toMatchObject({
+    planKey: "pro",
+    promotionCode: "PLAN100",
+  });
+  expect(document.body.textContent).toContain("This code can't be used for this plan.");
+
+  await click("Cancel");
+  await mount(plans(clientFixture(), "pro"));
+  await click("Upgrade to Max");
+  expect(document.querySelector("[role=dialog] input")).toBeNull();
 });
 
 test("downgrade and cancel use separate period-end endpoints without expiring credit early", async () => {

@@ -16119,6 +16119,7 @@
         "$.cancelUrl": "string?",
         "$.idempotencyKey": "string!",
         "$.planKey": "string!",
+        "$.promotionCode": "string?",
         "$.successUrl": "string?"
       }
     },
