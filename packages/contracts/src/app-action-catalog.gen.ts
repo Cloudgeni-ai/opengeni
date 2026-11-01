@@ -7463,16 +7463,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:admin"
   },
   {
-    "id": "PUT /v1/workspaces/:workspaceId/machines/:enrollmentId/reach",
-    "method": "PUT",
-    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/reach",
-    "request": [
-      "UpdateOrganizationComputeReachRequest"
-    ],
-    "response": [],
-    "permission": "enrollments:read"
-  },
-  {
     "id": "PUT /v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/members/external/:memberSource/:memberExternalId/allowance",
@@ -7496,15 +7486,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
     "request": [],
-    "response": []
-  },
-  {
-    "id": "PUT /v1/workspaces/:workspaceId/rigs/:rigId/reach",
-    "method": "PUT",
-    "path": "/v1/workspaces/:workspaceId/rigs/:rigId/reach",
-    "request": [
-      "UpdateOrganizationComputeReachRequest"
-    ],
     "response": []
   },
   {
@@ -9469,6 +9450,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "enrollments:read"
   },
   {
+    "id": "updateMachineReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/reach",
+    "request": [
+      "UpdateOrganizationComputeReachRequest"
+    ],
+    "response": [
+      "OrganizationComputeReachResponse"
+    ],
+    "permission": "enrollments:read"
+  },
+  {
     "id": "updateMemberNotifications",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/inbox/member-notifications",
@@ -9721,6 +9714,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Rig"
+    ]
+  },
+  {
+    "id": "updateRigReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/rigs/:rigId/reach",
+    "request": [
+      "UpdateOrganizationComputeReachRequest"
+    ],
+    "response": [
+      "OrganizationComputeReachResponse"
     ]
   },
   {
