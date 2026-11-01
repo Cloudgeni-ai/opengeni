@@ -4914,6 +4914,27 @@ are unchanged for every requester: a missing row is still `deleted`, a
 non-ready or expired row still fails as before, and bytes that do not match the
 recorded size, SHA-256 or dimensions still fail closed as `invalid_content`.
 
+Only the newest tool-result images reach the model with their pixels. When a
+turn attempt prepares its history from stored history, images older than the
+newest three are replaced, in batches of five, by a short text note (one per
+tool result): for `view_image` it names the path to view again (showing the
+file as it is now); for any other tool it asks the model to take a fresh
+screenshot or observation instead of repeating an action, because tools such as
+`interaction__browser_act` act as well as capture. When an attempt starts, the
+history therefore carries three to seven images; images added during the
+attempt all stay until the next one. The note is computed once per attempt, so
+every model call of a turn sees the same prefix, and the omitted set only grows,
+so the provider's prompt cache stays valid between batches. Each new batch
+makes the provider re-read the history after the first newly omitted image
+once; the batch size spreads that over five images, and the saving grows with
+every later call that no longer resends them. Context compaction's summarizer
+sees the same notes. Omitted images are not read from storage, canonical
+history keeps their markers, and user attachments and native
+`computer_call_result` screenshots are not affected; Opengeni's own
+`interaction__browser_*` and `interaction__computer_*` screenshots are function
+results and are omitted like any other
+(`omitOlderHistoryImages` in `apps/worker/src/activities/retained-screenshots.ts`).
+
 Generated images have a separate permanent workspace-file lifecycle. Adapter
 provider calls first cross a durable prepared/provider-started fence; after the
 provider may have run, recovery may finish an existing deterministic upload but
