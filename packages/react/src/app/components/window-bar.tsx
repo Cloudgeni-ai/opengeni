@@ -171,20 +171,26 @@ export function WindowBarPageTitle({
 }) {
   // In the order the headers mounted (the page's order); a header keeps its
   // place while its title is briefly empty.
-  const [claims, setClaims] = useState<readonly { id: string; title: string | null }[]>([]);
+  const [claims, setClaims] = useState<
+    readonly { id: string; title: string | null; fallback: boolean }[]
+  >([]);
   const [registry] = useState(() => ({
-    set(id: string, title: string | null) {
-      setClaims((current) =>
-        current.some((claim) => claim.id === id)
-          ? current.map((claim) => (claim.id === id ? { id, title } : claim))
-          : [...current, { id, title }],
-      );
+    set(id: string, title: string | null, fallback = false) {
+      setClaims((current) => {
+        const existing = current.find((claim) => claim.id === id);
+        if (existing?.title === title && existing.fallback === fallback) return current;
+        return existing
+          ? current.map((claim) => (claim.id === id ? { id, title, fallback } : claim))
+          : [...current, { id, title, fallback }];
+      });
     },
     release(id: string) {
       setClaims((current) => current.filter((claim) => claim.id !== id));
     },
   }));
-  const owner = claims.find((claim) => claim.title);
+  // A fallback claim (a hidden page under the open one) yields to any other.
+  const owner =
+    claims.find((claim) => claim.title && !claim.fallback) ?? claims.find((claim) => claim.title);
   const title = owner ? owner.title : fallbackTitle;
   const ownerId = owner?.id ?? null;
   const value = useMemo(

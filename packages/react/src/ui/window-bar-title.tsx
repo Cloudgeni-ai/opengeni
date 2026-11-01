@@ -1,7 +1,7 @@
 // The desktop window bar's title claims, in a module of its own (React only),
 // so page headers, overlays and the shells can share it without importing one
 // another.
-import { createContext, useContext, useId, useLayoutEffect, type ReactNode } from "react";
+import { createContext, useContext, useId, useLayoutEffect, useMemo, type ReactNode } from "react";
 
 /**
  * The desktop window bar's title line, when the page's shell draws one (the
@@ -10,8 +10,11 @@ import { createContext, useContext, useId, useLayoutEffect, type ReactNode } fro
  * title isn't shown twice. Provided by the shells (`useWindowBarRow`).
  */
 export const PageHeaderWindowBarContext = createContext<{
-  /** A header's title, or null while it has none to show; keeps its place. */
-  set(id: string, title: string | null): void;
+  /**
+   * A header's title, or null while it has none to show; keeps its place. A
+   * fallback claim shows only while no other header has a title.
+   */
+  set(id: string, title: string | null, fallback?: boolean): void;
   release(id: string): void;
   /** The header whose title the bar shows. */
   owner: string | null;
@@ -21,20 +24,31 @@ export const PageHeaderWindowBarContext = createContext<{
  * Headers inside an overlay (a dialog or sheet) never take the window bar:
  * the overlays' content wraps its children in this.
  *
- * With `when`, only while it is true: a hidden page that stays mounted (the
- * Capabilities catalog under an open capability page) lets go of the bar so
- * the page in front of it takes it, and claims it again when shown.
+ * With `fallback`, headers inside take the bar only while no other header has
+ * a title: a page that stays mounted, hidden, under the pages it opens (the
+ * Capabilities catalog) names the bar until an open page names it, including
+ * while that page is loading or has no header.
  */
 export function WindowBarTitleBoundary({
-  when = true,
+  fallback = false,
   children,
 }: {
-  when?: boolean | undefined;
+  fallback?: boolean | undefined;
   children: ReactNode;
 }) {
   const enclosing = useContext(PageHeaderWindowBarContext);
+  const value = useMemo(
+    () =>
+      fallback && enclosing
+        ? {
+            ...enclosing,
+            set: (id: string, title: string | null) => enclosing.set(id, title, true),
+          }
+        : null,
+    [fallback, enclosing],
+  );
   return (
-    <PageHeaderWindowBarContext.Provider value={when ? null : enclosing}>
+    <PageHeaderWindowBarContext.Provider value={value}>
       {children}
     </PageHeaderWindowBarContext.Provider>
   );

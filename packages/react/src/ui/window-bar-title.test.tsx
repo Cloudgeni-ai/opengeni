@@ -42,15 +42,16 @@ function Catalog({
 }: {
   pageOpen: boolean;
   boundary: boolean;
-  page?: string;
+  /** The open page's header; null for a page without one (loading, errors). */
+  page?: string | null;
 }) {
   const header = <Header title="Capabilities" />;
   return (
     <windowBar.WindowBarPageTitle enabled>
-      {pageOpen ? <Header key={page} title={page} /> : null}
+      {pageOpen && page ? <Header key={page} title={page} /> : null}
       <div hidden={pageOpen}>
         {boundary ? (
-          <titles.WindowBarTitleBoundary when={pageOpen}>{header}</titles.WindowBarTitleBoundary>
+          <titles.WindowBarTitleBoundary fallback>{header}</titles.WindowBarTitleBoundary>
         ) : (
           header
         )}
@@ -59,52 +60,66 @@ function Catalog({
   );
 }
 
-async function mount(node: ReactNode) {
+async function mount(node: ReactNode, check: (view: View) => Promise<void>) {
   const host = document.createElement("div");
   document.body.append(host);
   const root = ReactDomClient.createRoot(host);
-  await React.act(async () => root.render(node));
-  return {
-    bar: () => host.querySelector("[data-window-bar-title]")?.textContent ?? null,
-    render: (next: ReactNode) => React.act(async () => root.render(next)),
-    unmount: async () => {
-      await React.act(async () => root.unmount());
-      host.remove();
-    },
-  };
+  try {
+    await React.act(async () => root.render(node));
+    await check({
+      bar: () => host.querySelector("[data-window-bar-title]")?.textContent ?? null,
+      render: (next: ReactNode) => React.act(async () => root.render(next)),
+    });
+  } finally {
+    await React.act(async () => root.unmount());
+    host.remove();
+  }
 }
 
+type View = { bar(): string | null; render(next: ReactNode): Promise<void> };
+
 test("a page opened in front of a hidden, mounted page takes the window bar", async () => {
-  const view = await mount(<Catalog pageOpen={false} boundary />);
-  expect(view.bar()).toBe("Capabilities");
-  await view.render(<Catalog pageOpen boundary />);
-  expect(view.bar()).toBe("Slack");
-  // A page that replaces the open one (the Slack agent form) takes the bar too.
-  await view.render(<Catalog pageOpen boundary page="New Slack agent" />);
-  expect(view.bar()).toBe("New Slack agent");
-  await view.render(<Catalog pageOpen={false} boundary />);
-  expect(view.bar()).toBe("Capabilities");
-  await view.render(<Catalog pageOpen boundary />);
-  expect(view.bar()).toBe("Slack");
-  await view.unmount();
+  await mount(<Catalog pageOpen={false} boundary />, async (view) => {
+    expect(view.bar()).toBe("Capabilities");
+    await view.render(<Catalog pageOpen boundary />);
+    expect(view.bar()).toBe("Slack");
+    // A page that replaces the open one (the Slack agent form) takes the bar too.
+    await view.render(<Catalog pageOpen boundary page="New Slack agent" />);
+    expect(view.bar()).toBe("New Slack agent");
+    await view.render(<Catalog pageOpen={false} boundary />);
+    expect(view.bar()).toBe("Capabilities");
+    await view.render(<Catalog pageOpen boundary />);
+    expect(view.bar()).toBe("Slack");
+  });
+});
+
+test("a page without a header (loading, errors) leaves the hidden page's title", async () => {
+  await mount(<Catalog pageOpen={false} boundary />, async (view) => {
+    await view.render(<Catalog pageOpen boundary page={null} />);
+    expect(view.bar()).toBe("Capabilities");
+    // The page's header arrives once it has loaded.
+    await view.render(<Catalog pageOpen boundary page="Slack" />);
+    expect(view.bar()).toBe("Slack");
+  });
 });
 
 test("claims go in mount order, so a hidden header mounted first keeps the bar", async () => {
   // Documents the rule the boundary works around, not a desired outcome.
-  const view = await mount(<Catalog pageOpen={false} boundary={false} />);
-  await view.render(<Catalog pageOpen boundary={false} />);
-  expect(view.bar()).toBe("Capabilities");
-  await view.unmount();
+  await mount(<Catalog pageOpen={false} boundary={false} />, async (view) => {
+    await view.render(<Catalog pageOpen boundary={false} />);
+    expect(view.bar()).toBe("Capabilities");
+  });
 });
 
-test("a boundary without `when` always keeps headers out of the bar", async () => {
-  const view = await mount(
+test("a boundary without `fallback` always keeps headers out of the bar", async () => {
+  await mount(
     <windowBar.WindowBarPageTitle enabled fallbackTitle="Fallback">
       <titles.WindowBarTitleBoundary>
         <Header title="In a dialog" />
       </titles.WindowBarTitleBoundary>
     </windowBar.WindowBarPageTitle>,
+    async (view) => {
+      expect(view.bar()).toBe("Fallback");
+    },
   );
-  expect(view.bar()).toBe("Fallback");
-  await view.unmount();
 });
