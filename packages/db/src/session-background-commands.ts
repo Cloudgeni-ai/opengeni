@@ -1702,6 +1702,41 @@ export type CommandOutputRow = {
   payloadCodecVersion: number | null;
 };
 
+type CommandOutputChunk = {
+  sequence: number;
+  stream: "stdout" | "stderr";
+  streamFidelity: "separate" | "merged" | "unknown";
+  chunk: string;
+};
+
+function commandOutputRowText(row: CommandOutputRow): {
+  text: string;
+  stream: CommandOutputChunk["stream"];
+  streamFidelity: CommandOutputChunk["streamFidelity"];
+  gaps: string[];
+} {
+  const payload = fromPostgresLosslessJson(row.payload, row.payloadCodecVersion) as Record<
+    string,
+    unknown
+  >;
+  const gaps: string[] = [];
+  if (typeof payload?.chunk !== "string") gaps.push("retained_event_has_no_output_chunk");
+  if (payload?.commandReadProjectionGap === true) gaps.push("retained_event_exceeds_read_limit");
+  if (payload?.truncation && typeof payload.truncation === "object")
+    gaps.push("output_truncated_at_retention_boundary");
+  return {
+    text: typeof payload?.chunk === "string" ? payload.chunk : "",
+    stream: payload?.stream === "stderr" ? "stderr" : "stdout",
+    streamFidelity:
+      payload?.streamFidelity === "merged"
+        ? "merged"
+        : payload?.streamFidelity === "separate"
+          ? "separate"
+          : "unknown",
+    gaps,
+  };
+}
+
 /** Cursor offsets are UTF-16 positions at code-point boundaries; budgets are UTF-8 bytes. */
 export function projectCommandOutputPage(input: {
   commandId: string;
@@ -1716,26 +1751,14 @@ export function projectCommandOutputPage(input: {
   let remaining = budget;
   let sequence = start.sequence;
   let offset = start.offset;
-  const chunks: {
-    sequence: number;
-    stream: "stdout" | "stderr";
-    streamFidelity: "separate" | "merged" | "unknown";
-    chunk: string;
-  }[] = [];
+  const chunks: CommandOutputChunk[] = [];
   const gaps: string[] = [];
   if (start.offset > 0 && input.rows[0]?.sequence !== start.sequence)
     gaps.push("cursor_output_no_longer_retained");
   let consumed = 0;
   for (const row of input.rows.slice(0, COMMAND_OUTPUT_PAGE_ROWS)) {
-    const payload = fromPostgresLosslessJson(row.payload, row.payloadCodecVersion) as Record<
-      string,
-      unknown
-    >;
-    const text = typeof payload?.chunk === "string" ? payload.chunk : "";
-    if (typeof payload?.chunk !== "string") gaps.push("retained_event_has_no_output_chunk");
-    if (payload?.commandReadProjectionGap === true) gaps.push("retained_event_exceeds_read_limit");
-    if (payload?.truncation && typeof payload.truncation === "object")
-      gaps.push("output_truncated_at_retention_boundary");
+    const { text, stream, streamFidelity, gaps: rowGaps } = commandOutputRowText(row);
+    gaps.push(...rowGaps);
     const begin = row.sequence === start.sequence ? start.offset : 0;
     if (
       begin > 0 &&
@@ -1758,13 +1781,8 @@ export function projectCommandOutputPage(input: {
     if (end > begin)
       chunks.push({
         sequence: row.sequence,
-        stream: payload.stream === "stderr" ? "stderr" : "stdout",
-        streamFidelity:
-          payload.streamFidelity === "merged"
-            ? "merged"
-            : payload.streamFidelity === "separate"
-              ? "separate"
-              : "unknown",
+        stream,
+        streamFidelity,
         chunk: text.slice(begin, end),
       });
     if (end < text.length) {
@@ -1786,6 +1804,135 @@ export function projectCommandOutputPage(input: {
       gaps: [...new Set(gaps)],
     },
   };
+}
+
+/**
+ * The last `maxOutputBytes` UTF-8 bytes of a command's retained output that
+ * start at or after `from`. `rows` are the newest rows first, as
+ * commandOutputTailQuery returns them. `start` is the cursor of the first
+ * returned character; `endCursor` follows the newest row.
+ */
+export function projectCommandOutputTail(input: {
+  commandId: string;
+  from: { sequence: number; offset: number };
+  maxOutputBytes: number;
+  rows: CommandOutputRow[];
+}) {
+  let remaining = Math.max(0, input.maxOutputBytes);
+  const chunks: CommandOutputChunk[] = [];
+  const gaps: string[] = [];
+  let start = { sequence: input.from.sequence, offset: input.from.offset };
+  let reachedFrom = true;
+  const newest = input.rows[0];
+  const endCursor = newest
+    ? `${input.commandId}:${newest.sequence + 1}:0`
+    : `${input.commandId}:${input.from.sequence}:${input.from.offset}`;
+  for (const row of input.rows) {
+    if (row.sequence < input.from.sequence) break;
+    const { text, stream, streamFidelity, gaps: rowGaps } = commandOutputRowText(row);
+    gaps.push(...rowGaps);
+    const floor =
+      row.sequence === input.from.sequence ? Math.min(input.from.offset, text.length) : 0;
+    let begin = text.length;
+    while (begin > floor) {
+      // Step back one code point, never splitting a surrogate pair.
+      let step = 1;
+      const low = text.charCodeAt(begin - 1);
+      if (begin - 2 >= floor && low >= 0xdc00 && low <= 0xdfff) {
+        const high = text.charCodeAt(begin - 2);
+        if (high >= 0xd800 && high <= 0xdbff) step = 2;
+      }
+      const bytes = Buffer.byteLength(text.slice(begin - step, begin), "utf8");
+      if (bytes > remaining) break;
+      remaining -= bytes;
+      begin -= step;
+    }
+    if (begin < text.length)
+      chunks.unshift({ sequence: row.sequence, stream, streamFidelity, chunk: text.slice(begin) });
+    if (begin > floor) {
+      start = { sequence: row.sequence, offset: begin };
+      reachedFrom = false;
+      break;
+    }
+    start = { sequence: row.sequence, offset: floor };
+  }
+  // Rows beyond the fetched window lie between `from` and the oldest fetched row.
+  const oldest = input.rows.at(-1);
+  if (
+    reachedFrom &&
+    oldest !== undefined &&
+    input.rows.length >= COMMAND_OUTPUT_PAGE_ROWS &&
+    oldest.sequence > input.from.sequence
+  ) {
+    reachedFrom = false;
+  }
+  return {
+    chunks,
+    start,
+    startCursor: `${input.commandId}:${start.sequence}:${start.offset}`,
+    reachedFrom,
+    endCursor,
+    gaps: [...new Set(gaps)],
+  };
+}
+
+function commandOutputScanFilter(input: SessionCommandIdentity, fromSequence: number) {
+  // See commandOutputPageQuery for why the client event id prefix bounds the scan.
+  const clientIdFrom = commandOutputClientEventIdPrefix(input.commandId);
+  const clientIdBefore = `${clientIdFrom.slice(0, -1)};`;
+  return and(
+    eq(schema.sessionEvents.workspaceId, input.workspaceId),
+    eq(schema.sessionEvents.sessionId, input.sessionId),
+    sql`${schema.sessionEvents.type} = 'sandbox.command.output.delta'`,
+    sql`${schema.sessionEvents.clientEventId} collate "C" >= ${clientIdFrom}`,
+    sql`${schema.sessionEvents.clientEventId} collate "C" < ${clientIdBefore}`,
+    sql`${schema.sessionEvents.payload} ->> 'commandId' = ${input.commandId}`,
+    gte(schema.sessionEvents.sequence, fromSequence),
+  );
+}
+
+/** The newest output rows of one command, newest first, from a sequence on. */
+export function commandOutputTailQuery(
+  tx: Database,
+  input: SessionCommandIdentity,
+  fromSequence: number,
+) {
+  return tx
+    .select({
+      sequence: schema.sessionEvents.sequence,
+      payload: sql<unknown>`case when octet_length(${schema.sessionEvents.payload}::text) <= 262144
+      then ${schema.sessionEvents.payload}
+      else jsonb_build_object('commandReadProjectionGap', true) end`,
+      payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+    })
+    .from(schema.sessionEvents)
+    .where(commandOutputScanFilter(input, fromSequence))
+    .orderBy(desc(schema.sessionEvents.sequence))
+    .limit(COMMAND_OUTPUT_PAGE_ROWS);
+}
+
+/** Approximate UTF-8 size of one command's retained output rows in an inclusive sequence range. */
+export async function commandOutputBytesInRange(
+  tx: Database,
+  input: SessionCommandIdentity,
+  fromSequence: number,
+  toSequence: number,
+): Promise<number> {
+  const [row] = await tx
+    .select({
+      bytes: sql<
+        string | number | null
+      >`coalesce(sum(octet_length(${schema.sessionEvents.payload} ->> 'chunk')), 0)`,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        commandOutputScanFilter(input, fromSequence),
+        sql`${schema.sessionEvents.sequence} <= ${toSequence}`,
+      ),
+    );
+  const bytes = Number(row?.bytes ?? 0);
+  return Number.isSafeInteger(bytes) && bytes > 0 ? bytes : 0;
 }
 
 /** One page of a command's retained output rows, from the cursor sequence on. */
@@ -1829,11 +1976,106 @@ export function commandOutputPageQuery(
     .limit(COMMAND_OUTPUT_PAGE_ROWS + 1);
 }
 
+/**
+ * The output a read returns from `cursor`. Without `headAndTail` this is one
+ * page from the cursor. With it, output that fits the budget is returned
+ * whole; larger output returns its start (half the budget) as `chunks` and its
+ * end as `tail`, with the size of the omitted middle. `nextCursor` then points
+ * at the start of the omitted middle, so paging from it still visits every
+ * byte, and `endCursor` follows the newest output.
+ */
+async function readCommandOutputWindow(
+  db: Database,
+  input: SessionCommandIdentity & {
+    cursor?: string | undefined;
+    maxOutputBytes?: number | undefined;
+    headAndTail?: boolean | undefined;
+  },
+  cursor: { sequence: number; offset: number },
+) {
+  return await withRlsContext(db, input, async (tx) => {
+    const rows = await commandOutputPageQuery(tx, input, cursor.sequence);
+    const page = projectCommandOutputPage({ ...input, rows });
+    if (!input.headAndTail) return page;
+    if (!page.hasMore) return { ...page, endCursor: page.nextCursor };
+    const budget = input.maxOutputBytes ?? COMMAND_OUTPUT_DEFAULT_BYTES;
+    const head = projectCommandOutputPage({
+      ...input,
+      rows,
+      maxOutputBytes: Math.max(4, Math.floor(budget / 2)),
+    });
+    const headBytes = head.chunks.reduce(
+      (total, chunk) => total + Buffer.byteLength(chunk.chunk, "utf8"),
+      0,
+    );
+    const headEnd = parseCommandOutputCursor(head.nextCursor, input.commandId);
+    const tailRows = await commandOutputTailQuery(tx, input, headEnd.sequence);
+    const tail = projectCommandOutputTail({
+      commandId: input.commandId,
+      from: headEnd,
+      maxOutputBytes: budget - headBytes,
+      rows: tailRows,
+    });
+    const retention = {
+      ...head.retention,
+      gaps: [...new Set([...head.retention.gaps, ...tail.gaps])],
+    };
+    if (tail.reachedFrom) {
+      // Everything after the head fits: one contiguous window, nothing omitted.
+      return {
+        ...head,
+        chunks: [...head.chunks, ...tail.chunks],
+        nextCursor: tail.endCursor,
+        hasMore: false,
+        retention,
+        endCursor: tail.endCursor,
+      };
+    }
+    const textAt = (sequence: number) => {
+      const row = [...rows, ...tailRows].find((candidate) => candidate.sequence === sequence);
+      return row ? commandOutputRowText(row).text : "";
+    };
+    // Bytes of the rows spanning the omitted middle, less the parts of its
+    // first and last rows that the head and tail already returned.
+    const spanned = await commandOutputBytesInRange(
+      tx,
+      input,
+      headEnd.sequence,
+      tail.start.sequence,
+    );
+    const headPart =
+      headEnd.offset > 0
+        ? Buffer.byteLength(textAt(headEnd.sequence).slice(0, headEnd.offset), "utf8")
+        : 0;
+    const tailPart = Buffer.byteLength(
+      textAt(tail.start.sequence).slice(tail.start.offset),
+      "utf8",
+    );
+    const omittedBytes =
+      headEnd.sequence === tail.start.sequence
+        ? Buffer.byteLength(
+            textAt(headEnd.sequence).slice(headEnd.offset, tail.start.offset),
+            "utf8",
+          )
+        : Math.max(0, spanned - headPart - tailPart);
+    return {
+      ...head,
+      hasMore: true,
+      retention,
+      omitted: { bytes: omittedBytes, cursor: head.nextCursor },
+      tail: { chunks: tail.chunks, cursor: tail.startCursor },
+      endCursor: tail.endCursor,
+    };
+  });
+}
+
 export async function readSessionBackgroundCommandOutput(
   db: Database,
   input: SessionCommandIdentity & {
     cursor?: string | undefined;
     maxOutputBytes?: number | undefined;
+    /** Return the start and end of output larger than the budget (see readCommandOutputWindow). */
+    headAndTail?: boolean | undefined;
   },
 ) {
   const cursor = parseCommandOutputCursor(input.cursor, input.commandId);
@@ -1841,12 +2083,7 @@ export async function readSessionBackgroundCommandOutput(
   projectCommandOutputPage({ ...input, rows: [] });
   const command = await getSessionBackgroundCommand(db, input);
   if (!command) throw new Error("Background command not found in this session");
-  const rows = await withRlsContext(
-    db,
-    input,
-    async (tx) => await commandOutputPageQuery(tx, input, cursor.sequence),
-  );
-  const page = projectCommandOutputPage({ ...input, rows });
+  const page = await readCommandOutputWindow(db, input, cursor);
   // Only observe the terminal state actually used by this read. A finish racing
   // a running read must leave its notification pending.
   const terminal = command.state === "exited" || command.state === "lost";

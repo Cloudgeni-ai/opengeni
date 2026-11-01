@@ -55,7 +55,7 @@ test("temporary live transport failure preserves retained output after API reaut
     observationUnavailable(true),
   ]) {
     const calls: string[] = [];
-    const args = { commandId, cursor: "unchanged", maxOutputBytes: 64, waitSeconds: 45 };
+    const args = { commandId, cursor: "unchanged", maxOutputBytes: 64, waitSeconds: 0 };
     const result = await executeCommandReadWithRefresh({
       toolName: "command_wait",
       args,
@@ -129,7 +129,7 @@ test("a provider read that missed its window returns the durable receipt, never 
   const calls: string[] = [];
   const result = await executeCommandReadWithRefresh({
     toolName: "command_read",
-    args: { commandId },
+    args: { commandId, waitSeconds: 0 },
     call: async (readArgs) => {
       calls.push(`api:${readArgs.waitSeconds}`);
       return receipt(false);
@@ -468,4 +468,119 @@ test("non-owning runtime preserves API-only waiting", async () => {
     refresh: async () => false,
   });
   expect(waits).toEqual([0, 8]);
+});
+
+test("command_read waits by default; new output alone does not end an owned wait", async () => {
+  const waits: unknown[] = [];
+  let refreshes = 0;
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_read",
+    args: { commandId },
+    call: async (args) => {
+      waits.push(args.waitSeconds);
+      return receipt(refreshes >= 3, [{ stream: "stdout", chunk: `output ${refreshes}` }]);
+    },
+    refresh: async () => {
+      refreshes++;
+      return true;
+    },
+  });
+  expect(refreshes).toBe(3);
+  expect(waits).toEqual([0, 0, 1, 0, 1, 0]);
+  expect(snapshot(result)).toMatchObject({ terminal: true, timedOut: false });
+});
+
+test("an API yield ends an owned wait at once", async () => {
+  const waits: unknown[] = [];
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandId, waitSeconds: 20 },
+    call: async (args) => {
+      waits.push(args.waitSeconds);
+      const value = JSON.parse((receipt(false).content[0] as { text: string }).text);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(args.waitSeconds === 1 ? { ...value, yielded: true } : value),
+          },
+        ],
+      };
+    },
+    refresh: async () => true,
+  });
+  expect(waits).toEqual([0, 0, 1]);
+  expect(snapshot(result)).toMatchObject({ yielded: true, timedOut: false });
+});
+
+test("command_wait with several commands refreshes each running one until all settle", async () => {
+  const other = "0c1f4f0e-5d7a-4c2b-9a51-3f0f6b1e2d4c";
+  const terminal = new Set<string>();
+  const refreshed: string[] = [];
+  const many = () => ({
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({
+          commands: [commandId, other].map((id) => ({
+            commandId: id,
+            terminal: terminal.has(id),
+            chunks: [],
+          })),
+          waitFor: "all",
+          waitedMs: 0,
+          timedOut: false,
+        }),
+      },
+    ],
+  });
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandIds: [commandId, other], waitSeconds: 10 },
+    call: async () => many(),
+    refresh: async (id) => {
+      refreshed.push(id);
+      // The first command finishes on its first refresh, the other on its second.
+      if (id === commandId || refreshed.filter((value) => value === other).length >= 2)
+        terminal.add(id);
+      return true;
+    },
+  });
+  expect(refreshed).toEqual([commandId, other, other]);
+  const value = snapshot(result);
+  expect(value.commands.map((command: { terminal: boolean }) => command.terminal)).toEqual([
+    true,
+    true,
+  ]);
+  expect(value.timedOut).toBe(false);
+});
+
+test('waitFor "any" returns once one of several owned commands settles', async () => {
+  const other = "0c1f4f0e-5d7a-4c2b-9a51-3f0f6b1e2d4c";
+  const terminal = new Set<string>();
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandIds: [commandId, other], waitFor: "any", waitSeconds: 10 },
+    call: async () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            commands: [commandId, other].map((id) => ({
+              commandId: id,
+              terminal: terminal.has(id),
+              chunks: [],
+            })),
+          }),
+        },
+      ],
+    }),
+    refresh: async (id) => {
+      if (id === other) terminal.add(id);
+      return true;
+    },
+  });
+  expect(
+    snapshot(result).commands.map((command: { terminal: boolean }) => command.terminal),
+  ).toEqual([false, true]);
 });

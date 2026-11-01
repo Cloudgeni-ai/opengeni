@@ -357,13 +357,17 @@ import {
   type RunOnOp,
 } from "@opengeni/core";
 import {
+  getSessionBackgroundCommand,
   readSessionBackgroundCommandOutput,
   COMMAND_OUTPUT_MAX_BYTES,
 } from "@opengeni/db/session-background-commands";
 import {
   readCommandWithWait,
+  readCommandsWithWait,
+  COMMAND_READ_DEFAULT_SECONDS,
   COMMAND_READ_MAX_WAIT_SECONDS,
   COMMAND_WAIT_DEFAULT_SECONDS,
+  COMMAND_WAIT_MAX_COMMANDS,
 } from "./command-read";
 import {
   boundSessionEventCompactResult,
@@ -6341,49 +6345,133 @@ function registerWorkspaceOrchestrationTools(
     );
 
     if (callerSessionId !== null) {
+      const commandReadNotes =
+        "Output larger than maxOutputBytes (default 16384) returns its start and its end, with the size of the omitted middle and a cursor to read it; pass the end cursor to continue after the newest output. Output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.";
       for (const toolName of ["command_read", "command_wait"] as const) {
+        const multi = toolName === "command_wait";
         server.registerTool(
           toolName,
           {
-            description: `${toolName === "command_read" ? "Read retained output immediately, or briefly wait" : "Briefly wait using the same read operation as command_read"} for one command owned by the current session, across sandbox and Connected Machine providers. Returns bounded stdout/stderr chunks, durable state and exitCode, nextCursor and hasMore, plus explicit retention limitations. Pass nextCursor to continue; output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. waitSeconds is at most 50; command_wait defaults to 45, command_read to 0. These execution-wait limits do not cap wait_for_input: use it for long out-of-turn waits, except pending Codemode calls require observation in the same live attempt. Neither tool sends stdin or cancels the command.`,
+            description: multi
+              ? `Wait for background commands owned by the current session to finish, across sandbox and Connected Machine providers, then read them like command_read. Pass commandId, or commandIds (up to ${COMMAND_WAIT_MAX_COMMANDS}) with waitFor "all" (default) or "any", and optionally the cursor of each command. Returns when the commands finish or after waitSeconds (default ${COMMAND_WAIT_DEFAULT_SECONDS}, at most ${COMMAND_READ_MAX_WAIT_SECONDS}); new output alone does not end the wait. Returns each command's state, exit code and output; the output budget is shared across the commands. ${commandReadNotes}`
+              : `Read a background command owned by the current session, across sandbox and Connected Machine providers. While it runs, waits for it to finish for up to waitSeconds (default ${COMMAND_READ_DEFAULT_SECONDS}, at most ${COMMAND_READ_MAX_WAIT_SECONDS}; pass 0 to read at once); new output alone does not end the wait. Returns state, exit code and output. ${commandReadNotes}`,
             inputSchema: {
-              commandId: z4.string().uuid(),
+              commandId: multi ? z4.string().uuid().optional() : z4.string().uuid(),
+              ...(multi
+                ? {
+                    commandIds: z4
+                      .array(z4.string().uuid())
+                      .min(1)
+                      .max(COMMAND_WAIT_MAX_COMMANDS)
+                      .optional(),
+                    waitFor: z4.enum(["all", "any"]).optional(),
+                    cursors: z4
+                      .array(z4.string().max(128))
+                      .max(COMMAND_WAIT_MAX_COMMANDS)
+                      .optional(),
+                  }
+                : {}),
               cursor: z4.string().max(128).optional(),
               waitSeconds: z4.number().int().min(0).max(COMMAND_READ_MAX_WAIT_SECONDS).optional(),
               maxOutputBytes: z4.number().int().min(4).max(COMMAND_OUTPUT_MAX_BYTES).optional(),
             },
           },
-          async ({ commandId, cursor, waitSeconds, maxOutputBytes }, extra) => {
+          async (args, extra) => {
+            const { commandId, cursor, waitSeconds, maxOutputBytes } = args as {
+              commandId?: string;
+              cursor?: string;
+              waitSeconds?: number;
+              maxOutputBytes?: number;
+            };
+            const { commandIds, waitFor, cursors } = args as {
+              commandIds?: string[];
+              waitFor?: "all" | "any";
+              cursors?: string[];
+            };
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
-            let initialRead = true;
+            const identity = {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId: callerSessionId,
+            };
+            // Every durable check after the first reauthorizes, so a revoked
+            // caller stops waiting at its next recheck.
+            let checks = 0;
+            const reauthorize = async () => {
+              if (checks++ > 0)
+                await authorizeFirstPartySession(
+                  deps,
+                  grant,
+                  callerSessionId,
+                  "session.events.read",
+                );
+            };
+            const isTerminal = async (id: string) => {
+              await reauthorize();
+              const command = await getSessionBackgroundCommand(deps.db, {
+                ...identity,
+                commandId: id,
+              });
+              if (!command) throw new Error("Background command not found in this session");
+              return command.state === "exited" || command.state === "lost";
+            };
+            const readOutput = async (
+              id: string,
+              idCursor: string | undefined,
+              budget: number | undefined,
+            ) =>
+              await readSessionBackgroundCommandOutput(deps.db, {
+                ...identity,
+                commandId: id,
+                ...(idCursor === undefined ? {} : { cursor: idCursor }),
+                ...(budget === undefined ? {} : { maxOutputBytes: budget }),
+                headAndTail: true,
+              });
+            const controls = {
+              waitSeconds:
+                waitSeconds ??
+                (multi ? COMMAND_WAIT_DEFAULT_SECONDS : COMMAND_READ_DEFAULT_SECONDS),
+              ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+              ...(extra?.signal === undefined ? {} : { signal: extra.signal }),
+              subscribe: (onEvents: Parameters<typeof deps.bus.subscribe>[2]) =>
+                deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
+              yieldTo: async () => await callerTurnSteerPending(callerSessionId),
+            };
+            if (commandIds === undefined) {
+              if (commandId === undefined) throw new Error("Pass commandId or commandIds");
+              return json(
+                await readCommandWithWait({
+                  ...controls,
+                  commandId,
+                  isTerminal: async () => await isTerminal(commandId),
+                  read: async () => {
+                    await reauthorize();
+                    return await readOutput(commandId, cursor, maxOutputBytes);
+                  },
+                }),
+              );
+            }
+            const ids = [
+              ...new Set([...(commandId === undefined ? [] : [commandId]), ...commandIds]),
+            ];
+            // Each cursor names its own command; match them up by that prefix.
+            const cursorById = new Map<string, string>();
+            for (const value of [...(cursor === undefined ? [] : [cursor]), ...(cursors ?? [])]) {
+              const owner = ids.find((id) => value.startsWith(`${id}:`));
+              if (owner === undefined)
+                throw new Error("Each cursor must belong to one of the listed commands");
+              cursorById.set(owner, value);
+            }
             return json(
-              await readCommandWithWait({
-                commandId,
-                waitSeconds:
-                  waitSeconds ?? (toolName === "command_wait" ? COMMAND_WAIT_DEFAULT_SECONDS : 0),
-                ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
-                ...(extra?.signal === undefined ? {} : { signal: extra.signal }),
-                read: async () => {
-                  if (!initialRead)
-                    await authorizeFirstPartySession(
-                      deps,
-                      grant,
-                      callerSessionId,
-                      "session.events.read",
-                    );
-                  initialRead = false;
-                  return await readSessionBackgroundCommandOutput(deps.db, {
-                    accountId: grant.accountId,
-                    workspaceId: grant.workspaceId,
-                    sessionId: callerSessionId,
-                    commandId,
-                    ...(cursor === undefined ? {} : { cursor }),
-                    ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
-                  });
+              await readCommandsWithWait({
+                ...controls,
+                commandIds: ids,
+                ...(waitFor === undefined ? {} : { waitFor }),
+                isTerminal,
+                read: async (id, budget) => {
+                  await reauthorize();
+                  return await readOutput(id, cursorById.get(id), budget);
                 },
-                subscribe: (onEvents) =>
-                  deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
-                yieldTo: async () => await callerTurnSteerPending(callerSessionId),
               }),
             );
           },

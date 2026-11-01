@@ -16014,13 +16014,66 @@ export const CommandReadResult = /* @__PURE__ */ (() =>
         completeness: z.literal("unknown"),
         gaps: z.array(primitives.string),
       }),
+      // Output larger than the budget: `chunks` is its start, `tail` its end,
+      // and `omitted` the middle between them. `nextCursor` then points at the
+      // omitted middle, so paging from it still returns every byte.
+      omitted: z
+        .object({ bytes: primitives.nonnegativeInteger, cursor: primitives.string })
+        .strict()
+        .optional(),
+      tail: z
+        .object({
+          chunks: z
+            .array(
+              z.object({
+                sequence: primitives.nonnegativeInteger,
+                stream: z.enum(["stdout", "stderr"]),
+                streamFidelity: z.enum(["separate", "merged", "unknown"]),
+                chunk: primitives.string,
+              }),
+            )
+            .max(64),
+          cursor: primitives.string,
+        })
+        .strict()
+        .optional(),
+      /** Cursor after the newest retained output: read from it for new output only. */
+      endCursor: primitives.string.optional(),
+      notice: primitives.string.optional(),
       waitedMs: z.number().nonnegative(),
       timedOut: primitives.boolean,
       aborted: primitives.boolean,
       liveFanout: primitives.boolean,
+      /** The wait ended early so the caller's turn can take a pending Steer. */
+      yielded: z.literal(true).optional(),
     })
     .strict())();
 export type CommandReadResult = z.infer<typeof CommandReadResult>;
+
+/** command_wait over several commands (`commandIds`). */
+export const CommandWaitManyResult = /* @__PURE__ */ (() =>
+  z
+    .object({
+      commands: z
+        .array(
+          CommandReadResult.omit({
+            waitedMs: true,
+            timedOut: true,
+            aborted: true,
+            liveFanout: true,
+            yielded: true,
+          }),
+        )
+        .max(8),
+      waitFor: z.enum(["all", "any"]),
+      waitedMs: z.number().nonnegative(),
+      timedOut: primitives.boolean,
+      aborted: primitives.boolean,
+      liveFanout: primitives.boolean,
+      yielded: z.literal(true).optional(),
+    })
+    .strict())();
+export type CommandWaitManyResult = z.infer<typeof CommandWaitManyResult>;
 
 export const SessionBackgroundCommandListResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ commands: z.array(SessionBackgroundCommand).max(1000) }).strict(),

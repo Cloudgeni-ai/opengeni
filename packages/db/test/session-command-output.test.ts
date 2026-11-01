@@ -440,3 +440,135 @@ test("a replay that changes a captured part is rejected without inserting anythi
     await shared.admin`select count(*)::int as n from session_events where session_id=${sessionId} and type='sandbox.command.output.delta' and payload->>'commandId'=${identity.commandId}`;
   expect(count!.n).toBe(1);
 });
+
+test("a head-and-tail read returns the start and end of large output, and paging still visits every byte", async () => {
+  const identity = await connected();
+  const lines = Array.from({ length: 300 }, (_, index) => `line ${index} ${"x".repeat(60)}\n`);
+  for (const [index, line] of lines.entries()) {
+    await appendSessionCommandOutput(client.db, {
+      ...identity,
+      chunkId: `op-frame:${index}`,
+      stream: index % 7 === 0 ? ("stderr" as const) : ("stdout" as const),
+      chunk: line,
+    });
+  }
+  const full = lines.join("");
+  const read = await readSessionBackgroundCommandOutput(client.db, {
+    ...identity,
+    maxOutputBytes: 4096,
+    headAndTail: true,
+  });
+  expect(
+    CommandReadResult.safeParse({
+      ...read,
+      waitedMs: 0,
+      timedOut: false,
+      aborted: false,
+      liveFanout: true,
+    }).success,
+  ).toBe(true);
+  const head = read.chunks.map((item) => item.chunk).join("");
+  const tail = (read as { tail?: { chunks: Array<{ chunk: string }> } })
+    .tail!.chunks.map((item) => item.chunk)
+    .join("");
+  const omitted = (read as { omitted?: { bytes: number; cursor: string } }).omitted!;
+  expect(full.startsWith(head)).toBe(true);
+  expect(full.endsWith(tail)).toBe(true);
+  expect(head.startsWith("line 0 ")).toBe(true);
+  expect(tail.endsWith(`line 299 ${"x".repeat(60)}\n`)).toBe(true);
+  expect(Buffer.byteLength(head) + Buffer.byteLength(tail)).toBeLessThanOrEqual(4096);
+  expect(Buffer.byteLength(head) + Buffer.byteLength(tail)).toBeGreaterThan(4000);
+  expect(omitted.bytes).toBe(
+    Buffer.byteLength(full) - Buffer.byteLength(head) - Buffer.byteLength(tail),
+  );
+  expect(read.hasMore).toBe(true);
+  expect(read.nextCursor).toBe(omitted.cursor);
+  expect(read.terminal).toBe(false);
+  expect(read.completionObservedAt).toBeNull();
+
+  // Paging on from nextCursor, as programmatic callers do, recovers everything.
+  let recovered = head;
+  let cursor: string | undefined = read.nextCursor;
+  while (cursor) {
+    const page = await readSessionBackgroundCommandOutput(client.db, {
+      ...identity,
+      cursor,
+      maxOutputBytes: 4096,
+      headAndTail: true,
+    });
+    recovered += page.chunks.map((item) => item.chunk).join("");
+    cursor = page.hasMore ? page.nextCursor : undefined;
+  }
+  expect(recovered).toBe(full);
+
+  // endCursor follows the newest output: nothing new, then only the new frame.
+  const endCursor = (read as { endCursor?: string }).endCursor!;
+  const quiet = await readSessionBackgroundCommandOutput(client.db, {
+    ...identity,
+    cursor: endCursor,
+    headAndTail: true,
+  });
+  expect(quiet.chunks).toEqual([]);
+  expect(quiet.hasMore).toBe(false);
+  await appendSessionCommandOutput(client.db, {
+    ...identity,
+    chunkId: "op-frame:new",
+    stream: "stdout",
+    chunk: "fresh\n",
+  });
+  const fresh = await readSessionBackgroundCommandOutput(client.db, {
+    ...identity,
+    cursor: endCursor,
+    headAndTail: true,
+  });
+  expect(fresh.chunks.map((item) => item.chunk).join("")).toBe("fresh\n");
+  expect(fresh.hasMore).toBe(false);
+});
+
+test("a head-and-tail read of one oversized frame keeps both ends of that frame", async () => {
+  const identity = await connected();
+  const chunk = `START${"🙂".repeat(5_000)}END`;
+  await appendSessionCommandOutput(client.db, {
+    ...identity,
+    chunkId: "op-frame:big",
+    stream: "stdout",
+    chunk,
+  });
+  const read = await readSessionBackgroundCommandOutput(client.db, {
+    ...identity,
+    maxOutputBytes: 1001,
+    headAndTail: true,
+  });
+  const head = read.chunks.map((item) => item.chunk).join("");
+  const tail = (read as { tail?: { chunks: Array<{ chunk: string }> } })
+    .tail!.chunks.map((item) => item.chunk)
+    .join("");
+  const omitted = (read as { omitted?: { bytes: number } }).omitted!;
+  expect(head.startsWith("START")).toBe(true);
+  expect(tail.endsWith("END")).toBe(true);
+  expect(chunk.startsWith(head) && chunk.endsWith(tail)).toBe(true);
+  expect(Buffer.byteLength(head) + Buffer.byteLength(tail)).toBeLessThanOrEqual(1001);
+  expect(omitted.bytes).toBe(
+    Buffer.byteLength(chunk) - Buffer.byteLength(head) - Buffer.byteLength(tail),
+  );
+});
+
+test("a head-and-tail read of output within the budget returns it whole", async () => {
+  const identity = await connected();
+  for (const [index, line] of ["one\n", "two\n", "three\n"].entries()) {
+    await appendSessionCommandOutput(client.db, {
+      ...identity,
+      chunkId: `op-frame:${index}`,
+      stream: "stdout",
+      chunk: line,
+    });
+  }
+  const read = await readSessionBackgroundCommandOutput(client.db, {
+    ...identity,
+    headAndTail: true,
+  });
+  expect(read.chunks.map((item) => item.chunk).join("")).toBe("one\ntwo\nthree\n");
+  expect(read.hasMore).toBe(false);
+  expect((read as { omitted?: unknown }).omitted).toBeUndefined();
+  expect((read as { endCursor?: string }).endCursor).toBe(read.nextCursor);
+});
