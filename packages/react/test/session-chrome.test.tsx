@@ -825,6 +825,31 @@ describe("SessionChrome", () => {
     expect(mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')).toBeNull();
   });
 
+  test("keeps the stopping status on one line beside Activity at the rail's end", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        composer={composer({ stoppingAttempt: "current" })}
+        commandsCount={2}
+        commandsPanel={<div />}
+      />,
+    );
+
+    const stopping = mounted.container.querySelector<HTMLElement>(
+      '[data-testid="session-chrome-stopping"]',
+    )!;
+    const activity = mounted.container.querySelector<HTMLElement>(
+      '[aria-label="Session activity"]',
+    )!;
+    // A crowded rail clips its end, and wrapping would grow the row: the status
+    // takes the free space just before Activity and truncates instead of wrapping.
+    expect(stopping.nextElementSibling).toBe(activity);
+    expect(stopping.className).toContain("ml-auto");
+    expect(stopping.className).toContain("whitespace-nowrap");
+    expect(stopping.getAttribute("title")).toBe("Current work stopping");
+    expect(activity.className).not.toContain("ml-auto");
+  });
+
   test("shows stopping even when no Steer is queued", async () => {
     mounted = await renderComponent(
       <SessionChrome

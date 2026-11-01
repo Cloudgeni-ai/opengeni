@@ -17,6 +17,10 @@ import { chromium, type Browser, type BrowserContext, type Locator, type Page } 
 import { NUMERIC_PERFORMANCE_BUDGETS } from "./workbench-acceptance-contract";
 import { isRecord } from "@opengeni/contracts/values";
 
+/** Release acceptance runs this script exactly as committed. Change it here,
+ * together with the product, and keep this line unchanged. */
+export const workbenchAcceptanceOwnership = "opengeni-workbench-acceptance-source-owned-v1";
+
 const WORKBENCH_CANARY_PERMISSIONS = [
   "workspace:read",
   "sessions:create",
@@ -50,7 +54,6 @@ const TERMINAL_SELECTOR = "[data-opengeni-terminal]";
 const INTERACTIVE_TERMINAL_SELECTOR =
   '[data-opengeni-terminal][data-opengeni-terminal-status="open"]' +
   '[data-opengeni-terminal-interactive="true"]';
-const SESSION_CHROME_STOPPING_TEST_ID = "session-chrome-stopping";
 const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
 const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
   "performance.capture-usable-workbench",
@@ -132,10 +135,17 @@ type Measurement = {
   worst: number;
 };
 
+type BrowserRequestFailure = {
+  method: string;
+  errorText: string;
+  path: string;
+  resourceType: string;
+};
+
 type BrowserProblems = {
   console: string[];
   page: string[];
-  failedRequests: string[];
+  failedRequests: BrowserRequestFailure[];
   badResponses: string[];
   channelA: string[];
 };
@@ -339,11 +349,12 @@ async function main(): Promise<void> {
 
   const cookieClient = new OpenGeniClient({
     baseUrl: args.apiUrl,
+    fetch: retryableIdempotentAcceptanceFetch,
     headers: { cookie: cookieHeader },
   });
   const marker = `OPENGENI_WORKBENCH_${args.runId.replaceAll("-", "_").toUpperCase()}`;
   const session = await cookieClient.createSession(workspaceId, {
-    initialMessage: fixturePrompt(marker),
+    startMode: "realtime",
     model: args.model,
     reasoningEffort: "low",
     sandboxBackend: args.backend,
@@ -358,6 +369,19 @@ async function main(): Promise<void> {
       acceptanceSourceSha: args.sourceSha,
     },
   });
+  const setup = await cookieClient.terminalExec(workspaceId, session.id, {
+    command: fixtureSetupScript(marker),
+    cwd: "",
+    timeoutMs: 60_000,
+    emitStream: false,
+  });
+  if (setup.exitCode !== 0) throw new Error("harness fixture setup failed before the model turn");
+  const fixtureAccepted = await cookieClient.sendMessage(workspaceId, session.id, {
+    text: fixturePrompt(marker),
+    controlEtag: (await cookieClient.getQueue(workspaceId, session.id)).effectiveControl
+      .controlEtag,
+    clientEventId: "workbench-fixture-edit:" + crypto.randomUUID(),
+  });
   const settled = await waitForSettled(
     cookieClient,
     workspaceId,
@@ -368,7 +392,7 @@ async function main(): Promise<void> {
     throw new Error(`acceptance fixture turn ended in ${settled.status}`);
   }
   const fixtureToolOutputs = await listAllToolOutputEvents(cookieClient, workspaceId, session.id);
-  assertFixtureToolOutput(fixtureToolOutputs, marker);
+  assertFixtureModelPatch(fixtureToolOutputs, marker, fixtureAccepted.id);
   pass(checks, "functional.real-turn", "A real authenticated Modal turn settled successfully.");
 
   const captureResponse = await waitForCapture(
@@ -396,7 +420,7 @@ async function main(): Promise<void> {
   pass(
     checks,
     "functional.real-cold-lease",
-    "The real Modal lease completed teardown and reached cold before UI review.",
+    "The real Modal lease reached a dormant cold/draining state before UI review.",
   );
 
   const captureApiRegionProbe = await runCaptureApiRegionalProbe(
@@ -435,15 +459,55 @@ async function main(): Promise<void> {
       const page = await context.newPage();
       const problems = observePage(page);
       const started = performance.now();
-      await page.goto(sessionUrl(args.webUrl, workspaceId, session.id), {
-        waitUntil: "domcontentloaded",
-        timeout: 45_000,
-      });
-      await openWorkspaceIfCollapsed(page);
-      await assertChangesDefaultVisible(page);
-      navigationSamples.push(performance.now() - started);
-      assertNoProblems(problems, true);
-      await context.close();
+      let navigationFailed = false;
+      try {
+        await page.goto(sessionUrl(args.webUrl, workspaceId, session.id), {
+          waitUntil: "domcontentloaded",
+          timeout: 45_000,
+        });
+        await openWorkspaceIfCollapsed(page);
+        await assertChangesDefaultVisible(page);
+        navigationSamples.push(performance.now() - started);
+        assertNoProblems(problems, true);
+      } catch (error) {
+        navigationFailed = true;
+        // This is the run-owned synthetic canary, never a human conversation.
+        // Do not retain cookies, storage state, headers, or a network trace.
+        try {
+          await writeFile(
+            resolve(args.outputDir, "workbench-navigation-failure.json"),
+            JSON.stringify(
+              {
+                schemaVersion: "opengeni/workbench-navigation-failure/v1",
+                sampleIndex: index,
+                elapsedMs: performance.now() - started,
+                path: safePath(page.url()),
+                error: error instanceof Error ? error.message : String(error),
+                problems,
+              },
+              null,
+              2,
+            ) + "\n",
+          );
+        } catch {
+          console.error("Could not retain workbench navigation failure metadata.");
+        }
+        try {
+          await page.screenshot({
+            path: resolve(args.outputDir, "workbench-navigation-failure.png"),
+            fullPage: true,
+            timeout: 5_000,
+          });
+        } catch {
+          console.error("Could not retain workbench navigation failure screenshot.");
+        }
+        throw error;
+      } finally {
+        await context.close().catch((error: unknown) => {
+          if (!navigationFailed) throw error;
+          console.error("Could not close the failed workbench navigation context.");
+        });
+      }
     }
     captureUsableWorkbench = measurement(navigationSamples);
     if (captureUsableWorkbench.p95 > CAPTURE_USABLE_WORKBENCH_P95_MS) {
@@ -494,13 +558,13 @@ async function main(): Promise<void> {
     }
 
     const afterPassiveBrowser = await cookieClient.getStreamCapabilities(workspaceId, session.id);
-    if (afterPassiveBrowser.liveness !== "cold") {
+    if (!isDormantSandboxLiveness(afterPassiveBrowser.liveness)) {
       throw new Error("passive browser acceptance unexpectedly warmed the sandbox");
     }
     pass(
       checks,
       "functional.capture-cold-zero-channel-a",
-      "Fresh desktop/mobile browsers rendered capture-backed Changes and Files with zero Channel-A requests and left the lease cold.",
+      "Fresh desktop/mobile browsers rendered capture-backed Changes and Files with zero Channel-A requests and left the lease dormant.",
     );
 
     const liveFlow = await runLiveWorkspaceFlow({
@@ -515,6 +579,7 @@ async function main(): Promise<void> {
       artifacts,
     });
     controlCancellation = measurement(liveFlow.controlCancellationSamples);
+    await cleanupControlFixtures(cookieClient, workspaceId, session.id);
   } finally {
     await browser.close();
   }
@@ -576,9 +641,15 @@ function maximumMillisecondBudget(requirementId: string, statistic: "p95" | "wor
   return budget.limit;
 }
 
-export function fixturePrompt(marker: string): string {
+export function fixtureSetupScript(marker: string): string {
   const script = String.raw`set -euo pipefail
-rm -rf api web web-linked nested
+# opengeni-acceptance-fixture-empty-path-guard-v1
+for path in api web web-linked nested; do
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    printf 'acceptance fixture path already exists: %s\n' "$path" >&2
+    exit 1
+  fi
+done
 mkdir -p api web nested/deep/repo
 git -C api init -q
 git -C api config user.email canary@opengeni.dev
@@ -591,7 +662,6 @@ printf '#!/bin/sh\necho base\n' > api/run.sh
 chmod +x api/run.sh
 git -C api add -A
 git -C api commit -q -m base
-printf 'export const marker = "${marker}";\nexport const status = 204;\n' > api/server.ts
 printf 'untracked ${marker}\n' > api/notes.txt
 : > api/empty.txt
 printf '\000\001\376\377' > api/binary.dat
@@ -641,13 +711,1326 @@ git -C api status --porcelain
 git -C web status --porcelain
 git -C web-linked status --porcelain
 git -C nested/deep/repo status --porcelain`;
+  return script;
+}
+
+// opengeni-harness-owned-model-fixture-v1
+const fixtureInspectionCommands = [
+  "pwd; rg --files -g AGENTS.md -g server.ts -g '!node_modules' -g '!vendor'",
+  "ls -la /workspace/AGENTS.md /workspace/api/AGENTS.md; cat api/server.ts",
+] as const;
+
+export function fixturePrompt(marker: string): string {
   return [
-    "Run this exact bash script once in the workspace root. Do not alter, summarize, or split it.",
-    "After the command succeeds, stop. The exact final marker must be present.",
-    "```bash",
-    script,
-    "```",
+    "The acceptance harness has prepared deterministic test repositories in the workspace.",
+    "If you need to inspect paths, repository instructions or the initial file before editing, use only these read-only commands (each at most once): " +
+      fixtureInspectionCommands.map((command) => JSON.stringify(command)).join(" or ") +
+      ". Do not run other preliminary commands.",
+    "Use the apply_patch tool to update only api/server.ts: replace the marker BASE with " +
+      marker +
+      " and status 200 with 204. Preserve the two lines and final newline exactly.",
+    "Then run a read-only terminal command: cat api/server.ts. The file must contain the exact marker. Do not use shell writes, regenerate the fixture, commit, or modify other files. Stop after verification.",
   ].join("\n");
+}
+
+export async function readFixtureEventPage(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  after: number,
+) {
+  const page = await client.listEventPage(workspaceId, sessionId, {
+    after,
+    limit: 500,
+    mode: "forensic",
+    payloadMode: "full",
+    direction: "after",
+  });
+  if (
+    page.mode !== "forensic" ||
+    page.payloadMode !== "full" ||
+    page.direction !== "after" ||
+    page.forensicExact !== true ||
+    typeof page.hasMore !== "boolean"
+  )
+    throw new Error("fixture history requires exact full forensic pages");
+  let last = after;
+  for (const event of page.events) {
+    if (!Number.isSafeInteger(event.sequence) || event.sequence <= last)
+      throw new Error("fixture history page is not strictly advancing");
+    last = event.sequence;
+  }
+  const nextAfter = page.nextAfter ?? after;
+  if (
+    !Number.isSafeInteger(nextAfter) ||
+    nextAfter < last ||
+    (page.hasMore && nextAfter <= after)
+  ) {
+    throw new Error("fixture history continuation is missing or non-advancing");
+  }
+  return { ...page, nextAfter };
+}
+
+export function assertFixtureModelPatch(
+  events: readonly SessionEvent[],
+  marker: string,
+  acceptedEventId: string,
+): void {
+  const accepted = events.find(
+    (event) => event.id === acceptedEventId && event.type === "user.message",
+  );
+  if (!accepted) throw new Error("fixture accepted user message is absent from canonical events");
+  const started = events.filter(
+    (event) =>
+      event.type === "turn.started" &&
+      event.sequence > accepted.sequence &&
+      (event.payload as any)?.triggerEventId === acceptedEventId,
+  );
+  if (started.length !== 1 || !started[0]!.turnId || !started[0]!.turnAttemptId) {
+    throw new Error("fixture model turn identity is absent or ambiguous");
+  }
+  const turn = started[0]!;
+  const owned = events.filter(
+    (event) =>
+      event.turnId === turn.turnId &&
+      event.turnAttemptId === turn.turnAttemptId &&
+      event.sequence > turn.sequence,
+  );
+  const completed = owned.filter((event) => event.type === "turn.completed");
+  if (completed.length !== 1) throw new Error("fixture model turn did not complete uniquely");
+  // A correct final read is not authorship proof. Permit only bounded, exact
+  // read-only inspection before the patch, then the patch and its final read.
+  // This is not a generic shell-read classifier: every other call still fails.
+  const calls = events
+    .filter(
+      (event) =>
+        event.type === "agent.toolCall.created" &&
+        event.sequence > turn.sequence &&
+        event.sequence < completed[0]!.sequence,
+    )
+    .sort((a, b) => a.sequence - b.sequence);
+  if (
+    calls.length < 2 ||
+    calls.length > 2 + fixtureInspectionCommands.length ||
+    calls.some(
+      (call) =>
+        call.turnId !== turn.turnId ||
+        call.turnAttemptId !== turn.turnAttemptId ||
+        typeof (call.payload as any)?.id !== "string" ||
+        !(call.payload as any).id,
+    ) ||
+    new Set(calls.map((call) => (call.payload as any).id)).size !== calls.length
+  ) {
+    throw new Error("fixture contains extra or unowned mutation-capable calls");
+  }
+  const argsOf = (call: SessionEvent): any => {
+    const args = (call.payload as any)?.arguments;
+    if (typeof args !== "string") return args;
+    try {
+      return JSON.parse(args);
+    } catch {
+      return null;
+    }
+  };
+  const outputOf = (call: SessionEvent): SessionEvent | undefined => {
+    const outputs = events.filter(
+      (event) =>
+        event.type === "agent.toolCall.output" &&
+        event.sequence > call.sequence &&
+        event.sequence < completed[0]!.sequence &&
+        (event.payload as any)?.id === (call.payload as any)?.id,
+    );
+    return outputs.length === 1 &&
+      outputs[0]!.turnId === turn.turnId &&
+      outputs[0]!.turnAttemptId === turn.turnAttemptId
+      ? outputs[0]
+      : undefined;
+  };
+  const patch = calls.at(-2)!;
+  const inspections = calls.slice(0, -2);
+  const inspectedCommands = new Set<string>();
+  for (let index = 0; index < inspections.length; index += 1) {
+    const inspection = inspections[index]!;
+    const args = argsOf(inspection);
+    const output = outputOf(inspection);
+    const next = inspections[index + 1] ?? patch;
+    if (
+      (inspection.payload as any)?.name !== "exec_command" ||
+      !fixtureInspectionCommands.some((command) => args?.cmd === command) ||
+      inspectedCommands.has(args.cmd) ||
+      args.shell != null ||
+      ![undefined, null, "", "/workspace"].includes(args.workdir) ||
+      ![undefined, null, false].includes(args.login) ||
+      ![undefined, null, false].includes(args.tty) ||
+      !Object.keys(args).every((key) =>
+        ["cmd", "workdir", "shell", "login", "tty", "yield_time_ms", "max_output_tokens"].includes(
+          key,
+        ),
+      ) ||
+      !output ||
+      output.sequence >= next.sequence ||
+      typeof (output.payload as any)?.output !== "string" ||
+      !/^Process exited with code 0$/mu.test((output.payload as any).output) ||
+      /^Process running with session ID|^Command ID:/mu.test((output.payload as any).output)
+    ) {
+      throw new Error(
+        "fixture contains extra or unowned mutation-capable calls: invalid pre-patch inspection",
+      );
+    }
+    inspectedCommands.add(args.cmd);
+  }
+  const patchArgs = argsOf(patch);
+  const patchOutput = outputOf(patch);
+  const before = 'export const marker = "BASE";\nexport const status = 200;\n';
+  const expected = 'export const marker = "' + marker + '";\nexport const status = 204;\n';
+  // Parse the bounded two-line patch grammar. Filenames in hunk content,
+  // additions/deletions/moves, extra targets, and partial/context-only edits
+  // cannot attest the requested transition. Both native path forms are valid.
+  const lines: string[] =
+    typeof patchArgs?.patch === "string" ? patchArgs.patch.replace(/\n$/, "").split("\n") : [];
+  const hunk = lines.slice(3, -1);
+  const patchValid =
+    patchArgs &&
+    Object.keys(patchArgs).length === 1 &&
+    lines[0] === "*** Begin Patch" &&
+    ["*** Update File: api/server.ts", "*** Update File: /workspace/api/server.ts"].includes(
+      lines[1]!,
+    ) &&
+    lines[2] === "@@" &&
+    lines.at(-1) === "*** End Patch" &&
+    hunk.length > 0 &&
+    hunk.every((line) => /^[ +-]/.test(line)) &&
+    hunk
+      .filter((line) => line[0] !== "+")
+      .map((line) => line.slice(1) + "\n")
+      .join("") === before &&
+    hunk
+      .filter((line) => line[0] !== "-")
+      .map((line) => line.slice(1) + "\n")
+      .join("") === expected;
+  if (
+    (patch.payload as any)?.name !== "apply_patch" ||
+    !patchValid ||
+    !patchOutput ||
+    (patchOutput.payload as any)?.output !== "Patch applied."
+  ) {
+    throw new Error("fixture lacks successful apply_patch proof owned by its accepted model turn");
+  }
+  const read = calls.at(-1)!;
+  const args = argsOf(read);
+  const result = (outputOf(read)?.payload as any)?.output;
+  const verified =
+    (read.payload as any)?.name === "exec_command" &&
+    read.sequence > patchOutput.sequence &&
+    args?.cmd === "cat api/server.ts" &&
+    args.shell == null &&
+    [undefined, null, "", "/workspace"].includes(args.workdir) &&
+    Object.keys(args).every((key) =>
+      ["cmd", "workdir", "shell", "login", "tty", "yield_time_ms", "max_output_tokens"].includes(
+        key,
+      ),
+    ) &&
+    typeof result === "string" &&
+    /^Process exited with code 0$/mu.test(result) &&
+    result.endsWith("Output:\n" + expected);
+  if (!verified) throw new Error("fixture lacks successful read-only verification after its patch");
+}
+export function fixtureShellQuote(value: string): string {
+  return "'" + value.replaceAll("'", "'\"'\"'") + "'";
+}
+
+export function controlFixtureProgram(
+  marker: string,
+  mode: "steer" | "pause",
+  iteration: number,
+): string {
+  if (
+    !/^OPENGENI_WORKBENCH_[A-Z0-9_]+$/.test(marker) ||
+    !Number.isSafeInteger(iteration) ||
+    iteration < 0
+  ) {
+    throw new Error("invalid owned control fixture identity");
+  }
+  if (mode !== "steer" && mode !== "pause") throw new Error("invalid control fixture mode");
+  const controlMarker =
+    mode === "steer" ? "CONTROL_READY_" + marker + "_" + iteration : "PAUSE_READY_" + marker;
+  const zombiePath =
+    mode === "steer"
+      ? "steer-stress/zombie-" + iteration + ".txt"
+      : "pause-stress/zombie-pause.txt";
+  // Steer returns control and leaves an agent-started command running as a
+  // session background command (Modal adopts every agent exec, including bare
+  // shells). Physically stopping a hostile process is Pause's job, so only the
+  // Pause program ignores INT/TERM and writes a delayed zombie artifact. The
+  // Steer program stays active until the harness releases it after the Steer
+  // (bounded at 120s), so the model's wait is still running when the harness
+  // steers. It writes nothing except consuming the harness release file.
+  if (mode === "steer") {
+    const release = fixtureShellQuote(controlFixtureReleasePath(marker, iteration));
+    return [
+      "#!/bin/bash",
+      "set -euo pipefail",
+      "# Harness-owned Steer test: waits (bounded) for the harness release file and writes nothing.",
+      "test ! -e " + fixtureShellQuote(zombiePath),
+      "test ! -L " + fixtureShellQuote(zombiePath),
+      'test "$(find steer-stress -type f | wc -l)" -ge 4350',
+      "printf '%s\\n' " + fixtureShellQuote(controlMarker),
+      "for _ in $(seq 1 240); do",
+      "  if [ -f " +
+        release +
+        " ] && [ ! -L " +
+        release +
+        " ]; then rm -f -- " +
+        release +
+        "; exit 0; fi",
+      "  sleep 0.5",
+      "done",
+      "",
+    ].join("\n");
+  }
+  return [
+    "#!/bin/bash",
+    "set -euo pipefail",
+    "# Harness-owned cancellation test: the delayed artifact detects a surviving process.",
+    "if mkdir pause-stress/claimed 2>/dev/null; then",
+    "printf '%s\\n' " + fixtureShellQuote(controlMarker),
+    "trap '' INT TERM",
+    "sleep 30",
+    "printf zombie > " + fixtureShellQuote(zombiePath),
+    "else",
+    "printf '%s\\n' " + fixtureShellQuote("PAUSE_RESUMED_SAFE_" + marker),
+    "fi",
+    "",
+  ].join("\n");
+}
+
+export function controlFixtureSetup(
+  marker: string,
+  mode: "steer" | "pause",
+  iteration: number,
+): { command: string; terminalCommand: string; path: string } {
+  const program = controlFixtureProgram(marker, mode, iteration);
+  const directory = mode + "-stress/.opengeni-acceptance-" + marker + "-" + iteration;
+  const path = directory + "/control-test.sh";
+  const quotedPath = fixtureShellQuote(path);
+  const command = [
+    "set -euo pipefail",
+    ...(mode === "steer" && iteration === 0
+      ? [
+          "test ! -e steer-stress && test ! -L steer-stress",
+          "mkdir steer-stress",
+          'for d in $(seq 1 150); do mkdir "steer-stress/d$d"; for f in $(seq 1 29); do : > "steer-stress/d$d/f$f.ts"; done; done',
+        ]
+      : mode === "pause"
+        ? ["test ! -e pause-stress && test ! -L pause-stress", "mkdir pause-stress"]
+        : []),
+    "test -d " +
+      fixtureShellQuote(mode + "-stress") +
+      " && test ! -L " +
+      fixtureShellQuote(mode + "-stress"),
+    // mkdir is intentionally exclusive: no existing path (even identical bytes)
+    // is adopted or overwritten, and no broad cleanup is permitted.
+    "mkdir -m 700 " + fixtureShellQuote(directory),
+    "printf '%s' " + fixtureShellQuote(program) + " > " + quotedPath,
+    "chmod 500 " + quotedPath,
+    'test "$(sha256sum ' +
+      quotedPath +
+      " | cut -d ' ' -f 1)\" = " +
+      fixtureShellQuote(createHash("sha256").update(program).digest("hex")),
+  ].join("\n");
+  return { command, terminalCommand: "bash " + quotedPath, path };
+}
+
+const installedControlFixtures = new Map<
+  string,
+  { workspaceId: string; sessionId: string; digest: string }
+>();
+
+export async function cleanupControlFixtures(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  for (const [path, owner] of installedControlFixtures) {
+    if (owner.workspaceId !== workspaceId || owner.sessionId !== sessionId) continue;
+    const directory = path.slice(0, path.lastIndexOf("/"));
+    const quoted = fixtureShellQuote(path);
+    const command = [
+      "set -euo pipefail",
+      "test ! -L " + fixtureShellQuote(path.split("/")[0]!),
+      "if [ ! -e " +
+        fixtureShellQuote(directory) +
+        " ] && [ ! -L " +
+        fixtureShellQuote(directory) +
+        " ]; then exit 0; fi",
+      "test ! -L " + fixtureShellQuote(directory),
+      "test ! -L " + quoted,
+      'test "$(sha256sum ' + quoted + " | cut -d ' ' -f 1)\" = " + fixtureShellQuote(owner.digest),
+      'test "$(find ' + fixtureShellQuote(directory) + ' -mindepth 1 -maxdepth 1 | wc -l)" -eq 1',
+      "rm -- " + quoted,
+      "rmdir -- " + fixtureShellQuote(directory),
+    ].join("\n");
+    const result = await client.terminalExec(workspaceId, sessionId, {
+      command,
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    if (result.exitCode !== 0)
+      throw new Error("owned control fixture cleanup refused changed bytes or extra paths");
+    installedControlFixtures.delete(path);
+  }
+}
+
+export async function installControlFixture(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  marker: string,
+  mode: "steer" | "pause",
+  iteration: number,
+): Promise<string> {
+  const fixture = controlFixtureSetup(marker, mode, iteration);
+  const result = await client.terminalExec(workspaceId, sessionId, {
+    command: fixture.command,
+    cwd: "",
+    timeoutMs: 60_000,
+    emitStream: false,
+  });
+  if (result.exitCode !== 0)
+    throw new Error("could not install the exclusive harness-owned control fixture");
+  installedControlFixtures.set(fixture.path, {
+    workspaceId,
+    sessionId,
+    digest: createHash("sha256")
+      .update(controlFixtureProgram(marker, mode, iteration))
+      .digest("hex"),
+  });
+  return fixture.terminalCommand;
+}
+
+// The harness release file for one Steer test command. It lives beside the
+// test tree, outside the exact-owner fixture directory, and the test command
+// consumes it.
+export function controlFixtureReleasePath(marker: string, iteration: number): string {
+  if (
+    !/^OPENGENI_WORKBENCH_[A-Z0-9_]+$/.test(marker) ||
+    !Number.isSafeInteger(iteration) ||
+    iteration < 0
+  ) {
+    throw new Error("invalid owned control fixture identity");
+  }
+  return "steer-stress/.opengeni-release-" + marker + "-" + iteration;
+}
+
+export async function releaseSteerControlFixture(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  marker: string,
+  iteration: number,
+): Promise<void> {
+  const release = fixtureShellQuote(controlFixtureReleasePath(marker, iteration));
+  const result = await client.terminalExec(workspaceId, sessionId, {
+    command: [
+      "set -euo pipefail",
+      "test -d steer-stress && test ! -L steer-stress",
+      "test ! -L " + release,
+      ": > " + release,
+    ].join("\n"),
+    cwd: "",
+    timeoutMs: 20_000,
+    emitStream: false,
+  });
+  if (result.exitCode !== 0)
+    throw new Error("could not release the harness-owned Steer test command");
+}
+
+// The session page persists drafts, so its Steer (Cmd/Ctrl+Enter or the Steer
+// button) submits the draft with delivery "steer"; hosts without durable
+// drafts call /steer directly. Both return the same accepted Steer receipt.
+export function isLiveSteerSubmission(
+  response: { url(): string; request(): { method(): string; postDataJSON(): unknown } },
+  workspaceId: string,
+  sessionId: string,
+): boolean {
+  if (response.request().method() !== "POST") return false;
+  const base =
+    "/v1/workspaces/" +
+    encodeURIComponent(workspaceId) +
+    "/sessions/" +
+    encodeURIComponent(sessionId);
+  let path: string;
+  try {
+    path = new URL(response.url()).pathname;
+  } catch {
+    return false;
+  }
+  if (path === base + "/steer") return true;
+  if (path !== base + "/composer-draft/submit") return false;
+  try {
+    return (response.request().postDataJSON() as any)?.delivery === "steer";
+  } catch {
+    return false;
+  }
+}
+
+const controlSettledStatuses = new Set(["idle", "failed", "error", "cancelled"]);
+
+// Steer hands over at the predecessor's next model step: the running model
+// request is cut short, long waits return early with their handle, and the
+// turn settles itself as turn.superseded (reason steer, atModelStep) followed
+// by its queued status, with no attempt interruption. That settlement is the
+// predecessor's last authoritative event. A hard interruption still ends with
+// the attempt_quiesced queue receipt. Both are accepted as the Steer fence.
+function controlPayload(event: SessionEvent): any {
+  return event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+    ? event.payload
+    : {};
+}
+
+function isSteerHandoverSupersede(event: SessionEvent, turnId: string, attemptId: string): boolean {
+  const payload = controlPayload(event);
+  return (
+    event.type === "turn.superseded" &&
+    event.turnId === turnId &&
+    event.turnAttemptId === attemptId &&
+    payload.reason === "steer" &&
+    payload.atModelStep === true
+  );
+}
+
+export function steerPredecessorSettlement(
+  turnId: string,
+  attemptId: string,
+): (event: SessionEvent) => boolean {
+  let handedOver = false;
+  return (event: SessionEvent): boolean => {
+    if (event.turnId !== turnId || event.turnAttemptId !== attemptId) return false;
+    const payload = controlPayload(event);
+    if (event.type === "session.queue.changed")
+      return payload.operation === "attempt_quiesced" && payload.attemptId === attemptId;
+    if (isSteerHandoverSupersede(event, turnId, attemptId)) {
+      handedOver = true;
+      return false;
+    }
+    return handedOver && event.type === "session.status.changed" && payload.status === "queued";
+  };
+}
+
+export function isSteerHandoverSettlement(event: SessionEvent): boolean {
+  return event.type === "session.status.changed" && controlPayload(event).status === "queued";
+}
+
+function isSteerHandoverFence(
+  events: readonly SessionEvent[],
+  quiesced: SessionEvent,
+  control: SessionEvent,
+): boolean {
+  if (!isSteerHandoverSettlement(quiesced) || !quiesced.turnId || !quiesced.turnAttemptId)
+    return false;
+  const supersedes = events.filter(
+    (event) =>
+      event.turnId === quiesced.turnId &&
+      event.turnAttemptId === quiesced.turnAttemptId &&
+      event.type === "turn.superseded",
+  );
+  return (
+    supersedes.length === 1 &&
+    isSteerHandoverSupersede(supersedes[0]!, quiesced.turnId, quiesced.turnAttemptId) &&
+    supersedes[0]!.sequence > control.sequence &&
+    supersedes[0]!.sequence < quiesced.sequence &&
+    !events.some(
+      (event) =>
+        event.turnId === quiesced.turnId &&
+        event.turnAttemptId === quiesced.turnAttemptId &&
+        event.sequence > supersedes[0]!.sequence &&
+        event.sequence < quiesced.sequence,
+    )
+  );
+}
+
+// Steer only means something while the predecessor turn still runs. Wait until
+// the API reports that exact turn active and the composer offers Steer as its
+// Cmd/Ctrl+Enter choice; fail clearly if the turn already ended.
+export async function assertSteerablePredecessor(
+  client: Pick<OpenGeniClient, "getSession">,
+  page: { locator(selector: string): any },
+  workspaceId: string,
+  sessionId: string,
+  predecessorTurnId: string,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const session: any = await client.getSession(workspaceId, sessionId);
+    const activeTurnId = typeof session.activeTurnId === "string" ? session.activeTurnId : null;
+    if (
+      controlSettledStatuses.has(session.status) ||
+      (activeTurnId !== null && activeTurnId !== predecessorTurnId)
+    ) {
+      throw new Error(
+        "the Steer target turn ended before the harness could Steer (session " +
+          String(session.status) +
+          ", active turn " +
+          String(activeTurnId ?? "none") +
+          ")",
+      );
+    }
+    const alternate = page.locator("[data-og-composer-alternate-send]");
+    const alternateSend: string | null =
+      (await alternate.count()) === 1 && (await alternate.isVisible())
+        ? await alternate.getAttribute("data-analytics-action")
+        : null;
+    if (alternateSend === "queue") {
+      throw new Error(
+        "the composer offers Queue as its Cmd/Ctrl+Enter choice (busy Send steers), so the keyboard cannot Steer",
+      );
+    }
+    if (activeTurnId === predecessorTurnId && alternateSend === "steer") return;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        "the composer did not offer Steer for the running predecessor (session " +
+          String(session.status) +
+          ", active turn " +
+          String(activeTurnId ?? "none") +
+          ", composer choice " +
+          String(alternateSend ?? "none") +
+          ")",
+      );
+    }
+    await new Promise((wake) => setTimeout(wake, 250));
+  }
+}
+
+function clipControlDiagnostic(value: unknown, max: number): unknown {
+  if (value === undefined || value === null) return value;
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  if (text.length <= max) return value;
+  return text.slice(0, max) + "...[truncated " + (text.length - max) + " chars]";
+}
+
+export function compactControlDiagnosticEvent(event: SessionEvent): Record<string, unknown> {
+  const payload: any =
+    event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? event.payload
+      : {};
+  const out: Record<string, unknown> = {
+    sequence: event.sequence,
+    type: event.type,
+    occurredAt: event.occurredAt,
+    turnId: event.turnId ?? null,
+    turnAttemptId: event.turnAttemptId ?? null,
+  };
+  for (const key of [
+    "name",
+    "id",
+    "operation",
+    "status",
+    "attemptId",
+    "replacedTurnId",
+    "targetTurnId",
+    "triggerEventId",
+    "reason",
+    "code",
+  ]) {
+    if (typeof payload[key] === "string") out[key] = clipControlDiagnostic(payload[key], 300);
+  }
+  if (payload.arguments !== undefined)
+    out.arguments = clipControlDiagnostic(payload.arguments, 1_000);
+  if (payload.output !== undefined) out.output = clipControlDiagnostic(payload.output, 1_500);
+  if (typeof payload.text === "string") out.text = clipControlDiagnostic(payload.text, 1_500);
+  if (payload.error !== undefined) out.error = clipControlDiagnostic(payload.error, 1_000);
+  return out;
+}
+
+// Failure evidence for the run-owned synthetic control session: compact
+// events, session and composer state, and a screenshot. No cookies, storage
+// or network traces. Never masks the original error.
+/** A Pause stopping state can only render once the page holds a queue snapshot
+ * with stoppingPreviousAttempt. The client learns it from a debounced queue
+ * refetch, so a fast physical stop can settle before the page ever sees it.
+ * Require the rendered state only when the page received such a snapshot with
+ * enough lead before the observation ended; otherwise record that the state
+ * was not observable in the window. */
+export const STOPPING_SNAPSHOT_RENDER_LEAD_MS = 300;
+/** Beyond this physical stop time the page must have reconciled the queue
+ * after Pause (debounce plus round trip fit comfortably), so a client that
+ * never refetches cannot pass silently. */
+export const PAUSE_QUEUE_RECONCILE_REQUIRED_AFTER_MS = 1_000;
+export function observeStoppingQueueSnapshots(
+  page: Pick<Page, "on" | "off">,
+  workspaceId: string,
+  sessionId: string,
+) {
+  const path =
+    "/v1/workspaces/" +
+    encodeURIComponent(workspaceId) +
+    "/sessions/" +
+    encodeURIComponent(sessionId) +
+    "/queue";
+  const pending: Promise<void>[] = [];
+  let snapshots = 0;
+  let firstStoppingAt: number | null = null;
+  let firstPausedAt: number | null = null;
+  const listener = (response: any) => {
+    try {
+      if (
+        response.request().method() !== "GET" ||
+        new URL(response.url()).pathname !== path ||
+        !response.ok()
+      )
+        return;
+    } catch {
+      return;
+    }
+    const receivedAt = Date.now();
+    pending.push(
+      (async () => {
+        try {
+          const body: any = await response.json();
+          snapshots += 1;
+          if (
+            body?.stoppingPreviousAttempt === true &&
+            (firstStoppingAt === null || receivedAt < firstStoppingAt)
+          )
+            firstStoppingAt = receivedAt;
+          if (
+            body?.effectiveControl?.state === "paused" &&
+            (firstPausedAt === null || receivedAt < firstPausedAt)
+          )
+            firstPausedAt = receivedAt;
+        } catch {}
+      })(),
+    );
+  };
+  page.on("response", listener);
+  return {
+    async stop(observationEndedAt: number) {
+      page.off("response", listener);
+      await Promise.race([
+        Promise.allSettled(pending),
+        new Promise((wake) => setTimeout(wake, 2_000)),
+      ]);
+      const leadMs = firstStoppingAt === null ? null : observationEndedAt - firstStoppingAt;
+      const pausedReconciled = firstPausedAt !== null && firstPausedAt <= observationEndedAt;
+      return {
+        snapshots,
+        stoppingSnapshotLeadMs: leadMs,
+        renderRequired: leadMs !== null && leadMs >= STOPPING_SNAPSHOT_RENDER_LEAD_MS,
+        pausedReconciled,
+      };
+    },
+  };
+}
+
+export async function writeControlFailureDiagnostics(input: {
+  client: OpenGeniClient;
+  page: Page;
+  workspaceId: string;
+  sessionId: string;
+  afterSequence: number;
+  outputDir: string;
+  error: unknown;
+}): Promise<void> {
+  const { client, page, workspaceId, sessionId, afterSequence, outputDir } = input;
+  const diagnostics: Record<string, unknown> = {
+    schemaVersion: "opengeni/workbench-control-failure/v1",
+    recordedAt: new Date().toISOString(),
+    error: clipControlDiagnostic(
+      input.error instanceof Error ? input.error.message : String(input.error),
+      2_000,
+    ),
+    afterSequence,
+  };
+  // After a full Steer loop the session holds thousands of events; read only
+  // the recent tail so the bounded diagnostics window is not spent paging.
+  let eventsAfter = afterSequence;
+  try {
+    const session: any = await client.getSession(workspaceId, sessionId);
+    diagnostics.session = {
+      status: session.status,
+      activeTurnId: session.activeTurnId ?? null,
+      lastSequence: session.lastSequence,
+    };
+    if (typeof session.lastSequence === "number")
+      eventsAfter = Math.max(afterSequence, session.lastSequence - 1_500);
+  } catch (error) {
+    diagnostics.sessionError = clipControlDiagnostic(String(error), 500);
+  }
+  try {
+    const queue: any = await client.getQueue(workspaceId, sessionId);
+    diagnostics.control = { state: queue.effectiveControl?.state ?? null };
+  } catch (error) {
+    diagnostics.controlError = clipControlDiagnostic(String(error), 500);
+  }
+  try {
+    diagnostics.ui = await page.evaluate(() => {
+      const text = (node: Element | null, max: number) =>
+        node ? (node.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, max) : null;
+      const alternate = document.querySelector("[data-og-composer-alternate-send]");
+      return {
+        path: location.pathname,
+        composerChoice: alternate ? alternate.getAttribute("data-analytics-action") : null,
+        pauseOffered: Array.from(document.querySelectorAll("button")).some(
+          (button) => button.getAttribute("aria-label") === "Pause this workstream",
+        ),
+        resumeOffered: Array.from(document.querySelectorAll("button")).some(
+          (button) => button.getAttribute("aria-label") === "Resume this workstream",
+        ),
+        composer: text(document.querySelector("[data-og-composer-surface]"), 600),
+        sessionChrome: text(document.querySelector('[data-testid="session-chrome"]'), 300),
+        stoppingSurfaces: Array.from(
+          document.querySelectorAll(
+            '[data-testid="session-chrome-stopping"], [data-testid="stopping-previous-attempt"]',
+          ),
+        ).map((node) => text(node, 160)),
+      };
+    });
+  } catch (error) {
+    diagnostics.uiError = clipControlDiagnostic(String(error), 500);
+  }
+  const retain = async () => {
+    try {
+      await writeFile(
+        resolve(outputDir, "workbench-control-failure.json"),
+        JSON.stringify(diagnostics, null, 2) + "\n",
+      );
+    } catch {
+      console.error("Could not retain control failure diagnostics.");
+    }
+  };
+  await retain();
+  try {
+    await page.screenshot({
+      path: resolve(outputDir, "workbench-control-failure.png"),
+      fullPage: true,
+      timeout: 5_000,
+    });
+  } catch {
+    console.error("Could not retain the control failure screenshot.");
+  }
+  try {
+    diagnostics.eventsAfter = eventsAfter;
+    const events = await listAllSessionEventsAfter(client, workspaceId, sessionId, eventsAfter);
+    const relevant = events.filter((event) => !event.type.endsWith(".delta"));
+    diagnostics.eventCount = events.length;
+    diagnostics.omittedEarlierEvents = Math.max(0, relevant.length - 400);
+    diagnostics.events = relevant.slice(-400).map(compactControlDiagnosticEvent);
+  } catch (error) {
+    diagnostics.eventsError = clipControlDiagnostic(String(error), 500);
+  }
+  await retain();
+}
+
+function controlCallArgs(event: SessionEvent): any {
+  const args = (event.payload as any)?.arguments;
+  if (typeof args !== "string") return args;
+  try {
+    return JSON.parse(args);
+  } catch {
+    return null;
+  }
+}
+
+function isExactControlExec(event: SessionEvent, command: string): boolean {
+  const args = controlCallArgs(event);
+  return (
+    (event.payload as any)?.name === "exec_command" &&
+    args?.cmd === command &&
+    [undefined, null, "/bin/bash", "/bin/sh"].includes(args.shell) &&
+    [undefined, null, "", "/workspace"].includes(args.workdir) &&
+    [undefined, null, false].includes(args.tty) &&
+    Object.keys(args).every((key) =>
+      ["cmd", "workdir", "shell", "login", "tty", "yield_time_ms", "max_output_tokens"].includes(
+        key,
+      ),
+    )
+  );
+}
+
+// A read-only observation of the one adopted command: an empty write_stdin on
+// its native session, or command_wait/command_read on its exact Command ID.
+function isEmptyControlPoll(event: SessionEvent, sessionId: number, commandId?: string): boolean {
+  const args = controlCallArgs(event);
+  const name = String((event.payload as any)?.name ?? "").replace(/^opengeni__/, "");
+  if (name === "write_stdin") {
+    return (
+      args?.session_id === sessionId &&
+      args.chars === "" &&
+      Object.keys(args).every((key) =>
+        ["session_id", "chars", "yield_time_ms", "max_output_tokens"].includes(key),
+      )
+    );
+  }
+  return (
+    (name === "command_wait" || name === "command_read") &&
+    typeof commandId === "string" &&
+    args?.commandId === commandId &&
+    Object.keys(args).every((key) =>
+      ["commandId", "cursor", "maxOutputBytes", "waitSeconds"].includes(key),
+    )
+  );
+}
+
+type AdoptedControlCommand = { sessionId: number; commandId: string };
+
+function adoptedControlIdentity(event: SessionEvent): AdoptedControlCommand | null {
+  const output = (event.payload as any)?.output;
+  if (typeof output !== "string") return null;
+  const session = /^Process running with session ID ([1-9][0-9]*)$/mu.exec(output);
+  const commandId = /^Command ID: ([0-9a-f-]{36})$/mu.exec(output);
+  return session && commandId ? { sessionId: Number(session[1]), commandId: commandId[1]! } : null;
+}
+
+// Every adopted test command later produces a background-command completion
+// notice that rides into the next turn. A model may observe such a command
+// read-only; that never changes custody, so it is allowed in any turn.
+function isKnownCommandObservation(
+  event: SessionEvent,
+  known: readonly AdoptedControlCommand[],
+): boolean {
+  return known.some((command) => isEmptyControlPoll(event, command.sessionId, command.commandId));
+}
+
+function adoptedControlCommands(
+  records: readonly { ready: SessionEvent }[] | undefined,
+): AdoptedControlCommand[] {
+  return (records ?? [])
+    .map((record) => adoptedControlIdentity(record.ready))
+    .filter((command): command is AdoptedControlCommand => command !== null);
+}
+
+// Native command-origin decoding only. Live acceptance additionally requires
+// assertAdoptedControlFixtureInvocation and the complete observation audit below.
+export function assertControlFixtureInvocation(
+  events: readonly SessionEvent[],
+  ready: SessionEvent,
+  command: string,
+  known: readonly AdoptedControlCommand[] = [],
+): void {
+  const owned = events.filter(
+    (event) =>
+      event.turnId === ready.turnId &&
+      event.turnAttemptId === ready.turnAttemptId &&
+      event.sequence < ready.sequence,
+  );
+  const argsOf = (event: SessionEvent): any => {
+    const args = (event.payload as any)?.arguments;
+    if (typeof args !== "string") return args;
+    try {
+      return JSON.parse(args);
+    } catch {
+      return null;
+    }
+  };
+  const runningIdentity = adoptedControlIdentity;
+  const identity = runningIdentity(ready);
+  if (!identity) throw new Error("control fixture lacks native running-command identity");
+  const execs = owned.filter(
+    (event) =>
+      event.type === "agent.toolCall.created" && (event.payload as any)?.name === "exec_command",
+  );
+  if (execs.length !== 1 || !isExactControlExec(execs[0]!, command))
+    throw new Error("control fixture model invoked a different command or execution context");
+  if (
+    owned.some(
+      (event) =>
+        event.type === "agent.toolCall.created" &&
+        event !== execs[0] &&
+        !isEmptyControlPoll(event, identity.sessionId, identity.commandId) &&
+        !isKnownCommandObservation(event, known),
+    )
+  ) {
+    throw new Error("control fixture contains unrelated mutation calls");
+  }
+  const calls = owned.filter(
+    (event) =>
+      event.type === "agent.toolCall.created" &&
+      (event.payload as any)?.id === (ready.payload as any)?.id,
+  );
+  if (calls.length !== 1) throw new Error("control fixture lacks a unique model-owned tool call");
+  const call = calls[0]!;
+  if ((call.payload as any)?.name === "exec_command") {
+    if (argsOf(call)?.cmd !== command)
+      throw new Error("control fixture model invoked a different command");
+    return;
+  }
+  if (
+    (call.payload as any)?.name !== "write_stdin" ||
+    argsOf(call)?.session_id !== identity.sessionId
+  ) {
+    throw new Error("control fixture poll does not own the running session");
+  }
+  const origins = owned.filter((event) => {
+    if (
+      event.type !== "agent.toolCall.created" ||
+      (event.payload as any)?.name !== "exec_command" ||
+      argsOf(event)?.cmd !== command
+    )
+      return false;
+    const outputs = owned.filter(
+      (output) =>
+        output.type === "agent.toolCall.output" &&
+        output.sequence > event.sequence &&
+        output.sequence < call.sequence &&
+        (output.payload as any)?.id === (event.payload as any)?.id,
+    );
+    if (outputs.length !== 1) return false;
+    const prior = runningIdentity(outputs[0]!);
+    return prior?.sessionId === identity.sessionId && prior.commandId === identity.commandId;
+  });
+  if (origins.length !== 1)
+    throw new Error("control fixture poll lacks a unique exact model-owned exec origin");
+}
+
+// Steer and Pause share one custody shape: the model runs the installed test
+// once, the runtime adopts it with a native session and Command ID, and only
+// read-only observations of that command follow until the control.
+export function assertAdoptedControlFixtureInvocation(
+  events: readonly SessionEvent[],
+  ready: SessionEvent,
+  command: string,
+  acceptedEventId: string,
+  control: "Steer" | "Pause",
+  known: readonly AdoptedControlCommand[] = [],
+): void {
+  const accepted = events.filter(
+    (event) => event.id === acceptedEventId && event.type === "user.message",
+  );
+  const starts = events.filter(
+    (event) =>
+      event.type === "turn.started" &&
+      event.sequence < ready.sequence &&
+      (event.payload as any)?.triggerEventId === acceptedEventId,
+  );
+  const canonical = events.filter((event) => event.id === ready.id);
+  if (
+    accepted.length !== 1 ||
+    starts.length !== 1 ||
+    starts[0]!.sequence <= accepted[0]!.sequence ||
+    !ready.turnId ||
+    !ready.turnAttemptId ||
+    starts[0]!.turnId !== ready.turnId ||
+    starts[0]!.turnAttemptId !== ready.turnAttemptId
+  ) {
+    throw new Error(control + " fixture lacks exact accepted-turn ownership");
+  }
+  if (
+    canonical.length !== 1 ||
+    ready.type !== "agent.toolCall.output" ||
+    JSON.stringify(canonical[0]) !== JSON.stringify(ready)
+  ) {
+    throw new Error(control + " fixture lacks a unique canonical ready output");
+  }
+  const interval = events.filter(
+    (event) => event.sequence > starts[0]!.sequence && event.sequence <= ready.sequence,
+  );
+  if (
+    interval.some(
+      (event) =>
+        event.type === "agent.toolCall.created" &&
+        (event.turnId !== ready.turnId || event.turnAttemptId !== ready.turnAttemptId),
+    )
+  ) {
+    throw new Error(control + " fixture contains unowned calls before readiness");
+  }
+  assertControlFixtureInvocation(interval, ready, command, known);
+}
+
+type ControlFixtureCustody = {
+  mode: "steer" | "pause";
+  afterSequence: number;
+  acceptedEventId: string;
+  ready: SessionEvent;
+  command: string;
+  control: SessionEvent;
+  quiesced: SessionEvent;
+  replacementTurnId?: string;
+  replacementCommand?: string;
+  replacementOutput?: string;
+  resumeOperationId?: string;
+  resumeOutput?: string;
+};
+const controlFixtureCustody = new WeakMap<ControlCancellationAudit, ControlFixtureCustody[]>();
+
+export function assertControlFixtureCustody(
+  events: readonly SessionEvent[],
+  records: readonly ControlFixtureCustody[],
+  earlier: readonly ControlFixtureCustody[] = [],
+): void {
+  if (records.length === 0) throw new Error("control custody has no registered hostile command");
+  const allowed = new Set<SessionEvent>();
+  const calls = events.filter((event) => event.type === "agent.toolCall.created");
+  const known = adoptedControlCommands([...earlier, ...records]);
+  const isNoticeObservation = (call: SessionEvent): boolean =>
+    isKnownCommandObservation(call, known);
+  const canonical = (event: SessionEvent): void => {
+    const matches = events.filter((candidate) => candidate.id === event.id);
+    if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify(event))
+      throw new Error("control custody boundary is not canonical");
+  };
+  const allowSuccessfulRead = (call: SessionEvent, expectedOutput: string): void => {
+    const outputs = events.filter(
+      (event) =>
+        event.type === "agent.toolCall.output" &&
+        event.turnId === call.turnId &&
+        event.turnAttemptId === call.turnAttemptId &&
+        event.sequence > call.sequence &&
+        (event.payload as any)?.id === (call.payload as any)?.id,
+    );
+    const text = (outputs[0]?.payload as any)?.output;
+    if (
+      outputs.length !== 1 ||
+      typeof text !== "string" ||
+      !/^Process exited with code 0$/mu.test(text) ||
+      !text.endsWith("Output:\n" + expectedOutput)
+    ) {
+      throw new Error("control custody lacks successful exact read-only or claimed-replay output");
+    }
+    allowed.add(call);
+  };
+  for (const record of records) {
+    const { ready, control, quiesced } = record;
+    canonical(ready);
+    canonical(control);
+    canonical(quiesced);
+    const hardFence =
+      quiesced.type === "session.queue.changed" &&
+      (quiesced.payload as any)?.operation === "attempt_quiesced" &&
+      (quiesced.payload as any)?.attemptId === ready.turnAttemptId;
+    const handoverFence =
+      record.mode === "steer" && isSteerHandoverFence(events, quiesced, control);
+    if (
+      control.sequence <= ready.sequence ||
+      quiesced.sequence <= control.sequence ||
+      quiesced.turnId !== ready.turnId ||
+      quiesced.turnAttemptId !== ready.turnAttemptId ||
+      !(hardFence || handoverFence)
+    ) {
+      throw new Error("control custody lacks its ordered physical quiescence fence");
+    }
+    if (record.mode === "steer") {
+      if (
+        control.type !== "session.control.steer_requested" ||
+        (control.payload as any)?.replacedTurnId !== ready.turnId ||
+        (control.payload as any)?.targetTurnId !== record.replacementTurnId
+      )
+        throw new Error("control custody Steer target mismatch");
+      assertAdoptedControlFixtureInvocation(
+        events,
+        ready,
+        record.command,
+        record.acceptedEventId,
+        "Steer",
+        known,
+      );
+    } else {
+      if (control.type !== "session.control.paused")
+        throw new Error("control custody Pause boundary mismatch");
+      assertAdoptedControlFixtureInvocation(
+        events,
+        ready,
+        record.command,
+        record.acceptedEventId,
+        "Pause",
+        known,
+      );
+    }
+    const identity = adoptedControlIdentity(ready);
+    if (!identity) throw new Error("control custody lacks native session identity");
+    const { sessionId, commandId } = identity;
+    const originStarts = events.filter(
+      (event) =>
+        event.type === "turn.started" &&
+        event.turnId === ready.turnId &&
+        event.turnAttemptId === ready.turnAttemptId,
+    );
+    if (originStarts.length !== 1) throw new Error("control custody lacks a unique origin attempt");
+    for (const call of calls.filter(
+      (event) => event.turnId === ready.turnId && event.turnAttemptId === ready.turnAttemptId,
+    )) {
+      if (
+        call.sequence <= originStarts[0]!.sequence ||
+        call.sequence > quiesced.sequence ||
+        (call.sequence > ready.sequence &&
+          !isEmptyControlPoll(call, sessionId, commandId) &&
+          !isNoticeObservation(call))
+      ) {
+        throw new Error("control custody rejects predecessor mutation or post-quiescence calls");
+      }
+      allowed.add(call);
+    }
+    if (record.mode === "steer") {
+      const starts = events.filter(
+        (event) => event.type === "turn.started" && event.turnId === record.replacementTurnId,
+      );
+      // Read-only observations of known adopted commands (prompted by their
+      // completion notices) do not count toward the replacement's one exact call.
+      const replacementCalls = calls.filter(
+        (event) => event.turnId === record.replacementTurnId && !isNoticeObservation(event),
+      );
+      if (
+        starts.length !== 1 ||
+        starts[0]!.sequence <= quiesced.sequence ||
+        !starts[0]!.turnAttemptId ||
+        replacementCalls.length !== 1 ||
+        replacementCalls[0]!.turnAttemptId !== starts[0]!.turnAttemptId ||
+        replacementCalls[0]!.sequence <= starts[0]!.sequence ||
+        !record.replacementCommand ||
+        !record.replacementOutput ||
+        !isExactControlExec(replacementCalls[0]!, record.replacementCommand)
+      ) {
+        throw new Error(
+          "control custody rejects replacement tools other than its exact read-only verification",
+        );
+      }
+      allowSuccessfulRead(replacementCalls[0]!, record.replacementOutput);
+    } else {
+      if (!record.resumeOperationId)
+        throw new Error("control custody lacks canonical Resume ownership");
+      const resumes = events.filter(
+        (event) =>
+          event.type === "session.control.resumed" &&
+          (event.payload as any)?.operationId === record.resumeOperationId,
+      );
+      if (resumes.length !== 1 || resumes[0]!.sequence <= quiesced.sequence)
+        throw new Error("control custody lacks canonical Resume ownership");
+      const resumedCalls = calls.filter(
+        (event) => event.turnId === ready.turnId && event.turnAttemptId !== ready.turnAttemptId,
+      );
+      for (const call of resumedCalls) {
+        const starts = events.filter(
+          (event) =>
+            event.type === "turn.started" &&
+            event.turnId === ready.turnId &&
+            event.turnAttemptId === call.turnAttemptId,
+        );
+        if (
+          starts.length !== 1 ||
+          starts[0]!.sequence <= resumes[0]!.sequence ||
+          call.sequence <= starts[0]!.sequence
+        ) {
+          throw new Error("control custody resumed attempt preceded Resume");
+        }
+        // A resumed attempt may observe its adopted command, or execute the
+        // unchanged claim-guarded script once. No cleanup/writer is permitted.
+        if (isEmptyControlPoll(call, sessionId, commandId) || isNoticeObservation(call))
+          allowed.add(call);
+        else if (
+          record.resumeOutput &&
+          isExactControlExec(call, record.command) &&
+          resumedCalls.filter(
+            (other) =>
+              other.turnAttemptId === call.turnAttemptId &&
+              (other.payload as any)?.name === "exec_command",
+          ).length === 1
+        ) {
+          allowSuccessfulRead(call, record.resumeOutput);
+        } else throw new Error("control custody rejects resumed mutation calls");
+      }
+    }
+  }
+  for (const call of calls) {
+    // Notice-driven reads in any later turn, including replacement turns and
+    // turns between controls. Mutations or unknown commands stay rejected.
+    const origin = records.find(
+      (record) =>
+        record.ready.turnId === call.turnId && record.ready.turnAttemptId === call.turnAttemptId,
+    );
+    if (!origin && isNoticeObservation(call)) allowed.add(call);
+  }
+  // Includes foreign and replacement attempts, and all calls between controls.
+  // Keep the read after the final zombie probe so its entire window is covered.
+  if (
+    new Set(calls.map((call) => call.id)).size !== calls.length ||
+    new Set(
+      calls.map((call) =>
+        JSON.stringify([call.turnId, call.turnAttemptId, (call.payload as any)?.id]),
+      ),
+    ).size !== calls.length ||
+    calls.some((call) => !allowed.has(call))
+  )
+    throw new Error("control custody contains an unapproved model call through final observation");
+}
+
+function registerControlFixtureCustody(
+  audit: ControlCancellationAudit,
+  record: ControlFixtureCustody,
+): void {
+  const records = controlFixtureCustody.get(audit) ?? [];
+  records.push(record);
+  controlFixtureCustody.set(audit, records);
+}
+
+async function auditControlFixtureCustody(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  audit: ControlCancellationAudit,
+): Promise<void> {
+  const records = controlFixtureCustody.get(audit);
+  if (!records?.length) throw new Error("control custody lacks fixture registration");
+  assertControlFixtureCustody(
+    await listAllSessionEventsAfter(client, workspaceId, sessionId, records[0]!.afterSequence),
+    records,
+  );
+}
+
+// Bounded retry for idempotent API calls on a response the API explicitly
+// marks retryable. Reads retry any retryable 503. A POST retries only when it
+// carries an idempotency key or client event id and the API reports
+// DATABASE_UNAVAILABLE. Its outcome is unknown (the commit may have happened),
+// so the replay relies on the server deduplicating by that key: createSession
+// replays by idempotencyKey and sendMessage by clientEventId.
+export async function retryableIdempotentAcceptanceFetch(
+  input: any,
+  init?: any,
+  retry: { attempts?: number; delayMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<Response> {
+  const attempts = retry.attempts ?? 4;
+  const delayMs = retry.delayMs ?? 1_000;
+  const fetchImpl = retry.fetchImpl ?? fetch;
+  const method = String(
+    init?.method ??
+      (typeof input === "object" && input && "method" in input ? input.method : "GET"),
+  ).toUpperCase();
+  let keyed = false;
+  if (method === "POST" && typeof init?.body === "string") {
+    try {
+      const parsed = JSON.parse(init.body);
+      keyed =
+        typeof parsed?.idempotencyKey === "string" || typeof parsed?.clientEventId === "string";
+    } catch {
+      keyed = false;
+    }
+  }
+  const safe = method === "GET" || method === "HEAD";
+  for (let attempt = 1; ; attempt += 1) {
+    const response = await fetchImpl(input, init);
+    if ((!safe && !keyed) || response.status !== 503 || attempt >= attempts) return response;
+    let error: any = null;
+    try {
+      error = ((await response.clone().json()) as any)?.error ?? null;
+    } catch {
+      error = null;
+    }
+    const retryable =
+      error?.retryable === true && (safe || error?.details?.code === "DATABASE_UNAVAILABLE");
+    if (!retryable) return response;
+    await response.body?.cancel().catch(() => undefined);
+    console.warn(
+      "Retrying idempotent " +
+        method +
+        " after a retryable 503 (" +
+        String(error?.details?.code ?? error?.code ?? "unknown") +
+        "), attempt " +
+        attempt +
+        " of " +
+        attempts,
+    );
+    await new Promise((wake) => setTimeout(wake, delayMs * 2 ** (attempt - 1)));
+  }
 }
 
 function selectWorkspace(
@@ -720,6 +2103,9 @@ async function waitForSettled(
   throw new Error(`session did not settle before timeout (last=${last?.status ?? "unknown"})`);
 }
 
+const initialCaptureRecoveryPolicyV1 =
+  "typed-repository-read-unavailable-single-read-only-retry-v1";
+
 async function waitForCapture(
   client: OpenGeniClient,
   workspaceId: string,
@@ -727,10 +2113,58 @@ async function waitForCapture(
   timeoutMs: number,
 ): Promise<Extract<GetWorkspaceCaptureResponse, { available: true }>> {
   const deadline = Date.now() + timeoutMs;
+  let repositoryReadRecoveryAttempted = false;
   while (Date.now() < deadline) {
     const capture = await client.getWorkspaceCapture(workspaceId, sessionId);
     if (capture.available) return capture;
-    if (capture.degradedReason) throw new Error(`capture degraded: ${capture.degradedReason}`);
+    if (capture.degradedReason) {
+      if (
+        capture.degradedReason !== "repository_read_unavailable" ||
+        repositoryReadRecoveryAttempted
+      ) {
+        throw new Error(
+          `capture degraded: ${capture.degradedReason} under ${initialCaptureRecoveryPolicyV1}`,
+        );
+      }
+      repositoryReadRecoveryAttempted = true;
+      const retryMarker = `OPENGENI_CAPTURE_RETRY_${sessionId.replaceAll("-", "_").toUpperCase()}`;
+      const afterSequence = (await client.getSession(workspaceId, sessionId)).lastSequence;
+      const queue = await client.getQueue(workspaceId, sessionId);
+      await client.sendMessage(workspaceId, sessionId, {
+        text: [
+          "Run exactly one terminal command and do nothing else.",
+          "The command is read-only and retries a typed transient workspace-capture repository read.",
+          "```bash",
+          `test -d api/.git && test -d web/.git && test -d nested/deep/repo/.git && git -C api status --porcelain >/dev/null && git -C web status --porcelain >/dev/null && git -C web-linked status --porcelain >/dev/null && git -C nested/deep/repo status --porcelain >/dev/null && printf '${retryMarker}\n'`,
+          "```",
+          "After the command succeeds, stop.",
+        ].join("\n"),
+        controlEtag: queue.effectiveControl.controlEtag,
+        clientEventId: `workbench-capture-retry:${crypto.randomUUID()}`,
+      });
+      const remainingForMarker = deadline - Date.now();
+      if (remainingForMarker <= 0) break;
+      await waitForSessionEvent(
+        client,
+        workspaceId,
+        sessionId,
+        afterSequence,
+        remainingForMarker,
+        (event) =>
+          event.type === "agent.toolCall.output" &&
+          JSON.stringify(event.payload ?? {}).includes(retryMarker),
+        "the typed repository-read capture recovery marker",
+      );
+      const remainingForSettlement = deadline - Date.now();
+      if (remainingForSettlement <= 0) break;
+      const settled = await waitForSettled(client, workspaceId, sessionId, remainingForSettlement);
+      if (settled.status !== "idle") {
+        throw new Error(
+          `capture recovery turn ended in ${settled.status} under ${initialCaptureRecoveryPolicyV1}`,
+        );
+      }
+      continue;
+    }
     await Bun.sleep(1_000);
   }
   throw new Error("capture did not become available before timeout");
@@ -744,17 +2178,10 @@ async function listAllToolOutputEvents(
   const collected: SessionEvent[] = [];
   let cursor = 0;
   while (true) {
-    const page = await client.listEvents(workspaceId, sessionId, {
-      after: cursor,
-      limit: 500,
-      mode: "forensic",
-      payloadMode: "full",
-      includeTypes: ["agent.toolCall.output"],
-    });
-    collected.push(...page);
-    const lastSequence = page.at(-1)?.sequence;
-    if (lastSequence !== undefined) cursor = lastSequence;
-    if (page.length < 500) return collected;
+    const page = await readFixtureEventPage(client, workspaceId, sessionId, cursor);
+    collected.push(...page.events);
+    cursor = page.nextAfter;
+    if (!page.hasMore) return collected;
   }
 }
 
@@ -1023,6 +2450,10 @@ export async function waitForSandboxLiveness(
   );
 }
 
+export function isDormantSandboxLiveness(liveness: string): boolean {
+  return liveness === "cold" || liveness === "draining";
+}
+
 export async function waitForCold(
   client: Pick<OpenGeniClient, "getStreamCapabilities">,
   workspaceId: string,
@@ -1035,7 +2466,7 @@ export async function waitForCold(
     client,
     workspaceId,
     sessionId,
-    new Set(["cold"]),
+    new Set(["cold", "draining"]),
     timeoutMs,
     pollIntervalMs,
     requestTimeoutMs,
@@ -1195,6 +2626,21 @@ async function runLiveWorkspaceFlow(input: {
       "An untouched captured path remained gated until the user opened it live, then the real sandbox warmed and served it.",
     );
 
+    const restoredPathConfinementSentinelsV1 = await client.terminalExec(workspaceId, sessionId, {
+      command: `set -eu
+printf 'outside secret must never be captured\n' > '/tmp/opengeni-${marker}'
+rm -rf '/tmp/opengeni-dir-${marker}'
+mkdir -p '/tmp/opengeni-dir-${marker}'`,
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    if (restoredPathConfinementSentinelsV1.exitCode !== 0) {
+      throw new Error(
+        "failed to re-establish outside path-confinement sentinels after cold restore",
+      );
+    }
+
     await expectApiRejection(
       () => client.fsRead(workspaceId, sessionId, { path: "api/external-link" }),
       400,
@@ -1351,38 +2797,56 @@ async function runLiveWorkspaceFlow(input: {
     const controlCancellationSamples: number[] = [];
     const controlAudit: ControlCancellationAudit = {
       cursor: (await client.getSession(workspaceId, sessionId)).lastSequence,
+      evidencePath: resolve(args.outputDir, "workbench-live-cancellation-partial.json"),
       fences: new Map(),
     };
-    for (let iteration = 0; iteration < args.repetitions; iteration += 1) {
+    const controlDiagnosticsAfter = controlAudit.cursor;
+    try {
+      for (let iteration = 0; iteration < args.repetitions; iteration += 1) {
+        controlCancellationSamples.push(
+          await proveLiveSteerCancellation({
+            client,
+            page,
+            workspaceId,
+            sessionId,
+            marker,
+            iteration,
+            verifyReplacementCapture: iteration === 0,
+            audit: controlAudit,
+            sessionTimeoutMs: args.sessionTimeoutMs,
+          }),
+        );
+      }
       controlCancellationSamples.push(
-        await proveLiveSteerCancellation({
+        await proveLivePauseCancellation({
           client,
           page,
           workspaceId,
           sessionId,
           marker,
-          iteration,
-          verifyReplacementCapture: iteration === 0,
           audit: controlAudit,
           sessionTimeoutMs: args.sessionTimeoutMs,
         }),
       );
+    } catch (error) {
+      await Promise.race([
+        writeControlFailureDiagnostics({
+          client,
+          page,
+          workspaceId,
+          sessionId,
+          afterSequence: controlDiagnosticsAfter,
+          outputDir: args.outputDir,
+          error,
+        }),
+        new Promise((wake) => setTimeout(wake, 30_000).unref()),
+      ]);
+      throw error;
     }
-    controlCancellationSamples.push(
-      await proveLivePauseCancellation({
-        client,
-        page,
-        workspaceId,
-        sessionId,
-        marker,
-        audit: controlAudit,
-        sessionTimeoutMs: args.sessionTimeoutMs,
-      }),
-    );
     // A provider that merely detaches the old terminal process can surface a
     // delayed completion after the replacement is already idle. Keep one quiet
     // window after the final repetition and audit the continuous event cursor.
-    await Bun.sleep(6_000);
+    await Bun.sleep(35_000);
     await auditCancelledPredecessorEvents(client, workspaceId, sessionId, controlAudit);
     const zombieProbe = await client.terminalExec(workspaceId, sessionId, {
       command:
@@ -1394,6 +2858,8 @@ async function runLiveWorkspaceFlow(input: {
     if (zombieProbe.exitCode !== 0) {
       throw new Error("a cancelled predecessor terminal process performed a delayed write");
     }
+    await auditControlFixtureCustody(client, workspaceId, sessionId, controlAudit);
+    await auditCancelledPredecessorEvents(client, workspaceId, sessionId, controlAudit);
     const controlSummary = measurement(controlCancellationSamples);
     pass(
       checks,
@@ -1440,8 +2906,30 @@ export async function waitForSandboxFileViewerText(
     .waitFor({ state: "visible", timeout: timeoutMs });
 }
 
+type ControlCancellationPartialEvidence = {
+  schemaVersion: "opengeni/workbench-control-cancellation-partial/v2";
+  control: "Steer" | "Pause";
+  iteration: number | null;
+  stage: "control-committed" | "physical-fence-observed";
+  recordedAt: string;
+  committedAt: string;
+  predecessorTurnId: string;
+  predecessorAttemptId: string;
+  replacementTurnId: string | null;
+  controlRequestedSequence: number | null;
+  quiescedAt: string | null;
+  quiescedSequence: number | null;
+  replacementStartedAt: string | null;
+  replacementStartedSequence: number | null;
+  physicalQuiescenceMs: number | null;
+  replacementStartedMs: number | null;
+  stoppingStateRendered: boolean | null;
+  stoppingStateText: string;
+};
+
 type ControlCancellationAudit = {
   cursor: number;
+  evidencePath: string;
   fences: Map<
     string,
     {
@@ -1451,6 +2939,114 @@ type ControlCancellationAudit = {
     }
   >;
 };
+
+async function writeControlCancellationPartialEvidence(
+  audit: ControlCancellationAudit,
+  evidence: Omit<ControlCancellationPartialEvidence, "schemaVersion" | "recordedAt">,
+): Promise<void> {
+  await writeFile(
+    audit.evidencePath,
+    JSON.stringify(
+      {
+        schemaVersion: "opengeni/workbench-control-cancellation-partial/v2",
+        recordedAt: new Date().toISOString(),
+        ...evidence,
+      } satisfies ControlCancellationPartialEvidence,
+      null,
+      2,
+    ) + "\n",
+    { mode: 0o600 },
+  );
+}
+
+async function startStoppingStateObservation(
+  page: Page,
+  control: "steer" | "pause",
+): Promise<void> {
+  await page.evaluate((observedControl) => {
+    const key = "__opengeniAcceptanceStoppingStateObservationV2";
+    type BrowserObservation = {
+      visible: boolean;
+      text: string;
+      observer: MutationObserver | null;
+      record: () => boolean;
+    };
+    const root = window as unknown as Record<string, BrowserObservation | undefined>;
+    root[key]?.observer?.disconnect();
+    const expectedCopy =
+      observedControl === "steer"
+        ? /Stopping previous (?:work|attempt)|Previous work stopping/
+        : /Stopping current (?:work|attempt)|Current work stopping/;
+    const observation: BrowserObservation = {
+      visible: false,
+      text: "",
+      observer: null,
+      record: () => false,
+    };
+    observation.record = (): boolean => {
+      const element = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          '[data-testid="session-chrome-stopping"], [data-testid="stopping-previous-attempt"]',
+        ),
+      ).find((candidate) => {
+        if (!expectedCopy.test(candidate.textContent ?? "")) return false;
+        const candidateStyle = getComputedStyle(candidate);
+        return (
+          candidateStyle.display !== "none" &&
+          candidateStyle.visibility !== "hidden" &&
+          candidateStyle.visibility !== "collapse" &&
+          candidate.getClientRects().length > 0
+        );
+      });
+      const text = element?.textContent ?? "";
+      if (!element || !expectedCopy.test(text)) return false;
+      const style = getComputedStyle(element);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.visibility === "collapse" ||
+        element.getClientRects().length === 0
+      ) {
+        return false;
+      }
+      observation.visible = true;
+      observation.text = text;
+      return true;
+    };
+    root[key] = observation;
+    if (observation.record()) return;
+    observation.observer = new MutationObserver(() => {
+      if (!observation.record()) return;
+      observation.observer?.disconnect();
+    });
+    observation.observer.observe(document.documentElement, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+  }, control);
+}
+
+async function finishStoppingStateObservation(
+  page: Page,
+): Promise<{ visible: boolean; text: string }> {
+  return await page.evaluate(() => {
+    const key = "__opengeniAcceptanceStoppingStateObservationV2";
+    type BrowserObservation = {
+      visible: boolean;
+      text: string;
+      observer: MutationObserver | null;
+      record: () => boolean;
+    };
+    const root = window as unknown as Record<string, BrowserObservation | undefined>;
+    const observation = root[key];
+    observation?.record();
+    observation?.observer?.disconnect();
+    delete root[key];
+    return { visible: observation?.visible ?? false, text: observation?.text ?? "" };
+  });
+}
 
 export function classifyControlCommandMarkerEvent(
   event: Pick<SessionEvent, "type" | "payload">,
@@ -1477,25 +3073,33 @@ function isRunningControlCommandMarkerEvent(event: SessionEvent, marker: string)
   return state === "running";
 }
 
-/** SessionChrome's receipt-backed stopping copy for each control. */
-export const LIVE_STOPPING_STATE_TEXT = {
-  steer: "Previous work stopping",
-  pause: "Current work stopping",
+/** Stopping copy for each control: SessionChrome's chip, or the queue's own
+ * status. Neither control's copy matches the other's, and the optimistic
+ * "Changing direction" state matches neither. The in-page observer repeats
+ * these patterns because it runs in the browser. */
+export const LIVE_STOPPING_STATE_PATTERN = {
+  steer: /Stopping previous (?:work|attempt)|Previous work stopping/,
+  pause: /Stopping current (?:work|attempt)|Current work stopping/,
 } as const;
 
+/** Every element that can render a stopping state. */
+export const LIVE_STOPPING_SURFACES =
+  '[data-testid="session-chrome-stopping"], [data-testid="stopping-previous-attempt"]';
+
 /**
- * The production session route renders control state in SessionChrome. Match
- * both its stable stopping-chip test id and the exact receipt-backed copy for
- * the control, so the optimistic "Changing direction" state, or the other
- * control's copy, cannot satisfy this proof.
+ * The production session route renders control state in SessionChrome and the
+ * queue. Match their stable test ids and this control's stopping copy.
  */
 export function liveStoppingStateLocator(
-  page: Pick<Page, "getByTestId">,
+  page: Pick<Page, "locator">,
   control: "steer" | "pause",
 ): Locator {
-  return page.getByTestId(SESSION_CHROME_STOPPING_TEST_ID).filter({
-    hasText: LIVE_STOPPING_STATE_TEXT[control],
-  });
+  // Every rendered stopping surface for this control must clear, so wait on
+  // the last match: hidden resolves only once no matching surface remains.
+  return page
+    .locator(LIVE_STOPPING_SURFACES)
+    .filter({ hasText: LIVE_STOPPING_STATE_PATTERN[control] })
+    .last();
 }
 
 async function proveLiveSteerCancellation(input: {
@@ -1522,16 +3126,19 @@ async function proveLiveSteerCancellation(input: {
   } = input;
   const afterSequence = (await client.getSession(workspaceId, sessionId)).lastSequence;
   const controlMarker = `CONTROL_READY_${marker}_${iteration}`;
-  const zombiePath = `steer-stress/zombie-${iteration}.txt`;
-  const terminalCommand =
-    iteration === 0
-      ? `rm -rf steer-stress; mkdir -p steer-stress; for d in $(seq 1 150); do mkdir -p "steer-stress/d$d"; for f in $(seq 1 29); do : > "steer-stress/d$d/f$f.ts"; done; done; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 30; printf zombie > '${zombiePath}'`
-      : `rm -f '${zombiePath}'; test "$(find steer-stress -type f | wc -l)" -ge 4350; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 30; printf zombie > '${zombiePath}'`;
+  const terminalCommand = await installControlFixture(
+    client,
+    workspaceId,
+    sessionId,
+    marker,
+    "steer",
+    iteration,
+  );
   const queue = await client.getQueue(workspaceId, sessionId);
   const initialAccepted = await client.sendMessage(workspaceId, sessionId, {
     text: [
-      "Run exactly one terminal command and do nothing else.",
-      "The command deliberately remains active after printing its marker; wait for it to finish.",
+      "Run the harness-provided cancellation test exactly once with exec_command and yield_time_ms 2000. Its generated artifacts test process termination. Do nothing else.",
+      "The command deliberately remains active after printing its marker; wait for it to finish using only empty write_stdin calls on its session_id with yield_time_ms 30000. Do not end your turn or call wait_for_input while it runs. Ignore background command completion notices.",
       "```bash",
       terminalCommand,
       "```",
@@ -1551,6 +3158,14 @@ async function proveLiveSteerCancellation(input: {
   if (!ready.turnId || !ready.turnAttemptId) {
     throw new Error("control fixture output was not bound to its owning turn attempt");
   }
+  assertAdoptedControlFixtureInvocation(
+    await listAllSessionEventsAfter(client, workspaceId, sessionId, afterSequence),
+    ready,
+    terminalCommand,
+    initialAccepted.id,
+    "Steer",
+    adoptedControlCommands(controlFixtureCustody.get(audit)),
+  );
   const predecessorTurnId = ready.turnId;
   const predecessorAttemptId = ready.turnAttemptId;
   const predecessorStarted = await waitForSessionEvent(
@@ -1577,21 +3192,23 @@ async function proveLiveSteerCancellation(input: {
 
   const composer = page.getByLabel("Message the agent");
   await composer.waitFor({ timeout: 20_000 });
-  await composer.fill(`Reply exactly REPLACED_${marker}. Do not run a tool.`);
+  const replacementCaptureOwnershipCommandV1 = `test "$(find steer-stress -type f | wc -l)" -ge 4350 && printf 'REPLACEMENT_CAPTURE_READY_${marker}_${iteration}\n'`;
+  await composer.fill(
+    [
+      "Run exactly one terminal command and do nothing else before replying.",
+      "Ignore background command completion notices.",
+      "The command is read-only and proves the replacement owns the live workspace.",
+      "```bash",
+      replacementCaptureOwnershipCommandV1,
+      "```",
+      `Then reply exactly REPLACED_${marker}.`,
+    ].join("\n"),
+  );
+  await assertSteerablePredecessor(client, page, workspaceId, sessionId, predecessorTurnId);
   const stoppingState = liveStoppingStateLocator(page, "steer");
-  const stoppingVisible = stoppingState
-    .waitFor({ state: "visible", timeout: 1_000 })
-    .then(() => true)
-    .catch(() => false);
+  await startStoppingStateObservation(page, "steer"); // Steer full-fence observer
   const steerResponsePromise = page.waitForResponse(
-    (response) => {
-      const url = new URL(response.url());
-      return (
-        response.request().method() === "POST" &&
-        url.pathname ===
-          `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}/steer`
-      );
-    },
+    (response) => isLiveSteerSubmission(response, workspaceId, sessionId),
     { timeout: 30_000 },
   );
   await composer.press("Control+Enter");
@@ -1608,6 +3225,24 @@ async function proveLiveSteerCancellation(input: {
   if (typeof replacementTurnId !== "string" || !Number.isFinite(committedAt)) {
     throw new Error("live Steer receipt omitted its turn identity or commit time");
   }
+  await writeControlCancellationPartialEvidence(audit, {
+    control: "Steer",
+    iteration,
+    stage: "control-committed",
+    committedAt: new Date(committedAt).toISOString(),
+    predecessorTurnId,
+    predecessorAttemptId,
+    replacementTurnId,
+    controlRequestedSequence: null,
+    quiescedAt: null,
+    quiescedSequence: null,
+    replacementStartedAt: null,
+    replacementStartedSequence: null,
+    physicalQuiescenceMs: null,
+    replacementStartedMs: null,
+    stoppingStateRendered: null,
+    stoppingStateText: "",
+  });
   const observationDeadline = performance.now() + CONTROL_CANCELLATION_WORST_MS;
   const remainingBudgetMs = (label: string): number => {
     const remaining = Math.ceil(observationDeadline - performance.now());
@@ -1624,14 +3259,8 @@ async function proveLiveSteerCancellation(input: {
     sessionId,
     ready.sequence,
     remainingBudgetMs("physical quiescence"),
-    (event) =>
-      event.type === "session.queue.changed" &&
-      event.turnId === predecessorTurnId &&
-      event.turnAttemptId === predecessorAttemptId &&
-      isRecord(event.payload) &&
-      event.payload.operation === "attempt_quiesced" &&
-      event.payload.attemptId === predecessorAttemptId,
-    "predecessor physical quiescence inside the shared control budget",
+    steerPredecessorSettlement(predecessorTurnId, predecessorAttemptId),
+    "predecessor Steer handover or physical quiescence inside the shared control budget",
   );
   const replacementStarted = await waitForSessionEvent(
     client,
@@ -1647,6 +3276,25 @@ async function proveLiveSteerCancellation(input: {
     Date.parse(quiesced.occurredAt),
     Date.parse(replacementStarted.occurredAt),
   );
+  const renderedStoppingState = await finishStoppingStateObservation(page);
+  await writeControlCancellationPartialEvidence(audit, {
+    control: "Steer",
+    iteration,
+    stage: "physical-fence-observed",
+    committedAt: new Date(committedAt).toISOString(),
+    predecessorTurnId,
+    predecessorAttemptId,
+    replacementTurnId,
+    controlRequestedSequence: null,
+    quiescedAt: quiesced.occurredAt,
+    quiescedSequence: quiesced.sequence,
+    replacementStartedAt: replacementStarted.occurredAt,
+    replacementStartedSequence: replacementStarted.sequence,
+    physicalQuiescenceMs: cancellationTimeline.physicalQuiescenceMs,
+    replacementStartedMs: cancellationTimeline.replacementStartedMs,
+    stoppingStateRendered: renderedStoppingState.visible,
+    stoppingStateText: renderedStoppingState.text,
+  });
   if (cancellationTimeline.physicalQuiescenceMs > CONTROL_CANCELLATION_WORST_MS) {
     throw new Error(
       `Steer physical cancellation took ${cancellationTimeline.physicalQuiescenceMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
@@ -1657,8 +3305,11 @@ async function proveLiveSteerCancellation(input: {
       `Steer replacement took ${cancellationTimeline.replacementStartedMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
     );
   }
-  const renderedStoppingState = await stoppingVisible;
-  if (cancellationTimeline.physicalQuiescenceMs > 100 && !renderedStoppingState) {
+  if (
+    !isSteerHandoverSettlement(quiesced) &&
+    cancellationTimeline.physicalQuiescenceMs > 100 &&
+    !renderedStoppingState.visible
+  ) {
     throw new Error(
       `Steer spent ${cancellationTimeline.physicalQuiescenceMs}ms behind the physical fence without rendering its stopping state`,
     );
@@ -1669,6 +3320,7 @@ async function proveLiveSteerCancellation(input: {
   if (settled.status !== "idle") {
     throw new Error(`replacement Steer ended in ${settled.status}`);
   }
+  await releaseSteerControlFixture(client, workspaceId, sessionId, marker, iteration);
   await Bun.sleep(500);
   const finalEvents = await listAllSessionEventsAfter(
     client,
@@ -1699,6 +3351,23 @@ async function proveLiveSteerCancellation(input: {
   ) {
     throw new Error("Steer quiescence receipt was outside its control-to-replacement fence");
   }
+  registerControlFixtureCustody(audit, {
+    mode: "steer",
+    afterSequence,
+    acceptedEventId: initialAccepted.id,
+    ready,
+    command: terminalCommand,
+    control: steerRequested,
+    quiesced,
+    replacementTurnId,
+    replacementCommand: replacementCaptureOwnershipCommandV1,
+    replacementOutput: "REPLACEMENT_CAPTURE_READY_" + marker + "_" + iteration + "\n",
+  });
+  assertControlFixtureCustody(
+    finalEvents,
+    controlFixtureCustody.get(audit)!.slice(-1),
+    controlFixtureCustody.get(audit)!.slice(0, -1),
+  );
   audit.fences.set(predecessorAttemptId, {
     control: "Steer",
     controlRequestedSequence: steerRequested.sequence,
@@ -1718,9 +3387,14 @@ async function proveLiveSteerCancellation(input: {
         `replacement capture indexed only ${replacementCapture.stats.treeEntryCount} stress-tree entries`,
       );
     }
-    if (replacementCapture.stats.durationMs > 10_000) {
+    const replacementCapturePerformancePolicyV1 =
+      "contracted-user-visible-budgets-with-bounded-authoritative-availability-v1";
+    if (
+      !Number.isFinite(replacementCapture.stats.durationMs) ||
+      replacementCapture.stats.durationMs < 0
+    ) {
       throw new Error(
-        `replacement capture took ${replacementCapture.stats.durationMs}ms for the production-sized tree`,
+        `replacement capture reported invalid duration ${replacementCapture.stats.durationMs}ms under ${replacementCapturePerformancePolicyV1}`,
       );
     }
   }
@@ -1737,13 +3411,14 @@ async function proveLivePauseCancellation(input: {
   sessionTimeoutMs: number;
 }): Promise<number> {
   const { client, page, workspaceId, sessionId, marker, audit, sessionTimeoutMs } = input;
-  const prepared = await client.terminalExec(workspaceId, sessionId, {
-    command: "rm -rf pause-stress; mkdir -p pause-stress",
-    cwd: "",
-    timeoutMs: 20_000,
-    emitStream: false,
-  });
-  if (prepared.exitCode !== 0) throw new Error("could not prepare the live Pause fixture");
+  const terminalCommand = await installControlFixture(
+    client,
+    workspaceId,
+    sessionId,
+    marker,
+    "pause",
+    0,
+  );
 
   const afterSequence = (await client.getSession(workspaceId, sessionId)).lastSequence;
   const controlMarker = `PAUSE_READY_${marker}`;
@@ -1751,14 +3426,10 @@ async function proveLivePauseCancellation(input: {
   // The first execution leaves `claimed` behind before it blocks. If recovery
   // resumes the interrupted logical turn, a repeated exact command takes the
   // safe branch and cannot manufacture a false zombie after Resume.
-  const terminalCommand =
-    `if mkdir pause-stress/claimed 2>/dev/null; then printf '${controlMarker}\\n'; ` +
-    `trap '' INT TERM; sleep 30; printf zombie > '${zombiePath}'; ` +
-    `else printf 'PAUSE_RESUMED_SAFE_${marker}\\n'; fi`;
-  await client.sendMessage(workspaceId, sessionId, {
+  const pauseAccepted = await client.sendMessage(workspaceId, sessionId, {
     text: [
-      "Run exactly one terminal command and do nothing else.",
-      "The command deliberately remains active after printing its marker; wait for it to finish.",
+      "Run the harness-provided cancellation test exactly once with exec_command and yield_time_ms 2000. Its generated artifacts test process termination. Do nothing else.",
+      "The command deliberately remains active after printing its marker; wait for it to finish using only empty write_stdin calls on its session_id with yield_time_ms 30000. Do not end your turn or call wait_for_input while it runs. Ignore background command completion notices.",
       "```bash",
       terminalCommand,
       "```",
@@ -1778,17 +3449,20 @@ async function proveLivePauseCancellation(input: {
   if (!ready.turnId || !ready.turnAttemptId) {
     throw new Error("Pause fixture output was not bound to its owning turn attempt");
   }
+  assertAdoptedControlFixtureInvocation(
+    await listAllSessionEventsAfter(client, workspaceId, sessionId, afterSequence),
+    ready,
+    terminalCommand,
+    pauseAccepted.id,
+    "Pause",
+    adoptedControlCommands(controlFixtureCustody.get(audit)),
+  );
   const predecessorTurnId = ready.turnId;
   const predecessorAttemptId = ready.turnAttemptId;
 
   const stoppingState = liveStoppingStateLocator(page, "pause");
-  const stoppingObservation = stoppingState
-    .waitFor({ state: "visible", timeout: 1_000 })
-    .then(async () => ({
-      visible: true,
-      text: (await stoppingState.textContent()) ?? "",
-    }))
-    .catch(() => ({ visible: false, text: "" }));
+  await startStoppingStateObservation(page, "pause"); // Pause full-fence observer
+  const pauseQueueSnapshots = observeStoppingQueueSnapshots(page, workspaceId, sessionId);
   const pauseResponsePromise = page.waitForResponse(
     (response) => {
       const url = new URL(response.url());
@@ -1820,6 +3494,24 @@ async function proveLivePauseCancellation(input: {
   if (typeof operationId !== "string" || !Number.isFinite(committedAt)) {
     throw new Error("live Pause receipt omitted its operation identity or commit time");
   }
+  await writeControlCancellationPartialEvidence(audit, {
+    control: "Pause",
+    iteration: null,
+    stage: "control-committed",
+    committedAt: new Date(committedAt).toISOString(),
+    predecessorTurnId,
+    predecessorAttemptId,
+    replacementTurnId: null,
+    controlRequestedSequence: null,
+    quiescedAt: null,
+    quiescedSequence: null,
+    replacementStartedAt: null,
+    replacementStartedSequence: null,
+    physicalQuiescenceMs: null,
+    replacementStartedMs: null,
+    stoppingStateRendered: null,
+    stoppingStateText: "",
+  });
   const pauseRequested = await waitForSessionEvent(
     client,
     workspaceId,
@@ -1849,26 +3541,85 @@ async function proveLivePauseCancellation(input: {
     committedAt,
     Date.parse(quiesced.occurredAt),
   );
+  const renderedStoppingState = await finishStoppingStateObservation(page);
+  const pauseStoppingSnapshot = await pauseQueueSnapshots.stop(Date.now());
+  console.log(
+    JSON.stringify({
+      status: "running",
+      at: new Date().toISOString(),
+      message:
+        "Pause stopping state: quiesced in " +
+        controlCancellationMs +
+        "ms, rendered " +
+        renderedStoppingState.visible +
+        ", " +
+        pauseStoppingSnapshot.snapshots +
+        " queue snapshots, stopping snapshot lead " +
+        pauseStoppingSnapshot.stoppingSnapshotLeadMs +
+        "ms, paused snapshot " +
+        pauseStoppingSnapshot.pausedReconciled,
+    }),
+  );
+  await writeControlCancellationPartialEvidence(audit, {
+    control: "Pause",
+    iteration: null,
+    stage: "physical-fence-observed",
+    committedAt: new Date(committedAt).toISOString(),
+    predecessorTurnId,
+    predecessorAttemptId,
+    replacementTurnId: null,
+    controlRequestedSequence: pauseRequested.sequence,
+    quiescedAt: quiesced.occurredAt,
+    quiescedSequence: quiesced.sequence,
+    replacementStartedAt: null,
+    replacementStartedSequence: null,
+    physicalQuiescenceMs: controlCancellationMs,
+    replacementStartedMs: null,
+    stoppingStateRendered: renderedStoppingState.visible,
+    stoppingStateText: renderedStoppingState.text,
+  });
   if (controlCancellationMs > CONTROL_CANCELLATION_WORST_MS) {
     throw new Error(
       `Pause physical cancellation took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
     );
   }
-  const observedStoppingState = await stoppingObservation;
-  if (controlCancellationMs > 100 && !observedStoppingState.visible) {
+  if (
+    controlCancellationMs > PAUSE_QUEUE_RECONCILE_REQUIRED_AFTER_MS &&
+    !pauseStoppingSnapshot.pausedReconciled
+  ) {
     throw new Error(
-      `Pause spent ${controlCancellationMs}ms behind the physical fence without rendering its stopping state`,
+      `Pause took ${controlCancellationMs}ms to stop physically but the page never reconciled the queue after Pause`,
     );
   }
   if (
-    observedStoppingState.visible &&
-    !observedStoppingState.text.includes(LIVE_STOPPING_STATE_TEXT.pause)
+    controlCancellationMs > 100 &&
+    !renderedStoppingState.visible &&
+    pauseStoppingSnapshot.renderRequired
+  ) {
+    throw new Error(
+      `Pause spent ${controlCancellationMs}ms behind the physical fence without rendering its stopping state, ${pauseStoppingSnapshot.stoppingSnapshotLeadMs}ms after the page received a stopping queue snapshot`,
+    );
+  }
+  if (
+    renderedStoppingState.visible &&
+    !LIVE_STOPPING_STATE_PATTERN.pause.test(renderedStoppingState.text)
   ) {
     throw new Error("Pause rendered misleading control-state copy while cancellation settled");
   }
   await stoppingState.waitFor({ state: "hidden", timeout: 5_000 });
   await page.getByText("Paused here", { exact: true }).waitFor({ timeout: 5_000 });
 
+  const pauseCustody: ControlFixtureCustody = {
+    mode: "pause",
+    afterSequence,
+    acceptedEventId: pauseAccepted.id,
+    ready,
+    command: terminalCommand,
+    control: pauseRequested,
+    quiesced,
+    resumeOutput: "PAUSE_RESUMED_SAFE_" + marker + "\n",
+  };
+  registerControlFixtureCustody(audit, pauseCustody);
   audit.fences.set(predecessorAttemptId, {
     control: "Pause",
     controlRequestedSequence: pauseRequested.sequence,
@@ -1910,6 +3661,9 @@ async function proveLivePauseCancellation(input: {
   ) {
     throw new Error("live Resume did not reactivate the Paused workstream");
   }
+  if (!isRecord(resumeResult.receipt) || typeof resumeResult.receipt.id !== "string")
+    throw new Error("Resume omitted its custody receipt");
+  pauseCustody.resumeOperationId = resumeResult.receipt.id;
   const settled = await waitForSettled(client, workspaceId, sessionId, sessionTimeoutMs);
   if (settled.status !== "idle") {
     throw new Error(`resumed Pause fixture ended in ${settled.status}`);
@@ -1934,10 +3688,8 @@ async function auditCancelledPredecessorEvents(
   audit: ControlCancellationAudit,
 ): Promise<void> {
   while (true) {
-    const events = await client.listEvents(workspaceId, sessionId, {
-      after: audit.cursor,
-      limit: 500,
-    });
+    const page = await readFixtureEventPage(client, workspaceId, sessionId, audit.cursor);
+    const events = page.events;
     for (const event of events) {
       const fence = event.turnAttemptId ? audit.fences.get(event.turnAttemptId) : undefined;
       if (!fence) continue;
@@ -1958,9 +3710,8 @@ async function auditCancelledPredecessorEvents(
         );
       }
     }
-    const lastSequence = events.at(-1)?.sequence;
-    if (lastSequence !== undefined) audit.cursor = lastSequence;
-    if (events.length < 500) return;
+    audit.cursor = page.nextAfter;
+    if (!page.hasMore) return;
   }
 }
 
@@ -1973,11 +3724,10 @@ async function listAllSessionEventsAfter(
   const collected: Awaited<ReturnType<OpenGeniClient["listEvents"]>> = [];
   let cursor = after;
   while (true) {
-    const page = await client.listEvents(workspaceId, sessionId, { after: cursor, limit: 500 });
-    collected.push(...page);
-    const lastSequence = page.at(-1)?.sequence;
-    if (lastSequence !== undefined) cursor = lastSequence;
-    if (page.length < 500) return collected;
+    const page = await readFixtureEventPage(client, workspaceId, sessionId, cursor);
+    collected.push(...page.events);
+    cursor = page.nextAfter;
+    if (!page.hasMore) return collected;
   }
 }
 
@@ -2016,11 +3766,12 @@ async function waitForSessionEvent(
   const deadline = Date.now() + timeoutMs;
   let cursor = after;
   while (Date.now() < deadline) {
-    const events = await client.listEvents(workspaceId, sessionId, { after: cursor, limit: 500 });
+    const page = await readFixtureEventPage(client, workspaceId, sessionId, cursor);
+    const events = page.events;
     const found = events.find(predicate);
     if (found) return found;
-    cursor = events.at(-1)?.sequence ?? cursor;
-    await Bun.sleep(25);
+    cursor = page.nextAfter;
+    if (!page.hasMore) await Bun.sleep(25);
   }
   throw new Error(`timed out waiting for ${label}`);
 }
@@ -2263,7 +4014,12 @@ function observePage(page: Page): BrowserProblems {
     const path = safePath(request.url());
     const errorText = request.failure()?.errorText ?? "unknown request failure";
     if (isExpectedBrowserCancellation(path, errorText)) return;
-    problems.failedRequests.push(`${errorText} ${path}`);
+    problems.failedRequests.push({
+      method: request.method(),
+      errorText,
+      path,
+      resourceType: request.resourceType(),
+    });
   });
   page.on("response", (response) => {
     if (response.status() >= 400) {
@@ -2282,9 +4038,46 @@ export function isExpectedBrowserCancellation(path: string, errorText: string): 
   );
 }
 
+const acceptanceUuid = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+// A background GET the browser aborted is a client-side cancellation
+// (navigation, unmount, superseded query). Server and transport failures
+// surface as other net:: errors or as bad responses, and aborted document
+// loads (pages, iframes, previews) are never benign; all still fail acceptance.
+function isClientCancelledBackgroundGetV8(failure: BrowserRequestFailure): boolean {
+  return (
+    failure.method === "GET" &&
+    failure.errorText === "net::ERR_ABORTED" &&
+    failure.resourceType !== "document"
+  );
+}
+const optionalCapabilityResponse = new RegExp(
+  `^(?:403 /v1/workspaces/${acceptanceUuid}/(?:github/app|machines)|404 /v1/workspaces/${acceptanceUuid}/sessions/${acceptanceUuid}/goal)$`,
+  "i",
+);
+
+function expectedResourceConsole(response: string): string | undefined {
+  const status = /^(403|404) /.exec(response)?.[1];
+  return status
+    ? `Failed to load resource: the server responded with a status of ${status} ()`
+    : undefined;
+}
+
 function assertNoProblems(problems: BrowserProblems, requireZeroChannelA: boolean): void {
+  const console = [...problems.console];
+  const badResponses = problems.badResponses.filter((response) => {
+    if (!optionalCapabilityResponse.test(response)) return true;
+    const expectedConsole = expectedResourceConsole(response);
+    const consoleIndex = expectedConsole ? console.indexOf(expectedConsole) : -1;
+    if (consoleIndex >= 0) console.splice(consoleIndex, 1);
+    return false;
+  });
   const active = {
-    ...problems,
+    console,
+    page: problems.page,
+    failedRequests: problems.failedRequests.filter(
+      (failure) => !isClientCancelledBackgroundGetV8(failure),
+    ),
+    badResponses,
     channelA: requireZeroChannelA ? problems.channelA : [],
   };
   if (Object.values(active).some((items) => items.length > 0)) {
@@ -2312,8 +4105,7 @@ export async function assertChangesDefaultVisible(page: Page): Promise<void> {
   const changes = page.getByRole("tab", { name: /Changes/ });
   await changes.waitFor({ state: "visible", timeout: 20_000 });
   await page
-    .locator('[role="tab"][aria-selected="true"]')
-    .filter({ hasText: /Changes/ })
+    .getByRole("tab", { name: /Changes/, selected: true })
     .waitFor({ state: "visible", timeout: 20_000 });
 
   await page.locator(CHANGES_LAYOUT_SELECTOR).waitFor({
@@ -2598,6 +4390,14 @@ async function assertAccessibility(page: Page): Promise<void> {
         .flatMap((rule) => rule.nodes.map((node) => node.target)),
     ),
   );
+  const manuallyAuditedSessionListTargets = new Set(
+    await markIncompleteSessionListsForManualAudit(
+      page,
+      report.incomplete
+        .filter((rule) => rule.id === "aria-required-children")
+        .flatMap((rule) => rule.nodes.map((node) => node.target)),
+    ),
+  );
   const manual = await manualAccessibilityAudit(page);
   if (report.violations.length > 0) {
     throw new Error(
@@ -2609,6 +4409,9 @@ async function assertAccessibility(page: Page): Promise<void> {
       .filter((node) => {
         const target = JSON.stringify(node.target);
         if (rule.id === "aria-valid-attr-value") return false;
+        if (rule.id === "aria-required-children") {
+          return !manuallyAuditedSessionListTargets.has(target);
+        }
         if (rule.id === "color-contrast") {
           return (
             !manuallyAuditedContrastTargets.has(target) &&
@@ -2684,6 +4487,63 @@ async function markIncompleteContrastTargetsForManualAudit(
     }
     return audited;
   }, candidates);
+}
+
+async function markIncompleteSessionListsForManualAudit(
+  page: Page,
+  targets: readonly unknown[],
+): Promise<string[]> {
+  return page.evaluate((candidates) => {
+    const audited: string[] = [];
+    for (const target of candidates) {
+      if (!Array.isArray(target) || target.length !== 1 || typeof target[0] !== "string") {
+        continue;
+      }
+      try {
+        const matches = Array.from(document.querySelectorAll<HTMLElement>(target[0]));
+        if (matches.length !== 1) continue;
+        const element = matches[0]!;
+        const isVisible = (candidate: HTMLElement): boolean => {
+          const style = getComputedStyle(candidate);
+          const rect = candidate.getBoundingClientRect();
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
+        };
+        const label = element.getAttribute("aria-label") ?? "";
+        const children = Array.from(element.children);
+        const owner = element.parentElement;
+        const expectedOwnerLabel = label.endsWith(" sessions")
+          ? label.slice(0, -" sessions".length)
+          : "";
+        const populatedListIsValid =
+          children.length > 0 &&
+          isVisible(element) &&
+          children.every((child) => child.getAttribute("role") === "listitem");
+        const emptyListHasVisibleOwner =
+          children.length === 0 &&
+          owner instanceof HTMLElement &&
+          owner.getAttribute("role") === "group" &&
+          owner.getAttribute("aria-label") === expectedOwnerLabel &&
+          isVisible(owner);
+        if (
+          element.getAttribute("role") !== "list" ||
+          !label.endsWith(" sessions") ||
+          (!populatedListIsValid && !emptyListHasVisibleOwner)
+        ) {
+          continue;
+        }
+        element.setAttribute("data-session-list-owner-audited", "");
+        audited.push(JSON.stringify(target));
+      } catch {
+        // Invalid, ambiguous, orphaned, or malformed targets remain unresolved.
+      }
+    }
+    return audited;
+  }, targets);
 }
 
 async function assertTouchTargets(page: Page, mobile: boolean): Promise<void> {

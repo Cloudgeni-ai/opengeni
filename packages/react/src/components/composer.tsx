@@ -109,6 +109,7 @@ export type ComposerDelivery = Pick<
   | "preparing"
   | "error"
   | "clearError"
+  | "canBuyCredits"
   | "reconnecting"
   | "annotations"
   | "requestAnnotationReview"
@@ -829,7 +830,11 @@ export function useChatComposerController({
               ? messages.controlChangedError
               : formatError(
                   delivery.error,
-                  composerSubmissionErrorMessage(t, delivery.error) || messages.sendFailedError,
+                  composerSubmissionErrorMessage(
+                    t,
+                    delivery.error,
+                    delivery.canBuyCredits ?? true,
+                  ) || messages.sendFailedError,
                 ),
           }
         : null);

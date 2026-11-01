@@ -1,6 +1,6 @@
 import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
 import type { TranscribeAudioResponse, VoiceInputErrorCode } from "@opengeni/contracts";
-import type { CreditDebitAttribution, UsageEventProcessingResidency } from "@opengeni/db";
+import type { CreditDebitAttribution, Database, UsageEventProcessingResidency } from "@opengeni/db";
 import type { RecordingTranscriptionErrorCode } from "./recording-transcription";
 
 /**
@@ -74,6 +74,13 @@ export type TranscriptionBillingContext = {
    * provider reports no usage this deployment has a price for.
    */
   trustedDurationSeconds?: number | undefined;
+  /**
+   * Audio duration a client reported, for audio that never passes through
+   * the server (the live transcript streams from the device straight to the
+   * provider). Bills only without provider usage or a trusted duration, and
+   * the ledger names it `client_reported_duration`.
+   */
+  clientReportedDurationSeconds?: number | undefined;
 };
 
 export type TranscriptionResult = TranscribeAudioResponse & {
@@ -123,28 +130,54 @@ export class TranscriptionBillingRefusedError extends Error {
  * Subscription providers (Codex, SuperGrok) never reach this port.
  */
 export type TranscriptionBilling = {
-  /** Refuse before any audio is sent when the payer cannot fund the call. */
+  /**
+   * Refuse before any audio is sent when the payer cannot fund the call.
+   * `feature` words the refusal for what was refused (voice input by default).
+   */
   admit(input: {
     accountId: string;
     workspaceId: string;
     attribution: CreditDebitAttribution;
+    feature?: TranscriptionBillingFeature;
   }): Promise<void>;
   /**
    * Record usage and debit credits once per unit, after use. The usage receipt
    * commits before the debit, so a failed debit leaves a durable receipt that
    * `admit` reconciles on the workspace's next voice request.
    */
-  settle(input: {
-    accountId: string;
-    workspaceId: string;
-    providerId: string;
-    model: string;
-    pricing: VoiceInputPricing;
-    usage: VoiceInputUsage | null;
-    billing: TranscriptionBillingContext;
-    /** Where the provider processed the audio (its route's residency claim). */
-    processingResidency?: UsageEventProcessingResidency;
-  }): Promise<{ creditCostMicros: number }>;
+  settle(input: TranscriptionSettlement): Promise<{ creditCostMicros: number }>;
+  /**
+   * Record one unit's usage receipt inside the caller's transaction, so the
+   * charge commits with the caller's own write or not at all. `settle` for
+   * the same unit then applies its debit at the recorded amount, and a debit
+   * that fails is applied from the receipt by a later admission.
+   */
+  recordReceipt?(
+    tx: Database,
+    input: TranscriptionSettlement,
+  ): Promise<{ creditCostMicros: number }>;
+  /**
+   * Apply now the debit of every receipt in the workspace whose debit never
+   * committed (as `admit` does on the next voice request), so a meeting's
+   * failed live charges are paid when it is finalized.
+   */
+  reconcile?(input: { accountId: string; workspaceId: string }): Promise<void>;
+};
+
+/** What a billing refusal names: voice input, or a meeting's live transcript. */
+export type TranscriptionBillingFeature = "voice_input" | "live_transcript";
+
+/** One unit of deployment-funded transcription to settle. */
+export type TranscriptionSettlement = {
+  accountId: string;
+  workspaceId: string;
+  providerId: string;
+  model: string;
+  pricing: VoiceInputPricing;
+  usage: VoiceInputUsage | null;
+  billing: TranscriptionBillingContext;
+  /** Where the provider processed the audio (its route's residency claim). */
+  processingResidency?: UsageEventProcessingResidency;
 };
 
 export class TranscriptionServiceError extends Error {
@@ -237,6 +270,13 @@ export type TranscriptionService = {
     workspaceId: string;
     attribution: CreditDebitAttribution;
   }): Promise<void>;
+  /**
+   * The credit admission and settlement behind `admit`, for deployment-paid
+   * audio the API meters itself: the live transcript streams straight to the
+   * provider, so the API admits it before minting the grant and charges what
+   * each track streamed.
+   */
+  billing?: TranscriptionBilling;
   transcribe(request: TranscriptionRequest): Promise<TranscriptionResult>;
 };
 

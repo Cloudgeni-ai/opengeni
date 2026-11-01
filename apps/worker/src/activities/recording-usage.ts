@@ -213,6 +213,19 @@ export async function readTail(
   return (text + decoder.decode()).slice(-limit);
 }
 
+/**
+ * Whether a program was stopped from outside rather than failing on its own:
+ * killed by a signal, or ffmpeg's own "received signal" exit. That happens
+ * when the worker stops mid-job (a deploy or a lost pod), so the step is
+ * retried on another worker instead of failing the recording.
+ */
+export function stoppedBySignal(child: { signalCode: unknown }, stderr: string): boolean {
+  return (
+    (child.signalCode !== null && child.signalCode !== undefined) ||
+    /received signal \d+/u.test(stderr)
+  );
+}
+
 /** Run a program for the current stage, the way the dictation segmenter expects. */
 export async function runMeasuredCommand(
   command: string,

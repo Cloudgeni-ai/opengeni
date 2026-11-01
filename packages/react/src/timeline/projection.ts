@@ -35,10 +35,12 @@ import {
   sessionUsageLimitReachedMessage,
 } from "@opengeni/sdk/session-usage-limits";
 import {
-  CREDIT_EXHAUSTION_MESSAGE,
+  creditExhaustionText,
+  creditRefusalKindFromText,
   presentFailure,
   isCreditExhaustion,
   tryParseJson,
+  type CreditRefusalKind,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { invokedTool } from "./invoked-tool";
@@ -1669,12 +1671,13 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
-          items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE(t)));
+          const creditText = creditExhaustionPayloadText(t, payload);
+          items.push(turnEndItem(event, "failed", creditText));
           items.push({
             kind: "notice",
             id: event.id,
             tone: "failed",
-            text: CREDIT_EXHAUSTION_MESSAGE(t),
+            text: creditText,
             occurredAt: event.occurredAt,
           });
           break;
@@ -1781,7 +1784,7 @@ export function buildTimeline(
         const failureText = allowance
           ? ALLOWANCE_TURN_END_TEXT(t)
           : creditExhausted
-            ? CREDIT_EXHAUSTION_MESSAGE(t)
+            ? creditExhaustionPayloadText(t, payload)
             : (presented?.reason ?? null);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
@@ -2403,6 +2406,15 @@ const BARE_PROVIDER_CITATION_HANDLE = /[ \t]*(?:file)?cite(?:turn\d+[a-z_]+\d+)+
  */
 const ALLOWANCE_TURN_END_TEXT = (t: OpenGeniText) => t("timeline.projection.usageLimitReached");
 
+/** The credit-stop sentence for a turn-end payload (own key, API use, or none). */
+function creditExhaustionPayloadText(t: OpenGeniText, payload: Record<string, unknown>): string {
+  return creditExhaustionText(
+    t,
+    typeof payload.error === "string" ? payload.error : null,
+    typeof payload.detail === "string" ? payload.detail : null,
+  );
+}
+
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */
 function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
   if (payload.code === "allowance_exhausted") return false;
@@ -2420,6 +2432,26 @@ function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
  * settles any other way (someone topped up and kept working) clears it.
  */
 export function creditExhaustedFromEvents(events: SessionEvent[]): boolean {
+  const payload = lastTurnEndPayload(events);
+  return payload ? isCreditExhaustionPayload(payload) : false;
+}
+
+/**
+ * The one-fix refusal (own-key fee or API use) the session's most recent turn
+ * ended on, or null. Read from the same LAST turn-end as
+ * `creditExhaustedFromEvents`, so a stop between model calls (a completed,
+ * budget-exhausted turn) names its fix too, and an older failure never does.
+ */
+export function creditRefusalFromEvents(events: SessionEvent[]): CreditRefusalKind | null {
+  const payload = lastTurnEndPayload(events);
+  if (!payload || !isCreditExhaustionPayload(payload)) return null;
+  return creditRefusalKindFromText(
+    typeof payload.error === "string" ? payload.error : null,
+    typeof payload.detail === "string" ? payload.detail : null,
+  );
+}
+
+function lastTurnEndPayload(events: SessionEvent[]): Record<string, unknown> | null {
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
   for (let index = ordered.length - 1; index >= 0; index -= 1) {
     const event = ordered[index];
@@ -2430,9 +2462,9 @@ export function creditExhaustedFromEvents(events: SessionEvent[]): boolean {
     ) {
       continue;
     }
-    return isCreditExhaustionPayload(asRecord(event.payload));
+    return asRecord(event.payload);
   }
-  return false;
+  return null;
 }
 
 /** The latest session status carried in the event log, if any. */

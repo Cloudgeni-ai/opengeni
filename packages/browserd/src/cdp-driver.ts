@@ -8898,6 +8898,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       () => undefined,
     );
     const value = isRecord(settled.result) ? settled.result.value : undefined;
+    if (value === "unpressed") {
+      // Chrome sent the press but the page never received it: something
+      // outside the page took it. A browser prompt that holds the tab's input
+      // (a passkey request the browser shows its own dialog for, a permission
+      // prompt) does this to every click until it closes, so repeating the
+      // click does not help; a frame over the element can also take it.
+      throw new InteractionOutcomeUnknownDriverError(
+        "outcome_unknown",
+        "browser click was sent, but the page never received the press: something outside the page took it, such as a browser prompt holding the tab's input (a passkey or permission request) or a frame over the element. Clicking again will not help while a prompt stays open; check the page and the screen before continuing",
+      );
+    }
     const verdict = hitTargetVerdict(value);
     if (settled.exceptionDetails || (value !== null && verdict === null)) {
       throw unknown();

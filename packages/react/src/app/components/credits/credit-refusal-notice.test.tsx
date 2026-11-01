@@ -194,3 +194,50 @@ test("the refusal shows the server's sentence, not the SDK's status prefix or re
   expect(alert.textContent).not.toContain("API 402");
   expect(alert.textContent).not.toContain("Reference");
 });
+
+test("an own-key refusal asks only for credits: no model switch, no connect, no balance read", async () => {
+  const onAddCredits = mock(() => undefined);
+  const container = await render({
+    refusalCode: "byok_paid_credit_required",
+    message: "Add credits to use your own key.",
+    gap: { modelLabel: "Claude Opus 5.5", covered: [], selectionUsable: false },
+    onChooseModel: () => undefined,
+    onAddCredits,
+  });
+  expect(container.textContent).toBe("Add credits to use your own keyAdd credits");
+  expect(getBilling).not.toHaveBeenCalled();
+  const buttons = [...container.querySelectorAll("button")].map((button) => button.textContent);
+  expect(buttons).toEqual(["Add credits"]);
+  await act(async () => container.querySelector("button")!.click());
+  expect(onAddCredits).toHaveBeenCalledTimes(1);
+});
+
+test("an API refusal says credits pay for API use; a member is told to ask an owner", async () => {
+  const container = await render({
+    refusalCode: "api_credits_required",
+    message: "API usage uses credits, not your plan credit.",
+    canBuyCredits: false,
+  });
+  expect(container.textContent).toBe(
+    "API usage uses credits, not your plan creditAsk an organization owner to add credits.",
+  );
+  expect(container.querySelectorAll("a, button")).toHaveLength(0);
+});
+
+test("an own-key refusal on the Free plan offers one Upgrade to Pro action, even with a credits prompt", async () => {
+  const onAddCredits = mock(() => undefined);
+  const container = await render({
+    refusalCode: "byok_upgrade_required",
+    message: "Upgrade to Pro to use your own key.",
+    gap: { modelLabel: "Claude Opus 5.5", covered: [], selectionUsable: false },
+    onChooseModel: () => undefined,
+    onAddCredits,
+  });
+  expect(container.textContent).toBe("Upgrade to Pro to use your own keyUpgrade to Pro");
+  expect(container.querySelectorAll("button")).toHaveLength(0);
+  const links = [...container.querySelectorAll("a")];
+  expect(links.map((link) => link.getAttribute("href"))).toEqual([
+    "/workspaces/ws/organization?section=billing",
+  ]);
+  expect(onAddCredits).not.toHaveBeenCalled();
+});

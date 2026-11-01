@@ -1,6 +1,7 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { Permission, WorkspaceMember } from "@opengeni/contracts";
 import { withWorkspaceRls, type Database } from "./database";
+import { membershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
 import * as schema from "./schema";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 
@@ -72,7 +73,13 @@ export async function listWorkspaceMembers(
     const rows = await scopedDb
       .select()
       .from(schema.workspaceMemberships)
-      .where(eq(schema.workspaceMemberships.workspaceId, workspaceId))
+      .where(
+        and(
+          eq(schema.workspaceMemberships.workspaceId, workspaceId),
+          // A Personal workspace lists no members, as before its owner had a row.
+          membershipOutsidePersonalWorkspace(),
+        ),
+      )
       .orderBy(asc(schema.workspaceMemberships.createdAt));
     return rows.map(mapWorkspaceMember);
   });

@@ -226,7 +226,7 @@ export function voiceCreditStanding(balance: {
  * account holding only those must not be told it has nothing.
  */
 export function voiceInsufficientCreditsMessage(
-  feature: "Live voice" | "Voice input",
+  feature: "Live voice" | "Voice input" | "Live transcript",
   standing: VoiceCreditStanding,
 ): string {
   return standing === "promotional_only"

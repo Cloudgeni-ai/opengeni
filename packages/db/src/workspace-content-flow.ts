@@ -155,3 +155,23 @@ export async function assertOrganizationContentExchangeAllowed(
   if (!here && organization.any)
     throw new WorkspaceContentFlowRefusedError(input.accountId, input.here.workspaceId);
 }
+
+/**
+ * For an organization-wide setup that carries content both ways between any
+ * workspace of `accountId` and any workspace of `otherAccountId` (an
+ * organization connector holding an API key of that organization): allowed
+ * only when every workspace of both is EU-only, or none of them is.
+ */
+export async function assertOrganizationsContentExchangeAllowed(
+  db: Database,
+  input: { accountId: string; otherAccountId: string },
+): Promise<void> {
+  const here = await organizationEuOnlySummary(db, input.accountId);
+  const there =
+    input.otherAccountId.toLowerCase() === input.accountId.toLowerCase()
+      ? here
+      : await organizationEuOnlySummary(db, input.otherAccountId);
+  if (here.every && there.every) return;
+  if (!here.any && !there.any) return;
+  throw new WorkspaceContentFlowRefusedError(input.otherAccountId, input.accountId);
+}

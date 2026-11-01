@@ -283,9 +283,16 @@ describe.skipIf(!realDb)("Codex reset credits on the shared core (M3 PR 2c)", ()
     expect(
       await authorityOf(other, other.ownerSubjectId, connectionId, other.sharedWorkspaceId),
     ).toBeNull();
-    // Another workspace of the same organization does not manage it, even for its administrator.
-    const otherManager = await workspaceAdmin(org, org.personalWorkspaceId);
-    expect(await authorityOf(org, otherManager, connectionId, org.personalWorkspaceId)).toBeNull();
+    // Another workspace of the same organization does not manage it, even for
+    // its administrator. (A Personal workspace can't have one: only its owner.)
+    const [elsewhere] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${org.accountId}::uuid, 'Core Codex other workspace') returning id::text as id`;
+    await shared!.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${elsewhere!.id}::uuid, ${org.accountId}::uuid)`;
+    const otherManager = await workspaceAdmin(org, elsewhere!.id);
+    expect(await authorityOf(org, otherManager, connectionId, elsewhere!.id)).toBeNull();
     expect(
       await authorityOf(org, org.ownerSubjectId, connectionId, org.personalWorkspaceId),
     ).toBeNull();

@@ -225,6 +225,12 @@ export type ConnectMachineDialogProps = {
   personalWorkspace?: boolean | undefined;
   /** Whether this person may connect a machine for the whole workspace. */
   canShareWithWorkspace?: boolean | undefined;
+  /**
+   * Whether this person may connect a new machine of their own: false when
+   * the organization keeps that to its owners and admins. In a Personal
+   * workspace every machine is its owner's own.
+   */
+  canConnectOwnMachine?: boolean | undefined;
   /** Who can use it, to start with (a reconnect keeps the machine's access). */
   defaultScope?: ConnectMachineScope | undefined;
   /** Screen control's starting value (on when reconnecting to turn it on). */
@@ -262,6 +268,10 @@ export function ConnectMachineDialog({ open, onOpenChange, ...body }: ConnectMac
   );
 }
 
+/** Why a member can't connect a machine of their own (the server's words). */
+const OWN_MACHINES_ADMINS_ONLY =
+  "Your organization lets only its owners and admins connect their own machines.";
+
 function ConnectMachineBody({
   workspaceId,
   sessionId,
@@ -271,14 +281,17 @@ function ConnectMachineBody({
   machinesError = null,
   personalWorkspace = false,
   canShareWithWorkspace = true,
+  canConnectOwnMachine = true,
   defaultScope = "user",
   defaultAllowScreenControl = false,
   onConnected,
   useInChat,
   onClose,
 }: Omit<ConnectMachineDialogProps, "open" | "onOpenChange"> & { onClose: () => void }) {
+  // In a Personal workspace, This workspace is still only its owner.
+  const canConnectWorkspace = canShareWithWorkspace && (canConnectOwnMachine || !personalWorkspace);
   const [scope, setScope] = useState<ConnectMachineScope>(
-    canShareWithWorkspace ? defaultScope : "user",
+    !canConnectOwnMachine ? "workspace" : canShareWithWorkspace ? defaultScope : "user",
   );
   const [allowScreenControl, setAllowScreenControl] = useState(defaultAllowScreenControl);
   const [advanced, setAdvanced] = useState(defaultAllowScreenControl);
@@ -301,12 +314,29 @@ function ConnectMachineBody({
   if (connected) {
     return <ConnectedStep machine={connected} useInChat={useInChat} onClose={onClose} />;
   }
+  if (!canConnectOwnMachine && !canConnectWorkspace) {
+    // Nothing this person may connect here: say who can, mint nothing.
+    return (
+      <>
+        <DialogHeader>
+          <DialogTitle>Connect a machine</DialogTitle>
+          <DialogDescription>{OWN_MACHINES_ADMINS_ONLY}</DialogDescription>
+        </DialogHeader>
+        {personalWorkspace ? null : (
+          <Notice tone="muted" title="Need a machine here?">
+            A workspace admin can connect one for everyone in this workspace.
+          </Notice>
+        )}
+      </>
+    );
+  }
   const serverSetup = advanced ? (
     <ConnectSetup
       workspaceId={workspaceId}
       origin={origin}
       personalWorkspace={personalWorkspace}
       canShareWithWorkspace={canShareWithWorkspace}
+      canConnectOwnMachine={canConnectOwnMachine}
       scope={scope}
       onScopeChange={setScope}
       allowScreenControl={allowScreenControl}
@@ -315,8 +345,9 @@ function ConnectMachineBody({
   ) : null;
   // Inside the desktop app this computer is already here: no download or
   // hand-off to the app, just its own state and one action. Other computers
-  // and servers connect with a command, as on the web.
-  if (desktop && desktop.computer.status?.state !== "unavailable") {
+  // and servers connect with a command, as on the web. This computer is
+  // always one's own, so it is offered only while the organization allows it.
+  if (canConnectOwnMachine && desktop && desktop.computer.status?.state !== "unavailable") {
     return (
       <>
         <DialogHeader>
@@ -339,8 +370,8 @@ function ConnectMachineBody({
       </>
     );
   }
-  if (desktop) {
-    // This kind of computer can't be used here: other machines are what's left.
+  if (desktop || !canConnectOwnMachine) {
+    // This computer can't be used here: other machines are what's left.
     return (
       <>
         <DialogHeader>
@@ -354,6 +385,7 @@ function ConnectMachineBody({
           origin={origin}
           personalWorkspace={personalWorkspace}
           canShareWithWorkspace={canShareWithWorkspace}
+          canConnectOwnMachine={canConnectOwnMachine}
           scope={scope}
           onScopeChange={setScope}
           allowScreenControl={allowScreenControl}
@@ -495,6 +527,7 @@ function ConnectSetup({
   origin,
   personalWorkspace,
   canShareWithWorkspace,
+  canConnectOwnMachine,
   scope,
   onScopeChange,
   allowScreenControl,
@@ -504,6 +537,7 @@ function ConnectSetup({
   origin: string;
   personalWorkspace: boolean;
   canShareWithWorkspace: boolean;
+  canConnectOwnMachine: boolean;
   scope: ConnectMachineScope;
   onScopeChange: (scope: ConnectMachineScope) => void;
   allowScreenControl: boolean;
@@ -544,6 +578,8 @@ function ConnectSetup({
           icon={<UserIcon />}
           title="Only me"
           description="Just you, in every workspace you can open. Nobody else can use it."
+          disabled={!canConnectOwnMachine}
+          disabledReason={OWN_MACHINES_ADMINS_ONLY}
         />
         <ChoiceCard
           value="workspace"
@@ -554,8 +590,12 @@ function ConnectSetup({
               ? "Only in this personal workspace."
               : "Everyone in this workspace can run chats on it."
           }
-          disabled={!canShareWithWorkspace}
-          disabledReason="Only workspace admins can choose this."
+          disabled={!canShareWithWorkspace || (personalWorkspace && !canConnectOwnMachine)}
+          disabledReason={
+            canShareWithWorkspace
+              ? OWN_MACHINES_ADMINS_ONLY
+              : "Only workspace admins can choose this."
+          }
         />
       </ChoiceCards>
 

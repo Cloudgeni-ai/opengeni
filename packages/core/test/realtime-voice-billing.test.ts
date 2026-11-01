@@ -177,7 +177,35 @@ test("credit-funded voice honors the workspace switch that turns Opengeni credit
       attribution: { kind: "human", initiatingHumanSubjectId: "user:a" } as never,
     });
     await expect(refused).rejects.toBeInstanceOf(TranscriptionServiceError);
-    await expect(refused).rejects.toMatchObject({ code: "policy_blocked", fallbackSafe: true });
+    await expect(refused).rejects.toMatchObject({
+      code: "policy_blocked",
+      fallbackSafe: true,
+      message: "Credits are turned off in this workspace.",
+    });
+    // A meeting's live transcript says what's refused and how to fix it.
+    await expect(
+      dictation.admit({
+        accountId: "account-a",
+        workspaceId: "workspace-a",
+        attribution: { kind: "human", initiatingHumanSubjectId: "user:a" } as never,
+        feature: "live_transcript",
+      }),
+    ).rejects.toMatchObject({
+      code: "policy_blocked",
+      message:
+        "Live transcripts use credits, which are turned off in this workspace. A workspace admin can turn them on.",
+    });
+    await expect(
+      dictation.admit({
+        accountId: "account-a",
+        workspaceId: "workspace-a",
+        attribution: { kind: "unknown" },
+        feature: "live_transcript",
+      }),
+    ).rejects.toMatchObject({
+      code: "policy_blocked",
+      message: "This sign-in can't be charged for a live transcript.",
+    });
 
     // Without credit billing nothing is charged, so the switch has nothing to block.
     const selfHosted = createRealtimeVoiceBilling({

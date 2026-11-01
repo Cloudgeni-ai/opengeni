@@ -26,6 +26,8 @@ import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
   createInteractionAttemptToolDefinitions,
   interactionRequestNeedingCurrentTarget,
+  launchCarrier,
+  launchReceiptOnAppWindow,
   nativeCuaSchema,
   openComputerAppWindow,
   readInteractionRequestTarget,
@@ -6001,11 +6003,15 @@ describe("interaction attempt tools", () => {
     });
     const text = (result.content[0] as { text: string }).text;
     expect(text).toContain("2 targets:");
-    expect(text).toContain(
-      "This action opened window-calculator; act on that target with the observation below.",
-    );
+    // The receipt names the app's window, not the screen it was sent through.
+    expect(text).toContain("Action completed on window-calculator (operation");
+    expect(text).not.toContain("on screen-1");
     expect(result.structuredContent).toMatchObject({
-      launch: { state: "completed", observation: { target: { id: "window-calculator" } } },
+      launch: {
+        state: "completed",
+        targetId: "window-calculator",
+        observation: { target: { id: "window-calculator" } },
+      },
     });
 
     // A retried call repeats the same launch operation; a plain open launches nothing.
@@ -6014,6 +6020,104 @@ describe("interaction attempt tools", () => {
     const plain = await open({}, randomUUID());
     expect(requests).toHaveLength(2);
     expect(plain.structuredContent).not.toHaveProperty("launch");
+  });
+
+  test("a launch rides on the computer's current window and names the app window it observed", async () => {
+    // A computer that lists no screen: a system window is focused, and the
+    // app already shows a window someone else works in and this computer's own.
+    const system: ComputerTarget = {
+      ...computerTarget(),
+      id: "window-system",
+      applicationId: "System Helper",
+      processId: 7,
+    };
+    const theirs: ComputerTarget = { ...computerTarget(), id: "window-theirs", focused: false };
+    const mine: ComputerTarget = { ...computerTarget(), id: "window-mine", focused: false };
+    const hidden: ComputerTarget = { ...mine, id: "window-hidden", offScreen: true, current: true };
+    expect(launchCarrier([system, theirs, { ...mine, current: true }])?.id).toBe("window-mine");
+    expect(launchCarrier([system, theirs, mine])?.id).toBe("window-system");
+    expect(launchCarrier([hidden, theirs, mine])?.id).toBe("window-theirs");
+    expect(launchCarrier([system, { ...computerTarget(), id: "screen", kind: "screen" }])?.id).toBe(
+      "screen",
+    );
+    expect(launchCarrier([])).toBeNull();
+
+    // Sent through another app's window, the receipt names the app's window.
+    const sent = {
+      ...computerReceipt(randomUUID(), computerObservation(theirs)),
+      targetId: system.id,
+    };
+    expect(launchReceiptOnAppWindow(sent).targetId).toBe("window-theirs");
+    // A receipt that observed no window keeps the target it was sent through.
+    expect(launchReceiptOnAppWindow({ ...sent, observation: null }).targetId).toBe(system.id);
+
+    const session = {
+      ...discoveredComputerSession(randomUUID(), sessionId),
+      lifecycle: "active" as const,
+      placement: { kind: "connected_machine" as const, sandboxId: randomUUID() },
+      controller: {
+        controllerId: "controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      },
+      platform: "macos" as const,
+      adapter: "opengeni.cua.macos.v1",
+      seatId: "seat-1",
+      displayId: "aqua",
+      capabilities: {
+        semanticObservation: true,
+        appDiscovery: true,
+        appLaunch: true,
+        windowCapture: true,
+        screenCapture: false,
+        semanticActions: true,
+        pointerInput: true,
+        keyboardInput: true,
+        clipboard: true,
+        backgroundActions: true,
+        parallelApps: true,
+      },
+    };
+    const requests: ComputerActionRequest[] = [];
+    let listed: ComputerTarget[] = [system, theirs, { ...mine, current: true }];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listComputerSessions: async () => ({ revision: 0, sessions: [session] }),
+        listComputerTargets: async () => ({ computerSessionId, targets: listed }),
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          // The computer observes its own window when the launch rides on it,
+          // and otherwise the window the app reports first.
+          const observed = value.targetId === mine.id ? mine : theirs;
+          return {
+            ...computerReceipt(value.operationId, computerObservation(observed)),
+            targetId: value.targetId,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const open = async () =>
+      await definitions[0]!.execute(
+        { placement: session.placement, applicationId: "com.example.editor" },
+        { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+      );
+    const own = await open();
+    expect(requests.at(-1)?.targetId).toBe("window-mine");
+    expect(own.structuredContent).toMatchObject({
+      launch: { targetId: "window-mine", observation: { target: { id: "window-mine" } } },
+    });
+    // With no window of its own, the launch rides on the focused window, and
+    // its receipt names the app's window it observed, never the system one.
+    listed = [system, theirs, mine];
+    const fresh = await open();
+    expect(requests.at(-1)?.targetId).toBe("window-system");
+    expect(fresh.structuredContent).toMatchObject({
+      launch: { targetId: "window-theirs", observation: { target: { id: "window-theirs" } } },
+    });
   });
 
   test("computer_open with applicationId and includeScreenshot captures the app's window, and a failed launch keeps the open", async () => {

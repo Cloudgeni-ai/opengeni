@@ -114,7 +114,7 @@ import {
 import { Notice } from "../../ui/notice";
 import { CreditRefusalNotice } from "../components/credits/credit-refusal-notice";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
-import { isPaymentRequiredError } from "../lib/model-access";
+import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "../lib/transient-retry";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { StatusDot } from "../../ui/status-dot";
@@ -687,11 +687,9 @@ function SessionsIndexRouteContent({
     useState<SessionUsageLimitDraft>(NO_SESSION_USAGE_LIMIT);
   const [usageLimitSendBlocked, setUsageLimitSendBlocked] = useState(false);
   // The API refused to start this chat because no credit pays for its model.
-  const [createCreditRefusal, setCreateCreditRefusal] = useState<{
+  const [createCreditRefusal, setCreateCreditRefusal] = useState<CreditRefusalRecord<{
     workspaceId: string;
-    model: string;
-    message: string;
-  } | null>(null);
+  }> | null>(null);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -1076,12 +1074,9 @@ function SessionsIndexRouteContent({
     ? creditRefusalGap(modelCatalog.rows, refusedCreate.model, creditCoverageOptions)
     : freeCreditGap(modelCatalog.rows, context.model, creditCoverageOptions);
   const noteCreditRefusal = (error: Error, request: { model?: string | undefined }): boolean => {
-    if (!isPaymentRequiredError(error)) return false;
-    setCreateCreditRefusal({
-      workspaceId,
-      model: request.model ?? context.model,
-      message: error.message,
-    });
+    const refusal = creditRefusalRecord(error, { workspaceId }, request.model ?? context.model);
+    if (!refusal) return false;
+    setCreateCreditRefusal(refusal);
     // Re-read funding so the notice and picker name what the credit covers now.
     void modelCatalog.refresh();
     return true;
@@ -1843,6 +1838,11 @@ function SessionsIndexRouteContent({
               <Suspense fallback={null}>
                 <CreditTopupPrompt
                   purpose="topup"
+                  refusalCode={
+                    refusedCreate?.code === "byok_paid_credit_required"
+                      ? "byok_paid_credit_required"
+                      : null
+                  }
                   open={creditTopupOpen}
                   workspaceId={workspaceId}
                   accountId={workspace.accountId}
@@ -1869,6 +1869,7 @@ function SessionsIndexRouteContent({
             <CreditRefusalNotice
               gap={creditGap}
               message={refusedCreate?.message}
+              refusalCode={refusedCreate?.code}
               workspaceId={workspaceId}
               accountId={workspace?.accountId ?? null}
               canReadBilling={hasAccountPermission(

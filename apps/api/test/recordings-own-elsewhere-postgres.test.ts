@@ -18,10 +18,11 @@ import { createApp, type AppDependencies } from "../src/app";
  * A person's own Only me meetings across the workspaces of their
  * organization, through the real app as signed-in people (a verified managed
  * cookie, as in the product) and PostgreSQL as the restricted application
- * role. They are listed and open in place in every workspace of the
- * organization the person can read now, with the access the request has in
- * the workspace that stores them; nobody else's, no shared ones, and nothing
- * from another organization.
+ * role. They are listed and open in place in their Personal workspace and in
+ * the other workspaces of the organization where the person turned them on
+ * and can read now, with the access the request has in the workspace that
+ * stores them; nobody else's, no shared ones, and nothing from another
+ * organization.
  */
 
 const ORIGIN = "https://opengeni.example";
@@ -236,6 +237,38 @@ test("own Only me meetings open in place across the organization's workspaces, a
   ).toBe(200);
   const theirs = await record(colleague, sales, "Colleague's", "2026-10-27T10:00:00Z");
   const here = await record(owner, team, "Here", "2026-10-27T11:00:00Z");
+  const reach = (workspaceId: string, recordingId: string, reachWorkspaceIds: string[] | null) =>
+    call(as(owner), "PATCH", `/v1/workspaces/${workspaceId}/recordings/${recordingId}`, {
+      reachWorkspaceIds,
+    });
+
+  // A new one works only where it was recorded and in their Personal
+  // workspace, until they turn it on elsewhere.
+  expect(ids(await inTeam(owner, "GET", "/recordings"))).toEqual([here]);
+  expect((await inTeam(owner, "GET", `/recordings/${newer}`)).status).toBe(404);
+  expect(
+    (await call(as(owner), "GET", `/v1/workspaces/${sales}/recordings/${newer}`)).body,
+  ).toMatchObject({ reachWorkspaceIds: [] });
+  // On in Team, in all their workspaces, or in Team from their Personal
+  // workspace; the workspace storing it and Personal aren't kept in the list.
+  expect(await reach(sales, newer, [team, sales, personal])).toMatchObject({
+    status: 200,
+    body: { reachWorkspaceIds: [team] },
+  });
+  expect(await reach(sales, older, null)).toMatchObject({
+    status: 200,
+    body: { reachWorkspaceIds: null },
+  });
+  expect((await reach(personal, notes, [team])).status).toBe(200);
+  // Only their own workspaces of this organization, and only by its owner.
+  expect((await reach(sales, newer, [crypto.randomUUID()])).status).toBe(400);
+  expect(
+    (
+      await call(as(colleague), "PATCH", `/v1/workspaces/${sales}/recordings/${allHands}`, {
+        reachWorkspaceIds: [team],
+      })
+    ).status,
+  ).toBe(403);
 
   // Team lists the owner's own Only me meetings from Sales and their Personal
   // workspace, labelled with where each is stored, in the one list.
@@ -262,13 +295,18 @@ test("own Only me meetings open in place across the organization's workspaces, a
     `/recordings?limit=2&beforeStartedAt=${encodeURIComponent(cursor.startedAt)}&beforeId=${cursor.id}`,
   );
   expect(ids(rest)).toEqual([notes, older]);
-  // The Personal workspace lists the shared workspaces' ones too.
+  // The Personal workspace lists all of them, wherever they are on.
+  const draft = await record(owner, sales, "Draft", "2026-10-25T09:00:00Z");
   expect(ids(await call(as(owner), "GET", `/v1/workspaces/${personal}/recordings`))).toEqual([
     here,
     newer,
     notes,
     older,
+    draft,
   ]);
+  expect(
+    (await call(as(owner), "GET", `/v1/workspaces/${personal}/recordings/${draft}`)).status,
+  ).toBe(200);
 
   // It opens in place, as the owner, with its notes and title.
   expect(await inTeam(owner, "GET", `/recordings/${newer}`)).toMatchObject({
@@ -294,11 +332,26 @@ test("own Only me meetings open in place across the organization's workspaces, a
     expect((await inTeam(owner, "GET", `/recordings/${id}`)).status).toBe(404);
   }
   // A colleague in both workspaces sees only their own.
+  expect(ids(await inTeam(colleague, "GET", "/recordings"))).toEqual([]);
+  expect(
+    (
+      await call(as(colleague), "PATCH", `/v1/workspaces/${sales}/recordings/${theirs}`, {
+        reachWorkspaceIds: [team],
+      })
+    ).status,
+  ).toBe(200);
   expect(ids(await inTeam(colleague, "GET", "/recordings"))).toEqual([theirs]);
   expect((await inTeam(colleague, "GET", `/recordings/${newer}`)).status).toBe(404);
 
   // With read-only access to the storing workspace, it is read, not changed.
   const readers = await record(reader, sales, "Reader's own", "2026-10-25T08:00:00Z");
+  expect(
+    (
+      await call(as(reader), "PATCH", `/v1/workspaces/${sales}/recordings/${readers}`, {
+        reachWorkspaceIds: [team],
+      })
+    ).status,
+  ).toBe(200);
   await upsertWorkspaceMemberAsWorkspaceManager(client.db, {
     accountId,
     workspaceId: sales,
@@ -361,4 +414,128 @@ test("own Only me meetings open in place across the organization's workspaces, a
     where workspace_id = ${sales} and subject_id = ${owner.subjectId}`;
   expect(ids(await inTeam(owner, "GET", "/recordings"))).toEqual([here, notes]);
   expect((await inTeam(owner, "GET", `/recordings/${newer}`)).status).toBe(404);
+
+  // Turned off in Team, from Team, it leaves Team.
+  expect(
+    await inTeam(owner, "PATCH", `/recordings/${notes}`, { reachWorkspaceIds: [] }),
+  ).toMatchObject({ status: 200, body: { reachWorkspaceIds: [] } });
+  expect(ids(await inTeam(owner, "GET", "/recordings"))).toEqual([here]);
+  expect((await inTeam(owner, "GET", `/recordings/${notes}`)).status).toBe(404);
+}, 120_000);
+
+test("own Only me files work where they turn them on, always in their Personal workspace", async () => {
+  const app = buildApp();
+  const call = async (
+    headers: Record<string, string>,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<Result> => {
+    const response = await app.request(path, {
+      method,
+      headers: { ...headers, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const text = await response.text();
+    return { status: response.status, body: text ? JSON.parse(text) : null };
+  };
+  const as = (person: Person) => ({
+    cookie: person.cookie,
+    origin: ORIGIN,
+    "sec-fetch-site": "same-origin",
+  });
+  const owner = await signUp(true);
+  const { accountId, personalWorkspaceId: personal } = await personalWorkspace(owner);
+  const workspace = async (name: string) => {
+    const created = await call(as(owner), "POST", "/v1/workspaces", { accountId, name });
+    expect(created.status).toBe(201);
+    return String(created.body.id);
+  };
+  const team = await workspace("Team");
+  const sales = await workspace("Sales");
+  const colleague = await invite(owner, accountId);
+  for (const workspaceId of [team, sales])
+    await upsertWorkspaceMemberAsWorkspaceManager(client.db, {
+      accountId,
+      workspaceId,
+      actorSubjectId: owner.subjectId,
+      targetSubjectId: colleague.subjectId,
+      mode: "add",
+      role: "member",
+      permissions: (await rolePermissions("member")) as never,
+    });
+  /** A finished file; Only me for `privateTo`, with the column's default reach unless given. */
+  const file = async (
+    workspaceId: string,
+    privateTo: Person | null,
+    reach?: string[] | null,
+  ): Promise<string> => {
+    const id = crypto.randomUUID();
+    await shared.admin`insert into files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,sha256,bucket,object_key,private_owner_subject_ids,owner_subject_id)
+      values(${id},${accountId},${workspaceId},'ready','plan.pdf','plan.pdf','application/pdf',4,${"a".repeat(64)},'fixture',
+        ${`workspaces/${workspaceId}/files/${id}/plan.pdf`},${privateTo ? [privateTo.subjectId] : null},${privateTo?.subjectId ?? null})`;
+    if (reach !== undefined)
+      await shared.admin`update files set reach_workspace_ids = ${reach}::uuid[] where id = ${id}`;
+    return id;
+  };
+  const read = (workspaceId: string, fileId: string, who = owner) =>
+    call(as(who), "GET", `/v1/workspaces/${workspaceId}/files/${fileId}`);
+  const listed = async (workspaceId: string) =>
+    (await call(as(owner), "GET", `/v1/workspaces/${workspaceId}/files?scope=personal`)).body.files
+      .map((row: { id: string }) => row.id)
+      .sort();
+  const reach = (workspaceId: string, fileId: string, ids: string[] | null, who = owner) =>
+    call(as(who), "PUT", `/v1/workspaces/${workspaceId}/files/${fileId}/reach`, {
+      reachWorkspaceIds: ids,
+    });
+
+  const plan = await file(sales, owner);
+  const notes = await file(personal, owner);
+  const old = await file(sales, owner, null);
+  const shared_ = await file(sales, null);
+
+  // A new one works where it is stored and in their Personal workspace; one
+  // from before the list existed works everywhere, as it did.
+  expect((await read(sales, plan)).status).toBe(200);
+  expect(await read(personal, plan)).toMatchObject({
+    status: 200,
+    body: { id: plan, scope: "personal", reachWorkspaceIds: [] },
+  });
+  expect((await read(team, plan)).status).toBe(404);
+  expect((await read(team, notes)).status).toBe(404);
+  expect(await read(team, old)).toMatchObject({ status: 200, body: { reachWorkspaceIds: null } });
+  expect(await listed(team)).toEqual([old]);
+  expect(await listed(personal)).toEqual([plan, notes, old].sort());
+  // A workspace file has no reach and stays in its workspace.
+  expect((await read(sales, shared_)).body.reachWorkspaceIds).toBeUndefined();
+  expect((await read(team, shared_)).status).toBe(404);
+
+  // Its owner turns it on in Team from where it is stored; Personal and its
+  // own workspace aren't kept in the list.
+  expect(await reach(sales, plan, [team, sales, personal])).toMatchObject({
+    status: 200,
+    body: { file: { id: plan, reachWorkspaceIds: [team] } },
+  });
+  expect((await read(team, plan)).status).toBe(200);
+  expect((await reach(personal, notes, [team])).status).toBe(200);
+  expect(await listed(team)).toEqual([plan, notes, old].sort());
+  // It stays Only me there: a colleague in both workspaces never sees it.
+  expect((await read(team, plan, colleague)).status).toBe(404);
+
+  // Only from where it is stored, only their own workspaces, only by its
+  // owner, and only for an Only me file.
+  expect((await reach(team, plan, null)).status).toBe(404);
+  expect((await reach(sales, plan, [crypto.randomUUID()])).status).toBe(400);
+  expect((await reach(sales, plan, [team], colleague)).status).toBe(404);
+  expect((await reach(sales, shared_, [team])).status).toBe(409);
+
+  // All of their workspaces, then none again.
+  expect((await reach(sales, plan, null)).body.file.reachWorkspaceIds).toBeNull();
+  expect((await reach(sales, plan, [])).body.file.reachWorkspaceIds).toEqual([]);
+  expect((await read(team, plan)).status).toBe(404);
+  const audit = await shared.admin<Array<{ subject_id: string; metadata: { to: unknown } }>>`
+    select subject_id, metadata from audit_events
+    where action = 'file.reach.changed' and target_id = ${plan} order by occurred_at`;
+  expect(audit.map((row) => row.metadata.to)).toEqual([[team], null, []]);
+  expect(audit.every((row) => row.subject_id === owner.subjectId)).toBe(true);
 }, 120_000);
