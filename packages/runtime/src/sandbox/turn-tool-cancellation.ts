@@ -458,11 +458,13 @@ function foregroundWait(
   if (!cutPolling) return { waitMs: modelWaitMs(value, false) };
   if (options.finishFloor === true) {
     const requested = modelWaitMs(value, true);
-    // A wait the model already asked to make longer than the floor keeps its
-    // ordinary quiet return; only a raised wait delays it to the floor.
-    return requested > COMMAND_FINISH_FLOOR_MS
-      ? { waitMs: requested, quietReturnAfterMs: modelWaitMs(value, false) }
-      : { waitMs: COMMAND_FINISH_FLOOR_MS, quietReturnAfterMs: COMMAND_FINISH_FLOOR_MS };
+    const waitMs = Math.max(requested, COMMAND_FINISH_FLOOR_MS);
+    // A wait the model itself asked to make longer than the ordinary window
+    // keeps its ordinary quiet return; only a raised short wait delays it to
+    // the floor.
+    return requested > TURN_MAX_MODEL_WAIT_MS
+      ? { waitMs, quietReturnAfterMs: modelWaitMs(value, false) }
+      : { waitMs, quietReturnAfterMs: COMMAND_FINISH_FLOOR_MS };
   }
   return { waitMs: modelWaitMs(value, true), quietReturnAfterMs: modelWaitMs(value, false) };
 }

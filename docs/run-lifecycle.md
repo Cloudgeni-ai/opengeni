@@ -2737,8 +2737,8 @@ that the model did not mark `background: true` waits at least 60 seconds
 (`COMMAND_FINISH_FLOOR_MS`) however short a wait it asked for, still returning
 the moment the command exits; when the requested wait is that short, its
 quiet-output return applies only after those 60 seconds, while the input-prompt
-return still applies at once. A requested wait above the floor keeps the
-ordinary quiet-output return after 30 seconds. Models often ask for a yield of
+return still applies at once. A requested wait above the ordinary 30-second window
+keeps the ordinary quiet-output return. Models often ask for a yield of
 a second or less and then poll the handle with `command_read`, although most
 such commands finish within a minute. Servers, watchers and deliberate parallel
 runs pass `background: true` (or use a TTY) to keep the requested short wait;

@@ -476,6 +476,16 @@ describe("finish floor for commands without a TTY", () => {
       waitMs: 200_000,
       quietReturnAfterMs: 30_000,
     });
+    // A requested wait past the ordinary window but under the floor is raised
+    // to the floor and keeps the ordinary quiet return.
+    expect(execCommandForegroundWait({ yield_time_ms: 45_000, tty: false }, true, true)).toEqual({
+      waitMs: 60_000,
+      quietReturnAfterMs: 30_000,
+    });
+    expect(execCommandForegroundWait({ yield_time_ms: 30_000, tty: false }, true, true)).toEqual({
+      waitMs: 60_000,
+      quietReturnAfterMs: 60_000,
+    });
     expect(
       execCommandForegroundWait({ yield_time_ms: 900_000, tty: false }, true, true).waitMs,
     ).toBe(240_000);

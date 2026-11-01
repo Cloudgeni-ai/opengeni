@@ -147,7 +147,7 @@ describe("withLeanExecCommandArguments", () => {
 describe("composed shell capability", () => {
   test("the finish-floor variant describes the floor and offers background; the other keeps today's schema", () => {
     expect(LEAN_EXEC_COMMAND_PARAMETERS.properties.yield_time_ms.description).toContain(
-      "Unless `tty` or `background` is true, it waits at least 60000 (at most 30000 on a Connected Machine).",
+      "Omit for 10000. Unless `tty` or `background` is true, it waits at least 60000 (at most 30000 on a Connected Machine).",
     );
     expect(LEAN_EXEC_COMMAND_PARAMETERS.properties).toHaveProperty("background");
     expect(LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN.properties).toHaveProperty(
