@@ -556,65 +556,93 @@ describe("older images in the model history", () => {
   const outputs = (items: Array<Record<string, unknown>>) =>
     items.filter((item) => item.type === "function_call_result").map((item) => item.output);
 
-  test("omits whole batches of the oldest images and keeps the newest three to five", () => {
-    expect([0, 1, 3, 4, 5, 6, 7, 8, 9, 12].map((total) => historyImagesToOmit(total))).toEqual([
-      0, 0, 0, 0, 0, 3, 3, 3, 6, 9,
+  const GENERIC_NOTE =
+    "[An earlier image was omitted from the conversation to save context. If you need the current state, take a fresh screenshot or observation instead of repeating an action.]";
+  const viewNote = (index: number) =>
+    `[An earlier image was omitted from the conversation to save context. To see it again, call view_image with path "/workspace/shots/${index}.png"; it shows the file as it is now.]`;
+
+  test("omits whole batches of the oldest images and keeps the newest three to seven", () => {
+    expect([0, 1, 3, 7, 8, 9, 12, 13, 18].map((total) => historyImagesToOmit(total))).toEqual([
+      0, 0, 0, 0, 5, 5, 5, 10, 15,
     ]);
+    // A non-positive batch or negative keep cannot loop or over-omit.
+    expect(historyImagesToOmit(5, 3, 0)).toBe(2);
+    expect(historyImagesToOmit(2, -1, 1)).toBe(2);
   });
 
   test("replaces older view_image results with a note naming the path to view again", () => {
-    const original = history(7);
+    const original = history(9);
     const before = JSON.stringify(original);
     const projected = omitOlderHistoryImages(original);
     expect(JSON.stringify(original)).toBe(before);
     const shown = outputs(projected);
-    expect(shown.slice(0, 3)).toEqual(
-      [0, 1, 2].map(
-        (index) =>
-          `[An earlier image was omitted from the conversation to save context. To see it again, call view_image with path "/workspace/shots/${index}.png"; it shows the file as it is now.]`,
-      ),
-    );
-    expect(shown.slice(3)).toEqual([3, 4, 5, 6].map((index) => marker(index)));
+    expect(shown.slice(0, 5)).toEqual([0, 1, 2, 3, 4].map(viewNote));
+    expect(shown.slice(5)).toEqual([5, 6, 7, 8].map((index) => marker(index)));
     // Everything except the omitted outputs is the same object.
     expect(projected.filter((item) => item.type !== "function_call_result")).toEqual(
       original.filter((item) => item.type !== "function_call_result"),
     );
     // Below the first batch: the very same array.
-    const five = history(5);
-    expect(omitOlderHistoryImages(five)).toBe(five);
+    const seven = history(7);
+    expect(omitOlderHistoryImages(seven)).toBe(seven);
+  });
+
+  test("the SDK's view_image output shape gets the same path note", () => {
+    const items: Array<Record<string, unknown>> = Array.from({ length: 8 }, (_, index) => [
+      {
+        type: "function_call",
+        callId: `call-${index}`,
+        name: "view_image",
+        arguments: JSON.stringify({ path: `/workspace/shots/${index}.png` }),
+      },
+      {
+        type: "function_call_result",
+        callId: `call-${index}`,
+        output: [{ type: "input_image", image: marker(index) }],
+      },
+    ]).flat();
+    const shown = outputs(omitOlderHistoryImages(items));
+    expect(shown.slice(0, 5)).toEqual(
+      [0, 1, 2, 3, 4].map((index) => [{ type: "input_text", text: viewNote(index) }]),
+    );
+    expect(shown.slice(5)).toEqual(
+      [5, 6, 7].map((index) => [{ type: "input_image", image: marker(index) }]),
+    );
   });
 
   test("the projected prefix stays identical between omission batches", () => {
-    const sixth = JSON.stringify(omitOlderHistoryImages(history(6)));
-    const seventh = omitOlderHistoryImages(history(7));
-    const eighth = omitOlderHistoryImages(history(8));
-    // Turns that add the seventh and eighth image only append to the prefix
-    // the provider cached for the sixth.
-    expect(JSON.stringify(seventh).startsWith(sixth.slice(0, -1))).toBe(true);
-    expect(JSON.stringify(eighth).startsWith(JSON.stringify(seventh).slice(0, -1))).toBe(true);
-    // The ninth image starts the next batch.
+    const eighth = JSON.stringify(omitOlderHistoryImages(history(8)));
+    const ninth = omitOlderHistoryImages(history(9));
+    const twelfth = omitOlderHistoryImages(history(12));
+    // Turns that add the ninth to twelfth image only append to the prefix the
+    // provider cached for the eighth.
+    expect(JSON.stringify(ninth).startsWith(eighth.slice(0, -1))).toBe(true);
+    expect(JSON.stringify(twelfth).startsWith(JSON.stringify(ninth).slice(0, -1))).toBe(true);
+    // The thirteenth image starts the next batch.
     expect(
-      outputs(omitOlderHistoryImages(history(9))).filter((output) => typeof output === "string"),
-    ).toHaveLength(6);
+      outputs(omitOlderHistoryImages(history(13))).filter((output) => typeof output === "string"),
+    ).toHaveLength(10);
   });
 
-  test("content images of any tool are replaced slot by slot; computer screenshots are kept", () => {
+  test("content images of any tool get one neutral note per result; computer screenshots are kept", () => {
     const pngData = Buffer.from(PNG).toString("base64");
     const items: Array<Record<string, unknown>> = [
       {
         type: "function_call",
         callId: "call-browser",
-        name: "interaction__browser_screenshot",
-        arguments: "{}",
+        name: "interaction__browser_act",
+        arguments: JSON.stringify({ action: "click" }),
       },
       {
         type: "function_call_result",
         callId: "call-browser",
         output: {
+          isError: false,
           content: [
             { type: "text", text: "page" },
             { type: "input_image", image: marker(1) },
             { type: "image", data: pngData, mimeType: "image/png" },
+            { type: "text", text: "after" },
           ],
         },
       },
@@ -624,26 +652,89 @@ describe("older images in the model history", () => {
         callId: "call-unknown",
         output: [{ type: "input_image", image: marker(3) }],
       },
+      // Unparseable arguments fall back to the neutral note.
+      { type: "function_call", callId: "call-bad", name: "view_image", arguments: "{not json" },
+      { type: "function_call_result", callId: "call-bad", output: marker(9) },
       ...viewImage(4),
       ...viewImage(5),
       ...viewImage(6),
+      ...viewImage(7),
     ];
     const projected = omitOlderHistoryImages(items);
-    const browser = (projected[1]!.output as { content: unknown[] }).content;
-    expect(browser[0]).toEqual({ type: "text", text: "page" });
-    expect(browser[1]).toEqual({
-      type: "input_text",
-      text: "[An earlier image was omitted from the conversation to save context. It came from interaction__browser_screenshot; call it again to see the current state.]",
-    });
-    expect((browser[2] as { type: string }).type).toBe("input_text");
-    expect(projected[2]).toBe(items[2]);
-    expect(projected[3]!.output).toEqual([
-      {
-        type: "input_text",
-        text: "[An earlier image was omitted from the conversation to save context.]",
-      },
+    const browser = projected[1]!.output as { isError: boolean; content: unknown[] };
+    // Sibling fields survive and both images become a single note.
+    expect(browser.isError).toBe(false);
+    expect(browser.content).toEqual([
+      { type: "text", text: "page" },
+      { type: "input_text", text: GENERIC_NOTE },
+      { type: "text", text: "after" },
     ]);
-    expect(outputs(projected).slice(-3)).toEqual([marker(4), marker(5), marker(6)]);
+    expect(GENERIC_NOTE).not.toContain("call it again");
+    expect(projected[2]).toBe(items[2]);
+    expect(projected[3]!.output).toEqual([{ type: "input_text", text: GENERIC_NOTE }]);
+    expect(projected[5]!.output).toBe(GENERIC_NOTE);
+    expect(outputs(projected).slice(-4)).toEqual([viewNote(4), marker(5), marker(6), marker(7)]);
+  });
+
+  test("a result whose images straddle the cut-off keeps its newest image", () => {
+    const items: Array<Record<string, unknown>> = [
+      ...[0, 1, 2, 3].map((index) => viewImage(index)).flat(),
+      {
+        type: "function_call_result",
+        callId: "call-pair",
+        output: [
+          { type: "input_image", image: marker(4) },
+          { type: "input_image", image: marker(5) },
+        ],
+      },
+      ...[6, 7].map((index) => viewImage(index)).flat(),
+    ];
+    // Eight images: the five oldest go, which ends at the first of the pair.
+    const projected = omitOlderHistoryImages(items);
+    const shown = outputs(projected);
+    expect(shown.slice(0, 4)).toEqual([0, 1, 2, 3].map(viewNote));
+    expect(shown[4]).toEqual([
+      { type: "input_text", text: GENERIC_NOTE },
+      { type: "input_image", image: marker(5) },
+    ]);
+    expect(shown.slice(5)).toEqual([marker(6), marker(7)]);
+  });
+
+  test("with the defaults, receipts come from the full history and only kept images are read", async () => {
+    const forbidden = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("storage must not be read for omitted images");
+        },
+      },
+    );
+    const inline = `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`;
+    const full: Array<Record<string, unknown>> = [
+      ...history(5),
+      ...[5, 6, 7]
+        .map((index) => [
+          { type: "function_call", callId: `call-${index}`, name: "read_screen", arguments: "{}" },
+          { type: "function_call_result", callId: `call-${index}`, output: inline },
+        ])
+        .flat(),
+    ];
+    // The order TurnMediaArtifacts.materializeScreenshotHistory uses.
+    const receipts = collectRetainedScreenshotReceipts(full);
+    const materialized = await materializeRetainedScreenshotHistory({
+      db: forbidden as never,
+      objectStorage: forbidden as never,
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sessionId: "33333333-3333-4333-8333-333333333333",
+      history: omitOlderHistoryImages(full),
+    });
+    expect([...receipts.keys()].sort()).toEqual([0, 1, 2, 3, 4].map((index) => `call-${index}`));
+    expect(outputs(materialized)).toEqual([
+      ...[0, 1, 2, 3, 4].map(viewNote),
+      inline,
+      inline,
+      inline,
+    ]);
   });
 
   test("omitted images are never read from storage", async () => {
