@@ -20,6 +20,7 @@ import {
   syncUpdatedScheduledTask,
   syncCreatedScheduledTask,
   createValidatedScheduledTask,
+  turnOnOwnLoginHere,
   validatedScheduledTaskUpdate,
   type SessionWorkflowClient,
 } from "@opengeni/core";
@@ -133,6 +134,13 @@ async function commonConnectionDelegationFixture(
         authority_generation::int as "authorityGeneration"
     `;
     return row!;
+  });
+  // A login added in a shared workspace starts turned on there (D-54).
+  await turnOnOwnLoginHere(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    subjectId: workspace.subjectId,
+    authorityId: connection.authorityId,
   });
   return {
     connection,
@@ -529,17 +537,27 @@ describe("scheduled task personal MCP authority", () => {
       },
       metadata: {},
     });
-    const connect = () =>
-      admin.begin(async (tx) => {
+    const connect = async () => {
+      const account = await admin.begin(async (tx) => {
         await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true),
         set_config('opengeni.workspace_id', ${workspace.workspaceId}, true),
         set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
-        const [row] = await tx<{ id: string }[]>`insert into connections
+        const [row] = await tx<{ id: string; authorityId: string }[]>`insert into connections
         (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
         values (${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
-          'mail.example.test', 'oauth2', 'fixture-ciphertext') returning id`;
-        return row!.id;
+          'mail.example.test', 'oauth2', 'fixture-ciphertext')
+        returning id, authority_id as "authorityId"`;
+        return row!;
       });
+      // A login added in a shared workspace starts turned on there (D-54).
+      await turnOnOwnLoginHere(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: workspace.subjectId,
+        authorityId: account.authorityId,
+      });
+      return account.id;
+    };
     const firstAccount = await connect();
     const scheduler = activities({
       mcpServers: [

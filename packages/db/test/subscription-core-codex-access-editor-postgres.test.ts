@@ -9,13 +9,17 @@ import {
   getSubscriptionCoreOrganizationCodexAccount,
   listOrganizationAdministrationMembers,
   listSubscriptionCoreCodexServingConnections,
+  ModelConnectionAccessForbiddenError,
   ModelConnectionWorkspaceNotInOrganizationError,
   nestedPostgresSqlState,
   readSubscriptionCoreCodexModelConnectionAccess,
+  removeSubscriptionCoreProviderModelConnectionFromWorkspace,
   renameSubscriptionCoreCodexConnection,
   SubscriptionCoreAccessInvalidError,
+  SubscriptionCoreAccessMoveRequiredError,
   SubscriptionCoreAccessPeopleUnlistableError,
   SubscriptionCoreAccessPersonNotInOrganizationError,
+  SubscriptionCoreAccessWorkspaceNotAdministeredError,
   setSubscriptionCoreCodexAllocator,
   updateSubscriptionCoreCodexModelConnectionAccess,
   type DbClient,
@@ -326,7 +330,7 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([]);
   });
 
-  test("SUB-OWN-04 widening a workspace's own account makes it the organization's; its own reach keeps it the workspace's", async () => {
+  test("D-52 sharing a workspace's own account keeps its owner; serving everyone needs an explicit move", async () => {
     const org = await organization();
     const id = await connection(org, "own", { managedByWorkspaceId: org.sharedWorkspaceId });
     const manager = await member(org, "member", "admin");
@@ -349,22 +353,31 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     expect(await owner()).toBe(org.sharedWorkspaceId);
     expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
     expect(await servedIn(org, org.otherWorkspaceId)).toEqual([]);
-    // Giving it to another workspace makes it the organization's: one owner,
-    // used exactly where it reaches.
+    // Giving it to another workspace keeps it the workspace's, used exactly
+    // where it reaches. Leaving its own workspace out of the list keeps it too.
     expect(
       await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
         allowedModels: [MODEL],
-        allowedWorkspaces: [org.otherWorkspaceId, org.sharedWorkspaceId],
+        allowedWorkspaces: [org.otherWorkspaceId],
         allowPersonalWorkspaces: false,
         version: 2,
       }),
     ).toMatchObject({ version: 3 });
-    expect(await owner()).toBeNull();
-    const row = await stored(org, id);
-    expect(row.workspaces.sort()).toEqual([org.otherWorkspaceId, org.sharedWorkspaceId].sort());
+    expect(await owner()).toBe(org.sharedWorkspaceId);
+    expect(await stored(org, id)).toMatchObject({
+      scope_kind: "workspaces",
+      allow_personal_workspaces: false,
+      workspaces: [org.otherWorkspaceId, org.sharedWorkspaceId].sort(),
+      reach: null,
+    });
     expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
     expect(await servedIn(org, org.otherWorkspaceId)).toEqual([id]);
-    // Its former workspace's administrators no longer manage it.
+    expect(await readSubscriptionCoreCodexModelConnectionAccess(client!.db, target)).toMatchObject({
+      localWorkspaceIds: [org.sharedWorkspaceId],
+      managedByWorkspaceId: org.sharedWorkspaceId,
+      peopleSupported: true,
+    });
+    // Its workspace's administrators still manage it.
     expect(
       (
         await setSubscriptionCoreCodexAllocator(client!.db, {
@@ -376,7 +389,164 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
           expectedVersion: 1,
         })
       ).result,
+    ).toMatchObject({ kind: "updated" });
+    // Every shared workspace or Personal workspaces would make it the
+    // organization's: refused without an explicit move, and nothing changes.
+    for (const policy of [
+      { allowedWorkspaces: null, allowPersonalWorkspaces: false },
+      { allowedWorkspaces: [org.otherWorkspaceId], allowPersonalWorkspaces: true },
+    ])
+      await expect(
+        updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+          allowedModels: [MODEL],
+          ...policy,
+          version: 3,
+        }),
+      ).rejects.toBeInstanceOf(SubscriptionCoreAccessMoveRequiredError);
+    expect(await owner()).toBe(org.sharedWorkspaceId);
+    // The explicit move makes it the organization's, and its former
+    // workspace's administrators no longer manage it.
+    expect(
+      await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+        allowedModels: [MODEL],
+        allowedWorkspaces: null,
+        allowPersonalWorkspaces: false,
+        moveToOrganization: true,
+        version: 3,
+      }),
+    ).toMatchObject({ allowedWorkspaces: null, version: 4 });
+    expect(await owner()).toBeNull();
+    expect(
+      (
+        await setSubscriptionCoreCodexAllocator(client!.db, {
+          accountId: org.accountId,
+          workspaceId: org.sharedWorkspaceId,
+          subjectId: manager.subjectId,
+          connectionId: id,
+          enabled: true,
+          expectedVersion: 2,
+        })
+      ).result,
     ).toEqual({ kind: "not_found" });
+  });
+
+  test("D-52 a workspace's admins share its account with workspaces they also administer; served workspaces can remove it", async () => {
+    const org = await organization();
+    const id = await connection(org, "own", { managedByWorkspaceId: org.sharedWorkspaceId });
+    const manager = await member(org, "member", "admin");
+    await shared!
+      .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${org.accountId}::uuid, ${org.otherWorkspaceId}::uuid, ${manager.subjectId}, 'admin')`;
+    const third = await workspace(org.accountId, org.ownerSubjectId, "Shared C");
+    await shared!
+      .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${org.accountId}::uuid, ${third}::uuid, ${manager.subjectId}, 'member')`;
+    const target: ModelConnectionTarget = {
+      kind: "codex",
+      connectionId: id,
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      subjectId: manager.subjectId,
+    };
+    expect(
+      await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+        allowedModels: null,
+        allowedWorkspaces: [org.sharedWorkspaceId, org.otherWorkspaceId],
+        allowPersonalWorkspaces: false,
+        version: 1,
+      }),
+    ).toEqual({
+      allowedModels: null,
+      allowedWorkspaces: [org.otherWorkspaceId, org.sharedWorkspaceId].sort(),
+      allowPersonalWorkspaces: false,
+      version: 2,
+    });
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([id]);
+    // A workspace where they're only a member can't be added; nothing changes.
+    await expect(
+      updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+        allowedModels: null,
+        allowedWorkspaces: [org.sharedWorkspaceId, org.otherWorkspaceId, third],
+        allowPersonalWorkspaces: false,
+        version: 2,
+      }),
+    ).rejects.toBeInstanceOf(SubscriptionCoreAccessWorkspaceNotAdministeredError);
+    expect((await stored(org, id)).workspaces).toEqual(
+      [org.otherWorkspaceId, org.sharedWorkspaceId].sort(),
+    );
+    // Nor can a workspace route reach Personal workspaces or people.
+    await expect(
+      updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+        allowedModels: null,
+        allowedWorkspaces: [org.sharedWorkspaceId],
+        allowPersonalWorkspaces: true,
+        version: 2,
+      }),
+    ).rejects.toBeInstanceOf(SubscriptionCoreAccessInvalidError);
+    // A served workspace's member can't remove it; its administrator can, and
+    // can't change it otherwise.
+    const receiverMember = await member(org);
+    await shared!
+      .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${org.accountId}::uuid, ${org.otherWorkspaceId}::uuid, ${receiverMember.subjectId}, 'member')`;
+    const receiverAdmin = await member(org);
+    await shared!
+      .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${org.accountId}::uuid, ${org.otherWorkspaceId}::uuid, ${receiverAdmin.subjectId}, 'admin')`;
+    const inOther = (subjectId: string) => ({
+      kind: "codex" as const,
+      connectionId: id,
+      accountId: org.accountId,
+      workspaceId: org.otherWorkspaceId,
+      subjectId,
+    });
+    await expect(
+      removeSubscriptionCoreProviderModelConnectionFromWorkspace(
+        client!.db,
+        inOther(receiverMember.subjectId),
+      ),
+    ).rejects.toBeInstanceOf(ModelConnectionAccessForbiddenError);
+    expect(
+      await getSubscriptionCoreCodexModelConnectionAccess(
+        client!.db,
+        inOther(receiverAdmin.subjectId),
+      ),
+    ).toBeNull();
+    expect(
+      await removeSubscriptionCoreProviderModelConnectionFromWorkspace(
+        client!.db,
+        inOther(receiverAdmin.subjectId),
+      ),
+    ).toBe(true);
+    expect(await servedIn(org, org.otherWorkspaceId)).toEqual([]);
+    expect(await stored(org, id)).toMatchObject({ workspaces: [org.sharedWorkspaceId] });
+    // Its own workspace never removes it this way (it disconnects it instead).
+    expect(
+      await removeSubscriptionCoreProviderModelConnectionFromWorkspace(client!.db, {
+        ...target,
+        workspaceId: org.sharedWorkspaceId,
+      }),
+    ).toBeNull();
+    // An organization account can't be removed from a workspace this way.
+    const organizationAccount = await connection(org, "organization");
+    expect(
+      await removeSubscriptionCoreProviderModelConnectionFromWorkspace(client!.db, {
+        ...inOther(receiverAdmin.subjectId),
+        connectionId: organizationAccount,
+      }),
+    ).toBeNull();
+    // A workspace's own account never serves a Personal workspace: its
+    // administrators hold no membership there, so even their own is refused.
+    const current = await getSubscriptionCoreCodexModelConnectionAccess(client!.db, target);
+    await expect(
+      updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+        allowedModels: null,
+        allowedWorkspaces: [org.sharedWorkspaceId, manager.personalWorkspaceId],
+        allowPersonalWorkspaces: false,
+        version: current!.version,
+      }),
+    ).rejects.toBeInstanceOf(SubscriptionCoreAccessWorkspaceNotAdministeredError);
+    expect(await stored(org, id)).toMatchObject({ workspaces: [org.sharedWorkspaceId] });
   });
 
   test("a workspace admin changes the models of the account their workspace manages", async () => {
@@ -401,10 +571,11 @@ describe.skipIf(!realDb)("Codex access editor on the shared core", () => {
     };
     expect(await getSubscriptionCoreCodexModelConnectionAccess(client!.db, target)).toEqual({
       allowedModels: null,
-      allowedWorkspaces: null,
+      allowedWorkspaces: [org.sharedWorkspaceId],
       allowPersonalWorkspaces: false,
       version: 1,
     });
+    // Null keeps the workspaces it serves (an older client's form).
     expect(
       await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
         allowedModels: [MODEL],
@@ -669,7 +840,7 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
       },
       localWorkspaceIds: [org.sharedWorkspaceId],
       managedByWorkspaceId: org.sharedWorkspaceId,
-      peopleSupported: false,
+      peopleSupported: true,
     });
     // The organization's list says whose it is without reading its access.
     const listed = await getSubscriptionCoreOrganizationCodexAccount(client!.db, {
@@ -689,7 +860,7 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
     expect(await servedIn(org, org.personalWorkspaceId, org.ownerSubjectId)).toEqual([]);
   });
 
-  test("an organization administrator gives it to chosen workspaces, all of them, and back", async () => {
+  test("an organization administrator gives it to chosen workspaces, moves it to all of them, and back", async () => {
     const org = await organization();
     const id = await connection(org, "granted", { managedByWorkspaceId: org.sharedWorkspaceId });
     const target = organizationTarget(org, id);
@@ -705,26 +876,27 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
       }),
     ).toEqual({
       allowedModels: [MODEL],
-      allowedWorkspaces: [org.otherWorkspaceId],
+      allowedWorkspaces: [org.otherWorkspaceId, org.sharedWorkspaceId].sort(),
       allowPersonalWorkspaces: false,
       version: 2,
     });
-    // It now reaches exactly the chosen workspace, as the organization's.
+    // It now also reaches the chosen workspace, still as its workspace's.
     expect(await stored(org, id)).toMatchObject({
       scope_kind: "workspaces",
       allowed_model_ids: [MODEL],
-      workspaces: [org.otherWorkspaceId],
+      workspaces: [org.otherWorkspaceId, org.sharedWorkspaceId].sort(),
       reach: null,
     });
     expect(await servedIn(org, org.otherWorkspaceId)).toEqual([id]);
-    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([]);
+    expect(await servedIn(org, org.sharedWorkspaceId)).toEqual([id]);
 
-    // Every shared workspace, including later ones.
+    // Every shared workspace, including later ones, once moved to the organization.
     expect(
       await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
         allowedModels: [MODEL],
         allowedWorkspaces: null,
         allowPersonalWorkspaces: false,
+        moveToOrganization: true,
         version: 2,
       }),
     ).toMatchObject({ allowedWorkspaces: null, version: 3 });
@@ -774,14 +946,14 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
     });
   });
 
-  test("a workspace's delegated managers keep it: people scope is refused while a workspace manages it", async () => {
+  test("a workspace's delegated managers keep it: people scope needs a move to the organization", async () => {
     const org = await organization();
     const id = await connection(org, "managed", { managedByWorkspaceId: org.sharedWorkspaceId });
     const target = organizationTarget(org, id);
     const person = await member(org);
     expect(
       (await readSubscriptionCoreCodexModelConnectionAccess(client!.db, target))?.peopleSupported,
-    ).toBe(false);
+    ).toBe(true);
     await expect(
       updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
         allowedModels: null,
@@ -790,7 +962,7 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
         allowedPeople: [person.membershipId],
         version: 1,
       }),
-    ).rejects.toBeInstanceOf(SubscriptionCoreAccessInvalidError);
+    ).rejects.toBeInstanceOf(SubscriptionCoreAccessMoveRequiredError);
     expect(await stored(org, id)).toMatchObject({
       scope_kind: "workspaces",
       workspaces: [org.sharedWorkspaceId],
@@ -799,6 +971,22 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
     const [chosen] = await shared!.admin<{ count: number }[]>`
       select count(*)::int as count from subscription_connection_people where connection_id = ${id}::uuid`;
     expect(chosen?.count).toBe(0);
+    // With the move it becomes the organization's, limited to that person.
+    expect(
+      await updateSubscriptionCoreCodexModelConnectionAccess(client!.db, target, {
+        allowedModels: null,
+        allowedWorkspaces: [],
+        allowPersonalWorkspaces: false,
+        allowedPeople: [person.membershipId],
+        moveToOrganization: true,
+        version: 1,
+      }),
+    ).toMatchObject({ allowedPeople: [person.membershipId], version: 2 });
+    expect(await stored(org, id)).toMatchObject({ scope_kind: "people", workspaces: [] });
+    const [moved] = await shared!.admin<{ managed: string | null }[]>`
+      select managed_by_workspace_id::text as managed from subscription_connections
+      where id = ${id}::uuid`;
+    expect(moved?.managed).toBeNull();
   });
 
   test("chosen people: active members only, workspaces cleared, and an older form cannot replace them", async () => {
@@ -994,7 +1182,8 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
         }),
       ).rejects.toThrow();
     }
-    // The manager keeps exactly the workspace route: models only.
+    // The manager keeps exactly the workspace route: models, and the shared
+    // workspaces it serves among those they administer.
     const workspaceTarget: ModelConnectionTarget = {
       kind: "codex",
       connectionId: id,
@@ -1007,13 +1196,13 @@ describe.skipIf(!realDb)("Workspace-managed Codex accounts are organization acco
     ).toEqual({
       policy: {
         allowedModels: null,
-        allowedWorkspaces: null,
+        allowedWorkspaces: [org.sharedWorkspaceId],
         allowPersonalWorkspaces: false,
         allowedPeople: null,
         version: 1,
       },
-      localWorkspaceIds: [],
-      managedByWorkspaceId: null,
+      localWorkspaceIds: [org.sharedWorkspaceId],
+      managedByWorkspaceId: org.sharedWorkspaceId,
       peopleSupported: false,
     });
     await expect(

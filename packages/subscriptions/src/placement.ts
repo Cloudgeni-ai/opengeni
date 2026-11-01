@@ -1,11 +1,12 @@
 import { isCacheWarm } from "./cache";
 import {
+  automaticallyUsable,
   canServe,
   connectionUsesExtraCredits,
   connectionIneligibility,
   isPermanentIneligibility,
   modelAllowedInWorkspace,
-  personalFallbackActive,
+  ownSubscriptionTurnedOn,
   providerEnabled,
   servableAgainAt,
   type Ineligibility,
@@ -127,9 +128,13 @@ export function modelPermitted(
 }
 
 /**
- * Order servable connections for one model (design 4 step 5): the primary
- * first, whether or not its quota is known (D-13, D-15), then the session's
- * spread hash (D-14, D-21, D-23), then id. Missing telemetry is not a penalty.
+ * Order servable connections for one model (design 4 step 5, D-53). Included
+ * allowance comes before extra credits (SUB-CREDITS-01). Within that: the turn
+ * person's own subscription turned on here, then the primary an administrator
+ * pinned, whether or not its quota is known (D-13, D-15), then this
+ * workspace's own accounts, then the organization's and other workspaces',
+ * then the session's spread hash (D-14, D-21, D-23), then id. Missing
+ * telemetry is not a penalty.
  */
 export function rankConnections(
   input: PlacementInput,
@@ -140,14 +145,20 @@ export function rankConnections(
     return {
       connection,
       credits: connectionUsesExtraCredits(input, connection),
+      own: ownSubscriptionTurnedOn(input, connection),
       primary: rotation.mode === "primary_first" && rotation.primaryConnectionId === connection.id,
+      workspaces:
+        connection.ownership.kind === "shared" &&
+        connection.ownership.managedByWorkspaceId === input.workspace.id,
       hash: spreadHash(input.session.id, connection.id),
     };
   });
   keyed.sort(
     (left, right) =>
       Number(left.credits) - Number(right.credits) ||
+      Number(right.own) - Number(left.own) ||
       Number(right.primary) - Number(left.primary) ||
+      Number(right.workspaces) - Number(left.workspaces) ||
       left.hash - right.hash ||
       (left.connection.id < right.connection.id
         ? -1
@@ -230,12 +241,11 @@ export function bindingStickiness(input: PlacementInput): BindingStickiness {
       : reselect("model_not_permitted");
   const ineligibility = connectionIneligibility(input, bound, binding.modelId);
   if (ineligibility.length > 0) return reselect("account_ineligible", ineligibility);
-  const fallback = personalFallbackActive(input);
   if (
     connectionUsesExtraCredits(input, bound) &&
     connections.some(
       (candidate) =>
-        (candidate.ownership.kind === "shared" || fallback) &&
+        automaticallyUsable(input, candidate) &&
         !connectionUsesExtraCredits(input, candidate) &&
         canServe(input, candidate, binding.modelId),
     )
@@ -251,15 +261,16 @@ export function bindingStickiness(input: PlacementInput): BindingStickiness {
 
 /**
  * Place one session's turn (design 4): run on an account and model, or wait
- * with an explained reason. The sender is deliberately not an input: the
- * account belongs to the session (SUB-STICK-01).
+ * with an explained reason. The sender reaches placement only through the
+ * turn's accepted personal authority: their own subscription turned on here
+ * ranks first, and another person's never serves their turn (SUB-STICK-01,
+ * D-53).
  */
 export function decidePlacement(input: PlacementInput): PlacementDecision {
   const { session, connections } = input;
   const preferred = findModel(input, session.preferredModelId);
   const models = failoverCandidateModels(input);
   const permitted = models.filter((modelId) => modelPermitted(input, modelId));
-  const fallback = personalFallbackActive(input);
   const wait = (reason: WaitReason, earliestResetAt: number | null): PlacementDecision => ({
     kind: "wait",
     reason,
@@ -285,8 +296,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   const servableAutomatically = (modelId: ModelId) =>
     connections.some(
       (connection) =>
-        (connection.ownership.kind === "shared" || fallback) &&
-        canServe(input, connection, modelId),
+        automaticallyUsable(input, connection) && canServe(input, connection, modelId),
     );
   // Candidates the compaction lock alone keeps from this session (SUB-FAIL-09).
   const lockedOut = models.filter(
@@ -336,30 +346,20 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   const stickiness = bindingStickiness(input);
   if (stickiness.kind === "keep" && bound) return run(bound, stickiness.modelId, "sticky");
 
-  // Each model on shared connections, then (opt-in) on the owner's personal
-  // connections, before the next model (SUB-SEL-01, SUB-SEL-02, D-12).
+  // Each model on every account automatic selection may use, the turn
+  // person's own first, before the next model (SUB-SEL-01, SUB-SEL-02, D-12,
+  // D-53).
   for (const [index, modelId] of models.entries()) {
     if (!modelPermitted(input, modelId)) continue;
     const eligible = connections.filter(
       (connection) =>
-        canServe(input, connection, modelId) &&
-        (connection.ownership.kind === "shared" || fallback),
+        automaticallyUsable(input, connection) && canServe(input, connection, modelId),
     );
     const included = eligible.filter(
       (connection) => !connectionUsesExtraCredits(input, connection),
     );
     const servable = included.length ? included : eligible;
-    const chosen =
-      rankConnections(
-        input,
-        servable.filter((connection) => connection.ownership.kind === "shared"),
-      )[0] ??
-      (fallback
-        ? rankConnections(
-            input,
-            servable.filter((connection) => connection.ownership.kind === "personal"),
-          )[0]
-        : undefined);
+    const chosen = rankConnections(input, servable)[0];
     if (!chosen) continue;
     let kind: PlacementSwitch;
     if (!binding) kind = "initial";
@@ -383,7 +383,7 @@ export function decidePlacement(input: PlacementInput): PlacementDecision {
   let earliest: number | null = null;
   for (const modelId of permitted) {
     for (const connection of connections) {
-      if (connection.ownership.kind === "personal" && !fallback) continue;
+      if (!automaticallyUsable(input, connection)) continue;
       const at = servableAgainAt(input, connection, modelId);
       if (typeof at === "number") earliest = earliest === null ? at : Math.min(earliest, at);
     }

@@ -386,6 +386,9 @@ describe("the owner-only routines' predicates (0735)", () => {
   // source settlement, holder reclamation and live personal-authority denial.
   // 1120 replaces acceptance's retired per-account cutover switch with the
   // existing provider protocol receipt, checked before either workspace path.
+  // 1167 adds acceptance's restricted entry for the account a person turned
+  // on for their own turns in a shared workspace, on top of 1120's body;
+  // subscription-shared-personal-choice-postgres.test.ts exercises it.
   // Every other authorization clause remains byte-identical to its prior body.
   const expectedBodies: Record<string, string> = {
     "opengeni_private.begin_subscription_core_owned_connection_refresh(text, uuid, uuid, text, uuid)":
@@ -403,7 +406,7 @@ describe("the owner-only routines' predicates (0735)", () => {
     "opengeni_private.record_subscription_core_owned_connection_quota(text, uuid, uuid, text, uuid, bigint, bigint, jsonb, timestamp with time zone)":
       "dadb5ac909e2986a96f665f317f3c41f576e3b38c2b2ca4216162d12ffd86b2f",
     "opengeni_private.subscription_core_acceptance_authority_v2(text, uuid, uuid, uuid, text)":
-      "575b644fad7f0b9a92b5ee4fcfe8ed963ffaf25c30f3bc5017fe0d47eeef421c",
+      "c6ae52371a10f9a2aef86cb78a44203350a16f2ea1b7db0996281f89f2a47748",
     "opengeni_subscription_internal.subscription_core_connection_target(text, uuid, uuid, uuid, uuid, uuid, text, bigint)":
       "03c3db42c92513e7452ba8eedc570bcfe53b38d0cbc605111d0532fb39e66aba",
   };

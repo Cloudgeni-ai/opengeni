@@ -191,25 +191,10 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
 
     let people: PlacementInput["people"] = [];
     if (session.owner_membership_id) {
-      const [preference] = await rawRows<{ personal_fallback_opt_in: boolean }>(
-        tx,
-        sql`select personal_fallback_opt_in
-              from subscription_person_preferences
-              where account_id = ${request.accountId}::uuid
-                and organization_membership_id = ${session.owner_membership_id}::uuid
-              limit 1`,
-      );
       // The exact accepted-turn gate above established that a non-null owner
       // membership is active. Runtime roles intentionally cannot read the
-      // organization_memberships table directly; preferences remain
-      // independently scoped by FORCE RLS and default to false when absent.
-      people = [
-        {
-          membershipId: session.owner_membership_id,
-          active: true,
-          personalFallbackOptIn: preference?.personal_fallback_opt_in ?? false,
-        },
-      ];
+      // organization_memberships table directly.
+      people = [{ membershipId: session.owner_membership_id, active: true }];
     }
 
     if (
@@ -219,14 +204,7 @@ export async function withSubscriptionCoreProviderPlacementWorld<T>(
     ) {
       // The personal-access SQL gate proved this accepting human's live
       // membership. Do not replace the independently verified chat owner.
-      people = [
-        ...people,
-        {
-          membershipId: personalAuthority.ownerMembershipId,
-          active: true,
-          personalFallbackOptIn: false,
-        },
-      ];
+      people = [...people, { membershipId: personalAuthority.ownerMembershipId, active: true }];
     }
     const workspaceKind = session.workspace_kind === "personal" ? "personal" : "shared";
     const workspaceAllowedModelIds =

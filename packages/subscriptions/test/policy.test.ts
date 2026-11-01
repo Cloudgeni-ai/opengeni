@@ -41,7 +41,6 @@ describe("exact personal authority in shared chats", () => {
   function sharedChoice(): PlacementInput {
     const state = input({
       connections: [personal("own", "codex"), personal("other", "codex")],
-      personalFallbackOptIn: true,
       session: {
         ownerMembershipId: "chat-owner",
         personalAuthority: [
@@ -60,10 +59,7 @@ describe("exact personal authority in shared chats", () => {
         },
       },
     });
-    state.people = [
-      ...state.people,
-      { membershipId: "chat-owner", active: true, personalFallbackOptIn: true },
-    ];
+    state.people = [...state.people, { membershipId: "chat-owner", active: true }];
     return state;
   }
 
@@ -77,11 +73,17 @@ describe("exact personal authority in shared chats", () => {
     expect(checkPlacementDecision(state, result)).toEqual([]);
   });
 
-  test("automatic selection, foreign sessions, absent authority, policy off and inactive owners refuse", () => {
+  test("without a pin the accepted account serves automatically, ahead of shared accounts (D-53)", () => {
+    const state = sharedChoice();
+    state.session.binding = null;
+    state.connections = [...state.connections, connection("org", "codex")];
+    const result = decidePlacement(state);
+    expect(result).toMatchObject({ kind: "run", connectionId: "own", personal: true });
+    expect(checkPlacementDecision(state, result)).toEqual([]);
+  });
+
+  test("foreign sessions, absent authority, policy off and inactive owners refuse", () => {
     for (const mutate of [
-      (state: PlacementInput) => {
-        state.session.binding = null;
-      },
       (state: PlacementInput) => {
         state.session.id = "other-session";
       },
@@ -165,7 +167,6 @@ function input(patch: {
   session?: Partial<PlacementInput["session"]>;
   workspace?: Partial<PlacementInput["workspace"]>;
   connections?: SubscriptionConnection[];
-  personalFallbackOptIn?: boolean;
   now?: number;
 }): PlacementInput {
   return {
@@ -196,7 +197,6 @@ function input(patch: {
       {
         membershipId: "member-a",
         active: true,
-        personalFallbackOptIn: patch.personalFallbackOptIn ?? false,
       },
     ],
     models: [
@@ -277,7 +277,6 @@ describe("provider switches", () => {
         visibility: "shared",
         personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
       },
-      personalFallbackOptIn: true,
       settings: { personalFallbackAllowed: true },
       connections: [
         connection("org", "codex"),
@@ -383,7 +382,6 @@ describe("eligibility", () => {
     const privateWork = input({
       session: { visibility: "private" },
       connections: [own],
-      personalFallbackOptIn: true,
     });
     expect(authorizationIneligibility(privateWork, own)).toEqual(["personal_authority_missing"]);
     expect(decidePlacement(privateWork)).toMatchObject({ kind: "wait" });
@@ -393,9 +391,25 @@ describe("eligibility", () => {
         personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
       },
       connections: [own],
-      personalFallbackOptIn: true,
     });
-    expect(decidePlacement(withAuthority)).toMatchObject({
+    // Authorized for an explicit choice, but not turned on in this shared
+    // workspace: automatic selection does not use it (SUB-SEL-02, D-53).
+    expect(authorizationIneligibility(withAuthority, own)).toEqual([]);
+    expect(decidePlacement(withAuthority)).toMatchObject({ kind: "wait" });
+    const turnedOn = input({
+      session: {
+        visibility: "private",
+        personalAuthority: [
+          {
+            provider: "codex",
+            ownerMembershipId: "member-a",
+            sharedSessionChoice: { sessionId: "session-1", connectionId: "codex-mine" },
+          },
+        ],
+      },
+      connections: [own],
+    });
+    expect(decidePlacement(turnedOn)).toMatchObject({
       kind: "run",
       connectionId: "codex-mine",
       personal: true,
@@ -407,7 +421,6 @@ describe("eligibility", () => {
         personalAuthority: [{ provider: "claude", ownerMembershipId: "member-a" }],
       },
       connections: [own],
-      personalFallbackOptIn: true,
     });
     expect(authorizationIneligibility(otherProvider, own)).toEqual(["personal_authority_missing"]);
   });
@@ -847,7 +860,6 @@ describe("cache-aware stickiness: why a binding keeps or leaves its account", ()
     const mine = personal("codex-mine", "codex");
     const owned = input({
       connections: [connection("codex-org", "codex"), mine],
-      personalFallbackOptIn: true,
       session: {
         visibility: "private",
         personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
@@ -981,6 +993,156 @@ describe("placement", () => {
   });
 });
 
+describe("whose account pays: own, then pinned, then the workspace's, then the organization's (D-53)", () => {
+  const turnedOn = (connectionId: string, ownerMembershipId = "member-a") => ({
+    provider: "codex",
+    ownerMembershipId,
+    sharedSessionChoice: { sessionId: "session-1", connectionId },
+  });
+  const workspaces = (id: string, patch: Partial<SubscriptionConnection> = {}) =>
+    connection(id, "codex", {
+      ownership: {
+        kind: "shared",
+        scope: { kind: "workspaces", workspaceIds: ["ws-team"], allowPersonalWorkspaces: false },
+        managedByWorkspaceId: "ws-team",
+      },
+      ...patch,
+    });
+
+  test("SUB-SEL-01: this workspace's own account comes before the organization's", () => {
+    const world = input({
+      connections: [connection("codex-org", "codex"), workspaces("codex-team")],
+    });
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ kind: "run", connectionId: "codex-team" });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+  });
+
+  test("SUB-SEL-01: another workspace's account shared here ranks with the organization's", () => {
+    const elsewhere = workspaces("codex-other", {
+      ownership: {
+        kind: "shared",
+        scope: {
+          kind: "workspaces",
+          workspaceIds: ["ws-team", "ws-other"],
+          allowPersonalWorkspaces: false,
+        },
+        managedByWorkspaceId: "ws-other",
+      },
+    });
+    const world = input({ connections: [elsewhere, workspaces("codex-team")] });
+    expect(decidePlacement(world)).toMatchObject({ connectionId: "codex-team" });
+  });
+
+  test("SUB-SEL-03: an administrator's primary comes before this workspace's own account", () => {
+    const world = input({
+      connections: [connection("codex-org", "codex"), workspaces("codex-team")],
+      settings: {
+        rotation: { codex: { mode: "primary_first", primaryConnectionId: "codex-org" } },
+      },
+    });
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ connectionId: "codex-org" });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+  });
+
+  test("SUB-SEL-01: the turn person's own subscription turned on here comes before the primary and the workspace's", () => {
+    const world = input({
+      connections: [
+        connection("codex-org", "codex"),
+        workspaces("codex-team"),
+        personal("codex-mine", "codex"),
+      ],
+      settings: {
+        rotation: { codex: { mode: "primary_first", primaryConnectionId: "codex-org" } },
+      },
+      session: { personalAuthority: [turnedOn("codex-mine")] },
+    });
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ connectionId: "codex-mine", personal: true });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+    // Passing over it is a violation the reference names.
+    if (decision.kind !== "run") throw new Error("expected a run");
+    expect(
+      checkPlacementDecision(world, { ...decision, connectionId: "codex-org", personal: false }),
+    ).toContainEqual(expect.objectContaining({ requirement: "SUB-SEL-01" }));
+  });
+
+  test("SUB-SEL-01: passing over this workspace's own account is a violation unless the primary served", () => {
+    const world = input({
+      connections: [connection("codex-org", "codex"), workspaces("codex-team")],
+    });
+    const decision = decidePlacement(world);
+    if (decision.kind !== "run") throw new Error("expected a run");
+    expect(
+      checkPlacementDecision(world, { ...decision, connectionId: "codex-org" }),
+    ).toContainEqual(expect.objectContaining({ requirement: "SUB-SEL-01" }));
+  });
+
+  test("SUB-CREDITS-01: included allowance elsewhere comes before the own account's paid credits", () => {
+    const world = input({
+      connections: [
+        connection("codex-org", "codex"),
+        personal("codex-mine", "codex", {
+          extraCreditsEnabled: true,
+          quota: quota({
+            windows: [
+              { id: "primary", usedPercent: 100, resetsAt: NOW + 3_600_000, status: "exhausted" },
+            ],
+          }),
+        }),
+      ],
+      session: { personalAuthority: [turnedOn("codex-mine")] },
+    });
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ connectionId: "codex-org" });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+  });
+
+  test("SUB-STICK-02: a warm shared binding is kept when the sender's own account is turned on", () => {
+    const world = input({
+      connections: [connection("codex-org", "codex"), personal("codex-mine", "codex")],
+      session: {
+        personalAuthority: [turnedOn("codex-mine")],
+        binding: {
+          connectionId: "codex-org",
+          provider: "codex",
+          modelId: "codex/a",
+          choice: "automatic",
+          lastModelCallAt: NOW - 1_000,
+        },
+      },
+    });
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ connectionId: "codex-org", switch: "sticky" });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+  });
+
+  test("SUB-STICK-01, SUB-STICK-03: another sender's turn leaves the previous sender's own account, even warm", () => {
+    const theirs = connection("codex-theirs", "codex", {
+      ownership: { kind: "personal", ownerMembershipId: "member-b" },
+    });
+    const world = input({
+      connections: [connection("codex-org", "codex"), theirs, personal("codex-mine", "codex")],
+      session: {
+        // This turn is member-a's: their consent, none for member-b's account.
+        personalAuthority: [turnedOn("codex-mine")],
+        binding: {
+          connectionId: "codex-theirs",
+          provider: "codex",
+          modelId: "codex/a",
+          choice: "automatic",
+          lastModelCallAt: NOW - 1_000,
+        },
+      },
+    });
+    world.people = [...world.people, { membershipId: "member-b", active: true }];
+    const decision = decidePlacement(world);
+    expect(decision).toMatchObject({ connectionId: "codex-mine", personal: true });
+    expect(checkPlacementDecision(world, decision)).toEqual([]);
+  });
+});
+
 describe("package boundary", () => {
   test("the policy package imports nothing but its own modules and uses no clock or randomness", () => {
     const source = join(import.meta.dir, "..", "src");
@@ -1067,12 +1229,14 @@ describe("explicit choices, personal fallback and explained waits", () => {
     });
   });
 
-  test("SUB-STICK-02, SUB-STICK-03, SUB-STICK-07: a warm personal account is kept in its owner's private session after fallback is turned off (D-27), left at the next cold re-selection, and left when the session is shared or personal connections are disabled (SUB-OWN-05)", () => {
+  test("SUB-STICK-02, SUB-STICK-03, SUB-STICK-07: a warm personal account is kept in its owner's private session after it is turned off here (D-27, D-53), left at the next cold re-selection, and left when the session is shared or personal connections are disabled (SUB-OWN-05)", () => {
     const mine = personal("codex-mine", "codex");
     const base = {
       connections: [connection("codex-org", "codex"), mine],
       session: {
         visibility: "private" as const,
+        // Accepted while not turned on here: authority for an explicit
+        // choice only.
         personalAuthority: [{ provider: "codex", ownerMembershipId: "member-a" }],
         binding: {
           connectionId: "codex-mine",
@@ -1083,25 +1247,15 @@ describe("explicit choices, personal fallback and explained waits", () => {
         },
       },
     };
-    expect(decidePlacement(input({ ...base, personalFallbackOptIn: false }))).toMatchObject({
+    expect(decidePlacement(input({ ...base }))).toMatchObject({
       connectionId: "codex-mine",
       switch: "sticky",
     });
+    // The deprecated organization fallback switch no longer affects placement.
     expect(
       decidePlacement(
         input({
           ...base,
-          personalFallbackOptIn: false,
-          settings: { personalFallbackAllowed: false },
-        }),
-      ),
-    ).toMatchObject({ connectionId: "codex-mine", switch: "sticky" });
-    // The organization switch alone, with the owner still opted in.
-    expect(
-      decidePlacement(
-        input({
-          ...base,
-          personalFallbackOptIn: true,
           settings: { personalFallbackAllowed: false },
         }),
       ),
@@ -1111,7 +1265,6 @@ describe("explicit choices, personal fallback and explained waits", () => {
       decidePlacement(
         input({
           ...base,
-          personalFallbackOptIn: true,
           settings: { personalConnectionsAllowed: false },
         }),
       ),
@@ -1120,9 +1273,10 @@ describe("explicit choices, personal fallback and explained waits", () => {
       ...base.session,
       binding: { ...base.session.binding, lastModelCallAt: NOW - 2 * DEFAULT_IDLE_CUTOFF_MS },
     };
-    expect(
-      decidePlacement(input({ ...base, session: cold, personalFallbackOptIn: false })),
-    ).toMatchObject({ connectionId: "codex-org", personal: false });
+    expect(decidePlacement(input({ ...base, session: cold }))).toMatchObject({
+      connectionId: "codex-org",
+      personal: false,
+    });
     expect(
       decidePlacement(input({ ...base, session: { ...base.session, visibility: "shared" } })),
     ).toMatchObject({ connectionId: "codex-org", personal: false });

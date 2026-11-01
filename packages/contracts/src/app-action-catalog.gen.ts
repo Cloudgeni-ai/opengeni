@@ -8002,6 +8002,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:write"
   },
   {
+    "id": "removeModelConnectionFromWorkspace",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "removeSessionResources",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove",

@@ -36,6 +36,7 @@ import { Notice } from "@opengeni/react/ui/notice";
 import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { OwnSubscriptionTurnsRow, type OwnTurnsPlace } from "./own-subscription-turns";
 
 export type SubscriptionAccountPlaces = {
   scopeName: string;
@@ -45,6 +46,15 @@ export type SubscriptionAccountPlaces = {
   openConnect: (id?: string) => void;
   openAccess: (id: string) => void;
   sharePersonal?: ((id: string) => void) | undefined;
+  /** Your own account, seen from a shared workspace: turn it on for your messages there. */
+  ownTurns?: OwnTurnsPlace | undefined;
+  /** A workspace's name in the organization, where the viewer can read it. */
+  workspaceName?: ((workspaceId: string) => string | undefined) | undefined;
+  /**
+   * Workspace admins: stop using another workspace's own account that was
+   * shared with this one. Absent for everyone else.
+   */
+  removeFromWorkspace?: ((accountId: string) => Promise<void>) | undefined;
   backToList: () => void;
 };
 type AccountSummary = SubscriptionPoolAccount & {
@@ -181,12 +191,22 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
   const listLabel = useModelsListLabel();
   const [renaming, setRenaming] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const name = subscriptionAccountName(account);
   const canEdit = managesSubscriptionAccount(pool, account);
+  const organization = Boolean(pool.organizationId);
+  // Another workspace's own account shared with this one: that workspace's
+  // admins manage it, and this workspace can only stop using it.
+  const sharedBy =
+    !organization && account.ownerWorkspaceId && account.ownerWorkspaceId !== pool.workspaceId
+      ? account.ownerWorkspaceId
+      : null;
+  const sharedByName = sharedBy ? (places.workspaceName?.(sharedBy) ?? "another workspace") : null;
+  const removable = sharedBy !== null && places.removeFromWorkspace !== undefined;
   // A workspace also lists the organization's shared accounts; the organization manages them.
   const organizationManaged =
-    pool.inherited || (!pool.organizationId && account.scope === "organization");
-  const organization = Boolean(pool.organizationId);
+    sharedBy === null &&
+    (pool.inherited || (!pool.organizationId && account.scope === "organization"));
   const status =
     account.status !== "active"
       ? "needs_reconnect"
@@ -203,11 +223,13 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
   });
   const scopeLabel = pool.organizationId
     ? organizationReachLabel(places.scope, access.data)
-    : organizationManaged
-      ? places.scope.organization
-      : account.scope === "user"
-        ? places.scope.user
-        : places.scope.workspace;
+    : sharedByName
+      ? `Shared by ${sharedByName}`
+      : organizationManaged
+        ? places.scope.organization
+        : account.scope === "user"
+          ? places.scope.user
+          : places.scope.workspace;
   return (
     <DetailPage
       back={{ label: listLabel, onClick: places.backToList }}
@@ -235,11 +257,20 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
                 Disconnect
               </DropdownMenuItem>
             </MoreMenu>
+          ) : removable ? (
+            <MoreMenu label={`More actions for ${name}`}>
+              <DropdownMenuItem variant="destructive" onSelect={() => setRemoving(true)}>
+                <UnplugIcon />
+                Remove from this workspace
+              </DropdownMenuItem>
+            </MoreMenu>
           ) : null
         }
       />
       <DetailPageBody>
-        {organizationManaged ? (
+        {sharedByName ? (
+          <ManagedNote>{`Shared with ${places.scopeName} by ${sharedByName}. That workspace's admins manage it.`}</ManagedNote>
+        ) : organizationManaged ? (
           <ManagedNote>{`Managed by the owners and admins of ${places.organizationName}.`}</ManagedNote>
         ) : !canEdit ? (
           <ManagedNote>Only people who can manage connections can change this account.</ManagedNote>
@@ -281,6 +312,14 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
                 disabled={pool.busy}
                 onCheckedChange={(next) => void pool.setAllocator(account, next)}
               />
+              {account.scope === "user" && places.ownTurns ? (
+                <OwnSubscriptionTurnsRow
+                  client={client}
+                  place={places.ownTurns}
+                  connectionId={account.id}
+                  name={name}
+                />
+              ) : null}
               {pool.accounts.length > 1 ? (
                 <SettingRow
                   label="Primary account"
@@ -377,6 +416,24 @@ function SubscriptionAccountDetail<Account extends AccountSummary>({
           places.backToList();
         }}
       />
+      {removable ? (
+        <DestructiveConfirm
+          open={removing}
+          onOpenChange={setRemoving}
+          title={`Stop using ${name} in ${places.scopeName}?`}
+          consequences={[
+            `${name} stops paying for new work in ${places.scopeName}.`,
+            "Running work here stops using it before its next model call.",
+            `Only the admins of ${sharedByName} or the organization can share it here again.`,
+          ]}
+          confirmLabel="Remove"
+          pendingLabel="Removing…"
+          onConfirm={async () => {
+            await places.removeFromWorkspace!(account.id);
+            places.backToList();
+          }}
+        />
+      ) : null}
     </DetailPage>
   );
 }

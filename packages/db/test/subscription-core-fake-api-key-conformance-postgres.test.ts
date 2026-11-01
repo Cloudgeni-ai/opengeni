@@ -326,7 +326,7 @@ describe("fake API-key connector: cross-provider failover in the shared policy",
       personalConnectionsAllowed: true,
       personalFallbackAllowed: true,
     },
-    people: [{ membershipId: "member", active: true, personalFallbackOptIn: false }],
+    people: [{ membershipId: "member", active: true }],
     models: [
       { id: "codex/a", provider: "codex", reasoningLevels: ["medium"] },
       {

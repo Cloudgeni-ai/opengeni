@@ -327,9 +327,14 @@ describe.skipIf(!enabled)("independent session title custody", () => {
 
     test(`${provider.adapter.provider}: personal title authority is live after its source closes`, async () => {
       const org = await fixture.organization();
-      await shared.admin`insert into subscription_person_preferences(account_id, organization_membership_id, personal_fallback_opt_in)
-        values (${org.accountId}::uuid, ${org.membershipId}::uuid, true) on conflict do nothing`;
       const connectionId = await fixture.connection(org, provider, { personal: true });
+      // The owner turned it on for their own turns in this workspace (D-53).
+      await shared.admin`insert into organization_user_resource_grants (
+          account_id, authority_id, owner_organization_membership_id, workspace_id, action, mode, context
+        )
+        select connection.account_id, connection.authority_id, connection.owner_organization_membership_id,
+          ${org.workspaceId}::uuid, 'subscription_connection.use', 'always', 'workspace_shared'
+        from subscription_connections connection where connection.id = ${connectionId}::uuid`;
       const work = await fixture.turn(org, { model: models[index]!, private: true });
       expect(
         await subscriptionCoreTurns(provider).placeSubscriptionCoreTurn(fixture.client.db, work),

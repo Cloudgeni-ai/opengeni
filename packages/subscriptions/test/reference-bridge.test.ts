@@ -184,10 +184,30 @@ function randomProductionInput(seed: number): PlacementInput {
       reselectionPoints: rng.bool(0.15)
         ? [rng.pick(["compaction_completed", "model_changed"] as const)]
         : [],
-      personalAuthority: PROVIDERS.filter(() => rng.bool(0.6)).map((provider) => ({
-        provider,
-        ownerMembershipId: rng.bool(0.85) ? owner : rng.pick(PEOPLE),
-      })),
+      // Pool entries, and accepted consents for one account (an explicit
+      // choice or the turn person's own subscription turned on here, D-53),
+      // sometimes naming another session.
+      personalAuthority: PROVIDERS.filter(() => rng.bool(0.6)).map((provider) => {
+        const person = rng.bool(0.85) ? owner : rng.pick(PEOPLE);
+        const theirs = connections.filter(
+          (connection) =>
+            connection.provider === provider &&
+            connection.ownership.kind === "personal" &&
+            connection.ownership.ownerMembershipId === person,
+        );
+        return {
+          provider,
+          ownerMembershipId: person,
+          ...(theirs.length && rng.bool(0.5)
+            ? {
+                sharedSessionChoice: {
+                  sessionId: rng.bool(0.9) ? "session-" + seed : "session-other",
+                  connectionId: rng.pick(theirs).id,
+                },
+              }
+            : {}),
+        };
+      }),
       compactionProviderLock: rng.bool(0.15) ? "codex" : null,
     },
     settings: {
@@ -201,7 +221,6 @@ function randomProductionInput(seed: number): PlacementInput {
     people: PEOPLE.map((membershipId) => ({
       membershipId,
       active: rng.bool(0.9),
-      personalFallbackOptIn: rng.bool(),
     })),
     models: MODELS,
     connections,
@@ -308,7 +327,7 @@ describe("reference bridge", () => {
         personalConnectionsAllowed: true,
         personalFallbackAllowed: true,
       },
-      people: [{ membershipId: "member-a", active: true, personalFallbackOptIn: true }],
+      people: [{ membershipId: "member-a", active: true }],
       connections: [
         {
           id: "mine",

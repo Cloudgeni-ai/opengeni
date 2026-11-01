@@ -82,7 +82,16 @@ export function SubscriptionAccountPoolRows<T extends Account>({
   const entries = [
     ...shared.map((account) => {
       const organizationAccount = listed?.get(account.id);
-      const scopeLabel = !organization ? undefined : organizationAccount?.reach ? (
+      // Another workspace's own account, shared with this one. This
+      // workspace's own accounts have workspace scope, even when it uses the
+      // organization's accounts and lists them all together.
+      const sharedBy =
+        !pool.organizationId && account.scope === "organization" && account.ownerWorkspaceId
+          ? account.ownerWorkspaceId
+          : null;
+      const scopeLabel = sharedBy ? (
+        `Shared by ${places.workspaceName?.(sharedBy) ?? "another workspace"}`
+      ) : !organization ? undefined : organizationAccount?.reach ? (
         accountReachLabel(places.scope, organizationAccount.reach, organization.workspaceName)
       ) : organization.pool.loading ? (
         <ModelSettingsPlaceholder />
