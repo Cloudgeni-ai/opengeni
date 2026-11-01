@@ -297,7 +297,9 @@ pick a VM.
   at what it holds. A new one starts only in room above the buffer and the
   high watermark that no wake wants: none while a wake is queued for
   memory or refused and held, or before the first memory reading after a
-  start; and it is booked before it starts. Ready
+  start; and it is booked before it starts. A fill keeps room in the
+  budget above the buffer for claims of every ready clone kept, itself
+  included, too. Ready
   clones are the first relief for a wake, the buffer and memory pressure,
   oldest first, ahead of step 1 of the relief above; one still filling is
   left to finish. A ready clone is offered for relief only once it waits
@@ -335,10 +337,23 @@ pick a VM.
   held (anonymous, kernel, socket and huge-page memory and the cache that
   stays), which one read gives at once.
 - Local disk is booked the same way, because a full disk blocks the very
-  saves that relieve memory. Every VM whose state is not saved yet books
-  its worst-case next save: its memory size once where files share extents
-  (XFS), twice where they do not (the merge writes a whole new image), plus
-  64 MiB and a few inodes. Bookings plus a kept-back reserve
+  saves that relieve memory. Every VM whose state is not saved yet, and
+  that the host may save without being asked (its sleep settings save it
+  after some idle time or checkpoint it), books its worst-case next save:
+  its memory size once where files share extents (XFS), twice where they
+  do not (the merge writes a whole new image), plus 64 MiB and a few
+  inodes. A VM the host never saves on its own, such as a CI runner's,
+  which ends when its job does, books no save it would never take: on a
+  host of large runners those bookings alone would refuse creates and
+  wakes for disk that stays free. A save asked of it (a request to sleep
+  to saved or deeper, as a hand-off makes) books its save from the
+  request on, and the host refuses the request at once as host full
+  while the disk cannot book it, so its VM is never paused for a save
+  that would then wait for room. A request short by no more than what
+  bookings that ended since the last reading stood for waits for the next
+  reading, about a second, which decides it, as a create does, and one
+  asked before the host's first reading waits for that; its VM runs
+  meanwhile. Bookings plus a kept-back reserve
   (`--disk-reserve-mib`, `--disk-reserve-inodes`; by default a twentieth
   of the filesystem, at least 1 GiB and 1024 inodes) stay within what the
   filesystem has free, read every sample. A booking whose save has written

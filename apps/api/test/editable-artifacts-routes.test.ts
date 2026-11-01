@@ -21,6 +21,14 @@ import {
   editableArtifactActorForGrant,
   registerEditableArtifactRoutes,
 } from "../src/routes/editable-artifacts";
+import {
+  EditableArtifactAudienceRefusedError,
+  type EditableArtifactAudiencePort,
+} from "../src/editable-artifact-audience";
+import {
+  EditableArtifactAudienceOwnerRequiredError,
+  type PersistedEditableArtifactAudience,
+} from "@opengeni/db";
 
 const SECRET = "editable-artifact-route-test-secret";
 const ACCOUNT_ID = "10000000-0000-4000-8000-000000000001";
@@ -42,6 +50,12 @@ type RecordedApplication = {
   officeImportCalls: Array<Parameters<EditableArtifactOfficeImportPort["prepare"]>[0]>;
   officeImportError: { value: Error | null };
   failWith: { value: Error | null };
+  audienceCalls: Array<
+    | Readonly<{ kind: "resolveNew"; requested: string | undefined; sourcePrivate: boolean }>
+    | Readonly<{ kind: "change"; artifactId: string; requested: string }>
+  >;
+  /** Stored audiences the fake returns, by artifact id. */
+  audiences: Map<string, PersistedEditableArtifactAudience>;
 };
 
 function routeFixture(
@@ -52,6 +66,10 @@ function routeFixture(
     privateSessionOwner?: string;
     candidateIds?: readonly string[];
     readArtifacts?: EditableArtifactApplicationPort["readArtifacts"];
+    /** What the fake audience change does: store it, or refuse it. */
+    audienceChange?: "store" | "not_owner" | "refused";
+    /** The imported file is Only me to the caller. */
+    sourcePrivate?: boolean;
   }> = {},
 ): RecordedApplication {
   const modality = options.modality ?? "spreadsheet";
@@ -63,6 +81,45 @@ function routeFixture(
   const officeImportCalls: RecordedApplication["officeImportCalls"] = [];
   const officeImportError = { value: null as Error | null };
   const failWith = { value: null as Error | null };
+  const audienceCalls: RecordedApplication["audienceCalls"] = [];
+  const audiences = new Map<string, PersistedEditableArtifactAudience>();
+  const audiencePort: EditableArtifactAudiencePort = {
+    resolveNew:
+      (grant, resolveOptions = {}) =>
+      async (source) => {
+        audienceCalls.push({
+          kind: "resolveNew",
+          requested: resolveOptions.requested,
+          sourcePrivate: source.sourcePrivate,
+        });
+        return resolveOptions.requested === "private" || source.sourcePrivate
+          ? { visibility: "user_private", ownerSubjectId: grant.subjectId }
+          : { visibility: "workspace_shared", ownerSubjectId: grant.subjectId };
+      },
+    read: async (_scope, artifactIds) =>
+      new Map(
+        artifactIds.flatMap((id) => {
+          const stored = audiences.get(id);
+          return stored ? [[id, stored] as const] : [];
+        }),
+      ),
+    change: async (grant, input) => {
+      audienceCalls.push({
+        kind: "change",
+        artifactId: input.artifactId,
+        requested: input.requested,
+      });
+      if (options.audienceChange === "not_owner")
+        throw new EditableArtifactAudienceOwnerRequiredError();
+      if (options.audienceChange === "refused") throw new EditableArtifactAudienceRefusedError();
+      const stored: PersistedEditableArtifactAudience = {
+        visibility: input.requested === "private" ? "user_private" : "workspace_shared",
+        ownerSubjectId: grant.subjectId,
+      };
+      audiences.set(input.artifactId, stored);
+      return stored;
+    },
+  };
   const application = {
     ...(options.readArtifacts ? { readArtifacts: options.readArtifacts } : {}),
     createArtifact: async (input) => {
@@ -108,13 +165,17 @@ function routeFixture(
       prepare: async (input) => {
         officeImportCalls.push(input);
         if (officeImportError.value) throw officeImportError.value;
-        return preparedOfficeImport(input.modality);
+        return {
+          ...preparedOfficeImport(input.modality),
+          ...(options.sourcePrivate ? { sourcePrivate: true } : {}),
+        };
       },
     },
     editableArtifactSessionArtifactIds: async (scope, sourceSessionId, limit) => {
       listCalls.push([scope, sourceSessionId, limit]);
       return options.candidateIds ?? [ARTIFACT_ID];
     },
+    editableArtifactAudiences: audiencePort,
     ...(options.uncomposed ? {} : { editableArtifacts: application }),
   });
   return {
@@ -127,6 +188,8 @@ function routeFixture(
     officeImportCalls,
     officeImportError,
     failWith,
+    audienceCalls,
+    audiences,
   };
 }
 
@@ -463,6 +526,8 @@ describe("editable artifact create/open routes", () => {
       stateHash: `sha256:${"0".repeat(64)}`,
       createdAt: "2026-08-08T12:00:00.000Z",
       updatedAt: "2026-08-08T12:00:00.000Z",
+      visibility: "workspace",
+      ownedByViewer: false,
     });
     expect(fixture.createCalls[0]).toMatchObject({
       scope: { accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID },
@@ -470,7 +535,89 @@ describe("editable artifact create/open routes", () => {
       idempotencyKey: "create-1",
       modality: "spreadsheet",
       title: "Forecast",
+      audience: { visibility: "workspace_shared", ownerSubjectId: "user:artifact-test" },
     });
+    expect(fixture.audienceCalls).toEqual([
+      { kind: "resolveNew", requested: undefined, sourcePrivate: false },
+    ]);
+  });
+
+  test("creates an Only me artifact when its owner asks for one", async () => {
+    const fixture = routeFixture();
+    const response = await fixture.app.request(
+      `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts`,
+      {
+        method: "POST",
+        headers: { authorization: await bearer(), "content-type": "application/json" },
+        body: JSON.stringify({
+          replicaId: REPLICA_ID,
+          idempotencyKey: "create-private",
+          modality: "document",
+          title: "Notes",
+          visibility: "private",
+        }),
+      },
+    );
+    expect(response.status).toBe(201);
+    expect(fixture.createCalls[0]?.audience).toEqual({
+      visibility: "user_private",
+      ownerSubjectId: "user:artifact-test",
+    });
+    expect(fixture.audienceCalls).toEqual([
+      { kind: "resolveNew", requested: "private", sourcePrivate: false },
+    ]);
+  });
+
+  test("rejects an unknown audience on create", async () => {
+    const fixture = routeFixture();
+    const response = await fixture.app.request(
+      `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts`,
+      {
+        method: "POST",
+        headers: { authorization: await bearer(), "content-type": "application/json" },
+        body: JSON.stringify({
+          replicaId: REPLICA_ID,
+          idempotencyKey: "create-bad",
+          modality: "document",
+          title: "Notes",
+          visibility: "everyone",
+        }),
+      },
+    );
+    expect(response.status).toBe(422);
+    expect(fixture.createCalls).toHaveLength(0);
+  });
+
+  test("shows who can open each artifact, and whether the viewer owns it", async () => {
+    const fixture = routeFixture();
+    fixture.audiences.set(ARTIFACT_ID, {
+      visibility: "user_private",
+      ownerSubjectId: "user:artifact-test",
+    });
+    const response = await fixture.app.request(
+      `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${ARTIFACT_ID}?replicaId=${REPLICA_ID}`,
+      { headers: { authorization: await bearer() } },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ visibility: "private", ownedByViewer: true });
+
+    // An agent acting for the owner opens it, but never owns the choice.
+    const agent = await fixture.app.request(
+      `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${ARTIFACT_ID}?replicaId=${REPLICA_ID}`,
+      {
+        headers: {
+          authorization: await bearer({
+            principalKind: "agent_attempt",
+            sessionId: SESSION_ID,
+            turnId: TURN_ID,
+            attemptId: ATTEMPT_ID,
+            executionGeneration: 1,
+          }),
+        },
+      },
+    );
+    expect(agent.status).toBe(200);
+    expect(await agent.json()).toMatchObject({ visibility: "private", ownedByViewer: false });
   });
 
   test("opens metadata under exact artifact authorization", async () => {
@@ -506,6 +653,8 @@ describe("editable artifact create/open routes", () => {
           stateHash: `sha256:${"0".repeat(64)}`,
           createdAt: "2026-08-08T12:00:00.000Z",
           updatedAt: "2026-08-08T12:00:00.000Z",
+          visibility: "workspace",
+          ownedByViewer: false,
         },
       ],
     });
@@ -764,6 +913,97 @@ describe("editable artifact Office import route", () => {
       modality: "document",
       snapshot: { modality: "document" },
     });
+  });
+
+  test("an artifact imported from an Only me file starts Only me", async () => {
+    const fixture = routeFixture({ sourcePrivate: true });
+    const response = await importArtifact(fixture, await bearer());
+    expect(response.status).toBe(201);
+    expect(fixture.audienceCalls).toEqual([
+      { kind: "resolveNew", requested: undefined, sourcePrivate: true },
+    ]);
+    expect(fixture.importCalls[0]?.audience).toEqual({
+      visibility: "user_private",
+      ownerSubjectId: "user:artifact-test",
+    });
+  });
+});
+
+describe("editable artifact audience route", () => {
+  const put = async (
+    fixture: RecordedApplication,
+    body: unknown,
+    authorization?: string,
+  ): Promise<Response> =>
+    await fixture.app.request(
+      `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${ARTIFACT_ID}/visibility`,
+      {
+        method: "PUT",
+        headers: {
+          authorization: authorization ?? (await bearer()),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      },
+    );
+
+  test("its owner shares it with the workspace or limits it to themselves", async () => {
+    const fixture = routeFixture({ modality: "document" });
+    const limited = await put(fixture, { visibility: "private" });
+    expect(limited.status).toBe(200);
+    expect(limited.headers.get("cache-control")).toBe("private, no-store");
+    expect(await limited.json()).toMatchObject({
+      id: ARTIFACT_ID,
+      modality: "document",
+      visibility: "private",
+      ownedByViewer: true,
+    });
+    const shared = await put(fixture, { visibility: "workspace" });
+    expect(await shared.json()).toMatchObject({ visibility: "workspace", ownedByViewer: true });
+    expect(fixture.audienceCalls).toEqual([
+      { kind: "change", artifactId: ARTIFACT_ID, requested: "private" },
+      { kind: "change", artifactId: ARTIFACT_ID, requested: "workspace" },
+    ]);
+  });
+
+  test("someone who does not own it cannot change it", async () => {
+    const fixture = routeFixture({ audienceChange: "not_owner" });
+    const response = await put(fixture, { visibility: "private" });
+    expect(response.status).toBe(403);
+  });
+
+  test("an agent, key or service cannot change it", async () => {
+    const fixture = routeFixture({ audienceChange: "refused" });
+    const response = await put(fixture, { visibility: "workspace" });
+    expect(response.status).toBe(403);
+  });
+
+  test("someone else's Only me artifact answers like a missing one", async () => {
+    const fixture = routeFixture();
+    fixture.failWith.value = new EditableArtifactApplicationError("forbidden");
+    const response = await put(fixture, { visibility: "workspace" });
+    expect(response.status).toBe(404);
+    expect(fixture.audienceCalls).toEqual([]);
+  });
+
+  test("asks for a valid choice", async () => {
+    const fixture = routeFixture();
+    for (const body of [{}, { visibility: "everyone" }, { visibility: "private", extra: 1 }]) {
+      const response = await put(fixture, body);
+      expect(response.status).toBe(422);
+    }
+    expect(fixture.audienceCalls).toEqual([]);
+  });
+
+  test("needs permission to publish artifacts", async () => {
+    const fixture = routeFixture();
+    const response = await put(
+      fixture,
+      { visibility: "workspace" },
+      await bearer({ permissions: ["artifacts:read"] }),
+    );
+    expect(response.status).toBe(403);
+    expect(fixture.audienceCalls).toEqual([]);
   });
 });
 

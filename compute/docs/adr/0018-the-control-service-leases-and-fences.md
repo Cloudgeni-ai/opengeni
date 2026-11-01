@@ -27,8 +27,15 @@ can be built and tested.
   serves any request.
 - **Hosts renew their lease through the service.** An agent started with a
   host id and a control address registers, which gives it a host epoch,
-  then renews every third of the lease time T (10 s) with its capacity:
-  free memory and disk, ready clones per shape, awake sandboxes. A
+  then renews every 3⅓ s, nine times in the lease time T (30 s), with
+  its capacity:
+  free memory and disk, ready clones per shape, awake sandboxes, and what
+  the host is now (its address, memory, processors, disk and offers, as
+  it registers with them): a restarted agent keeps its registration while
+  what it is configured with may have changed, and the service places on
+  what it says, keeping the name and boot it registered with. A changed
+  class (profile or CPU template) applies to the sandboxes it places from
+  then on; each sandbox keeps the class it was placed under. A
   renewal is one row update, and capacity changes are sent at most once a
   second. Replicas read changed host rows every 250 ms into a view in
   memory; placement reads only that view. The host numbers its renewals
@@ -72,7 +79,8 @@ can be built and tested.
   host, and a failed read counts as still running. Meanwhile the host's
   sandboxes stay its own: a wake retries until its own deadline. New
   sandboxes go to other hosts, since every replica's placement passes
-  over a host it has read no renewal from for T. The wait trades a truly hung
+  over a host it has read no renewal from for three renewal intervals
+  (10 s), or T if that is shorter. The wait trades a truly hung
   host's recovery time (up to two minutes, not T plus margin) for keeping
   every program on a host that was only out of reach.
 - **A cut-off host stops its VMs, with or without its agent.** The host's
@@ -80,23 +88,32 @@ can be built and tested.
   T; a failed or unanswered renewal never extends it. A guard process, one
   per host, steps every 100 ms on that clock, and decides each step from
   the time, the deadline and what the kernel reports alone, never from
-  what an earlier step asked for: from a second before the deadline it
-  asks for the cgroup that holds every VM to freeze until `cgroup.events`
-  reports `frozen 1`; from the deadline, until the VMs are frozen or gone
+  what an earlier step asked for: from three seconds before the deadline it
+  asks for each VM's own group in the cgroup that holds every VM to freeze
+  until `cgroup.events` reports `frozen 1`; from the deadline, until the
+  VMs are frozen or gone
   (`populated 0`), it writes `cgroup.kill` on every step into each VM's
   own group that is neither, and leaves the frozen ones frozen (a VM
   ending while frozen, deleted or killed, reads `frozen 0` until its
   memory is released, which is long enough for a step to see; killing
   every VM for it would end every program on a host whose lease is only
-  late); while the deadline is further off it thaws a freeze it finds. A
+  late); while the deadline is further off it thaws a freeze it finds.
+  When the VMs cannot be told apart (a process sits in the cgroup
+  itself, or what is inside it cannot be read), or none is a sandbox's
+  only copy (below) and none holds a freeze of its own, it freezes,
+  kills and thaws the cgroup that holds them all instead, as guards
+  before only copies did; a guard asked to stop while the lease runs
+  out leaves the VMs so, frozen as a whole, which is what such a guard
+  expects to find. A
   frozen VMM cannot answer, so time its group spends frozen does not
   count toward a request's deadline, and a step under way when the
   freeze came finishes after the thaw instead of failing. So a guard that
   restarts after one that froze the VMs and died thaws them once the
   lease is renewed, and goes on freezing if it is not. The guard also
   holds the kernel watchdog (`softdog` with `nowayout`, W = 3 s), and feeds
-  it only while the deadline is ahead or the VMs are confirmed frozen or
-  gone. So if the guard stalls or dies, or a freeze and a kill both hang,
+  it only while the deadline is ahead or every VM it stops is confirmed
+  frozen or gone. So if the guard stalls or dies, or a freeze and a kill
+  both hang,
   the machine reboots W after the last feed, and stops within S (1 s) of
   that. The guard is the agent's own program run as a service of its own
   (`compute-host guard`), in a cgroup beside the VMs' (not inside it, or
@@ -105,6 +122,63 @@ can be built and tested.
   while it runs, and an agent refuses to join a fleet unless it finds the
   lock held. A host without a control address has no deadline and never
   freezes.
+- **A sandbox's only copy runs on.** Fencing a host keeps a sandbox the
+  service hands to another host from also running here. It also bounds
+  how long a host cut off from the service runs its sandboxes
+  unsupervised, since such a host carries out no delete, timeout or
+  suspension the service decides meanwhile. The service hands a sandbox
+  on only from a copy in object storage it can hand it on from (an adopt
+  starts from the archive's pointer, [25](0025-pointers-in-the-control-service-and-objects-by-day.md),
+  and a sandbox with none waits for its host; a capture's image starts
+  new sandboxes under new ids, not this one), and a host makes such a
+  copy only by archiving or checkpointing it, which starts only while
+  its lease is valid. So a VM whose sandbox has no such copy, and that
+  makes none while it runs, can never run twice, and stopping it would
+  cost its programs for the second protection alone: a CI runner's
+  sandbox, which is never archived (ADR 23), would lose its job to every
+  blip of the control service longer than the lead. The agent marks
+  such a VM, an extended attribute of its group naming the agent
+  process (`user.compute.only-copy`, its number and start time), and the
+  guard and the stop hook leave a marked VM running when the lease runs
+  out. That gives up the bound for it: an only copy on a host that stays
+  cut off runs until the host is back in touch or someone stops it. No
+  limit is set on that time, since reaching one would end the only copy.
+  Nor does the agent adjust memory meanwhile: it decides nothing while
+  its lease is out, so the memory rules of
+  [24](0024-busy-sandboxes-are-slowed-never-frozen.md) stop
+  moving, and an only copy that runs on is held by the limits its group
+  already has and the sandboxes' wall. The fleet's default rules take a
+  sandbox's first checkpoint within a minute (`FIRST_CHECKPOINT`) and
+  then one every ten, so in practice this covers sandboxes
+  that are never checkpointed (runner sandboxes, and sandboxes whose
+  rules ask for no checkpoint), and a default sandbox is its only copy
+  for its first minute at most.
+  A sandbox is its only copy from its create, or its claim from the
+  ready pool, until the first archive or checkpoint of it begins: before
+  that step writes anything, the agent clears its VM's mark (or fails
+  the step if it cannot) and then records that the sandbox has a copy,
+  so no later VM of it is marked. A sandbox taken up from the store is
+  never its only copy. A mark holds only while the agent that set it
+  runs, since only that agent keeps the promise to clear it before a
+  copy: an agent of an earlier release, which knows nothing of marks,
+  may archive a marked VM, and a mark left by an agent that has ended is
+  stopped as any VM is until the next agent's recovery marks it again
+  from its record (an earlier release's agent rewrites a record without
+  the field, so a record that still says so is right), except that,
+  found running past the deadline, it is frozen rather than killed. A
+  mark that cannot be set or read is not there: the VM is stopped as
+  any other, which is safe. A VM starts unmarked, whatever an earlier
+  VM in its group was, since a group whose removal gave up while the
+  kernel still held it keeps its mark. Only copies are still stopped
+  with the rest when the guard cannot tell the VMs apart (they are then
+  frozen and killed as a whole), while one guard hands over to the next
+  (which freezes the VMs as a whole until the new guard takes over), and
+  when the watchdog resets the machine because a VM that is not an only
+  copy could not be stopped. While only copies run past the deadline,
+  the agent counts the time as frozen when it measures its requests'
+  deadlines, which only makes it more lenient. A host in a cloud host
+  group is still reset when the leader gives up on it (below), only
+  copies with it; their disks stay, as every unarchived sandbox's does.
 - **While its lease has run out the agent decides nothing.** It takes no
   decision of its own (no sampling, no idle sleep, no eviction, no ready
   clones), its store starts no archive, and the host's own tools get its
@@ -116,7 +190,7 @@ can be built and tested.
   renewal's send that a VM can still run is (T + W) / (1 − ρ) + S, and the
   earliest the leader gives up is (T + M) / (1 + ρ). The terms are valid
   only if the second is later: `LeaseTerms::validate` refuses any margin
-  below the least that makes it so (4.27 s for T = 10 s; the margin is
+  below the least that makes it so (4.68 s for T = 30 s; the margin is
   5 s), any ρ of 10 % or more, a watchdog that is not whole seconds, and
   fewer than two renewals per term. The guarantee rests on stated
   assumptions: the kernel's timers run (a kernel hung hard enough to stop
@@ -124,11 +198,14 @@ can be built and tested.
   guard knowing. The watchdog counts on a clock that stops in a suspend
   and the lease on one that does not, so a host resumed after its
   deadline would run its VMs until the guard's next step. Hosts therefore
-  hold a block-mode systemd sleep inhibitor and mask the sleep targets,
-  and a system-sleep hook, if a suspend happens anyway, marks it under way
-  (the guard then treats the lease as run out and freezes) and waits for
-  the VMs to freeze before the machine sleeps; it lifts the mark after the
-  resume, and the guard thaws them only if the lease is still valid then.
+  mask the sleep targets (`host-setup`), so systemd never suspends them.
+  The guard also honours a mark that a suspend is under way
+  (`/run/compute-host/suspending`): while it is there, the guard treats
+  the lease as run out and freezes every VM that is not its sandbox's
+  only copy, and thaws them once it is gone only if the lease is valid
+  then. No system-sleep hook that leaves the mark ships, since the
+  targets are masked; a suspend forced past them without one is outside
+  the guarantee.
   A hypervisor that pauses the whole host VM without the guest knowing is
   outside the guarantee: once it resumes, the old VMs can run before the
   guard is scheduled, while another host already has their sandboxes.
@@ -190,6 +267,43 @@ can be built and tested.
   suggested while a member is stalled. Only zonal groups are supported,
   since a fence must name the instance's zone. Hosts outside a group rely
   on their deadline, guard and watchdog alone.
+- **T is 30 s, so hosts ride out ordinary blips.** With T at 10 s, a
+  host's renewals had to get through within about 9 s of the last one
+  answered, or the guard froze every VM on it and, a second later, killed
+  the ones it could not freeze. Real hosts missed that: links between
+  sites that drop for 10 to 20 s, a host whose disk stalls (its agent
+  slow for seconds), and the service's own rolling restarts each left
+  hosts unanswered for longer, and busy VMs that would not freeze in time
+  were killed, programs and all. At 30 s a host has nine renewals per
+  term and freezes only after 27 s without an answer. The cost is
+  recovery: the leader gives up on a host that is truly gone 20 s later
+  (T plus margin, 35 s), and a cloud host is fenced through its API
+  before that anyway. Placement does not wait that long: it passes over a
+  host after three missed renewals, as it did before. Renewals never wait
+  on the agent either: they carry the agent's latest reading of what the
+  host can take on, read on a task of its own once a second, so a busy
+  agent cannot hold them up. An agent that has not answered one for a
+  minute is stuck rather than busy: its process stops itself, renewing
+  the lease as any stop does, and the agent systemd starts again takes
+  back the VMs, which run on meanwhile, so a stuck agent neither keeps
+  its sandboxes out of reach for good nor costs their programs. A stop
+  that has not ended a minute later (it waits on writes a stuck disk may
+  never finish) ends the process at once, as systemd's stop timeout
+  would; a host that cannot start its agent again lets its lease lapse,
+  and the service moves its sandboxes. A gap is
+  visible before it costs anything:
+  the host warns once two renewals in a row go unanswered, with how long
+  its lease has left, the service records how long each host went
+  unheard (`compute_fleet_host_renewal_gap_seconds`), and a VM the guard
+  kills raises the host's `fenced` alarm, with the VM's end recorded as
+  `fenced`. A host only re-registers under terms equal to its own, so a
+  release that changes them rolls out service first, hosts promptly
+  after; a host on the old terms renews meanwhile, but one whose lease
+  runs out cannot register again until it is upgraded. The leader gives
+  up on a host after its own term, so the service must never be rolled
+  back below the release while hosts run it: an older leader would give
+  up on a host 20 s before its VMs stop, and wake its sandboxes elsewhere
+  while they still run. Roll hosts back first.
 - **A host that comes back is fenced until it has caught up.** It
   registers again only once its last registration lapsed (the store
   refuses while that one is live, since its VMs may still run), and lists
@@ -481,10 +595,15 @@ can be built and tested.
   drifting as far as the terms allow, partitions, lost and late messages
   (up to 27 s), stalled agents and guards, agent and guard restarts,
   suspends, power losses (some for good), stuck freezes and kills,
-  watchdog reboots and leader failovers. The watchdog counts on the
-  host's clock and stops in a suspend, as `softdog` does. It checks that a
-  sandbox never runs on two hosts or under an older epoch, that a host
-  given up on stopped its VMs before, that a pointer's stamp never goes
+  watchdog reboots, guard hand-overs and leader failovers. The guard sees
+  each VM's group with its mark as its sandbox's only copy (orphaned
+  while the agent that set it is down, kept by a group a VM left behind),
+  and some sandboxes, as runners', are never archived but to hand them
+  off. The watchdog counts on the host's clock and stops in a suspend, as
+  `softdog` does. It checks that a sandbox never runs on two hosts or
+  under an older epoch, that a VM marked its sandbox's only copy never
+  runs while a copy of it is in the store, that a host given up on
+  stopped every unmarked VM before, that a pointer's stamp never goes
   back, that a hand-off loses no write, and that at the end every sandbox
   runs on its owner, except those whose only copy was on a host that died
   before their first archive. Each rule above that is not obvious was

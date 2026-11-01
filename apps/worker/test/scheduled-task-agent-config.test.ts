@@ -266,6 +266,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     expect(accepted?.resolvedAgentConfig).toEqual(session.agent!);
     expect([...session.firstPartyMcpTools].sort()).toEqual(
       [
+        "call_user",
         "command_read",
         "command_wait",
         "goal_complete",

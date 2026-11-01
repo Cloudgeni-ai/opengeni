@@ -1,7 +1,6 @@
-import { Button } from "@opengeni/react/ui/button";
+import { WorkspaceChecklist } from "@opengeni/react/app/components/workspace-reach";
 import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
 import { CheckboxField, Field } from "@opengeni/react/ui/field";
-import { Skeleton } from "@opengeni/react/ui/skeleton";
 import {
   ACCESS_PRESET_COPY,
   ORGANIZATION_PERMISSION_GROUPS,
@@ -143,7 +142,11 @@ export function AccessPresetFields({
   );
 }
 
-/** "All workspaces, new ones too" or a picked list. */
+/**
+ * "All workspaces, new ones too" or a picked list: where a key or a connected
+ * agent may act. The list is the same workspace checklist the "Available in"
+ * control uses for things the organization shares.
+ */
 export function WorkspaceScopeFields({
   organizationName,
   scope,
@@ -195,45 +198,15 @@ export function WorkspaceScopeFields({
         />
       </ChoiceCards>
       {selected ? (
-        <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
-          <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">Workspaces</legend>
-          {workspaces === null && workspacesError ? (
-            <div className="flex min-w-0 flex-wrap items-center gap-3">
-              <p className="m-0 text-sm leading-5 text-fg-muted">
-                Couldn't load the organization's workspaces.
-              </p>
-              {onRetryWorkspaces ? (
-                <Button type="button" variant="outline" size="sm" onClick={onRetryWorkspaces}>
-                  Try again
-                </Button>
-              ) : null}
-            </div>
-          ) : workspaces === null ? (
-            <Skeleton className="h-5 w-48 rounded-md" />
-          ) : (
-            workspaces.map((workspace) => (
-              <CheckboxField
-                key={workspace.id}
-                label={workspace.personal ? "Your Personal workspace" : workspace.name}
-                disabled={disabled}
-                checked={selected.workspaceIds.includes(workspace.id)}
-                onCheckedChange={(checked) =>
-                  onScopeChange({
-                    kind: "selected",
-                    workspaceIds: checked
-                      ? [...new Set([...selected.workspaceIds, workspace.id])]
-                      : selected.workspaceIds.filter((id) => id !== workspace.id),
-                  })
-                }
-              />
-            ))
-          )}
-          {error ? (
-            <p role="alert" className="m-0 text-sm leading-5 text-danger">
-              {error}
-            </p>
-          ) : null}
-        </fieldset>
+        <WorkspaceChecklist
+          workspaces={workspaces}
+          workspacesError={workspacesError}
+          onRetryWorkspaces={onRetryWorkspaces}
+          selected={selected.workspaceIds}
+          onSelectedChange={(workspaceIds) => onScopeChange({ kind: "selected", workspaceIds })}
+          disabled={disabled}
+          error={error}
+        />
       ) : null}
     </div>
   );

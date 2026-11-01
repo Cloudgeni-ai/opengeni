@@ -14,7 +14,13 @@ const migration = readFileSync(
 // against the same two in core's tests). A new chat webhook type is then a
 // conscious decision here too.
 test("1105's session trigger fires for exactly the offered chat types", () => {
-  const notOffered = ["session.status.changed", "session.notification.withdrawn"];
+  const notOffered = [
+    "session.status.changed",
+    "session.notification.withdrawn",
+    "session.agentCall.ringing",
+    "session.agentCall.settled",
+    "turn.superseded",
+  ];
   const chatTypes = WORKSPACE_WEBHOOK_EVENT_TYPES.filter(
     (type) =>
       !type.startsWith("usage.") && !type.startsWith("recording.") && !notOffered.includes(type),

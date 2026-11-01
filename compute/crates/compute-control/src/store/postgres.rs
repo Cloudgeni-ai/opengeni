@@ -26,6 +26,7 @@ mod connect;
 mod images;
 mod lifecycles;
 mod pointers;
+mod renewals;
 mod schema;
 mod templates;
 
@@ -505,7 +506,7 @@ impl PostgresStore {
                 &epoch,
                 &nonce(register.attempt),
                 &Json(&rulings),
-                &Json(&register.capacity),
+                &Json(&register.capacity.split().0),
             ],
         )
         .await
@@ -565,56 +566,11 @@ impl Store for PostgresStore {
     }
 
     async fn renew(&self, renew: &Renew, names: &[String]) -> Result<bool> {
-        // A renewal without a capacity keeps the one last heard.
-        let mut client = self.client().await?;
-        let tx = client.transaction().await.map_err(database)?;
-        let in_service = renew
-            .capacity
-            .as_ref()
-            .is_none_or(|capacity| capacity.pointers_in_service);
-        if pointers::outdated(&tx, in_service).await? {
-            return Ok(false);
-        }
-        let updated = tx
-            .execute(
-                "update compute_hosts set renewals = renewals + 1, seq = greatest(seq, $3), \
-                 capacity = coalesce($4, capacity), changed = nextval('compute_changes') \
-                 where id = $1 and epoch = $2 and state <> 'lost' and name = any($5)",
-                &[
-                    &big(renew.host)?,
-                    &big(renew.epoch)?,
-                    &big(renew.seq)?,
-                    &renew.capacity.as_ref().map(Json),
-                    &names,
-                ],
-            )
-            .await
-            .map_err(database)?;
-        tx.commit().await.map_err(database)?;
-        Ok(updated == 1)
+        self.renew_now(renew, names).await
     }
 
     async fn report(&self, report: &Report, names: &[String]) -> Result<bool> {
-        let mut client = self.client().await?;
-        let tx = client.transaction().await.map_err(database)?;
-        if pointers::outdated(&tx, report.capacity.pointers_in_service).await? {
-            return Ok(false);
-        }
-        let updated = tx
-            .execute(
-                "update compute_hosts set capacity = $3, changed = nextval('compute_changes') \
-                 where id = $1 and epoch = $2 and state <> 'lost' and name = any($4)",
-                &[
-                    &big(report.host)?,
-                    &big(report.epoch)?,
-                    &Json(&report.capacity),
-                    &names,
-                ],
-            )
-            .await
-            .map_err(database)?;
-        tx.commit().await.map_err(database)?;
-        Ok(updated == 1)
+        self.report_now(report, names).await
     }
 
     async fn hosts_changed(&self, after: u64) -> Result<Vec<HostRow>> {

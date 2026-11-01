@@ -204,6 +204,19 @@ describe("computer actions", () => {
 });
 
 describe("redactInteractionSecretValues", () => {
+  test("redacts a three-digit CVC and site-grouped known card number without hiding unrelated text", () => {
+    const secrets = { number: "4242424242424242", cvc: "731" };
+    expect(
+      redactInteractionSecretValues(
+        { value: "4242 4242 4242 4242", description: "Security code 731" },
+        secrets,
+      ),
+    ).toEqual({
+      value: "[secret]",
+      description: "Security code [secret]",
+    });
+    expect(redactInteractionSecretValues("Order 824601", secrets)).toBe("Order 824601");
+  });
   test("keeps line and short-value behaviour of typed values", () => {
     // Every line of a multi-line typed value, from four characters, spaces allowed.
     expect(redactInteractionSecretValues("value second", { note: "line one\nsecond" })).toBe(

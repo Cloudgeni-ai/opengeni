@@ -34,10 +34,12 @@ import type {
   ScheduledTaskEvents,
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
+  ScheduledTaskSkill,
   SessionAutomationWaitSummary,
   SessionAvatar,
 } from "@opengeni/contracts";
 export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
+export type { ScheduledTaskSkill } from "@opengeni/contracts";
 export type {
   McpElicitationAnswer,
   McpElicitationApprovalRequest,
@@ -1093,6 +1095,14 @@ export type ConnectionMetadata = {
   verifiedInstallAt?: string | null;
   verifiedInstallVersion?: number | null;
   metadata: Record<string, unknown>;
+  /**
+   * Whether this OAuth MCP account can be told apart from another account of
+   * the same service: `verified` (its account is known), `reconnect` (sign in
+   * again once before adding another), or `single` (the service doesn't say
+   * which account it is, so each person can connect one). Absent for other
+   * connections and from older servers.
+   */
+  accountIdentity?: "verified" | "reconnect" | "single" | undefined;
   createdBySubjectId: string | null;
   updatedBySubjectId: string | null;
   createdAt: string;
@@ -2713,6 +2723,8 @@ export const SESSION_EVENT_TYPES = [
   "session.humanInput.requested",
   "session.notification.posted",
   "session.notification.withdrawn",
+  "session.agentCall.ringing",
+  "session.agentCall.settled",
   "session.context.compaction.requested",
   "session.context.compaction.started",
   "session.context.compacted",
@@ -3785,7 +3797,16 @@ export type ScheduledTaskAgentConfig = {
   approvalTimeoutSeconds?: number | undefined;
   /** Whether the chats this task starts run unattended; see the request type. */
   unattended?: boolean | undefined;
+  /** Remote MCP servers attached to each chat the task starts. */
+  mcpServers?: ScheduledTaskMcpServer[] | undefined;
+  /** Memory, agent reach and inline Skills of each chat the task starts. */
+  memoryScope?: SessionMemoryScope | undefined;
+  agentAccess?: SessionAgentAccess | undefined;
+  skills?: ScheduledTaskSkill[] | undefined;
 };
+
+/** A session-create MCP server without static headers, for chats a task starts. */
+export type ScheduledTaskMcpServer = Omit<SessionMcpServerInput, "headers">;
 
 export type ScopedKnowledgeScope =
   | { kind: "organization"; workspaceId: null; subjectId: null }
@@ -3855,6 +3876,12 @@ export type ScheduledTask = {
   /** Vaults every run may resolve secret references from (the task vault is always included). */
   vaultPolicy?: VaultPolicy | undefined;
   metadata: Record<string, unknown>;
+  /**
+   * Present and true when the task was created locked: only its creator (the
+   * same key or signed service identity) can change, run, resume or delete
+   * it, never an agent. A workspace admin can still pause it.
+   */
+  creatorLocked?: true | undefined;
   createdAt: string;
   updatedAt: string;
   /** Read-only: what `refreshScheduledTaskAccess` would change, for a viewer who can act on it. */
@@ -4209,6 +4236,7 @@ export type FirstPartyMcpToolName =
   | "notify_user"
   | "notification_withdraw"
   | "inbox_tidy"
+  | "call_user"
   | "goal_set"
   | "goal_update"
   | "goal_progress"
@@ -4592,8 +4620,18 @@ export type WorkspaceModelCatalogModel = ClientModel & {
     | undefined;
   credentialReadiness: ModelCredentialReadinessV1;
   creditFunding?: "promotional" | "general" | "unavailable" | undefined;
-  /** Exact workspace-policy verdict without exposing provider identity. */
+  /**
+   * Exact verdict of the policy the workspace runs with (its own lists within
+   * its organization's, and its credit switch), without exposing provider
+   * identity.
+   */
   policyAllowed?: boolean | undefined;
+  /**
+   * False when the organization's allowlist, a ceiling the workspace's own
+   * list can't widen, excludes the model. Absent when the organization allows
+   * every model, and from older servers. Ignores the credit switch.
+   */
+  organizationAllowed?: boolean | undefined;
   availability: ModelAvailabilityV1;
 };
 
@@ -4786,7 +4824,8 @@ export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewa
 
 /**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for
- * that dimension; an empty array is an explicit total block.
+ * that dimension; an empty array is an explicit total block. A model runs only
+ * when both this list and `organization` allow it.
  */
 export type WorkspaceModelAccessPolicy = {
   allowedProviders: string[] | null;
@@ -4796,7 +4835,10 @@ export type WorkspaceModelAccessPolicy = {
    * default it follows, or no restriction. Absent from older servers.
    */
   source?: "workspace" | "organization" | "none" | undefined;
-  /** The organization default the workspace follows without its own policy. */
+  /**
+   * The organization's list: what the workspace uses without its own policy,
+   * and a ceiling its own policy can only narrow.
+   */
   organization?: {
     allowedProviders: string[] | null;
     allowedModels: string[] | null;
@@ -4812,6 +4854,8 @@ export type WorkspaceModelAccessPolicy = {
 /**
  * Model defaults every workspace in an organization follows until it sets its
  * own (`GET/PATCH /v1/organizations/:id/model-defaults`, owners and admins).
+ * The allowlists are the exception: a ceiling every workspace stays within,
+ * which a workspace's own allowlist can only narrow.
  */
 export type OrganizationModelDefaults = {
   sessionDefaults: { model: string; reasoningEffort: ReasoningEffort } | null;
@@ -4910,6 +4954,11 @@ export type OrganizationModelAccountSettings = {
   locked: ModelAccountSettingKey[];
   version: number;
   updatedAt: string | null;
+  /**
+   * False when this deployment doesn't switch models when subscriptions run
+   * out, so `crossProviderFailover` has no effect here. Absent from older servers.
+   */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
@@ -4943,6 +4992,8 @@ export type WorkspaceModelAccountSettings = ModelAccountSettingsView & {
   version: number;
   updatedAt: string | null;
   canEdit: boolean;
+  /** As on the organization's settings: false when switching models is off here. */
+  crossProviderFailoverAvailable?: boolean | undefined;
 };
 
 /**
@@ -5158,6 +5209,12 @@ export type OrganizationPrivacySettings = {
   defaultVisibility: "private" | "workspace";
   /** Whether people have their own Personal workspace to see and work in. */
   personalWorkspaces: boolean;
+  /**
+   * The most each person can spend from the organization's credits in their
+   * own Personal workspace each calendar month (UTC), in USD micros; null for
+   * no limit. Work paid by their own model plans or keys doesn't count.
+   */
+  personalWorkspaceMonthlyCredits: number | null;
   /** Whether admins see that other people's Only me schedules exist, and can pause them. */
   adminsSeePrivateSchedules: boolean;
   limits: {
@@ -5176,6 +5233,8 @@ export type UpdateOrganizationPrivacySettingsRequest = {
   adminsSeePrivateSchedules?: boolean;
   /** Off: people no longer see or start new work in their Personal workspace. */
   personalWorkspaces?: boolean;
+  /** USD micros a month per person; null removes the limit. */
+  personalWorkspaceMonthlyCredits?: number | null;
 };
 
 /**
@@ -7058,7 +7117,15 @@ export type NativeAppToken = {
  * `needs_input` (a question or an approval), `reply_ready` (a turn finished),
  * `failed` (a turn failed) and `agent` (the agent chose to notify).
  */
-export type NativePushRule = "needs_input" | "reply_ready" | "failed" | "agent";
+export type NativePushRule =
+  | "needs_input"
+  | "reply_ready"
+  | "failed"
+  | "agent"
+  /** Agents working for this person may ring this phone (off unless the person turns it on). */
+  | "call"
+  /** Agents of other members of a shared workspace may ring it too; needs `call`. */
+  | "call_members";
 
 export type RegisterNativePushDeviceInput = {
   platform: NativeAppPlatform;
@@ -7069,6 +7136,8 @@ export type RegisterNativePushDeviceInput = {
   /** The APNs device token (hex) or FCM registration token. */
   token: string;
   rules: NativePushRule[];
+  /** iOS PushKit token that agent calls ring; iOS keeps no call rules without it. */
+  voipToken?: string | null;
 };
 
 /** This app credential's push registration. */
@@ -7078,6 +7147,43 @@ export type NativePushDevice = {
   environment: "development" | "production";
   token: string;
   rules: NativePushRule[];
+  voipToken?: string | null;
+  updatedAt: string;
+};
+
+/** Where an agent's call to a person stands. */
+export type AgentCallState = "ringing" | "answered" | "declined" | "missed" | "cancelled";
+
+/**
+ * An agent ringing a person's phones (`call_user`). Only the person called can
+ * read, answer or decline it. Answering opens the chat's voice call.
+ */
+export type AgentCall = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  /** Who the ring screen shows as calling. */
+  callerLabel: string | null;
+  /** Why the agent calls, in a few words. */
+  reason: string;
+  state: AgentCallState;
+  ringUntil: string;
+  createdAt: string;
+  endedAt: string | null;
+  /** Whether this phone (app credential) took the call; null when unknown. */
+  answeredHere: boolean | null;
+};
+
+/**
+ * Phones a product embedding Opengeni rings for agent calls itself, from the
+ * `session.agentCall.ringing` webhook with its own push credentials. Agents
+ * count them alongside the person's Opengeni app phones.
+ */
+export type AgentCallHostPhones = {
+  /** How many of the person's phones the product rings for agents, 1..20. */
+  phones: number;
+  /** Whether agents working for other members of a shared workspace may ring them too. */
+  teammates: boolean;
   updatedAt: string;
 };
 
@@ -7860,6 +7966,20 @@ export type ScheduledTaskAgentConfigInput = {
    * an existing chat follows that chat.
    */
   unattended?: boolean | undefined;
+  bundledSkillIds?: BundledSkillId[] | undefined;
+  /**
+   * Remote MCP servers attached to each chat the task starts, as on session
+   * create. Static headers are not stored: credentials come from the
+   * workspace credential provider or `connectionRef`.
+   */
+  mcpServers?: ScheduledTaskMcpServer[] | undefined;
+  /**
+   * Memory, agent reach and inline Skills of each chat the task starts, as on
+   * session create. Only a task that starts its own chats can carry them.
+   */
+  memoryScope?: SessionMemoryScope | undefined;
+  agentAccess?: SessionAgentAccess | undefined;
+  skills?: ScheduledTaskSkill[] | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {
@@ -7896,6 +8016,12 @@ export type CreateAgentScheduledTaskRequest = {
   /** Vault narrowing for every run; omission adds none. */
   vaultPolicy?: VaultPolicy | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /**
+   * Lock the task to its creator: only the same key or signed service
+   * identity can later change, run, resume or delete it, and no agent can.
+   * A workspace admin can still pause it. Set once at creation.
+   */
+  creatorLocked?: boolean | undefined;
 };
 
 export type CreateKnowledgeSourceSyncScheduledTaskRequest = {
@@ -7921,6 +8047,8 @@ export type CreateSessionScheduledTaskRequest = {
   /** Event triggers that also post into the chat; `once` makes this a "wake me when". */
   events?: ScheduledTaskEventsInput | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /** Lock the task to its creator; see the agent-task request. */
+  creatorLocked?: boolean | undefined;
 };
 
 export type CreateScheduledTaskRequest =
@@ -8218,8 +8346,9 @@ export type RigVerificationHealth = {
 };
 
 /**
- * Workspace-shared channel organizing root sessions ("workstreams") by work
- * type in the rail. Pure organizational metadata.
+ * A project ("channel") organizing root sessions ("workstreams") by work type
+ * in the rail. Pure organizational metadata, shared with the workspace or
+ * Only me, like a chat.
  */
 export type Channel = {
   id: string;
@@ -8234,6 +8363,13 @@ export type Channel = {
   avatar?: SessionAvatar | null | undefined;
   pinned: boolean;
   sortOrder: number;
+  /**
+   * Who sees it: the workspace, or only its owner ("private", Only me). An
+   * Only me project holds only its owner's own Only me chats and Sites.
+   * Absent from servers that predate project audiences, where every project
+   * is shared.
+   */
+  visibility?: "private" | "workspace" | undefined;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -8243,6 +8379,11 @@ export type CreateChannelRequest = {
   name: string;
   description?: string;
   avatar?: SessionAvatar | null;
+  /**
+   * Omitted, a person's project is shared with the workspace and an agent's
+   * follows its chat: Only me when made in an Only me chat.
+   */
+  visibility?: "private" | "workspace";
 };
 
 export type UpdateChannelRequest = {
@@ -8251,6 +8392,12 @@ export type UpdateChannelRequest = {
   /** null clears it; omitted keeps it. */
   avatar?: SessionAvatar | null;
   pinned?: boolean;
+  /**
+   * "workspace" shares the owner's Only me project with the workspace. A
+   * shared project cannot be made Only me; only its owner, signed in,
+   * changes it.
+   */
+  visibility?: "workspace";
 };
 
 /** Complete workspace project order. It is replaced atomically after a drag. */
@@ -9240,6 +9387,11 @@ export type CapabilityInstallation = {
 export type CapabilityCatalogResponse = {
   items: CapabilityCatalogItem[];
   installations: CapabilityInstallation[];
+  /**
+   * Who the organization lets turn integrations on: members (the default) or
+   * only integration admins. Older servers omit it; treat that as members.
+   */
+  memberIntegrationSetup?: "members" | "admins" | undefined;
 };
 
 export type CreateCapabilityCatalogItemRequest = {
@@ -10643,8 +10795,10 @@ export type ChangeMachineAudienceRequest = MachineAudiencePreviewRequest & {
 
 /** What the change does to one thing on the machine. `move_off`: the chat
  * leaves the machine (its history and files stay). `keep`: the owner's chat
- * stays. `make_only_me` / `pause`: a schedule that runs on the machine.
- * `remove_first`: the same computer is connected a second time. */
+ * stays. `pause`: another person's schedule that runs on the machine; the new
+ * owner's own schedules keep running and are not listed. `make_only_me` is no
+ * longer produced. `remove_first`: the same computer is connected a second
+ * time. */
 export type MachineAudienceAction = "move_off" | "keep" | "make_only_me" | "pause" | "remove_first";
 
 /** One thing an audience change affects. Another member's private chat or
@@ -10671,6 +10825,7 @@ export type MachineAudienceSummary = {
   keptChats: number;
   keptSharedChats: number;
   movedOffChats: number;
+  /** No longer produced: always 0. */
   schedulesMadeOnlyMe: number;
   schedulesPaused: number;
   stoppedTurns: number;

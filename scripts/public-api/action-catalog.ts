@@ -350,6 +350,7 @@ const ACCESS_GATES: Readonly<Record<string, string | null>> = {
   requireAccessGrant: null,
   requireAccessGrantAuthorization: null,
   requireFreshAccessGrant: null,
+  requireIntegrationSetupAuthorization: "connections:write",
   requireMachineAccessGrant: null,
   requireWorkspaceContributorGrant: "sessions:create",
   requireWorkspaceSettingsGrant: "workspace:admin",
@@ -373,9 +374,10 @@ export const ACCESS_GATE_WRAPPERS: ReadonlySet<string> = new Set([
  * permission (`await authorize(c, deps, "read")`), with the permission each
  * operation needs a person in the workspace to hold first, or null for none.
  * The usage and allowance routes (apps/api/src/routes/usage-allowances.ts):
- * reading the workspace's usage or budget and setting a member's allowance
- * need workspace:admin, setting the workspace budget needs an organization
- * admin, and reading one's own usage needs nothing. Organization keys have
+ * reading the workspace's usage and setting a member's allowance need
+ * workspace:admin, reading the workspace budget needs sessions:create (a
+ * person who can start chats there), setting the workspace budget needs an
+ * organization admin, and reading one's own usage needs nothing. Organization keys have
  * their own way in; the route's own checks still decide. A test keeps the
  * operations equal to that file's `Operation` type and checks that every
  * route calling the helper gets its operation's permission.
@@ -385,7 +387,7 @@ export const ACCESS_GATE_OPERATIONS: Readonly<
 > = {
   authorize: {
     read: "workspace:admin",
-    "budget-read": "workspace:admin",
+    "budget-read": "sessions:create",
     "member-write": "workspace:admin",
     "workspace-write": "account:admin",
     own: null,

@@ -240,25 +240,174 @@ const PLAIN_EMAIL = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24
 const PLAIN_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 
 /**
+ * What the server found for an id an app action names, read from its own
+ * records when the approval was prepared: never text from the call. The
+ * confirmation names it, so the person knows exactly what the change touches.
+ */
+export type AppActionTarget = {
+  /** What it is, in plain lower-case words: "connection", "scheduled task". */
+  kind: string;
+  /** Its name as the app shows it ("Gmail", "Daily digest"); absent when it wasn't found. */
+  name?: string | undefined;
+  /** The account or person it belongs to, when that tells it apart ("anna@example.com"). */
+  account?: string | undefined;
+  /** More facts that tell it apart from similar ones, in display order. */
+  facts?: ReadonlyArray<{ label: string; value: string }> | undefined;
+};
+
+/** Targets by the path parameter that names them ("connectionId", "workspaceId"). */
+export type AppActionTargets = Readonly<Record<string, AppActionTarget>>;
+
+/**
+ * The path parameter naming what the action changes: the last one in its
+ * route ("/connections/:connectionId" → "connectionId"), or undefined for a
+ * route without one.
+ */
+export function appActionTargetParameter(entry: ActionCatalogEntry): string | undefined {
+  return [...entry.path.matchAll(/:([A-Za-z][A-Za-z0-9]*)/g)].at(-1)?.[1];
+}
+
+/**
+ * The call's path parameters as the app sends them: a route under a
+ * workspace that the call leaves out runs in the chat's own workspace.
+ */
+function sentPathParameters(
+  entry: ActionCatalogEntry,
+  call: Record<string, unknown> | null,
+  chatWorkspaceId: string | undefined,
+): Record<string, unknown> | null {
+  const path = record(call?.pathParameters);
+  return chatWorkspaceId && entry.path.includes(":workspaceId") && !path?.workspaceId
+    ? { ...path, workspaceId: chatWorkspaceId }
+    : path;
+}
+
+/** The path parameters of an admin_action_call's action, with the values the call gave. */
+export function appActionCallPathIds(
+  args: unknown,
+  chatWorkspaceId?: string,
+): { entry: ActionCatalogEntry; ids: Record<string, string> } | undefined {
+  const call = callArguments(args);
+  const entry = typeof call?.id === "string" ? findAppAction(call.id) : undefined;
+  if (!entry) return undefined;
+  const path = sentPathParameters(entry, call, chatWorkspaceId);
+  const ids: Record<string, string> = {};
+  for (const [, name] of entry.path.matchAll(/:([A-Za-z][A-Za-z0-9]*)/g)) {
+    const value = path?.[name!];
+    // Exactly as sent: a padded id, or one a route decodes again ("%3A"),
+    // may not be the record the route acts on, so it's left unread.
+    if (typeof value === "string" && value && value === value.trim() && !value.includes("%"))
+      ids[name!] = value;
+  }
+  return { entry, ids };
+}
+
+/** A stored name made safe to quote in a question: one line, bounded. */
+function plainName(text: string | undefined): string | undefined {
+  const line = text
+    ?.replace(/[\p{Cc}\u2028\u2029]/gu, " ")
+    // Format characters (bidi overrides, zero-width) could reorder the
+    // question; joiners stay, as Persian, Indic scripts and emoji need them.
+    .replace(/(?![\u200c\u200d])\p{Cf}/gu, "")
+    // Quotes that could pass for the question's own.
+    .replace(/[“”„‟«»‹›＂〝〞″‶˝〃]/gu, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!line) return undefined;
+  // By code point, so a cut never leaves half an emoji (invalid JSON text).
+  const points = Array.from(line);
+  return points.length > 80 ? `${points.slice(0, 79).join("").trimEnd()}…` : line;
+}
+
+/** "Gmail · anna@example.com": a target's name and account, as one quoted label. */
+function targetLabel(target: AppActionTarget): string | undefined {
+  const name = plainName(target.name);
+  if (!name) return undefined;
+  const account = plainName(target.account);
+  return account && account !== name ? `${name} · ${account}` : name;
+}
+
+function capitalized(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
+ * The facts a confirmation card lists under its question: what the action
+ * changes beyond the name its question already says (or that it couldn't be
+ * found), then where it is when that isn't this chat or workspace. Only
+ * server-read targets; never the call's text.
+ */
+export function appActionTargetFacts(
+  args: unknown,
+  here: { workspaceId: string; sessionId: string },
+  targets: AppActionTargets | undefined,
+): Array<{ label: string; value: string }> {
+  const call = appActionCallPathIds(args, here.workspaceId);
+  if (!call || !targets) return [];
+  const parameter = appActionTargetParameter(call.entry);
+  // What the question already says isn't said again.
+  const title = appActionConfirmationTitle(args, here, targets);
+  // Said as a whole name, not as part of another word.
+  const said = (text: string | undefined) => {
+    const plain = plainName(text);
+    if (plain === undefined) return false;
+    const escaped = plain.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[\\s“·])${escaped}($|[\\s”·?])`, "u").test(title);
+  };
+  const facts: Array<{ label: string; value: string }> = [];
+  const add = (label: string, value: string | undefined) => {
+    const text = plainName(value);
+    if (text && facts.length < 12)
+      facts.push({ label: capitalized(label).slice(0, 64), value: text });
+  };
+  const primary = parameter ? targets[parameter] : undefined;
+  if (primary) {
+    if (!primary.name) add(primary.kind, "Not found. It may have been removed already.");
+    else {
+      if (!said(primary.name)) add(primary.kind, primary.name);
+      if (primary.account && !said(primary.account)) add("Account", primary.account);
+    }
+    for (const fact of primary.facts ?? []) add(fact.label, fact.value);
+  }
+  for (const [name, target] of Object.entries(targets)) {
+    if (name === parameter || !(name in call.ids)) continue;
+    if (name === "workspaceId" && call.ids.workspaceId === here.workspaceId) continue;
+    if (name === "sessionId" && call.ids.sessionId === here.sessionId) continue;
+    const label = targetLabel(target);
+    if (!label || !title.includes(label)) add(target.kind, label ?? "Not found");
+  }
+  return facts;
+}
+
+/**
  * The question the person answers before a change runs, in plain words, from
- * the action and its checked arguments; never text the agent wrote. `here` is
- * the chat asking, so "this chat" and "this workspace" are said only when the
- * call targets exactly them.
+ * the action, its checked arguments and the `targets` the server read for its
+ * ids; never text the agent wrote. `here` is the chat asking, so "this chat"
+ * and "this workspace" are said only when the call targets exactly them.
  */
 export function appActionConfirmationTitle(
   args: unknown,
   here: { workspaceId: string; sessionId: string },
+  targets?: AppActionTargets,
 ): string {
   const call = callArguments(args);
   const entry = typeof call?.id === "string" ? findAppAction(call.id) : undefined;
   if (!entry) return "Make this change in the app?";
   const body = record(call?.body);
-  const path = record(call?.pathParameters);
-  const workspace = path?.workspaceId === here.workspaceId ? "this workspace" : "another workspace";
+  const path = sentPathParameters(entry, call, here.workspaceId);
+  const targetName = (parameter: string) => plainName(targets?.[parameter]?.name);
+  const named = (parameter: string, kind: string, otherwise: string) => {
+    const label = targets?.[parameter] ? targetLabel(targets[parameter]!) : undefined;
+    return label ? `${kind} “${label}”` : otherwise;
+  };
+  const workspace =
+    path?.workspaceId === here.workspaceId
+      ? "this workspace"
+      : named("workspaceId", "workspace", "another workspace");
   const chat =
     path?.sessionId === here.sessionId && path?.workspaceId === here.workspaceId
       ? "this chat"
-      : "another chat";
+      : named("sessionId", "chat", "another chat");
   switch (entry.id) {
     case "createOrganizationInvitation": {
       const email = typeof body?.email === "string" ? body.email : "";
@@ -290,7 +439,7 @@ export function appActionConfirmationTitle(
     case "createSubscriptionPortalSession":
       return "Open your billing page? It can change your payment method or plan.";
     case "updateConnectorToolPermissions":
-      return `${toolApprovalQuestion(body, "this integration's")} in ${workspace}?`;
+      return `${toolApprovalQuestion(body, targetName("capabilityId") ? `${targetName("capabilityId")}'s` : "this integration's")} in ${workspace}?`;
     case "updateSessionMcpToolPermissions":
       return `${toolApprovalQuestion(body, "this MCP server's")} in ${workspace}?`;
     case "updateVideoGenerationPolicy": {
@@ -302,8 +451,13 @@ export function appActionConfirmationTitle(
         : `Turn off video for every chat in ${workspace}?`;
     }
     default: {
-      // Name where it applies; the card's next line shows the key values.
-      const target =
+      // Name what it changes, as the server found it; else where it applies.
+      // The card's facts say more about it.
+      const parameter = appActionTargetParameter(entry);
+      const target = parameter ? targets?.[parameter] : undefined;
+      const label = target ? targetLabel(target) : undefined;
+      const action = sentence(entry);
+      const where =
         typeof path?.sessionId === "string"
           ? ` for ${chat}`
           : typeof path?.workspaceId === "string"
@@ -311,9 +465,95 @@ export function appActionConfirmationTitle(
             : typeof path?.organizationId === "string"
               ? " in your organization"
               : "";
-      return `${sentence(entry)}${target}?`;
+      // The action is on the chat or workspace itself: "Delete chat “Q3 plan”?"
+      const itself = / (session|workspace)$/.exec(action);
+      if (itself && parameter === (itself[1] === "session" ? "sessionId" : "workspaceId"))
+        return `${action.slice(0, itself.index)} ${itself[1] === "session" ? chat : workspace}?`;
+      if (!label || parameter === "workspaceId" || parameter === "sessionId") {
+        // A route-named action never puts its request line beside a name.
+        if (!/^[a-z][A-Za-z0-9]*$/.test(entry.id) && where.includes("“"))
+          return `${entry.method === "DELETE" ? "Delete something" : "Make a change"}${where}?`;
+        return `${action}${where}?`;
+      }
+      // Somewhere other than here is named too; here goes without saying.
+      const elsewhere =
+        typeof path?.workspaceId === "string" && path.workspaceId !== here.workspaceId
+          ? ` in ${workspace}`
+          : typeof path?.sessionId === "string" && chat !== "this chat"
+            ? ` in ${chat}`
+            : "";
+      if (entry.id === "deleteConnection") {
+        const name = plainName(target!.name)!;
+        const account = plainName(target!.account);
+        return `Remove the ${name} connection${account && account !== name ? ` for ${account}` : ""}${elsewhere}?`;
+      }
+      return `${targetAction(entry, action, parameter!, target!)} “${label}”${elsewhere}?`;
     }
   }
+}
+
+/** Route segments that act on what precedes them ("…/:taskId/pause"), so it is named directly. */
+const ACTING_SEGMENTS: Record<string, string> = {
+  activate: "Activate",
+  disable: "Disable",
+  duplicate: "Duplicate",
+  enable: "Enable",
+  end: "End",
+  heartbeat: "Heartbeat",
+  move: "Move",
+  opened: "Open",
+  pause: "Pause",
+  prepare: "Prepare",
+  reconnect: "Reconnect",
+  redeem: "Redeem",
+  refresh: "Refresh",
+  "refresh-access": "Refresh access of",
+  reindex: "Reindex",
+  restore: "Restore",
+  resume: "Resume",
+  retry: "Retry",
+  revoke: "Revoke",
+  rollback: "Roll back",
+  "rotate-secret": "Rotate the secret of",
+  suspend: "Suspend",
+  sync: "Sync",
+  takedown: "Take down",
+  test: "Test",
+  trigger: "Trigger",
+  verify: "Verify",
+};
+
+/**
+ * The words before a target's quoted name: "Delete scheduled task", "Add
+ * document in document collection" when the target holds what changes,
+ * "Change the approval of vault item" for an action the catalog names only
+ * by its route; never "Run DELETE /v1/…" before a name.
+ */
+function targetAction(
+  entry: ActionCatalogEntry,
+  action: string,
+  parameter: string,
+  target: AppActionTarget,
+): string {
+  const segments = entry.path.split("/");
+  const after = segments.slice(segments.indexOf(`:${parameter}`) + 1);
+  const last = after.at(-1);
+  const acting = last !== undefined && Object.hasOwn(ACTING_SEGMENTS, last);
+  const kind = target.kind;
+  if (/^[a-z][A-Za-z0-9]*$/.test(entry.id)) {
+    // The target is what changes, or holds it: "Add document in …".
+    if (after.length === 0 || acting || action.toLowerCase().endsWith(kind.toLowerCase()))
+      return action;
+    return `${action} ${entry.method === "POST" ? "in" : "for"} ${kind}`;
+  }
+  const words = after.slice(0, acting ? -1 : undefined);
+  const plain = words.every((segment) => /^[a-z][a-z-]*$/.test(segment)) && words.length <= 2;
+  const part = words.join(" ").replaceAll("-", " ");
+  if (acting && plain) return `${ACTING_SEGMENTS[last!]}${part ? ` the ${part} of` : ""} ${kind}`;
+  if (entry.method === "POST") return `Make a change to ${kind}`;
+  const verb = entry.method === "DELETE" ? "Delete" : "Change";
+  if (after.length === 0) return `${verb} ${kind}`;
+  return plain ? `${verb} the ${part} of ${kind}` : `${verb} part of ${kind}`;
 }
 
 /**
@@ -354,7 +594,14 @@ function toolApprovalQuestion(body: Record<string, unknown> | null, owner: strin
 /** "updateWorkspaceSettings" reads "Update workspace settings"; unnamed routes read by their path. */
 function sentence(entry: ActionCatalogEntry): string {
   if (/^[a-z][A-Za-z0-9]*$/.test(entry.id)) {
-    const words = entry.id.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase();
+    const words = entry.id
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .toLowerCase()
+      .replace(
+        /\b(api|mcp|sso|url|sql|ip)(s?)\b/g,
+        (_, word: string, plural: string) => `${word.toUpperCase()}${plural}`,
+      )
+      .replace(/\bgit hub\b|\bgithub\b/g, "GitHub");
     return words.charAt(0).toUpperCase() + words.slice(1);
   }
   return `Run ${entry.method} ${entry.path}`;

@@ -65,9 +65,14 @@ test("a refused social sign-up while new accounts are paused says so and points 
 
 test("a refused social sign-up for an unapproved address says who to ask", () => {
   const message = readSignInCallbackError("?error=signup_email_not_allowed");
-  expect(message).toContain("Only approved email addresses");
-  expect(message).toContain("Ask whoever runs this service to allow your email address");
+  expect(message).toContain("This email can't create an account here. Ask your admin for access.");
   expect(message).not.toContain("Try again");
+});
+
+test("a refused social sign-in for an address that isn't allowed says who to ask", () => {
+  expect(readSignInCallbackError("?error=sign_in_email_not_allowed")).toBe(
+    "This email can't sign in here. Ask your admin for access.",
+  );
 });
 
 test("unchallenged OAuth signup directs the human through signup verification", () => {

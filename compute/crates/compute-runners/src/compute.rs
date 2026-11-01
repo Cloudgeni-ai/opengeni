@@ -18,6 +18,11 @@ const ENVD_PORT: u16 = 49983;
 /// How long saving a sandbox as a template may take: the service allows
 /// half an hour to store its disk.
 const SNAPSHOT_WITHIN: Duration = Duration::from_secs(35 * 60);
+/// How long creating a sandbox may take: a host without the template's
+/// image fetches it first, and the service allows a create ten minutes
+/// before it gives it up. Waiting less would drop a runner whose sandbox
+/// still comes.
+const CREATE_WITHIN: Duration = Duration::from_secs(10 * 60);
 
 /// The E2B API of a compute fleet.
 #[derive(Clone, Debug)]
@@ -101,6 +106,7 @@ impl Compute {
                 "envVars": new.env,
                 "secure": true,
             }))
+            .timeout(CREATE_WITHIN)
             .send()
             .await?;
         answer(

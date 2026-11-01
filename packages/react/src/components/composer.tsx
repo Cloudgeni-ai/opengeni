@@ -1990,7 +1990,7 @@ function WorkstreamPausedStrip({
                 {blockerHref(entry, controlLinks) ? (
                   <a
                     href={blockerHref(entry, controlLinks)}
-                    className="font-medium text-og-fg underline decoration-og-border-strong underline-offset-2 hover:text-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-ring/40"
+                    className="font-medium text-og-fg underline decoration-og-border-strong underline-offset-2 hover:text-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
                   >
                     {entry.displayName}
                   </a>

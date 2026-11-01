@@ -92,7 +92,14 @@ samples once a second.
   lower than on the reading before, counts as one the kernel cannot hold;
   one coming down, however slowly, is left to come down. After 10 s of
   that it is treated as costing the others, as a short host is: its guest
-  is asked to free what it holds above its high.
+  is asked to free what it holds above its high. The 10 s count only once
+  the host has brought the VM down as far as the kernel takes: before the
+  kernel compresses any of a VM that has just written gigabytes it ages
+  its pages, and on a one-CPU or busy host that took 6 to over 12 s at
+  about 1 MiB/s before compression ran at about 240 MiB/s. A VM the host
+  is still bringing down gets 60 s without coming down instead. Its
+  neighbour does not pay meanwhile: the VM's high holds it where it is,
+  the neighbour's low keeps its request, and the wall below stands.
 - **A high is never set below what a VM holds while its memory may not
   compress.** Past its
   `memory.high` every page a VM takes waits, about 64 s times the square
@@ -130,9 +137,17 @@ samples once a second.
   the descent drops only cache, and its growth past its high only waits
   until its guest is shrunk. A later bound tries it again for one step,
   and a lifted bound, a pause or a resume opens it. Memory that does not
-  compress costs a VM at most a step's work each time it is bounded. A
-  new bound starts from where the one before settled, never from the
-  thirty-second below that a descent it overtook left.
+  compress costs a VM at most a step's work each time it is bounded. Once
+  a step showed that the VM's memory compresses, one refusing step is not
+  enough: reclaim walks pages coldest first, a run of them may not
+  compress among many that do, and the counters lag the step a little.
+  The swap of such a VM closes after two refusing steps in a row, or one
+  that also brought it no lower, so memory that does not compress costs
+  it at most one step more, and a VM whose memory compresses is not left
+  with nothing the kernel may take (closed after one such step, the
+  borrower's program was ended instead of compressed in three of five
+  gate runs). A new bound starts from where the one before settled, never
+  from the thirty-second below that a descent it overtook left.
 - **The guest is asked to shrink.** When the host is short even with
   every running VM at its request and what is on its way back counted,
   for 10 s (by then pressure has put to sleep every idle sandbox it
@@ -187,8 +202,8 @@ samples once a second.
   requested, borrowed, compressed and out of RAM by running sandboxes;
   running sandboxes by memory stall (under 1 %, to 10 %, to 40 %, above);
   the borrowed level for idle and busy sandboxes, how many it holds back,
-  how many the kernel cannot hold to their bound, the memory on its way
-  back, and the shortfall;
+  how many the kernel cannot hold to their bound and how many it is still
+  bringing down to it, the memory on its way back, and the shortfall;
   shrinks by answer, memory they freed and programs they ended; the two
   alarms. Each shrink is an event naming its sandbox
   and the programs it ended, and each running sandbox's periodic summary

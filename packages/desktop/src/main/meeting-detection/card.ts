@@ -14,7 +14,10 @@ import { ENGLISH_MEETING_WORDS, type MeetingWords } from "./words";
 const WIDTH = 360 + MEETING_CARD_MARGIN * 2;
 const MIN_HEIGHT = 96;
 const MAX_HEIGHT = 320;
-/** How long a question to record stays up; hovering holds it. A question to stop stays. */
+/**
+ * How long a question to record, or the note that a call is being recorded,
+ * stays up; hovering holds it. A question to stop stays.
+ */
 export const MEETING_CARD_TIMEOUT_MS = 45_000;
 
 const ACTIONS = { act: "chosen", dismiss: "dismissed", expire: "expired" } as const;
@@ -159,7 +162,7 @@ export class MeetingPromptCard implements MeetingPromptView {
       title: words.title,
       ...text,
       icon: this.options.icon?.() ?? null,
-      timeoutMs: prompt.kind === "record" ? (this.options.timeoutMs ?? MEETING_CARD_TIMEOUT_MS) : 0,
+      timeoutMs: prompt.kind === "stop" ? 0 : (this.options.timeoutMs ?? MEETING_CARD_TIMEOUT_MS),
     };
     const measured = (await window.webContents.executeJavaScript(
       `render(${JSON.stringify(state)})`,

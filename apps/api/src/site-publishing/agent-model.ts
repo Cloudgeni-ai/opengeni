@@ -187,7 +187,8 @@ export type SiteAgentUnfundedReason = "no_credits" | "allowance_exhausted";
  */
 export function siteUnfundedReason(decision: LimitDecision): SiteAgentUnfundedReason | null {
   if (decision.allowed) return null;
-  if (decision.code === "insufficient_credits") return "no_credits";
+  if (decision.code === "insufficient_credits" || decision.code === "api_credits_required")
+    return "no_credits";
   if (decision.code === "allowance_exhausted") return "allowance_exhausted";
   return null;
 }
@@ -211,6 +212,8 @@ export async function siteOutsideModelFunding(
     action: "agent_run:create",
     quantity: 1,
     model,
+    // A published Site is set up in the app: its visitors' turns are app work.
+    billingOrigin: "app",
   });
 }
 

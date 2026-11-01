@@ -238,6 +238,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "answerAgentCall",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-calls/:callId/answer",
+    "request": [
+      "AgentCallActionRequest"
+    ],
+    "response": [
+      "AgentCall"
+    ]
+  },
+  {
     "id": "answerMcpConnectionRequest",
     "method": "POST",
     "path": "/v1/mcp-connections/requests/:request",
@@ -775,7 +786,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "IntegrationFacetMutationResult"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "configureOrganizationRecoveryPolicy",
@@ -981,7 +992,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "CapabilityCatalogItem"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "createChannel",
@@ -1475,6 +1486,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "PreferenceRegistryMutationResponse"
     ],
     "permission": "workspace:read"
+  },
+  {
+    "id": "declineAgentCall",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-calls/:callId/decline",
+    "request": [
+      "AgentCallActionRequest"
+    ],
+    "response": [
+      "AgentCall"
+    ]
   },
   {
     "id": "defineSiteDataCollection",
@@ -2908,7 +2930,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "VaultProviderConnectionSummary",
       "VaultSummary"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/state",
@@ -2916,7 +2938,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance/state",
     "request": [],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "GET /v1/workspaces/external/:workspaceSource/:workspaceExternalId/usage",
@@ -2956,6 +2978,27 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AccessContext"
+    ]
+  },
+  {
+    "id": "getAgentCall",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-calls/:callId",
+    "request": [],
+    "query": [
+      "device"
+    ],
+    "response": [
+      "AgentCall"
+    ]
+  },
+  {
+    "id": "getAgentCallHostPhones",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-call-phones",
+    "request": [],
+    "response": [
+      "AgentCallHostPhones"
     ]
   },
   {
@@ -4172,7 +4215,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceAllowance"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "getWorkspaceAllowanceState",
@@ -4182,7 +4225,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "WorkspaceAllowanceState"
     ],
-    "permission": "workspace:admin"
+    "permission": "sessions:create"
   },
   {
     "id": "getWorkspaceArtifact",
@@ -4645,7 +4688,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "InstalledApiIntegration"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "installFikenConnection",
@@ -4685,7 +4728,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "InstalledPlugin"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "installSkill",
@@ -6681,7 +6724,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "MutateIntegrationFacetRequest"
     ],
     "response": [],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/resume",
@@ -6691,7 +6734,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "MutateIntegrationFacetRequest"
     ],
     "response": [],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
@@ -6853,7 +6896,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "CreateSocialPostRequest"
     ],
     "response": [],
-    "permission": "workspace:admin"
+    "permission": "connections:write"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/tools/approvals",
@@ -7825,7 +7868,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "IntegrationFacetRemovalResult"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "removeWorkspaceMember",
@@ -8365,7 +8408,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "IntegrationFacetMutationResult"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "saveKnowledgeEntry",
@@ -8467,6 +8510,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SendTestEventResponse"
+    ]
+  },
+  {
+    "id": "setAgentCallHostPhones",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/agent-call-phones",
+    "request": [
+      "SetAgentCallHostPhonesRequest"
+    ],
+    "response": [
+      "AgentCallHostPhones"
     ]
   },
   {
@@ -9096,7 +9150,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "UninstallApiIntegrationResult"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "uninstallPlugin",
@@ -9108,7 +9162,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "UninstallPluginResult"
     ],
-    "permission": "capabilities:manage"
+    "permission": "connections:write"
   },
   {
     "id": "uninstallSkill",
@@ -9239,6 +9293,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [],
     "permission": "capabilities:manage"
+  },
+  {
+    "id": "updateEditableArtifactVisibility",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/editable-artifacts/:artifactId/visibility",
+    "request": [],
+    "response": [],
+    "permission": "artifacts:publish"
   },
   {
     "id": "updateEventSource",

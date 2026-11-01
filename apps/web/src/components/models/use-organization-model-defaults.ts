@@ -9,7 +9,8 @@ import { sharedQueryWriter, useSharedQuery } from "@opengeni/react/app/lib/share
 
 /* ----------------------------------------------------------------------------
    The model defaults every workspace in an organization follows until it sets
-   its own: the default model, Allowed models and compaction limits. Read and
+   its own (the default model and compaction limits), and Allowed models, a
+   ceiling a workspace's own list can only narrow. Read and
    changed by organization owners and admins on the organization's Models
    page. Workspace pages never read these directly; their own model routes say
    which values they follow.

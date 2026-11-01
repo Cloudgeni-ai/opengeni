@@ -402,6 +402,7 @@ export type {
   PinEditableArtifactVersionRequest,
   ReadEditableArtifactMaterializationOptions,
   ReadEditableArtifactResourceOptions,
+  UpdateEditableArtifactVisibilityRequest,
 } from "./editable-artifact-resources";
 export {
   OpenGeniApiContractMismatchError,
@@ -1134,6 +1135,9 @@ export type {
   NativeAppToken,
   NativePushDevice,
   NativePushRule,
+  AgentCall,
+  AgentCallHostPhones,
+  AgentCallState,
   InboxItem,
   InboxItemChoice,
   InboxItemFact,
@@ -1376,7 +1380,9 @@ export type {
   KnowledgeSourceSyncLimits,
   KnowledgeSourceSyncRunSummary,
   ScopedKnowledgeScope,
+  ScheduledTaskMcpServer,
   ScheduledTaskScheduleSpec,
+  ScheduledTaskSkill,
   ScheduledTaskStatus,
   ScheduledTaskTriggerType,
   Session,
@@ -1771,6 +1777,9 @@ export type {
   FeedbackSubmissionResponse,
   FeedbackContext,
   FeedbackRecentError,
+  FeedbackRecentRequest,
+  FeedbackRecentException,
+  FeedbackBreadcrumb,
   FeedbackScreenshot,
   FeedbackScreenshotUpload,
 } from "./feedback";

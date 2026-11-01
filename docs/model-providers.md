@@ -1796,13 +1796,22 @@ DELETE /v1/workspaces/:workspaceId/model-policy
 
 Organization owners and admins also set an allowlist once for every workspace
 (**Organization settings → Models → Defaults for every workspace**, or
-`modelPolicy` on `PATCH /v1/organizations/:organizationId/model-defaults`). A
-workspace without a policy row follows it; a workspace row, including one that
-allows every model, is that workspace's own choice and wins. The GET response
-reports `source` (`workspace`, `organization` or `none`) and the `organization`
-policy the workspace would follow; DELETE removes the workspace's own policy so
-it follows the organization again (`deleteWorkspaceModelAccessPolicy`). In the
-form, **Use <organization>'s allowed models** switches between the two.
+`modelPolicy` on `PATCH /v1/organizations/:organizationId/model-defaults`). It
+is a ceiling: a workspace without a policy row uses it as is, and a workspace
+row only narrows it. A model runs in a workspace only when both lists allow its
+provider and both allow the model, so a workspace row that allows every model
+allows exactly what the organization allows, and listing a model the
+organization doesn't allow never lets it run. The API edges, the omitted-model
+default, goal admission, subscription placement and failover, and the worker's
+post-resolution gate all apply the combined policy. The GET response reports
+the workspace's own lists as saved, `source` (`workspace`, `organization` or
+`none`) and the `organization` lists; DELETE removes the workspace's own policy
+so it uses the organization's again (`deleteWorkspaceModelAccessPolicy`). The
+workspace catalog's `policyAllowed` is the combined verdict per model, and
+`organizationAllowed: false` marks a model the organization's list rules out
+(omitted when the organization allows every model); the form shows those
+models locked. In the form, **Use <organization>'s allowed models** switches
+between the two.
 
 Each workspace also has a credit switch, the workspace setting
 `allowCreditModels` (default `true`; `PATCH /v1/workspaces/:workspaceId/settings`,

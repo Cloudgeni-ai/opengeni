@@ -42,7 +42,7 @@ import {
   type RecordingActivityOptions,
 } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
-import { ffmpegPath, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
+import { ffmpegPath, gatedOpusWebm, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -116,6 +116,7 @@ async function capturedRecording(
     options: { language: "en" },
   },
   sources: ReadonlyArray<"microphone" | "system"> = ["microphone", "system"],
+  silentTracks: ReadonlyArray<number> = [],
 ) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
@@ -145,7 +146,9 @@ async function capturedRecording(
     })),
   });
   for (const trackNumber of sources.keys()) {
-    const audio = opusWebm(2, trackNumber === 0 ? 440 : 660);
+    const audio = silentTracks.includes(trackNumber)
+      ? gatedOpusWebm(2, [])
+      : opusWebm(2, trackNumber === 0 ? 440 : 660);
     const half = Math.ceil(audio.length / 2);
     const parts = [audio.slice(0, half), audio.slice(half)];
     const chunks = parts.map((bytes, chunkNumber) => ({
@@ -614,8 +617,12 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     const storage = memoryStorage();
     const recording = await capturedRecording(storage);
     const calls: RecordingTranscriptionRequest[] = [];
+    const preparedAtCall: number[] = [];
     const provider = fakeProvider(async (request) => {
       calls.push(request);
+      preparedAtCall.push(
+        [...storage.objects.keys()].filter((key) => key.includes("/prepared/")).length,
+      );
       const microphone = request.audio.fileName === "track-0.webm";
       return {
         languages: ["eng"],
@@ -663,6 +670,8 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       ["track-0.webm", true, "en"],
       ["track-1.webm", true, "en"],
     ]);
+    // The whole meeting can play before the first track is transcribed.
+    expect(preparedAtCall).toEqual([2, 2]);
     const prepared = [...storage.objects.keys()].filter((key) => key.includes("/prepared/"));
     expect(prepared.sort()).toEqual([
       `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-0.timeline.webm`,
@@ -750,6 +759,43 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       }),
     ).toEqual({ outcome: "complete" });
     expect(calls).toHaveLength(6);
+  });
+
+  test("the computer's audio, silent through a room meeting, is never sent or billed", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, undefined, ["microphone", "system"], [1]);
+    const sent: string[] = [];
+    const provider = fakeProvider(async (request) => {
+      sent.push(request.audio.fileName);
+      return {
+        languages: ["eng"],
+        audioMilliseconds: 2_000,
+        diarized: false,
+        words: [
+          {
+            text: "Hello.",
+            startMilliseconds: 100,
+            endMilliseconds: 400,
+            speaker: null,
+            spaceBefore: false,
+          },
+        ],
+      };
+    });
+    const { activities: run } = activities(storage, provider);
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
+    expect(sent).toEqual(["track-0.webm"]);
+    const page = await getRecordingTranscriptPage(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(page.segments.map((segment) => [segment.trackNumber, segment.text])).toEqual([
+      [0, "Hello."],
+    ]);
+    // The model is paid for the microphone's two seconds, not the silent track's.
+    expect(page.version.costUsd).toBeGreaterThan(0);
+    expect(page.version.costUsd!).toBeLessThan((0.22 * 3) / 3_600);
   });
 
   test("a microphone alone may be a whole room, so its speakers are told apart and nobody is assumed", async () => {

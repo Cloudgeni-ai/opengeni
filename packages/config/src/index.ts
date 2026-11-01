@@ -6,6 +6,7 @@ import {
   DEFAULT_AGENT_INSTRUCTIONS,
   DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
   DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
+  DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
 } from "./defaults";
 export {
   DEFAULT_OPENROUTER_MODEL_ID,
@@ -16,6 +17,7 @@ export {
   DEFAULT_AGENT_INSTRUCTIONS,
   DEFAULT_TURN_WORKER_SHUTDOWN_GRACE_MS,
   DEFAULT_TURN_WORKER_SHUTDOWN_FORCE_MS,
+  DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
 } from "./defaults";
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
@@ -31,6 +33,8 @@ import {
 import {
   WebSearchProviderCredentialsSchema,
   webSearchProviderCredentialsFromEnv,
+  webSearchCreditBillingActive,
+  type WebSearchSettings,
 } from "./web-search";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
 export {
@@ -88,6 +92,17 @@ import {
   modelResidencyClaim,
   modelResidencyRouteProblems,
 } from "@opengeni/contracts";
+import {
+  CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX,
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  LEGACY_WORKSPACE_CLAUDE_SUBSCRIPTION_PROVIDER_ID,
+  claudeSubscriptionModelIdForms,
+  claudeSubscriptionUpstreamModelId,
+  isClaudeSubscriptionModelId,
+  isClaudeSubscriptionProviderId,
+  sameModelId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
 import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
@@ -340,6 +355,48 @@ export const McpOperationRecoverySchema = z
 /** Public, digest-pinned desktop image used by Modal unless the operator overrides it. */
 export const DEFAULT_MODAL_IMAGE_REF =
   "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805";
+
+/**
+ * Whether this account keeps the billing terms from before the app/API split:
+ * any credit pays any use, no own-key platform fee, no newly metered tools.
+ */
+export function isLegacyBillingAccount(
+  settings: Pick<Settings, "billingLegacyAccountIds">,
+  accountId: string | null | undefined,
+): boolean {
+  return (
+    typeof accountId === "string" &&
+    (settings.billingLegacyAccountIds ?? DEFAULT_BILLING_LEGACY_ACCOUNT_IDS).includes(
+      accountId.toLowerCase(),
+    )
+  );
+}
+
+/**
+ * THE single check point where the paid-hosted-tool charges start. True
+ * when the model of a response or turn is billed in Opengeni credits (cost
+ * class `credits`), credit billing is active and the account is not a legacy
+ * billing account. Every new charge depends on it: Opengeni's billed
+ * `web_search`/`web_fetch` replacing hosted search, the list-price charge for
+ * hosted searches a response reports, and the priced Gateway image tool
+ * replacing OpenAI hosted image generation on the deployment key. Turns on
+ * the user's own keys or subscriptions, free models, billing-off deployments
+ * and legacy accounts (CloudGeni's host account) are false and keep today's
+ * free hosted tools, as is every turn when the operator turned the charges
+ * off (`OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING=false`).
+ */
+export function paidHostedToolsChargeCredits(
+  settings: Pick<WebSearchSettings, "billingMode" | "usageLimitsMode"> &
+    Partial<Pick<Settings, "billingLegacyAccountIds" | "paidHostedToolsCreditBilling">>,
+  input: { accountId: string; chargesOpenGeniCredits: boolean },
+): boolean {
+  if (settings.paidHostedToolsCreditBilling === false) return false;
+  const billingLegacyAccountIds = settings.billingLegacyAccountIds ?? [
+    ...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS,
+  ];
+  if (isLegacyBillingAccount({ billingLegacyAccountIds }, input.accountId)) return false;
+  return input.chargesOpenGeniCredits && webSearchCreditBillingActive(settings);
+}
 
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
@@ -2301,6 +2358,29 @@ const SettingsSchema = z.object({
   stripeCreditsProductId: z.string().optional(),
   // Enables subscription service paths only; top-up billing remains independent.
   subscriptionPlansEnabled: EnvBoolean.default(false),
+  // Internal accounts billed on the terms from before the app/API split
+  // (docs/billing-origin.md#internal-accounts-cloudgeni-and-our-team): any
+  // credit pays any use, no own-key platform fee, no newly metered tool
+  // charges. Defaults to DEFAULT_BILLING_LEGACY_ACCOUNT_IDS (CloudGeni's host
+  // account and our own team's organizations); "none" lists no account.
+  billingLegacyAccountIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value.trim().toLowerCase() === "none"
+          ? []
+          : value
+              .split(",")
+              .map((id) => id.trim().toLowerCase())
+              .filter(Boolean)
+        : value,
+    z.array(z.string().uuid()).default([...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS]),
+  ),
+  // On turns whose model Opengeni pays for while credit billing is active,
+  // paid tools the model provider hosts cost credit: Opengeni's billed web
+  // tools replace hosted search (or reported hosted searches are charged) and
+  // the priced Gateway image tool replaces OpenAI hosted image generation on
+  // the deployment key. False restores free hosted search and images.
+  paidHostedToolsCreditBilling: EnvBoolean.default(true),
   mcpServers: z
     .array(
       z.object({
@@ -3552,6 +3632,10 @@ export const RegistryProviderKind = z.enum([
   "claude-subscription-organization",
   "anthropic-workspace",
   "claude-subscription-workspace",
+  // The one Claude subscription provider (`claude/<upstream>` model ids).
+  // The two scoped kinds above are its legacy forms; every form is served by
+  // the same subscription core and the same connections.
+  "claude-subscription",
 ]);
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
@@ -3859,6 +3943,7 @@ const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   "organization-claude-subscription",
   "workspace-anthropic",
   "workspace-claude-subscription",
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
 ]);
 
 export const ModelCostClass = z.enum(["free", "credits"]);
@@ -6354,6 +6439,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
     subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
+    billingLegacyAccountIds: optional("OPENGENI_BILLING_LEGACY_ACCOUNT_IDS"),
+    paidHostedToolsCreditBilling: optional("OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };
   const parsed = SettingsSchema.parse(raw);
@@ -8320,6 +8407,7 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
       return { kind: "connected_subscription", provider: "xai" };
     case "claude-subscription-workspace":
     case "claude-subscription-organization":
+    case "claude-subscription":
       return { kind: "connected_subscription", provider: "claude" };
     case "vercel-gateway-workspace":
     case "direct-openai-workspace":
@@ -8357,6 +8445,7 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "xai-subscription":
     case "claude-subscription-workspace":
     case "claude-subscription-organization":
+    case "claude-subscription":
       return { upstreamPayer: "connected_subscription", metering: "external" };
     case "vercel-gateway-workspace":
     case "direct-openai-workspace":
@@ -8503,6 +8592,7 @@ export function registryModelResidency(
       );
     case "claude-subscription-workspace":
     case "claude-subscription-organization":
+    case "claude-subscription":
       return builtInResidencyRule(
         "global",
         "subscription",
@@ -9314,6 +9404,11 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
   if (canonicalModelId.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)) {
     return XAI_SUBSCRIPTION_PROVIDER_ID;
   }
+  // A `claude/` id the catalog does not resolve still names a Claude
+  // subscription model, never the built-in fallback.
+  if (canonicalModelId.startsWith(CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX)) {
+    return CLAUDE_SUBSCRIPTION_PROVIDER_ID;
+  }
   if (canonicalModelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
     return WORKSPACE_GATEWAY_PROVIDER_ID;
   }
@@ -9348,6 +9443,7 @@ const NON_CREDIT_POLICY_PROVIDER_IDS = new Set<string>([
   "organization-anthropic",
   "workspace-claude-subscription",
   "organization-claude-subscription",
+  CLAUDE_SUBSCRIPTION_PROVIDER_ID,
 ]);
 
 /**
@@ -9367,6 +9463,7 @@ export function policyChargesCreditsForModel(settings: Settings, modelId: string
   if (configured) return configured.cost === "credits";
   if (canonicalModelId.startsWith(CODEX_MODEL_ID_PREFIX)) return false;
   if (canonicalModelId.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)) return false;
+  if (isClaudeSubscriptionModelId(canonicalModelId)) return false;
   const slash = canonicalModelId.indexOf("/");
   const providerPrefix = slash > 0 ? canonicalModelId.slice(0, slash) : "";
   if (
@@ -9936,8 +10033,16 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   const catalogSettings = settingsForTurnExecutionPolicy(settings, parsed.productModelId);
   const canonicalExpectedModel = canonicalizeConfiguredModelId(catalogSettings, expected.modelId);
   const expectedLatencyMode = expected.latencyMode ?? parsed.latencyMode;
+  // A Claude subscription policy may name its model in any id form (an older
+  // or newer release accepted it); every form is the same model.
+  const claudeForms =
+    isClaudeSubscriptionProviderId(parsed.providerId) &&
+    isClaudeSubscriptionModelId(parsed.productModelId);
+  const isAcceptedProductModel = (modelId: string) =>
+    modelId === parsed.productModelId ||
+    (claudeForms && sameModelId(modelId, parsed.productModelId));
   if (
-    parsed.productModelId !== canonicalExpectedModel ||
+    !isAcceptedProductModel(canonicalExpectedModel) ||
     parsed.reasoningEffort !== expected.reasoningEffort ||
     parsed.latencyMode !== expectedLatencyMode
   ) {
@@ -9948,15 +10053,18 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   assertLatencyModeRunnable(catalogSettings, parsed.productModelId, parsed.latencyMode);
   if (
     parsed.requestedModelId !== null &&
-    canonicalizeConfiguredModelId(catalogSettings, parsed.requestedModelId) !==
-      parsed.productModelId
+    !isAcceptedProductModel(canonicalizeConfiguredModelId(catalogSettings, parsed.requestedModelId))
   ) {
     throw new Error("Turn execution policy requested model does not match its product model");
   }
-  const resolved = resolveModelProvider(catalogSettings, parsed.productModelId);
-  if (!resolved) {
+  const executable = resolveModelProvider(catalogSettings, parsed.productModelId);
+  if (!executable) {
     throw new Error("Turn execution policy model is no longer configured");
   }
+  // The definition the policy froze, in the policy's own id form.
+  const resolved = claudeForms
+    ? claudeSubscriptionPolicyForm(executable, parsed.productModelId, parsed.providerId)
+    : executable;
   // The individual-account cutover corrects subscription accounting labels.
   // Preserve an already accepted legacy policy only if its complete original
   // executable digest matches; this exception cannot compose with other drift.
@@ -10019,10 +10127,64 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   if (!definitionVersionMatches && !legacyClaudeAccountingMatches) {
     throw new TurnExecutionPolicyDefinitionMismatchError();
   }
+  const accepted = configuredModelForAcceptedTurnExecutionPolicy(
+    resolved.model,
+    resolved.provider,
+    parsed,
+  );
   return {
     policy: parsed,
-    provider: resolved.provider,
-    model: configuredModelForAcceptedTurnExecutionPolicy(resolved.model, resolved.provider, parsed),
+    provider: executable.provider,
+    model:
+      resolved === executable
+        ? accepted
+        : {
+            ...accepted,
+            id: executable.model.id,
+            aliases: executable.model.aliases,
+            providerId: executable.model.providerId,
+            providerLabel: executable.model.providerLabel,
+          },
+  };
+}
+
+/** The registry kind of each Claude subscription provider id form. */
+function claudeSubscriptionProviderKind(providerId: string): RegistryProviderKind {
+  return providerId === LEGACY_WORKSPACE_CLAUDE_SUBSCRIPTION_PROVIDER_ID
+    ? "claude-subscription-workspace"
+    : providerId === LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID
+      ? "claude-subscription-organization"
+      : "claude-subscription";
+}
+
+/**
+ * A configured Claude subscription model restated in another id form (the
+ * model id, provider id and registry kind an accepted policy names). Every
+ * form shares the same executable definition, so a policy accepted under
+ * one form verifies against the model configured under another; nothing
+ * else of the definition changes.
+ */
+function claudeSubscriptionPolicyForm(
+  resolved: { provider: ResolvedModelProvider; model: ConfiguredModel },
+  modelId: string,
+  providerId: string,
+): { provider: ResolvedModelProvider; model: ConfiguredModel } {
+  if (
+    !isClaudeSubscriptionProviderId(resolved.provider.id) ||
+    (resolved.model.id === modelId && resolved.provider.id === providerId)
+  ) {
+    return resolved;
+  }
+  const provider = {
+    ...resolved.provider,
+    id: providerId,
+    kind: claudeSubscriptionProviderKind(providerId),
+  };
+  const { definitionVersion: _definitionVersion, ...model } = resolved.model;
+  const restated = { ...model, id: modelId, providerId, aliases: [] };
+  return {
+    provider,
+    model: { ...restated, definitionVersion: definitionVersionFor(restated, provider) },
   };
 }
 
@@ -10140,6 +10302,7 @@ function reviewedProviderModelPricing(
     case "anthropic-organization":
     case "claude-subscription-workspace":
     case "claude-subscription-organization":
+    case "claude-subscription":
       if (claudeNativeModelProfile(upstream)) {
         priceId = upstream;
         nativeClaude = true;
@@ -10645,6 +10808,7 @@ function nativeClaudeListWriteContext(
       provider.kind === "anthropic-organization" ||
       provider.kind === "claude-subscription-workspace" ||
       provider.kind === "claude-subscription-organization" ||
+      provider.kind === "claude-subscription" ||
       (provider.kind === "api-key" &&
         provider.baseUrl.replace(/\/$/u, "") === "https://api.anthropic.com/v1");
     const published = reviewedModelListPricing[upstream]?.default;
@@ -11174,32 +11338,36 @@ export function hasGitCredentialRepositorySelection(
 /**
  * TOKEN-BROKER (B1) parity: the STABLE git-auth POINTER environment a
  * repo-attached run declares — GIT_ASKPASS (a fixed path under HOME; the script
- * itself is provisioned at box setup), GIT_TERMINAL_PROMPT, and the GitHub-App
- * bot identity fallbacks. NO rotating value rides here (the token lives in the
- * file behind the askpass), so the layer is attach-reproducible and MUST be
- * applied identically by the worker turn (sandboxEnvironmentForRun) AND every
- * API-direct attach surface that can cold-create the box (viewer attach,
- * channel-A ops). A box cold-created WITHOUT this layer kills the next repo
- * turn: the turn's manifest declares these keys, the box's env lacks them, and
- * the SDK's provided-session guard throws "Live sandbox sessions cannot change
- * manifest environment variables" (observed live: an open session page's viewer
- * attach won the cold-create race and the first turn died).
+ * itself is provisioned at box setup) and GIT_TERMINAL_PROMPT. NO rotating value
+ * rides here (the token lives in the file behind the askpass), so the layer is
+ * attach-reproducible and MUST be applied identically by the worker turn
+ * (sandboxEnvironmentForRun) AND every API-direct attach surface that can
+ * cold-create the box (viewer attach, channel-A ops). A box cold-created
+ * WITHOUT this layer kills the next repo turn: the turn's manifest declares
+ * these keys, the box's env lacks them, and the SDK's provided-session guard
+ * throws "Live sandbox sessions cannot change manifest environment variables"
+ * (observed live: an open session page's viewer attach won the cold-create race
+ * and the first turn died).
  *
- * Mutates and returns `environment`. Identity fallbacks preserve values already
- * present (the deployment git-identity allowlist wins over the bot identity).
+ * Commit identity is deliberately NOT part of this layer. One session can mix
+ * repositories that commit as different identities (the GitHub App bot and the
+ * person's own GitHub account), and a live box keeps its creation-time manifest
+ * env for its whole life, so a box-wide GIT_AUTHOR_* value would be both wrong
+ * for mixed sessions and frozen to whichever surface cold-created the box. The
+ * repository-clone hook writes each repository's identity into that
+ * repository's local Git config instead. Only a deployment-configured identity
+ * (`collectGitIdentityEnvironment`, part of the stable base) remains box-wide,
+ * as the default for repositories without their own identity.
+ *
+ * Mutates and returns `environment`.
  */
 export function applyGitAuthPointerEnvironment(
   environment: Record<string, string>,
-  identity: { name: string; email: string } | null,
+  /** @deprecated Ignored: commit identity is per repository, written by the clone hook. */
+  _identity?: { name: string; email: string } | null,
 ): Record<string, string> {
   environment.GIT_ASKPASS = `${environment.HOME ?? "/workspace"}/.opengeni/askpass`;
   environment.GIT_TERMINAL_PROMPT = "0";
-  if (identity) {
-    environment.GIT_AUTHOR_NAME = environment.GIT_AUTHOR_NAME || identity.name;
-    environment.GIT_AUTHOR_EMAIL = environment.GIT_AUTHOR_EMAIL || identity.email;
-    environment.GIT_COMMITTER_NAME = environment.GIT_COMMITTER_NAME || identity.name;
-    environment.GIT_COMMITTER_EMAIL = environment.GIT_COMMITTER_EMAIL || identity.email;
-  }
   return environment;
 }
 
@@ -12754,6 +12922,7 @@ export function validateModelCatalogSettings(
       provider.kind === "anthropic-workspace" ||
       provider.kind === "claude-subscription-workspace" ||
       provider.kind === "claude-subscription-organization" ||
+      provider.kind === "claude-subscription" ||
       provider.kind === "xai-subscription"
     ) {
       throw new Error(
@@ -13394,7 +13563,61 @@ export function withClaudeConnectionCatalog(
       }),
     });
   }
-  return { ...settings, modelProvidersJson: JSON.stringify(providers) };
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify(withClaudeSubscriptionModelAliases(providers)),
+  };
+}
+
+/**
+ * Every id form of one Claude subscription model names one configured model
+ * (docs/design/subscription-model-ids-without-pools.md): the workspace
+ * list's model when the workspace list defines that upstream model, else the
+ * organization list's. That model accepts the canonical `claude/<upstream>`
+ * id and any legacy form no configured model owns, so a stored id in any
+ * form resolves wherever the model is offered. Recomputed whenever a Claude
+ * list changes, so the result does not depend on overlay order.
+ */
+function withClaudeSubscriptionModelAliases<
+  Provider extends {
+    id: string;
+    models: Array<{ id: string; aliases?: string[] | undefined }>;
+  },
+>(providers: Provider[]): Provider[] {
+  const claudeProviders = providers.filter((provider) =>
+    isClaudeSubscriptionProviderId(provider.id),
+  );
+  if (claudeProviders.length === 0) return providers;
+  const ownedIds = new Set(
+    claudeProviders.flatMap((provider) => provider.models.map((model) => model.id)),
+  );
+  const workspaceUpstreams = new Set(
+    claudeProviders
+      .filter((provider) => provider.id === LEGACY_WORKSPACE_CLAUDE_SUBSCRIPTION_PROVIDER_ID)
+      .flatMap((provider) =>
+        provider.models.map((model) => claudeSubscriptionUpstreamModelId(model.id)),
+      ),
+  );
+  return providers.map((provider) =>
+    isClaudeSubscriptionProviderId(provider.id)
+      ? {
+          ...provider,
+          models: provider.models.map((model) => {
+            const upstream = claudeSubscriptionUpstreamModelId(model.id);
+            const own =
+              upstream !== null &&
+              (provider.id !== LEGACY_ORGANIZATION_CLAUDE_SUBSCRIPTION_PROVIDER_ID ||
+                !workspaceUpstreams.has(upstream));
+            return {
+              ...model,
+              aliases: own
+                ? claudeSubscriptionModelIdForms(model.id).filter((id) => !ownedIds.has(id))
+                : [],
+            };
+          }),
+        }
+      : provider,
+  );
 }
 export function withClaudeConnectionCredential(
   settings: Settings,

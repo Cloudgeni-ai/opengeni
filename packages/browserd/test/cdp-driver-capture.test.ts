@@ -24,6 +24,23 @@ const validViewport = {
   maxTouchPoints: 0,
 };
 
+test("a failed privacy snapshot withholds pixels before capture and leaves unrelated targets usable", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.calls.length = 0;
+    fixture.setProtectionSnapshot({});
+    await expect(fixture.driver.captureScreenshot("target-1")).rejects.toThrow("page redaction");
+    expect(fixture.calls.some((call) => call.method === "Page.captureScreenshot")).toBe(false);
+    fixture.setProtectionSnapshot({ strings: [], documents: [] });
+    expect(
+      (await fixture.driver.captureScreenshot("target-2", { format: "jpeg" })).data.byteLength,
+    ).toBeGreaterThan(0);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
 test.each([
   { width: 0, height: 0, visualWidth: 0, visualHeight: 0 },
   { width: -1 },
@@ -549,6 +566,51 @@ test("a lost connection fails the live view instead of leaving a frozen subscrip
   }
 });
 
+test("a live view opened while its page is busy shows the page once it answers", async () => {
+  // Its first frame used to count timeouts toward the three-failure limit,
+  // so opening the view during a busy period failed it after about 6 s.
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    fixture.setPageBusy(true);
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    const next = frames[Symbol.asyncIterator]().next();
+    expect(await nextFrameWithin(next, 6_000)).toBe("pending");
+    fixture.setPageBusy(false);
+    expect(await nextFrameWithin(next, 3_000)).toBe("frame");
+  } finally {
+    fixture.setPageBusy(false);
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 20_000);
+
+test("a live view of a busy page keeps at most one layout read waiting on it", async () => {
+  // Each frame deadline (about 2 s) used to send one more read into a
+  // renderer that answers none of them.
+  const fixture = await captureFixture();
+  let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
+  try {
+    await fixture.driver.start();
+    fixture.setPageBusy(true);
+    const before = fixture.calls.length;
+    frames = await fixture.driver.subscribeFrames("target-1", { format: "jpeg" });
+    const next = frames[Symbol.asyncIterator]().next();
+    expect(await nextFrameWithin(next, 7_000)).toBe("pending");
+    const layoutReads = fixture.calls
+      .slice(before)
+      .filter((call) => call.method === "Page.getLayoutMetrics" && call.sessionId);
+    expect(layoutReads).toHaveLength(1);
+    fixture.setPageBusy(false);
+    expect(await nextFrameWithin(next, 3_000)).toBe("frame");
+  } finally {
+    fixture.setPageBusy(false);
+    await frames?.close();
+    await fixture.driver.close();
+  }
+}, 20_000);
+
 test("frames that keep failing for another reason still end the live view", async () => {
   const fixture = await captureFixture();
   let frames: Awaited<ReturnType<typeof fixture.driver.subscribeFrames>> | undefined;
@@ -566,6 +628,19 @@ test("frames that keep failing for another reason still end the live view", asyn
     await fixture.driver.close();
   }
 }, 20_000);
+
+test("a live view whose first frame keeps failing for another reason is refused", async () => {
+  const fixture = await captureFixture();
+  try {
+    await fixture.driver.start();
+    fixture.failMethod("Page.captureScreenshot", "synthetic capture failure");
+    await expect(fixture.driver.subscribeFrames("target-1", { format: "jpeg" })).rejects.toThrow(
+      "synthetic capture failure",
+    );
+  } finally {
+    await fixture.driver.close();
+  }
+});
 
 test("a screenshot of attached Chrome queued behind a frame still gives up at the stall bound", async () => {
   // The wait for the frame comes out of the screenshot's own 3 s, not on top.
@@ -1152,6 +1227,7 @@ async function captureFixture(
   let raster: { width: number; height: number; density: number } | null = null;
   // Real encoded pixels an unclipped capture returns instead of a sized header.
   let captureData: string | null = null;
+  let protectionSnapshot: unknown = { strings: [], documents: [] };
   // Surfaces Chromium still presents from before a viewport change.
   const staleRasters: Array<{ width: number; height: number; density: number }> = [];
   let viewport: unknown = "complete";
@@ -1249,6 +1325,7 @@ async function captureFixture(
       } else result = { result: { value: "complete" } };
     }
     if (command.method === "Accessibility.getFullAXTree") result = { nodes: [] };
+    if (command.method === "DOMSnapshot.captureSnapshot") result = protectionSnapshot;
     if (command.method === "Page.getLayoutMetrics") {
       result = {
         cssVisualViewport: {
@@ -1351,6 +1428,9 @@ async function captureFixture(
   });
   return {
     driver,
+    setProtectionSnapshot: (value: unknown) => {
+      protectionSnapshot = value;
+    },
     calls,
     setRaster(value: NonNullable<typeof raster>) {
       raster = value;

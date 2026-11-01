@@ -1,7 +1,6 @@
 import type { Recording } from "@opengeni/contracts";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import {
-  defaultMeetingTitle,
   formatClock,
   formatDuration,
   groupLiveTurns,
@@ -44,7 +43,12 @@ import {
   phoneRecorderErrorText,
   phoneUploadLine,
 } from "./phone-text";
-import { isCapturing, useMeetingRecorder, type MeetingRecorder } from "./recorder";
+import {
+  isCapturing,
+  useAppInForeground,
+  useMeetingRecorder,
+  type MeetingRecorder,
+} from "./recorder";
 
 export type MeetingsListProps = {
   /** The SDK client. The `OpenGeniProvider`'s client otherwise. */
@@ -410,8 +414,9 @@ function RecorderCard({
   const liveOn = liveTranscript ? (liveChoice ?? liveTranscript.defaultOn) : false;
 
   const start = () => {
+    // Unnamed: Opengeni names it after the calendar event at the time, or
+    // from the conversation once its notes are written.
     void recorder.start({
-      title: defaultMeetingTitle(new Date(), msg),
       ...(externalRef ? { externalRef } : {}),
       ...(liveOn ? { liveTranscript: true } : {}),
     });
@@ -734,12 +739,15 @@ const SILENT_AFTER_MS = 10_000;
  * True once a running recording has heard nothing at all since it started or
  * resumed. A microphone that has delivered sound is working, so a pause in
  * the conversation, however long, never counts.
+ *
+ * It checks only while the app is in front; nobody sees the warning otherwise.
  */
 function useSilentMicrophone(recorder: MeetingRecorder, active: boolean): boolean {
   const [silent, setSilent] = useState(false);
   const levels = recorder.levels;
+  const checking = useAppInForeground() && active;
   useEffect(() => {
-    if (!active) {
+    if (!checking) {
       setSilent(false);
       return;
     }
@@ -753,30 +761,35 @@ function useSilentMicrophone(recorder: MeetingRecorder, active: boolean): boolea
       setSilent(Date.now() - since > SILENT_AFTER_MS);
     }, 500);
     return () => clearInterval(timer);
-  }, [active, levels]);
+  }, [checking, levels]);
   return silent;
 }
 
+/**
+ * The bar is scaled on the native side, so moving it never lays out or
+ * redraws the screen, and it stops while the app is in the background.
+ */
 function LevelMeter({ recorder, active }: { recorder: MeetingRecorder; active: boolean }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const width = useRef(new Animated.Value(0)).current;
+  const level = useRef(new Animated.Value(0)).current;
   const levels = recorder.levels;
+  const moving = useAppInForeground() && active;
   useEffect(() => {
-    if (!active) {
-      width.setValue(0);
+    if (!moving) {
+      level.stopAnimation();
+      level.setValue(0);
       return;
     }
     const timer = setInterval(() => {
-      const level = Math.min(1, Math.max(0, levels()[0] ?? 0));
-      Animated.timing(width, {
-        toValue: level,
+      Animated.timing(level, {
+        toValue: Math.min(1, Math.max(0, levels()[0] ?? 0)),
         duration: 90,
-        useNativeDriver: false,
+        useNativeDriver: true,
       }).start();
     }, 100);
     return () => clearInterval(timer);
-  }, [active, levels, width]);
+  }, [moving, levels, level]);
   return (
     <View
       accessibilityElementsHidden
@@ -792,7 +805,9 @@ function LevelMeter({ recorder, active }: { recorder: MeetingRecorder; active: b
           height: 6,
           borderRadius: 3,
           backgroundColor: c.danger,
-          width: width.interpolate({ inputRange: [0, 1], outputRange: ["0%", "100%"] }),
+          width: "100%",
+          transformOrigin: "left",
+          transform: [{ scaleX: level }],
         }}
       />
     </View>

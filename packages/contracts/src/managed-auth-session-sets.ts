@@ -282,7 +282,11 @@ export const ManagedAuthSessionSetErrorCode = /* @__PURE__ */ defineSchema(() =>
     "api_contract_changed",
     "browser_session_set_required",
     "browser_session_set_unavailable",
+    // Email/password completion: the provider refused this sign-in. These are
+    // answers about the credentials or the account, never a server failure.
+    "email_not_verified",
     "generation_conflict",
+    "invalid_credentials",
     "invalid_browser_session_set_request",
     "invalid_transaction",
     "managed_authentication_required",
@@ -292,6 +296,8 @@ export const ManagedAuthSessionSetErrorCode = /* @__PURE__ */ defineSchema(() =>
     "origin_rejected",
     "login_transaction_rate_limited",
     "provider_route_blocked",
+    "sign_in_email_not_allowed",
+    "sign_in_refused",
     "slot_limit_reached",
     "slot_already_exists",
     "slot_unavailable",
