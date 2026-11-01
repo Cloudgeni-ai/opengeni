@@ -12000,6 +12000,13 @@
       }
     }
   }
+:where(.og-root).max-\[22rem\]\:pointer-coarse\:grid-cols-5,:where(.og-root) .max-\[22rem\]\:pointer-coarse\:grid-cols-5 {
+    @media (width < 22rem) {
+      @media (pointer: coarse) {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+      }
+    }
+  }
 :where(.og-root).\@max-\[34rem\]\/titlebar\:pointer-coarse\:min-w-11\!,:where(.og-root) .\@max-\[34rem\]\/titlebar\:pointer-coarse\:min-w-11\! {
     @container titlebar (width < 34rem) {
       @media (pointer: coarse) {

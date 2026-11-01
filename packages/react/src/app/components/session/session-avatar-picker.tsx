@@ -4,6 +4,7 @@
  * set. The caller owns the draft; `sessionAvatarFromDraft` turns it into the
  * saved avatar (null while the draft is incomplete or "none").
  */
+import { useId } from "react";
 import { PencilIcon, XIcon } from "lucide-react";
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { SESSION_AVATAR_ICONS, isSingleSessionAvatarEmoji } from "@opengeni/contracts";
@@ -236,7 +237,7 @@ export function SessionAvatarPicker({
         ) : null}
         {kind === "icon" ? (
           <div
-            className="grid w-fit grid-cols-8 gap-1 max-sm:grid-cols-6 pointer-coarse:grid-cols-6"
+            className="grid w-fit grid-cols-8 gap-1 max-sm:grid-cols-6 pointer-coarse:grid-cols-6 max-[22rem]:pointer-coarse:grid-cols-5"
             role="group"
             aria-label="Icons"
           >
@@ -334,6 +335,7 @@ export function SessionAvatarPickerButton({
 }) {
   const avatar = sessionAvatarFromDraft(draft, name, image);
   const invalid = Boolean(errors.emoji || errors.letters);
+  const problemId = useId();
   return (
     <PopoverPrimitive.Root
       {...(open === undefined ? {} : { open })}
@@ -341,11 +343,11 @@ export function SessionAvatarPickerButton({
     >
       <PopoverPrimitive.Trigger
         type="button"
-        aria-label={label}
+        aria-label={`Change ${label.toLowerCase()}`}
         // Not aria-invalid: the form focuses the first invalid control, which
         // must be the input in the popover that says what is wrong.
         data-invalid={invalid || undefined}
-        title={`Change ${label.toLowerCase()}`}
+        aria-describedby={invalid ? problemId : undefined}
         className={cn(
           "group/avatar relative inline-flex size-12 shrink-0 items-center justify-center rounded-lg outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40",
           "data-invalid:ring-2 data-invalid:ring-danger/60",
@@ -372,6 +374,11 @@ export function SessionAvatarPickerButton({
           <PencilIcon className="size-3" />
         </span>
       </PopoverPrimitive.Trigger>
+      {invalid ? (
+        <span id={problemId} className="sr-only">
+          {`This ${label.toLowerCase()} can't be saved.`}
+        </span>
+      ) : null}
       <PopoverContainedPortal>
         <PopoverPrimitive.Content
           aria-label={label}

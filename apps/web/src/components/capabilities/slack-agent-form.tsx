@@ -311,7 +311,8 @@ export function SlackAgentFormPage({
       submitLabel={agent ? "Save" : "Create agent"}
       pendingLabel={agent ? "Saving…" : "Creating…"}
       pending={turningOn ? true : undefined}
-      submitDisabled={!agent && !connection}
+      // Until every bot is in, the bot shared with this workspace may still be missing.
+      submitDisabled={!agent && (!connection || !connectionsLoaded)}
       disabledReason={
         !agent && !connection && connectionsLoaded
           ? "Add a Slack workspace to create Slack agents."

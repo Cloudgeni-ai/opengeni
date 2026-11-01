@@ -564,7 +564,7 @@ describe("Slack agent form", () => {
     const view = await render(<SlackAgentFormPage {...form()} />);
     // Booleans: a failing matcher on a DOM node prints the whole tree.
     expect(document.querySelector('[aria-label="Icons"]') === null).toBe(true);
-    const trigger = view.host.querySelector<HTMLButtonElement>('button[aria-label="Icon"]')!;
+    const trigger = view.host.querySelector<HTMLButtonElement>('button[aria-label="Change icon"]')!;
     expect(trigger !== null).toBe(true);
     await act(async () => {
       trigger.click();
@@ -589,7 +589,7 @@ describe("Slack agent form", () => {
     const createOpenGeniSlackAgent = mock(async () => ({ agent: agent() }));
     setContext({ createOpenGeniSlackAgent });
     const view = await render(<SlackAgentFormPage {...form()} />);
-    const trigger = view.host.querySelector<HTMLButtonElement>('button[aria-label="Icon"]')!;
+    const trigger = view.host.querySelector<HTMLButtonElement>('button[aria-label="Change icon"]')!;
     const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
     await act(async () => {
       trigger.click();
@@ -624,6 +624,8 @@ describe("Slack agent form", () => {
     // The button isn't what the form focuses as invalid; it only shows it.
     expect(trigger.hasAttribute("aria-invalid")).toBe(false);
     expect(trigger.hasAttribute("data-invalid")).toBe(true);
+    const problem = document.getElementById(trigger.getAttribute("aria-describedby")!);
+    expect(problem?.textContent).toBe("This icon can't be saved.");
     await view.unmount();
   });
 
@@ -632,7 +634,8 @@ describe("Slack agent form", () => {
     const view = await render(
       <SlackAgentFormPage {...form({ workspaceName: "this workspace" })} />,
     );
-    expect(view.host.textContent).toContain("Works in this workspace.");
+    const description = view.host.querySelector("[data-slot=form-frame] header p")?.textContent;
+    expect(description).toBe("Works in this workspace.");
     await view.unmount();
   });
 
