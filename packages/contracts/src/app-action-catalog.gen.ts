@@ -463,10 +463,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/browse",
     "request": [],
-    "query": [
-      "pageToken",
-      "parentId"
-    ],
     "response": [
       "GoogleDriveBrowseResponse"
     ],
@@ -2558,10 +2554,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/browse",
     "request": [],
-    "query": [
-      "pageToken",
-      "parentId"
-    ],
     "response": [],
     "permission": "connections:read"
   },
@@ -2700,6 +2692,29 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [],
     "permission": "sessions:create"
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/organization-vaults",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/organization-vaults",
+    "request": [],
+    "response": [
+      "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
+      "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
+      "OnePasswordConnectionSummary",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemApproval",
+      "VaultItemSummary",
+      "VaultProviderConnectionSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/downloads",
@@ -7902,11 +7917,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:write"
   },
   {
-    "id": "removeModelConnectionFromWorkspace",
-    "method": "DELETE",
-    "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
-    "request": [],
-    "response": []
+    "id": "removeSessionResources",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove",
+    "request": [
+      "RemoveSessionResourcesRequest"
+    ],
+    "response": [
+      "Session"
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "removeWorkspaceMember",
