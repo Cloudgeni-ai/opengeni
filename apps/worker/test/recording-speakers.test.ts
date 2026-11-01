@@ -15,6 +15,8 @@ let directory = "";
 // the way the real one does.
 const FAKE_SPEAKERS = [
   "#!/bin/sh",
+  // The worker stopping mid-run: the program is killed from outside.
+  `case "$*" in *"--max-speakers 2"*) kill -TERM $$;; esac`,
   "bytes=$(wc -c | tr -d ' ')",
   `case "$*" in *"--max-speakers 1"*) echo '{"error":"no voices"}' >&2; exit 1;; esac`,
   `printf '{"turns":[{"startMs":0,"endMs":%d,"speaker":0}],"speakers":[{"speaker":0,"speechMs":5,"embedding":[1,0]}]}\\n' $((bytes / 64))`,
@@ -86,6 +88,11 @@ describe("recording speaker models", () => {
     await expect(diarizer.diarize(audio, { maxSpeakers: 1 })).rejects.toThrow(
       "speaker models failed: no voices",
     );
+    // Stopped from outside: an interruption the attempt retries, not a model failure.
+    await expect(diarizer.diarize(audio, { maxSpeakers: 2 })).rejects.toMatchObject({
+      name: "RecordingSpeakersError",
+      interrupted: true,
+    });
   });
 
   test.skipIf(!hasFfmpeg)("hear holes in the track's timestamps as silence", async () => {
