@@ -555,10 +555,7 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
-  const accountProvider = subscriptionAccountProvider(
-    displayModelId,
-    selectedRow?.catalog.credentialSource,
-  );
+  const accountProvider = subscriptionAccountProvider(displayModelId, selectedRow?.catalog);
   const repliesMute = useSessionRepliesMute(session);
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;

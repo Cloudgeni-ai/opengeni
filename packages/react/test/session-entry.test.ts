@@ -58,6 +58,7 @@ describe("session-only entry", () => {
     expect([...thirdParty].sort()).toEqual([
       // Claude citation tags shown as their text: a dependency-free contracts leaf.
       "@opengeni/contracts/claude-cite-tags",
+      "@opengeni/contracts/claude-subscription-model-ids",
       // The MCP server question on a pending approval: a zod-free model leaf.
       "@opengeni/contracts/mcp-elicitation-model",
       // isRecord and errorMessage: a dependency-free contracts leaf, not a barrel.

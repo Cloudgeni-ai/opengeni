@@ -39166,6 +39166,7 @@
       "billingClassLabel": "value",
       "coerceReasoningEffortForModel": "value",
       "compactModelPill": "value",
+      "connectedSubscriptionProvider": "value",
       "defaultEffortForModel": "value",
       "effortOptionsForModel": "value",
       "findPickerRow": "value",
