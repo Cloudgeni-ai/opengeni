@@ -53,9 +53,7 @@ export type ImportAudioFileInput = {
   deleteAfter?: boolean;
 };
 
-type Importer = NonNullable<
-  ReturnType<typeof useMeetingRecorder>
->["importAudio"];
+type Importer = NonNullable<ReturnType<typeof useMeetingRecorder>>["importAudio"];
 
 /**
  * Make a meeting from one audio file. Resolves with the meeting's id once its
@@ -70,13 +68,9 @@ export async function importAudioFile(
   const file = new File(input.uri);
   const mimeType = audioImportMimeType(name, input.mimeType ?? file.type);
   if (!mimeType) {
-    throw new AudioImportError(
-      "unsupported",
-      `Recordings don't take this kind of audio: ${name}`,
-    );
+    throw new AudioImportError("unsupported", `Recordings don't take this kind of audio: ${name}`);
   }
-  if (!file.exists)
-    throw new AudioImportError("unreadable", `The file isn't there: ${name}`);
+  if (!file.exists) throw new AudioImportError("unreadable", `The file isn't there: ${name}`);
   const title = importedAudioTitle(name);
   const recordingId = await importAudio({
     // expo-file-system's File is a Blob that reads from disk.
@@ -111,9 +105,7 @@ function sharedInbox(): Directory | null {
  */
 function sharedFileKey(uri: string): string {
   const inbox = uri.indexOf("/Documents/Inbox/");
-  return inbox >= 0
-    ? `inbox:${uri.slice(inbox + "/Documents/Inbox/".length)}`
-    : uri;
+  return inbox >= 0 ? `inbox:${uri.slice(inbox + "/Documents/Inbox/".length)}` : uri;
 }
 
 function isInInbox(uri: string): boolean {
@@ -145,9 +137,7 @@ export type UseSharedAudioImportOptions = {
  * couldn't take them (closed before it got to them). Files are imported into
  * the workspace the recorder is in.
  */
-export function useSharedAudioImport(
-  options: UseSharedAudioImportOptions = {},
-): void {
+export function useSharedAudioImport(options: UseSharedAudioImportOptions = {}): void {
   const recorder = useMeetingRecorder();
   const importAudio = recorder?.importAudio ?? null;
   const latest = useRef(options);
@@ -189,9 +179,7 @@ export function useSharedAudioImport(
     for (const file of sharedInbox()?.list() ?? []) {
       if (file instanceof File) take(file.uri);
     }
-    const subscription = Linking.addEventListener("url", ({ url }) =>
-      take(url),
-    );
+    const subscription = Linking.addEventListener("url", ({ url }) => take(url));
     return () => subscription.remove();
   }, []);
 

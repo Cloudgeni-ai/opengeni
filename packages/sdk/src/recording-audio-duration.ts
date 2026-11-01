@@ -7,9 +7,7 @@
  * return null, and the worker measures their length when it prepares the
  * audio.
  */
-export function audioFileDurationMilliseconds(
-  bytes: Uint8Array,
-): number | null {
+export function audioFileDurationMilliseconds(bytes: Uint8Array): number | null {
   const header = movieHeader(bytes);
   if (!header || !header.timescale || header.duration === null) return null;
   const milliseconds = Math.round((header.duration * 1000) / header.timescale);
@@ -44,8 +42,7 @@ function movieHeader(
     timescale = view.getUint32(mvhd.contentStart + 20);
     duration = Number(view.getBigUint64(mvhd.contentStart + 24));
     // All ones means "unknown".
-    if (view.getBigUint64(mvhd.contentStart + 24) === 0xffffffffffffffffn)
-      duration = NaN;
+    if (view.getBigUint64(mvhd.contentStart + 24) === 0xffffffffffffffffn) duration = NaN;
   } else {
     created = view.getUint32(mvhd.contentStart + 4);
     timescale = view.getUint32(mvhd.contentStart + 12);
@@ -84,8 +81,7 @@ function findBox(
       bytes[offset + 6]!,
       bytes[offset + 7]!,
     );
-    if (name === type)
-      return { contentStart: offset + header, end: offset + size };
+    if (name === type) return { contentStart: offset + header, end: offset + size };
     offset += size;
   }
   return null;

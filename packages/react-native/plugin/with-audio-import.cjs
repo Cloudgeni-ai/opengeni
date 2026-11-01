@@ -8,17 +8,11 @@
 const { withAndroidManifest, withInfoPlist } = require("expo/config-plugins");
 
 const DOCUMENT_TYPE_NAME = "Audio recording";
-const AUDIO_CONTENT_TYPES = [
-  "public.audio",
-  "public.mpeg-4-audio",
-  "com.apple.m4a-audio",
-];
+const AUDIO_CONTENT_TYPES = ["public.audio", "public.mpeg-4-audio", "com.apple.m4a-audio"];
 
 /** Add the audio document type to a parsed Info.plist. */
 function addAudioImportToInfoPlist(plist) {
-  const types = Array.isArray(plist.CFBundleDocumentTypes)
-    ? plist.CFBundleDocumentTypes
-    : [];
+  const types = Array.isArray(plist.CFBundleDocumentTypes) ? plist.CFBundleDocumentTypes : [];
   if (!types.some((entry) => entry.CFBundleTypeName === DOCUMENT_TYPE_NAME)) {
     types.push({
       CFBundleTypeName: DOCUMENT_TYPE_NAME,
@@ -46,9 +40,8 @@ const VIEW_AUDIO_FILTER = {
 
 function isViewAudioFilter(filter) {
   return (
-    filter.action?.some(
-      (a) => a.$?.["android:name"] === "android.intent.action.VIEW",
-    ) && filter.data?.some((d) => d.$?.["android:mimeType"] === "audio/*")
+    filter.action?.some((a) => a.$?.["android:name"] === "android.intent.action.VIEW") &&
+    filter.data?.some((d) => d.$?.["android:mimeType"] === "audio/*")
   );
 }
 

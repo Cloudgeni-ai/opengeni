@@ -1,9 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { CreateRecordingRequest } from "@opengeni/contracts";
-import {
-  createMemoryRecordingChunkStore,
-  type RecorderPlatform,
-} from "@opengeni/sdk/recordings";
+import { createMemoryRecordingChunkStore, type RecorderPlatform } from "@opengeni/sdk/recordings";
 
 import { useRecorder } from "../src/hooks/use-recordings";
 import { WORKSPACE_ID } from "./fake-client";
@@ -16,10 +13,7 @@ describe("useRecorder importAudio", () => {
     const created: CreateRecordingRequest[] = [];
     const never = () => new Promise<never>(() => {});
     const recordings = {
-      createRecording: async (
-        _workspaceId: string,
-        request: CreateRecordingRequest,
-      ) => {
+      createRecording: async (_workspaceId: string, request: CreateRecordingRequest) => {
         created.push(request);
         return { id: request.recordingId } as never;
       },
@@ -71,9 +65,7 @@ describe("useRecorder importAudio", () => {
       tracks: [{ trackNumber: 0, source: "upload", mimeType: "audio/mp4" }],
     });
     await flush();
-    expect(created.map((request) => request.recordingId)).toEqual([
-      recordingId,
-    ]);
+    expect(created.map((request) => request.recordingId)).toEqual([recordingId]);
     // The live recorder is untouched.
     expect(hook.result.current.state).toBe("idle");
     await hook.unmount();

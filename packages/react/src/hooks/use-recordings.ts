@@ -30,14 +30,7 @@ import {
   type OpenGeniRecordingsTransport,
   uploadRecordingAudio,
 } from "@opengeni/sdk/recordings";
-import {
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { OpenGeniContext } from "../session-context";
 import { usePolledValue } from "./internal";
 
@@ -130,13 +123,12 @@ function useEmbeddedRecordings(
   let candidate: object | undefined = override.recordings;
   if (!candidate) {
     const base = (override.client ?? context?.client) as
-      Partial<OpenGeniRecordingsTransport> | undefined;
+      | Partial<OpenGeniRecordingsTransport>
+      | undefined;
     if (base && typeof base.requestJson === "function") {
       candidate = recordingClients.get(base);
       if (!candidate) {
-        const created = new OpenGeniRecordingsClient(
-          base as OpenGeniRecordingsTransport,
-        );
+        const created = new OpenGeniRecordingsClient(base as OpenGeniRecordingsTransport);
         recordingClients.set(base, created);
         candidate = created;
       }
@@ -148,9 +140,7 @@ function useEmbeddedRecordings(
     );
   }
   const methods = candidate as Record<string, unknown>;
-  const missing = requiredMethods.filter(
-    (method) => typeof methods[method] !== "function",
-  );
+  const missing = requiredMethods.filter((method) => typeof methods[method] !== "function");
   if (missing.length > 0) {
     throw new Error(
       `@opengeni/react: ${hookName} requires recordings client method${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`,
@@ -308,9 +298,7 @@ const IDLE_SNAPSHOT: RecorderSnapshot = {
  * released) and finishes the upload in the background; keep the hook in a
  * component that outlives page navigation to record across it.
  */
-export function useRecorder(
-  options: UseRecorderOptions = {},
-): UseRecorderResult {
+export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult {
   const { client, workspaceId } = useEmbeddedRecordings(
     options,
     [
@@ -333,17 +321,13 @@ export function useRecorder(
     const methods = clientRef.current as Partial<RecordingsClientLike>;
     return {
       createRecording: (...args) => clientRef.current.createRecording(...args),
-      createRecordingUploads: (...args) =>
-        clientRef.current.createRecordingUploads(...args),
-      completeRecordingChunks: (...args) =>
-        clientRef.current.completeRecordingChunks(...args),
-      finalizeRecording: (...args) =>
-        clientRef.current.finalizeRecording(...args),
+      createRecordingUploads: (...args) => clientRef.current.createRecordingUploads(...args),
+      completeRecordingChunks: (...args) => clientRef.current.completeRecordingChunks(...args),
+      finalizeRecording: (...args) => clientRef.current.finalizeRecording(...args),
       deleteRecording: (...args) => clientRef.current.deleteRecording(...args),
       ...(typeof methods.updateRecording === "function"
         ? {
-            updateRecording: (...args) =>
-              clientRef.current.updateRecording(...args),
+            updateRecording: (...args) => clientRef.current.updateRecording(...args),
           }
         : {}),
       // Only a client that has the live calls can show a live transcript.
@@ -360,9 +344,7 @@ export function useRecorder(
   }, []);
   const [snapshot, setSnapshot] = useState<RecorderSnapshot>(IDLE_SNAPSHOT);
   const [recovered, setRecovered] = useState<string[]>([]);
-  const [uploads, setUploads] = useState<
-    Readonly<Record<string, RecordingUploadStatus>>
-  >({});
+  const [uploads, setUploads] = useState<Readonly<Record<string, RecordingUploadStatus>>>({});
   const recorderRef = useRef<Recorder | null>(null);
   const uploaderRef = useRef<RecordingUploader | null>(null);
   const defaultPlatform = useMemo(() => browserRecorderPlatform(), []);
@@ -373,14 +355,12 @@ export function useRecorder(
     supported: platform.supported,
     systemAudio: platform.systemAudioSupported,
     systemAudioKind:
-      platform.systemAudioKind ??
-      (platform.systemAudioSupported ? ("display" as const) : null),
+      platform.systemAudioKind ?? (platform.systemAudioSupported ? ("display" as const) : null),
   };
   const storeRef = useRef<RecordingChunkStore | null>(null);
   const store = useCallback(
     (): RecordingChunkStore =>
-      optionsRef.current.store ??
-      (storeRef.current ??= platformRef.current.createStore()),
+      optionsRef.current.store ?? (storeRef.current ??= platformRef.current.createStore()),
     [],
   );
 
@@ -392,12 +372,9 @@ export function useRecorder(
         client: transport,
         store: store(),
         ...(platformFetch ? { fetch: platformFetch } : {}),
-        ...(isCaptureActive
-          ? { isCaptureActive: (id: string) => isCaptureActive(id) }
-          : {}),
+        ...(isCaptureActive ? { isCaptureActive: (id: string) => isCaptureActive(id) } : {}),
         onStatus: (status) => {
-          if (status.finalized)
-            optionsRef.current.onFinished?.(status.recordingId);
+          if (status.finalized) optionsRef.current.onFinished?.(status.recordingId);
           setUploads((previous) => ({
             ...previous,
             [status.recordingId]: status,
@@ -416,8 +393,7 @@ export function useRecorder(
   }, [transport, store]);
 
   useEffect(() => {
-    if (!support.supported || optionsRef.current.resumePending === false)
-      return;
+    if (!support.supported || optionsRef.current.resumePending === false) return;
     let cancelled = false;
     void (async () => {
       // Save what a capture cut short left half-written, then finish everything.
@@ -447,8 +423,7 @@ export function useRecorder(
       const recorder = recorderRef.current;
       if (
         recorder &&
-        (recorder.snapshot.state === "recording" ||
-          recorder.snapshot.state === "paused")
+        (recorder.snapshot.state === "recording" || recorder.snapshot.state === "paused")
       ) {
         void recorder.stop().catch(() => undefined);
       }
@@ -494,28 +469,18 @@ export function useRecorder(
         store: store(),
         uploader: uploader(),
         ...(merged.title ? { title: merged.title } : {}),
-        ...(merged.title && merged.titleSource
-          ? { titleSource: merged.titleSource }
-          : {}),
+        ...(merged.title && merged.titleSource ? { titleSource: merged.titleSource } : {}),
         ...(merged.visibility ? { visibility: merged.visibility } : {}),
         ...(merged.externalRef ? { externalRef: merged.externalRef } : {}),
         ...(merged.metadata ? { metadata: merged.metadata as never } : {}),
-        ...(merged.transcription
-          ? { transcription: merged.transcription }
-          : {}),
+        ...(merged.transcription ? { transcription: merged.transcription } : {}),
         ...(merged.ownerName?.trim() ? { ownerName: merged.ownerName } : {}),
-        ...(merged.microphone !== undefined
-          ? { microphone: merged.microphone }
-          : {}),
-        ...(merged.systemAudio !== undefined
-          ? { systemAudio: merged.systemAudio }
-          : {}),
+        ...(merged.microphone !== undefined ? { microphone: merged.microphone } : {}),
+        ...(merged.systemAudio !== undefined ? { systemAudio: merged.systemAudio } : {}),
         ...(merged.timesliceMilliseconds
           ? { timesliceMilliseconds: merged.timesliceMilliseconds }
           : {}),
-        ...(merged.keepAwake !== undefined
-          ? { keepAwake: merged.keepAwake }
-          : {}),
+        ...(merged.keepAwake !== undefined ? { keepAwake: merged.keepAwake } : {}),
         ...(merged.liveTranscript ? { liveTranscript: true } : {}),
         onChange: (next) => {
           if (recorderRef.current === recorder) setSnapshot(next);
@@ -538,9 +503,7 @@ export function useRecorder(
       const retried = uploaderRef.current?.retry(recordingId) ?? false;
       if (retried) {
         setRecovered((previous) =>
-          previous.includes(recordingId)
-            ? previous
-            : [...previous, recordingId],
+          previous.includes(recordingId) ? previous : [...previous, recordingId],
         );
       }
       return retried;
@@ -578,20 +541,12 @@ export function useRecorder(
             create: {
               purpose: "meeting",
               ...(title ? { title } : {}),
-              ...(title && input.titleSource
-                ? { titleSource: input.titleSource }
-                : {}),
-              ...(input.startedAt
-                ? { startedAt: input.startedAt.toISOString() }
-                : {}),
+              ...(title && input.titleSource ? { titleSource: input.titleSource } : {}),
+              ...(input.startedAt ? { startedAt: input.startedAt.toISOString() } : {}),
               ...(current.visibility ? { visibility: current.visibility } : {}),
               ...(externalRef ? { externalRef } : {}),
-              ...(current.metadata
-                ? { metadata: current.metadata as never }
-                : {}),
-              ...(current.transcription
-                ? { transcription: current.transcription }
-                : {}),
+              ...(current.metadata ? { metadata: current.metadata as never } : {}),
+              ...(current.transcription ? { transcription: current.transcription } : {}),
             },
             onStored: resolve,
           }).catch(reject);
@@ -625,20 +580,14 @@ export type UseRecordingsResult = {
 function isProcessing(recording: Recording | null | undefined): boolean {
   if (!recording) return false;
   const state = recording.transcript?.state;
-  return (
-    recording.state === "processing" ||
-    state === "queued" ||
-    state === "processing"
-  );
+  return recording.state === "processing" || state === "queued" || state === "processing";
 }
 
 /**
  * The recordings the signed-in person can see, newest first. Polls while any is
  * being transcribed, and less often while any is still being recorded.
  */
-export function useRecordings(
-  options: UseRecordingsOptions = {},
-): UseRecordingsResult {
+export function useRecordings(options: UseRecordingsOptions = {}): UseRecordingsResult {
   const { client, workspaceId } = useEmbeddedRecordings(
     options,
     ["listRecordings"],
@@ -673,17 +622,14 @@ export function useRecordings(
     const seen = new Set(first.map((recording) => recording.id));
     return [
       ...first,
-      ...olderForThisList.recordings.filter(
-        (recording) => !seen.has(recording.id),
-      ),
+      ...olderForThisList.recordings.filter((recording) => !seen.has(recording.id)),
     ];
   }, [state.data, olderForThisList]);
   const anyProcessing = recordings.some(isProcessing);
   useRefreshWhile(
     options.pollIntervalMs === undefined &&
       (options.enabled ?? true) &&
-      (anyProcessing ||
-        recordings.some((recording) => recording.state === "capturing")),
+      (anyProcessing || recordings.some((recording) => recording.state === "capturing")),
     state.refresh,
     anyProcessing ? PROCESSING_POLL_MS : CAPTURING_POLL_MS,
   );
@@ -711,16 +657,7 @@ export function useRecordings(
     } finally {
       setLoadingMore(false);
     }
-  }, [
-    client,
-    workspaceId,
-    query,
-    externalRef,
-    limit,
-    nextBefore,
-    loadingMore,
-    load,
-  ]);
+  }, [client, workspaceId, query, externalRef, limit, nextBefore, loadingMore, load]);
   return {
     recordings,
     loading: state.loading,
@@ -746,9 +683,7 @@ export type UseRecordingResult = {
   refresh: () => Promise<void>;
   update: (request: UpdateRecordingRequest) => Promise<Recording>;
   /** Transcribe again, optionally with another model, as a new version. */
-  rerun: (
-    transcription?: RecordingTranscriptionRequest,
-  ) => Promise<RecordingTranscriptVersion>;
+  rerun: (transcription?: RecordingTranscriptionRequest) => Promise<RecordingTranscriptVersion>;
   setCurrentVersion: (versionId: string) => Promise<void>;
   remove: () => Promise<void>;
 };
@@ -784,9 +719,7 @@ export function useRecording(
   const versions = state.data?.versions ?? [];
   const nowProcessing =
     isProcessing(recording) ||
-    versions.some(
-      (version) => version.state === "queued" || version.state === "processing",
-    );
+    versions.some((version) => version.state === "queued" || version.state === "processing");
   useRefreshWhile(
     enabled && (nowProcessing || recording?.state === "capturing"),
     state.refresh,
@@ -806,11 +739,7 @@ export function useRecording(
     refresh,
     update: useCallback(
       async (request: UpdateRecordingRequest) => {
-        const updated = await client.updateRecording(
-          workspaceId,
-          require(),
-          request,
-        );
+        const updated = await client.updateRecording(workspaceId, require(), request);
         await refresh();
         return updated;
       },
@@ -832,11 +761,7 @@ export function useRecording(
     ),
     setCurrentVersion: useCallback(
       async (versionId: string) => {
-        await client.setCurrentRecordingTranscript(
-          workspaceId,
-          require(),
-          versionId,
-        );
+        await client.setCurrentRecordingTranscript(workspaceId, require(), versionId);
         await refresh();
       },
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -882,9 +807,7 @@ export function useLiveTranscript(
     "useLiveTranscript",
   );
   const enabled = (options.enabled ?? true) && recordingId !== null;
-  const [state, setState] = useState<
-    UseLiveTranscriptResult & { recordingId: string | null }
-  >({
+  const [state, setState] = useState<UseLiveTranscriptResult & { recordingId: string | null }>({
     recordingId,
     segments: [],
     ended: false,
@@ -900,18 +823,13 @@ export function useLiveTranscript(
     let segments: RecordingLiveSegment[] = [];
     const read = async () => {
       try {
-        const page = await client.listRecordingLiveSegments(
-          workspaceId,
-          recordingId,
-          { after },
-        );
+        const page = await client.listRecordingLiveSegments(workspaceId, recordingId, { after });
         if (cancelled) return;
         after = page.after;
         if (page.segments.length > 0) {
           segments = [...segments, ...page.segments].sort(
             (left, right) =>
-              left.startMilliseconds - right.startMilliseconds ||
-              left.sequence - right.sequence,
+              left.startMilliseconds - right.startMilliseconds || left.sequence - right.sequence,
           );
         }
         setState({
@@ -924,9 +842,7 @@ export function useLiveTranscript(
       } catch (error) {
         if (cancelled) return;
         setState((previous) => ({
-          ...(previous.recordingId === recordingId
-            ? previous
-            : { segments: [], ended: false }),
+          ...(previous.recordingId === recordingId ? previous : { segments: [], ended: false }),
           recordingId,
           error: error instanceof Error ? error : new Error(String(error)),
         }));
@@ -983,11 +899,7 @@ export function useTranscript(
 ): UseTranscriptResult {
   const { client, workspaceId } = useEmbeddedRecordings(
     options,
-    [
-      "getRecordingTranscript",
-      "updateRecordingSpeakers",
-      "updateRecordingSegments",
-    ],
+    ["getRecordingTranscript", "updateRecordingSpeakers", "updateRecordingSegments"],
     "useTranscript",
   );
   const { versionId, refreshKey } = options;
@@ -1029,13 +941,10 @@ export function useTranscript(
   const segments = useMemo(() => {
     const original = base?.segments ?? [];
     const changed = overlay?.segments;
-    return changed
-      ? original.map((segment) => changed.get(segment.index) ?? segment)
-      : original;
+    return changed ? original.map((segment) => changed.get(segment.index) ?? segment) : original;
   }, [base, overlay]);
   const versionFor = () => {
-    if (!recordingId || !base)
-      throw new Error("The transcript is not loaded yet.");
+    if (!recordingId || !base) throw new Error("The transcript is not loaded yet.");
     return { recordingId, versionId: base.version.id };
   };
   const applySpeakers = (next: RecordingSpeaker[]) =>
@@ -1143,8 +1052,7 @@ export function useRecordingPeople(
   );
   const query = options.query;
   const load = useCallback(
-    async () =>
-      await client.listRecordingPeople(workspaceId, query ? { query } : {}),
+    async () => await client.listRecordingPeople(workspaceId, query ? { query } : {}),
     [client, workspaceId, query],
   );
   const state = usePolledValue(load, { enabled: options.enabled });
@@ -1164,13 +1072,9 @@ export function useRecordingPeople(
     ),
     rememberVoice: useCallback(
       async (personId: string, consent: RecordingVoiceprintConsent) => {
-        const person = await client.rememberRecordingPersonVoice(
-          workspaceId,
-          personId,
-          {
-            consent,
-          },
-        );
+        const person = await client.rememberRecordingPersonVoice(workspaceId, personId, {
+          consent,
+        });
         await refresh();
         return person;
       },
@@ -1178,10 +1082,7 @@ export function useRecordingPeople(
     ),
     forgetVoice: useCallback(
       async (personId: string) => {
-        const person = await client.forgetRecordingPersonVoice(
-          workspaceId,
-          personId,
-        );
+        const person = await client.forgetRecordingPersonVoice(workspaceId, personId);
         await refresh();
         return person;
       },
@@ -1226,14 +1127,8 @@ export function useRecordingModels(
   );
   const state = usePolledValue(load, { enabled: options.enabled });
   const all = state.data?.models;
-  const models = useMemo(
-    () => (all ?? []).filter((entry) => entry.capabilities.batch),
-    [all],
-  );
-  const liveModels = useMemo(
-    () => (all ?? []).filter((entry) => entry.capabilities.live),
-    [all],
-  );
+  const models = useMemo(() => (all ?? []).filter((entry) => entry.capabilities.batch), [all]);
+  const liveModels = useMemo(() => (all ?? []).filter((entry) => entry.capabilities.live), [all]);
   return {
     models,
     liveModels,
@@ -1286,9 +1181,7 @@ export function useRecordingNotes(
   );
   const load = useCallback(
     async () =>
-      recordingId
-        ? (await client.listRecordingNotes(workspaceId, recordingId)).notes
-        : [],
+      recordingId ? (await client.listRecordingNotes(workspaceId, recordingId)).notes : [],
     [client, workspaceId, recordingId],
   );
   const pollIntervalMs = options.pollIntervalMs ?? NOTES_POLL_MS;
@@ -1310,15 +1203,10 @@ export function useRecordingNotes(
     save: useCallback(
       async (kind: RecordingNoteKind, body: string) => {
         if (!recordingId) throw new Error("No recording selected.");
-        const saved = await client.saveRecordingNote(
-          workspaceId,
-          recordingId,
-          kind,
-          {
-            body,
-            ...(kind === "notes" ? { expectedRevision: writtenRevision } : {}),
-          },
-        );
+        const saved = await client.saveRecordingNote(workspaceId, recordingId, kind, {
+          body,
+          ...(kind === "notes" ? { expectedRevision: writtenRevision } : {}),
+        });
         await refresh();
         return saved;
       },

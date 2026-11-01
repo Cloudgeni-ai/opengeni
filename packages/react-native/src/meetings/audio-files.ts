@@ -49,10 +49,7 @@ export function fileName(uri: string): string {
  * The recording type for a file, from its stated type or its name's
  * extension; null when recordings don't take it.
  */
-export function audioImportMimeType(
-  name: string,
-  statedType?: string | null,
-): string | null {
+export function audioImportMimeType(name: string, statedType?: string | null): string | null {
   const stated = statedType?.split(";")[0]?.trim().toLowerCase();
   if (stated) {
     const known = TYPE_ALIASES[stated] ?? stated;
@@ -68,19 +65,13 @@ export function audioImportMimeType(
  * the conversation. Null for names that say nothing, such as an id.
  */
 export function importedAudioTitle(name: string): string | null {
-  const stem = (
-    name.includes(".") ? name.slice(0, name.lastIndexOf(".")) : name
-  )
+  const stem = (name.includes(".") ? name.slice(0, name.lastIndexOf(".")) : name)
     .replace(/[_]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (!/\p{L}/u.test(stem)) return null;
   if (/^[0-9a-f-]{16,}$/i.test(stem)) return null;
-  if (
-    /^(audio|recording|new recording|untitled|opptak|lydopptak)( \d+)?$/i.test(
-      stem,
-    )
-  ) {
+  if (/^(audio|recording|new recording|untitled|opptak|lydopptak)( \d+)?$/i.test(stem)) {
     return null;
   }
   return stem.slice(0, 200);
@@ -90,10 +81,7 @@ export function importedAudioTitle(name: string): string | null {
 export function isSharedAudioUrl(url: string): boolean {
   if (!/^(file|content):\/\//i.test(url)) return false;
   // Android content links often carry no extension; the type is read on import.
-  return (
-    url.toLowerCase().startsWith("content://") ||
-    audioImportMimeType(fileName(url)) !== null
-  );
+  return url.toLowerCase().startsWith("content://") || audioImportMimeType(fileName(url)) !== null;
 }
 
 /**
@@ -101,9 +89,6 @@ export function isSharedAudioUrl(url: string): boolean {
  * file shared to the app opens the meetings screen, where
  * {@link useSharedAudioImport} imports it, instead of an unknown screen.
  */
-export function sharedAudioRedirect(
-  path: string,
-  meetingsPath = "/meetings",
-): string | null {
+export function sharedAudioRedirect(path: string, meetingsPath = "/meetings"): string | null {
   return isSharedAudioUrl(path) ? meetingsPath : null;
 }

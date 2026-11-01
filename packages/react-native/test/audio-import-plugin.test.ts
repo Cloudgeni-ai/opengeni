@@ -4,9 +4,7 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const { addAudioImportToInfoPlist, addAudioImportToManifest } =
   require("../plugin/with-audio-import.cjs") as {
-    addAudioImportToInfoPlist(
-      plist: Record<string, unknown>,
-    ): Record<string, unknown>;
+    addAudioImportToInfoPlist(plist: Record<string, unknown>): Record<string, unknown>;
     addAudioImportToManifest(manifest: Record<string, unknown>): {
       manifest: {
         application: Array<{ activity: Array<{ "intent-filter": unknown[] }> }>;
@@ -20,9 +18,7 @@ const { pluginFeatures } = require("../plugin/call-intents.cjs") as {
 describe("audio import config plugin", () => {
   test("lets iOS offer the app for audio, beside the apps that own it, once", () => {
     const plist: Record<string, unknown> = {
-      CFBundleDocumentTypes: [
-        { CFBundleTypeName: "PDF", LSItemContentTypes: ["com.adobe.pdf"] },
-      ],
+      CFBundleDocumentTypes: [{ CFBundleTypeName: "PDF", LSItemContentTypes: ["com.adobe.pdf"] }],
     };
     addAudioImportToInfoPlist(plist);
     addAudioImportToInfoPlist(plist);
@@ -32,11 +28,7 @@ describe("audio import config plugin", () => {
         CFBundleTypeName: "Audio recording",
         CFBundleTypeRole: "Viewer",
         LSHandlerRank: "Alternate",
-        LSItemContentTypes: [
-          "public.audio",
-          "public.mpeg-4-audio",
-          "com.apple.m4a-audio",
-        ],
+        LSItemContentTypes: ["public.audio", "public.mpeg-4-audio", "com.apple.m4a-audio"],
       },
     ]);
     expect(plist.LSSupportsOpeningDocumentsInPlace).toBe(false);
@@ -62,13 +54,9 @@ describe("audio import config plugin", () => {
     };
     addAudioImportToManifest(manifest);
     const filters =
-      addAudioImportToManifest(manifest).manifest.application[0]!.activity[0]![
-        "intent-filter"
-      ];
+      addAudioImportToManifest(manifest).manifest.application[0]!.activity[0]!["intent-filter"];
     expect(filters).toHaveLength(2);
-    expect(JSON.stringify(filters[1])).toContain(
-      '"android:mimeType":"audio/*"',
-    );
+    expect(JSON.stringify(filters[1])).toContain('"android:mimeType":"audio/*"');
   });
 
   test("asking only for audio import sets up no calls", () => {
