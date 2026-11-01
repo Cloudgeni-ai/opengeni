@@ -431,7 +431,7 @@ export function IdentityPage({
         title="Organization identity"
         meta={[
           "Who your organization is and why it exists",
-          canManageOrganization ? null : "Managed by your organization's owners",
+          canManageOrganization ? null : "Managed by your organization's owners and admins",
         ]}
         actions={
           canManageOrganization ? (
@@ -483,7 +483,7 @@ export function IdentityPage({
             <p className="text-sm leading-6 text-fg-muted">
               {canManageOrganization
                 ? "Say who your organization is in organization settings, and every agent starts with it."
-                : "Your organization's owners haven't described it yet."}
+                : "Your organization's owners and admins haven't described it yet."}
             </p>
           </DetailSection>
         )}

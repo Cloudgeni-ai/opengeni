@@ -3273,6 +3273,10 @@ The runtime secret must provide values such as:
   defaults to our internal accounts (CloudGeni's host account and our own
   team's organizations) and `none` lists no account. See
   [billing-origin.md](billing-origin.md#internal-accounts-cloudgeni-and-our-team).
+- `OPENGENI_BYOK_PLATFORM_FEE_BPS` (default `500`, 5%) is the platform fee on
+  calls served by a person's own key or subscription, charged only with
+  `OPENGENI_BILLING_MODE=stripe` and only from paid credit; `0` turns it off.
+  See [billing-origin.md](billing-origin.md#platform-fee-on-your-own-keys).
 - `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING` (default `true`): on turns whose
   model Opengeni pays for while credit billing is active, hosted web search and
   OpenAI hosted image generation cost credit. Billed provider search replaces

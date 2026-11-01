@@ -20,9 +20,11 @@ import { checkWorkspaceAllowance } from "./usage-allowances";
 import { creditDebitAttributionForTurn } from "./credit-debit-attribution";
 import {
   chargeBillingOrigin,
-  getBillingBalance,
   getSpendableCreditBalance,
+  paidCreditReceipt,
+  paidDrawnMicros,
   planPostUseCreditAllocations,
+  readBillingBalance,
 } from "./credit-balances";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 
@@ -1378,14 +1380,20 @@ async function debitVideoGenerationCredits(
     );
   }
   // App use: plan credit (the Free plan's scoped credit too) pays first.
+  const origin = chargeBillingOrigin(usageOrigin);
+  const before = await readBillingBalance(tx, operation.accountId, undefined, settledAt, true);
   const allocations =
-    chargeBillingOrigin(usageOrigin) === "app"
-      ? planPostUseCreditAllocations(
-          await getBillingBalance(tx, operation.accountId, undefined, settledAt, true),
-          operation.pricedCostMicros,
-          undefined,
-        )
+    origin === "app"
+      ? planPostUseCreditAllocations(before.balance, operation.pricedCostMicros, undefined)
       : [];
+  // A refund returns as paid credit what this debit drew from paid credit.
+  const paidDrawn = paidDrawnMicros(
+    before.balance,
+    before.paid,
+    operation.pricedCostMicros,
+    allocations,
+    origin,
+  );
   const now = new Date();
   const inserted = await tx
     .insert(schema.creditLedgerEntries)
@@ -1396,13 +1404,14 @@ async function debitVideoGenerationCredits(
       amountMicros: -operation.pricedCostMicros,
       sourceType: "video_generation_operation",
       sourceId: operation.id,
-      usageOrigin: chargeBillingOrigin(usageOrigin),
+      usageOrigin: origin,
       idempotencyKey: `credit:video_generation_debit:${operation.id}`,
       metadata: {
         turnId: operation.turnId,
         modelId: operation.modelId,
         sourceMode: operation.sourceMode,
         pricedCostMicros: operation.pricedCostMicros,
+        ...(paidDrawn > 0 ? { paidDrawnMicros: paidDrawn } : {}),
       },
       occurredAt: now,
       createdAt: sql`${settledAt}::timestamptz`,
@@ -1465,6 +1474,14 @@ async function refundVideoGenerationCredits(
   );
   const refundMicros = operation.pricedCostMicros - Number(scoped?.micros ?? 0);
   if (refundMicros <= 0) return "refunded";
+  const receipt = await paidCreditReceipt(tx, {
+    accountId: operation.accountId,
+    settledAt,
+    type: "video_generation_refund",
+    amountMicros: refundMicros,
+    sourceType: "video_generation_operation",
+    sourceId: operation.id,
+  });
   const inserted = await tx
     .insert(schema.creditLedgerEntries)
     .values({
@@ -1480,9 +1497,10 @@ async function refundVideoGenerationCredits(
         modelId: operation.modelId,
         sourceMode: operation.sourceMode,
         pricedCostMicros: operation.pricedCostMicros,
+        ...receipt.metadata,
       },
       occurredAt: now,
-      createdAt: sql`${settledAt}::timestamptz`,
+      createdAt: receipt.createdAt,
     })
     .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
     .returning({ id: schema.creditLedgerEntries.id });

@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import {
+  authorizationHoldsOrganizationAdministration,
   verifyDirectModelAccess,
   MissingPermissionRefusal,
   WORKSPACE_SETTINGS_REFUSAL,
@@ -1078,7 +1079,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             const destinationSelection = destination.data;
             if (
               destinationSelection.authorityKind === "organization" &&
-              authorization.accountGrant?.permissions.includes("account:admin") !== true
+              !authorizationHoldsOrganizationAdministration(authorization)
             ) {
               throw new MissingPermissionRefusal("account:admin");
             }

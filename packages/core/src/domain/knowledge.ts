@@ -1,6 +1,11 @@
 import type { AccessGrant, KnowledgeEntryScope, Permission } from "@opengeni/contracts";
 import type { KnowledgeContext } from "@opengeni/db";
-import { hasPermission, MissingPermissionRefusal, type AccessGrantAuthorization } from "../access";
+import {
+  authorizationHoldsOrganizationAdministration,
+  hasPermission,
+  MissingPermissionRefusal,
+  type AccessGrantAuthorization,
+} from "../access";
 import { requireLiveAgentAttemptAuthorization } from "../session-authorization";
 import type { ApiRouteDeps } from "../dependencies";
 import { HTTPException } from "hono/http-exception";
@@ -112,8 +117,9 @@ export async function knowledgeContextForAccess(
   }
   const canWrite = hasPermission(grant.permissions, "documents:manage");
   const writeScopes: KnowledgeEntryScope[] = canWrite ? ["workspace", "personal"] : [];
-  // Organization authority does not follow from the workspace-admin wildcard.
-  if (canWrite && access.accountGrant?.permissions.includes("account:admin"))
+  // Organization authority does not follow from the workspace-admin wildcard:
+  // the organization's owner or admins write organization Knowledge.
+  if (canWrite && authorizationHoldsOrganizationAdministration(access))
     writeScopes.push("organization");
   return {
     accountId: grant.accountId,

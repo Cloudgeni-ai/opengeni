@@ -11693,11 +11693,15 @@
         "$.accountId": "string!",
         "$.apiDebtMicros": "integer?",
         "$.balanceMicros": "integer!",
+        "$.byokFeeDebtMicros": "integer?",
+        "$.byokPlatformFeeMonthMicros": "integer?",
         "$.creditsMicros": "integer?",
         "$.currency": "const!=[\"\\\"usd\\\"\"]",
         "$.generalBalanceMicros": "integer?",
         "$.heldCreditMicros": "integer?",
         "$.heldGeneralCreditMicros": "integer?",
+        "$.paidCreditsMicros": "integer?",
+        "$.paidPlanCreditMicros": "integer?",
         "$.plan": "ref(BillingPlanBalance)? null",
         "$.promotionDecision": "enum?=[\"\\\"denied\\\"\",\"\\\"eligible\\\"\",\"\\\"held\\\"\",\"\\\"verification_required\\\"\"]",
         "$.promotionalCredits": "array?",
@@ -24319,7 +24323,7 @@
         "$.name": "string!",
         "$.providerId": "string!",
         "$.providerName": "string!",
-        "$.unavailableReason": "enum? null=[\"\\\"region_restricted\\\"\"]",
+        "$.unavailableReason": "ref(RecordingTranscriptionUnavailableReason)? null",
         "$.usdPerHour": "number! null"
       }
     },
@@ -24351,6 +24355,14 @@
         "$.maxSpeakers": "integer?",
         "$.model": "string?",
         "$.providerId": "string?"
+      }
+    },
+    "RecordingTranscriptionUnavailableReason": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"region_restricted\\\"\",\"\\\"unpriced\\\"\"]"
       }
     },
     "RecordingVoiceprintConsent": {

@@ -25,7 +25,7 @@ function translate(error: unknown): never {
   if (state === "42501") {
     throw new CompanyProfileAgentPolicyError(
       "authority_unavailable",
-      "An active organization owner is required to manage company-profile agent autonomy.",
+      "An active organization owner or admin is required to manage company-profile agent autonomy.",
       { cause: error },
     );
   }
