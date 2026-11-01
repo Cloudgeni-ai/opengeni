@@ -137,8 +137,9 @@ export type UsageMemberListProps = {
 
 const STATUS_RANK = { exhausted: 0, warning: 1, ok: 2 } as const;
 
+/** What member shares are of: the period's whole pool, the workspace limit. */
 function shareBase(usage: WorkspaceUsageResponse): number {
-  return usage.workspace.includedCredits + usage.workspace.grantsRemaining;
+  return usage.workspace.limit ?? usage.workspace.includedCredits + usage.workspace.grantsRemaining;
 }
 
 function formatPercent(value: number): string {
