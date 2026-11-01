@@ -210,7 +210,10 @@ export function SlackAgentsSection({
           if (!open) setDeleting(null);
         }}
         title={`Delete ${deleting?.name ?? "this Slack agent"}?`}
-        consequences={["Its channel settings are removed.", "Its chats stay."]}
+        consequences={[
+          "Its channel settings are removed.",
+          deleting?.knowledgeCollectionId ? "Its chats and Memory stay." : "Its chats stay.",
+        ]}
         confirmLabel="Delete agent"
         pendingLabel="Deleting…"
         onConfirm={async () => {

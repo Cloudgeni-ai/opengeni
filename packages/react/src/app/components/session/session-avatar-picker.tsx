@@ -4,15 +4,24 @@
  * set. The caller owns the draft; `sessionAvatarFromDraft` turns it into the
  * saved avatar (null while the draft is incomplete or "none").
  */
-import { XIcon } from "lucide-react";
+import { PencilIcon, XIcon } from "lucide-react";
+import { Popover as PopoverPrimitive } from "radix-ui";
 import { SESSION_AVATAR_ICONS, isSingleSessionAvatarEmoji } from "@opengeni/contracts";
 import type { SessionAvatar as SessionAvatarValue, SessionAvatarIcon } from "@opengeni/sdk";
 
 import { Button } from "../../../ui/button";
 import { Field, TextInput } from "../../../ui/field";
+import { MENU_SURFACE_CLASS } from "../../../ui/menu-styles";
+import { containedPortal } from "../../../ui/portal-container";
 import { SegmentedControl } from "../../../ui/segmented-control";
 import { cn } from "../../lib/utils";
-import { SESSION_AVATAR_ICON_COMPONENTS, sessionAvatarInitials } from "./session-avatar";
+import {
+  SESSION_AVATAR_ICON_COMPONENTS,
+  SessionAvatar,
+  sessionAvatarInitials,
+} from "./session-avatar";
+
+const PopoverContainedPortal = containedPortal(PopoverPrimitive.Portal);
 
 export type SessionAvatarKind = "none" | "emoji" | "icon" | "letters" | "image";
 
@@ -190,6 +199,7 @@ export function SessionAvatarPicker({
         <SegmentedControl
           aria-label={`${label} kind`}
           size="sm"
+          className="self-start"
           options={kinds}
           value={kind === "none" ? undefined : kind}
           onValueChange={(next) => set({ kind: next })}
@@ -226,7 +236,7 @@ export function SessionAvatarPicker({
         ) : null}
         {kind === "icon" ? (
           <div
-            className="grid grid-cols-8 gap-1 max-sm:grid-cols-6"
+            className="grid w-fit grid-cols-8 gap-1 max-sm:grid-cols-6"
             role="group"
             aria-label="Icons"
           >
@@ -294,5 +304,93 @@ export function SessionAvatarPicker({
         ) : null}
       </div>
     </Field>
+  );
+}
+
+/**
+ * The avatar as a button that opens the picker in a popover, for forms where
+ * the avatar sits next to the name and the full picker would crowd the fields.
+ * Pass `open` and `onOpenChange` to open it when the draft can't be saved.
+ */
+export function SessionAvatarPickerButton({
+  draft,
+  onChange,
+  name,
+  image,
+  errors = NO_ERRORS,
+  label = "Avatar",
+  allowNone = true,
+  workspaceId,
+  seed,
+  open,
+  onOpenChange,
+}: Parameters<typeof SessionAvatarPicker>[0] & {
+  /** Where an image avatar lives. */
+  workspaceId: string;
+  /** Keeps an image's fallback colour stable. */
+  seed?: string | undefined;
+  open?: boolean | undefined;
+  onOpenChange?: ((open: boolean) => void) | undefined;
+}) {
+  const avatar = sessionAvatarFromDraft(draft, name, image);
+  const invalid = Boolean(errors.emoji || errors.letters);
+  return (
+    <PopoverPrimitive.Root
+      {...(open === undefined ? {} : { open })}
+      {...(onOpenChange ? { onOpenChange } : {})}
+    >
+      <PopoverPrimitive.Trigger
+        type="button"
+        aria-label={label}
+        aria-invalid={invalid || undefined}
+        title={`Change ${label.toLowerCase()}`}
+        className={cn(
+          "group/avatar relative inline-flex size-12 shrink-0 items-center justify-center rounded-lg outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40",
+          invalid && "ring-2 ring-danger/60",
+        )}
+      >
+        {avatar ? (
+          <SessionAvatar
+            avatar={avatar}
+            name={name || "Agent"}
+            workspaceId={workspaceId}
+            seed={seed}
+            size="lg"
+          />
+        ) : (
+          <span
+            aria-hidden="true"
+            className="flex size-12 items-center justify-center rounded-lg border border-dashed border-border-strong"
+          />
+        )}
+        <span
+          aria-hidden="true"
+          className="absolute -right-1 -bottom-1 flex size-5 items-center justify-center rounded-full border border-border bg-surface text-fg-muted shadow-og-sm transition-colors group-hover/avatar:text-fg"
+        >
+          <PencilIcon className="size-3" />
+        </span>
+      </PopoverPrimitive.Trigger>
+      <PopoverContainedPortal>
+        <PopoverPrimitive.Content
+          align="start"
+          sideOffset={6}
+          collisionPadding={12}
+          className={cn(
+            MENU_SURFACE_CLASS,
+            "z-50 w-[min(24rem,calc(100vw-24px))] p-3 outline-hidden",
+          )}
+        >
+          <SessionAvatarPicker
+            draft={draft}
+            onChange={onChange}
+            name={name}
+            image={image}
+            errors={errors}
+            label={label}
+            allowNone={allowNone}
+          />
+        </PopoverPrimitive.Content>
+      </PopoverContainedPortal>
+    </PopoverPrimitive.Root>
   );
 }

@@ -218,6 +218,7 @@ export function SlackConnectionsPage(props: {
         workspaceId={props.workspaceId}
         workspaceName={workspaceName}
         connections={agentConnections}
+        connectionsLoaded={botsLoaded}
         memoryReviewFirst={agentMemoryReviewFirst}
         onClose={() => setAgentPage(null)}
         onSaved={(saved, created) => {

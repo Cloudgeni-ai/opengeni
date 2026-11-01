@@ -12,18 +12,26 @@ const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 import * as SonnerPackage from "sonner";
 
-import * as DropdownModule from "@opengeni/react/ui/dropdown-menu";
-import * as DestructiveModule from "@opengeni/react/app/components/ui/destructive-confirm";
+// After the DOM exists: Radix loaded before it can't portal (the icon picker).
+const DropdownModule = await import("@opengeni/react/ui/dropdown-menu");
+const DestructiveModule = await import("@opengeni/react/app/components/ui/destructive-confirm");
 
 const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 const OTHER_WORKSPACE_ID = "44444444-4444-4444-8444-444444444444";
 const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
 const CONNECTION_ID = "66666666-6666-4666-8666-666666666666";
 const SECOND_CONNECTION_ID = "66666666-6666-4666-8666-666666666667";
+const MEMORY_ID = "77777777-7777-4777-8777-777777777777";
 
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
 mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => mutableContext.current,
+}));
+const NavigationModule = await import("@opengeni/react/app/lib/navigation");
+const navigate = mock(async (_options: { href?: string }) => undefined);
+mock.module("@opengeni/react/app/lib/navigation", () => ({
+  ...NavigationModule,
+  useNavigate: () => navigate,
 }));
 mock.module("sonner", () => ({
   ...SonnerPackage,
@@ -147,6 +155,9 @@ async function render(node: ReactNode) {
   await act(async () => root.render(node));
   return {
     host,
+    rerender: async (next: ReactNode) => {
+      await act(async () => root.render(next));
+    },
     unmount: async () => {
       await act(async () => root.unmount());
       host.remove();
@@ -255,6 +266,24 @@ describe("Slack agents section", () => {
     await view.unmount();
   });
 
+  test("delete says the agent's Memory stays in Knowledge", async () => {
+    setContext({ deleteOpenGeniSlackAgent: mock(async () => ({ deleted: true })) });
+    const view = await render(
+      <SlackAgentsSection
+        workspaceId={WORKSPACE_ID}
+        state={state([agent({ knowledgeCollectionId: MEMORY_ID })])}
+        canCreate={false}
+        onCreate={() => undefined}
+        onEdit={() => undefined}
+        onIntroduce={() => undefined}
+      />,
+    );
+    await act(async () => buttonNamed(view.host, "Delete").click());
+    const confirm = view.host.querySelector('[data-testid="confirm"]')!;
+    expect(confirm.textContent).toContain("Its chats and Memory stay.");
+    await view.unmount();
+  });
+
   test("shows nothing when there are no agents and the reader can't create one", async () => {
     setContext({});
     const view = await render(
@@ -320,11 +349,11 @@ describe("Slack agent form", () => {
     setContext({ createOpenGeniSlackAgent });
     const onSaved = mock(() => undefined);
     const view = await render(<SlackAgentFormPage {...form({ onSaved })} />);
-    expect(view.host.textContent).toContain("Works in Platform. This can't change later.");
+    expect(view.host.textContent).toContain("Works in the Platform workspace.");
     // One bot: no installation choice.
     expect(view.host.textContent).not.toContain("Slack workspace");
-    expect(view.host.textContent).toContain("A Knowledge collection named after the agent");
-    expect(view.host.textContent).not.toContain("saved for review first");
+    // Memory is made with the agent; there is nothing to set yet.
+    expect(view.host.textContent).not.toContain("Memory");
     await fill(view.host, "Data Team", "Answers questions about our metrics.");
     expect(view.host.textContent).toContain("People call it with @Opengeni +data-team");
     await submit(view.host);
@@ -464,19 +493,101 @@ describe("Slack agent form", () => {
     await view.unmount();
   });
 
-  test("edits only what changed and says new Memory waits for review", async () => {
-    const existing = agent({ memoryReviewFirst: true, instructions: "Be brief." });
+  test("edits only what changed and links its Memory, which waits for review", async () => {
+    const existing = agent({
+      memoryReviewFirst: true,
+      instructions: "Be brief.",
+      knowledgeCollectionId: MEMORY_ID,
+    });
     const updateOpenGeniSlackAgent = mock(async () => ({ agent: existing }));
     setContext({ updateOpenGeniSlackAgent });
     const view = await render(<SlackAgentFormPage {...form({ agent: existing })} />);
     expect(view.host.textContent).toContain("Edit Data team");
     expect(view.host.textContent).toContain("New Memory is saved for review first.");
+    const memory = view.host.querySelector<HTMLAnchorElement>("a[data-slack-agent-memory]")!;
+    expect(memory.textContent).toBe("Open in Knowledge");
+    const href = `/workspaces/${WORKSPACE_ID}/state?entry=${MEMORY_ID}`;
+    expect(memory.getAttribute("href")).toBe(href);
+    navigate.mockClear();
+    await act(async () => memory.click());
+    expect(navigate).toHaveBeenCalledWith({ href });
     await type(view.host.querySelector("textarea")!, "Be brief. Link the chart you used.");
     await submit(view.host);
     expect(updateOpenGeniSlackAgent).toHaveBeenCalledWith(WORKSPACE_ID, existing.id, {
       expectedVersion: 3,
       instructions: "Be brief. Link the chart you used.",
     });
+    await view.unmount();
+  });
+
+  test("creates once the Opengeni bot loads after the form opened", async () => {
+    const createOpenGeniSlackAgent = mock(async () => ({ agent: agent() }));
+    setContext({ createOpenGeniSlackAgent });
+    // "Use in Slack" on a bot template can open the form before the bots load.
+    const view = await render(
+      <SlackAgentFormPage {...form({ connections: [], connectionsLoaded: false })} />,
+    );
+    expect(view.host.textContent).toContain("Loading Slack workspaces…");
+    await view.rerender(<SlackAgentFormPage {...form({ connections: [bot()] })} />);
+    await fill(view.host, "Data team", "Answers questions about our metrics.");
+    await submit(view.host);
+    expect(createOpenGeniSlackAgent).toHaveBeenCalledWith(
+      WORKSPACE_ID,
+      expect.objectContaining({ connectionId: CONNECTION_ID }),
+    );
+    await view.unmount();
+  });
+
+  test("says why it can't create when no Slack workspace is connected", async () => {
+    setContext({});
+    const view = await render(<SlackAgentFormPage {...form({ connections: [] })} />);
+    expect(view.host.textContent).toContain("Add a Slack workspace to create Slack agents.");
+    expect(buttonNamed(view.host, "Create agent").disabled).toBe(true);
+    await view.unmount();
+  });
+
+  test("keeps the page gutter, like the other Capabilities pages", async () => {
+    setContext({});
+    const view = await render(<SlackAgentFormPage {...form()} />);
+    // The flush variant strips the gutter for columns that already have one;
+    // the Capabilities detail area has none, so the fields would touch the sidebar.
+    const frame = view.host.querySelector<HTMLElement>('[data-slot="form-frame"]')!;
+    expect(frame.className).not.toContain("[&>form>header]:px-0");
+    expect(frame.className).not.toContain("[&>form>[data-slot=form-body]]:px-0");
+    await view.unmount();
+  });
+
+  test("the icon picker opens from the icon next to the name", async () => {
+    const createOpenGeniSlackAgent = mock(async () => ({ agent: agent() }));
+    setContext({ createOpenGeniSlackAgent });
+    const view = await render(<SlackAgentFormPage {...form()} />);
+    // Booleans: a failing matcher on a DOM node prints the whole tree.
+    expect(document.querySelector('[aria-label="Icons"]') === null).toBe(true);
+    const trigger = view.host.querySelector<HTMLButtonElement>('button[aria-label="Icon"]')!;
+    expect(trigger !== null).toBe(true);
+    await act(async () => {
+      trigger.click();
+      // The popover mounts its portal on the next tick.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const icons = document.querySelector('[aria-label="Icons"]')!;
+    expect(icons !== null).toBe(true);
+    await act(async () => icons.querySelector<HTMLButtonElement>('[aria-label="Rocket"]')!.click());
+    await fill(view.host, "Data team", "Answers questions about our metrics.");
+    await submit(view.host);
+    expect(createOpenGeniSlackAgent).toHaveBeenCalledWith(
+      WORKSPACE_ID,
+      expect.objectContaining({
+        avatar: expect.objectContaining({ kind: "icon", icon: "rocket" }),
+      }),
+    );
+    await view.unmount();
+  });
+
+  test("shows no Memory link for an agent without one", async () => {
+    setContext({});
+    const view = await render(<SlackAgentFormPage {...form({ agent: agent() })} />);
+    expect(view.host.querySelector("[data-slack-agent-memory]") === null).toBe(true);
     await view.unmount();
   });
 
