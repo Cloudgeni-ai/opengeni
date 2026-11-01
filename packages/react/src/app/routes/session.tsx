@@ -3903,8 +3903,10 @@ function SessionChatPane(props: {
     props.session.workspaceId,
     "connections:write",
   );
+  // An archived chat is read-only: there is nothing to retry or recover.
   const failureRecovery =
     !props.hasNewer &&
+    !readOnlyArchive &&
     props.failure &&
     (props.session.status === "failed" ||
       (props.creditExhausted && props.session.status === "idle")) ? (

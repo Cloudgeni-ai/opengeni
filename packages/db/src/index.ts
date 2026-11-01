@@ -34751,9 +34751,9 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions &
     pinsOnly?: boolean | undefined;
     /** Skip pin hydration when the caller reads the pinned section separately. */
     includePinned?: boolean | undefined;
-    /** List personally archived chats instead of active chats. */
+    /** List archived chats instead of active chats. */
     archivedOnly?: boolean | undefined;
-    sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
+    sortBy?: "updatedAt" | "createdAt" | "name" | "archivedAt" | undefined;
     archiveStatus?: "active" | "archived" | "all" | undefined;
     /** Return a continuation cursor. Disable for legacy one-page array reads. */
     materializeSnapshot?: boolean | undefined;

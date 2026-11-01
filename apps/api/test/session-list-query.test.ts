@@ -94,6 +94,14 @@ describe("session list sorting and archive query", () => {
         });
       }
     }
+    // The Archived view sorts by archive date by default.
+    expect(sessionListQuery({ sortBy: "archivedAt", archiveStatus: "archived" })).toMatchObject({
+      sortBy: "archivedAt",
+      archiveStatus: "archived",
+    });
+    expect(sessionListQuery({ sortBy: "archivedAt", archivedOnly: "true" }).sortBy).toBe(
+      "archivedAt",
+    );
     expect(sessionListQuery({ archivedOnly: "true" })).toMatchObject({
       archivedOnly: true,
       sortBy: undefined,
@@ -106,6 +114,8 @@ describe("session list sorting and archive query", () => {
   test("rejects invalid modes, contradictory aliases and archived pins", () => {
     for (const query of [
       { sortBy: "archivedAt" },
+      { sortBy: "archivedAt", archiveStatus: "active" },
+      { sortBy: "archivedAt", archiveStatus: "all" },
       { sortBy: "" },
       { archiveStatus: "idle" },
       { archiveStatus: "all", archivedOnly: "true" },

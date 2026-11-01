@@ -6338,7 +6338,7 @@ export function sessionListQuery(
   contentArchivedOnly: boolean;
   mineOnly: boolean;
   archivedOnly: boolean;
-  sortBy: "updatedAt" | "createdAt" | "name" | undefined;
+  sortBy: "updatedAt" | "createdAt" | "name" | "archivedAt" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
   channelId: string | null | undefined;
   createdBy: { kind: "subject" | "service"; subjectId: string } | undefined;
@@ -6443,13 +6443,22 @@ export function sessionListQuery(
     throw new HTTPException(400, { message: 'archivedOnly must be the literal "true"' });
   }
   const archivedOnly = query.archivedOnly === "true";
-  const sortBy = z.enum(["updatedAt", "createdAt", "name"]).optional().safeParse(query.sortBy);
+  const sortBy = z
+    .enum(["updatedAt", "createdAt", "name", "archivedAt"])
+    .optional()
+    .safeParse(query.sortBy);
   const archiveStatus = z
     .enum(["active", "archived", "all"])
     .optional()
     .safeParse(query.archiveStatus);
   if (!sortBy.success || !archiveStatus.success) {
     throw new HTTPException(400, { message: "Invalid session sortBy or archiveStatus" });
+  }
+  // Only archived chats have an archive date to sort by.
+  if (sortBy.data === "archivedAt" && archiveStatus.data !== "archived" && !archivedOnly) {
+    throw new HTTPException(400, {
+      message: 'sortBy "archivedAt" requires archiveStatus "archived"',
+    });
   }
   if (archivedOnly && archiveStatus.data !== undefined && archiveStatus.data !== "archived") {
     throw new HTTPException(400, { message: "archivedOnly conflicts with archiveStatus" });
