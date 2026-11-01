@@ -118,6 +118,7 @@ import { useArtifactCatalogMutationInvalidation } from "../lib/use-artifact-cata
 import {
   creditExhaustedFromEvents,
   conversationTimeline,
+  approvalsDecidable,
   projectPendingApprovals,
   useComposer,
   useFileAttachments,
@@ -2086,6 +2087,11 @@ function useSessionEditableArtifactSummaries(input: {
     : { artifacts: [], status: "loading", retry, applyPin };
 }
 
+/** One decision per approval and question round: a new round under the same id is new. */
+function approvalDecisionKey(approval: PendingApproval): string {
+  return `${approval.id}\u0000${approval.elicitation?.round ?? ""}`;
+}
+
 function SessionChatPane(props: {
   session: Session;
   /** A narrow panel beside another view gets narrower gutters. */
@@ -2374,10 +2380,32 @@ function SessionChatPane(props: {
     terminal,
   ]);
   const agentsSignal = useMemo(() => sessionAgentsSignal(t, props.agentNodes), [props.agentNodes]);
-  const waitingSubSessions = useMemo(
-    () => waitingDescendants(props.agentNodes),
-    [props.agentNodes],
+  // Sub-sessions resuming from an approval decided on their card here: kept
+  // in the list so the pause's other approvals stay decidable meanwhile.
+  const [resumingSubSessions, setResumingSubSessions] = useState<ReadonlySet<string>>(
+    () => new Set(),
   );
+  const onSubSessionResumingChange = useCallback((sessionId: string, resuming: boolean) => {
+    setResumingSubSessions((current) => {
+      if (current.has(sessionId) === resuming) return current;
+      const next = new Set(current);
+      if (resuming) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+  const waitingSubSessions = useMemo(
+    () => waitingDescendants(props.agentNodes, resumingSubSessions),
+    [props.agentNodes, resumingSubSessions],
+  );
+  // A sub-session whose turn ended (idle, failed) is no longer resuming.
+  useEffect(() => {
+    if (resumingSubSessions.size === 0) return;
+    const live = new Set(waitingSubSessions.map((session) => session.id));
+    for (const id of resumingSubSessions) {
+      if (!live.has(id)) onSubSessionResumingChange(id, false);
+    }
+  }, [onSubSessionResumingChange, resumingSubSessions, waitingSubSessions]);
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -2430,22 +2458,37 @@ function SessionChatPane(props: {
   );
   const [approvalPending, setApprovalPending] = useState<Record<string, "approve" | "reject">>({});
   const [approvalSettled, setApprovalSettled] = useState<Record<string, "approve" | "reject">>({});
-  // Decision state is scoped to ONE requires_action pause. Once the session
-  // resumes, both maps reset — otherwise a later approval that reuses an id
-  // (including the index-fallback ids) would render permanently disabled, and
-  // long sessions would accumulate stale entries.
+  // Decision state is scoped to ONE turn's pauses. A decision resumes the turn
+  // while the pause's other approvals stay decidable, so the maps reset only
+  // when the turn ends, and each entry is keyed by the question round it
+  // decided: an MCP server asking again under the same call id asks anew.
   useEffect(() => {
-    if (props.session.status !== "requires_action") {
+    if (!approvalsDecidable(props.session.status)) {
       setApprovalPending((current) => (Object.keys(current).length ? {} : current));
       setApprovalSettled((current) => (Object.keys(current).length ? {} : current));
     }
   }, [props.session.status]);
+  // An approval no longer waiting drops its entry, so long sessions never
+  // accumulate stale ones.
+  useEffect(() => {
+    const waiting = new Set(props.approvals.map(approvalDecisionKey));
+    setApprovalSettled((current) => {
+      const kept = Object.entries(current).filter(([key]) => waiting.has(key));
+      return kept.length === Object.keys(current).length ? current : Object.fromEntries(kept);
+    });
+  }, [props.approvals]);
+  // Rapid clicks land before React re-renders with the pending state, so the
+  // in-flight fence is a ref: one request per approval, however fast.
+  const approvalInFlightRef = useRef(new Set<string>());
   const decideApproval = useCallback(
     async (approvalId: string, decision: "approve" | "reject", answer?: McpElicitationAnswer) => {
-      if (approvalPending[approvalId] || approvalSettled[approvalId]) {
+      const approval = props.approvals.find((candidate) => candidate.id === approvalId);
+      const key = approval ? approvalDecisionKey(approval) : approvalId;
+      if (approvalInFlightRef.current.has(key) || approvalPending[key] || approvalSettled[key]) {
         return;
       }
-      setApprovalPending((current) => ({ ...current, [approvalId]: decision }));
+      approvalInFlightRef.current.add(key);
+      setApprovalPending((current) => ({ ...current, [key]: decision }));
       // A failure propagates so the approval surface releases its fence and
       // the buttons stay live for a retry.
       try {
@@ -2454,12 +2497,13 @@ function SessionChatPane(props: {
           : props.onReject(approvalId));
         setApprovalSettled((current) => ({
           ...current,
-          [approvalId]: decision,
+          [key]: decision,
         }));
       } finally {
+        approvalInFlightRef.current.delete(key);
         setApprovalPending((current) => {
           const next = { ...current };
-          delete next[approvalId];
+          delete next[key];
           return next;
         });
       }
@@ -4019,8 +4063,10 @@ function SessionChatPane(props: {
                               {/* Recovery follows the failed request, only in the latest history window.
                         Credit exhaustion also surfaces on idle sessions. */}
                               {failureRecovery}
+                              {/* The pause's other approvals stay up while a decision
+                        resumes the turn: deciding them never waits for it. */}
                               {props.approvals.length > 0 &&
-                                props.session.status === "requires_action" && (
+                                approvalsDecidable(props.session.status) && (
                                   <ApprovalSurface
                                     approvals={props.approvals}
                                     selectedApprovalId={selectedApprovalId}
@@ -4255,6 +4301,7 @@ function SessionChatPane(props: {
                       events={props.events}
                       waiting={waitingSubSessions}
                       onResolved={props.onDescendantResolved}
+                      onResumingChange={onSubSessionResumingChange}
                       refreshSignal={props.descendantRefreshSignal}
                       loadSkillReview={loadSkillReview}
                       allowedSaveTo={secretSaveTargets(
