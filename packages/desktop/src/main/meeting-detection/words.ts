@@ -23,9 +23,18 @@ export interface MeetingWords {
   stop: string;
   /** Closes the question and keeps recording. */
   keepRecording: string;
+  /**
+   * Said when a call started recording without asking. Added later, so an
+   * app's own words may lack it and the English is shown.
+   */
+  recordingStarted?: string;
+  /** Why it is recording. `{app}` is the call's app. */
+  callRecording?: string;
+  /** Closes the card and keeps recording. */
+  ok?: string;
 }
 
-export const ENGLISH_MEETING_WORDS: MeetingWords = {
+export const ENGLISH_MEETING_WORDS: Required<MeetingWords> = {
   title: "Meeting detected",
   recordQuestion: "Record this meeting?",
   browserStarted: "{app} is using your microphone.",
@@ -36,6 +45,9 @@ export const ENGLISH_MEETING_WORDS: MeetingWords = {
   callEnded: "{app} stopped using your microphone. Still recording.",
   stop: "Stop recording",
   keepRecording: "Keep recording",
+  recordingStarted: "Recording this call",
+  callRecording: "A call in {app} started, so it's being recorded.",
+  ok: "OK",
 };
 
 /** `template` with each `{name}` replaced. */

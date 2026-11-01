@@ -402,6 +402,20 @@ pub trait Engine: Send + Sync + 'static {
         ))
     }
 
+    /// Marks `vm` its sandbox's only copy, or clears the mark: the
+    /// sandbox has no copy in object storage and the VM makes none, so no
+    /// other host can ever run it, and the host's guard leaves it running
+    /// when the host's lease runs out (ADR 18). The mark stays with the VM
+    /// until it ends or the mark is cleared, and holds only while the
+    /// agent process that set it runs ([`cgroup::OnlyCopy`]): an agent
+    /// that restarts marks the VMs it takes back again. A VM starts
+    /// unmarked, whatever an earlier VM under its name was. An engine
+    /// whose VMs no guard stops has nothing to mark, and does nothing.
+    fn set_only_copy(&self, vm: &Self::Vm, only: bool) -> Result<(), EngineError> {
+        let _ = (vm, only);
+        Ok(())
+    }
+
     /// Whether the kernel may compress running VMs' memory (ADR 24): on
     /// an engine that does not, a running VM's compressed pages are a
     /// defect worth a warning.

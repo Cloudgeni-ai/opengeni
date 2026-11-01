@@ -2514,6 +2514,11 @@ export type BuildAgentOptions = {
   attemptConnectorActionBindings?: readonly AttemptConnectorActionBinding[];
   /** Exact open-suffix call the current human approved before this agent was rebuilt. */
   approvedToolCallId?: string;
+  /**
+   * Every open-suffix call this resume runs as approved: the trigger's and the
+   * sibling approvals of the same pause decided before it began.
+   */
+  approvedToolCallIds?: readonly string[];
   // Historical prompt-replay/embedding compatibility slot. New Knowledge is
   // retrieved through tools and must not be composed here as standing guidance.
   // Omitted/blank preserves the existing prompt bytes.
@@ -3599,17 +3604,17 @@ export function buildOpenGeniAgent(
       settings,
       options.connectorActionPolicy,
       options.resolvedMcpConnectionIds,
-      options.approvedToolCallId,
+      approvedToolCallIdsOf(options),
     );
     installAttemptConnectorActionPolicy(
       agent as unknown as ApprovalCapableAgent,
       options.attemptConnectorActionBindings ?? [],
       options.connectorActionPolicy,
-      options.approvedToolCallId,
+      approvedToolCallIdsOf(options),
     );
     installInteractionInterventionPolicy(
       agent as unknown as ApprovalCapableAgent,
-      options.approvedToolCallId,
+      approvedToolCallIdsOf(options),
       options.unattendedNow === true,
     );
     installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
@@ -3617,7 +3622,7 @@ export function buildOpenGeniAgent(
     if (options.unattendedNow) {
       installUnattendedApprovalRefusal(
         agent as unknown as ApprovalCapableAgent,
-        options.approvedToolCallId,
+        approvedToolCallIdsOf(options),
       );
     }
     installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
@@ -3748,17 +3753,17 @@ export function buildOpenGeniAgent(
     settings,
     options.connectorActionPolicy,
     options.resolvedMcpConnectionIds,
-    options.approvedToolCallId,
+    approvedToolCallIdsOf(options),
   );
   installAttemptConnectorActionPolicy(
     agent as unknown as ApprovalCapableAgent,
     options.attemptConnectorActionBindings ?? [],
     options.connectorActionPolicy,
-    options.approvedToolCallId,
+    approvedToolCallIdsOf(options),
   );
   installInteractionInterventionPolicy(
     agent as unknown as ApprovalCapableAgent,
-    options.approvedToolCallId,
+    approvedToolCallIdsOf(options),
     options.unattendedNow === true,
   );
   installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
@@ -3766,7 +3771,7 @@ export function buildOpenGeniAgent(
   if (options.unattendedNow) {
     installUnattendedApprovalRefusal(
       agent as unknown as ApprovalCapableAgent,
-      options.approvedToolCallId,
+      approvedToolCallIdsOf(options),
     );
   }
   installToolPreflightContainment(agent as unknown as ApprovalCapableAgent);
@@ -4157,7 +4162,8 @@ export function unattendedApprovalRefusalOutput(): {
  * needed and the matching `invoke` returns the refusal without running any
  * inner wrapper, so nothing executes and nothing is approved. Policy is read
  * exactly as configured; only the wait is replaced. An already approved call
- * (`approvedToolCallId`) keeps its normal path.
+ * (`approvedToolCallIds`: the resume's trigger and approved siblings) keeps
+ * its normal path.
  *
  * Installed before preflight containment, which wraps it like any other
  * Opengeni approval hook (so a throwing policy check stays contained), and
@@ -4165,7 +4171,7 @@ export function unattendedApprovalRefusalOutput(): {
  */
 function installUnattendedApprovalRefusal(
   agent: ApprovalCapableAgent,
-  approvedToolCallId?: string,
+  approvedToolCallIds: ReadonlySet<string> = NO_APPROVED_TOOL_CALLS,
 ): void {
   const refused = new Set<string>();
   const listMcpTools = agent.getMcpTools.bind(agent);
@@ -4183,7 +4189,7 @@ function installUnattendedApprovalRefusal(
             callId: Parameters<typeof needsApproval>[2],
           ) => {
             const required = await needsApproval(runContext, parsedInput, callId);
-            if (!callId || callId === approvedToolCallId) return required;
+            if (!callId || approvedToolCallIds.has(callId)) return required;
             if (!required) {
               refused.delete(callId);
               return false;
@@ -4205,7 +4211,7 @@ function installUnattendedApprovalRefusal(
   if (clone) {
     agent.clone = (config: unknown) => {
       const cloned = clone(config);
-      installUnattendedApprovalRefusal(cloned, approvedToolCallId);
+      installUnattendedApprovalRefusal(cloned, approvedToolCallIds);
       return cloned;
     };
   }
@@ -4294,11 +4300,25 @@ function installToolPreflightContainment(agent: ApprovalCapableAgent): void {
  * paths. The base (non-sandbox) `Agent.clone` spreads `...this` and would carry
  * the override, but re-installing is idempotent there and keeps one code path.
  */
+const NO_APPROVED_TOOL_CALLS: ReadonlySet<string> = new Set();
+
+/** The open-suffix calls an agent build runs as approved, from either option. */
+function approvedToolCallIdsOf(options: {
+  approvedToolCallId?: string;
+  approvedToolCallIds?: readonly string[];
+}): ReadonlySet<string> {
+  const ids = [
+    ...(options.approvedToolCallIds ?? []),
+    ...(options.approvedToolCallId ? [options.approvedToolCallId] : []),
+  ];
+  return ids.length > 0 ? new Set(ids) : NO_APPROVED_TOOL_CALLS;
+}
+
 function installMcpApprovalPolicy(
   agent: ApprovalCapableAgent,
   policies: McpApprovalPolicy[],
   connectorActionPolicy?: ConnectorActionPolicyHooks,
-  approvedToolCallId?: string,
+  approvedToolCallIds: ReadonlySet<string> = NO_APPROVED_TOOL_CALLS,
 ): void {
   const approvalRequiredCallIds = new Set<string>();
   const preparations = new Map<string, ConnectorActionPolicyPreparation>();
@@ -4466,10 +4486,10 @@ function installMcpApprovalPolicy(
           }
           if (policy.connectorBacked) {
             const approvalConfirmed =
-              approvalRequiredCallIds.delete(callId) || approvedToolCallId === callId;
+              approvalRequiredCallIds.delete(callId) || approvedToolCallIds.has(callId);
             const preparation =
               preparations.get(callId) ??
-              (approvedToolCallId === callId
+              (approvedToolCallIds.has(callId)
                 ? ({ managed: true, decision: "ask" } as const)
                 : undefined);
             preparations.delete(callId);
@@ -4484,10 +4504,10 @@ function installMcpApprovalPolicy(
             );
           }
           const approvalConfirmed =
-            approvalRequiredCallIds.has(callId) || approvedToolCallId === callId;
+            approvalRequiredCallIds.has(callId) || approvedToolCallIds.has(callId);
           const preparation =
             preparations.get(callId) ??
-            (approvedToolCallId === callId
+            (approvedToolCallIds.has(callId)
               ? ({ managed: true, decision: "ask" } as const)
               : undefined);
           preparations.delete(callId);
@@ -4508,7 +4528,7 @@ function installMcpApprovalPolicy(
   if (originalClone) {
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
-      installMcpApprovalPolicy(cloned, policies, connectorActionPolicy, approvedToolCallId);
+      installMcpApprovalPolicy(cloned, policies, connectorActionPolicy, approvedToolCallIds);
       return cloned;
     };
   }
@@ -4523,7 +4543,7 @@ function installAttemptConnectorActionPolicy(
   agent: ApprovalCapableAgent,
   bindings: readonly AttemptConnectorActionBinding[],
   connectorActionPolicy?: ConnectorActionPolicyHooks,
-  approvedToolCallId?: string,
+  approvedToolCallIds: ReadonlySet<string> = NO_APPROVED_TOOL_CALLS,
 ): void {
   if (bindings.length === 0) return;
   const approvalRequiredCallIds = new Set<string>();
@@ -4588,10 +4608,10 @@ function installAttemptConnectorActionPolicy(
             throw new Error("Attempt connector action was not executed: missing durable identity");
           }
           const approvalConfirmed =
-            approvalRequiredCallIds.delete(callId) || approvedToolCallId === callId;
+            approvalRequiredCallIds.delete(callId) || approvedToolCallIds.has(callId);
           const preparation =
             preparations.get(callId) ??
-            (approvedToolCallId === callId
+            (approvedToolCallIds.has(callId)
               ? ({ managed: true, decision: "ask" } as const)
               : undefined);
           preparations.delete(callId);
@@ -4616,7 +4636,7 @@ function installAttemptConnectorActionPolicy(
         cloned,
         bindings,
         connectorActionPolicy,
-        approvedToolCallId,
+        approvedToolCallIds,
       );
       return cloned;
     };
@@ -4669,7 +4689,7 @@ export function interactionRequestArgumentsProblem(serialized: string): string |
  */
 function installInteractionInterventionPolicy(
   agent: ApprovalCapableAgent,
-  approvedToolCallId?: string,
+  approvedToolCallIds: ReadonlySet<string> = NO_APPROVED_TOOL_CALLS,
   unattendedNow = false,
 ): void {
   const approvalRequiredCallIds = new Set<string>();
@@ -4724,7 +4744,7 @@ function installInteractionInterventionPolicy(
             throw new Error("Interaction intervention is missing its durable approval identity");
           }
           const approvalConfirmed =
-            approvalRequiredCallIds.delete(callId) || approvedToolCallId === callId;
+            approvalRequiredCallIds.delete(callId) || approvedToolCallIds.has(callId);
           return await runWithModelToolInvocation(
             {
               modelName: tool.name,
@@ -4741,7 +4761,7 @@ function installInteractionInterventionPolicy(
   if (originalClone) {
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
-      installInteractionInterventionPolicy(cloned, approvedToolCallId, unattendedNow);
+      installInteractionInterventionPolicy(cloned, approvedToolCallIds, unattendedNow);
       return cloned;
     };
   }
@@ -4762,7 +4782,7 @@ function applyMcpApprovalPolicy(
   settings: Settings,
   connectorActionPolicy?: ConnectorActionPolicyHooks,
   resolvedMcpConnectionIds?: ReadonlyMap<string, string>,
-  approvedToolCallId?: string,
+  approvedToolCallIds: ReadonlySet<string> = NO_APPROVED_TOOL_CALLS,
 ): void {
   const policies: McpApprovalPolicy[] = settings.mcpServers
     .filter(
@@ -4805,7 +4825,7 @@ function applyMcpApprovalPolicy(
     agent as unknown as ApprovalCapableAgent,
     policies,
     connectorActionPolicy,
-    approvedToolCallId,
+    approvedToolCallIds,
   );
 }
 

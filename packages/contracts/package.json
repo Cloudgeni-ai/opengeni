@@ -86,6 +86,10 @@
       "types": "./src/session-usage-limit-refusal.ts",
       "default": "./src/session-usage-limit-refusal.ts"
     },
+    "./seat-upgrade": {
+      "types": "./src/seat-upgrade.ts",
+      "default": "./src/seat-upgrade.ts"
+    },
     "./browser-storage": {
       "types": "./src/browser-storage.ts",
       "default": "./src/browser-storage.ts"

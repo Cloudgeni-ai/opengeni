@@ -166,9 +166,10 @@ organization allows Only me chats.
   owner. The run rechecks that the owner is still an active member who may
   create Only me chats; if not, the run fails closed instead of creating a
   shared chat.
-- A schedule that posts into an Only me chat, saves to the owner's personal
-  knowledge, or runs on the owner's own (personal) Connected Machine is always
-  Only me. Widening it is refused while that holds. See
+- A schedule that posts into an Only me chat or saves to the owner's personal
+  knowledge is always Only me. Widening it is refused while that holds.
+- A schedule runs as its owner, so one on the owner's own (personal) Connected
+  Machine may be Only me or Workspace. See
   [Connected Machines](connected-machines.md) for how each run re-proves the
   owner's access to the machine.
 - Unless the organization turns it off under Security, workspace admins see

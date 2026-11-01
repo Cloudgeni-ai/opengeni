@@ -11,11 +11,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { stampDelegatedHumanAuthorization, type ApiRouteDeps } from "@opengeni/core";
@@ -35,7 +31,6 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("organization-inference-residency-routes");
   if (!acquired) throw new Error("EU-only inference route tests require PostgreSQL");
   shared = acquired;
-  await grantDeferredRuntimeAccess(shared.admin);
   db = createDb(shared.appUrl);
 }, 180_000);
 afterAll(async () => {
@@ -337,21 +332,6 @@ test("without Opengeni sign-in nobody could turn it off, so it can't be turned o
       change(true, 0),
     );
     expect(response.status).toBe(409);
-  }
-});
-
-test("until the change function is granted, changes are unavailable", async () => {
-  const app = buildApp();
-  const owner = await person("owner");
-  await shared.admin.unsafe(
-    "REVOKE EXECUTE ON FUNCTION opengeni_private.update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid) FROM opengeni_app",
-  );
-  try {
-    expect(
-      (await patch(app, owner.organizationId, browser(owner.cookie), change(true, 0))).status,
-    ).toBe(503);
-  } finally {
-    await grantDeferredRuntimeAccess(shared.admin);
   }
 });
 

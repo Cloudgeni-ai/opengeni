@@ -39,9 +39,13 @@ avoids that, but two of a host's rules then reach past compute:
 - **The service's stop hook does what the reset did, to compute alone.**
   After every end of the guard, however it ended (killed by its watchdog,
   crashed, failed to start, stopped), `ExecStopPost=compute-host
-  guard-stopped` kills every VM (`cgroup.kill` on the VMs' cgroup, again
-  until it is empty) and restarts the agent if it runs, which starts a new
-  guard with it. A stop on purpose, with the agent, stays stopped. So the
+  guard-stopped` kills every VM (`cgroup.kill` on each VM's group, again
+  until none is left) but those its running agent marked their sandbox's
+  only copy, which no other host can ever run and which the reset spared
+  no one for (ADR 18), and restarts the agent if it runs, which starts a
+  new guard with it. When the VMs cannot be told apart, it kills them
+  all at once, as before. A stop on purpose, with the agent, stays
+  stopped. So the
   safety budget holds unchanged: W after the last feed systemd kills the
   guard, and the hook's kill stops the VMs within S. The other VMs never
   notice.

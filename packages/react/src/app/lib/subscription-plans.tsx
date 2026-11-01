@@ -1,8 +1,11 @@
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
+import { seatUpgradePlan } from "@opengeni/contracts/seat-upgrade";
 import { apiErrorFacts } from "../../ui/api-error";
 
 export type CatalogPlan = BillingSubscriptionCatalog["plans"][number];
 export type PlanAction = "checkout" | "upgrade" | "downgrade" | "cancel";
+/** The one plan that adds the seats a refused invitation needs. */
+export type SeatUpgrade = { key: string; label: string };
 
 export function subscriptionAction(
   current: BillingPlanBalance,
@@ -35,6 +38,36 @@ export function planSeats(plan: BillingPlanBalance): string {
   return plan.seatLimit === null
     ? `${plan.seatsUsed} seats used · Unlimited`
     : `${plan.seatsUsed} / ${plan.seatLimit} seats used`;
+}
+
+/** True when the plan has no seat left for another invitation. */
+export function planSeatsFull(plan: BillingPlanBalance | null | undefined): boolean {
+  return plan != null && plan.seatLimit !== null && plan.seatsUsed >= plan.seatLimit;
+}
+
+/** The plan that gives room for `additionalSeats` more people, from the live catalog. */
+export function seatUpgradeFor(
+  plan: BillingPlanBalance | null | undefined,
+  plans: readonly CatalogPlan[] | null | undefined,
+  additionalSeats = 1,
+): SeatUpgrade | null {
+  if (!plan || !plans?.length) return null;
+  const target = seatUpgradePlan(plans, plan.key, plan.seatsUsed + Math.max(1, additionalSeats));
+  return target ? { key: target.key, label: target.label } : null;
+}
+
+/** The plan a seat-limit refusal names in its details, when the server sent one. */
+export function seatUpgradeFromError(error: unknown): SeatUpgrade | null {
+  const details =
+    error && typeof error === "object" && "details" in error
+      ? (error as { details?: unknown }).details
+      : null;
+  if (!details || typeof details !== "object") return null;
+  const { upgradePlan, upgradePlanLabel } = details as Record<string, unknown>;
+  if (typeof upgradePlan !== "string" || typeof upgradePlanLabel !== "string") return null;
+  const key = upgradePlan.trim();
+  const label = upgradePlanLabel.trim();
+  return key && label ? { key, label } : null;
 }
 
 export function isSeatLimitError(

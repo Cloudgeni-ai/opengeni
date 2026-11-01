@@ -22,7 +22,7 @@
 //! host connects to the guest's notice port and sends one line:
 //!
 //! ```text
-//! restored <unix time in nanoseconds> sandbox=<sandbox id> seed=<hex> order=<generation>.<revision> owner=<owner epoch>
+//! restored <unix time in nanoseconds> sandbox=<sandbox id> seed=<hex> order=<generation>.<revision> owner=<owner epoch> disk=<bytes>
 //! ```
 //!
 //! The guest sets its clock, drops connections it opened before the
@@ -33,6 +33,16 @@
 //! sandbox is used only after `ok seeded`: until it reseeds, it draws the
 //! numbers every other clone of the same snapshot draws. Later
 //! `key=value` fields may follow; a guest ignores those it does not know.
+//!
+//! `disk` is how long the sandbox's disk is, as the host made it: a claim
+//! or a create from a template may have made it longer than the memory the
+//! guest wakes with knows, and the guest's kernel learns of that only once
+//! it handles its disk's change after the resume. Before it answers, the
+//! guest waits for its kernel to see the disk that long and grows its root
+//! file system to fill it, so a sandbox is never used with less room than
+//! it asked for. A guest of a release before this grows it a moment after
+//! it answers.
+//!
 //! The host retries until the guest answers or a deadline passes, so set a
 //! notice port only for guest images that listen on it; a guest that never
 //! answers costs every restore the whole deadline (and still runs).
@@ -148,17 +158,24 @@ fn unix_nanos(at: SystemTime) -> io::Result<u128> {
 }
 
 /// Formats the notice to sandbox `sandbox` with `seed` at `order` for the
-/// time `now`.
+/// time `now`, with its disk's length, if known.
 fn notice(
     now: SystemTime,
     sandbox: impl fmt::Display,
     seed: &str,
     (owner, generation, revision): Order,
+    disk: Option<u64>,
 ) -> io::Result<String> {
+    use std::fmt::Write as _;
     let nanos = unix_nanos(now)?;
-    Ok(format!(
-        "restored {nanos} sandbox={sandbox} seed={seed} order={generation}.{revision} owner={owner}\n"
-    ))
+    let mut line = format!(
+        "restored {nanos} sandbox={sandbox} seed={seed} order={generation}.{revision} owner={owner}"
+    );
+    if let Some(disk) = disk {
+        let _ = write!(line, " disk={disk}");
+    }
+    line.push('\n');
+    Ok(line)
 }
 
 /// 32 bytes from the host's random number generator, in hex.
@@ -183,9 +200,10 @@ const FIRST_ATTEMPT: Duration = Duration::from_secs(1);
 /// Pause before trying again after the guest dropped the connection.
 const RETRY_PAUSE: Duration = Duration::from_millis(5);
 
-/// Tells the guest of sandbox `sandbox`, whose record is at `order`, through
-/// the VM's vsock socket and waits for its answer, trying again until
-/// `deadline` has passed.
+/// Tells the guest of sandbox `sandbox`, whose record is at `order` and
+/// whose disk is `disk` bytes long (if known), through the VM's vsock
+/// socket and waits for its answer, trying again until `deadline` has
+/// passed.
 ///
 /// Retrying matters right after a restore: the guest kernel first handles
 /// the VMM's vsock transport reset, and a connection that arrives in that
@@ -203,6 +221,7 @@ pub async fn tell_restored(
     port: u32,
     sandbox: impl fmt::Display,
     order: Order,
+    disk: Option<u64>,
     deadline: Duration,
 ) -> io::Result<Told> {
     let sandbox = sandbox.to_string();
@@ -215,7 +234,7 @@ pub async fn tell_restored(
         let left = give_up.saturating_duration_since(Instant::now());
         let error = match tokio::time::timeout(
             wait.min(left),
-            exchange(vsock_socket, port, &sandbox, &seed, order),
+            exchange(vsock_socket, port, &sandbox, &seed, order, disk),
         )
         .await
         {
@@ -246,10 +265,11 @@ async fn exchange(
     sandbox: &str,
     seed: &str,
     order: Order,
+    disk: Option<u64>,
 ) -> io::Result<bool> {
     let mut stream = vsock::connect(vsock_socket, port).await?;
     stream
-        .write_all(notice(SystemTime::now(), sandbox, seed, order)?.as_bytes())
+        .write_all(notice(SystemTime::now(), sandbox, seed, order, disk)?.as_bytes())
         .await?;
     let mut answer = Vec::with_capacity(SEEDED.len() + 1);
     let mut byte = [0_u8; 1];
@@ -562,11 +582,15 @@ mod tests {
     }
 
     #[test]
-    fn the_notice_carries_unix_nanoseconds_and_the_record_fence() {
+    fn the_notice_carries_unix_nanoseconds_the_record_fence_and_the_disk() {
         let at = UNIX_EPOCH + Duration::new(1_700_000_000, 5);
         assert_eq!(
-            notice(at, "00ab", "5eed", ORDER).unwrap(),
+            notice(at, "00ab", "5eed", ORDER, None).unwrap(),
             "restored 1700000000000000005 sandbox=00ab seed=5eed order=4.9 owner=2\n"
+        );
+        assert_eq!(
+            notice(at, "00ab", "5eed", ORDER, Some(21_474_836_480)).unwrap(),
+            "restored 1700000000000000005 sandbox=00ab seed=5eed order=4.9 owner=2 disk=21474836480\n"
         );
     }
 
@@ -623,7 +647,7 @@ mod tests {
             ("seeded", b"ok seeded\n", true),
         ] {
             let socket = guest(name, Box::leak(Box::new([Some(answer)])));
-            let told = tell_restored(&socket, 53, 7, ORDER, Duration::from_secs(5))
+            let told = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_secs(5))
                 .await
                 .unwrap();
             assert_eq!(
@@ -639,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn a_guest_resetting_its_transport_is_told_on_a_later_attempt() {
         let socket = guest("reset", &[None, Some(b""), Some(b"ok seeded\n")]);
-        let told = tell_restored(&socket, 53, 7, ORDER, Duration::from_secs(5))
+        let told = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(told.attempts, 3);
@@ -654,7 +678,7 @@ mod tests {
             ("stale", b"stale\n"),
         ] {
             let socket = guest(name, Box::leak(Box::new([Some(answer), Some(b"ok\n")])));
-            let error = tell_restored(&socket, 53, 7, ORDER, Duration::from_secs(5))
+            let error = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_secs(5))
                 .await
                 .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
@@ -835,7 +859,7 @@ mod tests {
     #[tokio::test]
     async fn a_silent_guest_times_out() {
         let socket = guest("silent", &[Some(b""), Some(b""), Some(b"")]);
-        let error = tell_restored(&socket, 53, 7, ORDER, Duration::from_millis(200))
+        let error = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_millis(200))
             .await
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);

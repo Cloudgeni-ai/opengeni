@@ -83,16 +83,20 @@ fn a_count_the_guard_cannot_write_is_not_said() {
     let freezes = Freezes::beside(&config.lock);
     let mut saying = Saying::new(freezes.clone());
     let mut fencing = Fencing::new(freezes.fenced());
-    let mut last = None;
+    let mut last = Acted::default();
     let mut step = |saying: &mut Saying| {
-        assert!(step_once(
-            &guard,
-            &cgroup,
-            &config,
-            &mut last,
-            saying,
-            &mut fencing
-        ));
+        assert!(
+            step_once(
+                &guard,
+                &cgroup,
+                &config,
+                &mut last,
+                saying,
+                &mut fencing,
+                false,
+            )
+            .feed
+        );
     };
     step(&mut saying);
     let running = freezes.read().unwrap();
@@ -173,7 +177,7 @@ fn past_the_deadline_only_the_vms_still_running_are_killed() {
     let fenced = freezes.fenced();
     let mut fencing = Fencing::new(fenced.clone());
     let mut saying = Saying::new(freezes);
-    let mut last = None;
+    let mut last = Acted::default();
     let before = boot_now();
     let feed = step_once(
         &guard,
@@ -182,8 +186,10 @@ fn past_the_deadline_only_the_vms_still_running_are_killed() {
         &mut last,
         &mut saying,
         &mut fencing,
-    );
-    assert_eq!(last, Some(GuardAction::Kill));
+        false,
+    )
+    .feed;
+    assert_eq!(last.vms, Some(GuardAction::Kill));
     assert!(!feed, "not every VM is known to be stopped yet");
     assert!(killed(&group.join("ending")), "the one still running");
     assert!(!killed(&group.join("frozen")), "a frozen VM stays frozen");
@@ -194,28 +200,263 @@ fn past_the_deadline_only_the_vms_still_running_are_killed() {
     assert!(fenced.ended("ending", before));
     assert!(!fenced.ended("frozen", before));
     assert!(!fenced.ended("ending", boot_now() + Duration::from_secs(1)));
-    assert!(!step_once(
-        &guard,
-        &cgroup,
-        &config,
-        &mut last,
-        &mut saying,
-        &mut fencing,
-    ));
+    assert!(
+        !step_once(
+            &guard,
+            &cgroup,
+            &config,
+            &mut last,
+            &mut saying,
+            &mut fencing,
+            false,
+        )
+        .feed
+    );
     assert_eq!(fenced.read().len(), 1, "{:?}", fenced.read());
 
     // A process in the VMs' cgroup itself: everything goes.
     std::fs::write(group.join("cgroup.procs"), "4242\n").unwrap();
-    assert!(!step_once(
-        &guard,
-        &cgroup,
-        &config,
-        &mut last,
-        &mut saying,
-        &mut fencing,
-    ));
+    assert!(
+        !step_once(
+            &guard,
+            &cgroup,
+            &config,
+            &mut last,
+            &mut saying,
+            &mut fencing,
+            false,
+        )
+        .feed
+    );
     assert!(killed(&group));
     assert!(fenced.ended("frozen", before), "every VM went");
+}
+
+/// A stand-in for the VMs' cgroup, `vms`, with a group of its own for each
+/// VM, none holding a process itself.
+struct Groups {
+    vms: PathBuf,
+}
+
+impl Groups {
+    fn new(dir: &Path) -> Self {
+        let groups = Self {
+            vms: dir.join("vms"),
+        };
+        set_group(&groups.vms, "0", true, false);
+        groups
+    }
+
+    /// A running VM's group, marked its sandbox's only copy if `only`;
+    /// `None` if the test's file system keeps no user extended attributes.
+    fn vm(&self, name: &str, only: bool) -> Option<PathBuf> {
+        let path = self.vms.join(name);
+        set_group(&path, "0", true, false);
+        if only && Cgroup::at(&path).set_only_copy(true).is_err() {
+            eprintln!(
+                "skipped: the test directory's file system keeps no user extended attributes"
+            );
+            return None;
+        }
+        Some(path)
+    }
+
+    /// What the kernel would report once the freezes asked for took: each
+    /// group frozen that asks for a freeze, or whose cgroup above does.
+    fn settle(&self) {
+        let asked =
+            |path: &Path| std::fs::read_to_string(path.join("cgroup.freeze")).unwrap() == "1";
+        let above = asked(&self.vms);
+        let mut all = true;
+        for entry in std::fs::read_dir(&self.vms).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                let frozen = above || asked(&path);
+                all &= frozen;
+                let freeze = std::fs::read_to_string(path.join("cgroup.freeze")).unwrap();
+                set_group(&path, &freeze, true, frozen);
+            }
+        }
+        let freeze = std::fs::read_to_string(self.vms.join("cgroup.freeze")).unwrap();
+        set_group(&self.vms, &freeze, true, all);
+    }
+}
+
+/// Makes `path` a group whose freeze reads `freeze`, as populated and
+/// frozen as said.
+fn set_group(path: &Path, freeze: &str, populated: bool, frozen: bool) {
+    std::fs::create_dir_all(path).unwrap();
+    std::fs::write(path.join("cgroup.freeze"), freeze).unwrap();
+    std::fs::write(
+        path.join("cgroup.events"),
+        format!(
+            "populated {}\nfrozen {}\n",
+            u8::from(populated),
+            u8::from(frozen)
+        ),
+    )
+    .unwrap();
+    std::fs::write(path.join("cgroup.procs"), "").unwrap();
+}
+
+fn freeze_of(path: &Path) -> String {
+    std::fs::read_to_string(path.join("cgroup.freeze")).unwrap()
+}
+
+/// With its lease run out, the guard freezes each VM on its own and
+/// leaves running the one marked its sandbox's only copy, kills a fenced
+/// one that has not frozen by the deadline and never the only copy, and
+/// thaws them once the lease is renewed. The count says the VMs are
+/// stopped while any fenced one is.
+#[test]
+fn the_guard_leaves_a_vm_that_is_its_sandboxes_only_copy_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let groups = Groups::new(dir.path());
+    let (fenced_vm, Some(only)) = (groups.vm("fenced", false).unwrap(), groups.vm("only", true))
+    else {
+        return;
+    };
+    let mut config = config(dir.path(), None);
+    config.cgroup = groups.vms.clone();
+    let lease = |deadline: At| {
+        LeaseFile {
+            host: Some(1),
+            epoch: Some(1),
+            deadline_ns: nanos(deadline),
+            seq: 1,
+        }
+        .write(&config.lease_file)
+        .unwrap();
+    };
+    // Inside the lead: the fenced VM freezes, the only copy runs on.
+    lease(boot_now() + Duration::from_secs(2));
+    let (guard, cgroup) = (Guard::new(), Cgroup::at(&groups.vms));
+    let freezes = Freezes::beside(&config.lock);
+    let fenced = freezes.fenced();
+    let mut fencing = Fencing::new(fenced.clone());
+    let mut saying = Saying::new(freezes.clone());
+    let mut last = Acted::default();
+    let mut step = |config: &GuardConfig| {
+        step_once(
+            &guard,
+            &cgroup,
+            config,
+            &mut last,
+            &mut saying,
+            &mut fencing,
+            false,
+        )
+    };
+    let stepped = step(&config);
+    assert!(stepped.feed, "the deadline is ahead");
+    assert_eq!(freeze_of(&fenced_vm), "1");
+    assert_eq!(freeze_of(&only), "0");
+    assert_eq!(freeze_of(&groups.vms), "0", "the cgroup above stays thawed");
+    assert_eq!(freezes.read().unwrap().count % 2, 1, "odd: a VM is stopped");
+    groups.settle();
+    // Past the deadline: with the fenced VM frozen, it feeds the watchdog
+    // and kills nothing.
+    lease(At::from_millis(1));
+    assert!(step(&config).feed);
+    assert!(!fenced_vm.join("cgroup.kill").exists());
+    assert!(!only.join("cgroup.kill").exists());
+    // A fenced VM that has not frozen by then is killed, and recorded.
+    let late = groups.vm("late", false).unwrap();
+    let before = boot_now();
+    assert!(!step(&config).feed, "a fenced VM still runs");
+    assert_eq!(
+        std::fs::read_to_string(late.join("cgroup.kill")).unwrap(),
+        "1"
+    );
+    assert!(fenced.ended("late", before));
+    assert!(!fenced.ended("only", before));
+    assert!(!only.join("cgroup.kill").exists(), "never the only copy");
+    set_group(&late, "0", false, false);
+    assert!(step(&config).feed, "every fenced VM is frozen or gone");
+    std::fs::remove_dir_all(&late).unwrap();
+    // One whose mark an agent that has ended set is frozen, not killed.
+    let orphan = groups.vm("orphan", false).unwrap();
+    rustix::fs::setxattr(
+        &orphan,
+        compute_engine::cgroup::ONLY_COPY,
+        format!("{} 1", std::process::id()).as_bytes(),
+        rustix::fs::XattrFlags::empty(),
+    )
+    .unwrap();
+    assert!(!step(&config).feed, "it runs, and nothing vouches for it");
+    assert_eq!(freeze_of(&orphan), "1");
+    assert!(!orphan.join("cgroup.kill").exists());
+    groups.settle();
+    assert!(step(&config).feed);
+    // Renewed: the fenced VM is thawed, and the count says they run.
+    lease(boot_now() + Duration::from_secs(600));
+    let stepped = step(&config);
+    assert!(stepped.feed);
+    assert!(!stepped.may_stop, "not before the thaw shows");
+    assert_eq!(freeze_of(&fenced_vm), "0");
+    assert_eq!(freeze_of(&orphan), "0");
+    assert_eq!(freezes.read().unwrap().count % 2, 0, "even: they run");
+    groups.settle();
+    assert!(step(&config).may_stop);
+}
+
+/// After an earlier guard froze the whole cgroup, the guard has each
+/// fenced VM ask for its own freeze and thaws the cgroup, so the only
+/// copy runs again and the fenced ones never do. Asked to stop while the
+/// lease runs out, it hands them over frozen as a whole, its own freezes
+/// thawed, as a guard of an earlier release expects them.
+#[test]
+fn the_guard_takes_over_and_hands_over_vms_frozen_as_a_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let groups = Groups::new(dir.path());
+    let (fenced_vm, Some(only)) = (groups.vm("fenced", false).unwrap(), groups.vm("only", true))
+    else {
+        return;
+    };
+    std::fs::write(groups.vms.join("cgroup.freeze"), "1").unwrap();
+    groups.settle();
+    let mut config = config(dir.path(), None);
+    config.cgroup = groups.vms.clone();
+    // No lease file: the lease has run out.
+    let (guard, cgroup) = (Guard::new(), Cgroup::at(&groups.vms));
+    let freezes = Freezes::beside(&config.lock);
+    let mut fencing = Fencing::new(freezes.fenced());
+    let mut saying = Saying::new(freezes);
+    let mut last = Acted::default();
+    let mut step = |stopping: bool| {
+        step_once(
+            &guard,
+            &cgroup,
+            &config,
+            &mut last,
+            &mut saying,
+            &mut fencing,
+            stopping,
+        )
+    };
+    let stepped = step(false);
+    assert_eq!(
+        freeze_of(&fenced_vm),
+        "1",
+        "its own freeze, before the thaw"
+    );
+    assert_eq!(freeze_of(&groups.vms), "0");
+    assert_eq!(freeze_of(&only), "0");
+    assert!(stepped.feed);
+    groups.settle();
+    assert!(!fenced_vm.join("cgroup.kill").exists());
+    // Asked to stop: the whole cgroup freezes first.
+    let stepped = step(true);
+    assert_eq!(freeze_of(&groups.vms), "1");
+    assert!(!stepped.may_stop, "the only copy may still run");
+    groups.settle();
+    // Then its own freezes go, and it may stop.
+    assert!(!step(true).may_stop);
+    assert_eq!(freeze_of(&fenced_vm), "0");
+    groups.settle();
+    let stepped = step(true);
+    assert!(stepped.may_stop && stepped.feed);
+    assert_eq!(freeze_of(&groups.vms), "1", "frozen as a whole");
 }
 
 #[test]
