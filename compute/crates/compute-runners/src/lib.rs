@@ -8,4 +8,5 @@ pub mod cache;
 pub mod compute;
 pub mod github;
 pub mod pool;
+pub mod room;
 pub mod warm;
