@@ -284,6 +284,44 @@ The personal workspace still receives no `workspace_memberships` row, so
 membership CRUD and subject-membership fallback cannot discover or widen the
 owner-only projection.
 
+### One member, enforced by the database (migration 1159)
+
+Migration `1159_personal_workspace_single_member.sql` turns "a Personal
+workspace has exactly one member, its owner" from a runtime property into a
+database rule. It comes ahead of giving the owner a real membership row in a later
+release. A workspace is Personal when it carries the Personal identity:
+`external_source = 'opengeni:organization-membership'` and
+`external_id = '<organization id>:<owner subject>'`
+(`PERSONAL_WORKSPACE_EXTERNAL_SOURCE`). Triggers refuse, for every writer:
+
+- any `workspace_memberships` row there except its owner's, including an
+  organization owner's or admin's;
+- an owner row with an `owner` or `admin` role, or with `workspace:admin`,
+  `members:manage`, `api_keys:manage` or `usage_allowances:manage`, so the row
+  can never let anyone else in;
+- moving a row into, out of, or within a Personal workspace to another person,
+  workspace or organization;
+- pointing an organization membership at someone else's Personal workspace,
+  or moving it to another person while it points at one (the existing
+  `(personal_workspace_id, account_id)` foreign key already keeps it in the
+  same organization);
+- changing a Personal workspace's identity, or giving an existing workspace one.
+
+`POST /v1/workspaces` and `PUT /v1/workspaces/external` refuse that external
+source (422), so nobody can create someone's Personal workspace before they
+join.
+
+A row in a Personal workspace is never membership to the runtime. Every
+TypeScript membership reader (`getWorkspaceGrant`, workspace lists, member
+lists, the session-list, pin, draft and search fences, Slack, recordings,
+Sites, MCP OAuth and `subjectHasLiveWorkspaceAuthorityInScope`) excludes it
+through `membershipOutsidePersonalWorkspace`
+(`packages/db/src/personal-workspace-membership.ts`). A membership row admits
+whoever names its subject, so the owner keeps reaching Personal only through
+the pointer with verified owning-user proof. The previous release reads rows
+without that exclusion. The owner's row can therefore be created and backfilled
+only in a release after this one is in production.
+
 ### Session ownership at the mint (migration 0302)
 
 Because that workspace has no membership row, migration 0225's session write
@@ -828,6 +866,12 @@ browsers and vaults, which keep working from shared workspaces, and existing
 chats, their workers and existing schedules there keep working and stay
 reachable by link.
 
+They also choose whether members connect machines of their own
+(`membersConnectOwnMachines`, column `members_connect_own_machines`, migration
+1148, on by default). Off, only owners and admins connect new Only me machines,
+or any machine in a Personal workspace; machines already connected keep
+working. See [Connect a machine](connected-machines.md#connect-a-machine).
+
 EU-only inference is an organization setting too
 (`organization_inference_residency` and its append-only
 `organization_inference_residency_events`, migration 1060,
@@ -1262,7 +1306,11 @@ sources (`scheduled_tasks:*`), changes or deletes any bot template shared with
 the workspace, and records posts on their own social accounts. A signed-in
 Member also edits the workspace instructions
 and reviews the agent's proposed changes to them (`sessions:create`, see
-[workspace instruction policies](workspace-instruction-policies.md)).
+[workspace instruction policies](workspace-instruction-policies.md)), renames a
+shared workspace (`PATCH /v1/workspaces/:workspaceId` with `name`; its `slug`
+stays Admin-only and a Personal workspace keeps its name), and adds or removes
+its custom model entries (Gateway, OpenRouter, Opper and Claude custom models;
+the keys and subscriptions they run on stay Admin-only).
 Settings-class powers stay Admin-only:
 `workspace:admin` (workspace settings, learning settings, Insights),
 `members:manage`, `api_keys:manage`, `github:manage` (the workspace GitHub
@@ -1285,9 +1333,11 @@ external (`external_user:`) memberships are excluded too: an organization
 service key stores them as role `member` with a caller-chosen permission set,
 which a preset change must not widen.
 Organization owners and administrators may create and rename shared
-workspaces, grant or replace access, and revoke access. Ordinary organization
-members, cross-organization membership ids, and every Personal workspace fail
-closed. Organization membership role changes keep the 0263 sole-owner
+workspaces, grant or replace access, and revoke access through these
+organization routes. Ordinary organization members, cross-organization
+membership ids, and every Personal workspace fail closed here; a member who can
+start chats in a shared workspace still renames it from its own settings
+(`PATCH /v1/workspaces/:workspaceId`). Organization membership role changes keep the 0263 sole-owner
 invariant; workspace roles do not alter organization roles.
 
 That authority covers every shared workspace in the organization and every

@@ -269,6 +269,7 @@ export function WorkspaceModelsPageBody({
   organizationId,
   organizationName,
   canManageSettings,
+  canManageCustomModels = canManageSettings,
   canAdministerWorkspace,
   canManageConnections,
   canManageOrganizationModels,
@@ -293,8 +294,14 @@ export function WorkspaceModelsPageBody({
   organizationId?: string | undefined;
   /** Its name, or "your organization" when it has none. */
   organizationName: string;
-  /** Workspace admins: default model, Allowed models, custom models. */
+  /** Workspace admins: default model and Allowed models. */
   canManageSettings: boolean;
+  /**
+   * Add and remove the workspace's custom model entries: anyone who can start
+   * chats in a shared workspace, as well as its settings managers. Defaults
+   * to `canManageSettings`.
+   */
+  canManageCustomModels?: boolean;
   /**
    * The viewer holds `workspace:admin` here. A Personal workspace's owner
    * manages its settings without that grant, so a regular member's own
@@ -379,7 +386,8 @@ export function WorkspaceModelsPageBody({
     config: PROVIDER_CONNECTION_CONFIGS[id],
     workspaceId,
     canManageConnection: canManageWorkspaceKeys,
-    canManageCustomModels: canManageSettings,
+    canManageCustomModels,
+    canManageAccess: canManageSettings,
     onConnectionChange: connectionChanged,
     enabled,
   });

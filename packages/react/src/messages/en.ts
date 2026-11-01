@@ -2058,8 +2058,36 @@ export const englishMessages = {
   "interactiveAnswer.viewAs": "View as",
   "interactiveAnswer.writing": "Writing options…",
   "interactiveAnswer.yes": "Yes",
+  "lib.format.apiCreditsRequired":
+    "API usage uses credits, not your plan credit. Add credits to continue. The conversation is preserved.",
+  "lib.format.apiCreditsRequiredAskOwner":
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  "lib.format.apiCreditsRequiredHeadline":
+    "API usage uses credits, not your plan credit. Add credits to continue.",
+  "lib.format.byokPaidCreditRequired":
+    "Add credits to use your own key. The conversation is preserved.",
+  "lib.format.byokPaidCreditRequiredAskOwner":
+    "Ask an organization owner to add credits to use your own key.",
+  "lib.format.byokPaidCreditRequiredHeadline": "Add credits to use your own key.",
+  "lib.format.byokUpgradeRequired":
+    "Upgrade to Pro to use your own key. The conversation is preserved.",
+  "lib.format.byokUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  "lib.format.byokUpgradeRequiredHeadline": "Upgrade to Pro to use your own key.",
   "lib.format.capacityRecoveryExhausted":
     "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
+  "lib.format.composerApiCreditsRequired":
+    "API usage uses credits, not your plan credit. Add credits to continue. Your message and attachments are saved.",
+  "lib.format.composerApiCreditsRequiredAskOwner":
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits. Your message and attachments are saved.",
+  "lib.format.composerByokPaidCreditRequired":
+    "Add credits to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokPaidCreditRequiredAskOwner":
+    "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokUpgradeRequired":
+    "Upgrade to Pro to use your own key. Your message and attachments are saved.",
+  "lib.format.composerByokUpgradeRequiredAskOwner":
+    "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
@@ -2549,6 +2577,21 @@ export const englishMessages = {
   "meetings.detailPage.sharedWithTheWorkspace": "Shared with the workspace",
   /** A person's own Only me meeting opened from another workspace of the same organization. */
   "meetings.detailPage.onlyMeRecordedIn": "Only me · recorded in {workspace}",
+  /** The meeting menu item that opens where the owner's Only me meeting works. */
+  "meetings.detailPage.availableInMenu": "Available in…",
+  /** Title of the dialog choosing the workspaces an Only me meeting works in. */
+  "meetings.detailPage.availableIn": "Available in",
+  "meetings.detailPage.onlyYouSeeItInThese":
+    "It stays Only me: in each of these workspaces, only you and agent turns you start can use it.",
+  /** The workspace that stores the meeting, always ticked. */
+  "meetings.detailPage.recordedThereAlwaysIncluded":
+    "It was recorded there, so it's always included.",
+  "meetings.detailPage.itWillNoLongerShowHere":
+    "It will no longer show in this workspace, and you'll go back to Meetings.",
+  "meetings.detailPage.itNoLongerShowsHere": "This meeting no longer shows in this workspace",
+  "meetings.detailPage.couldnTChangeWhereItWorks": "Couldn't change where this meeting works.",
+  /** Stands in for the organization's name when the app doesn't give it. */
+  "meetings.detailPage.thisOrganization": "this organization",
   /** Names the Summary · Transcript · Notepad switch for screen readers. */
   "meetings.detailPage.show": "Show",
   "meetings.detailPage.speakers": "Speakers",
@@ -2947,6 +2990,8 @@ export const englishMessages = {
   "meetings.settings.meetingsAreDeletedAfterRetentionperiodname":
     "Meetings are deleted after {retentionPeriodName}",
   "meetings.settings.meetingsAreKeptUntilSomeone": "Meetings are kept until someone deletes them",
+  "meetings.settings.meetingsListenForNoWords": "Meetings no longer listen for particular words",
+  "meetings.settings.meetingsListenForTheseWords": "Meetings listen for these words",
   "meetings.settings.meetingsNoLongerGetNotes": "Meetings no longer get notes written for them",
   "meetings.settings.meetingsRecordedMoreThanPeriod":
     "Meetings older than {period} are deleted now with their audio and transcripts, and the rest when they turn {period}. This can't be undone.",
@@ -2994,6 +3039,7 @@ export const englishMessages = {
     "Audio older than {retentionPeriodName} is deleted now. Transcripts stay, but those meetings can't be played or transcribed again. This can't be undone.",
   "meetings.settings.thisDeploymentUsesOneModel":
     "This deployment uses one model for all transcription.",
+  "meetings.settings.tooManyWords": "Keep the list to {max} names and words.",
   "meetings.settings.transcriptionModel": "Transcription model",
   "meetings.settings.turnOffAndForgetVoices": "Turn off and forget voices",
   "meetings.settings.turnsAMeetingSAudio":
@@ -3007,6 +3053,11 @@ export const englishMessages = {
   "meetings.settings.whenATranscriptIsReady":
     "When a meeting's transcript is ready, an agent writes its notes: a summary, decisions and action items.",
   "meetings.settings.whoSeesNewMeetings": "Who sees new meetings",
+  "meetings.settings.wordTooLong": "“{term}” is too long. Keep each to {max} characters.",
+  "meetings.settings.wordsToListenFor": "Words to listen for",
+  "meetings.settings.wordsToListenForDescription":
+    "Names and words every meeting transcript listens for, such as people, customers, products and trade terms. One per line. Some models charge a little more when given words.",
+  "meetings.settings.wordsToListenForPlaceholder": "Ada Lovelace\nKubernetes",
   "meetings.settings.workspace": "Workspace",
   "meetings.settings.writeNotesAfterEachMeeting": "Write notes after each meeting",
   "meetings.settings.youAgreedOpengeniLearnsYour":
@@ -3408,6 +3459,19 @@ export const englishMessages = {
   "native.presentation.youAnswered": "You answered",
   "native.presentation.youLetTheAgentDecide": "You let the agent decide",
   "native.presentation.yourInputIsNeeded": "Your input is needed",
+  /** Heads the alert when an audio file shared to the app or picked with Import doesn't become a meeting. */
+  "native.meetings.audioImport.couldntImport": "Couldn't import the recording",
+  /** The Import button on the phone's meetings screen, under Record a meeting. */
+  "native.meetings.audioImport.importARecording": "Import a recording",
+  "native.meetings.audioImport.importHint":
+    "Recorded a phone call or a voice memo? Share it to this app, or import it here, for a transcript and notes.",
+  "native.meetings.audioImport.importing": "Importing…",
+  "native.meetings.audioImport.unreadable": "The file couldn't be read. Share it to the app again.",
+  "native.meetings.audioImport.unsupported":
+    "This kind of audio can't be imported. Phone call recordings and voice memos (M4A) can, as can AAC, WebM and Ogg files.",
+  /** While imported recordings upload, before they show in the list. */
+  "native.meetings.audioImport.uploading_one": "Uploading the imported recording…",
+  "native.meetings.audioImport.uploading_other": "Uploading {count} imported recordings…",
   "native.meetings.meetingView.aNewTranscriptIsMadeFromTheFullAudio":
     "Makes a new transcript from the audio. Speaker names carry over.",
   "native.meetings.meetingView.delete": "Delete",
@@ -5333,7 +5397,7 @@ export const englishMessages = {
   "timeline.patchApplyCommand.tryAgain": "Try again",
   "timeline.paymentPage.balanceNow": "Balance {balance}",
   "timeline.paymentPage.billingPortal": "Billing",
-  "timeline.paymentPage.buyCredits": "Buy credits",
+  "timeline.paymentPage.buyCredits": "Add credits",
   "timeline.paymentPage.continueToPayment": "Continue to payment",
   "timeline.paymentPage.checkFailed":
     "Couldn't check your payment from here. If you paid, your credits still arrive.",

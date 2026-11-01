@@ -2651,6 +2651,7 @@ describe("One Models page for the organization and the workspace", () => {
       accountId: "organization-a",
       workspaceId,
       subjectId: "user:member",
+      principalKind: "human_session",
       permissions,
     });
     const previous = { workspaces: context.workspaces, accessContext: context.accessContext };
@@ -2666,6 +2667,7 @@ describe("One Models page for the organization and the workspace", () => {
         },
       ];
       context.accessContext = {
+        subjectId: "user:member",
         accountGrants: [{ accountId: "organization-a", permissions: [] }],
         workspaceGrants: [
           memberGrant("workspace-a", sharedPermissions),
@@ -2754,6 +2756,22 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         expect(view.container.textContent).toContain("Only its workspace admins");
         expect(button(view.container, /Connect provider/)).toBeUndefined();
+      } finally {
+        await cleanup(view);
+      }
+
+      // A member who can start chats there opens it for its custom models,
+      // even without connections:write, as the server allows.
+      setAccess(["workspace:read", "sessions:create"]);
+      view = await mount();
+      try {
+        expect(view.container.textContent).not.toContain("Only its workspace admins");
+        expect(button(view.container, /Connect provider/)).toBeUndefined();
+        await act(async () => navigateTo({}));
+        await flush();
+        const row = rowsNamed(view.container, "Design preview")[0];
+        expect(row?.textContent).toContain("Custom models");
+        expect(row?.textContent).not.toContain("your own subscriptions");
       } finally {
         await cleanup(view);
       }

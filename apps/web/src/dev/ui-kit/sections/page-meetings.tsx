@@ -153,6 +153,7 @@ function fakeRecorder(
     stop: async () => {},
     discard: async () => {},
     rename: async () => {},
+    importAudio: async () => LIVE_RECORDING_ID,
     levels: () => {
       const t = Date.now() / 180;
       return {

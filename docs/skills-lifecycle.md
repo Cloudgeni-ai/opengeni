@@ -26,6 +26,31 @@ for the actual Skill catalog or accepted turn context. The disposable diagnostic
 1,000 canonical Skills; its JSON sizes are decoded response bytes, not wire
 traffic, and it does not establish a transaction-count or production CPU gain.
 
+## Where an organization Skill works
+
+An organization Skill works in every shared workspace of its organization and in
+members' Personal workspaces until someone who may change the organization's
+Skills picks otherwise. `PUT /v1/workspaces/:workspaceId/skills/content/:skillId/reach`
+takes `{ allowedWorkspaceIds, allowPersonalWorkspaces }`: `null` means every
+shared workspace, new ones too, and a list names the ones it works in. It uses
+the same gate as changing the organization's Skills (its owner or admins), works from
+any workspace, and refuses workspaces outside the organization's shared ones
+(422) and workspace or personal Skills (409). SDK: `updateSkillReach`.
+
+Reach lives in `organization_skill_reach` (migration 1195), one row per narrowed
+Skill; no row means everywhere, so existing Skills keep working where they did.
+The Skill head itself is not touched, so the lifecycle guard and revision
+history are unchanged. Moving a Skill off organization scope deletes its row
+under the same head lock, and moving it back starts again at everywhere.
+
+Reach decides what agents see. The descriptor reader behind the Skill index,
+`skill_read`, `skill_search` and the default `listSkillRecords` read drop an
+organization Skill in a workspace it doesn't work in, from the next turn. People's
+Skills page reads pass `includeOrganizationElsewhere`, so every record carries
+`reach` and `availableHere`: whoever may change it still finds it there, marked
+"Not used here", and changes it from its "Available in" row. Everyone else sees
+what this workspace's agents use.
+
 ## Permanent removal
 
 The human Skills editor exposes **Remove skill** for saved personal/workspace

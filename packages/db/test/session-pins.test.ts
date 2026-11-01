@@ -1548,6 +1548,57 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(count?.count).toBe(0);
   }, 60_000);
 
+  test("pinning an archived chat restores it, so it shows under Pinned", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:pin-archived";
+    await grantMember(workspace, subjectId);
+    const target = await session({ ...workspace, message: "archived then pinned" });
+    const archived = await setSessionArchive(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: target.id,
+      archived: true,
+    });
+    expect(archived).toMatchObject({ archived: true, archiveVersion: 1, pinned: false });
+
+    // Opened from search and pinned from the chat header.
+    const pinned = await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: target.id,
+      pinned: true,
+      expectedVersion: 0,
+    });
+    expect(pinned).toMatchObject({
+      pinned: true,
+      pinVersion: 1,
+      archived: false,
+      archivedAt: null,
+      archiveVersion: 2,
+    });
+
+    const page = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      pinsOnly: true,
+    });
+    expect(page.pinned.map((row) => row.id)).toEqual([target.id]);
+
+    // Archive still wins afterwards: archiving the pinned chat unpins it.
+    const rearchived = await setSessionArchive(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: target.id,
+      archived: true,
+      expectedVersion: 2,
+    });
+    expect(rearchived).toMatchObject({ archived: true, archiveVersion: 3, pinned: false });
+    const [both] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_pins
+      where workspace_id = ${workspace.workspaceId} and pinned and archived`;
+    expect(both?.count).toBe(0);
+  }, 60_000);
+
   test("ordinary-only pages skip pin hydration without changing pin exclusion or cursors", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

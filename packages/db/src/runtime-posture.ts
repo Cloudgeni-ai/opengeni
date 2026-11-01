@@ -56,8 +56,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * the EU-only inference setting and its history (1060), the secret history
  * scrub's reader and cell writer (1091), the subscription
  * account-administrator grant (1103), which records a request's verified
- * account:admin proof for one transaction, and agent calls' device lookup,
- * register, claim, device count, busy check and ring (1107). Each is
+ * account:admin proof for one transaction, agent calls' device lookup,
+ * register, claim, device count, busy check and ring (1107), and the lock-free
+ * read of a known external identity (1172). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -83,6 +84,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "agent_call_device_count_v1(text, boolean)",
   "agent_call_ringing_v1(text)",
   "ring_agent_call_v1(uuid, boolean)",
+  "read_external_identity_v1(uuid, text, text)",
 ] as const;
 
 /**
@@ -106,6 +108,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * call routines and the native push v2 functions that carry the iOS VoIP
  * token; until they are granted, native push keeps its v1 functions, no phone
  * takes calls and agents cannot place one.
+ * 1172 withholds the lock-free external identity read; until it is granted,
+ * authenticating an external user takes the organization membership fence
+ * exclusively, as before.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -118,6 +123,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "agent_call_device_count_v1(text, boolean)",
   "agent_call_ringing_v1(text)",
   "ring_agent_call_v1(uuid, boolean)",
+  "read_external_identity_v1(uuid, text, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -202,6 +208,10 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "opengeni_private.native_push_deliveries",
     "opengeni_private.native_push_devices",
     "auth_sessions",
+  ],
+  "read_external_identity_v1(uuid, text, text)": [
+    "external_identities",
+    "organization_memberships",
   ],
 };
 
@@ -2093,6 +2103,7 @@ export const FORCE_RLS_TABLES = [
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_connectors",
   "organization_credential_providers",
   "organization_inference_residency",
   "organization_inference_residency_events",
@@ -2124,6 +2135,7 @@ export const FORCE_RLS_TABLES = [
   "organization_recovery_policy_heads",
   "organization_service_accounts",
   "organization_shared_workspace_administration_capabilities",
+  "organization_skill_reach",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -2158,6 +2170,7 @@ export const FORCE_RLS_TABLES = [
   "recording_chunks",
   "recording_events",
   "recording_live_segments",
+  "recording_live_unbacked_hours",
   "recording_notes",
   "recording_people",
   "recording_segment_edits",
@@ -2532,6 +2545,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_agent_admin_access",
   "organization_api_key_workspaces",
   "organization_codex_rotation_settings",
+  "organization_connectors",
   "organization_credential_providers",
   "organization_model_defaults",
   "organization_model_provider_connection_operations",
@@ -2539,6 +2553,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_model_provider_custom_models",
   "organization_privacy_preferences",
   "organization_service_accounts",
+  "organization_skill_reach",
   "organization_webhook_deliveries",
   "organization_webhooks",
   "pr_review_app_registrations",
@@ -2546,6 +2561,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "pr_review_repository_bindings",
   "recording_chunks",
   "recording_live_segments",
+  "recording_live_unbacked_hours",
   "recording_notes",
   "recording_people",
   "recording_segment_edits",

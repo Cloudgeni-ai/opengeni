@@ -1626,6 +1626,21 @@ describe("BrowserControlClient", () => {
             { status: 500 },
           );
         }
+        if (url.pathname === "/v1/read-unavailable") {
+          return Response.json(
+            {
+              protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+              ok: false,
+              error: {
+                code: "resource_unavailable",
+                message: "browser observation unavailable",
+                retryable: true,
+              },
+              diagnostic: { errorClass: "Error", frame: "AgentBrowserDriver.refreshAccessibility" },
+            },
+            { status: 503 },
+          );
+        }
         if (url.pathname === "/v1/malformed") {
           return Response.json({ nope: true });
         }
@@ -1846,6 +1861,22 @@ describe("BrowserControlClient", () => {
         status: 500,
         error: { code: "driver_failed", message: "driver broke", retryable: false },
         diagnostic: { errorClass: "TypeError", frame: "Backend.observe" },
+      });
+      // A read the controller gave up retrying keeps the driver's cause too.
+      await expect(
+        client.requestForSession({
+          method: "GET",
+          path: "/v1/read-unavailable",
+          token: controlToken,
+        }),
+      ).rejects.toMatchObject<Partial<BrowserControlRequestError>>({
+        status: 503,
+        error: {
+          code: "resource_unavailable",
+          message: "browser observation unavailable",
+          retryable: true,
+        },
+        diagnostic: { errorClass: "Error", frame: "AgentBrowserDriver.refreshAccessibility" },
       });
       await expect(
         client.requestForSession({

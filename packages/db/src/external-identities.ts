@@ -110,6 +110,73 @@ export async function lockExternalWorkspaceMembershipLifecycle(
   );
 }
 
+/** The same fence in shared mode: ordered against every lifecycle writer
+ * (they take it exclusively) but not against other readers, so concurrent
+ * requests of one organization do not queue behind each other. Take it before
+ * any other lock in the transaction, never after holding it shared and then
+ * wanting it exclusively. Caller must pass an open transaction. */
+export async function lockExternalWorkspaceMembershipLifecycleShared(
+  tx: Database,
+  accountId: string,
+): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock_shared(hashtextextended(${`organization-membership:${accountId}`}, 0))`,
+  );
+}
+
+const EXTERNAL_IDENTITY_READ = "opengeni_private.read_external_identity_v1(uuid, text, text)";
+
+/**
+ * Whether the runtime may call the lock-free external identity read yet. 1172
+ * creates it withheld: a release that does not know it rejects a runtime
+ * EXECUTE grant on it, so a later migration grants it once this release is the
+ * previous one. Until then authentication takes the fence exclusively, as
+ * before. A separate statement: EXECUTE is checked when a statement starts.
+ */
+export async function externalIdentityReadGranted(db: Pick<Database, "execute">): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(to_regprocedure(${EXTERNAL_IDENTITY_READ})::oid, 'EXECUTE')
+      as granted`,
+  );
+  return row?.granted === true;
+}
+
+/** An existing external identity, read without locking or changing it, or
+ * null when it does not exist yet (provision it with ensureExternalIdentity
+ * under the exclusive fence). An inactive identity is refused with 42501, as
+ * ensureExternalIdentity refuses it. Caller holds the membership fence, at
+ * least shared, in the same transaction and the account's RLS scope, and has
+ * checked externalIdentityReadGranted. */
+export async function readExternalIdentity(
+  tx: Database,
+  input: {
+    accountId: string;
+    externalId: string;
+    source?: string;
+  },
+): Promise<ExternalIdentity | null> {
+  const reference = ExternalIdentityReference.parse({
+    externalId: input.externalId,
+    source: input.source,
+  });
+  const [row] = await rawRows<{ result: unknown }>(
+    tx,
+    sql`select opengeni_private.read_external_identity_v1(
+    ${input.accountId}::uuid, ${reference.source}, ${reference.externalId}) as result`,
+  );
+  if (row?.result === null || row?.result === undefined) return null;
+  const result = ExternalIdentity.parse(row.result);
+  if (
+    result.accountId !== input.accountId ||
+    result.source !== reference.source ||
+    result.externalId !== reference.externalId
+  ) {
+    throw new Error("External identity scope mismatch");
+  }
+  return result;
+}
+
 /** Internal lifecycle seam. Caller must authenticate an organization key and
  * establish its exact account before invoking; this does not admit HTTP users.
  * It never creates shared-workspace membership or reactivates removed users. */

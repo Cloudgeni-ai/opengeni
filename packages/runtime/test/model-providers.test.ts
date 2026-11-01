@@ -136,13 +136,14 @@ describe("Azure hosted-search evidence continuity", () => {
         reasoning: Object.freeze({ effort }),
         include,
       });
-      const projected = azureModelRequestPolicy({ body })!.body!;
+      const projected = azureModelRequestPolicy({ path: "/responses", body })!.body!;
+      expect(projected.store).toBe(false);
       expect(projected.include).toEqual([
         "reasoning.encrypted_content",
         "web_search_call.action.sources",
         ...(effort === "medium" ? ["web_search_call.results"] : []),
       ]);
-      expect(azureModelRequestPolicy({ body: projected })).toBeUndefined();
+      expect(azureModelRequestPolicy({ path: "/responses", body: projected })).toBeUndefined();
       expect(body.include).toBe(include);
       const provider = {
         id: "fixture",
@@ -155,13 +156,13 @@ describe("Azure hosted-search evidence continuity", () => {
       expect(modelRequestPolicyForProvider(provider)({ path: "/responses", body })).toBeUndefined();
     }
     for (const tools of [[], [{ type: "function", name: "web_search" }]]) {
-      expect(
-        azureModelRequestPolicy({ body: { input: [], tools, reasoning: { effort: "high" } } }),
-      ).toBeUndefined();
+      const body = { input: [], tools, reasoning: { effort: "high" }, store: false };
+      expect(azureModelRequestPolicy({ path: "/responses", body })).toBeUndefined();
     }
     const computer = Object.freeze({ type: "computer_call", action: { type: "screenshot" } });
     const input = Object.freeze([computer]);
     const projected = azureModelRequestPolicy({
+      path: "/responses",
       body: { input, tools: [{ type: "web_search_preview" }] },
     })!.body!;
     expect(projected.include).toEqual(["web_search_call.action.sources"]);

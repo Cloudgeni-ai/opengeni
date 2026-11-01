@@ -157,7 +157,7 @@ export function SubscriptionPlans({
           {/* No grant this period (e.g. a Free org without monthly credit): show no empty meter. */}
           {plan.creditGrantedMicros > 0 ? (
             <UsageMeter
-              label="Monthly plan credit"
+              label="Plan credit"
               percent={(plan.creditRemainingMicros / plan.creditGrantedMicros) * 100}
               valueLabel={`${formatMoneyMicros(plan.creditRemainingMicros, "usd")} of ${formatMoneyMicros(plan.creditGrantedMicros, "usd")} left`}
               {...(reset ? { resetsLabel: reset } : {})}
@@ -166,7 +166,7 @@ export function SubscriptionPlans({
           {plan.cancelAtPeriodEnd ? (
             <Notice title="Cancellation scheduled">
               Your paid plan ends{reset ? ` ${reset}` : " at the end of this period"}. You'll move
-              to Free. Top-up credit stays available.
+              to Free. Credits stay available.
             </Notice>
           ) : plan.status !== "active" ? (
             <Notice title="Your subscription needs attention">
@@ -188,7 +188,17 @@ export function SubscriptionPlans({
       <Section
         variant="open"
         title="Plans"
-        description="Monthly plan credit is used first and doesn't roll over. When it runs out, usage continues on your other credit."
+        description={
+          <>
+            <span className="block">
+              Subscriptions give 5x the plan price in credits for the Opengeni apps, and you can
+              bring your own keys.
+            </span>
+            <span className="block">
+              API use in your own product is pay-as-you-go at cost plus 5%, own keys welcome.
+            </span>
+          </>
+        }
       >
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {catalog.plans.map((item) => {
@@ -319,7 +329,7 @@ export function SubscriptionPlans({
               </p>
             ) : (
               <p>
-                Unused monthly plan credit expires. Top-up credit stays available.
+                Unused plan credit expires. Credits stay available.
                 {selection.target.seatLimit !== null
                   ? ` ${selection.target.label} allows ${selection.target.seatLimit} seats; existing people keep access, but you can't add more while over the limit.`
                   : ""}

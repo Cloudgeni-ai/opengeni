@@ -4,6 +4,7 @@ import {
   CATALOG_IMPORT_SEMANTIC_VERSION,
   catalogCapabilityId,
   catalogImportFingerprint,
+  catalogMcpUrlRejection,
   catalogRowToDbInput,
   normalizeCatalogSnapshot,
   readSnapshotFile,
@@ -92,6 +93,17 @@ describe("integrations.sh catalog import normalization", () => {
     expect(changedSemantics.completedBatch).toBeNull();
     expect(changedLogos.snapshotRef).not.toBe(first.snapshotRef);
     expect(changedSemantics.snapshotRef).not.toBe(first.snapshotRef);
+  });
+
+  test("allows a query string only on an exact reviewed MCP URL", () => {
+    expect(catalogMcpUrlRejection("https://mcp.atlassian.com/v2/mcp?tools=all")).toBeNull();
+    for (const url of [
+      "https://mcp.atlassian.com/v2/mcp?tools=all&token=secret",
+      "https://mcp.atlassian.com/v2/mcp?tools=some",
+      "https://mcp.atlassian.com/v1/mcp?tools=all",
+      "https://other.example.test/v2/mcp?tools=all",
+    ])
+      expect(catalogMcpUrlRejection(url)).toBe("credential_query_parameter");
   });
 
   test("quarantines Figma remote access while allowing other reviewed servers", () => {

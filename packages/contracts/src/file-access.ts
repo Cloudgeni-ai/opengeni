@@ -24,3 +24,13 @@ export const UpdateFileVisibilityRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({ visibility: WorkspaceArtifactVisibility }).strict(),
 );
 export type UpdateFileVisibilityRequest = z.infer<typeof UpdateFileVisibilityRequest>;
+
+/**
+ * The owner's change of where their Only me file works: the other workspaces
+ * of the organization they belong to, besides the one that stores it and their
+ * Personal workspace, or null for every workspace. It stays Only me in each.
+ */
+export const UpdateFileReachRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ reachWorkspaceIds: z.array(z.string().uuid()).max(200).nullable() }).strict(),
+);
+export type UpdateFileReachRequest = z.infer<typeof UpdateFileReachRequest>;

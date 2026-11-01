@@ -603,6 +603,24 @@ describe("a turn the workspace can't pay for, seen from outside the workspace", 
     expect(allowance!.details).toMatchObject({ reason: "allowance_exhausted" });
   });
 
+  test("own-key and API credit refusals never reach an outsider with the owner's prompt", async () => {
+    for (const code of ["byok_paid_credit_required", "api_credits_required"]) {
+      const translated = await siteOutsiderUnfundedRefusal(
+        { kind: "guest" },
+        refusal({
+          error: {
+            status: 402,
+            code: "payment_required",
+            message: "Add credits to use your own key.",
+            details: { code },
+          },
+        }),
+      );
+      expect(translated?.status).toBe(403);
+      expect(translated!.details).toMatchObject({ reason: "no_credits" });
+    }
+  });
+
   test("a translated refusal consumes the body; a passed-through one leaves it readable", async () => {
     const passed = refusal({ error: { code: "payment_required", message: "Other" } });
     expect(await siteOutsiderUnfundedRefusal({ kind: "guest" }, passed)).toBeNull();

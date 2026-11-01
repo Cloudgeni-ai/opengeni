@@ -477,6 +477,7 @@ export { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "./human-in
 export {
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,

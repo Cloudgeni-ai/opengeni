@@ -458,6 +458,7 @@ export function useOrganizationProviderConnection({
     accessTarget: { client, organizationId, kind: providerKind, connectionId: "current" },
     canManageConnection: enabled && !catalogConnection,
     canManageCustomModels: enabled,
+    canManageAccess: enabled,
     connected,
     endpoint: connection?.status === "active" ? connection.endpoint : undefined,
     authMethod: connection?.status === "active" ? connection.authMethod : undefined,
