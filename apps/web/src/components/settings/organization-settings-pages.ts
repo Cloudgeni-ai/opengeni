@@ -70,7 +70,7 @@ export function organizationSettingsDescription(
     case "models":
       return `The models people in ${organizationName} can use, and the subscriptions and keys that pay for them.`;
     case "integrations":
-      // "Allowed integrations" and its one row say it all.
+      // "Connectors" and "Allowed integrations" each say what they are.
       return undefined;
     case "agents":
       return `Use ${organizationName} from Claude Code, Cursor, Codex or any MCP client. Each agent acts as you, with the access you choose when it signs in.`;
