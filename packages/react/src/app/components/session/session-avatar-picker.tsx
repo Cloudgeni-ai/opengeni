@@ -236,7 +236,7 @@ export function SessionAvatarPicker({
         ) : null}
         {kind === "icon" ? (
           <div
-            className="grid w-fit grid-cols-8 gap-1 max-sm:grid-cols-6"
+            className="grid w-fit grid-cols-8 gap-1 max-sm:grid-cols-6 pointer-coarse:grid-cols-6"
             role="group"
             aria-label="Icons"
           >
@@ -342,11 +342,13 @@ export function SessionAvatarPickerButton({
       <PopoverPrimitive.Trigger
         type="button"
         aria-label={label}
-        aria-invalid={invalid || undefined}
+        // Not aria-invalid: the form focuses the first invalid control, which
+        // must be the input in the popover that says what is wrong.
+        data-invalid={invalid || undefined}
         title={`Change ${label.toLowerCase()}`}
         className={cn(
           "group/avatar relative inline-flex size-12 shrink-0 items-center justify-center rounded-lg outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40",
-          invalid && "ring-2 ring-danger/60",
+          "data-invalid:ring-2 data-invalid:ring-danger/60",
         )}
       >
         {avatar ? (
@@ -372,12 +374,22 @@ export function SessionAvatarPickerButton({
       </PopoverPrimitive.Trigger>
       <PopoverContainedPortal>
         <PopoverPrimitive.Content
+          aria-label={label}
           align="start"
           sideOffset={6}
           collisionPadding={12}
+          onOpenAutoFocus={(event) => {
+            // Opened because the emoji or letters can't be saved: go to that input.
+            const field = (event.currentTarget as HTMLElement | null)?.querySelector<HTMLElement>(
+              '[aria-invalid="true"]',
+            );
+            if (!field) return;
+            event.preventDefault();
+            field.focus();
+          }}
           className={cn(
             MENU_SURFACE_CLASS,
-            "z-50 w-[min(24rem,calc(100vw-24px))] p-3 outline-hidden",
+            "z-50 max-h-(--radix-popover-content-available-height) w-[min(24rem,calc(100vw-24px))] overflow-y-auto p-3 outline-hidden",
           )}
         >
           <SessionAvatarPicker

@@ -325,7 +325,6 @@ describe("Slack agent form", () => {
       workspaceId: WORKSPACE_ID,
       workspaceName: "Platform",
       connections: [bot()],
-      memoryReviewFirst: null,
       onClose: () => undefined,
       onSaved: () => undefined,
       ...props,
@@ -527,7 +526,9 @@ describe("Slack agent form", () => {
     const view = await render(
       <SlackAgentFormPage {...form({ connections: [], connectionsLoaded: false })} />,
     );
-    expect(view.host.textContent).toContain("Loading Slack workspaces…");
+    expect(buttonNamed(view.host, "Create agent").disabled).toBe(true);
+    // Loading isn't a reason to show: it ends on its own.
+    expect(view.host.textContent).not.toContain("Add a Slack workspace");
     await view.rerender(<SlackAgentFormPage {...form({ connections: [bot()] })} />);
     await fill(view.host, "Data team", "Answers questions about our metrics.");
     await submit(view.host);
@@ -581,6 +582,57 @@ describe("Slack agent form", () => {
         avatar: expect.objectContaining({ kind: "icon", icon: "rocket" }),
       }),
     );
+    await view.unmount();
+  });
+
+  test("an icon that can't be saved reopens the picker at the field that says why", async () => {
+    const createOpenGeniSlackAgent = mock(async () => ({ agent: agent() }));
+    setContext({ createOpenGeniSlackAgent });
+    const view = await render(<SlackAgentFormPage {...form()} />);
+    const trigger = view.host.querySelector<HTMLButtonElement>('button[aria-label="Icon"]')!;
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+    await act(async () => {
+      trigger.click();
+      await settle();
+    });
+    const letters = [...document.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
+      (candidate) => candidate.textContent === "Letters",
+    )!;
+    await act(async () => {
+      letters.click();
+      await settle();
+    });
+    await type(document.querySelector<HTMLInputElement>('input[maxlength="2"]')!, "!!");
+    await act(async () => {
+      trigger.click();
+      await settle();
+    });
+    expect(document.querySelector('input[maxlength="2"]') === null).toBe(true);
+    await fill(view.host, "Data team", "Answers questions about our metrics.");
+    await act(async () => {
+      view.host
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await settle();
+    });
+    expect(createOpenGeniSlackAgent).not.toHaveBeenCalled();
+    const input = document.querySelector<HTMLInputElement>('input[maxlength="2"]')!;
+    expect(input !== null).toBe(true);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(document.body.textContent).toContain("Use one or two letters or digits.");
+    expect(document.activeElement === input).toBe(true);
+    // The button isn't what the form focuses as invalid; it only shows it.
+    expect(trigger.hasAttribute("aria-invalid")).toBe(false);
+    expect(trigger.hasAttribute("data-invalid")).toBe(true);
+    await view.unmount();
+  });
+
+  test("names the workspace once when its name already says workspace", async () => {
+    setContext({});
+    const view = await render(
+      <SlackAgentFormPage {...form({ workspaceName: "this workspace" })} />,
+    );
+    expect(view.host.textContent).toContain("Works in this workspace.");
     await view.unmount();
   });
 

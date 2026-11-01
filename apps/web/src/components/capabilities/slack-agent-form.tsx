@@ -74,6 +74,13 @@ function nameError(name: string): string | null {
   return null;
 }
 
+/** "Works in the Platform workspace.", or "Works in this workspace." when the name already says it. */
+function worksIn(workspaceName: string): string {
+  return /workspace$/i.test(workspaceName.trim())
+    ? `Works in ${workspaceName}.`
+    : `Works in the ${workspaceName} workspace.`;
+}
+
 function installationName(connection: ConnectionMetadata): string {
   return openGeniSlackBotUiMetadata(connection)?.slackTeamName ?? "Slack workspace";
 }
@@ -115,7 +122,6 @@ export function SlackAgentFormPage({
   workspaceName,
   connections,
   connectionsLoaded = true,
-  memoryReviewFirst,
   onClose,
   onSaved,
 }: {
@@ -129,8 +135,6 @@ export function SlackAgentFormPage({
   connections: ConnectionMetadata[];
   /** False while the bots are still loading; the form can open before them. */
   connectionsLoaded?: boolean | undefined;
-  /** New Memory waits for review in the agent's workspace; null when unknown. */
-  memoryReviewFirst: boolean | null;
   onClose: () => void;
   /** After a create or an edit. */
   onSaved: (agent: SlackAgent, created: boolean) => void;
@@ -170,7 +174,6 @@ export function SlackAgentFormPage({
   const [pickerOpen, setPickerOpen] = useState(false);
   const avatar = sessionAvatarFromDraft(draft, name, null);
   const connection = connections.find((row) => row.id === connectionId) ?? connections[0] ?? null;
-  const reviewFirst = agent ? agent.memoryReviewFirst : memoryReviewFirst;
   const agentWorkspaceName = agent ? (agent.targetWorkspaceName ?? workspaceName) : workspaceName;
   const handle = name.trim() ? slackAgentHandle(name) : null;
   // Opening an agent to anyone in Slack is an organization admin's call; any
@@ -190,7 +193,8 @@ export function SlackAgentFormPage({
       ...sessionAvatarDraftErrors(draft, name, null),
     };
     setErrors(next);
-    if (next.emoji || next.letters) setPickerOpen(true);
+    // Name and description first; then the picker opens on the icon's error.
+    if (!next.name && !next.description && (next.emoji || next.letters)) setPickerOpen(true);
     return !next.name && !next.description && !next.emoji && !next.letters && avatar !== null;
   }
 
@@ -301,7 +305,7 @@ export function SlackAgentFormPage({
   return (
     <FormPage
       title={agent ? `Edit ${agent.name}` : "New Slack agent"}
-      description={`Works in the ${agentWorkspaceName} workspace.`}
+      description={worksIn(agentWorkspaceName)}
       back={{ label: "Slack", onClick: onClose }}
       onCancel={onClose}
       submitLabel={agent ? "Save" : "Create agent"}
@@ -309,10 +313,8 @@ export function SlackAgentFormPage({
       pending={turningOn ? true : undefined}
       submitDisabled={!agent && !connection}
       disabledReason={
-        !agent && !connection
-          ? connectionsLoaded
-            ? "Add a Slack workspace to create Slack agents."
-            : "Loading Slack workspaces…"
+        !agent && !connection && connectionsLoaded
+          ? "Add a Slack workspace to create Slack agents."
           : undefined
       }
       onSubmit={async () => {
@@ -421,7 +423,7 @@ export function SlackAgentFormPage({
           <MemoryField
             workspaceId={agent.targetWorkspaceId}
             collectionId={agent.knowledgeCollectionId}
-            reviewFirst={reviewFirst === true}
+            reviewFirst={agent.memoryReviewFirst}
           />
         ) : null}
         {agent ? (
