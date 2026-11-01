@@ -6,6 +6,7 @@ import {
 } from "../src/recording-transcription-azure";
 import {
   mergeRecordingTranscriptionPieces,
+  planRecordingSoundPieces,
   planRecordingTranscriptionPieces,
   RecordingTranscriptionError,
   type RecordingTranscriptionResult,
@@ -188,6 +189,39 @@ describe("Azure Speech recordings", () => {
 });
 
 describe("pieces of long tracks", () => {
+  test("plans pieces over only the stretches with sound", () => {
+    expect(
+      planRecordingSoundPieces(600_000, null, [
+        { startMilliseconds: 10_000, endMilliseconds: 40_000 },
+        { startMilliseconds: 300_000, endMilliseconds: 700_000 },
+      ]),
+    ).toEqual([
+      {
+        startMilliseconds: 10_000,
+        endMilliseconds: 40_000,
+        keepFromMilliseconds: 10_000,
+        keepUntilMilliseconds: 40_000,
+      },
+      {
+        startMilliseconds: 300_000,
+        endMilliseconds: 600_000,
+        keepFromMilliseconds: 300_000,
+        keepUntilMilliseconds: Number.POSITIVE_INFINITY,
+      },
+    ]);
+    // A stretch longer than the model takes is split like a whole track.
+    const long = planRecordingSoundPieces(600_000, 100_000, [
+      { startMilliseconds: 100_000, endMilliseconds: 350_000 },
+    ]);
+    expect(long.map((piece) => [piece.startMilliseconds, piece.endMilliseconds])).toEqual([
+      [100_000, 190_000],
+      [170_000, 270_000],
+      [250_000, 350_000],
+      [330_000, 350_000],
+    ]);
+    expect(planRecordingSoundPieces(600_000, null, [])).toEqual([]);
+  });
+
   test("keeps a track that fits whole", () => {
     expect(planRecordingTranscriptionPieces(90_000, 120_000)).toEqual([
       {

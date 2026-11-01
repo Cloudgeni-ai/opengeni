@@ -149,6 +149,7 @@ async function runFfmpeg(
   ffmpegPath: string,
   args: string[],
   signal?: AbortSignal,
+  stderrBytes = 16_384,
 ): Promise<{ stderr: string }> {
   const child = Bun.spawn([ffmpegPath, ...args], {
     stdin: "ignore",
@@ -160,7 +161,7 @@ async function runFfmpeg(
   signal?.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(abort, FFMPEG_TIMEOUT_MS);
   try {
-    const [code, stderr] = await Promise.all([child.exited, readTail(child.stderr, 16_384)]);
+    const [code, stderr] = await Promise.all([child.exited, readTail(child.stderr, stderrBytes)]);
     if (code === 0) return { stderr };
     throw new RecordingAudioError(
       `ffmpeg could not prepare the audio: ${stderr.trim().split("\n").slice(-3).join(" ").slice(0, 400) || `exit ${code}`}`,
@@ -405,6 +406,138 @@ export const RECORDING_PIECE_BYTES_PER_SECOND: Partial<Record<RecordingPieceForm
   flac: 32_000,
   wav: 32_000,
 };
+
+/**
+ * Quieter than this (-55 dBFS) is no speech: well below a voice, even a
+ * soft one across the room, and above the near-silence of an idle
+ * microphone or the digital silence of a computer playing nothing. The
+ * aligner draws the same line.
+ */
+export const RECORDING_QUIET_DECIBELS = -55;
+/** Only quiet this long is left out: short pauses go to the model with the speech around them. */
+export const RECORDING_QUIET_MIN_MILLISECONDS = 20_000;
+/** Sound kept on each side of a quiet stretch that is left out, so no word's edge is lost. */
+export const RECORDING_QUIET_MARGIN_MILLISECONDS = 1_000;
+
+/** The quiet stretches ffmpeg's `silencedetect` reported, a trailing one ending with the audio. */
+export function parseSilences(
+  stderr: string,
+  durationMilliseconds: number,
+): Array<{ startMilliseconds: number; endMilliseconds: number }> {
+  const silences: Array<{ startMilliseconds: number; endMilliseconds: number }> = [];
+  let start: number | null = null;
+  for (const match of stderr.matchAll(/silence_(start|end): (-?\d+(?:\.\d+)?)/gu)) {
+    const at = Math.max(0, Math.round(Number(match[2]) * 1_000));
+    if (match[1] === "start") {
+      start = at;
+    } else if (start !== null) {
+      silences.push({
+        startMilliseconds: start,
+        endMilliseconds: Math.min(at, durationMilliseconds),
+      });
+      start = null;
+    }
+  }
+  if (start !== null && start < durationMilliseconds) {
+    silences.push({ startMilliseconds: start, endMilliseconds: durationMilliseconds });
+  }
+  return silences;
+}
+
+/**
+ * The stretches with sound between long quiet ones, each widened by a margin
+ * into the quiet around it.
+ */
+export function soundBetweenSilences(
+  silences: ReadonlyArray<{ startMilliseconds: number; endMilliseconds: number }>,
+  durationMilliseconds: number,
+  marginMilliseconds = RECORDING_QUIET_MARGIN_MILLISECONDS,
+): Array<{ startMilliseconds: number; endMilliseconds: number }> {
+  const sound: Array<{ startMilliseconds: number; endMilliseconds: number }> = [];
+  const add = (startMilliseconds: number, endMilliseconds: number) => {
+    const start = Math.max(0, startMilliseconds);
+    const end = Math.min(durationMilliseconds, endMilliseconds);
+    if (end <= start) return;
+    const last = sound.at(-1);
+    // Margins can reach over a short gap; join what touches.
+    if (last && start <= last.endMilliseconds) {
+      last.endMilliseconds = Math.max(last.endMilliseconds, end);
+    } else {
+      sound.push({ startMilliseconds: start, endMilliseconds: end });
+    }
+  };
+  // Sound runs from the end of one silence to the start of the next.
+  let soundFrom = 0;
+  for (const silence of silences) {
+    if (silence.startMilliseconds > soundFrom) {
+      add(soundFrom - marginMilliseconds, silence.startMilliseconds + marginMilliseconds);
+    }
+    soundFrom = Math.max(soundFrom, silence.endMilliseconds);
+  }
+  if (soundFrom < durationMilliseconds) {
+    add(soundFrom - marginMilliseconds, durationMilliseconds);
+  }
+  return sound;
+}
+
+/**
+ * The stretches of a prepared track with sound in them, leaving out quiet
+ * that lasts at least `RECORDING_QUIET_MIN_MILLISECONDS`. A track with no
+ * sound at all has none, however short it is.
+ */
+export async function detectRecordingSound(input: {
+  audio: { bytes: Uint8Array; extension: string };
+  durationMilliseconds: number;
+  ffmpegPath: string;
+  tempRoot?: string | undefined;
+  signal?: AbortSignal | undefined;
+}): Promise<Array<{ startMilliseconds: number; endMilliseconds: number }>> {
+  // A track shorter than the minimum is quiet only when (nearly) all of it is.
+  const minQuietSeconds = Math.max(
+    0.1,
+    Math.min(RECORDING_QUIET_MIN_MILLISECONDS, input.durationMilliseconds - 500) / 1_000,
+  );
+  const directory = await mkdtemp(join(input.tempRoot ?? tmpdir(), "opengeni-recording-sound-"));
+  try {
+    const source = join(directory, `source.${input.audio.extension}`);
+    const handle = await open(source, "wx", 0o600);
+    try {
+      await handle.write(input.audio.bytes);
+    } finally {
+      await handle.close();
+    }
+    const { stderr } = await runFfmpeg(
+      input.ffmpegPath,
+      [
+        "-nostdin",
+        "-hide_banner",
+        "-nostats",
+        "-loglevel",
+        "info",
+        "-i",
+        source,
+        "-vn",
+        "-map",
+        "0:a:0",
+        "-ac",
+        "1",
+        "-af",
+        `silencedetect=noise=${RECORDING_QUIET_DECIBELS}dB:d=${minQuietSeconds}`,
+        "-f",
+        "null",
+        "-",
+      ],
+      input.signal,
+      1_048_576,
+    );
+    return soundBetweenSilences(
+      parseSilences(stderr, input.durationMilliseconds),
+      input.durationMilliseconds,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 /**
  * Cut one stretch of a prepared track into its own file in the given
