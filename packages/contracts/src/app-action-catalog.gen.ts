@@ -1534,13 +1534,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
-    "id": "DELETE /v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
-    "method": "DELETE",
-    "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
-    "request": [],
-    "response": []
-  },
-  {
     "id": "DELETE /v1/workspaces/:workspaceId/connections/:connectionId/1password",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/connections/:connectionId/1password",
@@ -7922,6 +7915,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "IntegrationFacetRemovalResult"
     ],
     "permission": "connections:write"
+  },
+  {
+    "id": "removeModelConnectionFromWorkspace",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:scopeId/model-connections/:kind/:connectionId/access",
+    "request": [],
+    "response": []
   },
   {
     "id": "removeSessionResources",
