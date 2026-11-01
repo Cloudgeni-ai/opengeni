@@ -37,6 +37,15 @@ This confirms transport settlement, not server processing or consumer storage.
 Receipt failure remains an unknown publication outcome; it does not authorize
 replaying the publication. Ordinary queued publication stays unchanged.
 
+A separate local change in `tls.rs` reads the platform trust store on the
+blocking pool and keeps its first successful result for the process, instead
+of reading it on the async worker for every dial. On macOS that read can block
+for many seconds and then fail transiently, which turned a scheduled credential
+rotation into a reconnect outage of a minute or more. A failed read is not
+kept, so the next dial reads again. A caller-provided `ClientConfig` no longer
+triggers a platform read it then discards. Its tests are named
+`platform_certs_tests`.
+
 The package is excluded from the workspace's member set. Native CI runs its
 focused library tests explicitly; unrelated upstream server integration tests
 are not part of the agent suite. Remove this vendored copy when an upstream

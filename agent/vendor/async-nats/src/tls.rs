@@ -17,6 +17,7 @@ use rustls_pki_types::pem::PemObject;
 use rustls_webpki::types::{CertificateDer, PrivateKeyDer};
 use std::io::{self, BufReader, ErrorKind};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
 /// Loads client certificates from a `.pem` file.
@@ -55,20 +56,57 @@ pub(crate) async fn load_key(path: PathBuf) -> io::Result<PrivateKeyDer<'static>
     .await?
 }
 
+/// Platform trust anchors, loaded once per process after the first success.
+static PLATFORM_CERTS: OnceLock<Vec<CertificateDer<'static>>> = OnceLock::new();
+
+/// Returns the platform's trust anchors, reading the platform store only until
+/// one read succeeds.
+///
+/// Every dial used to read the store again. On macOS that is a synchronous
+/// trust-settings query that can block for many seconds and then fail
+/// transiently, which turned a routine credential rotation into a long outage
+/// and stalled the async worker running it. The read now runs on the blocking
+/// pool, and its first successful result serves every later dial. A failure
+/// is not cached, so the next dial reads the store again.
+async fn platform_certs<F>(load: F) -> io::Result<Vec<CertificateDer<'static>>>
+where
+    F: FnOnce() -> io::Result<Vec<CertificateDer<'static>>> + Send + 'static,
+{
+    platform_certs_in(&PLATFORM_CERTS, load).await
+}
+
+async fn platform_certs_in<F>(
+    cache: &'static OnceLock<Vec<CertificateDer<'static>>>,
+    load: F,
+) -> io::Result<Vec<CertificateDer<'static>>>
+where
+    F: FnOnce() -> io::Result<Vec<CertificateDer<'static>>> + Send + 'static,
+{
+    if let Some(certs) = cache.get() {
+        return Ok(certs.clone());
+    }
+    let certs = tokio::task::spawn_blocking(load)
+        .await
+        .map_err(io::Error::other)?
+        .map_err(|err| io::Error::other(format!("could not load platform certs: {err}")))?;
+    Ok(cache.get_or_init(|| certs).clone())
+}
+
 pub(crate) async fn config_tls(options: &ConnectorOptions) -> io::Result<ClientConfig> {
+    // A caller-provided ClientConfig carries its own roots.
+    if let Some(config) = &options.tls_client_config {
+        return Ok(config.to_owned());
+    }
     let mut root_store = RootCertStore::empty();
     // load native system certs only if user did not specify them.
-    if options.tls_client_config.is_some() || options.certificates.is_empty() {
-        let certs_iter = rustls_native_certs::load_native_certs()
-            .map_err(|err| io::Error::other(format!("could not load platform certs: {err}")))?;
-        root_store.add_parsable_certificates(certs_iter);
+    if options.certificates.is_empty() {
+        let certs = platform_certs(rustls_native_certs::load_native_certs).await?;
+        root_store.add_parsable_certificates(certs);
     }
 
     // use provided ClientConfig or built it from options.
     let tls_config = {
-        if let Some(config) = &options.tls_client_config {
-            Ok(config.to_owned())
-        } else {
+        {
             // Include user-provided certificates.
             for cafile in &options.certificates {
                 let trust_anchors = load_certs(cafile.to_owned())
@@ -104,4 +142,74 @@ pub(crate) async fn config_tls(options: &ConnectorOptions) -> io::Result<ClientC
         }
     }?;
     Ok(tls_config)
+}
+
+#[cfg(test)]
+mod platform_certs_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn anchor(byte: u8) -> CertificateDer<'static> {
+        CertificateDer::from(vec![byte; 4])
+    }
+
+    #[tokio::test]
+    async fn platform_certs_are_read_once_and_reused_after_the_first_success() {
+        static CACHE: OnceLock<Vec<CertificateDer<'static>>> = OnceLock::new();
+        static READS: AtomicUsize = AtomicUsize::new(0);
+
+        let failed = platform_certs_in(&CACHE, || {
+            READS.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::other("I/O error"))
+        })
+        .await
+        .expect_err("a failed read is reported");
+        assert!(failed.to_string().contains("could not load platform certs"));
+
+        let first = platform_certs_in(&CACHE, || {
+            READS.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![anchor(1)])
+        })
+        .await
+        .expect("a later read succeeds because the failure was not cached");
+        assert_eq!(first, vec![anchor(1)]);
+
+        for _ in 0..3 {
+            let again = platform_certs_in(&CACHE, || {
+                READS.fetch_add(1, Ordering::SeqCst);
+                Err(io::Error::other("the platform store is not read again"))
+            })
+            .await
+            .expect("later dials reuse the loaded anchors");
+            assert_eq!(again, vec![anchor(1)]);
+        }
+        assert_eq!(READS.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_slow_platform_read_does_not_block_the_async_runtime() {
+        static CACHE: OnceLock<Vec<CertificateDer<'static>>> = OnceLock::new();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        // If the read ran on the runtime's only thread, nothing below could run
+        // until this watchdog released it, and the elapsed-time check fails.
+        let watchdog = release.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let _ = watchdog.send(());
+        });
+        let started = std::time::Instant::now();
+
+        let read = tokio::spawn(platform_certs_in(&CACHE, move || {
+            released.recv().expect("released");
+            Ok(vec![anchor(2)])
+        }));
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the runtime stalled while the platform store was read"
+        );
+        let _ = release.send(());
+        assert_eq!(read.await.expect("joined").expect("read"), vec![anchor(2)]);
+    }
 }
