@@ -1,5 +1,10 @@
 import { t } from "./console-text";
-import { isDiagnosticFailureCode } from "../../lib/format";
+import {
+  creditRefusalHeadline,
+  creditRefusalKindFromText,
+  isDiagnosticFailureCode,
+  type CreditRefusalKind,
+} from "../../lib/format";
 import { providerRecoverySubject } from "../../lib/provider-recovery";
 import type { SessionFailureSummary } from "./events";
 import { freeCreditGapReason, type FreeCreditGap } from "./free-credit-gap";
@@ -202,6 +207,11 @@ export function failedSessionCopy(
   canChooseModel = false,
   /** Free credit remains, but not for this model: name the gap instead of an empty workspace. */
   freeCreditGap: FreeCreditGap | null = null,
+  /**
+   * The refusal the last turn ended on (`creditRefusalFromEvents`); null when
+   * it named none. Omitted, the recorded failure text decides.
+   */
+  stopRefusal?: CreditRefusalKind | null,
 ): {
   reason: string;
   unavailableModel: boolean;
@@ -213,6 +223,8 @@ export function failedSessionCopy(
   dailyLimit?: true | undefined;
   /** The compaction-failure headline; the timeline's own landmark can carry it instead. */
   compaction?: true | undefined;
+  /** A credit stop one action fixes (own-key fee or API use); no model choice helps. */
+  creditRefusal?: CreditRefusalKind | undefined;
 } {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
   const diagnostic = failure.recordedDetail || failure.reason;
@@ -337,6 +349,20 @@ export function failedSessionCopy(
       ...(diagnostic ? { detail: diagnostic } : {}),
     };
   }
+  // An own-key or API stop names its one fix; free credit for another model
+  // can't pay for either.
+  const creditRefusal = creditExhausted
+    ? stopRefusal !== undefined
+      ? stopRefusal
+      : creditRefusalKindFromText(failure.recordedDetail, failure.reason)
+    : null;
+  if (creditRefusal) {
+    return {
+      reason: creditRefusalHeadline(t, creditRefusal),
+      unavailableModel: false,
+      creditRefusal,
+    };
+  }
   const reason = creditExhausted
     ? freeCreditGap
       ? freeCreditGapReason(freeCreditGap)
@@ -355,4 +381,42 @@ export function failedSessionCopy(
             : recorded
           : "This session failed.";
   return { reason, unavailableModel };
+}
+
+/**
+ * The composer placeholder of a chat. "Send a message to revive" is a dead end
+ * without credits: the reply turn stops the same way. An own-key or API stop
+ * names its one fix; with free credit left for other models, a covered model
+ * revives it.
+ */
+export function chatComposerPlaceholder(input: {
+  cancelled: boolean;
+  /** Out of credits, and the chat has stopped (failed or idle). */
+  creditStopped: boolean;
+  stopRefusal: CreditRefusalKind | null;
+  creditGap: FreeCreditGap | null;
+  canBuyCredits: boolean;
+}): string {
+  if (input.cancelled) return "This session was cancelled.";
+  if (!input.creditStopped) return "Send a follow-up…";
+  if (input.stopRefusal) return creditRefusalHeadline(t, input.stopRefusal, input.canBuyCredits);
+  if (input.creditGap) {
+    return input.creditGap.selectionUsable
+      ? "Send a follow-up…"
+      : "Your free credits don't cover this model — choose another model or add credits.";
+  }
+  return "Out of Opengeni credits — add credits to continue.";
+}
+
+/**
+ * The plain failure line shown while the banner loads or if it fails: the
+ * banner's headline, so a member is told to ask an owner there too.
+ */
+export function failureFallbackReason(
+  copy: { reason: string; creditRefusal?: CreditRefusalKind | null | undefined },
+  canBuyCredits: boolean,
+): string {
+  return copy.creditRefusal && !canBuyCredits
+    ? creditRefusalHeadline(t, copy.creditRefusal, false)
+    : copy.reason;
 }
