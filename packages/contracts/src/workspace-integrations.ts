@@ -171,14 +171,23 @@ export const OrganizationWebhook = /* @__PURE__ */ defineSchema(() =>
           "Organization webhooks accept session events only; subscribe to usage events on a workspace webhook.",
       }),
     workspaceFilter: IntegrationWorkspaceFilter.nullable(),
+    /** Shared workspaces whose events it receives; null is every one. Never Personal ones. */
+    allowedWorkspaceIds: z.array(primitives.uuid).nullable(),
   }),
 );
 export type OrganizationWebhook = z.infer<typeof OrganizationWebhook>;
+
+/** Picked shared workspaces; null is every shared workspace. */
+const OrganizationIntegrationWorkspaceIds = /* @__PURE__ */ defineSchema(() =>
+  z.array(primitives.uuid).max(500).nullable(),
+);
 
 export const CreateOrganizationWebhookRequest = /* @__PURE__ */ defineSchema(() =>
   CreateWorkspaceWebhookRequest.extend({
     eventTypes: OrganizationEventTypes,
     workspaceFilter: IntegrationWorkspaceFilter.nullable(),
+    /** Omitted or null: every shared workspace the filter allows. */
+    allowedWorkspaceIds: OrganizationIntegrationWorkspaceIds.optional(),
   }),
 );
 export type CreateOrganizationWebhookRequest = z.input<typeof CreateOrganizationWebhookRequest>;
@@ -188,6 +197,8 @@ export const UpdateOrganizationWebhookRequest = /* @__PURE__ */ defineSchema(() 
     eventTypes: OrganizationEventTypes.optional(),
     /** Explicit on every update: null covers all non-personal workspaces. */
     workspaceFilter: IntegrationWorkspaceFilter.nullable(),
+    /** Omitted keeps the stored list; null is every shared workspace. */
+    allowedWorkspaceIds: OrganizationIntegrationWorkspaceIds.optional(),
   }),
 );
 export type UpdateOrganizationWebhookRequest = z.input<typeof UpdateOrganizationWebhookRequest>;
@@ -404,6 +415,8 @@ export const OrganizationCredentialProvider = /* @__PURE__ */ defineSchema(() =>
     workspaceFilter: IntegrationWorkspaceFilter.nullable(),
     /** Members' Personal workspaces; `workspaceFilter` picks shared ones only. */
     allowPersonalWorkspaces: primitives.boolean,
+    /** Shared workspaces it serves; null is every one. `workspaceFilter` applies on top. */
+    allowedWorkspaceIds: z.array(primitives.uuid).nullable(),
   }),
 );
 export type OrganizationCredentialProvider = z.infer<typeof OrganizationCredentialProvider>;
@@ -415,6 +428,12 @@ export const PutOrganizationCredentialProviderRequest =
       workspaceFilter: IntegrationWorkspaceFilter.nullable(),
       /** Also cover members' Personal workspaces. Defaults to false; PUT replaces configuration. */
       allowPersonalWorkspaces: primitives.optionalBoolean,
+      /**
+       * Shared workspaces it serves; null is every one. Unlike the other
+       * fields, omitting it keeps the stored list (every one on create), so
+       * an older client never widens where the provider works.
+       */
+      allowedWorkspaceIds: OrganizationIntegrationWorkspaceIds.optional(),
     }),
   );
 export type PutOrganizationCredentialProviderRequest = z.input<

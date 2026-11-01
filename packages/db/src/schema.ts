@@ -4110,6 +4110,8 @@ export const organizationCredentialProviders = pgTable(
     workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
     /** Personal workspaces; the workspace filter applies to shared ones only. */
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(false),
+    /** Shared workspaces it serves; null is every one. The filter applies on top. */
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     createdBySubjectId: text("created_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4132,6 +4134,8 @@ export const organizationWebhooks = pgTable(
     enabled: boolean("enabled").notNull().default(true),
     description: text("description"),
     workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
+    /** Shared workspaces whose events it receives; null is every one. Never Personal ones. */
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
     createdBySubjectId: text("created_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
