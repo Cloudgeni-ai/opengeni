@@ -11,6 +11,54 @@ const PAN = "4000000000000002";
 const GROUPED = "4000 0000 0000 0002";
 const CVC = "731";
 
+function paymentContentJson(value: unknown, ...fixtureOrigins: string[]): string {
+  return JSON.stringify(value, (key, item: unknown) => {
+    // Generated refs and the fixture's random port are not page content.
+    // Keep every other string, including URL paths and queries, under test.
+    if (key === "ref") return "<element-ref>";
+    return typeof item === "string"
+      ? fixtureOrigins.reduce((text, origin) => text.replaceAll(origin, "<fixture-origin>"), item)
+      : item;
+  });
+}
+
+test("payment privacy comparisons ignore only generated refs and the fixture origin", () => {
+  const semantic = {
+    roots: [
+      {
+        ref: "ef2e7319d",
+        name: "Checkout fixture",
+        states: ["url=http://127.0.0.1:57317/", "url=http://localhost:57317/frame"],
+        children: [{ ref: "ee2712731", value: { redacted: true, reason: "payment" } }],
+      },
+    ],
+  };
+  expect(JSON.stringify(semantic)).toContain(CVC);
+  const text = paymentContentJson(semantic, "http://127.0.0.1:57317", "http://localhost:57317");
+  expect(text).not.toContain(CVC);
+  expect(text).toContain("Checkout fixture");
+  expect(text).toContain('"reason":"payment"');
+});
+
+test("payment privacy comparisons still detect secrets in all page-content strings", () => {
+  for (const secret of [PAN, GROUPED, CVC]) {
+    for (const content of [
+      { value: secret },
+      { name: `Card ${secret}` },
+      { description: secret },
+      { identifier: secret },
+      { states: [`url=http://127.0.0.1:57317/${secret}?card=${secret}`] },
+      { states: [`url=http://localhost:57317/${secret}?card=${secret}`] },
+      { children: [{ name: `Reference-like page text e${secret}d` }] },
+      { states: [`url=https://example.test/${secret}`] },
+    ]) {
+      expect(
+        paymentContentJson(content, "http://127.0.0.1:57317", "http://localhost:57317"),
+      ).toContain(secret);
+    }
+  }
+});
+
 e2e(
   "ordinary hidden metadata and expiry years do not poison later page reads or image eligibility",
   async () => {
@@ -110,7 +158,7 @@ e2e(
         action,
       });
     const safe = (value: unknown) => {
-      const text = JSON.stringify((value as BrowserObservation).semantic);
+      const text = paymentContentJson((value as BrowserObservation).semantic, server.url.origin);
       for (const secret of [PAN, GROUPED, CVC]) expect(text).not.toContain(secret);
       expect(text).toContain("Card number");
       expect(text).toContain("Order 824601");
@@ -212,7 +260,11 @@ for (const crossOrigin of [false, true]) {
       });
       try {
         const observation = await driver.start(String(server.url));
-        const text = JSON.stringify(observation.semantic);
+        const text = paymentContentJson(
+          observation.semantic,
+          server.url.origin,
+          `http://localhost:${server.port}`,
+        );
         for (const secret of [PAN, GROUPED, CVC]) expect(text).not.toContain(secret);
         expect(text).toContain("Embedded card");
         expect(text).toContain("Embedded security code");

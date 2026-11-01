@@ -48,6 +48,7 @@ import {
   FolderIcon,
   FolderPlusIcon,
   ListFilterIcon,
+  LockIcon,
   MailIcon,
   MailOpenIcon,
   MessagesSquareIcon,
@@ -57,6 +58,7 @@ import {
   PlusIcon,
   SearchIcon,
   Trash2Icon,
+  UsersIcon,
   LinkIcon,
 } from "lucide-react";
 import { SessionAvatar } from "../session/session-avatar";
@@ -118,7 +120,8 @@ import {
   DropdownMenuTrigger,
 } from "../../../ui/dropdown-menu";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../../../ui/hover-card";
-import { ChannelCreateDialog } from "./channel-create-dialog";
+import { ChannelCreateDialog, type ProjectAudience } from "./channel-create-dialog";
+import { useCanLimitToMe } from "../../lib/use-can-limit-to-me";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../../ui/tooltip";
 import { useAppContext } from "../../app-context";
 import {
@@ -283,6 +286,7 @@ import { rememberSidebarSites } from "../../lib/actions/site-directory";
 import { useChatOperations } from "../../lib/actions/chat-operations";
 import { TooltipWithKeys } from "../command-menu/keycaps";
 import { errorMessage } from "@opengeni/contracts/values";
+import { userErrorText } from "../../../ui/api-error";
 
 /** True when the browser should own navigation (new tab / window / modified click). */
 function isModifiedNavigationClick(
@@ -531,8 +535,21 @@ export function SessionList() {
   } = channelsQuery;
   const [channelDialogOpen, setChannelDialogOpen] = useState(false);
   const [channelNameDraft, setChannelNameDraft] = useState("");
+  const [channelAudienceDraft, setChannelAudienceDraft] = useState<ProjectAudience>("workspace");
+  // Only me projects are offered only where this person may make Only me work:
+  // never in a Personal workspace, where everything is theirs anyway.
+  const personalRailWorkspace = isPersonalWorkspace(
+    context.workspaces?.find((workspace) => workspace.id === rail.workspaceId) ?? null,
+    null,
+  );
+  const canMakeOnlyMeProject = useCanLimitToMe(
+    context.client,
+    rail.workspaceId,
+    channelDialogOpen && !personalRailWorkspace,
+  );
   const [projectPendingEdit, setProjectPendingEdit] = useState<Channel | null>(null);
   const [projectPendingDelete, setProjectPendingDelete] = useState<Channel | null>(null);
+  const [projectPendingShare, setProjectPendingShare] = useState<Channel | null>(null);
   const [sessionPendingDelete, setSessionPendingDelete] = useState<Session | null>(null);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
@@ -1784,14 +1801,18 @@ export function SessionList() {
   const submitCreateChannel = useCallback(async () => {
     const name = channelNameDraft.trim();
     if (!name) return;
-    const created = await requestCreateChannel({ name });
+    const created = await requestCreateChannel({
+      name,
+      ...(canMakeOnlyMeProject ? { visibility: channelAudienceDraft } : {}),
+    });
     if (created) {
       setChannelDialogOpen(false);
       setChannelNameDraft("");
+      setChannelAudienceDraft("workspace");
     } else {
       toast.error("Couldn't create the project. The name may already be in use.");
     }
-  }, [channelNameDraft, requestCreateChannel]);
+  }, [canMakeOnlyMeProject, channelAudienceDraft, channelNameDraft, requestCreateChannel]);
   const onMoveToChannel = useCallback(
     async (
       session: Session,
@@ -1872,7 +1893,15 @@ export function SessionList() {
           setChannelMoveOverrides((current) =>
             rollbackSessionChannelMove(current, session.id, operation),
           );
-          toast.error("Couldn't move the workstream. Its previous project was restored.");
+          // Rows don't carry a chat's audience, so name the likely reason here.
+          const onlyMeTarget =
+            channels.find((project) => project.id === channelId)?.visibility === "private";
+          toast.error(
+            "Couldn't move the workstream. Its previous project was restored.",
+            onlyMeTarget
+              ? { description: "An Only me project holds only your own Only me chats." }
+              : undefined,
+          );
         }
         await refreshSessionPages();
       } finally {
@@ -1884,7 +1913,7 @@ export function SessionList() {
         }
       }
     },
-    [context, refreshSessionPages, verifySessionChannelMove],
+    [channels, context, refreshSessionPages, verifySessionChannelMove],
   );
   const saveProjectProfile = useCallback(
     async (project: Channel, change: UpdateChannelRequest): Promise<boolean> => {
@@ -1917,6 +1946,17 @@ export function SessionList() {
     await refreshSessionPages();
     return true;
   }, [projectPendingDelete, refreshSessionPages, removeProject]);
+  const onShareProject = useCallback(async (): Promise<boolean> => {
+    if (!projectPendingShare) return false;
+    const shared = await updateProject(projectPendingShare.id, { visibility: "workspace" });
+    if (!shared) {
+      toast.error(
+        "Couldn't share the project. A shared project may already use this name; rename it and try again.",
+      );
+      return false;
+    }
+    return true;
+  }, [projectPendingShare, updateProject]);
   const onReorderProjects = useCallback(
     async (sourceProjectId: string, targetProjectId: string) => {
       if (sourceProjectId === targetProjectId) return;
@@ -2263,9 +2303,12 @@ export function SessionList() {
           channelId,
         });
         moved = true;
-      } catch {
+      } catch (moveError) {
+        // Says why, for example that an Only me project takes only Only me Sites.
         if (context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition))
-          toast.error("Couldn't move the Site. Its previous project was restored.");
+          toast.error("Couldn't move the Site. Its previous project was restored.", {
+            description: userErrorText(moveError),
+          });
       }
       try {
         if (context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition) && moved)
@@ -4092,6 +4135,7 @@ export function SessionList() {
                       }
                       onToggleProjectPin={onToggleProjectPin}
                       onEditProject={setProjectPendingEdit}
+                      onShareProject={setProjectPendingShare}
                       onDeleteProject={setProjectPendingDelete}
                       draggedProjectId={draggedProjectId}
                       dragOverProjectId={dragOverProjectId}
@@ -4307,10 +4351,18 @@ export function SessionList() {
             open={channelDialogOpen}
             name={channelNameDraft}
             busy={channelsQuery.mutating}
+            audience={
+              canMakeOnlyMeProject
+                ? { value: channelAudienceDraft, onChange: setChannelAudienceDraft }
+                : undefined
+            }
             onNameChange={setChannelNameDraft}
             onOpenChange={(open) => {
               setChannelDialogOpen(open);
-              if (!open) setChannelNameDraft("");
+              if (!open) {
+                setChannelNameDraft("");
+                setChannelAudienceDraft("workspace");
+              }
             }}
             onSubmit={() => void submitCreateChannel()}
           />
@@ -4341,6 +4393,17 @@ export function SessionList() {
             confirmLabel="Delete project"
             cancelAutoFocus
             onConfirm={onDeleteProject}
+          />
+          <ConfirmDialog
+            open={projectPendingShare !== null}
+            onOpenChange={(open) => {
+              if (!open) setProjectPendingShare(null);
+            }}
+            title={<>Share “{projectPendingShare?.name}” with the workspace?</>}
+            description="Everyone in this workspace will see the project and can file their chats in it. Your Only me chats and Sites in it stay Only me. A shared project can't be made Only me again."
+            confirmLabel="Share project"
+            cancelAutoFocus
+            onConfirm={onShareProject}
           />
         </div>
       </WorkstreamRootsContext.Provider>
@@ -4536,6 +4599,8 @@ function SessionGroup(props: {
   project?: Channel | undefined;
   onToggleProjectPin?: ((project: Channel) => void) | undefined;
   onEditProject?: ((project: Channel) => void) | undefined;
+  /** Offered on the owner's Only me project: share it with the workspace. */
+  onShareProject?: ((project: Channel) => void) | undefined;
   onDeleteProject?: ((project: Channel) => void) | undefined;
   draggedProjectId?: string | null | undefined;
   dragOverProjectId?: string | null | undefined;
@@ -4609,6 +4674,12 @@ function SessionGroup(props: {
         <ProjectGlyph project={props.project} open={sectionExpanded} />
       </span>
       <span className="min-w-0 flex-1 truncate">{props.label}</span>
+      {props.project?.visibility === "private" ? (
+        <>
+          <LockIcon aria-hidden="true" className="size-3 shrink-0 text-fg-subtle" />
+          <span className="sr-only">Only me</span>
+        </>
+      ) : null}
       {props.showSummary !== false ? (
         // The row's actions sit where the summary is, on the translucent
         // hover wash, so the summary steps aside while they show.
@@ -4731,6 +4802,12 @@ function SessionGroup(props: {
                   <PencilIcon aria-hidden="true" />
                   Edit project…
                 </DropdownMenuItem>
+                {props.project.visibility === "private" && props.onShareProject ? (
+                  <DropdownMenuItem onSelect={() => props.onShareProject?.(props.project!)}>
+                    <UsersIcon aria-hidden="true" />
+                    Share with workspace…
+                  </DropdownMenuItem>
+                ) : null}
                 <DropdownMenuItem onSelect={() => props.onToggleProjectPin?.(props.project!)}>
                   <PinIcon
                     aria-hidden="true"

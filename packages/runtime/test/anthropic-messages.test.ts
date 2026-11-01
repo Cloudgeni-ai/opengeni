@@ -670,6 +670,42 @@ describe("Claude full-history Messages adapter", () => {
     expect(() => anthropicMessages(input.slice(0, 3))).toThrow("missing");
   });
 
+  test("a system message inside an unfinished tool step moves after the step's results when more of the reply follows", () => {
+    // Another provider ran two tool searches between a call and its result,
+    // and a search notice followed the first search.
+    const search = (id: string) => [
+      { type: "tool_search_call", id: `ts_${id}`, arguments: { query: id }, callId: id },
+      { type: "tool_search_output", id: `to_${id}`, tools: [], callId: id },
+    ];
+    const notice = { type: "message", role: "developer", content: "Search notice" };
+    const input: any[] = [
+      { type: "message", role: "user", content: "check" },
+      { type: "function_call", callId: "a", name: "list", arguments: "{}" },
+      ...search("s1"),
+      notice,
+      ...search("s2"),
+      { type: "function_call_result", callId: "a", output: "listed" },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] },
+    ];
+    const messages = anthropicMessages(input);
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "system",
+      "assistant",
+    ]);
+    expect(messages[1]!.content[0]).toMatchObject({ type: "tool_use", id: "a" });
+    expect(messages[2]!.content).toEqual([
+      { type: "tool_result", tool_use_id: "a", content: [{ type: "text", text: "listed" }] },
+    ]);
+    expect(JSON.stringify(messages[3]!.content)).toContain("Search notice");
+
+    // Followed directly by the results, it keeps its place, as before.
+    const direct = anthropicMessages([input[0], input[1], notice, input[7]]);
+    expect(direct.map((message) => message.role)).toEqual(["user", "assistant", "system", "user"]);
+  });
+
   test("signed thinking round trips exactly, including redacted blocks", () => {
     const signed = { type: "thinking", thinking: "A thought", signature: "opaque-signature" };
     const redacted = { type: "redacted_thinking", data: "opaque-data" };

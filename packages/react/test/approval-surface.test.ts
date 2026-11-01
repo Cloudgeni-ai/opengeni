@@ -3,6 +3,7 @@ import { act, createElement, useLayoutEffect, type ReactNode } from "react";
 import { ApprovalSurface } from "../src";
 import { OpenGeniApiError, type SessionEvent, type ToolActionReview } from "@opengeni/sdk";
 import {
+  approvalsDecidable,
   approvalsFromRequiresAction,
   projectPendingApprovals,
   type PendingApproval,
@@ -63,6 +64,15 @@ function LayoutObservation({ children, observe }: { children?: ReactNode; observ
   useLayoutEffect(observe);
   return children;
 }
+
+describe("approvalsDecidable", () => {
+  test("a pause's approvals stay decidable while a sibling decision resumes the turn", () => {
+    for (const status of ["requires_action", "running", "queued", "recovering", "waiting_capacity"])
+      expect(approvalsDecidable(status)).toBe(true);
+    for (const status of ["idle", "failed", "cancelled", "terminated", null, undefined])
+      expect(approvalsDecidable(status)).toBe(false);
+  });
+});
 
 describe("ApprovalSurface", () => {
   test.each(["saved", "legacy"] as const)(

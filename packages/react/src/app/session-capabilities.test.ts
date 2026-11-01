@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { builtInMcpCapability, sessionCapabilityGroupsFor } from "./lib/session-capabilities";
-import { firstPartySessionToolOptions } from "./lib/session-tools";
+import { firstPartySessionToolOptionsFor } from "./lib/session-tools";
 
 describe("session capability product groups", () => {
   test("represents every current first-party tool once and omits retired native Atlassian tools", () => {
@@ -10,10 +10,10 @@ describe("session capability product groups", () => {
       "atlassian_search",
       "atlassian_get",
     ]);
-    const expectedToolIds = firstPartySessionToolOptions
+    const expectedToolIds = firstPartySessionToolOptionsFor(undefined)
       .map((option) => option.id)
       .filter((id) => !retiredNativeToolIds.has(id));
-    const groups = sessionCapabilityGroupsFor(firstPartySessionToolOptions);
+    const groups = sessionCapabilityGroupsFor(firstPartySessionToolOptionsFor(undefined));
     const groupedIds = groups.flatMap((group) => group.toolIds);
 
     expect(new Set(groupedIds)).toEqual(new Set(expectedToolIds));
@@ -33,7 +33,7 @@ describe("session capability product groups", () => {
     expect(builtInMcpCapability({ id: "files" })?.name).toBe("Files");
     expect(builtInMcpCapability({ id: "docs" })?.name).toBe("Documents");
     expect(
-      sessionCapabilityGroupsFor(firstPartySessionToolOptions).find(
+      sessionCapabilityGroupsFor(firstPartySessionToolOptionsFor(undefined)).find(
         (group) => group.id === "knowledge",
       )?.name,
     ).toBe("Memory & learning");

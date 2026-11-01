@@ -55,14 +55,15 @@ jobs:
             /scripts/ci/regenerate-merge.ts
           sparse-checkout-cone-mode: false
           persist-credentials: false
-      # Full history to merge main, with file contents fetched only as needed.
+      # Full history with every file's contents. A blobless clone can't merge:
+      # git merge's checkout asks the remote for blobs the merge has just
+      # written, and the remote refuses them (regenerate-merge.ts checks this).
       - name: Check out the PR head
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.head }}
           path: work
           fetch-depth: 0
-          filter: blob:none
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:

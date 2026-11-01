@@ -103,7 +103,9 @@ export function createAzureOpenAiTranscriptionProvider(input: {
       } catch (error) {
         throw fetchError(error);
       }
-      if (!response.ok) throw responseError(response.status);
+      if (!response.ok) {
+        throw responseError(response.status, await response.json().catch(() => null));
+      }
       const body = await response.json().catch(() => null);
       const parsed = parseTranscriptionResponseBody(body);
       if (!parsed) {

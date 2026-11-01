@@ -526,9 +526,12 @@ describe("conversation connection card", () => {
       expect(h.host.querySelector('[data-state="setup"]')).not.toBeNull();
       expect(h.container.textContent).toContain("Server URL");
       expect(button(h.container, "Add MCP server").disabled).toBe(true);
-      expect(h.container.textContent).toContain("A workspace admin needs to add this server");
+      expect(h.container.textContent).toContain(
+        "Someone who can add connections here needs to add this server",
+      );
+      // A member (connections:write) adds it; no admin permission is needed.
       context.accessContext.workspaceGrants = [
-        { workspaceId: "workspace", permissions: ["capabilities:manage", "connections:read"] },
+        { workspaceId: "workspace", permissions: ["connections:write", "connections:read"] },
       ];
       await h.rerender("workspace");
       expect(button(h.container, "Add MCP server").disabled).toBe(false);
@@ -583,7 +586,7 @@ describe("conversation connection card", () => {
     try {
       await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
       expect(h.host.textContent).toContain("Connect Internal Tools");
-      expect(h.host.textContent).not.toContain("A workspace admin needs to add this server");
+      expect(h.host.textContent).not.toContain("needs to add this server");
       expect(context.client.createCapability).not.toHaveBeenCalled();
     } finally {
       createdCatalogItem = null;

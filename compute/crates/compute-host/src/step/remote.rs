@@ -111,8 +111,10 @@ impl<E: Engine, S: Store> Job<E, S> {
     pub(super) async fn archive_files(&mut self, files: &SavedFiles) -> Result<Receipt, Outcome> {
         const OP: &str = "archive";
         // A number no other archive of this owner has used, even one cut
-        // short by a crash: recorded before the store sees it.
-        if let Err(error) = self.commit(Change::new().next_save()).await {
+        // short by a crash: recorded before the store sees it, with the
+        // record no longer the only copy's (the step cleared the VM's mark
+        // before it began).
+        if let Err(error) = self.commit(Change::new().next_save().copied()).await {
             return Err(state_failure(&error));
         }
         let save = self.record.save();

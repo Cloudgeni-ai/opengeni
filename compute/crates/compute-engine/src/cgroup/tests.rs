@@ -1,5 +1,70 @@
 use super::*;
 
+/// A group carries the mark that its VM is its sandbox's only copy until
+/// it is cleared; clearing is idempotent, a group that is gone is not
+/// marked, and a mark holds only while the process that set it runs.
+/// (Real cgroups keep user extended attributes since Linux 5.7; the
+/// test's directory stands in for one.)
+#[test]
+fn a_group_is_marked_its_sandboxes_only_copy_until_cleared() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = Cgroup::at(dir.path().join("vm"));
+    assert_eq!(group.only_copy().unwrap(), OnlyCopy::No, "gone");
+    group.set_only_copy(false).unwrap();
+    fs::create_dir(group.path()).unwrap();
+    if let Err(error) = group.set_only_copy(true) {
+        assert_eq!(
+            error.raw_os_error(),
+            Some(rustix::io::Errno::NOTSUP.raw_os_error()),
+            "{error}"
+        );
+        eprintln!("skipped: the test directory's file system keeps no user extended attributes");
+        return;
+    }
+    assert_eq!(group.only_copy().unwrap(), OnlyCopy::Yes);
+    group.set_only_copy(true).unwrap();
+    assert_eq!(
+        group.only_copy().unwrap(),
+        OnlyCopy::Yes,
+        "marked again, still marked"
+    );
+    group.set_only_copy(false).unwrap();
+    assert_eq!(group.only_copy().unwrap(), OnlyCopy::No);
+    group.set_only_copy(false).unwrap();
+    let mark = |value: &[u8]| {
+        rustix::fs::setxattr(
+            group.path(),
+            ONLY_COPY,
+            value,
+            rustix::fs::XattrFlags::empty(),
+        )
+        .unwrap();
+        group.only_copy().unwrap()
+    };
+    // This process, started at another time: one that has ended.
+    let me = std::process::id();
+    assert_eq!(mark(format!("{me} 1").as_bytes()), OnlyCopy::Orphaned);
+    assert_eq!(
+        mark(format!("{} 1", u32::MAX).as_bytes()),
+        OnlyCopy::Orphaned
+    );
+    assert_eq!(mark(b"1"), OnlyCopy::Orphaned, "an earlier form");
+    assert_eq!(
+        mark(&[b'7'; 100]),
+        OnlyCopy::Orphaned,
+        "too long for a mark"
+    );
+    group.set_only_copy(true).unwrap();
+    assert_eq!(group.only_copy().unwrap(), OnlyCopy::Yes, "marked again");
+    fs::remove_dir(group.path()).unwrap();
+    fs::create_dir(group.path()).unwrap();
+    assert_eq!(
+        group.only_copy().unwrap(),
+        OnlyCopy::No,
+        "a group made again starts unmarked"
+    );
+}
+
 #[test]
 fn memory_high_is_set_and_read_back_as_it_is_now() {
     let dir = tempfile::tempdir().unwrap();

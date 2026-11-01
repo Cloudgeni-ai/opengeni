@@ -729,19 +729,14 @@ function AgentScheduleForm({
       ? sessions.find((session) => session.id === draft.targetSessionId)
       : undefined;
   // A schedule that posts into an Only me chat, or saves to personal
-  // knowledge, is always Only me; the server enforces the same rule.
-  const personalMachineChosen =
-    !inheritsChatSettings &&
-    draft.executionTarget === "machine" &&
-    personalMachines.some((machine) => machine.sandboxId === draft.machineSandboxId);
+  // knowledge, is always Only me; the server enforces the same rule. One on
+  // your own machine can be shared: it runs as you either way.
   const privateReason =
     audienceTarget?.tenancy?.visibility === "private"
       ? "It posts into an Only me chat."
       : draft.knowledgeSource?.destination.kind === "personal"
         ? "It saves to your personal knowledge."
-        : personalMachineChosen
-          ? "It runs on your own machine."
-          : null;
+        : null;
   useEffect(() => {
     if (privateReason)
       setDraft((current) =>
@@ -888,13 +883,9 @@ function AgentScheduleForm({
   }, [baselineDestinationKey, client, learningRetry, taskId, workspaceId]);
 
   /* ----- where it runs */
-  // Your own machines are offered whenever the schedule can be Only me.
-  const offerPersonalMachines =
-    personalMachines.length > 0 &&
-    (personal || canCreatePrivate === true || draft.visibility === "private");
-  const scheduledMachines = offerPersonalMachines
-    ? [...sharedMachines, ...personalMachines]
-    : sharedMachines;
+  // Your own machines run your own schedules, Only me or shared: a schedule
+  // runs as its owner.
+  const scheduledMachines = [...sharedMachines, ...personalMachines];
   const selectableMachines = scheduledMachines.filter((machine) =>
     isMachineComputeSelectable(machine.state),
   );
@@ -983,7 +974,7 @@ function AgentScheduleForm({
       }`,
       description:
         machine.scope === "user"
-          ? "Runs on your own computer. Only you can see this automation and its chats."
+          ? "Runs on your own computer, as you."
           : "Runs on this computer, in its code folder.",
       leading: <LaptopIcon className="size-4 text-fg-subtle" />,
       disabled: !isMachineComputeSelectable(machine.state),

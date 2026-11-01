@@ -141,13 +141,16 @@ describe("inChatConnectDecision", () => {
     expect(inChatConnectDecision(request(), ready(conversationOnly), true).kind).toBe(
       "unavailable",
     );
+  });
+
+  test("a member with connections:write can turn on an integration that is not on yet", () => {
     expect(
       inChatConnectDecision(
         request(),
         ready(["sessions:control", "connections:read", "connections:write"]),
         true,
       ).kind,
-    ).toBe("unavailable");
+    ).toBe("card");
   });
 
   test("an enabled capability needs no capabilities:manage", () => {

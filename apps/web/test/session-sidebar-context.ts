@@ -1152,6 +1152,8 @@ export const useRail = () => ({
   isMobile: window.innerWidth < 768,
   setDrawerOpen: () => {},
 });
+// The settings shell reads the rail where it may be absent; it has no sidebar state here.
+export const useOptionalRail = () => null;
 
 declare global {
   interface Window {

@@ -736,7 +736,7 @@ function ConversationView({
           </InteractiveAnswerProvider>
         )}
         {importedArchive ? (
-          <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
+          <p className="shrink-0 px-4 py-2 text-center text-sm text-og-fg-muted" role="status">
             {t("sessionConversation.archivedConversationReadOnly")}
           </p>
         ) : (

@@ -1633,6 +1633,42 @@ describe("Transcription model picker", () => {
       "Azure Speech isn't available here right now",
     );
   });
+
+  test("transcribing again prices every recorded track, since each is billed on its own", async () => {
+    const { transcribeAgainEstimate } = await import("./meeting-detail-page");
+    const hour = 3_600_000;
+    const track = (trackNumber: number, durationMilliseconds: number, chunkCount = 10) => ({
+      trackNumber,
+      kind: "audio" as const,
+      source: trackNumber === 0 ? ("microphone" as const) : ("system" as const),
+      mimeType: "audio/webm",
+      chunkCount,
+      totalBytes: 1_000,
+      durationMilliseconds,
+      playable: true,
+      video: null,
+      live: null,
+    });
+    // A microphone beside computer audio: two hours of audio for a one-hour meeting.
+    const both = transcribeAgainEstimate(
+      { durationMilliseconds: hour, tracks: [track(0, hour), track(1, hour)] },
+      0.22,
+    );
+    expect(both?.tracks).toBe(2);
+    expect(both?.usd).toBeCloseTo(0.44, 6);
+    // A track that never got audio costs nothing.
+    const micOnly = transcribeAgainEstimate(
+      { durationMilliseconds: hour, tracks: [track(0, hour), track(1, 0, 0)] },
+      0.22,
+    );
+    expect(micOnly).toEqual({ usd: 0.22, tracks: 1 });
+    // Without track details the meeting's length is the audio.
+    expect(transcribeAgainEstimate({ durationMilliseconds: hour / 2, tracks: [] }, 0.22)).toEqual({
+      usd: 0.11,
+      tracks: 1,
+    });
+    expect(transcribeAgainEstimate({ durationMilliseconds: hour, tracks: [] }, null)).toBeNull();
+  });
 });
 
 describe("Recorder errors", () => {

@@ -10,7 +10,7 @@ import type {
   SessionSummary,
   WorkspaceSessionListEvent,
 } from "@opengeni/sdk";
-import { projectPendingApprovals, type PendingApproval } from "../../approvals";
+import { approvalsDecidable, projectPendingApprovals, type PendingApproval } from "../../approvals";
 import { humanInputRequestFromEvent } from "../../human-input";
 import { awaitsPerson } from "./needs-you";
 
@@ -43,12 +43,35 @@ export function awaitsPersonInTree(session: SessionSummary): boolean {
   return session.archived !== true && awaitsPerson(session);
 }
 
-/** Every descendant that waits on the person, the longest-waiting first. */
-export function waitingDescendants(nodes: readonly LineageNode[]): SessionSummary[] {
+const NO_SESSION_IDS: ReadonlySet<string> = new Set();
+
+/**
+ * A sub-session resuming from an approval decided on the parent's card, whose
+ * other approvals of the same pause stay decidable: its card stays up instead
+ * of vanishing until the sub-session pauses again.
+ */
+export function resumingFromDecision(
+  session: SessionSummary,
+  resuming: ReadonlySet<string>,
+): boolean {
+  return (
+    resuming.has(session.id) && session.archived !== true && approvalsDecidable(session.status)
+  );
+}
+
+/**
+ * Every descendant that waits on the person, the longest-waiting first, with
+ * those still resuming from a decision made here (`resuming`).
+ */
+export function waitingDescendants(
+  nodes: readonly LineageNode[],
+  resuming: ReadonlySet<string> = NO_SESSION_IDS,
+): SessionSummary[] {
   const waiting: SessionSummary[] = [];
   const visit = (level: readonly LineageNode[]) => {
     for (const node of level) {
-      if (awaitsPersonInTree(node.session)) waiting.push(node.session);
+      if (awaitsPersonInTree(node.session) || resumingFromDecision(node.session, resuming))
+        waiting.push(node.session);
       visit(node.children);
     }
   };

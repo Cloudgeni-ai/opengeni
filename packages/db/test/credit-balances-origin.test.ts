@@ -7,6 +7,7 @@ import {
   planCreditDebit,
   planPostUseCreditAllocations,
   spendableCreditMicros,
+  toolCreditUsage,
 } from "../src/credit-balances";
 import { withBillingOriginOverride } from "../src/credit-debit-attribution";
 
@@ -84,4 +85,32 @@ test("the Free plan's monthly credit pays for app tools, not for other models or
   expect(spendableCreditMicros(free, undefined, "api")).toBe(0);
   // A promotional offer for a model is still for that model only.
   expect(spendableCreditMicros(balance, undefined)).toBe(100 * M);
+});
+
+test("a paid tool on any model is paid from plan credit and grants listing that model", () => {
+  const free = {
+    ...balance,
+    balanceMicros: 10 * M,
+    generalBalanceMicros: 0,
+    creditsMicros: 0,
+    promotionalCredits: [
+      {
+        grantId: "00000000-0000-4000-8000-000000000003",
+        label: "Monthly plan credit",
+        eligibleModelIds: ["model-a"],
+        remainingMicros: 10 * M,
+        planCredit: true,
+      },
+    ],
+  } as BillingBalance;
+  // The Free plan's credit pays for a tool on a model outside its scope.
+  expect(spendableCreditMicros(free, toolCreditUsage("model-b"))).toBe(10 * M);
+  expect(planPostUseCreditAllocations(free, 2 * M, toolCreditUsage("model-b"))).toEqual([
+    { grantEntryId: "00000000-0000-4000-8000-000000000003", amountMicros: 2 * M },
+  ]);
+  expect(spendableCreditMicros(free, toolCreditUsage("model-b"), "api")).toBe(0);
+  // A promotional grant pays for tools only on the models it lists.
+  expect(spendableCreditMicros(balance, toolCreditUsage("model-a"))).toBe(130 * M);
+  expect(spendableCreditMicros(balance, toolCreditUsage("model-b"))).toBe(100 * M);
+  expect(spendableCreditMicros(balance, toolCreditUsage())).toBe(100 * M);
 });
