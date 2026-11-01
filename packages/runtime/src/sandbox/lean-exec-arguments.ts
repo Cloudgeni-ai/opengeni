@@ -57,9 +57,9 @@ export const LEAN_EXEC_COMMAND_DEFAULTS = {
 const YIELD_TIME_DESCRIPTION =
   "How long to wait (in milliseconds) for output before yielding. Omit for the default of 10000.";
 const FINISH_FLOOR_YIELD_TIME_DESCRIPTION =
-  "How long to wait (in milliseconds) for the command to finish. It returns as soon as the command exits, or with a session ID if it is still running. Without `tty` or `background` the wait is at least 60000. Omit for the default of 10000.";
+  "How long to wait (in milliseconds) for the command to finish. It returns as soon as the command exits, or with a session ID if it is still running. Unless `tty` or `background` is true, it waits at least 60000 (at most 30000 on a Connected Machine).";
 const BACKGROUND_DESCRIPTION =
-  "Return after yield_time_ms even if the command is still running, and keep it running in the background: for servers, watchers and commands you run in parallel. Omit for the default of false.";
+  "Return after yield_time_ms even if the command is still running, and keep it running while you continue: for servers, watchers and commands you run in parallel. Omit for the default of false.";
 
 function leanExecCommandParameters(ttyDescription: string, finishFloor: boolean) {
   return {

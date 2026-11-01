@@ -2731,20 +2731,27 @@ REPL does not hold the turn for minutes, the call still returns once output it
 produced has been quiet for 5 seconds after the ordinary 30-second window, or
 after 2 seconds when that output ends in an input prompt
 (`looksLikeInputPrompt`). A call that produced no output waits for exit or its
-requested window. With the same setting, an `exec_command` without a TTY that
-the model did not mark `background: true` waits at least 60 seconds
+requested window. While cut polling and the lean schema
+(settings.experimentOutputCost) are both on, an `exec_command` without a TTY
+that the model did not mark `background: true` waits at least 60 seconds
 (`COMMAND_FINISH_FLOOR_MS`) however short a wait it asked for, still returning
-the moment the command exits; its quiet-output return applies only after those
-60 seconds, while the input-prompt return still applies at once. Models often
-ask for a yield of a second or less and then poll the handle with
-`command_read`, although most such commands finish within a minute. Servers,
-watchers and deliberate parallel runs pass `background: true` (or use a TTY)
-to keep the requested short wait; the turn-cancellation layer removes the flag
-before the SDK and providers see the arguments, and the lean schema offers it
-only while the floor is active. `OPENGENI_EXPERIMENT_CUT_POLLING=false` restores
-the 30-second cap and removes the floor. Connected Machine (op-stream) commands
+the moment the command exits; when the requested wait is that short, its
+quiet-output return applies only after those 60 seconds, while the input-prompt
+return still applies at once. A requested wait above the floor keeps the
+ordinary quiet-output return after 30 seconds. Models often ask for a yield of
+a second or less and then poll the handle with `command_read`, although most
+such commands finish within a minute. Servers, watchers and deliberate parallel
+runs pass `background: true` (or use a TTY) to keep the requested short wait;
+the turn-cancellation layer removes the flag before the SDK and providers see
+the arguments. The floor applies only where the schema offers `background`
+(`finishFloor`), so `OPENGENI_EXPERIMENT_OUTPUT_COST=false` or
+`OPENGENI_EXPERIMENT_CUT_POLLING=false` keeps the requested wait, and the
+latter also restores the 30-second cap. Connected Machine (op-stream) commands
 keep their own 30-second background yield ceiling; the floor is sent to them as
 the requested yield, so a tiny requested yield there waits up to 30 seconds.
+The machine waits that window in one block, so a Steer during such a wait takes
+effect when it ends (up to 30 seconds), while Pause and turn cancellation still
+cancel the operation at once.
 Live output still streams to the command card while the call
 waits, and Pause/Steer cancellation is still checked between slices. The
 model-facing `exec_command` schema is non-strict and requires only `cmd` and

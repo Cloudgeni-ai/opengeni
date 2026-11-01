@@ -5142,6 +5142,8 @@ function buildAgentCapabilitiesFromComposition(
     options.credentials
       ? createTurnToolCancellationController(options.turnCancellationSignal, {
           cutPolling: settings.experimentCutPolling,
+          // The floor needs the lean schema, which offers `background`.
+          finishFloor: settings.experimentCutPolling && settings.experimentOutputCost,
           sandboxTemporaryDirectory:
             (options.sandboxEnvironment ?? collectSandboxEnvironment(settings)).TMPDIR || "/tmp",
           ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
@@ -5278,7 +5280,8 @@ function buildAgentCapabilitiesFromComposition(
   // default; OPENGENI_EXPERIMENT_OUTPUT_COST=false disables). Outermost, so every
   // inner layer (SDK parser, turn cancellation, routing fence) sees canonical
   // arguments. Its wait text and `background` flag describe the finish floor,
-  // which the turn-cancellation controller applies with cut polling.
+  // which the turn-cancellation controller applies exactly when both this
+  // schema and cut polling are on.
   if (settings.experimentOutputCost) {
     const finishFloor = settings.experimentCutPolling && toolCancellation !== null;
     for (const capability of caps) {

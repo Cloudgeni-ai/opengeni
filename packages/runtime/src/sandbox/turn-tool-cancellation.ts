@@ -457,26 +457,30 @@ function foregroundWait(
 ): { waitMs: number; quietReturnAfterMs?: number } {
   if (!cutPolling) return { waitMs: modelWaitMs(value, false) };
   if (options.finishFloor === true) {
-    return {
-      waitMs: Math.max(modelWaitMs(value, true), COMMAND_FINISH_FLOOR_MS),
-      quietReturnAfterMs: COMMAND_FINISH_FLOOR_MS,
-    };
+    const requested = modelWaitMs(value, true);
+    // A wait the model already asked to make longer than the floor keeps its
+    // ordinary quiet return; only a raised wait delays it to the floor.
+    return requested > COMMAND_FINISH_FLOOR_MS
+      ? { waitMs: requested, quietReturnAfterMs: modelWaitMs(value, false) }
+      : { waitMs: COMMAND_FINISH_FLOOR_MS, quietReturnAfterMs: COMMAND_FINISH_FLOOR_MS };
   }
   return { waitMs: modelWaitMs(value, true), quietReturnAfterMs: modelWaitMs(value, false) };
 }
 
 /**
- * The model-facing wait of one `exec_command` call. A command without a TTY
- * that is not explicitly backgrounded gets the finish floor
- * (COMMAND_FINISH_FLOOR_MS); `tty: true` and `background: true` keep the
+ * The model-facing wait of one `exec_command` call. With the finish floor on
+ * (`finishFloor`, set only where the model is offered `background`), a command
+ * without a TTY that is not explicitly backgrounded waits at least
+ * COMMAND_FINISH_FLOOR_MS; `tty: true` and `background: true` keep the
  * requested wait.
  */
 export function execCommandForegroundWait(
   args: { yield_time_ms?: unknown; tty?: unknown; background?: unknown },
   cutPolling: boolean,
+  finishFloor: boolean,
 ): { waitMs: number; quietReturnAfterMs?: number } {
   return foregroundWait(args.yield_time_ms, cutPolling, {
-    finishFloor: args.tty === false && args.background !== true,
+    finishFloor: finishFloor && args.tty === false && args.background !== true,
   });
 }
 
@@ -1149,6 +1153,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private readonly signal: AbortSignal | undefined;
   private readonly onAbort = (): void => this.cancel(this.signal?.reason);
   private readonly cutPolling: boolean;
+  private readonly finishFloor: boolean;
   private readonly shellMarkerDirectory: string;
   private readonly secretResolver: SecretResolver | null;
   private readonly credentials: CredentialEnvironment | null;
@@ -1161,6 +1166,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     const temporaryDirectory = options.sandboxTemporaryDirectory || "/tmp";
     this.shellMarkerDirectory = posix.join(temporaryDirectory, "opengeni-turn-shell");
     this.cutPolling = options.cutPolling === true;
+    this.finishFloor = this.cutPolling && options.finishFloor === true;
     this.secretResolver = options.secretResolver ?? null;
     this.credentials = options.credentials ?? null;
     if (signal?.aborted) {
@@ -1788,7 +1794,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     }
     // `background` only selects this call's model-facing wait; no inner layer
     // reads it, so it is removed before the arguments are forwarded.
-    const execWait = execCommandForegroundWait(parsed, this.cutPolling);
+    const execWait = execCommandForegroundWait(parsed, this.cutPolling, this.finishFloor);
     const backgroundArgumentPresent = Object.hasOwn(parsed, "background");
     delete parsed.background;
     const token = crypto.randomUUID();
@@ -3234,6 +3240,13 @@ export type TurnToolCancellationControllerOptions = {
    * Omitted means the ordinary 30-second cap.
    */
   cutPolling?: boolean;
+  /**
+   * With cut polling, wait at least COMMAND_FINISH_FLOOR_MS for an
+   * `exec_command` without a TTY or `background: true`. Set only where the
+   * model's `exec_command` schema offers `background` and describes the floor
+   * (the lean schema), so the model always has a way to keep a short wait.
+   */
+  finishFloor?: boolean;
   /**
    * The attempt's secret resolver. Commands, stdin, patches and image paths
    * holding `{{secret:…}}` / `{{secretfile:…}}` references are resolved below

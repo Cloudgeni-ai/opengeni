@@ -147,7 +147,7 @@ describe("withLeanExecCommandArguments", () => {
 describe("composed shell capability", () => {
   test("the finish-floor variant describes the floor and offers background; the other keeps today's schema", () => {
     expect(LEAN_EXEC_COMMAND_PARAMETERS.properties.yield_time_ms.description).toContain(
-      "Without `tty` or `background` the wait is at least 60000.",
+      "Unless `tty` or `background` is true, it waits at least 60000 (at most 30000 on a Connected Machine).",
     );
     expect(LEAN_EXEC_COMMAND_PARAMETERS.properties).toHaveProperty("background");
     expect(LEAN_EXEC_COMMAND_PARAMETERS_WITHOUT_WRITE_STDIN.properties).toHaveProperty(
@@ -280,6 +280,43 @@ describe("composed shell capability", () => {
     expect(explicit).toContain("LOGIN-SHELL");
     expect(explicit).not.toContain("NON-LOGIN-SHELL");
   });
+
+  test("the finish floor applies exactly where the schema offers background", async () => {
+    const command = "sleep 3; echo floor-done";
+    // Lean schema and cut polling: a 1 s yield still returns the finished command.
+    const abort = new AbortController();
+    const lean = await execTool(true, { turnCancellationSignal: abort.signal });
+    const floored = String(
+      await lean.invoke(
+        {} as never,
+        JSON.stringify({ cmd: command, yield_time_ms: 1_000, max_output_tokens: 200 }),
+      ),
+    );
+    expect(floored).toContain("floor-done");
+    expect(floored).toContain("Process exited with code 0");
+    // Strict SDK schema (no `background` to opt out): the requested wait is kept.
+    const strict = await execTool(false, { turnCancellationSignal: abort.signal });
+    expect(strict.parameters as unknown as { properties: object }).not.toHaveProperty(
+      "properties.background",
+    );
+    const kept = String(
+      await strict.invoke(
+        {} as never,
+        JSON.stringify({
+          cmd: command,
+          login: false,
+          max_output_tokens: 200,
+          shell: "bash",
+          tty: false,
+          workdir: null,
+          yield_time_ms: 1_000,
+        }),
+      ),
+    );
+    expect(kept).not.toContain("floor-done");
+    expect(kept).toContain("Process running with session ID");
+    abort.abort(new Error("test done"));
+  }, 30_000);
 
   test("with the turn cancellation fence an omitted tty still runs without a TTY", async () => {
     const abort = new AbortController();
