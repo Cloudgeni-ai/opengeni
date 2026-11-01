@@ -440,15 +440,16 @@ export async function getConnectorToolPermissions(
   input: Input,
 ): Promise<ConnectorToolPermissionsResponse> {
   const target = await resolveTarget(input);
+  const policyWorkspaceId = connectorToolPolicyWorkspaceId(input, target.connection);
   const policies = await listConnectorToolPermissionPolicies(input.db, {
     accountId: input.grant.accountId,
-    workspaceId: input.workspaceId,
+    workspaceId: policyWorkspaceId,
     connectionId: target.connectionId,
   });
   const changedTools = new Set(
     await listChangedConnectorToolPermissions(input.db, {
       accountId: input.grant.accountId,
-      workspaceId: input.workspaceId,
+      workspaceId: policyWorkspaceId,
       connectionId: target.connectionId,
       serverId: target.server.id,
     }),
@@ -506,6 +507,19 @@ export async function getConnectorToolPermissions(
   };
 }
 
+/**
+ * Where a login's tool choices are kept. A personal login's choices belong to
+ * the login, so they live in the workspace it was connected from and follow
+ * it to every workspace where its owner uses it. A workspace login's, or a
+ * credential-free server's, belong to this workspace.
+ */
+function connectorToolPolicyWorkspaceId(
+  input: Pick<Input, "workspaceId">,
+  connection: { workspaceId: string; subjectId: string | null } | null,
+): string {
+  return connection?.subjectId ? connection.workspaceId : input.workspaceId;
+}
+
 function canManageConnectorPermissions(grant: AccessGrant): boolean {
   return (
     hasPermission(grant.permissions, "capabilities:manage") &&
@@ -541,7 +555,7 @@ export async function updateConnectorToolPermissions(
   try {
     await updateConnectorToolPermissionPolicies(input.db, {
       accountId: input.grant.accountId,
-      workspaceId: input.workspaceId,
+      workspaceId: connectorToolPolicyWorkspaceId(input, target.connection),
       subjectId: input.grant.subjectId,
       connectionId: target.connectionId,
       serverId: target.server.id,

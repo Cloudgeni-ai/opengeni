@@ -1,4 +1,7 @@
-import { inChatCapabilitySetup } from "@opengeni/contracts/personal-integration-setup";
+import {
+  inChatCapabilitySetup,
+  type MemberIntegrationSetup,
+} from "@opengeni/contracts/personal-integration-setup";
 import type { AccessContext, CapabilityCatalogItem, Permission } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import type { AuthNeededItem } from "../timeline/types";
@@ -6,7 +9,10 @@ import type { AuthNeededItem } from "../timeline/types";
 /** What the conversation reads to decide whether this person can connect in the chat. */
 export type InChatConnectSource = {
   getAccessContext: () => Promise<AccessContext>;
-  listCapabilities: (workspaceId: string) => Promise<{ items: CapabilityCatalogItem[] }>;
+  listCapabilities: (workspaceId: string) => Promise<{
+    items: CapabilityCatalogItem[];
+    memberIntegrationSetup?: MemberIntegrationSetup | undefined;
+  }>;
 };
 
 export type InChatConnectSupport =
@@ -18,6 +24,8 @@ export type InChatConnectSupport =
       permissions: ReadonlySet<Permission>;
       permissionMode?: "legacy" | "explicit" | undefined;
       catalog: ReadonlyMap<string, CapabilityCatalogItem>;
+      /** Who the organization lets turn integrations on (omitted: members). */
+      memberIntegrationSetup?: MemberIntegrationSetup | undefined;
     };
 
 export type InChatConnectDecision =
@@ -89,6 +97,7 @@ export function inChatConnectDecision(
     { permissions: [...support.permissions], permissionMode: support.permissionMode },
     requested.id,
     capability,
+    support.memberIntegrationSetup,
   );
   if (setup.kind === "integration")
     return { kind: "integration", capabilityId: requested.id, name: requested.name };
@@ -139,6 +148,9 @@ export function useInChatConnectSupport(
             permissions: new Set(grant?.permissions ?? []),
             permissionMode: grant?.permissionMode,
             catalog: new Map(catalog.items.map((entry) => [entry.id, entry])),
+            ...(catalog.memberIntegrationSetup
+              ? { memberIntegrationSetup: catalog.memberIntegrationSetup }
+              : {}),
           },
         });
       },

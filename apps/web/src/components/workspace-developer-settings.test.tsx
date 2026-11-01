@@ -131,7 +131,8 @@ GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
 
-const { WorkspaceDeveloperSettings } = await import("./workspace-developer-settings");
+const { WorkspaceDeveloperSettings, OrganizationDeveloperIntegrations } =
+  await import("./workspace-developer-settings");
 const { WorkspaceSandboxImageRow } = await import("./workspace-sandbox-image-row");
 const { webhookHealth } = await import("./developer/webhooks");
 type DeveloperLocation = import("@/lib/developer-route").DeveloperLocation;
@@ -446,5 +447,100 @@ describe("workspace developer settings", () => {
       <WorkspaceSandboxImageRow client={client as never} workspaceId={workspaceId} canManage />,
     );
     expect(hidden.textContent).toBe("");
+  });
+});
+
+describe("organization credential provider", () => {
+  const organizationId = "77777777-7777-4777-8777-777777777777";
+  const path = `/v1/organizations/${organizationId}/credential-provider`;
+
+  function organizationClient(initial: Record<string, unknown> | null) {
+    let stored = initial;
+    const writes: Array<Record<string, unknown>> = [];
+    const requestJson = mock(async (method: string, url: string, body?: unknown) => {
+      if (url !== path) throw new Error(`unexpected ${method} ${url}`);
+      if (method === "GET") return { provider: stored };
+      if (method === "PUT") {
+        const request = body as Record<string, unknown>;
+        writes.push(request);
+        const created = stored === null;
+        stored = { organizationId, createdAt: timestamp, updatedAt: timestamp, ...request };
+        return { provider: stored, ...(created ? { secret: "ogcp_one_time_value" } : {}) };
+      }
+      throw new Error(`unexpected ${method} ${url}`);
+    });
+    return { client: { requestJson }, writes };
+  }
+
+  async function organizationPage(api: { requestJson: unknown }, location: DeveloperLocation) {
+    return await render(
+      <OrganizationDeveloperIntegrations
+        client={api as never}
+        organizationId={organizationId}
+        canManage
+        location={location}
+        onNavigate={() => undefined}
+      />,
+    );
+  }
+
+  test("offers Personal workspaces as their own choice, off by default", async () => {
+    const { client: api, writes } = organizationClient(null);
+    const container = await organizationPage(api, { view: "connect-credential-provider" });
+    expect(container.textContent).not.toContain("Personal workspaces are never included.");
+    const personal = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(personal.closest("div")?.parentElement?.textContent).toContain("Personal workspaces");
+    expect(personal.checked).toBe(false);
+    await type(
+      container.querySelector<HTMLInputElement>("#credential-provider-url")!,
+      "https://product.example/credentials",
+    );
+    await act(async () => personal.click());
+    await submitForm(container);
+    await flush();
+    expect(writes).toEqual([
+      {
+        url: "https://product.example/credentials",
+        enabled: true,
+        timeoutMs: 10000,
+        workspaceFilter: null,
+        allowPersonalWorkspaces: true,
+      },
+    ]);
+  });
+
+  test("resuming keeps the Personal switch, because every save replaces the configuration", async () => {
+    const { client: api, writes } = organizationClient({
+      organizationId,
+      url: "https://product.example/credentials",
+      enabled: false,
+      timeoutMs: 10000,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      workspaceFilter: null,
+      allowPersonalWorkspaces: true,
+    });
+    const container = await organizationPage(api, { view: "credential-provider" });
+    expect(container.textContent).toContain("Every shared workspace, plus Personal workspaces");
+    await act(async () => button(container, "Resume").click());
+    await flush();
+    expect(writes).toEqual([
+      {
+        url: "https://product.example/credentials",
+        enabled: true,
+        timeoutMs: 10000,
+        workspaceFilter: null,
+        allowPersonalWorkspaces: true,
+      },
+    ]);
+  });
+
+  test("without the Personal choice (webhooks), the field says Personal workspaces are never included", async () => {
+    const { WorkspaceFilterField } = await import("./developer/workspace-filter-field");
+    const container = await render(
+      <WorkspaceFilterField value={null} onChange={() => undefined} />,
+    );
+    expect(container.textContent).toContain("Personal workspaces are never included.");
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
   });
 });

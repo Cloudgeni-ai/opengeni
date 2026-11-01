@@ -22,6 +22,7 @@ import {
   type Workspace,
 } from "@opengeni/contracts";
 import {
+  INTEGRATION_SETUP_PERMISSION,
   PERSONAL_INTEGRATION_SETUP_PERMISSION,
   permissionSetCovers,
 } from "@opengeni/contracts/personal-integration-setup";
@@ -177,6 +178,33 @@ export function requireApiKeyDelegationContext(
  * the value the cookie branch produced.
  */
 const canonicalManagedCookieContexts = new WeakSet<AccessContext>();
+/**
+ * Grants resolved for a person signed in to Opengeni's own web, desktop or
+ * mobile apps (a canonical managed or local human session). Funding origin
+ * only (`BillingOrigin` app): never an authorization input.
+ */
+const appCredentialGrants = new WeakSet<AccessGrant>();
+
+/** Was this exact grant resolved for a person signed in to Opengeni's own apps? */
+export function isAppCredentialGrant(grant: AccessGrant): boolean {
+  return appCredentialGrants.has(grant);
+}
+
+/**
+ * Mark the grants of a just-stamped canonical app context (cookie, native app
+ * credential or local install) so work they start outside a turn (a model
+ * call, dictation, a search) is billed as app use.
+ */
+function markAppCredentialGrants(context: AccessContext): void {
+  for (const grant of context.workspaceGrants) {
+    if (
+      isCanonicalManagedHumanSession(context, grant) ||
+      isCanonicalLocalHumanSession(context, grant)
+    ) {
+      appCredentialGrants.add(grant);
+    }
+  }
+}
 /** Downstream legacy credentials cannot encode a partially selected admin. */
 export function requireExplicitPermissionDelegation(
   grant: Pick<AccessGrant, "permissions" | "permissionMode">,
@@ -529,6 +557,8 @@ function attributionForExternalContext(context: AccessContext): ExternalActorAtt
   });
 }
 const resolvedAccessGrantAuthorizations = new WeakSet<object>();
+/** The resolved context behind each authorization, for organization administration. */
+const authorizationContexts = new WeakMap<AccessGrantAuthorization, AccessContext>();
 const verifiedExternalAuthorizations = new WeakMap<
   AccessGrantAuthorization,
   {
@@ -840,6 +870,10 @@ export function accessGrantAuthorizationFromContext(
     canonicalLocalHumanSession: isCanonicalLocalHumanSession(context, grant),
   };
   resolvedAccessGrantAuthorizations.add(authorization);
+  authorizationContexts.set(authorization, context);
+  if (authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession) {
+    appCredentialGrants.add(grant);
+  }
   if (contextIntegrity && developerSetupApiKeyContexts.has(context)) {
     developerSetupAuthorizations.set(authorization, grant);
     developerSetupGrants.add(grant);
@@ -910,6 +944,100 @@ export function requireAccountAdminAuthorizationStamp(
     accountGrant?.accountId !== grant.accountId ||
     accountGrant.subjectId !== grant.subjectId ||
     !accountGrant.permissions.includes("account:admin")
+  ) {
+    throw new MissingPermissionRefusal("account:admin");
+  }
+  return Object.freeze({
+    authorizationId: crypto.randomUUID(),
+    accountId: grant.accountId,
+    actorSubjectId: grant.subjectId,
+    permission: "account:admin" as const,
+  });
+}
+
+/**
+ * Organization administration: the organization's owner or one of its admins.
+ * It covers the organization's own resources that opt into it: organization
+ * Knowledge, documents and Skills, the company profile and the organization
+ * session list. Billing, roles, ownership and deleting the organization stay
+ * with `account:admin`, which only the owner holds.
+ *
+ * True for a literal `account:admin` grant on this organization (the owner,
+ * the single local administrator, an administering organization key), or for
+ * a person whose live role in this organization is owner or admin and who
+ * authenticated as themselves: the canonical managed cookie (or approved
+ * native app), or a verified agent acting as them (connected agent or personal
+ * API key) whose access setting literally includes `account:admin`, the same
+ * ceiling an owner's agent needs. The role comes from this organization's own
+ * grant, so being an admin in one organization grants nothing in another.
+ * Agent turns, services and keys never qualify through a role.
+ */
+export function holdsOrganizationAdministration(
+  context: AccessContext,
+  organizationId: string,
+): boolean {
+  const matching = context.accountGrants.filter(
+    (candidate) => candidate.accountId === organizationId,
+  );
+  if (matching.length !== 1) return false;
+  const accountGrant = matching[0]!;
+  if (accountGrant.subjectId !== context.subjectId) return false;
+  if (hasLiteralPermission(accountGrant.permissions, "account:admin")) return true;
+  if (accountGrant.role !== "owner" && accountGrant.role !== "admin") return false;
+  if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) return false;
+  if (canonicalManagedCookieContexts.has(context)) return true;
+  const delegated = delegatedHumanContexts.get(context);
+  return (
+    delegated !== undefined &&
+    !workspaceExternalPersonProofs.has(delegated) &&
+    delegated.organizationId === organizationId &&
+    delegated.subjectId === context.subjectId &&
+    hasLiteralPermission(delegated.permissions, "account:admin")
+  );
+}
+
+/**
+ * {@link holdsOrganizationAdministration} for a resolved workspace
+ * authorization, in that workspace's organization. A literal `account:admin`
+ * account grant keeps its existing meaning; the role path needs the exact
+ * authorization the resolver produced, with an intact context.
+ */
+export function authorizationHoldsOrganizationAdministration(
+  authorization: AccessGrantAuthorization,
+): boolean {
+  const { grant, accountGrant } = authorization;
+  if (accountGrant?.permissions.includes("account:admin") === true) return true;
+  const context = authorizationContexts.get(authorization);
+  return Boolean(
+    context &&
+    resolvedAccessGrantAuthorizations.has(authorization) &&
+    authorization.contextIntegrity &&
+    authorization.authenticatedSubjectId === grant.subjectId &&
+    accountGrant?.accountId === grant.accountId &&
+    accountGrant.subjectId === grant.subjectId &&
+    holdsOrganizationAdministration(context, grant.accountId),
+  );
+}
+
+/**
+ * Mint the organization-administration capability passed to database
+ * lifecycles (organization document backfills, authority reclassification and
+ * their audits). Same opaque stamp as {@link requireAccountAdminAuthorizationStamp}
+ * and the same database contract, whose `permission` label stays
+ * `account:admin`, but admitted for the organization's owner or admins. Billing
+ * and usage allowances keep the owner-only stamp.
+ */
+export function requireOrganizationAdministrationStamp(
+  authorization: AccessGrantAuthorization,
+): AccountAdminAuthorizationStamp {
+  const { grant, accountGrant } = authorization;
+  if (
+    !resolvedAccessGrantAuthorizations.has(authorization) ||
+    !authorization.contextIntegrity ||
+    authorization.authenticatedSubjectId !== grant.subjectId ||
+    accountGrant?.accountId !== grant.accountId ||
+    accountGrant.subjectId !== grant.subjectId ||
+    !authorizationHoldsOrganizationAdministration(authorization)
   ) {
     throw new MissingPermissionRefusal("account:admin");
   }
@@ -1075,6 +1203,45 @@ export async function requireWorkspaceSettingsAuthorization(
 }
 
 /**
+ * Whether this grant may add integrations to its workspace (Members'
+ * `connections:write`, or an integration admin's `capabilities:manage`). See
+ * `INTEGRATION_SETUP_PERMISSION` for what that covers and what stays admin.
+ */
+export function hasIntegrationSetupPermission(
+  grant: Pick<AccessGrant, "permissions" | "permissionMode">,
+): boolean {
+  return (
+    hasPermission(grant.permissions, INTEGRATION_SETUP_PERMISSION, grant.permissionMode) ||
+    hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode)
+  );
+}
+
+/** Whether this grant holds integration admin rights (`capabilities:manage`). */
+export function hasIntegrationAdminPermission(
+  grant: Pick<AccessGrant, "permissions" | "permissionMode">,
+): boolean {
+  return hasPermission(grant.permissions, "capabilities:manage", grant.permissionMode);
+}
+
+/**
+ * The access check of every route that adds or removes an integration
+ * (plugins, API integrations, custom MCP servers, integration sources):
+ * `connections:write` or `capabilities:manage`. The route still keeps what
+ * stays admin work (auto-approval, changing what is already on) behind
+ * {@link hasIntegrationAdminPermission}.
+ */
+export async function requireIntegrationSetupAuthorization(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<AccessGrantAuthorization> {
+  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  requireResolvedAccessGrantAuthorization(authorization, workspaceId);
+  if (hasIntegrationSetupPermission(authorization.grant)) return authorization;
+  throw new MissingPermissionRefusal(INTEGRATION_SETUP_PERMISSION);
+}
+
+/**
  * Whether this request may change `workspaceId`'s settings, the one decision
  * {@link requireWorkspaceSettingsGrant} enforces. An accepted message records
  * the same answer with its turn's app-action access, so the person's own
@@ -1112,9 +1279,9 @@ export const WORKSPACE_CONTRIBUTOR_REFUSAL =
 /**
  * Ordinary shared content of a workspace that anyone who works there may
  * change for everyone, like a shared Skill or Knowledge entry: its
- * instructions and the review of the agent's proposed changes to them.
- * Whoever may change the workspace's settings may (see
- * {@link workspaceSettingsAuthorized});
+ * instructions and the review of the agent's proposed changes to them, a
+ * shared workspace's name and its custom model entries. Whoever may change
+ * the workspace's settings may (see {@link workspaceSettingsAuthorized});
  * otherwise a person of the organization who can start chats here
  * (`sessions:create`), acting as themselves: signed in, or their own chat or
  * connected agent or personal API key acting for them within what they
@@ -1153,7 +1320,16 @@ export async function requireWorkspaceContributorGrant(
   deps: AccessDeps,
   workspaceId: string,
 ): Promise<AccessGrant> {
-  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  // A first-use external membership holds only the defaults, which never pass
+  // this rule (people from another product aren't contributors, and the
+  // defaults lack workspace:admin), so a refused request creates nothing.
+  const authorization = await accessGrantAuthorization(
+    await requireAccessContext(c, deps),
+    deps,
+    workspaceId,
+    undefined,
+    { firstUseMembership: true, firstUseRequires: "workspace:admin" },
+  );
   const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
   if (await workspaceContributionAuthorized(deps, authorization, workspaceId)) return grant;
   throw new MissingPermissionRefusal("sessions:create", {
@@ -1433,7 +1609,15 @@ async function accessGrantAuthorization(
   deps: AccessDeps,
   workspaceId: string,
   permission?: Permission,
-  options: { firstUseMembership?: boolean } = {},
+  options: {
+    firstUseMembership?: boolean;
+    /**
+     * What a first-use membership would need for the request to succeed when
+     * the route decides after resolving (no `permission`). First use creates
+     * nothing unless the defaults include it.
+     */
+    firstUseRequires?: Permission;
+  } = {},
 ): Promise<AccessGrantAuthorization> {
   // No named-subject or organization-key fallback may widen verified OAuth
   // bounds. These grants came from this resolution's live native access only.
@@ -1488,7 +1672,13 @@ async function accessGrantAuthorization(
       !grant &&
       !personal &&
       options.firstUseMembership === true &&
-      (await provisionExternalMemberOnFirstUse(deps, context, external, workspaceId, permission))
+      (await provisionExternalMemberOnFirstUse(
+        deps,
+        context,
+        external,
+        workspaceId,
+        permission ?? options.firstUseRequires,
+      ))
     ) {
       grant = await membershipGrant();
     }
@@ -1848,6 +2038,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
       subjectLabel: "Local dev",
     });
     canonicalLocalHumanContexts.add(context);
+    markAppCredentialGrants(context);
     return context;
   }
 
@@ -1892,6 +2083,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;
     }
@@ -1925,6 +2117,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;
     }

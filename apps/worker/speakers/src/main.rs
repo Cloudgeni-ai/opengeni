@@ -7,7 +7,8 @@
 //!
 //! ```text
 //! opengeni-speakers diarize --models DIR [--threads N] [--min-speakers N]
-//!     [--max-speakers N] [--threshold D] [--step S] < audio.f32
+//!     [--max-speakers N] [--threshold D] [--merge-threshold D] [--step S]
+//!     < audio.f32
 //! opengeni-speakers embed --models DIR --segments FILE < audio.f32
 //! opengeni-speakers align --models DIR --words FILE [--threads N] < audio.f32
 //! opengeni-speakers describe MODEL.onnx
@@ -180,6 +181,9 @@ fn run_diarize(args: &Args) -> Result<String> {
     let options = Options {
         step_seconds: args.get("step")?.unwrap_or(defaults.step_seconds),
         threshold: args.get("threshold")?.unwrap_or(defaults.threshold),
+        merge_threshold: args
+            .get("merge-threshold")?
+            .unwrap_or(defaults.merge_threshold),
         min_speakers: args.get("min-speakers")?.unwrap_or(defaults.min_speakers),
         max_speakers: args.get("max-speakers")?.unwrap_or(defaults.max_speakers),
         min_cluster_size: args

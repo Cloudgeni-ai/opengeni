@@ -35,6 +35,8 @@ export const SessionTitleRequest = z.object({
   externallyBilled: z.boolean(),
   chargesOpenGeniCredits: z.boolean(),
   countsTowardTokenCap: z.boolean(),
+  /** Served by the person's own key or subscription; older requests omit it. */
+  byok: z.boolean().optional(),
   pricingJson: z.string(),
   serviceTier: z.enum(["fast", "priority", "ultrafast"]).optional(),
   /**

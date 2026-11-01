@@ -23,6 +23,7 @@ import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
+  evaluateWorkspaceModelPolicy,
   machineCanBeWorkspaceDefault,
   MemberDefaultExecutionTarget,
   resolveRealtimeVoiceSettings,
@@ -150,6 +151,7 @@ import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireWorkspaceMemberManagementAuthority,
+  requireWorkspaceContributorGrant,
   requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
@@ -515,7 +517,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/workspaces/:workspaceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    // Each field has its own rule, checked below once the body says which
+    // fields change: anyone who works here renames a shared workspace and
+    // edits its instructions; only an admin changes its slug.
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const body = await readRequestJson(c);
     if (workspaceUpdateRequestsSettings(body)) {
       throw new ApiHttpError(400, {
@@ -546,6 +551,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const payload = parseRequestBody(UpdateWorkspaceRequest, body);
+    if (payload.slug !== undefined) {
+      await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    }
+    if (
+      payload.name !== undefined &&
+      !hasPermission(grant.permissions, "workspace:admin", grant.permissionMode) &&
+      (await requireWorkspace(deps.db, workspaceId)).kind !== "shared"
+    ) {
+      // A Personal workspace keeps its name; only a shared one is renamed by its members.
+      throw new MissingPermissionRefusal("workspace:admin", {
+        message: "A Personal workspace keeps its name.",
+      });
+    }
     const workspace = await updateWorkspace(deps.db, workspaceId, {
       ...(payload.name !== undefined ? { name: payload.name.trim() } : {}),
       ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),
@@ -874,6 +892,30 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       },
     );
+    // The organization's allowlist is a ceiling the workspace's own list can
+    // only narrow; say per model where it rules one out (Allowed models).
+    if (
+      organizationDefaults.allowedProviders !== null ||
+      organizationDefaults.allowedModels !== null
+    ) {
+      const providerByModel = new Map(
+        selections.map((selection) => [selection.model.id, selection.model.providerId]),
+      );
+      for (const model of catalog.models) {
+        model.organizationAllowed = evaluateWorkspaceModelPolicy(
+          {
+            allowedProviders: organizationDefaults.allowedProviders,
+            allowedModels: organizationDefaults.allowedModels,
+            allowCreditModels: true,
+          },
+          {
+            providerId: providerByModel.get(model.id) ?? model.provider,
+            modelId: model.id,
+            chargesCredits: false,
+          },
+        ).allowed;
+      }
+    }
     for (const model of catalog.models) {
       model.compactionPolicy = workspaceModelCompactionPolicy(
         workspaceCatalogSettings,
@@ -922,7 +964,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const parsed = parseRequestBody(
       CreateWorkspaceGatewayCustomModelRequest,
       await c.req.json().catch(() => null),
@@ -997,7 +1039,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/gateway-custom-models/:customModelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const customModelId = c.req.param("customModelId");
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
@@ -1055,7 +1097,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/openrouter-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const parsed = parseRequestBody(
       CreateWorkspaceOpenRouterCustomModelRequest,
       await c.req.json().catch(() => null),
@@ -1130,7 +1172,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/openrouter-custom-models/:customModelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const customModelId = c.req.param("customModelId");
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
@@ -1189,7 +1231,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/opper-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const parsed = parseRequestBody(
       CreateWorkspaceOpperCustomModelRequest,
       await c.req.json().catch(() => null),
@@ -1266,7 +1308,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/opper-custom-models/:customModelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceContributorGrant(c, deps, workspaceId);
     const customModelId = c.req.param("customModelId");
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
@@ -1834,6 +1876,8 @@ async function workspaceModelPolicyResponse(
   workspaceId: string,
 ): Promise<WorkspaceModelPolicyResponse> {
   const layers = await getWorkspaceModelPolicyLayers(deps.db, workspaceId);
+  // The workspace's own list as saved (the form edits it); a model runs only
+  // when both it and `organization` allow it.
   const effective = layers.workspace ?? layers.organization;
   return WorkspaceModelPolicyResponse.parse({
     allowedProviders: effective?.allowedProviders ?? null,

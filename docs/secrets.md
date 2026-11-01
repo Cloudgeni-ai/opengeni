@@ -33,8 +33,12 @@ each hosted field keeps encrypted **versions**.
   before this setting existed stay available everywhere until narrowed.
 - **Workspace** vaults are usable by members of that workspace.
 - **Organization** vaults are managed with `account:admin`; their reach is set
-  by "Available in" (all workspaces or a list, and optionally personal
-  workspaces).
+  by "Available in": every shared workspace (`allowedWorkspaceIds: null`) or a
+  list of them, and separately whether members' Personal workspaces have it
+  (`allowPersonalWorkspaces`). The switch alone decides Personal workspaces,
+  whichever workspace choice is made (migration 1171; before it, a vault with
+  a list never reached a Personal workspace, so 1171 turned the switch off on
+  those vaults to keep their reach).
 - **Task** vaults hold secrets created during one task. There is one per root
   session, and it is deleted with that session.
 - Default hosted vaults are created on first use: **Private** (Only me),

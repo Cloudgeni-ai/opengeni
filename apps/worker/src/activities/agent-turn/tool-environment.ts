@@ -8,6 +8,10 @@ import {
   sessionUnattendedNow,
 } from "./unattended";
 import {
+  resolveAppActionTargets,
+  savedAppActionApprovalCard,
+} from "@opengeni/db/app-action-targets";
+import {
   resolveInitiatingHuman,
   buildSlackApiRateLimiter,
   beginConnectorActionExecution,
@@ -38,6 +42,7 @@ import {
   createFirstPartyInteractionRequestTargetReader,
   mcpToolDisplayMetadata,
   sideFeatureRouteRunnable,
+  skillInstructionsBody,
   toolFamilyForCatalogIdentity,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
@@ -127,6 +132,11 @@ import {
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
+import {
+  createPrivacyFactsAttemptToolDefinition,
+  loadPrivacyFactsLive,
+  privacyFactsRouteForTurn,
+} from "./privacy-facts";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
 import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
@@ -148,6 +158,13 @@ import {
   attachTaskVaultSecretCapture,
   currentAttemptSecretValues,
 } from "./secret-values";
+
+/**
+ * The largest personal SKILL.md the Skill index reads for showing in full: a
+ * description of up to 1,024 characters plus a body within the index's own
+ * inline bound. Larger Skills are never transferred just to build the index.
+ */
+const PERSONAL_SKILL_MARKDOWN_MAX_BYTES = 8 * 1024;
 
 /** A linked turn's immutable policy must survive array and token boundaries. */
 export function linkedTurnFirstPartyPermissions(
@@ -210,6 +227,8 @@ export type PrepareTurnToolRuntimeDeps = {
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
   /** The workspace allows Opengeni credits; paid web tools are omitted when not. */
   workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
+  /** Hosted paid tools would run on Opengeni's bill; provider web tools replace hosted search. */
+  hostedToolsBillCredits: GovernanceModelOk["hostedToolsBillCredits"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
@@ -325,6 +344,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     resolvedModel,
     lazyToolTransport,
     workspaceCreditModelsAllowed,
+    hostedToolsBillCredits,
     turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
     activeSandboxBackend,
@@ -500,11 +520,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       : getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
     toolFamilies.skills === false
       ? Promise.resolve([])
-      : listSkillDescriptors(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
-        }),
+      : listSkillDescriptors(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+          },
+          { personalSkillMarkdownMaxBytes: PERSONAL_SKILL_MARKDOWN_MAX_BYTES },
+        ),
   ]);
   if (workspaceResult.status === "rejected") throw workspaceResult.reason;
   if (skillConfigurationResult.status === "rejected") throw skillConfigurationResult.reason;
@@ -581,15 +605,43 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       sessionId: input.sessionId,
       settings: runSettings,
       // Live per change, the same check the API makes before running it.
-      authority: async () =>
-        (
-          await resolveSessionAppActionAuthority(db, {
+      authority: async () => {
+        const authority = await resolveSessionAppActionAuthority(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+        });
+        return {
+          kind: authority.kind,
+          ...("subjectId" in authority ? { subjectId: authority.subjectId } : {}),
+        };
+      },
+      // Names what a confirmed change touches, read as the person it asks.
+      targets: async (args, reader) =>
+        await resolveAppActionTargets(
+          db,
+          {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-          })
-        ).kind,
+            subjectId: reader.subjectId,
+            onLookupError: (error, parameter) =>
+              console.warn("app action target lookup failed", {
+                parameter,
+                error: error instanceof Error ? error.message : String(error),
+              }),
+          },
+          args,
+        ),
+      saved: async (approvalId) =>
+        await savedAppActionApprovalCard(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          approvalId,
+        }),
+      cards: eventing.appActionApprovalCards,
     },
   );
   const bundledSkills =
@@ -623,11 +675,19 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           ...withoutSessionShadowedSkills(
             sharedSkillDescriptors.filter((entry) => entry.activationMode === "workspace_managed"),
             sessionShadowedSkillNames(selectedSkills),
-          ).map((entry) => ({
-            id: entry.id,
-            name: entry.title,
-            description: entry.description,
-          })),
+          ).map((entry) => {
+            // A short personal Skill (a standing preference) is shown in full,
+            // within the index's inline bounds, so it applies without a read.
+            const instructions = entry.personalSkillMarkdown
+              ? skillInstructionsBody(entry.personalSkillMarkdown)
+              : null;
+            return {
+              id: entry.id,
+              name: entry.title,
+              description: entry.description,
+              ...(instructions ? { instructions } : {}),
+            };
+          }),
           ...selectedSkills.map((entry) => ({
             id: entry.id,
             name: entry.artifact.name,
@@ -827,18 +887,26 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     hasSkills: skillCatalog.length > 0,
   });
   // Provider web search: only where the turn has no hosted search (or the
-  // operator chose `replace`), only when a provider is configured, and only
-  // when the session's agent configuration allows web search (filtered below).
+  // operator chose `replace`, or hosted search would run on Opengeni's bill),
+  // only when a provider is configured, and only when the session's agent
+  // configuration allows web search (filtered below).
   const webSearchTools = webSearchToolDefinitions({
     settings: runSettings,
-    tools: turnWebSearchPlan(resolvedModel, runSettings, workspaceCreditModelsAllowed)
-      .providerTools,
+    tools: turnWebSearchPlan(
+      resolvedModel,
+      runSettings,
+      workspaceCreditModelsAllowed,
+      hostedToolsBillCredits,
+    ).providerTools,
     scope: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       turnId: turn.id,
       attemptId: input.attemptId,
+      // A turn whose paid hosted tools bill credits pays its web tools from
+      // the plan and grants covering its model first, like its Gateway images.
+      ...(hostedToolsBillCredits ? { creditUsageModelId: turnExecutionPolicy.productModelId } : {}),
     },
     billing: createWebSearchBilling({ db, settings: runSettings }),
     observability,
@@ -907,6 +975,36 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           modelNotes: currentCatalog.modelNotes,
         };
       },
+    }),
+    createPrivacyFactsAttemptToolDefinition({
+      route: privacyFactsRouteForTurn({
+        settings: runSettings,
+        policy: turnExecutionPolicy,
+        resolved: resolvedModel,
+      }),
+      deployment: {
+        privacyPolicyUrl: runSettings.legalPrivacyPolicyUrl ?? null,
+        termsOfServiceUrl: runSettings.legalTermsOfServiceUrl ?? null,
+        supportEmail: runSettings.supportEmail ?? null,
+        subprocessorsUrl: runSettings.legalSubprocessorsUrl ?? null,
+        dataHostingLocation: runSettings.dataHostingLocation ?? null,
+        sandboxes: {
+          backend: runSettings.sandboxBackend,
+          regions: runSettings.modalRegions ?? null,
+        },
+        // Archiving needs object storage; without it the worker never archives.
+        sessionArchiveIdleDays:
+          runSettings.sessionArchiveEnabled && deps.objectStorage
+            ? runSettings.sessionArchiveIdleDays
+            : null,
+      },
+      loadLive: async () =>
+        await loadPrivacyFactsLive({
+          db,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          deploymentEuOnly: runSettings.requiredModelGeography === "eu",
+        }),
     }),
     ...(titleToolPlan.promoteTitleTool
       ? [

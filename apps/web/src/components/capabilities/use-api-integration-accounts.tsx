@@ -26,7 +26,12 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import { ConnectionOwnershipDialog } from "@opengeni/react/app/components/capabilities/connection-ownership-selector";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { oauthCallbackReasonMessage } from "@opengeni/react/app/lib/oauth-callback-messages";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import {
+  canAddWorkspaceIntegrations,
+  canChangeWorkspaceIntegrations,
+  canManageWorkspaceIntegrations,
+} from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import type {
   ApiIntegrationInstallationSummary,
   ConnectionOwnership,
@@ -258,6 +263,8 @@ export function useApiIntegrationAccounts({
   definitions,
   instances,
   canManage,
+  canAdd = canManage,
+  canChange = canManage,
   ownership = "workspace",
   personalOnly = false,
   refresh,
@@ -268,7 +275,12 @@ export function useApiIntegrationAccounts({
   definitionId: string;
   definitions: IntegrationDefinitionSummary[];
   instances: ApiIntegrationInstallationSummary[];
+  /** Remove accounts and configure their sources (members). */
   canManage: boolean;
+  /** Add an account (members, unless their organization keeps it for admins). */
+  canAdd?: boolean;
+  /** Reconnect a shared account that is already set up (integration admins). */
+  canChange?: boolean;
   ownership?: ConnectionOwnership;
   /** This provider accepts only user-owned grants for new accounts. */
   personalOnly?: boolean;
@@ -308,13 +320,18 @@ export function useApiIntegrationAccounts({
   const canManagePersonalDestination = Boolean(
     workspaceGrant && context.accessContext?.subjectId === workspaceGrant.subjectId,
   );
-  const canManageOrganizationDestination = Boolean(
-    workspaceGrant &&
-    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
-  );
+  const canManageOrganizationDestination = canAdministerOrganization({
+    accessContext: context.accessContext,
+    clientConfig: context.clientConfig,
+    accountId: workspaceGrant?.accountId,
+  });
+
+  // A member reconnects only their own account; a shared one stays with admins.
+  const canReconnect = (account: ApiIntegrationInstallationSummary) =>
+    canChange || (canManage && account.ownership === "personal");
 
   async function startAdd(existing: ApiIntegrationInstallationSummary | null) {
-    if (!definition || !canManage || busy) return;
+    if (!definition || busy || !(existing ? canReconnect(existing) : canAdd)) return;
     setBusy(true);
     try {
       const instanceKey = existing?.instanceKey ?? `account-${crypto.randomUUID()}`;
@@ -415,7 +432,7 @@ export function useApiIntegrationAccounts({
     ...(canManage && !account.personalExtension
       ? {
           actions: [
-            ...(account.connected
+            ...(account.connected || !canReconnect(account)
               ? []
               : [{ label: "Reconnect", onClick: () => void startAdd(account), disabled: busy }]),
             {
@@ -547,10 +564,11 @@ export function useIntegrationDefinitionRow({
   refreshRevision?: number;
 }): IntegrationAdapter {
   const context = useAppContext();
-  const canManage = hasWorkspacePermission(
+  const canManage = canManageWorkspaceIntegrations(context.accessContext, workspaceId);
+  const canAdd = canAddWorkspaceIntegrations(
     context.accessContext,
     workspaceId,
-    "capabilities:manage",
+    context.workspaceMemberIntegrationSetup,
   );
   const controller = useApiIntegrationAccounts({
     workspaceId,
@@ -558,6 +576,8 @@ export function useIntegrationDefinitionRow({
     definitions,
     instances,
     canManage,
+    canAdd,
+    canChange: canChangeWorkspaceIntegrations(context.accessContext, workspaceId),
     ...(ownership ? { ownership } : {}),
     ...(personalOnly !== undefined ? { personalOnly } : {}),
     ...(refresh ? { refresh } : {}),
@@ -567,7 +587,7 @@ export function useIntegrationDefinitionRow({
 
   const chip: IntegrationChip =
     controller.accounts.length === 0
-      ? canManage
+      ? canAdd
         ? { label: "Not connected", tone: "idle" }
         : { label: "Set up by an admin", tone: "plain" }
       : controller.needsAttention
@@ -576,7 +596,7 @@ export function useIntegrationDefinitionRow({
 
   const footer: IntegrationFooter =
     controller.accounts.length === 0
-      ? canManage
+      ? canAdd
         ? { kind: "setup", onSetup: controller.addAccount, busy: controller.busy }
         : { kind: "locked" }
       : {
@@ -598,7 +618,7 @@ export function useIntegrationDefinitionRow({
           access: {
             title: "Connected accounts",
             items: controller.accessItems,
-            ...(canManage
+            ...(canAdd
               ? {
                   editLabel: "Add account",
                   onEdit: controller.addAccount,

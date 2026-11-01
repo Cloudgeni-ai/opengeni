@@ -523,7 +523,7 @@ export const englishMessages = {
   "automations.rows.sentAgain_other": "Sent again {count} times",
   "automations.rows.type": "Type",
   "automations.run.error.accessUnavailable":
-    "The access it was saved with has changed. Save it again to approve it with your current access.",
+    "The access it was saved with has changed. Its owner can save it again to approve it with their current access. If they've left, it can't run as them again.",
   "automations.run.error.accountUnavailable":
     "A connected account it needs can no longer be used. Reconnect that account.",
   "automations.run.error.allowanceUsed": "The usage allowance is used up.",
@@ -1876,7 +1876,7 @@ export const englishMessages = {
     "This chat's working folder isn't inside that machine's workspace. Start a new chat on that machine instead.",
   "hooks.useMachines.onlyTheMachineSOwner": "Only the machine's owner can use it in this chat.",
   "hooks.useMachines.theMachineSOwnerHas":
-    "The machine's owner has not allowed this chat to use it.",
+    "The machine's owner hasn't turned it on in this workspace.",
   "hooks.useNewConversation.newChatsAreNotEnabled": "New chats are not enabled for this product.",
   "hooks.useSandboxFiles.createFile": "create file",
   "hooks.useSandboxFiles.createFolder": "create folder",
@@ -2461,6 +2461,8 @@ export const englishMessages = {
     "The audio, transcript and speaker names are deleted. This can't be undone.",
   "meetings.detailPage.aboutEstimateForThisDuration":
     "About ${estimate} for this {duration} meeting.",
+  "meetings.detailPage.aboutEstimateForTracks":
+    "About ${estimate} for this {duration} meeting. Each of its {count} audio tracks is transcribed and billed separately.",
   "meetings.detailPage.aboutLessThan001": "Less than $0.01 for this {duration} meeting.",
   "meetings.detailPage.aboutThisTranscript": "About this transcript",
   "meetings.detailPage.addCredits": "Add credits",
@@ -2739,12 +2741,12 @@ export const englishMessages = {
     "Microphone only: other people on a call won't be heard.",
   "meetings.recorderPanel.nameIt": "Name it",
   "meetings.recorderPanel.nameThisMeeting": "Name this meeting",
-  "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting (optional)",
+  "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting, or it's named for you",
+  "meetings.recorderPanel.namedForYou": "Named for you",
   "meetings.recorderPanel.newRecording": "New recording",
   "meetings.recorderPanel.noLiveTranscriptionProviderIs":
     "Live transcription isn't set up. Ask an admin to connect it.",
   "meetings.recorderPanel.noMicrophoneFound": "No microphone found",
-  "meetings.recorderPanel.noNameYet": "No name yet",
   "meetings.recorderPanel.noSoundServerIsRunning":
     "No sound server (PipeWire or PulseAudio) is running. Start one, or record without computer audio.",
   "meetings.recorderPanel.nothingIsRecordedWhilePaused": "Nothing is recorded while paused.",
@@ -4326,6 +4328,8 @@ export const englishMessages = {
     "This chat runs on your personal machine “{machine}”. Messages from other people cannot start work on it.",
   "sessionAdmission.ownMachineQueuedNext":
     "The queued message is saved. Choose a workspace or cloud machine, or ask a workspace admin to share this machine. After changing machines or access, recheck to run the saved message.",
+  "sessionAdmission.ownMachineSharedHeadsUp":
+    "This chat runs on your personal machine “{machine}”. People in this workspace see what the agent does on it.",
   "sessionAdmission.ownerRequest":
     "This chat runs on your personal machine “{machine}”, so my message can't start there. Could you make the machine available to the workspace, or help me choose a shared machine?",
   "sessionAdmission.pausedNote":
@@ -5281,16 +5285,21 @@ export const englishMessages = {
     "Waiting for {count} agents · since {since}",
   "timeline.noticePresentation.waitingSince": "Waiting · since {since}",
   "timeline.noticePresentation.declinedAutomatically": "Declined automatically.",
+  "timeline.noticePresentation.declinedAutomaticallyTitle": "Declined automatically: “{title}”.",
+  "timeline.noticePresentation.declinedAutomaticallyTitleWithDetail":
+    "Declined automatically: “{title}” ({detail}).",
   "timeline.noticePresentation.youApprovedActions_one": "You approved {count} action.",
   "timeline.noticePresentation.youApprovedActions_other": "You approved {count} actions.",
   "timeline.noticePresentation.youApprovedAndRejected":
-    "You approved {approved} and rejected {rejected}.",
+    "You approved {approved} and declined {rejected}.",
   "timeline.noticePresentation.youApprovedThis": "You approved this.",
   "timeline.noticePresentation.youApprovedTitle": "You approved “{title}”.",
-  "timeline.noticePresentation.youRejectedActions_one": "You rejected {count} action.",
-  "timeline.noticePresentation.youRejectedActions_other": "You rejected {count} actions.",
-  "timeline.noticePresentation.youRejectedThis": "You rejected this.",
-  "timeline.noticePresentation.youRejectedTitle": "You rejected “{title}”.",
+  "timeline.noticePresentation.youApprovedTitleWithDetail": "You approved “{title}” ({detail}).",
+  "timeline.noticePresentation.youRejectedActions_one": "You declined {count} action.",
+  "timeline.noticePresentation.youRejectedActions_other": "You declined {count} actions.",
+  "timeline.noticePresentation.youRejectedThis": "You declined this.",
+  "timeline.noticePresentation.youRejectedTitle": "You declined “{title}”.",
+  "timeline.noticePresentation.youRejectedTitleWithDetail": "You declined “{title}” ({detail}).",
   "timeline.noticePresentation.youRespondedToThisApproval": "You responded to this approval.",
   "timeline.patchApplyCommand.commandToApplyTheseChanges": "Command to apply these changes",
   "timeline.patchApplyCommand.copied": "Copied",
@@ -5741,7 +5750,7 @@ export const englishMessages = {
   "timeline.toolRenderers.waited": "Waited",
   "timeline.toolRenderers.waitingForYourApproval": "Waiting for your approval",
   "timeline.toolRenderers.declinedAutomatically": "Declined automatically",
-  "timeline.toolRenderers.youRejectedThis": "You rejected this",
+  "timeline.toolRenderers.youRejectedThis": "You declined this",
   "timeline.toolRenderers.wasNotFound": "was not found",
   "timeline.toolStep.archiveDocument.done": "Archived a document",
   "timeline.toolStep.archiveDocument.running": "Archiving a document",

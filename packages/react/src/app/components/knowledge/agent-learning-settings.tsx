@@ -324,7 +324,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
         </ErrorMessage>
       ) : null}
       {saveError ? (
-        <p role="alert" className="text-xs text-status-error">
+        <p role="alert" className="text-xs text-danger">
           Couldn't save that. {userErrorText(saveError)}
         </p>
       ) : null}
@@ -442,7 +442,7 @@ export function AgentLearningDraftEditor(props: {
             The workspace defaults aren't visible to you. A workspace admin can see them.
           </p>
         ) : (
-          <p role="alert" className="text-xs text-status-error">
+          <p role="alert" className="text-xs text-danger">
             Couldn't load the defaults. {userErrorText(error)}
           </p>
         )

@@ -21,6 +21,11 @@ export function connectionAccountIdentityLabel(
       metadata.googleCalendarEmail,
       metadata.googleDriveEmail,
       metadata.atlassianEmail,
+      metadata.linearEmail,
+      metadata.notionEmail,
+      metadata.asanaEmail,
+      metadata.stripeEmail,
+      metadata.oidcEmail,
       metadata.accountLabel,
       metadata.displayName,
       metadata.providerDisplayName,
@@ -29,12 +34,19 @@ export function connectionAccountIdentityLabel(
       metadata.name,
       metadata.slackUserName,
       metadata.atlassianName,
+      metadata.linearName,
+      metadata.notionName,
+      metadata.asanaName,
+      metadata.oidcName,
       metadata.username,
     ]
       .map(text)
       .find(Boolean) ?? fallback;
   const workspace = [
     metadata.slackTeamName,
+    metadata.linearWorkspaceName,
+    metadata.notionWorkspaceName,
+    metadata.stripeAccountName,
     metadata.teamName,
     metadata.workspaceName,
     metadata.team_name,

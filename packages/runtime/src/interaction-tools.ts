@@ -566,6 +566,12 @@ const BrowserOpenInput = z
     networkRouteId: z.string().uuid().optional(),
     linkedComputerSessionId: z.string().uuid().optional(),
     includeScreenshot: z.boolean().optional(),
+    // Named by the refusal of a browser whose working copy needs adopting
+    // (see workingCopyRecoveryError), never needed otherwise.
+    adoptWorkingCopy: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -591,6 +597,13 @@ const BrowserOpenInput = z
         code: "custom",
         path: ["mode"],
         message: "mode=new cannot target an existing BrowserSession",
+      });
+    }
+    if (value.adoptWorkingCopy && !value.browserSessionId) {
+      context.addIssue({
+        code: "custom",
+        path: ["adoptWorkingCopy"],
+        message: "adoptWorkingCopy needs the browserSessionId whose working copy it adopts",
       });
     }
     if (
@@ -1554,11 +1567,17 @@ export function createInteractionAttemptToolDefinitions(
     if (isReconnectedAttachedBrowser(before))
       throw reconnectedAttachedBrowserError(browserSessionId);
     if (!isResumablePausedBrowser(before)) return null;
-    const response = await input.transport.resumeBrowserSession(
-      input.workspaceId,
-      browserSessionId,
-      { operationId: derivedOperationId("browser-tool-resume", operationId, browserSessionId) },
-    );
+    let response: Awaited<ReturnType<InteractionTransport["resumeBrowserSession"]>>;
+    try {
+      response = await input.transport.resumeBrowserSession(input.workspaceId, browserSessionId, {
+        operationId: derivedOperationId("browser-tool-resume", operationId, browserSessionId),
+      });
+    } catch (error) {
+      throw (
+        (await workingCopyRecoveryError(input.transport, input.workspaceId, browserSessionId)) ??
+        error
+      );
+    }
     const resumed = { count, tabs: null as ResumedTabs | null, shownAt: null as number | null };
     if (response.operation.state !== "failed") {
       // From here the browser may have reloaded its tabs, even if what
@@ -1575,6 +1594,12 @@ export function createInteractionAttemptToolDefinitions(
       );
     }
     if (response.operation.state === "failed") {
+      const recovery = await workingCopyRecoveryError(
+        input.transport,
+        input.workspaceId,
+        browserSessionId,
+      );
+      if (recovery) throw recovery;
       throw new OpenGeniApiError(
         409,
         `BrowserSession ${browserSessionId} had stopped and could not be resumed: ${failure?.message ?? response.operation.state}`,
@@ -4074,6 +4099,93 @@ function isResumablePausedBrowser(session: z.infer<typeof BrowserSession>): bool
   );
 }
 
+type WorkingCopyTransport = Partial<
+  Pick<OpenGeniClient, "inspectBrowserSessionWorkingCopy" | "adoptBrowserSessionWorkingCopy">
+>;
+
+/**
+ * A stopped browser whose working directory was moved, copied or restored
+ * (for example when its machine's disk was restored) does not continue from
+ * it by itself, because how recent that copy is cannot be proven. Its
+ * refusal then says what the agent can do with the tools it has: adopt
+ * exactly that copy through browser_open, or open a new browser. Read after
+ * a resume failed; null when the working copy is not why (or cannot be read),
+ * so the original refusal stands. Inspection changes nothing.
+ */
+async function workingCopyRecoveryError(
+  transport: WorkingCopyTransport,
+  workspaceId: string,
+  browserSessionId: string,
+): Promise<OpenGeniApiError | null> {
+  if (!transport.inspectBrowserSessionWorkingCopy || !transport.adoptBrowserSessionWorkingCopy)
+    return null;
+  const inspection = await transport
+    .inspectBrowserSessionWorkingCopy(workspaceId, browserSessionId)
+    .catch(() => null);
+  if (!inspection) return null;
+  const unfinished = inspection.activeAdoption;
+  if (
+    unfinished &&
+    unfinished.operationId ===
+      workingCopyAdoptionOperationId(browserSessionId, unfinished.manifestDigest)
+  )
+    return new OpenGeniApiError(
+      409,
+      `BrowserSession ${browserSessionId} cannot continue yet: adopting its working copy did not finish. Call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${unfinished.manifestDigest}" again to finish it.`,
+      { code: "conflict", retryable: false },
+    );
+  if (!inspection.adoptable || !inspection.manifest) return null;
+  const checkpoint = inspection.freshness.latestCheckpointAt;
+  return new OpenGeniApiError(
+    409,
+    `BrowserSession ${browserSessionId} cannot continue by itself: its working directory was moved, copied or restored since it last ran, and how recent that copy is cannot be proven${
+      checkpoint ? ` (its latest saved checkpoint is from ${checkpoint})` : ""
+    }. To continue from exactly this copy (${inspection.manifest.entries} files, ${inspection.manifest.bytes} bytes), call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${inspection.manifest.digest}"; the directory it replaces is kept. To start over without it, call browser_open with mode "new".`,
+    { code: "conflict", retryable: false },
+  );
+}
+
+/** One adoption per browser and copy, so a retry of the same adoption (after
+ * a lost reply or one that stopped part way) settles it instead of starting
+ * another. */
+function workingCopyAdoptionOperationId(browserSessionId: string, manifestDigest: string): string {
+  return derivedOperationId("browser-working-copy-adoption", manifestDigest, browserSessionId);
+}
+
+/** Adopt exactly the inspected bytes of a stopped browser's working copy, as
+ * the refusal from workingCopyRecoveryError offered. The controller refuses
+ * when the bytes changed since, and keeps the directory it replaces. */
+async function adoptBrowserWorkingCopy(
+  transport: WorkingCopyTransport,
+  workspaceId: string,
+  browserSessionId: string,
+  manifestDigest: string,
+): Promise<void> {
+  if (!transport.adoptBrowserSessionWorkingCopy)
+    throw new Error("this browser transport cannot adopt a working copy");
+  const adopted = await transport.adoptBrowserSessionWorkingCopy(workspaceId, browserSessionId, {
+    operationId: workingCopyAdoptionOperationId(browserSessionId, manifestDigest),
+    manifestDigest,
+  });
+  const phase = adopted.adoption?.phase ?? null;
+  if (phase === "adopted") return;
+  const again = `call browser_open with browserSessionId "${browserSessionId}" and adoptWorkingCopy "${manifestDigest}" again`;
+  const reason = adopted.inFlight
+    ? `the adoption is still running; ${again} in a moment`
+    : phase === "interrupted" || phase === "failed" || phase === "reverted" || phase === null
+      ? `the adoption stopped before the copy took the browser's place${
+          adopted.adoption?.failureCode ? ` (${adopted.adoption.failureCode})` : ""
+        }, and the browser's own directory is unchanged. Call browser_open with browserSessionId "${browserSessionId}" alone to see whether its copy can still be adopted, or with mode "new" to start over`
+      : phase === "collision" || phase === "reverting"
+        ? `the adoption found the browser's directories in an unexpected state and stopped without removing anything, so this browser stays unavailable until a person reverts the adoption. Call browser_open with mode "new" to continue in a new browser`
+        : `the adoption stopped part way; ${again} to finish it`;
+  throw new OpenGeniApiError(
+    409,
+    `BrowserSession ${browserSessionId}'s working copy was not adopted: ${reason}.`,
+    { code: "conflict", retryable: adopted.inFlight },
+  );
+}
+
 /** A session in the person's own Chrome that ended because that Chrome
  * reconnected (Chrome, or its extension's background worker, restarted). The
  * new connection cannot inherit the old one's tabs and debugger attachments,
@@ -4568,12 +4680,30 @@ async function openBrowser(
       }
     }
   }
+  if (value.adoptWorkingCopy) {
+    if (!isResumablePausedBrowser(session))
+      throw new OpenGeniApiError(
+        409,
+        `BrowserSession ${session.id} is ${session.lifecycle}, so it has no stopped working copy to adopt; call browser_open without adoptWorkingCopy.`,
+        { code: "conflict", retryable: false },
+      );
+    await adoptBrowserWorkingCopy(transport, workspaceId, session.id, value.adoptWorkingCopy);
+  }
   if (isResumablePausedBrowser(session)) {
-    session = (
-      await transport.resumeBrowserSession(workspaceId, session.id, {
+    const stoppedId = session.id;
+    let resumed: Awaited<ReturnType<InteractionTransport["resumeBrowserSession"]>>;
+    try {
+      resumed = await transport.resumeBrowserSession(workspaceId, stoppedId, {
         operationId: context.operationId,
-      })
-    ).session;
+      });
+    } catch (error) {
+      throw (await workingCopyRecoveryError(transport, workspaceId, stoppedId)) ?? error;
+    }
+    if (resumed.operation?.state === "failed") {
+      const recovery = await workingCopyRecoveryError(transport, workspaceId, stoppedId);
+      if (recovery) throw recovery;
+    }
+    session = resumed.session;
   }
   const chosenProfile = profileChoice
     ? {
@@ -5135,7 +5265,8 @@ export function openComputerAppWindow(
 }
 
 type InteractionPlacementTransport = InteractionTransport &
-  Partial<Pick<OpenGeniClient, "getSession" | "listMachines" | "swapActiveSandbox">>;
+  Partial<Pick<OpenGeniClient, "getSession" | "listMachines" | "swapActiveSandbox">> &
+  WorkingCopyTransport;
 
 /** Where a placement-less open creates its session: the machine the chat is
  * routed to now. No active sandbox means the session's own group sandbox; a

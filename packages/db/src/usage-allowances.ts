@@ -136,6 +136,7 @@ async function command<T>(db: Database, input: Scope & Record<string, unknown>):
   }
   try {
     const mutation = ["set", "clear", "member", "grant"].includes(String(input.action));
+    const read = input.action === "usage" || input.action === "check";
     return await withRlsContext(
       db,
       input,
@@ -150,12 +151,29 @@ async function command<T>(db: Database, input: Scope & Record<string, unknown>):
         }
         if (typeof input.actorSubjectId === "string")
           await setSubjectRlsContext(scoped, input.actorSubjectId);
-        const [row] = await rawRows<{ result: T }>(
+        const commandCall = sql`usage_allowance_command(${JSON.stringify(input)}::jsonb)`;
+        // Reads also take the organization's per-person limit for Personal
+        // workspaces, in the same statement (see personalWorkspaceConfig).
+        const [row] = await rawRows<{ result: T; personal_monthly_credits?: string | null }>(
           scoped,
-          sql`select usage_allowance_command(${JSON.stringify(input)}::jsonb) as result`,
+          read
+            ? sql`select ${commandCall} as result, (
+                select preferences.personal_workspace_monthly_credits
+                from organization_privacy_preferences preferences
+                where preferences.account_id = ${input.accountId}::uuid
+                  and preferences.personal_workspace_monthly_credits is not null
+                  and get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) = 'personal'
+              ) as personal_monthly_credits`
+            : sql`select ${commandCall} as result`,
         );
         if (!row) throw new Error("Usage allowance command returned no result");
-        return row.result;
+        if (!read) return row.result;
+        const credits = row.personal_monthly_credits;
+        return {
+          ...(row.result as object),
+          personalMonthlyCredits:
+            credits === null || credits === undefined ? null : Number(credits),
+        } as T;
       },
       undefined,
       mutation ? "none" : "shared",
@@ -272,7 +290,22 @@ type RawUsage = {
     used: number;
     externalIdentity: { source: string; externalId: string } | null;
   })[];
+  /** The organization's per-person limit when this is a Personal workspace. */
+  personalMonthlyCredits?: number | null;
 };
+
+/**
+ * A Personal workspace without a budget of its own takes its organization's
+ * per-person monthly limit, metered by the calendar-month counters every
+ * workspace keeps. The limit applies to the running month only: a past month
+ * without a budget of its own has no recorded window (`end` is null), and the
+ * organization keeps no history of the limit.
+ */
+function personalWorkspaceConfig(raw: RawUsage): WorkspaceAllowanceConfig | null {
+  const credits = raw.personalMonthlyCredits;
+  if (credits === null || credits === undefined || raw.period.end === null) return null;
+  return { includedCredits: credits, period: "monthly" };
+}
 
 export function allowanceUsage(
   limit: number | null,
@@ -319,11 +352,14 @@ export async function getWorkspaceUsage(
 }
 
 function projectUsage(raw: RawUsage, pageSize: number): WorkspaceUsage {
-  const config = raw.config;
+  const config = raw.config ?? personalWorkspaceConfig(raw);
+  // The period's whole pool: included credits plus the grants spent this
+  // period and those still left. Usage counts the whole period, so its
+  // ceilings must too: against what is left, every credit spent would shrink
+  // every member's share.
   const pool = config
     ? config.includedCredits + Number(raw.grantsUsed) + Number(raw.grantsRemaining)
     : null;
-  const memberPool = config ? config.includedCredits + Number(raw.grantsRemaining) : null;
   const resetsAt = config ? raw.period.end : null;
   const members = raw.members.slice(0, pageSize).map((member) => {
     let rule = member.rule;
@@ -341,9 +377,9 @@ function projectUsage(raw: RawUsage, pageSize: number): WorkspaceUsage {
         ? null
         : "credits" in rule
           ? rule.credits
-          : memberPool === null
+          : pool === null
             ? null
-            : Math.min(Number.MAX_SAFE_INTEGER, Math.floor(memberPool * rule.share));
+            : Math.min(Number.MAX_SAFE_INTEGER, Math.floor(pool * rule.share));
     return {
       ...member,
       rule: member.rule,

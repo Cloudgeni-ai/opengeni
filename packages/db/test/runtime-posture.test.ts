@@ -592,11 +592,11 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
       },
-      // 1103: created without runtime EXECUTE until its follow-up release.
+      // 1103 created it without runtime EXECUTE; 1149 granted it.
       {
         name: "grant_subscription_account_administrator(jsonb)",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
         securityDefiner: true,
         triggerCallable: false,
@@ -1948,6 +1948,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1131 hourly live transcript time per person: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -2045,6 +2051,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1143_agent_call_host_phones: full DML, FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2112,7 +2124,9 @@ describe("runtime database posture evaluator", () => {
         1 + // 1071 shared Site project placements: full-DML, FORCE-RLS.
         1 + // 1090 personal default machines: full-DML, FORCE-RLS.
         1 + // 1105 workspace activity facts: read and insert, FORCE-RLS.
-        1; // 1107 agent calls: read, insert and update, FORCE-RLS.
+        1 + // 1107 agent calls: read, insert and update, FORCE-RLS.
+        1 + // 1131 hourly live transcript time per person: full-DML, FORCE-RLS.
+        1; // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -2128,6 +2142,8 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_project_placements");
       expect(FORCE_RLS_TABLES).toContain("workspace_member_execution_defaults");
       expect(RUNTIME_FULL_DML_TABLES).toContain("workspace_member_execution_defaults");
+      expect(FORCE_RLS_TABLES).toContain("recording_live_unbacked_hours");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("recording_live_unbacked_hours");
       expect(FORCE_RLS_TABLES).toContain("secret_approval_rules");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_approval_rules");
       expect(FORCE_RLS_TABLES).toContain("automation_templates");
@@ -4029,7 +4045,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 0988's, 1002's, 1060's, 1091's and 1107's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 1103 and 1060 withheld; 0978's, 0984's, 0988's, 1002's, 1091's and 1107's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4157,10 +4173,8 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "summarize_queued_turns_by_hold()",
-      "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
-      "grant_subscription_account_administrator(jsonb)",
       "native_push_device_v2(text)",
       "register_native_push_device_v2(text, text, text, text, text, text[], text)",
       "claim_native_push_deliveries_v2(uuid, integer, integer)",
@@ -4169,6 +4183,12 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "ring_agent_call_v1(uuid, boolean)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
+    expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
+      "runtime role lacks EXECUTE on private routine update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
+    );
+    expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
+      "runtime role lacks EXECUTE on private routine grant_subscription_account_administrator(jsonb)",
+    );
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
       runtimePosture.RUNTIME_DEFINER_ROUTINES.filter(
         (name) =>

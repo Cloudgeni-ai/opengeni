@@ -1,0 +1,86 @@
+name: Regenerate generated files
+# The merge batcher dispatches this for a queued PR that conflicts with main
+# (scripts/batcher/pass.ts). It merges main into the PR head and, when every
+# conflicted file is generated, regenerates those files with the PR's own
+# generators (scripts/ci/regenerate-merge.ts) and uploads the result. It pushes
+# nothing and its token can only read: the batcher checks the result and
+# writes it to the PR's branch itself. See docs/merge-batcher.md.
+# The batcher finds the run for a PR head by this name.
+run-name: "Regenerate #${{ inputs.pull }} at ${{ inputs.head }}"
+on:
+  workflow_dispatch:
+    inputs:
+      pull:
+        description: PR number
+        required: true
+        type: string
+      head:
+        description: PR head commit
+        required: true
+        type: string
+      main:
+        description: Main commit to merge into it
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  regenerate:
+    name: Regenerate generated files
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check the inputs
+        env:
+          PULL: ${{ inputs.pull }}
+          HEAD_SHA: ${{ inputs.head }}
+          MAIN_SHA: ${{ inputs.main }}
+        run: |
+          [[ "$PULL" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "pull must be a PR number" >&2; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+            { echo "head and main must be full commit SHAs" >&2; exit 1; }
+      # The script, the registry of generated files and the Bun version come
+      # from the commit this workflow runs from; only the generators come from
+      # the PR.
+      - name: Check out the regeneration script
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: |
+            /*
+            !/*/
+            /scripts/ci/check-generated-artifacts.ts
+            /scripts/ci/regenerate-merge.ts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      # Full history with every file's contents. A blobless clone can't merge:
+      # git merge's checkout asks the remote for blobs the merge has just
+      # written, and the remote refuses them (regenerate-merge.ts checks this).
+      - name: Check out the PR head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.head }}
+          path: work
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Merge main and regenerate the conflicting generated files
+        working-directory: work
+        env:
+          PULL: ${{ inputs.pull }}
+          HEAD_SHA: ${{ inputs.head }}
+          MAIN_SHA: ${{ inputs.main }}
+        run: >-
+          bun ../scripts/ci/regenerate-merge.ts --pull "$PULL" --head "$HEAD_SHA"
+          --main "$MAIN_SHA" --out "$RUNNER_TEMP/regeneration.json"
+      - name: Upload the result
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: regeneration
+          path: ${{ runner.temp }}/regeneration.json
+          if-no-files-found: error
+          retention-days: 3

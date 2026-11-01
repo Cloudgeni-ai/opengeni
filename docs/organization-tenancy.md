@@ -239,6 +239,21 @@ admitted and revalidated against a `connected_machine.use` grant. Workspace acce
 loss removes workspace resources immediately without deleting the user's resources;
 cross-organization visibility remains impossible.
 
+### Available here
+
+Workspace settings › Available here shows what agent turns in one workspace can
+use, grouped by owner: the workspace's own things, the organization's things
+that reach the workspace, and the viewer's own things. It reads the same lists
+each kind's own page reads (connector installations, Connected Machines, rigs,
+vaults, Skills and Knowledge), so it never shows anything those pages would not:
+other people's personal resources never appear, and a kind the viewer may not
+list is left out instead of shown as an error. Each row says who manages it
+(workspace admins for connectors and machines, workspace members and admins for
+rigs, vaults, Skills and Knowledge, organization owners for organization things,
+only the owner for personal things) and opens the thing's own page. Model plans
+and keys stay on Organization settings › Models, which already shows each
+one's owner; the page links there for people who may open it.
+
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
 Migration `0219_organization_tenancy_managed_human_provisioning.sql` adds the
@@ -830,10 +845,9 @@ other actor. Changes carry the current `version` (stale: `409`) and an
 `operationId`: an exact replay returns the stored result, and the same id with
 a different request is `409`. A request that changes nothing keeps the
 version, so repeating "on" never makes someone else's change stale. 1060
-withholds the runtime's EXECUTE on that
-function for one release (see
-[migrations-expand-contract.md](migrations-expand-contract.md)); until a later
-migration grants it, changes answer `503` and the setting stays off.
+withheld the runtime's EXECUTE on that function for one release and 1210
+granted it (see [migrations-expand-contract.md](migrations-expand-contract.md));
+readiness requires the grant.
 
 Only Opengeni sign-in (managed access) has people in browsers who could turn
 it off, so in local and configured access modes it can't be changed at all
@@ -1242,19 +1256,28 @@ or model subscriptions; it includes `connections:personal`, below), `mcp_servers
 `rigs:manage` (create and edit Sandbox Environments, which are versioned) and
 `enrollments:read` (see and pick Connected Machines). A Member also manages any
 Site they can see (Site Data, Site SQL, publication settings, takedown and
-restore) and authors, installs and reviews workspace Skills
-(`documents:manage`). A signed-in Member also edits the workspace instructions
+restore), authors, installs and reviews workspace Skills
+(`documents:manage`), creates and runs schedules, automations and event
+sources (`scheduled_tasks:*`), changes or deletes any bot template shared with
+the workspace, and records posts on their own social accounts. A signed-in
+Member also edits the workspace instructions
 and reviews the agent's proposed changes to them (`sessions:create`, see
-[workspace instruction policies](workspace-instruction-policies.md)).
+[workspace instruction policies](workspace-instruction-policies.md)), renames a
+shared workspace (`PATCH /v1/workspaces/:workspaceId` with `name`; its `slug`
+stays Admin-only and a Personal workspace keeps its name), and adds or removes
+its custom model entries (Gateway, OpenRouter, Opper and Claude custom models;
+the keys and subscriptions they run on stay Admin-only).
 Settings-class powers stay Admin-only:
-`workspace:admin` (workspace settings, learning settings, Insights, automations),
+`workspace:admin` (workspace settings, learning settings, Insights),
 `members:manage`, `api_keys:manage`, `github:manage` (the workspace GitHub
 App), `variable-sets:manage`, `enrollments:manage` (enrolling and changing
 workspace and organization machines; a signed-in Member connects and changes
 their own Only me machine with `enrollments:read`, see
 [Connected Machines](connected-machines.md#connect-a-machine)),
-`capabilities:manage` (integration and plugin install, workspace
-tool policy) and `secrets:read`. Routes where a newly granted permission would
+`capabilities:manage` (workspace tool policy, auto-approval, and changing or
+turning off an integration that is on; Members add integrations and plugins
+with `connections:write`, see [Capability Catalog](capabilities.md)) and
+`secrets:read`. Routes where a newly granted permission would
 otherwise reach workspace-wide configuration check the settings power
 explicitly: workspace-owned model-provider keys and the Slack bot need
 `capabilities:manage`, and the workspace default Sandbox Environment needs
@@ -1266,9 +1289,11 @@ external (`external_user:`) memberships are excluded too: an organization
 service key stores them as role `member` with a caller-chosen permission set,
 which a preset change must not widen.
 Organization owners and administrators may create and rename shared
-workspaces, grant or replace access, and revoke access. Ordinary organization
-members, cross-organization membership ids, and every Personal workspace fail
-closed. Organization membership role changes keep the 0263 sole-owner
+workspaces, grant or replace access, and revoke access through these
+organization routes. Ordinary organization members, cross-organization
+membership ids, and every Personal workspace fail closed here; a member who can
+start chats in a shared workspace still renames it from its own settings
+(`PATCH /v1/workspaces/:workspaceId`). Organization membership role changes keep the 0263 sole-owner
 invariant; workspace roles do not alter organization roles.
 
 That authority covers every shared workspace in the organization and every

@@ -20,7 +20,7 @@ use admission::FirstWake;
 pub(crate) use admission::WakeRoom;
 pub use admission::{Capacity, CpuCapacity, CreateRoom, Size};
 pub use disk::{DiskCapacity, DiskSpace, Resource};
-pub use outgrowth::MemoryLevels;
+pub use outgrowth::{MemoryLevels, ShrinkCause};
 pub use spare::Claims;
 pub(crate) use squeeze::{Balloon, Squeeze};
 
@@ -61,6 +61,9 @@ pub enum Input {
         sandbox: SandboxId,
         /// What it may take of host memory.
         size: Size,
+        /// How it will sleep: its first wake books its next save only if
+        /// the host may save it unasked ([`SleepPolicy::saves`]).
+        policy: SleepPolicy,
         /// Whether its first wake fetches it from object storage, as an
         /// adopted sandbox's does, and so books its fetch too.
         remote: bool,
@@ -500,14 +503,19 @@ pub enum Action {
         keep: u64,
         /// Which request this is.
         request: ShrinkRequest,
+        /// Why the host asks it.
+        cause: ShrinkCause,
     },
-    /// End the sandbox's running VM: its guest could not be shrunk and the
-    /// host is still short with every running sandbox held to its request.
-    /// Report it with [`Input::Lost`] once it has ended; it is then
-    /// restored from its last copy as any lost VM is.
+    /// End the sandbox's running VM: its guest could not be shrunk, and
+    /// the host is still short with every running sandbox held to its
+    /// request, or the kernel still cannot hold it to its bound. Report it
+    /// with [`Input::Lost`] once it has ended; it is then restored from its
+    /// last copy as any lost VM is.
     EndForMemory {
         /// The sandbox.
         sandbox: SandboxId,
+        /// Why the host ends it.
+        cause: ShrinkCause,
     },
     /// Set the sandbox's running VM's `memory.low` to `low` and its
     /// `memory.high` to `high` (`None` for none). A VM starts, resumes and
@@ -899,17 +907,10 @@ impl Host {
             Input::Creating {
                 sandbox,
                 size,
+                policy,
                 remote,
                 until,
-            } => self.creating(
-                now,
-                sandbox,
-                FirstWake {
-                    size,
-                    remote,
-                    until,
-                },
-            ),
+            } => self.creating(now, sandbox, FirstWake::new(size, policy, remote, until)),
             Input::Remove { sandbox } => self.remove(sandbox, out),
             Input::Spare {
                 sandbox,

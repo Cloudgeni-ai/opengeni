@@ -12,6 +12,7 @@ import {
   recordingDiarizationKind,
   RecordingTranscriptionError,
   transcriptLanguages,
+  transcriptionProviderOutOfCredit,
   withoutMicrophoneEchoes,
   withRecorderVoice,
   type RecordingTranscribedWord,
@@ -146,6 +147,10 @@ describe("withRecorderVoice", () => {
           word("hva", 400, 700, "A"),
           word("trenger", 3_000, 3_600, "B"),
           word("dere?", 3_700, 4_500, "B"),
+          word("Vi", 4_600, 4_800, "B"),
+          word("trenger", 4_900, 5_300, "B"),
+          word("en", 5_400, 5_500, "B"),
+          word("pris.", 5_600, 6_000, "B"),
           word("Et", 7_000, 7_200, "A"),
           word("tilbud.", 7_300, 7_800, "A"),
           word(" ", 7_900, 9_900, "C"),
@@ -154,6 +159,32 @@ describe("withRecorderVoice", () => {
       null,
     );
     expect(speakerOf(track)).toBe("B");
+  });
+
+  test("a few words placed over minutes don't make a voice the one that spoke the most", () => {
+    // Text-only models give words no times, and the aligner can stretch a
+    // word over a long silence. What a voice said is counted, not how long.
+    const track = withRecorderVoice(
+      {
+        trackNumber: 0,
+        recorder,
+        words: [
+          word("But", 0, 336_960, "X"),
+          word("I", 534_680, 534_800, "A"),
+          word("agree.", 534_900, 535_400, "A"),
+          word("I", 535_500, 535_600, "A"),
+          word("think", 535_700, 536_000, "A"),
+          word("we", 536_100, 536_200, "A"),
+          word("should", 536_300, 536_600, "A"),
+          word("That", 868_120, 1_051_800, "A"),
+          word("Yeah,", 1_196_160, 1_197_000, "X"),
+          word("it", 1_197_100, 1_197_400, "X"),
+          word("is.", 1_197_500, 1_198_020, "X"),
+        ],
+      },
+      null,
+    );
+    expect(speakerOf(track)).toBe("A");
   });
 
   test("the remembered voice picks the person recording over who spoke the most", () => {
@@ -476,6 +507,55 @@ describe("ElevenLabs provider", () => {
     expect((await attempt(400)).message).toContain("nope");
   });
 
+  test("an account out of credit is told apart from a wrong key, though both are 401", async () => {
+    const attempt = async (status: number, body: unknown) => {
+      const provider = createElevenLabsRecordingTranscriptionProvider({
+        fetch: (async () => Response.json(body, { status })) as unknown as typeof fetch,
+      });
+      try {
+        await provider.transcribe({ audio, model: "scribe_v2", diarize: false }, { apiKey: "k" });
+      } catch (error) {
+        return error as RecordingTranscriptionError;
+      }
+      throw new Error("expected failure");
+    };
+    // What ElevenLabs answers when the month's credits are spent.
+    const spent = await attempt(401, {
+      detail: {
+        status: "quota_exceeded",
+        message:
+          "This request exceeds your quota of 10000. You have 0 credits remaining, while 12 credits are required for this request.",
+      },
+    });
+    expect([spent.code, spent.retryable]).toEqual(["quota_exceeded", false]);
+    expect(spent.message).toContain("exceeds your quota");
+    expect(
+      await attempt(401, {
+        detail: { type: "payment_required", code: "insufficient_credits", message: "No credits" },
+      }),
+    ).toMatchObject({ code: "quota_exceeded" });
+    const wrongKey = await attempt(401, {
+      detail: { status: "invalid_api_key", message: "Invalid API key" },
+    });
+    expect([wrongKey.code, wrongKey.message]).toEqual([
+      "unauthorized",
+      "ElevenLabs could not transcribe this audio (HTTP 401: Invalid API key)",
+    ]);
+  });
+
+  test("a live transcript on a spent account fails as out of credit", async () => {
+    const provider = createElevenLabsRecordingTranscriptionProvider({
+      fetch: (async () =>
+        Response.json(
+          { detail: { status: "quota_exceeded", message: "This request exceeds your quota." } },
+          { status: 401 },
+        )) as unknown as typeof fetch,
+    });
+    await expect(
+      provider.createLiveSession!({ model: "scribe_v2_realtime" }, { apiKey: "k" }),
+    ).rejects.toMatchObject({ code: "quota_exceeded", retryable: false });
+  });
+
   test("network failures are retryable", async () => {
     const provider = createElevenLabsRecordingTranscriptionProvider({
       fetch: (async () => {
@@ -526,6 +606,38 @@ describe("ElevenLabs provider", () => {
     await expect(
       provider.createLiveSession!({ model: "scribe_v2_realtime" }, { apiKey: "k" }),
     ).rejects.toMatchObject({ code: "unauthorized" });
+  });
+});
+
+describe("transcriptionProviderOutOfCredit", () => {
+  test("reads the providers' own ways of saying an account is spent", () => {
+    expect(transcriptionProviderOutOfCredit({ detail: { status: "quota_exceeded" } })).toBe(true);
+    expect(transcriptionProviderOutOfCredit({ error: { code: "insufficient_quota" } })).toBe(true);
+    expect(
+      transcriptionProviderOutOfCredit({ error: { message: "Out of call volume quota for F0." } }),
+    ).toBe(true);
+    expect(transcriptionProviderOutOfCredit("Insufficient credits")).toBe(true);
+  });
+
+  test("a busy provider, a wrong key or no body is not out of credit", () => {
+    // Azure OpenAI's rate limit links to its quota page; that is still a rate limit.
+    expect(
+      transcriptionProviderOutOfCredit({
+        error: {
+          code: "429",
+          message:
+            "Requests have exceeded token rate limit of your current pricing tier. Please retry after 4 seconds. Please go here: https://aka.ms/oai/quotaincrease if you would like to further increase the default rate limit.",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      transcriptionProviderOutOfCredit({
+        error: { code: "rate_limit_exceeded", message: "Rate limit reached for requests." },
+      }),
+    ).toBe(false);
+    expect(transcriptionProviderOutOfCredit({ detail: { status: "invalid_api_key" } })).toBe(false);
+    expect(transcriptionProviderOutOfCredit(null)).toBe(false);
+    expect(transcriptionProviderOutOfCredit({})).toBe(false);
   });
 });
 

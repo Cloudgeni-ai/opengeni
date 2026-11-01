@@ -3283,6 +3283,23 @@ The runtime secret must provide values such as:
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
 - `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
+- `OPENGENI_BILLING_LEGACY_ACCOUNT_IDS` lists accounts kept on the billing terms
+  from before the app/API split (any credit pays any use, no own-key fee); it
+  defaults to our internal accounts (CloudGeni's host account and our own
+  team's organizations) and `none` lists no account. See
+  [billing-origin.md](billing-origin.md#internal-accounts-cloudgeni-and-our-team).
+- `OPENGENI_BYOK_PLATFORM_FEE_BPS` (default `500`, 5%) is the platform fee on
+  calls served by a person's own key or subscription, charged only with
+  `OPENGENI_BILLING_MODE=stripe` and only from paid credit; `0` turns it off.
+  See [billing-origin.md](billing-origin.md#platform-fee-on-your-own-keys).
+- `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING` (default `true`): on turns whose
+  model Opengeni pays for while credit billing is active, hosted web search and
+  OpenAI hosted image generation cost credit. Billed provider search replaces
+  hosted search, or reported hosted searches are charged. The priced Gateway
+  image tool replaces OpenAI hosted images, so such turns have no image tool
+  without the Gateway image credential or a workspace Gateway key. `false`
+  restores free hosted search and images. See
+  [web-search.md](web-search.md#hosted-search-on-turns-opengeni-pays-for).
 - `OPENGENI_SUBSCRIPTION_PLANS_ENABLED=false` is the default. Enabling it opts into
   subscription API/webhook plan writes (and the separately integrated maintenance
   service); prepaid top-ups remain independent. Configure the operator runtime

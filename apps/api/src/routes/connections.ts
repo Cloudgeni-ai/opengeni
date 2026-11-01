@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import {
+  authorizationHoldsOrganizationAdministration,
   verifyDirectModelAccess,
   MissingPermissionRefusal,
   WORKSPACE_SETTINGS_REFUSAL,
@@ -195,6 +196,7 @@ import {
 } from "@opengeni/contracts";
 import { readSignedState } from "@opengeni/github";
 import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations/oauth-client";
+import { withAccountIdentityState } from "../integrations/oauth-account-identity";
 import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 import { disconnectAuditActor } from "../http/disconnect-audit-actor";
 import { parsePathParam } from "../http/path-identifier";
@@ -230,10 +232,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       ListConnectionsResponse.parse({
         // The personal setup permission sees only the caller's own accounts.
-        connections:
+        connections: withAccountIdentityState(
           reach === "all"
             ? connections
             : connections.filter((connection) => connection.subjectId === grant.subjectId),
+        ),
       }),
     );
   });
@@ -252,11 +255,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(
       ListConnectionsResponse.parse({
-        connections: (
-          await listOwnConnectionAccountsForGrant(db, grant, {
-            includeInactive: includeInactive === "true",
-          })
-        ).filter((connection) => reach === "all" || connection.subjectId === grant.subjectId),
+        connections: withAccountIdentityState(
+          (
+            await listOwnConnectionAccountsForGrant(db, grant, {
+              includeInactive: includeInactive === "true",
+            })
+          ).filter((connection) => reach === "all" || connection.subjectId === grant.subjectId),
+        ),
       }),
     );
   });
@@ -931,8 +936,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       grant,
       connectionId: c.req.param("connectionId"),
       payload: await c.req.json(),
-      canManageOrganizationDestination:
-        authorization.accountGrant?.permissions.includes("account:admin") === true,
+      canManageOrganizationDestination: authorizationHoldsOrganizationAdministration(authorization),
       canManageWorkspaceDestination: await workspaceSettingsAuthorized(
         deps,
         authorization,
@@ -1020,7 +1024,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         connectionId: c.req.param("connectionId"),
         payload: await c.req.json(),
         canManageOrganizationDestination:
-          authorization.accountGrant?.permissions.includes("account:admin") === true,
+          authorizationHoldsOrganizationAdministration(authorization),
         canManageWorkspaceDestination: await workspaceSettingsAuthorized(
           deps,
           authorization,
@@ -1135,7 +1139,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             const destinationSelection = destination.data;
             if (
               destinationSelection.authorityKind === "organization" &&
-              authorization.accountGrant?.permissions.includes("account:admin") !== true
+              !authorizationHoldsOrganizationAdministration(authorization)
             ) {
               throw new MissingPermissionRefusal("account:admin");
             }

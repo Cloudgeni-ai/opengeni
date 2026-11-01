@@ -37,6 +37,14 @@ export const recordingTrackKindValues = ["audio", "video"] as const;
 // Migration 0945. "browser": an agent's browser recording, kept out of meeting lists.
 // Migration 0962. "dictation": speech recorded to type it; private and short-lived.
 export const recordingPurposeValues = ["meeting", "browser", "dictation"] as const;
+// Migration 1132. Where a recording's title came from; see RecordingTitleSource.
+export const recordingTitleSourceValues = [
+  "person",
+  "calendar",
+  "conversation",
+  "app",
+  "default",
+] as const;
 export const recordingChunkStateValues = ["pending", "uploaded"] as const;
 export const recordingTranscriptVersionStateValues = [
   "queued",
@@ -79,6 +87,10 @@ export const recordings = pgTable(
       .notNull()
       .default("user_private"),
     title: text("title").notNull(),
+    // Migration 1132. Rows from before it are "person": nothing replaces their titles.
+    titleSource: text("title_source", { enum: recordingTitleSourceValues })
+      .notNull()
+      .default("person"),
     purpose: text("purpose", { enum: recordingPurposeValues }).notNull().default("meeting"),
     // Migration 0945. Why a browser recording's video could not be made.
     errorCode: text("error_code"),
@@ -129,6 +141,24 @@ export const recordingTracks = pgTable(
     liveModel: text("live_model"),
     liveStreamedMilliseconds: integer("live_streamed_milliseconds").notNull().default(0),
     liveCostUsdMicros: bigint("live_cost_usd_micros", { mode: "number" }),
+    // Migration 1131. How far the track's streamed audio is charged in credits,
+    // and that audio's list price (never counted by a usage allowance); null
+    // until a charged append first sets them.
+    liveChargedMilliseconds: integer("live_charged_milliseconds"),
+    liveChargedCostUsdMicros: bigint("live_charged_cost_usd_micros", { mode: "number" }),
+    // Migration 1131. Live sessions granted for the track, measured per session
+    // against the audio the recorder reports (see recording-live.ts).
+    liveGrants: integer("live_grants"),
+    liveGrantedAt: timestamp("live_granted_at", { withTimezone: true }),
+    liveReportedAt: timestamp("live_reported_at", { withTimezone: true }),
+    liveCountedAt: timestamp("live_counted_at", { withTimezone: true }),
+    liveCoveredMilliseconds: bigint("live_covered_milliseconds", { mode: "number" }),
+    liveUnbackedMilliseconds: bigint("live_unbacked_milliseconds", { mode: "number" }),
+    liveUnreportedGrants: integer("live_unreported_grants"),
+    // Migration 1131. What the track's open session could still stream,
+    // counted up front against the person's day, and the hour it was counted in.
+    liveProvisionalMilliseconds: bigint("live_provisional_milliseconds", { mode: "number" }),
+    liveProvisionalHour: timestamp("live_provisional_hour", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -139,6 +169,23 @@ export const recordingTracks = pgTable(
       table.trackNumber,
     ),
   ],
+);
+
+// Migration 1131. Live transcript time no reported audio accounts for
+// (provisional time of open sessions included), and live audio charged in
+// credits, per person (`api_key` for every API key of the workspace together)
+// and hour, for the daily bound (see recording-live.ts). RLS: own rows only.
+export const recordingLiveUnbackedHours = pgTable(
+  "recording_live_unbacked_hours",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    boundSubjectId: text("bound_subject_id").notNull(),
+    hourStart: timestamp("hour_start", { withTimezone: true }).notNull(),
+    unbackedMilliseconds: bigint("unbacked_milliseconds", { mode: "number" }).notNull(),
+    chargedMilliseconds: bigint("charged_milliseconds", { mode: "number" }).notNull().default(0),
+  },
+  (table) => [primaryKey({ columns: [table.workspaceId, table.boundSubjectId, table.hourStart] })],
 );
 
 export const recordingChunks = pgTable(

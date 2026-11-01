@@ -34,13 +34,14 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-function runtime(mode: "legacy" | "dual" | "broker" = "legacy") {
+function runtime(mode: "legacy" | "dual" | "broker" = "legacy", allowedUserEmails?: string[]) {
   const settings = testSettings({
     databaseUrl: shared!.appUrl,
     productAccessMode: "managed",
     managedAuthSessionSetMode: mode,
     publicBaseUrl: ORIGIN,
     betterAuthSecret: "native-desktop-sign-in-test-secret-at-least-32-bytes",
+    ...(allowedUserEmails ? { allowedUserEmails } : {}),
   });
   const auth = createManagedAuth(settings, client.db, {
     sender: "auth@example.test",
@@ -75,7 +76,7 @@ async function signedInBrowser(rt: ReturnType<typeof runtime>) {
   return { userId, cookie };
 }
 
-async function desktopCredential(rt: ReturnType<typeof runtime>, browserCookie: string) {
+async function desktopAuthorization(rt: ReturnType<typeof runtime>, browserCookie: string) {
   const verifier = randomBytes(48).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   const authorize = await rt.app.request("/v1/native-app/authorize", {
@@ -97,11 +98,22 @@ async function desktopCredential(rt: ReturnType<typeof runtime>, browserCookie: 
   expect(authorize.status).toBe(200);
   const { redirectUrl } = (await authorize.json()) as { redirectUrl: string };
   const code = new URL(redirectUrl).searchParams.get("code")!;
-  const token = await rt.app.request("/v1/native-app/token", {
+  return { code, verifier };
+}
+
+function redeemDesktopCode(
+  rt: ReturnType<typeof runtime>,
+  { code, verifier }: { code: string; verifier: string },
+) {
+  return rt.app.request("/v1/native-app/token", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ code, codeVerifier: verifier, redirectUri: "opengeni://auth/callback" }),
   });
+}
+
+async function desktopCredential(rt: ReturnType<typeof runtime>, browserCookie: string) {
+  const token = await redeemDesktopCode(rt, await desktopAuthorization(rt, browserCookie));
   expect(token.status).toBe(200);
   return ((await token.json()) as { accessToken: string }).accessToken;
 }
@@ -168,6 +180,16 @@ describe("desktop app sign-in", () => {
     });
     expect(forged.status).toBe(401);
     expect(forged.headers.getSetCookie()).toEqual([]);
+  }, 120_000);
+
+  test("an address taken off the allowed list before the code is redeemed is denied, not a server error", async () => {
+    const open = runtime();
+    const browser = await signedInBrowser(open);
+    const authorization = await desktopAuthorization(open, browser.cookie);
+    const restricted = runtime("legacy", ["someone-else@example.test"]);
+    const token = await redeemDesktopCode(restricted, authorization);
+    expect(token.status).toBe(403);
+    expect(await token.json()).toEqual({ error: "access_denied" });
   }, 120_000);
 
   test("broker deployments refuse the legacy window cookie", async () => {

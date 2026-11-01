@@ -749,23 +749,25 @@ as the new session row. If the target is invalid, removed, revoked, or otherwise
 no longer attachable, the create fails without leaving a queued session shell.
 
 Workspace- and organization-scoped machines run any schedule. A user-scoped
-(personal) machine runs only an **Only me** schedule owned by the machine's
-owner:
+(personal) machine runs only schedules owned by the machine's owner, **Only
+me** or **Workspace** alike, because a schedule runs as its owner:
 
-- Saving is the consent. Create and update accept a personal machine only when
-  the final audience is Only me; widening such a schedule to Workspace, or
-  saving it for Workspace, returns 422. The scoped sandbox lookup returns a
-  personal machine to its owner alone, so nobody else can select it.
+- Picking the machine on the schedule is the consent. The scoped sandbox
+  lookup returns a personal machine to its owner alone, so nobody else can
+  select it, and only a schedule's owner changes or runs it. A schedule never
+  uses a personal machine by following the workspace default (422).
 - Each run attaches the machine through the owner's scoped authorization and
   then issues a `session`-mode `connected_machine.use` grant (context
-  `user_private`) for exactly that run's chat. No standing `always` grant is
-  created, so the owner's other chats keep asking.
+  `user_private` or `workspace_shared`, like the run's chat) for exactly that
+  run's chat. No standing `always` grant is created.
 - Every attempt goes through the same database admission as an interactive
   turn (`admit_session_attempt_personal_machine`): the run's causal human must
   be the machine's owner and still an active member with access to the
   workspace, the machine's authority must be current, and the run's grant must
   be active. Removing the person, revoking the machine or revoking the grant
   stops the next attempt.
+- Other people can see a Workspace schedule's runs and write in its chats.
+  Their messages wait for the owner, as in any chat on a personal machine.
 
 In a chat on a personal machine, only the owner's own messages start work. A
 message somebody else sends there (through the API, an agent acting for them,
@@ -977,10 +979,36 @@ the monitored ancestor and candidate cgroup have the same owner, so host policy
 must preserve that ownership relationship. Cgroup placement alone does not change
 host-wide kernel OOM victim selection: the generated service requests a negative
 supervisor `OOMScoreAdjust`, startup reports the effective `/proc` value because an
-unprivileged user manager may clamp it. A pre-exec hook gives commands the smallest
-valid higher OOM-score bias over the live supervisor: neutral `0` when the
-supervisor is negative, otherwise supervisor + 1. If the supervisor is already at
+unprivileged user manager may clamp it. A pre-exec hook gives commands a higher
+OOM-score bias than the live supervisor: neutral `0` when the supervisor is
+negative, otherwise the kernel maximum `1000`. Raising a score needs no
+privilege, while lowering one needs `CAP_SYS_RESOURCE`, which containers lack by
+default; the supervisor then stays at `0`, and only the maximum bias (the whole
+memory limit added to every command process's score) keeps a small command
+process ahead of the supervisor's mostly file-backed resident memory. A bias of
+`+1` was worth about a thousandth of the limit, less than the supervisor itself.
+A human terminal's shell gets the same bias. If the supervisor is already at
 the kernel maximum, no relative preference is representable and both remain 1000.
+On a machine where a user service manager clamps the supervisor to `0`, this
+also makes the agent's commands the first victims of a machine-wide OOM, ahead
+of the person's other processes; that is deliberate, since a killed command
+fails visibly while a killed supervisor takes the machine offline.
+
+A foreground `opengeni-agent run` on Linux (a container, a CI job, a terminal)
+has no service manager to start it again, so it runs as a small keeper process
+whose child is the real agent. When the agent is killed (`SIGKILL`, as from the
+out-of-memory killer) or crashes, the keeper starts it again after a back-off of
+1 s doubling to 30 s, reset after a minute of healthy running; the new agent
+reconnects with a new connection instance, and the commands of the agent that
+died ended with it. Stop signals (`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`) are
+passed on and stop it for good, `SIGUSR1` and `SIGUSR2` are passed on, an agent
+that exits by itself is not started again and the keeper exits with its status,
+and a killed keeper takes the agent with it. A signal ignored at start (`nohup`)
+stays ignored. The agent that starts again logs why in `agent.log`. The generated
+services, the desktop app and compute sandboxes already start the agent again and
+run it without a keeper; an in-place update keeps the agent's process, and so its
+keeper. A process started with `SIGCHLD` ignored, or without a readable `/proc`,
+runs the agent itself without a keeper, as before.
 Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
 of the command: the daemon chooses that workload's cgroup and OOM score. Operators
@@ -1818,9 +1846,9 @@ Nothing has to be resolved by hand first. Narrowing to **Only me** does this:
   cancelled (`authority_changed`): turns in chats that move off, and turns
   someone other than the owner started in the owner's shared chats. The agent's
   commands still running in chats that move off are stopped too.
-- **Schedules** that target the machine: the owner's Workspace schedules become
-  Only me schedules when the owner may have Only me schedules, and pause
-  otherwise. Everyone else's pause. The owner's Only me schedules keep running.
+- **Schedules** that target the machine: the new owner's schedules keep running
+  with no change, Only me or Workspace, because a schedule runs as its owner.
+  Everyone else's pause.
 - **Notices**: each affected person other than the one switching gets one
   inbox notification saying what moved, paused or stopped, and that they can
   choose another machine to continue.
@@ -1849,8 +1877,9 @@ The API is the same flow:
 - `POST /v1/workspaces/:ws/machines/:enrollmentId/audience/preview` with
   `{ audience: "only_me" | "workspace", ownerSubjectId? }` returns the plan:
   `summary` counts, `items` (each with its `action`: `move_off`, `keep`,
-  `make_only_me`, `pause` or `remove_first`), whether it is `ready`, and the
-  machine's `generation`.
+  `pause` or `remove_first`; `make_only_me` and `summary.schedulesMadeOnlyMe`
+  are no longer produced), whether it is `ready`, and the machine's
+  `generation`.
 - `PUT /v1/workspaces/:ws/machines/:enrollmentId/audience` with the same body
   plus `expectedGeneration` applies it and returns the counts and the chats it
   moved off. It answers `409` with `details.reason: "stale"` when the machine
@@ -1892,8 +1921,12 @@ fleet. Tokens minted before 0696 carry no `jti` and stay multi-use until they
 expire an hour later. Expired redemptions are pruned per workspace during later
 exchanges.
 
-`scope` chooses who can use the machine: `"workspace"` (the default, shared with
-the workspace) or `"user"` (only the person who minted the token). A personal
+`scope` chooses who can use the machine: `"workspace"` (shared with the
+workspace) or `"user"` (only the person who minted the token). Omitted, it is
+`"workspace"` for callers that may connect workspace machines
+(`enrollments:manage`), keys and services, and `"user"` for a signed-in
+teammate without `enrollments:manage`, who can only connect their own machine.
+A personal
 token can be minted only for a verified person: a signed-in human session, or a
 credential acting as that person (a personal API key, or an organization key or
 organization MCP client acting as them), the same canonical-actor rule as
@@ -1922,7 +1955,7 @@ is **secret**: anyone holding it can connect one machine until it expires.
 const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
   workspaceId,
   {
-    scope: "user", // only me; "workspace" (the default) shares it
+    scope: "user", // only me; "workspace" shares it with the workspace
     allowScreenControl: false, // bake screen-control consent into the token
   },
 );

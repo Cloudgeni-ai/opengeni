@@ -548,11 +548,16 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
   billingState.chargesOpenGeniCredits = verifiedExecutionPolicy.model.cost === "credits";
   billingState.countsTowardTokenCap = billingIdentity.countsTowardTokenCap;
+  billingState.billingOrigin = turn.billingOrigin;
+  billingState.isByokTurn =
+    !billingState.chargesOpenGeniCredits &&
+    turnExecutionPolicy.billing.upstreamPayer !== "deployment";
   billingState.isCodexTurn = billingIdentity.codexSubscription;
   billingState.isXaiTurn = billingIdentity.xaiSubscription;
   billingState.isClaudeTurn =
     verifiedExecutionPolicy.provider.kind === "claude-subscription-workspace" ||
-    verifiedExecutionPolicy.provider.kind === "claude-subscription-organization";
+    verifiedExecutionPolicy.provider.kind === "claude-subscription-organization" ||
+    verifiedExecutionPolicy.provider.kind === "claude-subscription";
   if (!trigger) {
     throw new Error(`Trigger event not found: ${attempt.triggerEventId}`);
   }
@@ -607,6 +612,8 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         turn.initiatingHumanSubjectId,
         turnExecutionPolicy.productModelId,
         input.sessionId,
+        turn.billingOrigin,
+        billingState.isByokTurn,
       ),
       cancellationSignal,
       undefined,

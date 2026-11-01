@@ -1,3 +1,5 @@
+import { isClaudeSubscriptionProviderId } from "./claude-subscription-model-ids";
+
 export type ModelPickerBillingClass =
   // Legacy public identifier for the Opengeni presentation group, including
   // free deployment models. Never use this UI grouping to decide settlement.
@@ -44,10 +46,8 @@ export function modelPickerBillingClassFor(
   model: ModelPickerBillingCandidate,
 ): ModelPickerBillingClass {
   if (
-    model.provider === "workspace-claude-subscription" ||
-    model.providerId === "workspace-claude-subscription" ||
-    model.provider === "organization-claude-subscription" ||
-    model.providerId === "organization-claude-subscription"
+    (model.provider !== undefined && isClaudeSubscriptionProviderId(model.provider)) ||
+    (model.providerId !== undefined && isClaudeSubscriptionProviderId(model.providerId))
   )
     return "claude_subscription";
   if (model.cost === "credits" || model.cost === "free") return "opengeni_credits";

@@ -363,6 +363,71 @@ export function hasWorkspacePermission(
 }
 
 /**
+ * Whether the viewer may add integrations here: install plugins and API
+ * integrations, add MCP servers and turn on an integration that is not on yet.
+ * Members hold `connections:write`; integration admins hold
+ * `capabilities:manage`. An organization can keep this for admins
+ * (`memberIntegrationSetup: "admins"`). A member's add never changes what is
+ * already set up; see {@link canChangeWorkspaceIntegrations}.
+ */
+export function canAddWorkspaceIntegrations(
+  context: AccessContext | null,
+  workspaceId: string,
+  memberIntegrationSetup?: "members" | "admins",
+): boolean {
+  return (
+    canChangeWorkspaceIntegrations(context, workspaceId) ||
+    (canManageWorkspaceIntegrations(context, workspaceId) && memberIntegrationSetup !== "admins")
+  );
+}
+
+/**
+ * Whether the viewer may remove plugins and integrations and configure an
+ * integration's sources here, whatever the organization's setup policy. The
+ * same rule as the API's (`INTEGRATION_SETUP_PERMISSION`).
+ */
+export function canManageWorkspaceIntegrations(
+  context: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  return (
+    hasWorkspacePermission(context, workspaceId, "capabilities:manage") ||
+    hasWorkspacePermission(context, workspaceId, "connections:write")
+  );
+}
+
+/**
+ * Whether the viewer may change an integration that is already set up: update
+ * a plugin, check a custom API for updates, or reconnect a shared account.
+ * Integration admin work (`capabilities:manage`), like tool approval rules,
+ * auto-approval and turning an integration off for everyone.
+ */
+export function canChangeWorkspaceIntegrations(
+  context: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  return hasWorkspacePermission(context, workspaceId, "capabilities:manage");
+}
+
+/**
+ * Whether the chat's connect card may sign in a workspace-owned account for an
+ * OAuth MCP server. Admins may for any server. Members (`connections:write`)
+ * may only turn on a server that is not on yet, when their organization lets
+ * members turn integrations on: their setup never changes a server that is
+ * already on, so a new account for one would go unused.
+ */
+export function canConnectWorkspaceMcpFromChat(
+  context: AccessContext | null,
+  workspaceId: string,
+  item: { enabled?: boolean | undefined } | undefined,
+  memberIntegrationSetup?: "members" | "admins",
+): boolean {
+  if (!hasWorkspacePermission(context, workspaceId, "connections:write")) return false;
+  if (hasWorkspacePermission(context, workspaceId, "capabilities:manage")) return true;
+  return item?.enabled !== true && memberIntegrationSetup !== "admins";
+}
+
+/**
  * True only when the viewer's loaded grant for this workspace provably lacks
  * `permission`. A missing grant (still loading, local mode, or no access at
  * all) is not evidence of a narrower role.
@@ -416,7 +481,8 @@ export function canManageWorkspaceSettings(
 /**
  * Shared content of a workspace that everyone who works there may change for
  * everyone, like a shared Skill: its instructions and the review of the
- * agent's proposed changes to them. Whoever manages the workspace's settings
+ * agent's proposed changes to them, a shared workspace's name and its custom
+ * model entries. Whoever manages the workspace's settings
  * may; otherwise a person of the organization who can start chats here
  * (`sessions:create`), signed in as themselves (see {@link isSignedInPerson}).
  * Mirrors the API's `requireWorkspaceContributorGrant`. UI affordance only.

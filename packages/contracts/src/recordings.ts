@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { defineSchema } from "./define-schema";
-import { FeatureUnavailableReason } from "./inference-residency";
+import { REGION_RESTRICTED } from "./inference-residency";
 import * as primitives from "./primitives";
 
 /**
@@ -74,6 +74,25 @@ export const RecordingCapturePurpose = /* @__PURE__ */ defineSchema(() =>
   z.enum(["meeting", "dictation"]),
 );
 export type RecordingCapturePurpose = z.infer<typeof RecordingCapturePurpose>;
+
+/**
+ * Where a recording's title came from. person: someone gave it, and nothing
+ * replaces it. calendar: the owner's calendar event at the time it started.
+ * conversation: written from what was said, with the meeting's notes.
+ * app: a guess the recording app made, such as the call app's name.
+ * default: none was given; the title is when it started.
+ * A better source replaces a title from a weaker one, in that order.
+ */
+export const RecordingTitleSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["person", "calendar", "conversation", "app", "default"]),
+);
+export type RecordingTitleSource = z.infer<typeof RecordingTitleSource>;
+
+/** The sources a client may name for the title it creates a recording with. */
+export const RecordingCreateTitleSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["person", "app"]),
+);
+export type RecordingCreateTitleSource = z.infer<typeof RecordingCreateTitleSource>;
 
 /** How long a dictation is kept after it is transcribed, for the client to take its text. */
 export const DICTATION_RETENTION_MILLISECONDS = 24 * 60 * 60 * 1_000;
@@ -279,7 +298,19 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
        * `language` spoken; without one the language is detected.
        */
       purpose: RecordingCapturePurpose.optional(),
+      /**
+       * Leave it out unless the person gave one: Opengeni then names the
+       * meeting from the owner's calendar event at the time, or else from
+       * what was said once its notes are written.
+       */
       title: z.string().trim().min(1).max(300).optional(),
+      /**
+       * How `title` was chosen: `person` (the default) when someone typed or
+       * chose it, so nothing replaces it; `app` when your app guessed it,
+       * such as "Zoom meeting", so a calendar event or a name from the
+       * conversation replaces it.
+       */
+      titleSource: RecordingCreateTitleSource.optional(),
       visibility: RecordingVisibility.optional(),
       startedAt: z.string().datetime({ offset: true }).optional(),
       externalRef: externalRef.optional(),
@@ -429,6 +460,7 @@ export type FinalizeRecordingRequest = z.infer<typeof FinalizeRecordingRequest>;
 export const UpdateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
+      /** A title given here is the person's, and nothing replaces it. */
       title: z.string().trim().min(1).max(300).optional(),
       visibility: RecordingVisibility.optional(),
       externalRef: externalRef.nullable().optional(),
@@ -612,6 +644,8 @@ export const Recording = /* @__PURE__ */ defineSchema(() =>
     ownerSubjectId: z.string(),
     visibility: RecordingVisibility,
     title: z.string(),
+    /** Where the title came from. Absent from servers before it was added. */
+    titleSource: RecordingTitleSource.optional(),
     purpose: RecordingPurpose,
     state: RecordingState,
     /** Why a browser recording's video could not be made, when it failed. */
@@ -864,6 +898,19 @@ export const RecordingTranscriptionFunding = /* @__PURE__ */ defineSchema(() =>
 );
 export type RecordingTranscriptionFunding = z.infer<typeof RecordingTranscriptionFunding>;
 
+/**
+ * Why a transcription model is switched off when the reason is not setup:
+ * `region_restricted` (EU-only workspace, no EU route: "Not supported in
+ * EU"), or `unpriced` (a model the deployment pays for that has no credit
+ * price while credits are billed, so it isn't served).
+ */
+export const RecordingTranscriptionUnavailableReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([REGION_RESTRICTED, "unpriced"]),
+);
+export type RecordingTranscriptionUnavailableReason = z.infer<
+  typeof RecordingTranscriptionUnavailableReason
+>;
+
 export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
   z.object({
     providerId: z.string(),
@@ -875,9 +922,10 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
     /**
      * Why `available` is false when the reason is not setup: `region_restricted`
      * when the workspace is EU-only and this provider has no EU route (show
-     * "Not supported in EU").
+     * "Not supported in EU"); `unpriced` when the deployment pays for it but
+     * has no credit price for it while credits are billed.
      */
-    unavailableReason: FeatureUnavailableReason.nullable().optional(),
+    unavailableReason: RecordingTranscriptionUnavailableReason.nullable().optional(),
     funding: RecordingTranscriptionFunding,
     capabilities: RecordingTranscriptionCapabilities,
     /**

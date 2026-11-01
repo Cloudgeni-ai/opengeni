@@ -211,7 +211,7 @@ describe("Personal workspace settings", () => {
   });
 });
 
-describe("shared workspace content (instructions and their reviews)", () => {
+describe("shared workspace content (instructions, name, custom models)", () => {
   const workspace = {
     id: "44444444-4444-4444-8444-444444444444",
     accountId: "11111111-1111-4111-8111-111111111111",

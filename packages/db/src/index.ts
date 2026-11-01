@@ -25,6 +25,7 @@ export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
+export * from "./session-search-records";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
 export * from "./workspace-model-catalog-inputs";
@@ -97,16 +98,27 @@ export * from "./subscription-plans";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 export * from "./subscription-plan-maintenance";
 import {
+  byokFeeFunding,
+  chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
+  paidCreditReceipt,
+  receiptCreatedAt,
   planCreditDebit,
   planPostUseCreditAllocations,
+  readBillingBalance,
   type CreditUsage,
 } from "./credit-balances";
+import { chainedReceipt, feeDebtRepaid, paidCreditMark } from "./paid-credit";
 export {
+  apiSpendableCreditMicros,
+  byokFeeSpendableMicros,
+  chargeBillingOrigin,
   getBillingBalance,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   spendableCreditMicros,
+  toolCreditUsage,
   VOICE_CREDIT_USAGE,
   type CreditUsage,
 } from "./credit-balances";
@@ -161,6 +173,7 @@ import {
   withSessionUnattendedMetadata,
   type SessionUnattendedSetting,
 } from "@opengeni/contracts";
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import {
@@ -302,6 +315,11 @@ export {
 
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
+  BYOK_PLATFORM_FEE_TYPE,
+  storedBillingOrigin,
+  type BillingOrigin,
+} from "@opengeni/contracts";
+import {
   normalizeOrganizationAccessPolicy,
   type OrganizationAccessPolicy,
   type UpdateOrganizationApiKeyRequest,
@@ -343,6 +361,7 @@ import {
   currentSessionRlsActorInitiatingHumanSubjectId,
 } from "./database";
 import {
+  ambientBillingOrigin,
   CreditDebitAttribution,
   creditDebitAttributionMetadata,
   currentCreditDebitAttribution,
@@ -1034,6 +1053,11 @@ import {
 } from "@opengeni/config";
 import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
+import { canonicalSecretPermissions } from "./canonical-secret-permissions";
+import {
+  accountPermissionsForOrganizationRole,
+  allAccountPermissions,
+} from "./organization-role-permissions";
 import {
   canonicalizePersistedHistoryItem,
   CodexAppsCredentialUnavailable,
@@ -2264,15 +2288,10 @@ export const allWorkspacePermissions: Permission[] = [
   "connections:write",
   "connections:personal",
   "capabilities:manage",
-  "variable-sets:list",
-  "variable-sets:read",
-  "variable-sets:write",
-  "variable-sets:manage",
-  "variable-sets:attach",
-  "variable-sets:use",
   "secrets:list",
   "secrets:read",
   "secrets:write",
+  "secrets:use",
   "mcp_servers:attach",
   "goals:manage",
   "enrollments:read",
@@ -2354,23 +2373,7 @@ export async function turnWorkspaceSettingsAccess(
   return allowed ? authority.kind : null;
 }
 
-export const allAccountPermissions: Permission[] = [
-  "account:read",
-  "account:admin",
-  "members:manage",
-  "workspace:create",
-  "billing:read",
-  "billing:manage",
-  "api_keys:manage",
-];
-
-function accountPermissionsForOrganizationRole(role: "owner" | "admin" | "member"): Permission[] {
-  if (role === "owner") return allAccountPermissions;
-  if (role === "admin") {
-    return ["account:read", "members:manage", "workspace:create", "billing:read"];
-  }
-  return ["account:read"];
-}
+export { allAccountPermissions } from "./organization-role-permissions";
 
 export type BootstrapWorkspaceInput = {
   accountExternalSource: string;
@@ -4773,25 +4776,29 @@ export async function deleteWorkspaceIfQuiescent(
           // deleting the parent. Finalize the gate inside this transaction: the
           // workspace activity counter disappears with the parent cascade.
           const variableSetDetachStartedAt = performance.now();
-          await withRestoredSessionActivityRlsContext(
+          // Release-N compatibility only: ordinary ORM reads no longer name
+          // retired columns. The contract release removes this table and its
+          // attachment guards atomically, after which detachment is unnecessary.
+          const [retiredVariableSetSchema] = await rawRows<{ present: boolean }>(
             tx,
-            { accountId: input.accountId, workspaceId: input.workspaceId },
-            async (activityDb) => {
-              await activityDb
-                .update(schema.sessions)
-                .set({
-                  variableSetIds: [],
-                  variableSetId: null,
-                  updatedAt: new Date(),
-                })
-                .where(
-                  and(
-                    eq(schema.sessions.workspaceId, input.workspaceId),
-                    isNotNull(schema.sessions.variableSetId),
-                  ),
-                );
-            },
+            sql`select pg_catalog.to_regclass('workspace_variable_sets') is not null as present`,
           );
+          if (retiredVariableSetSchema?.present) {
+            await withRestoredSessionActivityRlsContext(
+              tx,
+              { accountId: input.accountId, workspaceId: input.workspaceId },
+              async (activityDb) => {
+                await activityDb.execute(sql`
+                  update sessions
+                  set variable_set_ids = '[]'::jsonb, variable_set_id = null,
+                    updated_at = ${new Date().toISOString()}::timestamptz
+                  where workspace_id = ${input.workspaceId}::uuid
+                    and account_id = ${input.accountId}::uuid
+                    and variable_set_id is not null
+                `);
+              },
+            );
+          }
           observeWorkspaceDeletePhase(input.observer, {
             phase: "variable_set_detach",
             outcome: "ok",
@@ -6666,6 +6673,18 @@ export async function applyCreditLedgerEntryOnce(
       // Funding and usage adjustments share the expiry boundary too.
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      // Paid-for credit, refunds of it and unpaid credit record what they
+      // change in paid credit (paid-credit.ts).
+      const receipt = await paidCreditReceipt(scopedDb, {
+        accountId: input.accountId,
+        settledAt,
+        type: input.type,
+        amountMicros: input.amountMicros,
+        eligibleModelIds: input.eligibleModelIds ?? null,
+        metadata: input.metadata,
+        sourceType: input.sourceType ?? null,
+        sourceId: input.sourceId ?? null,
+      });
       const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
@@ -6677,9 +6696,9 @@ export async function applyCreditLedgerEntryOnce(
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
           idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
+          metadata: { ...input.metadata, ...receipt.metadata },
           occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
+          createdAt: receipt.createdAt,
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
@@ -6691,6 +6710,83 @@ export async function applyCreditLedgerEntryOnce(
       };
     },
   );
+}
+
+const USAGE_ORIGIN_TURN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The funding origin a usage debit is charged under, frozen on its ledger row
+ * (`usage_origin`): the caller's explicit origin; else the origin carried in
+ * its attribution metadata; else the turn it names; else the origin a
+ * trusted outer scope fixed; else app (today's behaviour, and legacy null).
+ * API debits never count against the monthly plan allowance.
+ */
+/**
+ * The origin a frozen billing record is charged under, resolved like the
+ * debit itself (see resolveUsageOrigin), so admission and charge agree.
+ */
+async function attributionBillingOrigin(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attribution?: CreditDebitAttribution | null | undefined;
+  },
+): Promise<BillingOrigin> {
+  const attribution = input.attribution;
+  if (!attribution || attribution.kind === "unknown") return ambientBillingOrigin() ?? "app";
+  return await resolveUsageOrigin(scopedDb, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    metadata: creditDebitAttributionMetadata(attribution),
+  });
+}
+
+/** {@link attributionBillingOrigin} for a caller outside an account scope. */
+export async function billingOriginForAttribution(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    attribution?: CreditDebitAttribution | null | undefined;
+  },
+): Promise<BillingOrigin> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await attributionBillingOrigin(scopedDb, input),
+  );
+}
+
+async function resolveUsageOrigin(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    usageOrigin?: BillingOrigin | undefined;
+    metadata?: Record<string, unknown> | undefined;
+  },
+): Promise<BillingOrigin> {
+  if (input.usageOrigin) return input.usageOrigin;
+  const metadataOrigin = input.metadata?.billingOrigin;
+  if (metadataOrigin === "app" || metadataOrigin === "api") return metadataOrigin;
+  const attribution = currentCreditDebitAttribution();
+  const turnId =
+    typeof input.metadata?.turnId === "string"
+      ? input.metadata.turnId
+      : attribution.kind === "turn" && !attribution.billingOrigin
+        ? attribution.turnId
+        : null;
+  if (turnId && input.workspaceId && USAGE_ORIGIN_TURN_ID.test(turnId)) {
+    const [turn] = await rawRows<{ billingOrigin: string | null }>(
+      scopedDb,
+      sql`SELECT billing_origin AS "billingOrigin" FROM session_turns
+        WHERE account_id=${input.accountId}::uuid AND workspace_id=${input.workspaceId}::uuid
+          AND id=${turnId}::uuid`,
+    );
+    if (turn) return storedBillingOrigin(turn.billingOrigin);
+  }
+  return ambientBillingOrigin() ?? "app";
 }
 
 export async function applyCreditDebitUpToBalance(
@@ -6708,6 +6804,8 @@ export async function applyCreditDebitUpToBalance(
     idempotencyKey: string;
     metadata?: Record<string, unknown>;
     occurredAt?: Date;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
   },
 ): Promise<{
   balance: BillingBalance;
@@ -6739,7 +6837,8 @@ export async function applyCreditDebitUpToBalance(
         settledAt,
         true,
       );
-      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
+      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId, usageOrigin);
       const candidateDebitMicros = plan.debitedMicros;
       // Keep a zero-cost receipt too: retrying after a top-up must not charge
       // a response that was already settled while the eligible balance was empty.
@@ -6752,6 +6851,7 @@ export async function applyCreditDebitUpToBalance(
           amountMicros: -candidateDebitMicros,
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
+          usageOrigin,
           idempotencyKey: input.idempotencyKey,
           metadata: {
             ...input.metadata,
@@ -6811,10 +6911,15 @@ export async function applyCreditDebitAfterUse(
      * Omitted: general credit only.
      */
     usage?: CreditUsage;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
   },
 ): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
     throw new Error("post-use credit debit requires a positive, safe integer micro amount");
+  }
+  if (input.type === BYOK_PLATFORM_FEE_TYPE) {
+    throw new Error("a bring-your-own-key fee settles with applyByokPlatformFeeDebit");
   }
   return await withRlsContext(
     db,
@@ -6824,68 +6929,165 @@ export async function applyCreditDebitAfterUse(
       // that cannot allocate promotional grants.
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
-      if (input.usage) {
+      // App use: plan credit (the Free plan's scoped credit too) pays for
+      // tools as well as models.
+      if (usageOrigin === "app") {
         allocations = planPostUseCreditAllocations(
           await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
           input.amountMicros,
           input.usage,
         );
       }
-      const inserted = await scopedDb
-        .insert(schema.creditLedgerEntries)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId ?? null,
-          type: input.type,
-          amountMicros: -input.amountMicros,
-          sourceType: input.sourceType,
-          sourceId: input.sourceId,
-          idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
-          occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
-        })
-        .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
-        .returning({ id: schema.creditLedgerEntries.id });
-      if (inserted.length === 0) {
-        const [prior] = await scopedDb
-          .select({
-            accountId: schema.creditLedgerEntries.accountId,
-            workspaceId: schema.creditLedgerEntries.workspaceId,
-            type: schema.creditLedgerEntries.type,
-            amountMicros: schema.creditLedgerEntries.amountMicros,
-            sourceType: schema.creditLedgerEntries.sourceType,
-            sourceId: schema.creditLedgerEntries.sourceId,
-          })
-          .from(schema.creditLedgerEntries)
-          .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
-        if (
-          !prior ||
-          prior.accountId !== input.accountId ||
-          prior.workspaceId !== (input.workspaceId ?? null) ||
-          prior.type !== input.type ||
-          prior.amountMicros !== -input.amountMicros ||
-          prior.sourceType !== input.sourceType ||
-          prior.sourceId !== input.sourceId
-        ) {
-          throw new Error(
-            "post-use credit debit idempotency key conflicts with a different charge",
-          );
-        }
-      } else if (allocations.length) {
+      const insertedId = await insertPostUseDebit(scopedDb, input, usageOrigin, settledAt);
+      if (insertedId && allocations.length) {
         await scopedDb.insert(schema.creditDebitAllocations).values(
           allocations.map((allocation) => ({
             ...allocation,
             accountId: input.accountId,
-            debitEntryId: inserted[0]!.id,
+            debitEntryId: insertedId,
           })),
         );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
-        debitedMicros: inserted.length ? input.amountMicros : 0,
+        debitedMicros: insertedId ? input.amountMicros : 0,
       };
+    },
+  );
+}
+
+/**
+ * Insert an already-consumed charge once. A replay of the same idempotency
+ * key must be the same charge. Returns the new row's id, or null on replay.
+ */
+async function insertPostUseDebit(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    type: string;
+    amountMicros: number;
+    sourceType: string;
+    sourceId: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+  },
+  usageOrigin: BillingOrigin,
+  settledAt: string,
+  createdAt: SQL = sql`${settledAt}::timestamptz`,
+): Promise<string | null> {
+  const inserted = await scopedDb
+    .insert(schema.creditLedgerEntries)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId ?? null,
+      type: input.type,
+      amountMicros: -input.amountMicros,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      usageOrigin,
+      idempotencyKey: input.idempotencyKey,
+      metadata: input.metadata ?? {},
+      occurredAt: input.occurredAt ?? new Date(),
+      createdAt,
+    })
+    .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
+    .returning({ id: schema.creditLedgerEntries.id });
+  if (inserted.length) return inserted[0]!.id;
+  const [prior] = await scopedDb
+    .select({
+      accountId: schema.creditLedgerEntries.accountId,
+      workspaceId: schema.creditLedgerEntries.workspaceId,
+      type: schema.creditLedgerEntries.type,
+      amountMicros: schema.creditLedgerEntries.amountMicros,
+      sourceType: schema.creditLedgerEntries.sourceType,
+      sourceId: schema.creditLedgerEntries.sourceId,
+    })
+    .from(schema.creditLedgerEntries)
+    .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
+  if (
+    !prior ||
+    prior.accountId !== input.accountId ||
+    prior.workspaceId !== (input.workspaceId ?? null) ||
+    prior.type !== input.type ||
+    prior.amountMicros !== -input.amountMicros ||
+    prior.sourceType !== input.sourceType ||
+    prior.sourceId !== input.sourceId
+  ) {
+    throw new Error("post-use credit debit idempotency key conflicts with a different charge");
+  }
+  return null;
+}
+
+/**
+ * Settle one bring-your-own-key platform fee (`byok_platform_fee`), payable
+ * only from paid credit: an active paid plan's credit first (app use), then
+ * paid credits; the rest is fee debt the next top-up repays. Its row records
+ * the split (`planPaidMicros`, `creditPaidMicros`, `unfundedMicros`) and a
+ * paid-credit mark (paid-credit.ts). One balance read under the account lock.
+ */
+export async function applyByokPlatformFeeDebit(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    amountMicros: number;
+    sourceType: string;
+    sourceId: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
+  },
+): Promise<{
+  debitedMicros: number;
+  planPaidMicros: number;
+  creditPaidMicros: number;
+  unfundedMicros: number;
+}> {
+  if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
+    throw new Error("post-use credit debit requires a positive, safe integer micro amount");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+      const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
+      const { balance, paid } = await readBillingBalance(
+        scopedDb,
+        input.accountId,
+        undefined,
+        settledAt,
+        true,
+      );
+      const funding = byokFeeFunding(balance, paid, input.amountMicros, usageOrigin);
+      const insertedId = await insertPostUseDebit(
+        scopedDb,
+        {
+          ...input,
+          type: BYOK_PLATFORM_FEE_TYPE,
+          metadata: {
+            ...input.metadata,
+            ...chainedReceipt(
+              paid,
+              { type: BYOK_PLATFORM_FEE_TYPE, amountMicros: input.amountMicros },
+              { ...funding, ...paidCreditMark(paid), ...feeDebtRepaid(paid) },
+            ),
+          },
+        },
+        usageOrigin,
+        settledAt,
+        receiptCreatedAt(settledAt, paid),
+      );
+      return insertedId
+        ? { debitedMicros: input.amountMicros, ...funding }
+        : { debitedMicros: 0, planPaidMicros: 0, creditPaidMicros: 0, unfundedMicros: 0 };
     },
   );
 }
@@ -7118,6 +7320,8 @@ export type ScheduledTaskCreatorPolicy = {
 export type CreateScheduledTaskInput = {
   id?: string;
   accountId: string;
+  /** Funding origin of whoever set the task up, inherited by every run. */
+  billingOrigin?: BillingOrigin | null;
   /** Vault narrowing for every run (0739); omission is `{ mode: "all" }`. */
   vaultPolicy?: import("@opengeni/contracts").VaultPolicy | undefined;
   workspaceId: string;
@@ -7659,6 +7863,11 @@ export type CreateCapabilityCatalogItemInput = {
   installUrl?: string | null;
   authModel?: string | null;
   metadata?: Record<string, unknown>;
+  /**
+   * Insert only: an existing workspace row with this id is returned unchanged
+   * instead of being rewritten (a member adding a server never edits one).
+   */
+  createOnly?: boolean;
 };
 
 export type ImportBatch = {
@@ -7941,6 +8150,8 @@ export type EnqueueSessionTurnInput = {
   source: SessionTurnSource;
   /** Content-free product surface the request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the turn; null inherits the session's latest. */
+  billingOrigin?: BillingOrigin | null;
   prompt: string;
   modelContext?: string | null;
   resources: ResourceRef[];
@@ -7970,6 +8181,8 @@ export type SessionTurnForExecution = SessionTurn & {
   /** Worker-only causal authority; never inferred from the current worker. */
   initiatingHumanSubjectId: string | null;
   scheduledTaskRunId: string | null;
+  /** Funding origin frozen at acceptance; legacy null is app. */
+  billingOrigin: BillingOrigin;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
   goalSnapshot: SessionGoalSnapshot;
@@ -10330,14 +10543,24 @@ export async function upsertCapabilityCatalogItem(
         metadata: values.metadata,
         updatedAt: values.updatedAt,
       };
-      const [row] = await scopedDb
-        .insert(schema.capabilityCatalogItems)
-        .values(values)
-        .onConflictDoUpdate({
-          target: [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id],
-          set: updateValues,
-        })
-        .returning();
+      const insert = scopedDb.insert(schema.capabilityCatalogItems).values(values);
+      const target = [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id];
+      const [row] = input.createOnly
+        ? await insert.onConflictDoNothing({ target }).returning()
+        : await insert.onConflictDoUpdate({ target, set: updateValues }).returning();
+      if (!row && input.createOnly) {
+        const [existing] = await scopedDb
+          .select()
+          .from(schema.capabilityCatalogItems)
+          .where(
+            and(
+              eq(schema.capabilityCatalogItems.workspaceId, input.workspaceId),
+              eq(schema.capabilityCatalogItems.id, input.id),
+            ),
+          )
+          .limit(1);
+        if (existing) return mapCapabilityCatalogItem(existing);
+      }
       if (!row) {
         throw new Error("Failed to upsert capability catalog item");
       }
@@ -19295,6 +19518,7 @@ export async function createScheduledTask(
           id: input.id,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
+          billingOrigin: input.billingOrigin ?? null,
           name: input.name,
           ownerSubjectId:
             (input.action?.kind ?? "agent_turn") === "agent_turn"
@@ -19318,7 +19542,9 @@ export async function createScheduledTask(
             input.claudeProviderAccountAuthoritySnapshot ?? sharedTaskPool!.claude,
           subscriptionAuthority: taskSubscriptionAuthority,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
-          creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
+          creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions
+            ? canonicalSecretPermissions(input.creatorPolicy.firstPartyMcpPermissions)
+            : null,
           creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
           reusableSessionId: input.targetSessionId ?? null,
           // The column default is { mode: "all" }; omit it so rows written
@@ -19581,6 +19807,34 @@ export async function getVisibleSessionTenancyVisibility(
   });
 }
 
+/**
+ * A chat's audience and, for an Only me chat, its owner; null when the
+ * caller cannot see the chat.
+ */
+export async function getVisibleSessionAudience(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{
+  visibility: "user_private" | "workspace_shared";
+  ownerSubjectId: string | null;
+} | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        visibility: schema.sessions.visibility,
+        ownerSubjectId: schema.sessions.ownerSubjectId,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    return row.visibility === "user_private"
+      ? { visibility: "user_private", ownerSubjectId: row.ownerSubjectId ?? null }
+      : { visibility: "workspace_shared", ownerSubjectId: null };
+  });
+}
+
 export async function updateScheduledTask(
   db: Database,
   workspaceId: string,
@@ -19654,9 +19908,9 @@ export async function updateScheduledTask(
         ...(input.creatorFirstPartyPolicy
           ? {
               creatorFirstPartyMcpTools: [...input.creatorFirstPartyPolicy.firstPartyMcpTools],
-              creatorFirstPartyMcpPermissions: [
-                ...input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
-              ],
+              creatorFirstPartyMcpPermissions: canonicalSecretPermissions(
+                input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
+              ),
             }
           : {}),
         ...(input.refreshPersonalResourceAuthority ||
@@ -22706,10 +22960,35 @@ export class ChannelNotFoundError extends Error {
   }
 }
 
+/**
+ * An Only me project holds only its owner's own Only me chats and Sites
+ * (1161), so nothing in it is ever visible to anyone else.
+ */
+export class ChannelAudienceMismatchError extends Error {
+  constructor(kind: "chat" | "Site") {
+    super(`An Only me project holds only your own Only me ${kind}s.`);
+    this.name = "ChannelAudienceMismatchError";
+  }
+}
+
 function isChannelNameUniqueViolation(error: unknown): boolean {
+  const constraint = safeDatabaseErrorFacts(error).constraint;
   return (
     nestedPostgresSqlState(error) === "23505" &&
-    safeDatabaseErrorFacts(error).constraint === "channels_workspace_name_idx"
+    (constraint === "channels_workspace_name_idx" || constraint === "channels_owner_name_idx")
+  );
+}
+
+/** Whether an item fits a project: anything fits a shared one. */
+function fitsProject(
+  project: { visibility: string; ownerSubjectId: string | null },
+  item: { visibility: string; ownerSubjectId: string | null },
+): boolean {
+  return (
+    project.visibility !== "user_private" ||
+    (item.visibility === "user_private" &&
+      item.ownerSubjectId !== null &&
+      item.ownerSubjectId === project.ownerSubjectId)
   );
 }
 
@@ -22742,6 +23021,7 @@ function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
     avatar: storedSessionAvatar(row.avatar),
     pinned: row.pinned,
     sortOrder: row.sortOrder,
+    visibility: row.visibility === "user_private" ? "private" : "workspace",
     createdBy: row.createdBy ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -22757,8 +23037,17 @@ export async function createChannel(
     description?: string | null;
     avatar?: SessionAvatar | null;
     createdBy?: string | null;
+    /**
+     * Who sees it; Only me needs its owner. Omitted, shared with the
+     * workspace, as every project was before audiences.
+     */
+    audience?: { visibility: "user_private" | "workspace_shared"; ownerSubjectId: string | null };
   },
 ): Promise<Channel> {
+  const visibility = input.audience?.visibility ?? "workspace_shared";
+  const ownerSubjectId = input.audience?.ownerSubjectId ?? null;
+  if (visibility === "user_private" && !ownerSubjectId)
+    throw new TypeError("An Only me project needs an owner");
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -22782,6 +23071,8 @@ export async function createChannel(
             description: input.description ?? null,
             avatar: input.avatar ?? null,
             sortOrder: nextSortOrder,
+            visibility,
+            ownerSubjectId,
             createdBy: input.createdBy ?? null,
           })
           .returning();
@@ -22838,9 +23129,28 @@ export async function updateChannel(
     description?: string | null | undefined;
     avatar?: SessionAvatar | null | undefined;
     pinned?: boolean | undefined;
+    /** Shares an Only me project with the workspace; never narrows. */
+    visibility?: "workspace_shared" | undefined;
   },
 ): Promise<Channel | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    // Sharing keeps the name, which then has to be free among shared projects.
+    const conflictName =
+      input.name ??
+      (input.visibility === undefined
+        ? ""
+        : ((
+            await scopedDb
+              .select({ name: schema.channels.name })
+              .from(schema.channels)
+              .where(
+                and(
+                  eq(schema.channels.workspaceId, workspaceId),
+                  eq(schema.channels.id, channelId),
+                ),
+              )
+              .limit(1)
+          )[0]?.name ?? ""));
     try {
       const [row] = await scopedDb
         .update(schema.channels)
@@ -22849,6 +23159,7 @@ export async function updateChannel(
           ...(input.description !== undefined ? { description: input.description } : {}),
           ...(input.avatar !== undefined ? { avatar: input.avatar } : {}),
           ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+          ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
           updatedAt: new Date(),
         })
         .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
@@ -22856,7 +23167,7 @@ export async function updateChannel(
       return row ? mapChannel(row) : null;
     } catch (error) {
       if (isChannelNameUniqueViolation(error)) {
-        throw new ChannelNameConflictError(input.name ?? "");
+        throw new ChannelNameConflictError(conflictName);
       }
       throw error;
     }
@@ -22952,7 +23263,11 @@ export async function setSessionChannel(
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
     if (input.channelId !== null) {
       const [channel] = await scopedDb
-        .select({ id: schema.channels.id })
+        .select({
+          id: schema.channels.id,
+          visibility: schema.channels.visibility,
+          ownerSubjectId: schema.channels.ownerSubjectId,
+        })
         .from(schema.channels)
         .where(
           and(
@@ -22963,6 +23278,29 @@ export async function setSessionChannel(
         .limit(1);
       if (!channel) {
         throw new ChannelNotFoundError(input.channelId);
+      }
+      if (channel.visibility === "user_private") {
+        const [session] = await scopedDb
+          .select({
+            visibility: schema.sessions.visibility,
+            ownerSubjectId: schema.sessions.ownerSubjectId,
+          })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        if (!session) return false;
+        if (
+          !fitsProject(channel, {
+            visibility: session.visibility,
+            ownerSubjectId: session.ownerSubjectId ?? null,
+          })
+        )
+          throw new ChannelAudienceMismatchError("chat");
       }
     }
     try {
@@ -23061,6 +23399,8 @@ export async function moveSiteToProject(
         accountId: string;
         homeChannelId: string | null;
         inAudience: boolean;
+        visibility: string;
+        ownerSubjectId: string | null;
       }>(
         scoped,
         sql`
@@ -23068,7 +23408,9 @@ export async function moveSiteToProject(
             (case when placement.site_id is not null then placement.channel_id
               else creator.channel_id end)::text as "homeChannelId",
             (artifact.visibility = 'workspace_shared'
-              or artifact.owner_subject_id = ${input.subjectId}) as "inAudience"
+              or artifact.owner_subject_id = ${input.subjectId}) as "inAudience",
+            artifact.visibility as "visibility",
+            artifact.owner_subject_id as "ownerSubjectId"
           from ${schema.workspaceArtifacts} artifact
           left join ${schema.siteProjectPlacements} placement
             on placement.workspace_id = artifact.workspace_id and placement.site_id = artifact.id
@@ -23089,7 +23431,11 @@ export async function moveSiteToProject(
       if (input.fromChannelId === input.channelId) return { siteMoved: false, movedSessionIds: [] };
       if (input.channelId !== null) {
         const [channel] = await scoped
-          .select({ id: schema.channels.id })
+          .select({
+            id: schema.channels.id,
+            visibility: schema.channels.visibility,
+            ownerSubjectId: schema.channels.ownerSubjectId,
+          })
           .from(schema.channels)
           .where(
             and(
@@ -23099,6 +23445,30 @@ export async function moveSiteToProject(
           )
           .limit(1);
         if (!channel) throw new ChannelNotFoundError(input.channelId);
+        // An Only me project takes only its owner's Only me Site, and the
+        // conversations that move with a row must fit it too.
+        if (channel.visibility === "user_private") {
+          if (!fitsProject(channel, site)) throw new ChannelAudienceMismatchError("Site");
+          const misfits =
+            input.sessionIds.length === 0
+              ? []
+              : await scoped
+                  .select({ id: schema.sessions.id })
+                  .from(schema.sessions)
+                  .where(
+                    and(
+                      eq(schema.sessions.workspaceId, input.workspaceId),
+                      inArray(schema.sessions.id, [...input.sessionIds]),
+                      or(
+                        ne(schema.sessions.visibility, "user_private"),
+                        isNull(schema.sessions.ownerSubjectId),
+                        ne(schema.sessions.ownerSubjectId, channel.ownerSubjectId ?? ""),
+                      ),
+                    ),
+                  )
+                  .limit(1);
+          if (misfits.length > 0) throw new ChannelAudienceMismatchError("chat");
+        }
       }
       const siteMoved = site.inAudience && site.homeChannelId === input.fromChannelId;
       try {
@@ -27747,9 +28117,10 @@ export async function readSubscriptionCoreCodexResetAuthority(
  * post-resolution gate (a blocked provider never reaches a model call and
  * never silently remaps).
  *
- * A workspace row is the workspace's own choice. Without one, the workspace
- * follows its organization's default allowlist (organization_model_defaults);
- * with neither, every model is allowed.
+ * The organization's allowlist (organization_model_defaults) is a ceiling for
+ * every workspace in it. A workspace row only narrows it: a model must pass
+ * both. Without a row the workspace uses the organization's list as is; with
+ * neither, every model is allowed.
  */
 export type WorkspaceModelPolicy = {
   allowedProviders: string[] | null;
@@ -27771,10 +28142,33 @@ function restrictsAnything(policy: WorkspaceModelPolicy | null | undefined): boo
   return Boolean(policy && (policy.allowedProviders !== null || policy.allowedModels !== null));
 }
 
+/** One allowlist narrowed by another; null allows everything. */
+function narrowAllowlist(ceiling: string[] | null, own: string[] | null): string[] | null {
+  if (ceiling === null) return own;
+  if (own === null) return ceiling;
+  const allowed = new Set(ceiling);
+  return own.filter((id) => allowed.has(id));
+}
+
 /**
- * The workspace's own policy row and the organization default it would
- * follow without one. `organization` is null when the organization allows
- * every model.
+ * What a workspace may use: its own allowlists within the organization's. A
+ * model passes only when both allow its provider and both allow the model.
+ */
+function narrowWorkspaceModelPolicy(
+  organization: WorkspaceModelPolicy | null,
+  workspace: WorkspaceModelPolicy | null,
+): WorkspaceModelPolicy | null {
+  if (!organization) return workspace;
+  if (!workspace) return organization;
+  return {
+    allowedProviders: narrowAllowlist(organization.allowedProviders, workspace.allowedProviders),
+    allowedModels: narrowAllowlist(organization.allowedModels, workspace.allowedModels),
+  };
+}
+
+/**
+ * The workspace's own policy row and the organization's ceiling above it.
+ * `organization` is null when the organization allows every model.
  */
 export async function getWorkspaceModelPolicyLayers(
   db: Database,
@@ -27825,17 +28219,23 @@ export async function getWorkspaceModelPolicyLayers(
 }
 
 /**
- * The policy this workspace runs with: the allowlists of its own row, else of
- * its organization's default, plus its credit switch. Null only when nothing
- * is restricted (every model allowed and credits on).
+ * The policy this workspace runs with: its own allowlists narrowed within its
+ * organization's, plus its credit switch. Null only when nothing is
+ * restricted (every model allowed and credits on).
  */
 export async function getWorkspaceModelPolicy(
   db: Database,
   workspaceId: string,
 ): Promise<EffectiveWorkspaceModelPolicy | null> {
-  const layers = await getWorkspaceModelPolicyLayers(db, workspaceId);
-  const allowlists = layers.workspace ?? layers.organization;
-  if (!allowlists && layers.allowCreditModels) return null;
+  return effectiveWorkspaceModelPolicy(await getWorkspaceModelPolicyLayers(db, workspaceId));
+}
+
+/** The policy a workspace runs with, from its already-read layers. */
+function effectiveWorkspaceModelPolicy(
+  layers: Awaited<ReturnType<typeof getWorkspaceModelPolicyLayers>>,
+): EffectiveWorkspaceModelPolicy | null {
+  const allowlists = narrowWorkspaceModelPolicy(layers.organization, layers.workspace);
+  if (!restrictsAnything(allowlists) && layers.allowCreditModels) return null;
   return {
     allowedProviders: allowlists?.allowedProviders ?? null,
     allowedModels: allowlists?.allowedModels ?? null,
@@ -27843,7 +28243,7 @@ export async function getWorkspaceModelPolicy(
   };
 }
 
-/** Remove the workspace's own policy so it follows its organization's default. */
+/** Remove the workspace's own policy so it uses its organization's list as is. */
 export async function deleteWorkspaceModelPolicy(
   db: Database,
   input: { accountId: string; workspaceId: string },
@@ -27861,8 +28261,8 @@ export async function deleteWorkspaceModelPolicy(
 
 /**
  * Create or replace the workspace's own model policy. Passing null for a field
- * clears that restriction; a policy of {null, null} is kept as the workspace's
- * explicit choice to allow every model even when its organization restricts.
+ * clears that restriction. It only ever narrows the organization's list, so
+ * {null, null} allows exactly what the organization allows.
  */
 export async function upsertWorkspaceModelPolicy(
   db: Database,
@@ -29548,6 +29948,105 @@ export async function listConnectorActionPolicies(
         );
     },
   );
+}
+
+const connectorActionPolicySnapshotColumns = {
+  id: schema.connectorActionPolicies.id,
+  connectionId: schema.connectorActionPolicies.connectionId,
+  serverId: schema.connectorActionPolicies.serverId,
+  toolName: schema.connectorActionPolicies.toolName,
+  actionName: schema.connectorActionPolicies.actionName,
+  policy: schema.connectorActionPolicies.policy,
+  version: schema.connectorActionPolicies.version,
+};
+
+/**
+ * The tool choices a turn starts with. A workspace login's choices are that
+ * workspace's. A personal login's choices belong to the login: they are stored
+ * once, in the workspace it was connected from, and follow it to every
+ * workspace where its owner's turn uses it. A copy left in this workspace is
+ * ignored. A login whose choices don't fit the snapshot bound is left out
+ * whole, so its recommendations apply; never part of its rules. The
+ * workspace's own rows keep database order and followed logins come after
+ * them, so exact-attempt re-entry compares equal snapshots.
+ */
+export async function connectorActionPolicySnapshotForTurn(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    bindings: readonly McpConnectionAccountBinding[] | null;
+  },
+): Promise<ConnectorActionPolicySnapshotEntry[]> {
+  const followed = new Map<string, Set<string>>();
+  for (const binding of input.bindings ?? []) {
+    if (binding.subjectScope !== "subject" || binding.originWorkspaceId === input.workspaceId)
+      continue;
+    const ids = followed.get(binding.originWorkspaceId) ?? new Set<string>();
+    ids.add(binding.connectionId);
+    followed.set(binding.originWorkspaceId, ids);
+  }
+  const followedIds = new Set([...followed.values()].flatMap((ids) => [...ids]));
+  const stored = await db
+    .select(connectorActionPolicySnapshotColumns)
+    .from(schema.connectorActionPolicies)
+    .where(
+      and(
+        eq(schema.connectorActionPolicies.accountId, input.accountId),
+        eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+      ),
+    )
+    .orderBy(
+      asc(schema.connectorActionPolicies.connectionId),
+      asc(schema.connectorActionPolicies.serverId),
+      asc(schema.connectorActionPolicies.toolName),
+      asc(schema.connectorActionPolicies.actionName),
+      asc(schema.connectorActionPolicies.id),
+    )
+    .limit(CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX + 1);
+  if (stored.length > CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX) {
+    throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
+  }
+  const snapshot: ConnectorActionPolicySnapshotEntry[] = stored.filter(
+    (row) => !followedIds.has(row.connectionId),
+  );
+  for (const [originWorkspaceId, ids] of [...followed].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  )) {
+    // Read the login's home under that workspace's tenant scope, without the
+    // session-tenancy fence: this is a read inside the claim transaction.
+    const rows = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: originWorkspaceId },
+      async (scoped) =>
+        await scoped
+          .select(connectorActionPolicySnapshotColumns)
+          .from(schema.connectorActionPolicies)
+          .where(
+            and(
+              eq(schema.connectorActionPolicies.accountId, input.accountId),
+              eq(schema.connectorActionPolicies.workspaceId, originWorkspaceId),
+              inArray(schema.connectorActionPolicies.connectionId, [...ids].sort()),
+            ),
+          )
+          .orderBy(
+            asc(schema.connectorActionPolicies.connectionId),
+            asc(schema.connectorActionPolicies.serverId),
+            asc(schema.connectorActionPolicies.toolName),
+            asc(schema.connectorActionPolicies.actionName),
+            asc(schema.connectorActionPolicies.id),
+          )
+          .limit(CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX + 1),
+      undefined,
+      "none",
+    );
+    for (const connectionId of [...ids].sort()) {
+      const group = rows.filter((row) => row.connectionId === connectionId);
+      if (snapshot.length + group.length <= CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX)
+        snapshot.push(...group);
+    }
+  }
+  return snapshot;
 }
 
 /**
@@ -31423,7 +31922,9 @@ async function createSessionInTransaction(
         rigId: input.rigId ?? null,
         rigVersionId: input.rigVersionId ?? null,
         channelId,
-        firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+        firstPartyMcpPermissions: input.firstPartyMcpPermissions
+          ? canonicalSecretPermissions(input.firstPartyMcpPermissions)
+          : null,
         firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
         initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
         initialMcpAccountBindings: acceptedMcpAccountBindings,
@@ -40807,10 +41308,10 @@ export type AcceptSessionHumanInputResponseResult =
   | { action: "not_found" };
 
 /**
- * One requires-action boundary may admit exactly one durable resume event.
- * Human-input responses and ordinary approval decisions share this gate: a
- * mixed parallel interruption batch must not accept one of each before the
- * workflow claims the first and advances the turn's trigger/generation.
+ * One requires-action boundary admits one question answer: only the trigger
+ * carries an answer into the resume. Approval decisions never block it; the
+ * peek resumes from the answer first, and that resume applies every approval
+ * decision of the pause recorded before it.
  */
 async function hasAcceptedRequiresActionAdvance(
   tx: Database,
@@ -40843,12 +41344,122 @@ async function hasAcceptedRequiresActionAdvance(
         eq(schema.sessionEvents.sessionId, input.sessionId),
         eq(schema.sessionEvents.turnId, input.turnId),
         eq(schema.sessionEvents.turnGeneration, input.turnGeneration),
-        inArray(schema.sessionEvents.type, ["user.approvalDecision", "user.humanInputResponse"]),
+        eq(schema.sessionEvents.type, "user.humanInputResponse"),
         gt(schema.sessionEvents.sequence, trigger.sequence),
       ),
     )
     .limit(1);
   return accepted !== undefined;
+}
+
+/** One approval's identity for one question round; rounds only for MCP questions. */
+function approvalDecisionKey(approvalId: string | null, round: number | undefined): string {
+  return `${approvalId ?? ""}\u0000${round ?? ""}`;
+}
+
+/** A recorded approval decision: the call it decides and the decision payload. */
+export type TurnApprovalDecision = {
+  eventId: string;
+  sequence: number;
+  approvalId: string;
+  /** The question round it answers or declined; none for an approval without one. */
+  elicitationRound?: number;
+  payload: Record<string, unknown>;
+};
+
+async function turnApprovalDecisionsTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    afterSequence?: number;
+    throughSequence?: number;
+  },
+): Promise<TurnApprovalDecision[]> {
+  const rows = await tx
+    .select({
+      id: schema.sessionEvents.id,
+      sequence: schema.sessionEvents.sequence,
+      payload: schema.sessionEvents.payload,
+      payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "user.approvalDecision"),
+        eq(schema.sessionEvents.turnId, input.turnId),
+        ...(input.afterSequence !== undefined
+          ? [gt(schema.sessionEvents.sequence, input.afterSequence)]
+          : []),
+        ...(input.throughSequence !== undefined
+          ? [lte(schema.sessionEvents.sequence, input.throughSequence)]
+          : []),
+      ),
+    )
+    .orderBy(asc(schema.sessionEvents.sequence));
+  return rows.flatMap((row) => {
+    const payload = sessionEventPayloadRecord(row.payload, row.payloadCodecVersion);
+    if (typeof payload.approvalId !== "string") return [];
+    const round = approvalDecisionRound(payload);
+    return [
+      {
+        eventId: row.id,
+        sequence: row.sequence,
+        approvalId: payload.approvalId,
+        ...(round !== undefined ? { elicitationRound: round } : {}),
+        payload,
+      },
+    ];
+  });
+}
+
+/** Keys of the approvals decided after the attempt's trigger: the next resume applies them. */
+async function approvalDecisionsAfterTriggerTx(
+  tx: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string; triggerEventId: string },
+): Promise<Set<string>> {
+  const [trigger] = await tx
+    .select({ sequence: schema.sessionEvents.sequence })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.id, input.triggerEventId),
+      ),
+    )
+    .limit(1);
+  if (!trigger) return new Set();
+  const decisions = await turnApprovalDecisionsTx(tx, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    afterSequence: trigger.sequence,
+  });
+  return new Set(
+    decisions.map((decision) =>
+      approvalDecisionKey(decision.approvalId, decision.elicitationRound),
+    ),
+  );
+}
+
+/**
+ * The approval decisions a resume applies besides its own trigger: every
+ * decision of the turn recorded up to the trigger, oldest first. A pause's
+ * decisions are applied together; one recorded later resumes the turn again.
+ */
+export async function listTurnApprovalDecisions(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string; throughSequence: number },
+): Promise<TurnApprovalDecision[]> {
+  return await withWorkspaceRls(
+    db,
+    input.workspaceId,
+    async (scopedDb) => await turnApprovalDecisionsTx(scopedDb, input),
+  );
 }
 
 async function humanInputResponseEventForRequest(
@@ -46405,8 +47016,9 @@ export class SandboxPaidComputeAdmissionError extends Error {
   constructor(
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
+    message = "Insufficient workspace credits to admit paid sandbox compute",
   ) {
-    super("Insufficient workspace credits to admit paid sandbox compute");
+    super(message);
   }
 }
 
@@ -47729,9 +48341,28 @@ async function acquireLeaseOnce(
                 refusal,
               );
             }
-            const balance = await getSpendableCreditBalance(tx, accountId);
+            // The box is funded like the work it runs: an API chat's box spends credits.
+            const leaseOrigin = await attributionBillingOrigin(tx, {
+              accountId,
+              workspaceId,
+              attribution,
+            });
+            const balance = await getSpendableCreditBalance(
+              tx,
+              accountId,
+              undefined,
+              undefined,
+              undefined,
+              leaseOrigin,
+            );
             if (balance.balanceMicros <= 0) {
-              throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
+              throw new SandboxPaidComputeAdmissionError(
+                workspaceId,
+                sandboxGroupId,
+                chargeBillingOrigin(leaseOrigin) === "api"
+                  ? `${API_CREDITS_REQUIRED_MESSAGE} Add credits to start this computer.`
+                  : undefined,
+              );
             }
           }
         }
@@ -54868,7 +55499,20 @@ export async function heartbeatLeaseHolderStatus(
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&
           snapshot.rateMicrosPerSecond > 0 &&
-          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
+          (
+            await getSpendableCreditBalance(
+              tx,
+              input.accountId,
+              undefined,
+              undefined,
+              undefined,
+              await attributionBillingOrigin(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                attribution: snapshot.attribution,
+              }),
+            )
+          ).balanceMicros <= 0
         ) {
           // Touching the holder above is essential: the running writer remains
           // protected while it winds down. The provider/lease TTL is not renewed.
@@ -57079,7 +57723,20 @@ export async function reArmDrainingLease(
             ? snapshot.mode === "credits" && snapshot.rateMicrosPerSecond > 0
             : input.warmBilling?.rateMicrosPerSecond !== undefined &&
               input.warmBilling.rateMicrosPerSecond > 0) &&
-          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
+          (
+            await getSpendableCreditBalance(
+              tx,
+              input.accountId,
+              undefined,
+              undefined,
+              undefined,
+              await attributionBillingOrigin(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                attribution: snapshot?.attribution ?? null,
+              }),
+            )
+          ).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
         }
@@ -73362,6 +74019,8 @@ export type InitializeSessionStartInput = {
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /** Funding origin frozen on the initial turn; null inherits the parent's. */
+  billingOrigin?: BillingOrigin | null;
   /**
    * Normalized IANA zone of the person sending the initial message, frozen in
    * the initial turn's metadata.
@@ -73987,6 +74646,7 @@ export async function initializeSessionStartAtomically(
                   status: "queued",
                   source: "user",
                   surface: input.surface ?? null,
+                  billingOrigin: input.billingOrigin ?? null,
                   promptRouting: runnable ? "accepted_for_execution" : "queued_for_execution",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
@@ -74333,6 +74993,7 @@ export async function enqueueSessionTurn(
                 status: "queued",
                 source: input.source,
                 surface: input.surface ?? null,
+                billingOrigin: input.billingOrigin ?? null,
                 promptRouting: "queued_for_execution",
                 position,
                 prompt: input.prompt,
@@ -77034,29 +77695,14 @@ export async function claimSessionWorkForAttempt(
               }
             }
           }
-          const connectorPolicyRows = await tx
-            .select({
-              id: schema.connectorActionPolicies.id,
-              connectionId: schema.connectorActionPolicies.connectionId,
-              serverId: schema.connectorActionPolicies.serverId,
-              toolName: schema.connectorActionPolicies.toolName,
-              actionName: schema.connectorActionPolicies.actionName,
-              policy: schema.connectorActionPolicies.policy,
-              version: schema.connectorActionPolicies.version,
-            })
-            .from(schema.connectorActionPolicies)
-            .where(eq(schema.connectorActionPolicies.workspaceId, workspaceId))
-            .orderBy(
-              asc(schema.connectorActionPolicies.connectionId),
-              asc(schema.connectorActionPolicies.serverId),
-              asc(schema.connectorActionPolicies.toolName),
-              asc(schema.connectorActionPolicies.actionName),
-              asc(schema.connectorActionPolicies.id),
-            )
-            .limit(2049);
-          if (connectorPolicyRows.length > 2048) {
-            throw new Error("Connector action policy snapshot exceeds the 2048-row bound");
-          }
+          const connectorPolicyRows = await connectorActionPolicySnapshotForTurn(
+            tx as unknown as Database,
+            {
+              accountId: session.accountId,
+              workspaceId,
+              bindings: turn.mcpAccountBindings,
+            },
+          );
           // New queued, compaction, and internal-update executions are born
           // while the locked session still has no active-turn pointer. Publish
           // that ownership edge before freezing governance so the database
@@ -80671,7 +81317,15 @@ export async function peekSessionWork(
               gt(schema.sessionEvents.sequence, currentTrigger.sequence),
             ),
           )
-          .orderBy(desc(schema.sessionEvents.sequence), desc(schema.sessionEvents.id))
+          // One question answer is accepted per pause and only the trigger
+          // carries it, so it resumes first. Approval decisions are applied
+          // together by any resume (those up to its trigger), and one recorded
+          // after the trigger resumes the turn again.
+          .orderBy(
+            sql`(${schema.sessionEvents.type} = 'user.humanInputResponse') desc`,
+            desc(schema.sessionEvents.sequence),
+            desc(schema.sessionEvents.id),
+          )
           .limit(1);
         if (actionResponse) {
           return {
@@ -84283,6 +84937,25 @@ export async function applySessionTurnSettlement(
       }));
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
       let interactionRefusalEvent: AppendEventInput | null = null;
+      // Decisions recorded while this attempt resumed (after its trigger) are
+      // applied by the next resume. Their approvals stay in the frozen run
+      // state for it, but are never shown or announced as waiting again.
+      // When every approval was decided that way, the pause is still written
+      // as requires_action with nothing shown; the workflow's immediate
+      // re-peek resumes it from those decisions.
+      const decidedSinceTrigger =
+        input.runState && input.turnStatus === "requires_action"
+          ? await approvalDecisionsAfterTriggerTx(tx as unknown as Database, {
+              workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              triggerEventId: input.triggerEventId,
+            })
+          : null;
+      const undecided = (approval: unknown) =>
+        !decidedSinceTrigger?.has(
+          approvalDecisionKey(approvalIdentifier(approval), pendingApprovalRound(approval)),
+        );
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
           throw new Error("A frozen run state requires a requires_action settlement");
@@ -84444,9 +85117,9 @@ export async function applySessionTurnSettlement(
             if (!(error instanceof InteractionRequestRefusedError)) throw error;
             // The agent learns why as this call's result: the pause records
             // a system rejection, so the turn resumes at once instead of
-            // failing. One decision resumes a pause, so a second refused call
-            // stays pending; the worker's re-freeze after the first is
-            // answered passes it here again and it is refused the same way.
+            // failing. Only one refusal is recorded per pause, so a second
+            // refused call stays pending; a later resume's re-freeze passes
+            // it here again and it is refused the same way.
             interactionRefusalEvent ??= {
               type: "user.approvalDecision",
               payload: {
@@ -84472,7 +85145,7 @@ export async function applySessionTurnSettlement(
               turnId: input.turnId,
               turnGeneration: turn.executionGeneration,
               humanInputRequests,
-              pendingApprovals: input.runState.pendingApprovals,
+              pendingApprovals: input.runState.pendingApprovals.filter(undecided),
             },
           );
         }
@@ -84667,7 +85340,7 @@ export async function applySessionTurnSettlement(
               : {}),
           }
         : null;
-      const inputEvents =
+      const projectedInputEvents =
         input.dropProactiveCompactionRequest === undefined
           ? input.events
           : input.events.map((event) =>
@@ -84681,6 +85354,22 @@ export async function applySessionTurnSettlement(
                   }
                 : event,
             );
+      const inputEvents =
+        decidedSinceTrigger && decidedSinceTrigger.size > 0
+          ? projectedInputEvents.flatMap((event) => {
+              if (event.type !== "session.requiresAction") return [event];
+              const payload =
+                event.payload && typeof event.payload === "object"
+                  ? (event.payload as Record<string, unknown>)
+                  : {};
+              const approvals = Array.isArray(payload.approvals) ? payload.approvals : [];
+              const waiting = approvals.filter(undecided);
+              if (waiting.length === approvals.length) return [event];
+              return waiting.length > 0
+                ? [{ ...event, payload: { ...payload, approvals: waiting } }]
+                : [];
+            })
+          : projectedInputEvents;
       if (input.turnStatus === "completed") {
         await settleInterruptedCodemodeCallsInTransaction(tx as unknown as Database, {
           workspaceId,
@@ -90332,7 +91021,101 @@ export type AcceptSessionApprovalDecisionResult =
       events: SessionEvent[];
       workflowWakeRevision: number;
     }
-  | { action: "conflict"; sessionStatus: SessionStatus };
+  | {
+      action: "conflict";
+      sessionStatus: SessionStatus;
+      reason: SessionApprovalConflictReason;
+      /** What the person reads: why this decision cannot be taken. */
+      message: string;
+    };
+
+/**
+ * Why a decision was refused. A decision for an approval that is still
+ * undecided is never refused merely because the session is resuming from a
+ * sibling decision of the same pause.
+ */
+export type SessionApprovalConflictReason =
+  | "already_decided"
+  | "already_finished"
+  | "turn_ended"
+  | "not_pending";
+
+function approvalConflict(
+  sessionStatus: SessionStatus,
+  reason: SessionApprovalConflictReason,
+  decided?: unknown,
+): Extract<AcceptSessionApprovalDecisionResult, { action: "conflict" }> {
+  const message =
+    reason === "already_decided"
+      ? decided === "reject"
+        ? "This action was already declined."
+        : "This action was already approved."
+      : reason === "already_finished"
+        ? "This action already finished."
+        : reason === "turn_ended"
+          ? "This approval closed: the agent's turn ended before it was decided."
+          : "This approval is no longer waiting for a decision.";
+  return { action: "conflict", sessionStatus, reason, message };
+}
+
+/** The question round a decision answers; none for an approval without questions. */
+function approvalDecisionRound(payload: Record<string, unknown>): number | undefined {
+  return typeof payload.elicitationRound === "number" ? payload.elicitationRound : undefined;
+}
+
+/** The question round an approval currently asks; none when it asks no question. */
+function pendingApprovalRound(pending: unknown): number | undefined {
+  const elicitation =
+    pending && typeof pending === "object"
+      ? (pending as { elicitation?: unknown }).elicitation
+      : undefined;
+  if (elicitation === undefined) return undefined;
+  const parsed = McpElicitationApprovalRequest.safeParse(elicitation);
+  return parsed.success ? parsed.data.round : undefined;
+}
+
+/**
+ * The newest recorded decision for one approval and question round, within
+ * the live turn when there is one. Call ids are unique within a turn, and an
+ * MCP server asking again under the same id asks a new round, so this is the
+ * decision the person already made for exactly what they see.
+ */
+async function latestApprovalDecisionForRound(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    approvalId: string;
+    round: number | undefined;
+    /** The live turn: call ids are only unique within one turn. */
+    turnId?: string;
+  },
+): Promise<{
+  event: typeof schema.sessionEvents.$inferSelect;
+  payload: Record<string, unknown>;
+} | null> {
+  const rows = await tx
+    .select()
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "user.approvalDecision"),
+        input.turnId === undefined ? undefined : eq(schema.sessionEvents.turnId, input.turnId),
+        sql`${schema.sessionEvents.payload} ->> 'approvalId' = ${input.approvalId}`,
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.sequence))
+    .limit(16);
+  for (const row of rows) {
+    const payload = sessionEventPayloadRecord(row.payload, row.payloadCodecVersion);
+    if (payload.approvalId !== input.approvalId) continue;
+    if (approvalDecisionRound(payload) !== input.round) continue;
+    return { event: row, payload };
+  }
+  return null;
+}
 
 /** The answer to an approval's MCP server questions does not fit their forms. */
 export class SessionApprovalAnswerError extends Error {
@@ -90365,7 +91148,10 @@ function approvalDecisionPayloadWithAnswer(
     return payload;
   }
   const request = McpElicitationApprovalRequest.parse(elicitation);
-  if (payload.decision !== "approve") return withoutAnswer;
+  // A rejection needs no round from the client, but records the round it
+  // declined so a later question under the same call id is never taken as
+  // already declined.
+  if (payload.decision !== "approve") return { ...withoutAnswer, elicitationRound: request.round };
   if (elicitationRound !== request.round) {
     throw new SessionApprovalAnswerError(
       elicitationRound === undefined
@@ -90383,9 +91169,12 @@ function approvalDecisionPayloadWithAnswer(
 }
 
 /**
- * Accept exactly one decision for the currently waiting approval boundary.
- * The session and active turn are locked with the append so concurrent Pause,
- * Steer, and duplicate decisions cannot manufacture a second resume trigger.
+ * Accept one decision for an approval still open in the live turn's latest
+ * pause, whether the session waits or is resuming from a sibling decision.
+ * The same decision again is idempotent; a different one is refused as
+ * already decided. The session and active turn are locked with the append so
+ * concurrent Pause, Steer, and duplicate decisions stay serialized with the
+ * worker's settlement.
  */
 export async function acceptSessionApprovalDecision(
   db: Database,
@@ -90504,55 +91293,153 @@ export async function acceptSessionApprovalDecision(
         if (turnPreview && !turn) {
           throw new Error(`Active turn disappeared: ${turnPreview.id}`);
         }
-        if (session.status !== "requires_action" || turn?.status !== "requires_action") {
-          return {
-            action: "conflict",
-            sessionStatus: session.status as SessionStatus,
-          } as const;
-        }
-        if (
-          await hasAcceptedRequiresActionAdvance(tx as unknown as Database, {
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            turnGeneration: turn.executionGeneration,
-            triggerEventId: turn.triggerEventId,
-          })
-        ) {
-          return {
-            action: "conflict",
-            sessionStatus: "requires_action",
-          } as const;
-        }
+        const sessionStatus = session.status as SessionStatus;
         const approvalId = payload.approvalId;
-        const [runState] = await tx
-          .select({
-            turnId: schema.agentRunStates.turnId,
-            pendingApprovals: schema.agentRunStates.pendingApprovals,
-            pendingApprovalsCodecVersion: schema.agentRunStates.pendingApprovalsCodecVersion,
-          })
-          .from(schema.agentRunStates)
-          .where(
-            and(
-              eq(schema.agentRunStates.workspaceId, input.workspaceId),
-              eq(schema.agentRunStates.sessionId, input.sessionId),
-              eq(schema.agentRunStates.turnId, turn.id),
-            ),
-          )
-          .orderBy(desc(schema.agentRunStates.stateVersion))
-          .limit(1);
-        const pendingApproval =
-          typeof approvalId === "string" && runState
-            ? fromPostgresLosslessJson(
-                runState.pendingApprovals,
-                runState.pendingApprovalsCodecVersion,
-              ).find((pending) => approvalIdentifier(pending) === approvalId)
+        if (typeof approvalId !== "string") {
+          return approvalConflict(sessionStatus, "not_pending");
+        }
+        // Every approval of the turn's latest pause stays decidable until its
+        // call settles, also while the turn resumes from a sibling decision:
+        // a pause's decisions are applied together, and one recorded while
+        // the turn resumes is applied by the next resume.
+        const liveTurn =
+          turn &&
+          session.activeTurnId === turn.id &&
+          !isTerminalSessionTurnStatus(turn.status as SessionTurnStatus)
+            ? turn
             : undefined;
-        if (typeof approvalId !== "string" || pendingApproval === undefined) {
-          return {
-            action: "conflict",
-            sessionStatus: "requires_action",
-          } as const;
+        const [runState] = liveTurn
+          ? await tx
+              .select({
+                turnId: schema.agentRunStates.turnId,
+                pendingApprovals: schema.agentRunStates.pendingApprovals,
+                pendingApprovalsCodecVersion: schema.agentRunStates.pendingApprovalsCodecVersion,
+              })
+              .from(schema.agentRunStates)
+              .where(
+                and(
+                  eq(schema.agentRunStates.workspaceId, input.workspaceId),
+                  eq(schema.agentRunStates.sessionId, input.sessionId),
+                  eq(schema.agentRunStates.turnId, liveTurn.id),
+                ),
+              )
+              .orderBy(desc(schema.agentRunStates.stateVersion))
+              .limit(1)
+          : [];
+        const pendingApproval = runState
+          ? fromPostgresLosslessJson(
+              runState.pendingApprovals,
+              runState.pendingApprovalsCodecVersion,
+            ).find((pending) => approvalIdentifier(pending) === approvalId)
+          : undefined;
+        const [pendingCall] =
+          liveTurn && pendingApproval !== undefined
+            ? await tx
+                .select({
+                  interruptionKind: schema.sessionPendingToolCalls.interruptionKind,
+                  hasResult: sql<boolean>`${schema.sessionPendingToolCalls.resultItem} is not null`,
+                })
+                .from(schema.sessionPendingToolCalls)
+                .where(
+                  and(
+                    eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+                    eq(schema.sessionPendingToolCalls.turnId, liveTurn.id),
+                    eq(schema.sessionPendingToolCalls.callId, approvalId),
+                  ),
+                )
+                .limit(1)
+            : [];
+        const callSettled = pendingCall?.hasResult === true;
+        const waiting =
+          sessionStatus === "requires_action" && liveTurn?.status === "requires_action";
+        // The same decision again (a double click, a retry after a lost
+        // response) is the decision already recorded: accepted, nothing new.
+        const round =
+          pendingApproval !== undefined
+            ? pendingApprovalRound(pendingApproval)
+            : approvalDecisionRound(payload);
+        const prior = await latestApprovalDecisionForRound(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          approvalId,
+          round,
+          ...(liveTurn ? { turnId: liveTurn.id } : {}),
+        });
+        if (prior) {
+          // A decision the waiting pause should already have applied, for a
+          // call that is still open, was lost (a worker from before this
+          // change resumed only its own trigger): take the new one instead.
+          const [trigger] =
+            waiting && liveTurn && pendingCall && !callSettled
+              ? await tx
+                  .select({ sequence: schema.sessionEvents.sequence })
+                  .from(schema.sessionEvents)
+                  .where(
+                    and(
+                      eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                      eq(schema.sessionEvents.sessionId, input.sessionId),
+                      eq(schema.sessionEvents.id, liveTurn.triggerEventId),
+                    ),
+                  )
+                  .limit(1)
+              : [];
+          const lost = trigger !== undefined && prior.event.sequence <= trigger.sequence;
+          if (!lost) {
+            // A repeat that carries credentials to store is a different
+            // response: the recorded one already decided, so refuse it
+            // rather than report its credentials as stored.
+            if (
+              prior.payload.decision !== payload.decision ||
+              (input.mcpCredentialUpdates?.length ?? 0) > 0
+            ) {
+              return approvalConflict(sessionStatus, "already_decided", prior.payload.decision);
+            }
+            const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+              tx as unknown as Database,
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+                reason: "approval_decision",
+              },
+            );
+            return {
+              action: "accepted",
+              event: mapEvent(prior.event),
+              events: [],
+              workflowWakeRevision,
+            } as const;
+          }
+        }
+        if (!liveTurn) return approvalConflict(sessionStatus, "turn_ended");
+        if (pendingApproval === undefined) return approvalConflict(sessionStatus, "not_pending");
+        if (callSettled) return approvalConflict(sessionStatus, "already_finished");
+        if (!waiting) {
+          // Resuming: only a call the next resume can still apply. A model
+          // tool's open call, or a programmatic call still waiting on review.
+          const resumable =
+            pendingCall !== undefined
+              ? pendingCall.interruptionKind === "approval" ||
+                pendingCall.interruptionKind === "interaction_intervention"
+              : // Programmatic approval ids are operation UUIDs.
+                UUID_PATTERN.test(approvalId) &&
+                (
+                  await tx
+                    .select({ operationId: schema.sessionAttemptCodemodeCalls.operationId })
+                    .from(schema.sessionAttemptCodemodeCalls)
+                    .where(
+                      and(
+                        eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
+                        eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
+                        eq(schema.sessionAttemptCodemodeCalls.turnId, liveTurn.id),
+                        eq(schema.sessionAttemptCodemodeCalls.operationId, approvalId),
+                        eq(schema.sessionAttemptCodemodeCalls.state, "waiting_for_approval"),
+                      ),
+                    )
+                    .limit(1)
+                ).length > 0;
+          if (!resumable) return approvalConflict(sessionStatus, "not_pending");
         }
         payload = approvalDecisionPayloadWithAnswer(pendingApproval, payload);
         if (input.interactionIntervention) {
@@ -90620,8 +91507,8 @@ export async function acceptSessionApprovalDecision(
                 accountId: session.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
-                turnId: turn.id,
-                turnGeneration: turn.executionGeneration,
+                turnId: liveTurn.id,
+                turnGeneration: liveTurn.executionGeneration,
                 turnAssociation: "current",
                 sequence: session.lastSequence + 1,
                 type: "user.approvalDecision",
@@ -90641,8 +91528,8 @@ export async function acceptSessionApprovalDecision(
             input.workspaceId,
             session,
             {
-              turnId: turn.id,
-              turnGeneration: turn.executionGeneration,
+              turnId: liveTurn.id,
+              turnGeneration: liveTurn.executionGeneration,
               requestId: null,
               approvalId,
               outcome: approvalDecision === "approve" ? "approved" : "rejected",
@@ -90671,7 +91558,7 @@ export async function acceptSessionApprovalDecision(
               and(
                 eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
                 eq(schema.connectorActionRequests.sessionId, input.sessionId),
-                eq(schema.connectorActionRequests.turnId, turn.id),
+                eq(schema.connectorActionRequests.turnId, liveTurn.id),
                 eq(schema.connectorActionRequests.approvalId, approvalId),
                 eq(schema.connectorActionRequests.status, "pending"),
               ),
@@ -92238,7 +93125,11 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               ? { firstPartyMcpTools: update.firstPartyMcpTools }
               : {}),
             ...(update.firstPartyMcpPermissions !== undefined
-              ? { firstPartyMcpPermissions: update.firstPartyMcpPermissions }
+              ? {
+                  firstPartyMcpPermissions: canonicalSecretPermissions(
+                    update.firstPartyMcpPermissions,
+                  ),
+                }
               : {}),
             ...(update.sandboxBackend !== undefined
               ? { sandboxBackend: update.sandboxBackend }
@@ -92519,8 +93410,10 @@ function mapSession(
     effectiveControl,
     inputWait: effectiveControl.state === "active" ? (row.currentInputWait ?? null) : null,
     lastSequence: row.lastSequence,
-    codexPinnedCredentialId: row.codexPinnedCredentialId ?? null,
-    codexLastCredentialId: row.codexLastCredentialId ?? null,
+    // Public adapters project these from subscription-core bindings and leases,
+    // never the frozen columns of the retired allocator.
+    codexPinnedCredentialId: null,
+    codexLastCredentialId: null,
     codexCompactionMode:
       row.codexCompactionMode === "remote_v2" || row.codexCompactionMode === "portable"
         ? row.codexCompactionMode
@@ -92635,6 +93528,7 @@ function mapSessionTurnForExecution(
     mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcpAccountBindings),
     initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
     scheduledTaskRunId: row.scheduledTaskRunId ?? null,
+    billingOrigin: storedBillingOrigin(row.billingOrigin),
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personalConnectionDelegations,
       `session_turns:${row.workspaceId}:${row.sessionId}:${row.id}`,

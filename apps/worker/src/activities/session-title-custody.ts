@@ -1,7 +1,6 @@
 import {
   ClaudeSubscriptionCredential,
   parseClaudeUsageHeaders,
-  withClaudeConnectionCredential,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -30,10 +29,10 @@ import {
   type CoreSubscriptionRequests,
 } from "./agent-turn/subscription-core-requests";
 import {
-  claudeCoreModelScope,
   claudeCoreRequestPreparer,
   claudeCoreSettingsCredential,
   claudeSubscriptionUpstreamModelIds,
+  withClaudeCoreConnectionCredential,
 } from "./agent-turn/claude-core";
 import { runAuxiliaryProviderDispatch } from "./auxiliary-provider-dispatch";
 import {
@@ -295,11 +294,9 @@ export async function withSessionTitleCustody<T>(
           });
       },
     };
-    const claudeSettings = withClaudeConnectionCredential(
+    const claudeSettings = withClaudeCoreConnectionCredential(
       settings,
-      "claude_subscription",
       claudeCoreSettingsCredential(current, operation.connectionId),
-      claudeCoreModelScope(input.productModelId),
       { connectionId: operation.connectionId, credentialVersion: current.credentialVersion },
     );
     return await withClaudeUsageObserver(

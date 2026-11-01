@@ -709,6 +709,329 @@ describe("People page", () => {
     },
   );
 
+  // Bendik's limits: Free 1, Pro 2, Max 10, Enterprise unlimited.
+  const seatCatalog = [
+    { key: "free", label: "Free", price: 0, seats: 1, selfService: false },
+    { key: "pro", label: "Pro", price: 20_000_000, seats: 2, selfService: true },
+    { key: "max", label: "Max", price: 100_000_000, seats: 10, selfService: true },
+    { key: "enterprise", label: "Enterprise", price: null, seats: null, selfService: false },
+  ].map((item) => ({
+    key: item.key,
+    label: item.label,
+    monthlyPriceMicros: item.price,
+    monthlyCreditMicros: 0,
+    seatLimit: item.seats,
+    freeCredit: item.key === "free",
+    stripePriceId: item.selfService ? `price_${item.key}` : null,
+    selfService: item.selfService,
+  }));
+  function seatPlan(key: string, seatsUsed: number): BillingPlanBalance {
+    const item = seatCatalog.find((each) => each.key === key)!;
+    return {
+      key,
+      label: item.label,
+      status: "active",
+      creditGrantedMicros: 0,
+      creditRemainingMicros: 0,
+      periodResetAt: null,
+      seatsUsed,
+      seatLimit: item.seatLimit,
+      cancelAtPeriodEnd: false,
+    };
+  }
+  async function invitePage(plan: BillingPlanBalance, canManageBilling: boolean, create?: unknown) {
+    const client = makeClient({
+      getBilling: mock(async () => ({ balance: { plan } })),
+      getBillingSubscriptionPlans: mock(async () => ({ plan, plans: seatCatalog })),
+      ...(create ? { createOrganizationInvitation: create } : {}),
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationPeoplePage
+          workspaceId="workspace-a"
+          view="invite"
+          canManageBilling={canManageBilling}
+        />
+      </Provider>,
+    );
+    await flush();
+    return view;
+  }
+
+  test("a full plan names the one plan that adds a seat before anyone is invited", async () => {
+    const view = await invitePage(seatPlan("pro", 2), true);
+    try {
+      expect(view.container.textContent).toContain("2 / 2 seats used");
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(view.container.textContent).not.toContain("View upgrade options");
+      await act(async () => button(view.container, "Upgrade to Max").click());
+      expect(navigate).toHaveBeenCalledWith(
+        expect.objectContaining({ search: { section: "billing" } }),
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("people without billing access are told to ask an owner, with no upgrade button", async () => {
+    const view = await invitePage(seatPlan("free", 1), false);
+    try {
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(view.container.textContent).not.toContain("to add more people");
+      expect(view.container.textContent).toContain("Ask an organization owner to upgrade to Pro.");
+      expect(
+        [...view.container.querySelectorAll("button")].some((each) =>
+          /Upgrade to|View upgrade options/.test(each.textContent ?? ""),
+        ),
+      ).toBe(false);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a plan with room shows no notice, and a refusal names the plan the server chose", async () => {
+    const create = mock(async () => {
+      throw new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            status: 402,
+            code: "seat_limit_reached",
+            message: "Upgrade to Max to add more people.",
+            retryable: false,
+            details: {
+              seatLimit: 2,
+              seatsUsed: 2,
+              upgradePlan: "max",
+              upgradePlanLabel: "Max",
+              action: { type: "upgrade", href: "/billing" },
+            },
+          },
+        }),
+        { mutation: true },
+      );
+    });
+    // The directory still believes there is room, as when someone else took the seat.
+    const view = await invitePage(seatPlan("pro", 1), true, create);
+    try {
+      expect(view.container.textContent).toContain("1 / 2 seats used");
+      expect(view.container.textContent).not.toContain("seat limit is reached");
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { getData: () => "new@example.test," },
+      });
+      await act(async () =>
+        view.container.querySelector("input[type=email]")!.dispatchEvent(paste),
+      );
+      await act(async () =>
+        view.container
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      await flush();
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(button(view.container, "Upgrade to Max")).toBeDefined();
+      expect(view.container.textContent).toContain("new@example.test");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("several refused people get the plan with room for all of them, not the server's one-seat pick", async () => {
+    const create = mock(async () => {
+      throw new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            status: 402,
+            code: "seat_limit_reached",
+            message: "Upgrade to Pro to add more people.",
+            retryable: false,
+            details: { upgradePlan: "pro", upgradePlanLabel: "Pro" },
+          },
+        }),
+        { mutation: true },
+      );
+    });
+    // One seat used of Free's one; three more people need four seats, which only Max has.
+    const view = await invitePage(seatPlan("free", 1), true, create);
+    try {
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { getData: () => "a@example.test, b@example.test, c@example.test," },
+      });
+      await act(async () =>
+        view.container.querySelector("input[type=email]")!.dispatchEvent(paste),
+      );
+      await act(async () =>
+        view.container
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      await flush();
+      expect(create).toHaveBeenCalledTimes(3);
+      expect(button(view.container, "Upgrade to Max")).toBeDefined();
+      expect(view.container.textContent).not.toContain("Upgrade to Pro");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  const seatRefusal = () =>
+    new OpenGeniApiError(
+      402,
+      JSON.stringify({
+        error: {
+          status: 402,
+          code: "seat_limit_reached",
+          message: "Upgrade to Pro to add more people.",
+          retryable: false,
+          details: { upgradePlan: "pro", upgradePlanLabel: "Pro" },
+        },
+      }),
+      { mutation: true },
+    );
+  async function submitEmails(container: HTMLElement, text: string) {
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: { getData: () => text } });
+    await act(async () => container.querySelector("input[type=email]")!.dispatchEvent(paste));
+    await act(async () =>
+      container
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await flush();
+  }
+
+  test("while the plan is re-read after invites, the seat notice stays and then shows the server's count", async () => {
+    let seatsUsed = 1;
+    let release: (() => void) | null = null;
+    let hold = false;
+    const create = mock(async (_org: string, request: { email: string }) => {
+      hold = true;
+      if (request.email === "a@example.test") {
+        seatsUsed = 2;
+        return { ...invitation("member"), id: "created-a", targetEmail: request.email };
+      }
+      throw seatRefusal();
+    });
+    const client = makeClient({
+      // Reads after the invitations wait until the test releases them.
+      getBilling: mock(async () => {
+        if (hold) {
+          const previous = release;
+          await new Promise<void>((resolve) => {
+            release = () => {
+              previous?.();
+              resolve();
+            };
+          });
+        }
+        return { balance: { plan: seatPlan("pro", seatsUsed) } };
+      }),
+      getBillingSubscriptionPlans: mock(async () => ({
+        plan: seatPlan("pro", seatsUsed),
+        plans: seatCatalog,
+      })),
+      createOrganizationInvitation: create,
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationPeoplePage workspaceId="workspace-a" view="invite" canManageBilling />
+      </Provider>,
+    );
+    await flush();
+    try {
+      expect(view.container.textContent).toContain("1 / 2 seats used");
+      await submitEmails(view.container, "a@example.test, b@example.test,");
+      expect(create).toHaveBeenCalledTimes(2);
+      // The re-read is in flight: the previous plan keeps the one notice up.
+      expect(release).not.toBeNull();
+      // No local guess at the count: it only changes once the server answers.
+      expect(view.container.textContent).toContain("1 / 2 seats used");
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(view.container.textContent).not.toContain("Couldn't send the invitation");
+      expect(button(view.container, "Upgrade to Max")).toBeDefined();
+      await act(async () => release!());
+      await flush();
+      expect(view.container.textContent).toContain("2 / 2 seats used");
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("other failures stay visible beside the seat notice, and the plan follows the form", async () => {
+    const create = mock(async (_org: string, request: { email: string }) => {
+      if (request.email === "c@example.test") throw new Error("Request failed.");
+      throw seatRefusal();
+    });
+    // Free is full; with three people still in the form, only Max has room.
+    const view = await invitePage(seatPlan("free", 1), true, create);
+    try {
+      await submitEmails(view.container, "a@example.test, b@example.test, c@example.test,");
+      expect(create).toHaveBeenCalledTimes(3);
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(button(view.container, "Upgrade to Max")).toBeDefined();
+      expect(view.container.textContent).toContain("Couldn't invite c@example.test");
+      // Down to one person, Pro has room.
+      await act(async () => button(view.container, "Remove b@example.test").click());
+      await act(async () => button(view.container, "Remove c@example.test").click());
+      expect(button(view.container, "Upgrade to Pro")).toBeDefined();
+      expect(view.container.textContent).not.toContain("Upgrade to Max");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a refused restore tells people without billing access to ask an owner", async () => {
+    const plan = seatPlan("pro", 2);
+    const suspended = person("member-x", "Xena Example", "member", { status: "suspended" });
+    const client = makeClient({
+      getBilling: mock(async () => ({ balance: { plan } })),
+      getBillingSubscriptionPlans: mock(async () => ({ plan, plans: seatCatalog })),
+      listOrganizationAdministrationMembers: mock(async () => ({ members: [owner, suspended] })),
+      updateOrganizationMember: mock(async () => {
+        throw new OpenGeniApiError(
+          402,
+          JSON.stringify({
+            error: {
+              status: 402,
+              code: "seat_limit_reached",
+              message: "Upgrade to Max to add more people.",
+              retryable: false,
+              details: { upgradePlan: "max", upgradePlanLabel: "Max" },
+            },
+          }),
+          { mutation: true },
+        );
+      }),
+    });
+    const view = mount(null);
+    try {
+      await view.render(
+        <Provider client={client}>
+          <OrganizationPeoplePage
+            workspaceId="workspace-a"
+            person="member-x"
+            canManageBilling={false}
+          />
+        </Provider>,
+      );
+      await flush();
+      await act(async () => button(view.container, "Restore access").click());
+      await flush();
+      expect(toastError).toHaveBeenCalledWith(
+        "Couldn't restore Xena Example",
+        expect.objectContaining({ description: "Ask an organization owner to upgrade to Max." }),
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("names the person in the suspend confirmation and says access is removed", async () => {
     const client = makeClient();
     const view = mount(null);
@@ -725,6 +1048,10 @@ describe("People page", () => {
     expect(confirm.textContent).toContain("Suspend Maria Chen?");
     expect(confirm.textContent).toContain(
       "Their access to Platform engineering is removed. Restoring doesn't bring it back.",
+    );
+    // The admin learns before confirming that the person's schedules stop.
+    expect(confirm.textContent).toContain(
+      "Schedules they own stop running and pause themselves. Each one says why on its Automations page.",
     );
     await act(async () => button(confirm, "Suspend").click());
     await flush();

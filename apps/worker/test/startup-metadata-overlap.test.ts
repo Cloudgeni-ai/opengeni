@@ -12,11 +12,17 @@ const start = source.indexOf(
 );
 const end = source.indexOf("const selectedFirstPartyMcpTools", start);
 if (start < 0 || end < 0) throw new Error("Missing startup metadata stage");
+// The stage reads the personal Skill index under this module-level bound.
+const personalSkillBound = /^const PERSONAL_SKILL_MARKDOWN_MAX_BYTES = [^;\n]+;$/mu.exec(
+  source,
+)?.[0];
+if (!personalSkillBound) throw new Error("Missing personal Skill index bound");
 const stage = new Function(
   "ports",
   "options",
   `
   const { requireWorkspace, getWorkspaceVideoGenerationPolicy, listSkillDescriptors } = ports;
+  ${personalSkillBound}
   const db = {}, input = { accountId: "account", workspaceId: "workspace" }, turn = {};
   const deps = { fileAuthoritySubjectId: "human" };
   const toolFamilies = { skills: options.skills };
@@ -84,6 +90,7 @@ for (const first of [0, 1, 2]) {
       workspaceId: "workspace",
       subjectId: "human",
     });
+    expect(calls[2]!.args[2]).toEqual({ personalSkillMarkdownMaxBytes: 8 * 1024 });
   });
 }
 

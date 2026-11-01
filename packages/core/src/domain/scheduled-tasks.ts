@@ -24,7 +24,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
-import type { VaultPolicy } from "@opengeni/contracts";
+import type { BillingOrigin, VaultPolicy } from "@opengeni/contracts";
 import {
   ATLASSIAN_NATIVE_RETIRED_MESSAGE,
   isRetiredNativeAtlassianSource,
@@ -89,6 +89,8 @@ import {
   updateScheduledTask,
   ScheduledTaskHeadChangedError,
   withWorkspaceSubjectRls,
+  manualScheduledTaskRunBillingOrigin,
+  markScheduledTaskApiBilled,
   type Database,
   type ScheduledTaskCreatorPolicy,
   type SessionCommandActor,
@@ -122,6 +124,7 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
 } from "../session-authorization";
+import { fundedBillingOrigin, resolveTurnBillingOrigin } from "../billing-origin";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import {
@@ -507,10 +510,6 @@ export async function createValidatedScheduledTask(input: {
       grant: input.grant,
       runMode: input.payload.runMode,
       agentConfig,
-      audience:
-        "visibility" in input.payload && input.payload.visibility === "private"
-          ? "user_private"
-          : "workspace_shared",
     });
   }
   // The rig is stored on the task and resolved to its ACTIVE version per fire
@@ -665,16 +664,17 @@ export async function createValidatedScheduledTask(input: {
     personalKnowledge: agentConfig.knowledgeSource?.destination.kind === "personal",
     ownerSubjectId,
   });
-  await requirePersonalMachineAudience({
-    db: input.db,
+  // Every run is billed as whoever set the task up: in the app, plan credit
+  // first; over the API, credits only.
+  const billingOrigin = await resolveTurnBillingOrigin(input.db, {
     grant: input.grant,
-    agentConfig,
-    audience: visibility,
+    authorization: input.authorization,
   });
   return await withScheduledTaskAuthorityWriteErrors(() =>
     input.db.transaction(async (transaction) => {
       const task = await createScheduledTask(transaction, {
         id,
+        billingOrigin,
         accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
         name: trimmedScheduledTaskName(input.payload.name),
@@ -886,10 +886,20 @@ export async function updateScheduledTaskForApi(
 ): Promise<ScheduledTask> {
   const workspaceId = grant.workspaceId;
   const beforeUpdateCommit = update.beforeUpdateCommit;
+  // An API caller's edit makes every later run API use (credits only).
+  // Pausing spends nothing, so it leaves the origin alone.
+  const pauseOnly = Object.keys(update).length === 1 && update.status === "paused";
+  const callerOrigin = pauseOnly ? null : await resolveTurnBillingOrigin(db, { grant });
   update = {
     ...update,
     beforeUpdateCommit: async (tx) => {
       await assertScheduledTaskMutationOwner(tx, grant, taskId);
+      if (callerOrigin === "api")
+        await markScheduledTaskApiBilled(tx, {
+          accountId: grant.accountId,
+          workspaceId,
+          taskId,
+        });
       await beforeUpdateCommit?.(tx);
     },
   };
@@ -1019,14 +1029,33 @@ export async function pauseScheduledTaskAsAdmin(
 export const SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE =
   "This schedule is paused, so it cannot run now. Resume it first, then trigger it.";
 
+/**
+ * Who pays for a run `grant` starts by hand: API when the caller or the task
+ * is API, else the task's app origin. The edge checks credits with it.
+ */
+export async function manualScheduledTaskTriggerBillingOrigin(
+  db: Database,
+  grant: AccessGrant,
+  taskId: string,
+): Promise<BillingOrigin> {
+  return fundedBillingOrigin(
+    grant.accountId,
+    await manualScheduledTaskRunBillingOrigin(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      taskId,
+      callerOrigin: await resolveTurnBillingOrigin(db, { grant }),
+    }),
+  );
+}
+
 export async function triggerScheduledTaskForGrant(
   db: Database,
   grant: AccessGrant,
   workflowClient: SessionWorkflowClient,
   input: Parameters<SessionWorkflowClient["triggerScheduledTask"]>[0],
 ): Promise<void> {
-  await db.transaction(async (tx) => {
-    await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+  const refuseUnrunnable = () => {
     if (isRetiredNativeGoogleDriveTask(input.task))
       throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
     if (isRetiredNativeAtlassianTask(input.task))
@@ -1035,6 +1064,23 @@ export async function triggerScheduledTaskForGrant(
     // told, instead of accepting a trigger that would silently do nothing.
     if (input.task.status === "paused")
       throw new HTTPException(409, { message: SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE });
+  };
+  // An API caller's run, and every later run, is API use (credits only).
+  // Committed before the run starts, so the run's turn reads it.
+  if ((await resolveTurnBillingOrigin(db, { grant })) === "api") {
+    await db.transaction(async (tx) => {
+      await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+      refuseUnrunnable();
+      await markScheduledTaskApiBilled(tx, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        taskId: input.task.id,
+      });
+    });
+  }
+  await db.transaction(async (tx) => {
+    await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+    refuseUnrunnable();
     const actor = creationInitiatorForGrant(grant).actor ?? null;
     const restriction = await scheduledTaskCredentialRestrictionForGrant(tx, grant, actor);
     // A caller cannot supply or clear the trusted ceiling. Ownerless and
@@ -1150,52 +1196,22 @@ export async function validateScheduledTaskTarget(input: {
   return session;
 }
 
-export const PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE =
-  "Your personal machine can only run schedules that only you can see. Set Who can see it to Only me, or pick a shared machine.";
-
 /** Following a default never counts as consent to run unattended on a personal machine. */
 export const WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE =
   "The workspace default is a personal machine, which runs only automations it is chosen on. Choose the machine for this automation instead of the workspace default.";
 
 /**
- * A schedule's audience is resolved after its machine is validated, and can be
- * changed without touching the machine. Re-check the pairing on the final
- * audience so a personal machine never ends up on a schedule others can see.
+ * A schedule runs as its owner, so it may use the owner's own (personal)
+ * machine whoever can see it, but only when the machine is picked on it. The
+ * owner check is the scoped lookup itself, which returns a personal machine to
+ * nobody else, and only the owner changes or runs a schedule.
  */
-async function requirePersonalMachineAudience(input: {
-  db: Database;
-  grant: AccessGrant;
-  agentConfig: ScheduledTaskAgentConfig;
-  audience: "user_private" | "workspace_shared";
-}): Promise<void> {
-  const target = input.agentConfig.machineTarget;
-  if (!target || input.audience === "user_private") return;
-  const sandbox = await getSandbox(
-    input.db,
-    {
-      accountId: input.grant.accountId,
-      workspaceId: input.grant.workspaceId,
-      subjectId: input.grant.subjectId,
-    },
-    target.targetSandboxId,
-  );
-  if (sandbox?.scope === "user") {
-    throw new HTTPException(422, { message: PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE });
-  }
-}
-
 export async function validateScheduledTaskMachineTarget(input: {
   settings: Settings;
   db: Database;
   grant: AccessGrant;
   runMode: ScheduledTask["runMode"];
   agentConfig: ScheduledTaskAgentConfig;
-  /**
-   * Who can see the schedule. A personal machine runs only an Only me schedule
-   * of its owner; the owner check is the scoped lookup itself, which returns a
-   * personal machine to nobody else.
-   */
-  audience: "user_private" | "workspace_shared";
   requireOnline?: boolean;
   /** A reusable chat already owns its placement. */
   reusableSessionId?: string | null;
@@ -1273,9 +1289,6 @@ export async function validateScheduledTaskMachineTarget(input: {
     throw new HTTPException(422, {
       message: WORKSPACE_DEFAULT_PERSONAL_MACHINE_SCHEDULE_MESSAGE,
     });
-  }
-  if (sandbox.scope === "user" && input.audience !== "user_private") {
-    throw new HTTPException(422, { message: PERSONAL_MACHINE_SCHEDULE_AUDIENCE_MESSAGE });
   }
   const enrollment = input.requireOnline
     ? await getLiveEnrollmentConnection(input.db, access, sandbox.enrollmentId)
@@ -1416,12 +1429,6 @@ export async function validatedScheduledTaskUpdate(
     targetSessionId,
     personalKnowledge: agentConfig.knowledgeSource?.destination.kind === "personal",
     ownerSubjectId: input.existing.ownerSubjectId,
-  });
-  await requirePersonalMachineAudience({
-    db: input.db,
-    grant: input.grant,
-    agentConfig,
-    audience: visibility,
   });
   const current = input.existing.visibility === "private" ? "user_private" : "workspace_shared";
   const audited = withScheduledTaskAccountChoiceAudit(input.grant, input.existing, update);
@@ -2149,10 +2156,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       grant: input.grant,
       runMode: nextRunMode,
       agentConfig: update.agentConfig ?? input.existing.agentConfig,
-      audience:
-        (input.payload.visibility ?? input.existing.visibility) === "private"
-          ? "user_private"
-          : "workspace_shared",
     });
   }
   if (

@@ -311,10 +311,12 @@ function isComposerCreditRefusal(error: Error): boolean {
  * workspace ran out of credits? Matches the engine's "insufficient workspace
  * credits" text, and the older "insufficient Opengeni credits" wording in
  * existing history (case-insensitive, substring — it arrives both bare and
- * wrapped in "Activity task failed: …") and the
+ * wrapped in "Activity task failed: …"), the refusal of an API turn that has
+ * no credits or of an own-key turn that has no paid credit, and the
  * budget-exhausted segment limit the engine stamps on a turn it ended early.
  */
-const CREDIT_EXHAUSTION_TEXT = /insufficient (?:workspace|opengeni) credits/i;
+const CREDIT_EXHAUSTION_TEXT =
+  /insufficient (?:workspace|opengeni) credits|add credits to use your own key|upgrade to pro to use your own key|api usage uses credits, not your plan credit/i;
 
 export function isCreditExhaustion(
   input: { error?: string | null; detail?: string | null; segmentLimit?: string | null } | string,

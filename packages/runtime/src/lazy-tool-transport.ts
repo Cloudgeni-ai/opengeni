@@ -111,6 +111,8 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "repository_skill_read",
   "request_human_input",
   "list_models",
+  // Answers privacy and data questions from server facts, never guesses.
+  "privacy_facts",
   // Jev-backed code search. Present only when the deployment and workspace
   // enable it; hiding it behind search would spend a model round trip to find
   // the tool that exists to save round trips.

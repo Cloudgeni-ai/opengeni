@@ -43,6 +43,7 @@ import {
   listOrganizationWebhooks,
   listWorkspaceWebhookDeliveries,
   listWorkspaceWebhooks,
+  organizationCredentialProviderReaches,
   redeliverWorkspaceWebhookDelivery,
   resolveInitiatingHuman,
   resolveWorkspaceCredentialProvider,
@@ -426,8 +427,7 @@ export function registerWorkspaceIntegrationRoutes(
     const grant = await requireIntegrationAdmin(c, workspaceId);
     const workspace = await getWorkspace(deps.db, workspaceId);
     c.header("cache-control", "private, no-store");
-    // Organization registrations never cover a Personal workspace.
-    if (!workspace || workspace.accountId !== grant.accountId || workspace.kind !== "shared") {
+    if (!workspace || workspace.accountId !== grant.accountId) {
       return c.json(
         WorkspaceInheritedIntegrationsResponse.parse({ credentialProvider: null, webhooks: [] }),
       );
@@ -439,12 +439,14 @@ export function registerWorkspaceIntegrationRoutes(
     });
     const inheritedProvider =
       organizationProvider?.enabled &&
-      integrationWorkspaceFilterMatches(organizationProvider.workspaceFilter, workspace)
+      organizationCredentialProviderReaches(organizationProvider, workspace)
         ? organizationProvider
         : null;
-    const organizationWebhooks = await listOrganizationWebhooks(deps.db, {
-      accountId: grant.accountId,
-    });
+    // Organization webhooks never cover a Personal workspace.
+    const organizationWebhooks =
+      workspace.kind === "shared"
+        ? await listOrganizationWebhooks(deps.db, { accountId: grant.accountId })
+        : [];
     return c.json(
       WorkspaceInheritedIntegrationsResponse.parse({
         credentialProvider: inheritedProvider

@@ -57,11 +57,18 @@ mock.module("@opengeni/db", () => ({
     fn: (db: unknown) => Promise<unknown>,
   ) => fn(_db),
   isCodexBilledTurn: async () => false,
+  // Knowledge queries run in the app unless an outer scope says otherwise.
+  chargeBillingOrigin: (origin?: "app" | "api" | null) => origin ?? "app",
   SUBSCRIPTION_CORE_XAI_PROVIDER: "xai",
   // Knowledge queries and document indexing carry no inference model, so the
   // imported billing helper must never consult subscription-route funding.
   readSubscriptionCoreFunding: async () => {
     throw new Error("Unexpected subscription-route funding lookup in knowledge fixture");
+  },
+  // Knowledge queries make no own-key model call, so the imported billing
+  // helpers must never read the own-key fee balance.
+  getByokFeeSpendableBalance: async () => {
+    throw new Error("Unexpected own-key fee balance read in knowledge fixture");
   },
   getWorkspaceModelPolicy: async () => creditPolicy,
   sumUsageQuantity: async (_db: unknown, input: { eventType: string }) =>

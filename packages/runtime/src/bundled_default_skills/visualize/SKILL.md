@@ -7,6 +7,7 @@ description: "Create visualizations and interactive tools directly in conversati
 
 - A request for a new standalone file, website, app page, component, or other project change is not an in-conversation visualization request, even when the deliverable contains charts or interactive content.
 - A request to preview, explain, or explore a proposed interface in the conversation is an in-conversation visualization request.
+- A mockup on top of an existing product whose source or running build you can reach is built from that product, not redrawn in a fragment. See UI mockups below.
 - Create a visual only when the user needs to see or explore it in the conversation and it materially improves the explanation. Do not create an inline visual merely because the request involves data, charts, or an interactive page.
 - Use a normal Markdown table when the user asks for a table; return it directly and do not create a visualization file.
 - When the user is choosing among concrete options you found (products, plans, providers, places, candidates), write an `opengeni-ui` options answer instead of HTML or a long table. See Options answers below.
@@ -179,7 +180,9 @@ Choose the smallest composition that fits.
 
 - Include a few thoughtfully chosen design alternatives whenever they would help the user explore a mockup, without waiting for the user to ask. Use compact, labeled local controls for these alternatives. Do not assume a Tweak helper or host annotation API exists. Do not add design controls to charts, explainers, or simulations unless requested.
 - "In the widget" means the in-conversation visualization, not a widget inside the depicted product.
-- Use product and platform context already available in the conversation; don't search the project to render a mockup. Match the product's chrome, navigation, typography, colors, and content. If its design is unavailable, infer one from the platform and request.
+- Sketch a new idea from the product context already in the conversation; don't search a project just to sketch.
+- When the user wants the mockup on top of an existing product whose source or running build you can reach (an open repository, prototype code from earlier work, a running local app), build it from that product instead: make the change in the real source on a scratch branch or worktree, with sample data where the backend is missing, then build or run it and show the compiled result. Show it as screenshots in the reply, or, when the user should click through it, package the built page as a Site (read `sites`) and embed it with `opengeni-site`. Never retype the product's shell, components, or styles into a fragment, and never copy its compiled HTML or CSS into one by hand.
+- When you do draw the product in a fragment, match its chrome, navigation, typography, colors, and content. If its design is unavailable, infer one from the platform and request.
 - NEVER use visualization CSS variables or utility classes inside a mockup (for example, `--card`, `--font-size-base`, `.card`, or `.btn`). Define root-scoped, product-specific colors, typography, surfaces, and controls instead. This rule overrides all general visualization guidance.
 - Keep only the surrounding conversation surface transparent. Give product windows, cards, menus, and popovers opaque backgrounds, and stack overlays above the product content.
 - Follow the host's active appearance with product-specific `light-dark(<light>, <dark>)` colors unless a fixed theme is requested.

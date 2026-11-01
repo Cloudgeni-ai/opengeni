@@ -4,7 +4,7 @@ import { rateLimitKeys, underRateLimit } from "../src/api";
 import { edgeCacheKey } from "../src/edge-cache";
 import { HOST_MISS_CACHE_TTL, shouldWriteBack } from "../src/host-map";
 import type { SiteContext } from "../src/site-context";
-import { EDGE_HTML_TTL, isFrameLoad, siteHtmlEtag } from "../src/version";
+import { EDGE_HTML_TTL, isFrameLoad, siteFrameEtag } from "../src/version";
 
 function record(generation: number, status: SiteHostMapRecord["status"]): SiteHostMapRecord {
   return {
@@ -54,9 +54,17 @@ describe("gateway caches", () => {
     expect(isFrameLoad(load("empty"))).toBe(false);
     // No Fetch Metadata at all (older browsers): served, still sandboxed by its CSP.
     expect(isFrameLoad(load())).toBe(true);
-    expect(await siteHtmlEtag("<p>a</p>")).toBe(await siteHtmlEtag("<p>a</p>"));
-    expect(await siteHtmlEtag("<p>a</p>")).not.toBe(await siteHtmlEtag("<p>b</p>"));
-    expect(await siteHtmlEtag("<p>a</p>")).toMatch(/^"[0-9a-f]{32}"$/u);
+    // Versions are immutable: the ETag names the Site, the version and the gateway's frame format,
+    // so serving or revalidating a page never needs the page whole.
+    const site = "33333333-3333-4333-8333-333333333333";
+    const v1 = "11111111-1111-4111-8111-111111111111";
+    const v2 = "22222222-2222-4222-8222-222222222222";
+    expect(await siteFrameEtag(site, v1)).toBe(await siteFrameEtag(site, v1));
+    expect(await siteFrameEtag(site, v1)).not.toBe(await siteFrameEtag(site, v2));
+    expect(await siteFrameEtag(site, v1)).not.toBe(
+      await siteFrameEtag("44444444-4444-4444-8444-444444444444", v1),
+    );
+    expect(await siteFrameEtag(site, v1)).toMatch(/^"[0-9a-f]{32}"$/u);
   });
 });
 

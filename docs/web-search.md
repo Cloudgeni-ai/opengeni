@@ -83,6 +83,14 @@ results also count as input tokens on later requests.
   `web_search_tool_result` blocks, including the encrypted page content, and
   cited text keeps its citations in `providerData.anthropic.citations`. Claude
   receives all of them back exactly as returned, which Anthropic requires.
+- Anthropic tells Claude to mark quotes with `cite` tags (`index="N-M"` names
+  search result N, sentence M) and turns them into citations only in ordinary
+  answer text. In a `wait_for_input` reply, which is shown verbatim, the
+  transport rewrites each tag into its quoted text, linked to result N counted
+  from 1 across the request's and response's results in order, or plain text
+  when there is no such result. Other tool arguments keep their exact text.
+  Chat timelines, copied text, Slack and Teams show any remaining tag as its
+  text, outside code.
 - A search Claude defers behind Opengeni tool calls resumes on the next
   request. A paused turn (`pause_turn`) is continued inside the transport with
   its content unchanged, up to eight requests in total, and reported as one response.
@@ -105,13 +113,55 @@ including encrypted reasoning, remain enabled. Other providers' includes are unc
 
 The SDK retains returned evidence in canonical history. Before replay and portable
 compaction accounting, `packages/runtime/src/hosted-search-evidence.ts` projects
-included HTTP(S) URLs and text-result titles/snippets into one unprivileged assistant
-historical-evidence message at the original position. It labels web content as
+included HTTP(S) URLs and text-result titles/snippets into one labelled search
+record in the session's record form (below) at the original position. It labels
+web content as
 untrusted, examines at most 64 entries per include, emits at most 20 entries, and
 bounds the serialized message to 32 KiB. Titles/snippets are clipped explicitly;
 URLs are never shortened or rewritten. Omitted evidence is distinguished from
 genuinely empty includes. Provider IDs and arbitrary provider metadata are not
 needed to replay these facts. Canonical hosted items and tool pairing stay intact.
+
+The record must never look like the assistant's own speech. When it did (an
+assistant-role message), GPT models on Azure imitated it and wrote invented
+records as progress text instead of searching. The record is therefore a
+labelled runtime record in the user role (the `runtime` form).
+
+Changing how a session's searches are projected would change text its earlier
+requests already sent and lose the provider's prompt cache, so the form belongs
+to the session (`SearchRecordForm`, stored as `sessions.search_records_as_input`).
+A session keeps the original assistant-role record (the `assistant` form, byte
+for byte what it always sent) while its active history still holds an item the
+two forms project differently (`searchRecordFormMatters`). Once none is left,
+which is from the first turn for a new session and after compaction or clearing
+for an older one, the worker records the move before the turn's first request
+and the session uses the `runtime` form for good. Every model-facing projection
+of a turn reads that one form: its history, the run's own model calls, and
+compaction. Callers that know no session get the `assistant` form. A Claude
+search kept native for the Claude transport carries the session's form as a
+request-local mark (a symbol key, never part of a payload or of storage), so the
+transport projects it in that form when it cannot replay it natively.
+
+In the `runtime` form a record also never separates a tool call from its result
+(`withSearchRecordsAfterOpenCalls`): Chat Completions and Claude require the
+result right after the call, so a record that falls while calls are open moves
+to just after the result that closes them, and the Claude transport places a
+record for Claude's own search in the next user message. Replay turns an
+assistant message that is entirely a record (marker, explanation, one evidence
+JSON object, nothing else) into a short note with the same item identity. For
+every session, the worker's stream filter (`HostedSearchEvidenceEchoGuard`)
+keeps such a copy out of the visible transcript; text that quotes, mentions or
+continues after a record is shown in full. A final output that is only a copy
+counts as an empty reply, so the turn asks once for a real answer.
+
+Trust tradeoff: web titles and snippets now reach the model in the user role.
+The alternatives were worse: the assistant role caused the imitation above, a
+synthetic tool call/result pair invites calls to an undefined tool, and a
+developer or system message would raise web text above the user. The record is
+therefore labelled as untrusted web content and carries the web text only as
+escaped JSON values. On Azure Responses (stateless, encrypted reasoning), a
+mid-turn user-role record was probed against the assistant-role record: earlier
+reasoning still counted in input tokens and the cached prefix was unchanged.
 
 This does not reconstruct evidence absent from older responses, perform another
 search, or guarantee native citation annotations. Sources-only includes supply URLs,
@@ -325,6 +375,35 @@ Every call, billed or not, records a `web_search.search_requests` or
 
 If settlement fails after the provider answered, the model still gets its
 result and the worker logs `web search usage settlement failed`.
+
+### Hosted search on turns Opengeni pays for
+
+Paid tools always cost credit. On a turn whose model Opengeni pays for (cost
+class `credits`) while credit billing is active, hosted search would otherwise
+run free, so one check point, `paidHostedToolsChargeCredits` in
+`packages/config/src/index.ts`, switches such turns to billed tools:
+
+- **Provider tools replace hosted search** whenever the turn gets them, as
+  with `OPENGENI_WEB_SEARCH_PREFER=provider`.
+- **Without a provider tool, hosted search stays and is charged.** Each model
+  response's hosted searches (Claude's reported count, OpenAI's
+  `web_search_call` items) cost $10 per 1,000 plus the web-search margin, as a
+  separate idempotent `web_search_debit` (source `hosted:<turnId>:<response>`).
+  A cost the Gateway reported already includes search and is not charged
+  again.
+- **OpenAI hosted image generation on the deployment's own key is not
+  offered.** The turn uses the priced Gateway image tool instead, so it has no
+  image tool unless the managed Gateway image credential or the workspace's
+  own Gateway key is configured.
+
+Plan credit pays first, the Free plan's monthly credit included whatever
+models its scope lists, then grants that list the turn's model, then general
+credit. API work pays from credits only. Turns on the user's own keys or
+subscriptions, free models, billing-off deployments and legacy billing
+accounts (`OPENGENI_BILLING_LEGACY_ACCOUNT_IDS`) keep free hosted search and
+images. `OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING=false` (default `true`)
+restores that for every turn, for example while the Gateway image credential
+is not set.
 
 ## Evaluating providers
 

@@ -172,7 +172,7 @@ import {
   SlackBotProviderError,
   slackHistoryRateLimited,
 } from "./slack-bot";
-import { slackMrkdwnFromMarkdown } from "./slack-mrkdwn";
+import { slackMrkdwnFromMarkdown, slackMrkdwnKeepingClaudeCiteTags } from "./slack-mrkdwn";
 import {
   isSlackDirectMessageConversation,
   resolveSlackWorkspaceRoute,
@@ -4769,7 +4769,7 @@ async function executeSlackAction(
       return {
         result: "stale",
         stale: true,
-        text: `${mention}This approval is no longer pending.`,
+        text: `${mention}${accepted.message}`,
       };
     }
     await publishDurableSessionEvents(
@@ -6335,30 +6335,55 @@ async function postDelivery(
  * Slack syntax.
  *
  * The post and update ledgers bind an operation id to a digest over the exact
- * bytes, and an operation an earlier release already bound to the unformatted
- * bytes (a claimed-but-unposted row, a response-loss retry, or a page replayed
- * across the deploy) must keep them, or every retry would conflict and wedge
- * the interaction. The ledger reports that conflict from its durable claim,
- * before any Slack write, so one retry with the unformatted bytes under the
- * same operation id is safe. The id itself never changes: action handles and
- * the post lookups keyed on it stay exact, and a new operation always carries
- * the formatted bytes.
+ * bytes, and an operation an earlier release already bound to other bytes (a
+ * claimed-but-unposted row, a response-loss retry, or a page replayed across
+ * the deploy) must keep them, or every retry would conflict and wedge the
+ * interaction. Earlier releases sent the unformatted bytes, then the
+ * formatting from before Claude citation tags were rewritten. The ledger
+ * reports a conflict from its durable claim, before any Slack write, so
+ * retrying with each earlier rendering that differs under the same operation
+ * id is safe. The id itself never changes: action handles and the post lookups
+ * keyed on it stay exact, and a new operation always carries the current
+ * formatting.
  */
 async function deliverSlackModelText(
   deliver: (format: (text: string) => string) => Promise<unknown>,
 ): Promise<void> {
-  let formatted = false;
-  try {
-    await deliver((text) => {
-      const slackText = slackMrkdwnFromMarkdown(text);
-      if (slackText !== text) formatted = true;
-      return slackText;
-    });
-  } catch (error) {
-    if (!formatted || !(error instanceof SlackBotOperationConflictError)) throw error;
-    await deliver((text) => text);
+  const texts: string[] = [];
+  let attempt = 0;
+  for (;;) {
+    const render = SLACK_MODEL_TEXT_RENDERINGS[attempt]!;
+    try {
+      await deliver((text) => {
+        if (attempt === 0) texts.push(text);
+        return render(text);
+      });
+      return;
+    } catch (error) {
+      if (!(error instanceof SlackBotOperationConflictError)) throw error;
+      // The next rendering that gives any of these texts bytes no earlier
+      // attempt sent; one that sends the same bytes would conflict the same way.
+      const next = SLACK_MODEL_TEXT_RENDERINGS.findIndex(
+        (candidate, index) =>
+          index > attempt &&
+          texts.some((text) =>
+            SLACK_MODEL_TEXT_RENDERINGS.slice(0, index).every(
+              (earlier) => earlier(text) !== candidate(text),
+            ),
+          ),
+      );
+      if (next < 0) throw error;
+      attempt = next;
+    }
   }
 }
+
+/** Current Slack formatting first, then each rendering an earlier release used. */
+const SLACK_MODEL_TEXT_RENDERINGS: readonly ((text: string) => string)[] = [
+  slackMrkdwnFromMarkdown,
+  slackMrkdwnKeepingClaudeCiteTags,
+  (text) => text,
+];
 
 async function enqueueNormalizedSlackInteraction(
   deps: ApiRouteDeps,

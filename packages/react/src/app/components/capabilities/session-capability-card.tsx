@@ -161,7 +161,14 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   // this card never offers a connection the agent was told isn't possible.
   // Until the grant has loaded, offer the card; the API still enforces access.
   const setup =
-    capability && grant ? inChatCapabilitySetup(grant, capability.id, resolved) : undefined;
+    capability && grant
+      ? inChatCapabilitySetup(
+          grant,
+          capability.id,
+          resolved,
+          context.workspaceMemberIntegrationSetup,
+        )
+      : undefined;
   if (setup?.kind === "unavailable") return <AuthNeededRow item={item} setupUnavailable />;
   if (capability?.kind === "plugin") {
     return (
@@ -529,7 +536,7 @@ function SessionCapabilitySetup({
           canManageSkills: hasWorkspacePermission(
             context.accessContext,
             workspaceId,
-            "capabilities:manage",
+            "documents:manage",
           ),
           refresh: catalog.refresh,
           onRuntimeChanged: () => {
@@ -674,7 +681,7 @@ function SessionCapabilitySetup({
           canManageSkills={hasWorkspacePermission(
             context.accessContext,
             workspaceId,
-            "capabilities:manage",
+            "documents:manage",
           )}
           onAction={(action) => void act(action)}
           nobodyToShareWith={nobodyToShareWith}

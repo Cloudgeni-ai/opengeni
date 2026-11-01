@@ -31,6 +31,7 @@ export function BotTemplateDialog({
   seed,
   mode,
   initial,
+  canMakePrivate = true,
   onSubmit,
 }: {
   open: boolean;
@@ -40,6 +41,8 @@ export function BotTemplateDialog({
   /** `save`: from a chat; `new`: from scratch; `edit`: a saved template. */
   mode: "save" | "new" | "edit";
   initial: BotTemplateValues;
+  /** False when only whoever saved it, or an admin, could make it Only me. */
+  canMakePrivate?: boolean;
   onSubmit: (values: BotTemplateValues) => Promise<void>;
 }) {
   const [setup, setSetup] = useState(initial.setupInstructions);
@@ -116,18 +119,24 @@ export function BotTemplateDialog({
       <Field
         label="Who can use it"
         hint={
-          visibility === "private"
-            ? "Only you see it in Bot templates."
-            : "Everyone in this workspace can start bots from it."
+          !canMakePrivate
+            ? "Only whoever saved it, or an admin, can make it Only me."
+            : visibility === "private"
+              ? "Only you see it in Bot templates."
+              : "Everyone in this workspace can start bots from it."
         }
       >
-        <SegmentedControl
-          size="sm"
-          aria-label="Who can use it"
-          options={VISIBILITY_OPTIONS}
-          value={visibility}
-          onValueChange={setVisibility}
-        />
+        {canMakePrivate ? (
+          <SegmentedControl
+            size="sm"
+            aria-label="Who can use it"
+            options={VISIBILITY_OPTIONS}
+            value={visibility}
+            onValueChange={setVisibility}
+          />
+        ) : (
+          <p className="text-sm text-fg">Everyone in the workspace</p>
+        )}
       </Field>
     </SessionProfileDialog>
   );
