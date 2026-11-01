@@ -1,4 +1,5 @@
 import {
+  assertOrganizationsContentExchangeAllowed,
   assertOrganizationContentExchangeAllowed,
   findActiveApiKeyByHash,
   type Database,
@@ -31,11 +32,7 @@ export async function assertMcpCredentialContentFlowAllowed(
     headers?: Record<string, string> | null | undefined;
   },
 ): Promise<void> {
-  const keys = new Set<string>();
-  for (const value of [input.url ?? "", ...Object.values(input.headers ?? {})]) {
-    for (const match of value.matchAll(OPENGENI_KEY)) keys.add(match[0]);
-  }
-  for (const key of keys) {
+  for (const key of opengeniKeys(input)) {
     const apiKey = await findActiveApiKeyByHash(db, await sha256Hex(key));
     // Not a live key: it reaches nothing.
     if (!apiKey) continue;
@@ -44,4 +41,39 @@ export async function assertMcpCredentialContentFlowAllowed(
       here: input.target,
     });
   }
+}
+
+/**
+ * The same check for an organization connector, which serves every workspace
+ * its reach selects (and the reach can change): a stored Opengeni key is
+ * refused unless content may move both ways between every workspace of the
+ * connector's organization and every workspace of the key's.
+ */
+export async function assertOrganizationMcpCredentialContentFlowAllowed(
+  db: Database,
+  input: {
+    accountId: string;
+    url?: string | null | undefined;
+    headers?: Record<string, string> | null | undefined;
+  },
+): Promise<void> {
+  for (const key of opengeniKeys(input)) {
+    const apiKey = await findActiveApiKeyByHash(db, await sha256Hex(key));
+    if (!apiKey) continue;
+    await assertOrganizationsContentExchangeAllowed(db, {
+      accountId: input.accountId,
+      otherAccountId: apiKey.accountId,
+    });
+  }
+}
+
+function opengeniKeys(input: {
+  url?: string | null | undefined;
+  headers?: Record<string, string> | null | undefined;
+}): Set<string> {
+  const keys = new Set<string>();
+  for (const value of [input.url ?? "", ...Object.values(input.headers ?? {})]) {
+    for (const match of value.matchAll(OPENGENI_KEY)) keys.add(match[0]);
+  }
+  return keys;
 }

@@ -546,9 +546,13 @@ for it. Up to 16 values are saved per result, four at a time; the rest are
 saved from a later result. A value that got a marker is detected and saved
 again from the next result that contains it. An attempt captures into its root session's Task vault only
 while it holds fewer than 200 captured items (attempts running at the same
-time in one session tree can go slightly over). When saving is not possible (the secrets capability is off,
-the attempt cannot write to the Task vault, the capture or vault limit is
-reached, any error), the value is replaced by a marker such as
+time in one session tree can go slightly over). A session whose first-party
+permissions are narrowed to a list without `secrets:use`,
+`variable-sets:use`, `variable-sets:attach` or `environments:use` has no Task
+vault, so its attempts do not try to save and use markers from the start.
+When saving is not possible (the secrets capability is off, the agent may not
+use secrets, the attempt cannot write to the Task vault, the capture or vault
+limit is reached, any error), the value is replaced by a marker such as
 `[masked url password]` and the tool call still succeeds. After three failed
 saves in a row an attempt stops trying and writes markers. A save that
 finishes after the wait upgrades the marker to the reference from the next

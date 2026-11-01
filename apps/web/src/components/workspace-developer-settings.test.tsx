@@ -454,10 +454,20 @@ describe("organization credential provider", () => {
   const organizationId = "77777777-7777-4777-8777-777777777777";
   const path = `/v1/organizations/${organizationId}/credential-provider`;
 
+  const design = "88888888-8888-4888-8888-888888888888";
+  const sales = "99999999-9999-4999-8999-999999999999";
+
   function organizationClient(initial: Record<string, unknown> | null) {
     let stored = initial;
     const writes: Array<Record<string, unknown>> = [];
     const requestJson = mock(async (method: string, url: string, body?: unknown) => {
+      if (method === "GET" && url === `/v1/organizations/${organizationId}/overview`)
+        return {
+          workspaces: [
+            { id: design, name: "Design" },
+            { id: sales, name: "Sales" },
+          ],
+        };
       if (url !== path) throw new Error(`unexpected ${method} ${url}`);
       if (method === "GET") return { provider: stored };
       if (method === "PUT") {
@@ -505,8 +515,74 @@ describe("organization credential provider", () => {
         timeoutMs: 10000,
         workspaceFilter: null,
         allowPersonalWorkspaces: true,
+        allowedWorkspaceIds: null,
       },
     ]);
+  });
+
+  test("Selected workspaces sends only the ticked shared workspaces", async () => {
+    const { client: api, writes } = organizationClient(null);
+    const container = await organizationPage(api, { view: "connect-credential-provider" });
+    await type(
+      container.querySelector<HTMLInputElement>("#credential-provider-url")!,
+      "https://product.example/credentials",
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('button[role="radio"][value="selected"]')!.click(),
+    );
+    await flush();
+    const designBox = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    ).find((box) => box.closest("div")?.textContent?.includes("Design"))!;
+    expect(container.textContent).toContain("Sales");
+    await act(async () => designBox.click());
+    await submitForm(container);
+    await flush();
+    expect(writes).toEqual([
+      {
+        url: "https://product.example/credentials",
+        enabled: true,
+        timeoutMs: 10000,
+        workspaceFilter: null,
+        allowPersonalWorkspaces: false,
+        allowedWorkspaceIds: [design],
+      },
+    ]);
+  });
+
+  test("Selected workspaces with none ticked asks for one, unless Personal workspaces are on", async () => {
+    const { client: api, writes } = organizationClient(null);
+    const container = await organizationPage(api, { view: "connect-credential-provider" });
+    await type(
+      container.querySelector<HTMLInputElement>("#credential-provider-url")!,
+      "https://product.example/credentials",
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('button[role="radio"][value="selected"]')!.click(),
+    );
+    await flush();
+    await submitForm(container);
+    await flush();
+    expect(writes).toEqual([]);
+    expect(container.textContent).toContain(
+      "Pick at least one workspace, or turn on Personal workspaces.",
+    );
+  });
+
+  test("the provider's page says how many shared workspaces it serves", async () => {
+    const { client: api } = organizationClient({
+      organizationId,
+      url: "https://product.example/credentials",
+      enabled: true,
+      timeoutMs: 10000,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      workspaceFilter: null,
+      allowPersonalWorkspaces: true,
+      allowedWorkspaceIds: [design, sales],
+    });
+    const container = await organizationPage(api, { view: "credential-provider" });
+    expect(container.textContent).toContain("2 shared workspaces, plus Personal workspaces");
   });
 
   test("resuming keeps the Personal switch, because every save replaces the configuration", async () => {
@@ -538,7 +614,10 @@ describe("organization credential provider", () => {
   test("without the Personal choice (webhooks), the field says Personal workspaces are never included", async () => {
     const { WorkspaceFilterField } = await import("./developer/workspace-filter-field");
     const container = await render(
-      <WorkspaceFilterField value={null} onChange={() => undefined} />,
+      <WorkspaceFilterField
+        value={{ filter: null, workspaceIds: null }}
+        onChange={() => undefined}
+      />,
     );
     expect(container.textContent).toContain("Personal workspaces are never included.");
     expect(container.querySelector('input[type="checkbox"]')).toBeNull();
