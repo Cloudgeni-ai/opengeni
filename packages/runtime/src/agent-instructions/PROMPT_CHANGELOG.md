@@ -1,5 +1,26 @@
 # Modular prompt changelog
 
+The agent knows both GitHub identities. When personal GitHub sign-in is
+enabled on the deployment (new `personalGitHub` resource fact) and
+`github_connect_link` is available, the admin module adds one sentence (about
+195 bytes) mapping "connect my GitHub" or "do it as me" to the person's own
+account (Your GitHub) and "install the GitHub app" to the Opengeni app. The
+repositories module gains a "GitHub identity per mounted repository:" block
+only when a repository is mounted as the person: one bullet per GitHub
+repository (as the person, with their login when known, or as the Opengeni
+app), plus a sentence saying to use plain git and the github_personal__* tools
+on personal repositories because gh and raw GitHub API calls do not act as the
+person, and, with both identities, a sentence pointing to the github_app__*
+tools. With a personal repository, the gh sentence is limited to repositories
+not mounted as the person. Deployments without personal sign-in and sessions
+that mount only Opengeni app repositories render byte-for-byte as before. The
+`github_connect_link` description and response add the `personal` identity
+(see docs/github-app.md).
+
+```diff
++ For GitHub, `github_connect_link` reports both identities: 'connect my GitHub' or 'do it as me' means the person's own account (Your GitHub), and 'install the GitHub app' means the Opengeni app.
+```
+
 Automatic chat titles are written in the language the person writes in, and
 a chat that has only a greeting, thanks or small talk stays untitled until it
 has a task, question or subject. The title request's instructions

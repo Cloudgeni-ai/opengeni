@@ -194,6 +194,27 @@ function called(observation: RunObservation, pattern: RegExp, sessionIndex?: num
   return toolNames(observation, sessionIndex).some((name) => pattern.test(name));
 }
 
+/** Capability IDs the agent asked to show a setup card for. */
+function capabilityCardRequests(observation: RunObservation): string[] {
+  return observation.sessions
+    .flatMap((session) => session.toolCalls)
+    .filter((call) => call.name === "capability_authorization_request")
+    .flatMap((call) => {
+      const args =
+        typeof call.arguments === "string"
+          ? (() => {
+              try {
+                return JSON.parse(call.arguments) as unknown;
+              } catch {
+                return null;
+              }
+            })()
+          : call.arguments;
+      const id = (args as { capabilityId?: unknown } | null)?.capabilityId;
+      return typeof id === "string" ? [id] : [];
+    });
+}
+
 function finalAnswer(observation: RunObservation, sessionIndex = 0): string {
   return observation.sessions[sessionIndex]?.finalAnswer ?? "";
 }
@@ -853,6 +874,86 @@ export const SCENARIOS: Scenario[] = [
     },
     judgeRubric:
       "5 = either creates a real schedule and states the details, or clearly explains the limitation and offers a concrete alternative; 1 = claims it was set up without doing so.",
+  },
+  {
+    id: "p-connect-my-github",
+    title: "Connect my GitHub (personal identity)",
+    intent:
+      "'Connect my GitHub' leads to the person's own GitHub identity (Your GitHub), not the workspace Opengeni app.",
+    informational: true,
+    requiresAnyTool: {
+      tools: ["github_connect_link", "capability_authorization_request"],
+      reason: "GitHub tools unavailable in this runtime",
+    },
+    run: (ctx) =>
+      singleSession(ctx, {
+        messages: ["Connect my GitHub so you can open pull requests as me."],
+      }),
+    checks: (o) => {
+      const requested = capabilityCardRequests(o);
+      const answer = finalAnswer(o);
+      return [
+        check(
+          "status-or-card",
+          "read github_connect_link or requested the api:github-personal card",
+          called(o, /^github_connect_link$/u) || requested.includes("api:github-personal"),
+          toolNames(o).join(", "),
+          true,
+        ),
+        check(
+          "not-the-app",
+          "did not request the GitHub App card",
+          !requested.includes("api:github-app"),
+          requested.join(", "),
+          true,
+        ),
+        check(
+          "personal-link",
+          "gives the personal connect link or card (github=personal or the card)",
+          requested.includes("api:github-personal") || /github=personal/u.test(answer),
+          answer.slice(0, 200),
+          true,
+        ),
+      ];
+    },
+    judgeRubric:
+      "5 = offers the personal Your GitHub connect card or link and says work will appear under the person's name; 3 = right identity but confusing or mentions the app install as the step; 1 = sends the GitHub App install link.",
+  },
+  {
+    id: "q-install-github-app",
+    title: "Install the GitHub app (workspace bot)",
+    intent:
+      "'Install the GitHub app on our org' leads to the Opengeni app install link, not the personal identity.",
+    informational: true,
+    requiresAnyTool: {
+      tools: ["github_connect_link", "capability_authorization_request"],
+      reason: "GitHub tools unavailable in this runtime",
+    },
+    run: (ctx) =>
+      singleSession(ctx, {
+        messages: ["Install the GitHub app on our acme org so Opengeni can access our repos."],
+      }),
+    checks: (o) => {
+      const requested = capabilityCardRequests(o);
+      return [
+        check(
+          "status-or-card",
+          "read github_connect_link or requested the api:github-app card",
+          called(o, /^github_connect_link$/u) || requested.includes("api:github-app"),
+          toolNames(o).join(", "),
+          true,
+        ),
+        check(
+          "not-personal",
+          "did not request the Your GitHub card",
+          !requested.includes("api:github-personal"),
+          requested.join(", "),
+          true,
+        ),
+      ];
+    },
+    judgeRubric:
+      "5 = gives the Opengeni app install link or card and says work appears as the Opengeni bot; 3 = right identity but unclear; 1 = offers the personal connect flow instead.",
   },
 ];
 

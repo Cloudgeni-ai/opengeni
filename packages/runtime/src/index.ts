@@ -438,6 +438,7 @@ import {
   UNATTENDED_SESSION_GUIDANCE,
   workspaceEnvironmentInstructions,
   type AgentPromptExperiments,
+  type AgentPromptRepositoryIdentity,
   type AgentPromptResources,
   type AgentPromptToolAvailability,
   type RigInstructionsContext,
@@ -458,6 +459,7 @@ export {
   workspaceEnvironmentInstructions,
   type AgentPromptContext,
   type AgentPromptExperiments,
+  type AgentPromptRepositoryIdentity,
   type AgentPromptResources,
   type AgentPromptToolAvailability,
   type AgentPromptToolAvailabilityInput,
@@ -2556,6 +2558,12 @@ export type BuildAgentOptions = {
   // the historical instruction composition byte-for-byte.
   workspaceGovernance?: string;
   workspaceEnvironment?: WorkspaceEnvironmentContext;
+  /**
+   * GitHub login of the person whose personal GitHub identity repositories in
+   * this session are mounted with. Prompt text only: never a credential, and
+   * omitted keeps the repository identity clause generic.
+   */
+  personalGitHubLogin?: string;
   // M3 rig runtime binding (all absent ⇒ a rig-less turn, byte-for-byte today).
   //  - `rig`: renders the non-bypassable rig doctrine block in the CORE.
   //  - `rigSetup`: the rig version's setup script, run ONCE per box (marker-
@@ -2833,12 +2841,16 @@ export function agentPromptResourcesFor(
     | "rig"
     | "secrets"
     | "unattended"
+    | "personalGitHubLogin"
   >,
 ): AgentPromptResources {
   const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
   const connectedMachine = backend === "selfhosted";
   const managedSandbox = backend !== "none" && !connectedMachine;
   const gitTokenSeeds = Object.values(options.gitTokenSeeds ?? {}).filter(Boolean);
+  const repositoryIdentities = managedSandbox
+    ? repositoryIdentitiesFor(resources, options.personalGitHubLogin)
+    : [];
   return {
     managedSandbox,
     connectedMachine,
@@ -2853,7 +2865,48 @@ export function agentPromptResourcesFor(
     ...(options.rig ? { rig: options.rig } : {}),
     ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
     ...(options.unattended ? { unattended: true } : {}),
+    ...(settings.githubPersonalOauthEnabled ? { personalGitHub: true } : {}),
+    ...(repositoryIdentities.length > 0 ? { repositoryIdentities } : {}),
   };
+}
+
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u;
+
+/**
+ * Which GitHub identity each mounted GitHub repository acts as: the person's
+ * own account (a personal GitHub resource) or the workspace Opengeni app (an
+ * installation-scoped resource). Other repositories are not listed, and an
+ * App-only session lists none, so its prompt stays byte-identical.
+ */
+export function repositoryIdentitiesFor(
+  resources: readonly ResourceRef[],
+  personalGitHubLogin?: string,
+): AgentPromptRepositoryIdentity[] {
+  const login =
+    personalGitHubLogin && GITHUB_LOGIN.test(personalGitHubLogin) ? personalGitHubLogin : undefined;
+  const identities = resources.flatMap((resource): AgentPromptRepositoryIdentity[] => {
+    if (resource.kind !== "repository") return [];
+    const identity =
+      resource.connectionType === "github_personal"
+        ? "personal"
+        : gitCredentialProviderForRepository(resource) === "github" &&
+            (resource.githubInstallationId ?? resource.installationId)
+          ? "app"
+          : null;
+    if (!identity) return [];
+    let path: string;
+    try {
+      path = resourceMountPath(resource);
+    } catch {
+      // Prompt text only: a repository without a mount path is left out here
+      // and fails, if at all, where it is materialized.
+      return [];
+    }
+    return identity === "personal"
+      ? [{ path, identity, ...(login ? { login } : {}) }]
+      : [{ path, identity }];
+  });
+  return identities.some((entry) => entry.identity === "personal") ? identities : [];
 }
 
 /** Deployment prompt experiments; absent when every experiment is off. */

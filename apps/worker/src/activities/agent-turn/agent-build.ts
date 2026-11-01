@@ -64,6 +64,7 @@ import {
 } from "../image-generation-references";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { managedCodemodeClientDownload } from "./codemode-client-download";
+import { personalGitHubLoginForTurn } from "./personal-github-login";
 import { withSandboxStartupPhases } from "./sandbox-startup-phase";
 import {
   VideoGenerationRejectedResult,
@@ -804,6 +805,21 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     agent: session.agent,
     vaultAccess: deps.vaultAccess,
   });
+  // Prompt text only: the repositories module names the person's login for
+  // repositories mounted as them in a managed sandbox. Best effort and never
+  // an authority; a failed read only drops the login from that turn's prompt.
+  const promptBackend = activeSandboxBackend ?? groupBoxBackend;
+  const personalGitHubLogin =
+    session.agent &&
+    promptBackend !== "selfhosted" &&
+    promptBackend !== "none" &&
+    runtimeResources.some(
+      (resource) =>
+        resource.kind === "repository" &&
+        (resource as { connectionType?: string }).connectionType === "github_personal",
+    )
+      ? await personalGitHubLoginForTurn(db, turn.personalConnectionDelegations)
+      : undefined;
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
@@ -831,6 +847,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
         ...(session.agent ? { agentConfig: session.agent, toolRouterInHistory } : {}),
+        ...(personalGitHubLogin ? { personalGitHubLogin } : {}),
         ...(session.agent && promptToolAvailability
           ? { agentPromptToolAvailability: promptToolAvailability }
           : {}),
