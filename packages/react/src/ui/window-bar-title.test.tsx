@@ -35,11 +35,19 @@ function Header({ title }: { title: string }) {
 }
 
 /** The catalog stays mounted and hidden while a page is open in front of it. */
-function Catalog({ pageOpen, boundary }: { pageOpen: boolean; boundary: boolean }) {
+function Catalog({
+  pageOpen,
+  boundary,
+  page = "Slack",
+}: {
+  pageOpen: boolean;
+  boundary: boolean;
+  page?: string;
+}) {
   const header = <Header title="Capabilities" />;
   return (
     <windowBar.WindowBarPageTitle enabled>
-      {pageOpen ? <Header title="Slack" /> : null}
+      {pageOpen ? <Header key={page} title={page} /> : null}
       <div hidden={pageOpen}>
         {boundary ? (
           <titles.WindowBarTitleBoundary when={pageOpen}>{header}</titles.WindowBarTitleBoundary>
@@ -71,13 +79,18 @@ test("a page opened in front of a hidden, mounted page takes the window bar", as
   expect(view.bar()).toBe("Capabilities");
   await view.render(<Catalog pageOpen boundary />);
   expect(view.bar()).toBe("Slack");
+  // A page that replaces the open one (the Slack agent form) takes the bar too.
+  await view.render(<Catalog pageOpen boundary page="New Slack agent" />);
+  expect(view.bar()).toBe("New Slack agent");
   await view.render(<Catalog pageOpen={false} boundary />);
   expect(view.bar()).toBe("Capabilities");
+  await view.render(<Catalog pageOpen boundary />);
+  expect(view.bar()).toBe("Slack");
   await view.unmount();
 });
 
-test("without the boundary the first-mounted header keeps the bar", async () => {
-  // Why the catalog needs it: claims go in mount order.
+test("claims go in mount order, so a hidden header mounted first keeps the bar", async () => {
+  // Documents the rule the boundary works around, not a desired outcome.
   const view = await mount(<Catalog pageOpen={false} boundary={false} />);
   await view.render(<Catalog pageOpen boundary={false} />);
   expect(view.bar()).toBe("Capabilities");

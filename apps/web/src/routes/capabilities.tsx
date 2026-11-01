@@ -1781,6 +1781,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     : null;
   const pageOpen = openKey !== null;
   let detailPage: ReactNode = null;
+  // Whether the open page has a header to name it in the macOS window bar.
+  let detailPageTitled = true;
   if (openIntegrationModel) {
     const back = backFrom(openIntegrationModel.id);
     detailPage =
@@ -1891,6 +1893,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       openKey.startsWith("integration:") ||
       openKey.startsWith("service:"))
   ) {
+    detailPageTitled = false;
     detailPage = (
       <DetailPage back={{ label: "Capabilities", onClick: () => goTo(null) }}>
         {loading ? (
@@ -1973,8 +1976,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           className="mx-auto w-full max-w-[1200px] px-4 pt-6 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:px-6 lg:px-8"
         >
           <LineTabs value={activeTab} onValueChange={setActiveTab} className="min-w-0">
-            {/* Hidden under an open page, the catalog leaves the window bar to that page. */}
-            <WindowBarTitleBoundary when={pageOpen}>
+            {/*
+              Hidden under an open page, the catalog's header leaves the macOS
+              window bar to that page. Only the header: skill, plugin and bundle
+              pages render inside this tree (portaled out) and take the bar.
+            */}
+            <WindowBarTitleBoundary when={pageOpen && detailPageTitled}>
               <PageHeader
                 icon={<PlugIcon />}
                 title="Capabilities"
