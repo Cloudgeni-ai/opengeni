@@ -17,7 +17,8 @@
 // Per-machine changes (command policy, screen control, privacy panes, agent
 // update) follow the machine's scope (../sandbox/machine-authority.ts): the
 // owner changes their own Only me machine; workspace machines need
-// enrollments:manage and organization machines also account:admin.
+// enrollments:manage and organization machines also the organization's owner
+// or an admin.
 
 import {
   ChangeMachineAudienceRequest,

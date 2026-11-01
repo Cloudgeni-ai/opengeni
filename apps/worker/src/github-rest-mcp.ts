@@ -1,6 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import {
   mergeToolRefs,
+  resourcesIncludeRepository,
   type McpPersonalConnectionDelegation,
   type ResourceRef,
   type ToolRef,
@@ -13,6 +14,7 @@ import { personalGitHubRepositoryResources } from "@opengeni/core";
 import {
   getConnectionMetadata,
   getPersonalGitHubRepositorySelectionState,
+  getSessionResourcesForAuthority,
   hasAuditableGitHubInstallationAuthority,
   listGitHubInstallationAccessForWorkspace,
   resolveAcceptedConnectionUse,
@@ -35,6 +37,7 @@ import {
   GITHUB_REST_READ_TOOL_NAMES,
   GITHUB_REST_TOOL_NAMES,
   GitHubRestAuthorityError,
+  GitHubRestRepositoryDetachedError,
   githubRestConnectorActionOutcome,
   GitHubRestMcpServer,
   type GitHubRestRepository,
@@ -236,12 +239,34 @@ function personalRepositoryAuthority(
   });
 }
 
+/**
+ * Session membership is live authority: a repository removed from the chat
+ * stops working on the next call, even for a turn, child or goal
+ * continuation that captured an older resource snapshot.
+ */
+async function assertRepositoryStillAttached(
+  input: { db: Database; workspaceId: string; sessionId: string },
+  repository: GitHubRestRepository,
+): Promise<void> {
+  const resources = await getSessionResourcesForAuthority(
+    input.db,
+    input.workspaceId,
+    input.sessionId,
+  );
+  if (!resources || !resourcesIncludeRepository(resources, repository.canonicalUrl)) {
+    throw new GitHubRestRepositoryDetachedError(
+      `${repository.fullName} was removed from this chat`,
+    );
+  }
+}
+
 function workspaceAppAuthorityResolver(
   input: {
     db: Database;
     settings: Settings;
     accountId: string;
     workspaceId: string;
+    sessionId: string;
   },
   repositories: GitHubRestRepository[],
 ): ConstructorParameters<typeof GitHubRestMcpServer>[0]["resolveAuthority"] {
@@ -258,6 +283,7 @@ function workspaceAppAuthorityResolver(
     if (!installationId || !Number.isSafeInteger(repositoryId)) {
       throw new GitHubRestAuthorityError("GitHub App repository binding changed");
     }
+    await assertRepositoryStillAttached(input, repository);
     const installations = await listGitHubInstallationAccessForWorkspace(
       input.db,
       input.workspaceId,
@@ -413,6 +439,7 @@ async function validatePersonalRepository(
   repository: GitHubRestRepository,
   validateAcceptedUse: boolean,
 ) {
+  await assertRepositoryStillAttached(input, repository);
   const delegation = exactPersonalDelegation(input.turn.personalConnectionDelegations);
   if (delegation.connectionId !== repository.connectionId || !delegation.originWorkspaceId) {
     throw new GitHubRestAuthorityError("Personal GitHub delegation changed");

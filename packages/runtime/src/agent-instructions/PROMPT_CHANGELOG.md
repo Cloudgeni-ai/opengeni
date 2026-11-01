@@ -1,5 +1,40 @@
 # Modular prompt changelog
 
+The agent knows both GitHub identities. When personal GitHub sign-in is
+enabled on the deployment (new `personalGitHub` resource fact) and
+`github_connect_link` is available, the admin module adds one sentence (about
+195 bytes) mapping "connect my GitHub" or "do it as me" to the person's own
+account (Your GitHub) and "install the GitHub app" to the Opengeni app. The
+repositories module gains a "GitHub identity per mounted repository:" block
+only when a repository is mounted as the person: one bullet per GitHub
+repository (as the person, with their login when known, or as the Opengeni
+app), plus a sentence saying to use plain git and the github_personal__* tools
+on personal repositories because gh and raw GitHub API calls do not act as the
+person, and, with both identities, a sentence pointing to the github_app__*
+tools. With a personal repository, the gh sentence is limited to repositories
+not mounted as the person. Deployments without personal sign-in and sessions
+that mount only Opengeni app repositories render byte-for-byte as before. The
+`github_connect_link` description and response add the `personal` identity
+(see docs/github-app.md).
+
+```diff
++ For GitHub, `github_connect_link` reports both identities: 'connect my GitHub' or 'do it as me' means the person's own account (Your GitHub), and 'install the GitHub app' means the Opengeni app.
+```
+
+Automatic chat titles are written in the language the person writes in, and
+a chat that has only a greeting, thanks or small talk stays untitled until it
+has a task, question or subject. The title request's instructions
+(`SESSION_TITLE_GENERATION_INSTRUCTIONS`, a separate single call outside the
+agent's conversation) say so and answer exactly `NO_TITLE` when there is
+nothing to name yet. That answer saves no title, so a later turn titles the
+chat. On a later turn the title request also receives that turn's message
+after the chat's first message. The descriptions of the agent's
+`opengeni__set_session_title` tool and the first-party MCP `set_session_title`
+tool gain the same two rules: write the label in the person's language, and
+call it once the chat has a task, question or subject, not while it holds only
+a greeting or small talk. Nothing else in the instructions or tool list
+changes.
+
 Privacy questions are answered from server facts. One bullet joins "Rules for
 getting work done" in both the legacy CORE and the modular base behavior (about
 210 bytes): answer questions about privacy, retention, training, the model or

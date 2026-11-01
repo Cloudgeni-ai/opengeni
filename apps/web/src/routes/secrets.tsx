@@ -71,9 +71,9 @@ import { useAppContext } from "@opengeni/react/app/app-context";
 import { orgLabel } from "@opengeni/react/app/lib/org";
 import {
   canManageWorkspaceSettings,
-  hasAccountPermission,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import {
   connectViewProvider,
   type SecretsConnectOwner,
@@ -223,9 +223,12 @@ export function SecretsRoute({
   const canUse = can("secrets:use");
   const workspaceGrant = access.workspaceGrants.find((grant) => grant.workspaceId === workspaceId);
   const accountId = workspaceGrant?.accountId ?? null;
-  const canManageOrganization = Boolean(
-    accountId && hasAccountPermission(access, accountId, "account:admin"),
-  );
+  // Organization vaults: the owner or an admin, as the server allows.
+  const canManageOrganization = canAdministerOrganization({
+    accessContext: access,
+    clientConfig: context.clientConfig,
+    accountId,
+  });
   const canWriteWorkspace = can("secrets:write");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const organizationName = workspace

@@ -38,6 +38,8 @@ import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
 import { RepeatedMachineRequestNote, SessionMachineCapabilityCard } from "./session-machine-card";
 import { SessionChromeCapabilityCard } from "./session-chrome-card";
+import { SessionPersonalGitHubCapabilityCard } from "./session-personal-github-card";
+import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import { useNobodyToShareWith } from "../../lib/workspace-sharing";
 import { SessionPluginCapabilityCard } from "./session-plugin-card";
 import { usePage } from "../../lib/navigation";
@@ -139,6 +141,15 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         resources={props.resources}
         sendContext={props.sendContext}
         onConfigured={props.onConfigured}
+      />
+    );
+  }
+  if (capability?.id === PERSONAL_GITHUB_CAPABILITY_ID) {
+    return (
+      <SessionPersonalGitHubCapabilityCard
+        key={`${props.workspaceId}:${props.sessionId}`}
+        item={item}
+        workspaceId={props.workspaceId}
       />
     );
   }

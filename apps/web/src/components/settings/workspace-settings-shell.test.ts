@@ -233,6 +233,8 @@ describe("settings rail", () => {
         "People",
         "Workspaces",
         "Organization identity",
+        // Everything the organization shares, and where each works.
+        "Shared",
         // Every model setting, each workspace's included, lives on Organization > Models.
         "Models",
         "Integrations",
@@ -244,7 +246,7 @@ describe("settings rail", () => {
       ]);
       expect(
         Array.from(organizationSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([4, 7]);
+      ).toEqual([4, 8]);
       for (const link of Array.from(organizationSection!.querySelectorAll("a"))) {
         expect(link.getAttribute("href")).toBe(`${base}/organization`);
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");

@@ -333,12 +333,11 @@ test("the switch shows only where it pauses a schedule the viewer can change", (
   expect(canSwitchSchedule(schedule("a", "Mine", "active"), { ...manager, canManage: false })).toBe(
     false,
   );
-  // A sync that would run once on, and ones stopped by their source or connection.
-  expect(canSwitchSchedule(sync("s", "paused", { sourceEnabled: true }), manager)).toBe(true);
+  // Integration Knowledge sync is retired: no saved sync can be switched on.
+  expect(canSwitchSchedule(sync("s", "paused", { sourceEnabled: true }), manager)).toBe(false);
   expect(canSwitchSchedule(sync("s", "active", { sourceEnabled: false }), manager)).toBe(false);
-  expect(canSwitchSchedule(sync("s", "paused", { sourceEnabled: false }), manager)).toBe(false);
   expect(canSwitchSchedule(sync("s", "active", { connectionPaused: true }), manager)).toBe(false);
-  // A retired sync.
+  // A provider-specific retired sync.
   const retired = {
     ...sync("r", "active", {}),
     agentConfig: {
@@ -351,7 +350,7 @@ test("the switch shows only where it pauses a schedule the viewer can change", (
   expect(canSwitchSchedule(retired, manager)).toBe(false);
 });
 
-test("rows without a switch keep Pause in their menu; switched rows drop it", async () => {
+test("switched rows drop Pause from their menu; retired syncs offer only Delete", async () => {
   async function menuFor(task: ScheduledTask, pauseItem: boolean) {
     document.body.replaceChildren();
     const container = document.createElement("div");
@@ -391,8 +390,8 @@ test("rows without a switch keep Pause in their menu; switched rows drop it", as
     "Duplicate",
     "Delete",
   ]);
-  const stopped = sync("s", "active", { sourceEnabled: false });
-  expect(await menuFor(stopped, !canSwitchSchedule(stopped, manager))).toContain("Pause");
+  const retired = sync("s", "active", { sourceEnabled: true });
+  expect(await menuFor(retired, !canSwitchSchedule(retired, manager))).toEqual(["Delete"]);
 });
 
 test("a list of others' schedules shows no switches", async () => {

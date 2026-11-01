@@ -463,10 +463,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/browse",
     "request": [],
-    "query": [
-      "pageToken",
-      "parentId"
-    ],
     "response": [
       "GoogleDriveBrowseResponse"
     ],
@@ -1170,6 +1166,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "createOpenGeniSlackAgent",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/agents",
+    "request": [
+      "CreateSlackAgentRequest"
+    ],
+    "response": [
+      "SlackAgentResponse"
+    ],
+    "permission": "workspace:admin"
+  },
+  {
     "id": "createOrganization",
     "method": "POST",
     "path": "/v1/organizations",
@@ -1206,6 +1214,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "OrganizationConnector"
     ],
     "secretFields": [
+      "request.apiKey",
       "request.headers"
     ]
   },
@@ -1741,6 +1750,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [],
     "permission": "sessions:control"
+  },
+  {
+    "id": "deleteOpenGeniSlackAgent",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/agents/:agentId",
+    "request": [],
+    "response": []
   },
   {
     "id": "deleteOrganizationApiKey",
@@ -2558,10 +2574,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/browse",
     "request": [],
-    "query": [
-      "pageToken",
-      "parentId"
-    ],
     "response": [],
     "permission": "connections:read"
   },
@@ -2700,6 +2712,29 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [],
     "permission": "sessions:create"
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/organization-vaults",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/organization-vaults",
+    "request": [],
+    "response": [
+      "DisconnectOnePasswordResponse",
+      "DisconnectVaultProviderResponse",
+      "InstallOnePasswordResponse",
+      "InstallVaultProviderResponse",
+      "ListVaultProviderConnectionsResponse",
+      "OnePasswordConnectionSummary",
+      "ProviderVaultMeta",
+      "RevealVaultFieldResponse",
+      "SessionSecretsView",
+      "VaultFieldVersionMeta",
+      "VaultItem",
+      "VaultItemApproval",
+      "VaultItemSummary",
+      "VaultProviderConnectionSummary",
+      "VaultSummary"
+    ]
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/downloads",
@@ -3500,6 +3535,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "KnowledgeEntryRecord"
+    ]
+  },
+  {
+    "id": "getKnowledgeEntryReach",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/knowledge/entries/:entryId/reach",
+    "request": [],
+    "response": [
+      "KnowledgeEntryReachRecord"
     ]
   },
   {
@@ -5448,6 +5492,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "listOpenGeniSlackAgentChannels",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/agents/:agentId/channels",
+    "request": [],
+    "query": [
+      "cursor"
+    ],
+    "response": [
+      "SlackAgentChannelListResponse"
+    ]
+  },
+  {
+    "id": "listOpenGeniSlackAgents",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/agents",
+    "request": [],
+    "response": [
+      "SlackAgentListResponse"
+    ],
+    "permission": "workspace:read"
+  },
+  {
     "id": "listOpenGeniSlackChannelRoutes",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/channel-routes",
@@ -7218,6 +7284,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "account:admin"
   },
   {
+    "id": "postOpenGeniSlackAgentIntro",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/agents/:agentId/intro",
+    "request": [
+      "SlackAgentIntroRequest"
+    ],
+    "response": [
+      "SlackAgentIntroResponse"
+    ]
+  },
+  {
     "id": "prepareKnowledgeFile",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/knowledge/files/:fileId/prepare",
@@ -7282,6 +7359,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MachineAudiencePreview"
+    ]
+  },
+  {
+    "id": "previewOrganizationApiIntegration",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/connectors/api-integrations/preview",
+    "request": [
+      "PreviewOrganizationApiIntegrationRequest"
+    ],
+    "response": [
+      "ApiIntegrationPreview"
+    ],
+    "secretFields": [
+      "request.apiKey"
     ]
   },
   {
@@ -7900,6 +7991,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "IntegrationFacetRemovalResult"
     ],
     "permission": "connections:write"
+  },
+  {
+    "id": "removeSessionResources",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/resources/remove",
+    "request": [
+      "RemoveSessionResourcesRequest"
+    ],
+    "response": [
+      "Session"
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "removeWorkspaceMember",
@@ -8641,6 +8744,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "OpenGeniSlackBotOrganizationAccess"
     ],
     "permission": "connections:write"
+  },
+  {
+    "id": "setOrganizationApiIntegrationHere",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/integrations/:capabilityId/organization",
+    "request": [
+      "SetOrganizationApiIntegrationHereRequest"
+    ],
+    "response": [
+      "OrganizationApiIntegrationHere"
+    ],
+    "permission": "capabilities:manage"
   },
   {
     "id": "setOrganizationClaudeSubscriptionAccountAllocator",
@@ -9440,6 +9555,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateKnowledgeEntryReach",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/knowledge/entries/:entryId/reach",
+    "request": [
+      "UpdateKnowledgeEntryReachRequest"
+    ],
+    "response": [
+      "KnowledgeEntryReachRecord"
+    ]
+  },
+  {
     "id": "updateMachineAgent",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/update",
@@ -9508,6 +9634,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateOpenGeniSlackAgent",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/agents/:agentId",
+    "request": [
+      "UpdateSlackAgentRequest"
+    ],
+    "response": [
+      "SlackAgentResponse"
+    ]
+  },
+  {
     "id": "updateOpenGeniSlackChannelRoutes",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/channel-routes",
@@ -9550,6 +9687,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "OrganizationConnector"
     ],
     "secretFields": [
+      "request.apiKey",
       "request.headers"
     ]
   },

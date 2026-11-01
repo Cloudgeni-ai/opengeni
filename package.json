@@ -98,7 +98,6 @@
     "deployment:temporal-values": "bun scripts/deployment-temporal-values.ts",
     "deployment:conformance": "bun scripts/deployment-conformance.ts",
     "deployment:connected-machine-load": "bun scripts/operator/connected-machine-load-profile.ts",
-    "deployment:google-drive-readiness": "bun scripts/google-drive-release-readiness.ts",
     "agent:local-runtime": "bun scripts/prepare-local-agent-runtime.ts",
     "agent:local-runtime:run": "bun scripts/prepare-local-agent-runtime.ts --run",
     "deployment:opensandbox-conformance": "bun scripts/operator/opensandbox-conformance.ts",

@@ -101,6 +101,8 @@ function fakeClient(overrides: Partial<Record<string, () => Promise<unknown>>> =
       skills: [
         { id: "s1", scope: "organization", status: "active" },
         { id: "s2", scope: "organization", status: "active" },
+        // An organization Skill that doesn't work here: listed for its managers only.
+        { id: "s5", scope: "organization", status: "active", availableHere: false },
         { id: "s3", scope: "workspace", status: "active" },
         { id: "s4", scope: "user", status: "inactive" },
       ],
@@ -137,6 +139,72 @@ describe("loadAvailableHere", () => {
     expect(gmail?.login).toBe("own");
     expect(things.find((thing) => thing.name === "Tracker")?.login).toBe("shared");
     expect(things.find((thing) => thing.key === "skills:organization")?.count).toBe(2);
+  });
+
+  test("lists the organization's connectors that reach here, and Only me connectors carried in", async () => {
+    const organizationItem = (
+      id: string,
+      login: string,
+      lifecycleStatus: "ready" | "available" | "unavailable",
+    ) => ({
+      id,
+      name: id,
+      kind: "mcp",
+      enabled: lifecycleStatus === "ready",
+      connectionRef: null,
+      lifecycle: { status: lifecycleStatus, managedBy: "organization" },
+      metadata: { organizationConnector: { id: `oc-${id}`, login } },
+    });
+    const { things } = await loadAvailableHere(
+      fakeClient({
+        listCapabilities: async () => ({
+          items: [
+            organizationItem("Drive", "each_person", "ready"),
+            organizationItem("Search", "organization_key", "ready"),
+            organizationItem("Status", "none", "ready"),
+            organizationItem("Broken", "organization_key", "unavailable"),
+            // Turned off in this workspace: agents here can't use it.
+            organizationItem("Muted", "each_person", "available"),
+            // The workspace's own installation of it is what agents use.
+            organizationItem("Tracker", "organization_key", "ready"),
+            {
+              id: "Tracker",
+              name: "Tracker",
+              kind: "mcp",
+              enabled: true,
+              connectionRef: null,
+              lifecycle: { status: "ready", managedBy: "workspace" },
+              metadata: {},
+            },
+            {
+              id: "Calendar",
+              name: "Calendar",
+              kind: "mcp",
+              enabled: true,
+              connectionRef: { providerDomain: "calendar.example.com", subjectScope: "subject" },
+              lifecycle: { status: "ready", managedBy: "workspace" },
+              metadata: { personalExtension: { originWorkspaceName: "Design" } },
+            },
+          ],
+          installations: [{ id: "i1", capabilityId: "Tracker", kind: "mcp", status: "active" }],
+        }),
+      }),
+      WORKSPACE,
+    );
+    const connectors = things
+      .filter((thing) => thing.kind === "connector")
+      .map((thing) => `${thing.owner}:${thing.name}:${thing.login}:${thing.state}`)
+      .sort();
+    expect(connectors).toEqual(
+      [
+        "organization:Broken:shared:Unavailable",
+        "organization:Drive:own:null",
+        "organization:Search:shared:null",
+        "organization:Status:null:null",
+        "workspace:Tracker:null:null",
+        "you:Calendar:own:null",
+      ].sort(),
+    );
   });
 
   test("leaves out a kind the viewer may not read, and reports any other failure", async () => {

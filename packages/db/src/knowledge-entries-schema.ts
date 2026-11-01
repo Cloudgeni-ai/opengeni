@@ -17,6 +17,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { losslessCodecVersion, losslessJsonb, losslessText } from "./lossless-columns";
+import { sql } from "drizzle-orm";
 
 // SQL owns composite foreign keys, immutable history guards, tenant policies
 // and lifecycle-only grants. These mappings are not an alternate write API.
@@ -87,6 +88,14 @@ export const knowledgeEntries = pgTable(
     legacyScopeSessionId: uuid("legacy_scope_session_id"),
     validFrom: timestamp("valid_from", { withTimezone: true }).notNull().defaultNow(),
     validUntil: timestamp("valid_until", { withTimezone: true }),
+    /** Organization entries: every shared workspace (null) or these (1196). */
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    /** Organization entries: whether members' Personal workspaces have it. */
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    /** Personal entries: the owner's other workspaces that have it; null for all. */
+    reachWorkspaceIds: uuid("reach_workspace_ids")
+      .array()
+      .default(sql`'{}'::uuid[]`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

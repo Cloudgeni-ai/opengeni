@@ -1,5 +1,7 @@
 # @opengeni/subscriptions
 
+## 6.4.0
+
 ## 6.3.1
 
 ### Minor Changes

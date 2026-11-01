@@ -2086,6 +2086,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1150 Slack agents: two full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 2
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2156,7 +2162,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 1105 workspace activity facts: read and insert, FORCE-RLS.
         1 + // 1107 agent calls: read, insert and update, FORCE-RLS.
         1 + // 1131 hourly live transcript time per person: full-DML, FORCE-RLS.
-        1; // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
+        1 + // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
+        2; // 1150 Slack agents and their per-person state: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -4079,7 +4086,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 1103 and 1060 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1107's and 1172's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 1103 and 1060 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1107's, 1172's and 1218's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4137,6 +4144,8 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
     "task_note_write_capabilities",
     "auth_sessions",
     "agent_calls",
+    "vaults",
+    "vault_items",
   ];
   // Private tables runtime definers own (RUNTIME_DEFINER_ROUTINE_TABLES names them with their schema).
   const definerPrivateTables = ["native_push_devices", "native_push_deliveries"];
@@ -4204,6 +4213,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
       "read_external_identity_v1(uuid, text, text)",
+      "list_organization_vaults_v1(uuid, jsonb)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4217,6 +4227,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "agent_call_ringing_v1(text)",
       "ring_agent_call_v1(uuid, boolean)",
       "read_external_identity_v1(uuid, text, text)",
+      "list_organization_vaults_v1(uuid, jsonb)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4281,6 +4292,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "claim_native_push_deliveries_v2(uuid, integer, integer)",
       "ring_agent_call_v1(uuid, boolean)",
       "read_external_identity_v1(uuid, text, text)",
+      "list_organization_vaults_v1(uuid, jsonb)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

@@ -1961,6 +1961,11 @@ export type Session = {
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
   resources: ResourceRef[];
+  /**
+   * Repositories a person removed from this chat, newest per repository. The
+   * agent can't attach one again; a person attaching it again ends its record.
+   */
+  removedRepositories?: SessionRemovedRepository[] | undefined;
   skills: SessionSkill[];
   tools: ToolRef[];
   toolPolicy: SessionToolPolicy;
@@ -2826,6 +2831,7 @@ export const SESSION_EVENT_TYPES = [
   "session.tool_policy.updated",
   "session.agent.updated",
   "session.skills.updated",
+  "session.resources.removed",
   "session.model_settings.updated",
   // An authorized person or host changed the task root's usage limit.
   "session.usage_limit.updated",
@@ -4395,6 +4401,8 @@ export type FirstPartyMcpToolName =
   | "slack_bot_delete_message"
   | "slack_bot_prepare_message"
   | "slack_bot_send_prepared_message"
+  | "slack_agent_handoff"
+  | "slack_agent_chats"
   | "fiken_companies_list"
   | "fiken_contacts_list"
   | "fiken_contact_create"
@@ -6576,6 +6584,9 @@ export type SlackChannelRoute = {
   slackChannelId: string;
   targetWorkspaceId: string;
   targetWorkspaceName: string | null;
+  /** Set when a Slack agent answers in this channel. */
+  slackAgentId?: string | null | undefined;
+  slackAgentName?: string | null | undefined;
   source: "picker" | "admin";
   updatedAt: string;
 };
@@ -6587,7 +6598,12 @@ export type SlackChannelRouteListResponse = {
 
 export type UpdateSlackChannelRoutesRequest = {
   connectionId: string;
-  routes: Array<{ slackChannelId: string; targetWorkspaceId: string | null }>;
+  routes: Array<{
+    slackChannelId: string;
+    targetWorkspaceId: string | null;
+    /** A Slack agent working in `targetWorkspaceId`; omitted or null is plain Opengeni. */
+    slackAgentId?: string | null | undefined;
+  }>;
 };
 
 export type VoiceInputProviderId =
@@ -9843,6 +9859,17 @@ export type ApiIntegrationInstallationSummary = {
    * workspace where they connected it "Only me"; it is managed there.
    */
   personalExtension?: { originWorkspaceId: string; originWorkspaceName: string };
+  /**
+   * Set when the organization serves it here (organization settings manage
+   * it); `enabledHere` is false while this workspace turned it off.
+   */
+  organizationConnector?: {
+    connectorId: string;
+    login: "each_person" | "organization_key" | "none";
+    /** How the API authenticates: what a person adds when each person signs in. */
+    auth: ApiIntegrationAuthPreview;
+    enabledHere: boolean;
+  };
 };
 
 export type ListApiIntegrationsResponse = {
@@ -10188,6 +10215,18 @@ export type BillingBalance = {
   currency: "usd";
   updatedAt: string;
   generalBalanceMicros?: number | undefined;
+  /** Credits outside plan credit (top-ups, operator grants). API usage spends only this. */
+  creditsMicros?: number | undefined;
+  /** Credit debt from API usage. Plan credit never repays it. */
+  apiDebtMicros?: number | undefined;
+  /** Paid plan credit the own-key platform fee may draw (app use only). */
+  paidPlanCreditMicros?: number | undefined;
+  /** Paid-for credits the own-key platform fee may draw. */
+  paidCreditsMicros?: number | undefined;
+  /** Own-key platform fees charged this calendar month (UTC). */
+  byokPlatformFeeMonthMicros?: number | undefined;
+  /** Own-key fees that ran past paid credit; the next top-up repays it. */
+  byokFeeDebtMicros?: number | undefined;
   promotionalCredits?: PromotionalCreditBalance[] | undefined;
   heldCreditMicros?: number | undefined;
   heldGeneralCreditMicros?: number | undefined;
@@ -11418,6 +11457,25 @@ export type UpdateSessionSkillsRequest = {
   skills: SessionSkillInput[];
   /** The session's current `toolPolicyVersion` (shared CAS). */
   expectedVersion: number;
+};
+
+/**
+ * `POST .../sessions/:id/resources/remove`. Removes attached repositories from
+ * the session and its child sessions. Access ends on the next Git or GitHub
+ * call; the next turn removes the repository folders. Repositories that are
+ * not attached are ignored.
+ */
+export type RemoveSessionResourcesRequest = {
+  resources: Array<{ kind: "repository"; uri: string }>;
+};
+
+/** One repository removed from a session (`Session.removedRepositories`). */
+export type SessionRemovedRepository = {
+  id: string;
+  resource: RepositoryResourceRef;
+  removedAt: string;
+  /** True until the next turn has removed the folder from the sandbox. */
+  sandboxCleanupPending: boolean;
 };
 
 /** `PUT .../sessions/:id/agent`. Omitted agent fields keep their current values. */

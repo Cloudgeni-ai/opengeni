@@ -57,7 +57,7 @@ export function administersOrganization(input: {
 /**
  * The API's organization-administration rule, for the organization-wide
  * resources that use it (organization Knowledge, documents and Skills, the
- * company profile): a literal `account:admin` grant (the owner, the single
+ * company profile, vaults, machines and Sandbox Environments): a literal `account:admin` grant (the owner, the single
  * local user), or an owner or admin in a signed-in session. The single local
  * user always holds the literal grant, so the local-mode role branch in
  * `administersOrganization` never widens anything here. Billing, roles and

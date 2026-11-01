@@ -1129,6 +1129,60 @@ describe("Workspace page", () => {
     expect(put[3]).toMatchObject({ role: "member", expectedUpdatedAt: null });
     await view.unmount();
   });
+
+  test("deleting a workspace names the Slack agents that go with it", async () => {
+    const listOpenGeniSlackAgents = mock(async () => ({
+      routingEnabled: true,
+      agents: [
+        { name: "Data team", targetWorkspaceId: "ws-platform" },
+        { name: "Elsewhere", targetWorkspaceId: "ws-other" },
+        { name: "Release", targetWorkspaceId: "ws-platform" },
+      ],
+    }));
+    const client = makeClient({ listOpenGeniSlackAgents });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationWorkspacesPage workspaceId="workspace-a" workspace="ws-platform" />
+      </Provider>,
+    );
+    await flush();
+    expect(listOpenGeniSlackAgents).not.toHaveBeenCalled();
+    const remove = Array.from(view.container.querySelectorAll('[role="menuitem"]')).find((item) =>
+      item.textContent?.includes("Delete workspace"),
+    ) as HTMLButtonElement;
+    await act(async () => remove.click());
+    await flush();
+    expect(listOpenGeniSlackAgents).toHaveBeenCalledWith("workspace-a");
+    const confirm = view.container.querySelector('[data-testid="confirm"]');
+    expect(confirm?.textContent).toContain("Its Slack agents are deleted too: Data team, Release.");
+    expect(confirm?.textContent).not.toContain("Elsewhere");
+    await view.unmount();
+  });
+
+  test("deleting a workspace without Slack agents says nothing about them", async () => {
+    const client = makeClient({
+      listOpenGeniSlackAgents: mock(async () => {
+        throw new Error("unavailable");
+      }),
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationWorkspacesPage workspaceId="workspace-a" workspace="ws-platform" />
+      </Provider>,
+    );
+    await flush();
+    const remove = Array.from(view.container.querySelectorAll('[role="menuitem"]')).find((item) =>
+      item.textContent?.includes("Delete workspace"),
+    ) as HTMLButtonElement;
+    await act(async () => remove.click());
+    await flush();
+    const confirm = view.container.querySelector('[data-testid="confirm"]');
+    expect(confirm?.textContent).toContain("Its chats, files, automations and knowledge");
+    expect(confirm?.textContent).not.toContain("Slack agents");
+    await view.unmount();
+  });
 });
 
 describe("organization with many tenant workspaces", () => {

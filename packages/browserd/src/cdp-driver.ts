@@ -112,6 +112,7 @@ import {
   pageProtection,
   protectedNodeKey,
   SENSITIVE_FIELD_REASON_SOURCE,
+  sensitiveFieldReason,
   type PageProtection,
 } from "./page-protection";
 import { reportUnexpectedDispatchError } from "./controller-diagnostics";
@@ -2298,10 +2299,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             );
             let layout: ScrollbarLayout | null = null;
             try {
-              const metrics = await this.screenshotRead(
-                "Page.getLayoutMetrics",
+              const metrics = await this.untilLaidOut(
                 deadline,
-                async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+                async () =>
+                  await this.screenshotRead(
+                    "Page.getLayoutMetrics",
+                    deadline,
+                    async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+                  ),
               );
               const capture: Record<string, unknown> = {
                 format: normalized.format,
@@ -3125,6 +3130,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             this.states.get(state.targetId) !== state) ||
           (error instanceof InteractionControllerError &&
             error.cause instanceof CdpSessionDetachedError);
+        // The tab closed after the input, not by a close-tab call: its page
+        // closed it, as a finished sign-in or payment window does. The input
+        // reached the page, so the actions completed; only the outline of a
+        // tab that no longer exists is missing.
+        const gone = this.goneTargets.get(this.tabIdOf(state.targetId));
+        if (
+          gone?.kind === "closed" &&
+          !gone.byCloseCall &&
+          this.states.get(state.targetId) !== state &&
+          (retiredSession ||
+            (error instanceof InteractionDefiniteDriverError && error.code === "target_not_found"))
+        ) {
+          trace?.record({
+            actionIndex: actions.length - 1,
+            kind: "observation_unavailable",
+            message: `${
+              actions.length > 1
+                ? `all ${actions.length} actions completed`
+                : "the action completed"
+            }, and then this tab closed (its page closed it, as a finished sign-in or payment window does, or someone closed it), so this receipt has no outline; ${LIST_CURRENT_TABS}`,
+          } satisfies BrowserActionNoteValue);
+          return null;
+        }
         // A native invalid-session reply after this exact attachment retired
         // is target loss, not loss of the browser transport or healthy peers.
         if (!(error instanceof InteractionDefiniteDriverError) && !retiredSession) {
@@ -6023,9 +6051,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             ? protectedNodeKey(node.frameId, node.backendDOMNodeId)
             : null;
         const reason =
-          key === null
+          (key === null
             ? undefined
-            : protections.map((protection) => protection.nodes.get(key)).find(Boolean);
+            : protections.map((protection) => protection.nodes.get(key)).find(Boolean)) ??
+          passwordNamedTextbox(node);
         return reason ? { ...node, protectedReason: reason } : node;
       }),
     );
@@ -6530,6 +6559,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         ) {
           throw error;
         }
+        if (Date.now() + pause >= deadline) {
+          const failure = new InteractionControllerError(
+            "timeout",
+            UNDRAWN_SURFACE_TIMED_OUT,
+            true,
+          );
+          failure.cause = error;
+          throw failure;
+        }
+        await delay(pause);
+        pause = Math.min(pause * 2, 200);
+      }
+    }
+  }
+
+  /** Repeat a layout read while the tab reports no page size yet (a tab a
+   * relaunched browser has just restored lays out a moment after it is
+   * listed), until it lays out or the capture deadline passes. */
+  private async untilLaidOut<T>(deadline: number, read: () => Promise<T>): Promise<T> {
+    let pause = 16;
+    for (;;) {
+      try {
+        return await read();
+      } catch (error) {
+        if (!(error instanceof PageNotLaidOutError)) throw error;
         if (Date.now() + pause >= deadline) {
           const failure = new InteractionControllerError(
             "timeout",
@@ -7149,12 +7203,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.sendActionTarget(state, "Input.insertText", {
             text: action.value,
           });
-        const confirmed = await this.callOnNode(
-          state,
-          node.backendDOMNodeId,
-          CONFIRM_EDITABLE_VALUE_FUNCTION,
-          [{ value: action.value }],
-        );
+        let confirmed: unknown;
+        try {
+          confirmed = await this.callOnNode(
+            state,
+            node.backendDOMNodeId,
+            CONFIRM_EDITABLE_VALUE_FUNCTION,
+            [{ value: action.value }],
+          );
+        } catch (error) {
+          // The input navigated the page or replaced its document (a
+          // one-time-code form that submits itself once complete) before the
+          // field could be read back. Chrome took the text, so the fill is
+          // done; the observation that follows shows the page it led to.
+          if (error instanceof CdpProtocolError && FILLED_DOCUMENT_GONE.test(error.message)) return;
+          throw error;
+        }
+        if (confirmed === "removed") return;
         if (confirmed !== true) {
           throw new InteractionOutcomeUnknownDriverError(
             "outcome_unknown",
@@ -10927,10 +10992,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           !before.open.has(requestId) &&
           requestLoad(state.requests.get(requestId), Date.now()) === "loading",
       );
-    while (pending() && Date.now() < deadline && !state.dialog) {
+    while (pending() && Date.now() < deadline && !state.dialog && this.attached(state)) {
       await delay(ACTION_REQUEST_POLL_MS);
     }
-    if (!state.dialog) await delay(ACTION_RESPONSE_APPLY_MS);
+    if (!state.dialog && this.attached(state)) await delay(ACTION_RESPONSE_APPLY_MS);
+  }
+
+  /** Whether `state` is still this tab's attachment. A tab that closed (a
+   * popup its page closed, say) or lost its attachment has nothing left to
+   * settle, so the settle waits end at once instead of at their bound. */
+  private attached(state: TargetState): boolean {
+    return this.states.get(state.targetId) === state;
   }
 
   /**
@@ -10943,12 +11015,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async settleActionNavigation(state: TargetState): Promise<void> {
     const deadline = Date.now() + ACTION_NAVIGATION_SETTLE_LIMIT_MS;
     const loaderId = state.frame.loaderId;
-    while (state.navigationPending && Date.now() < deadline && !state.dialog) {
+    while (
+      state.navigationPending &&
+      Date.now() < deadline &&
+      !state.dialog &&
+      this.attached(state)
+    ) {
       if (state.frame.loaderId !== loaderId) break;
       await delay(ACTION_REQUEST_POLL_MS);
     }
     if (state.dialog || state.frame.loaderId === loaderId) return;
-    while (Date.now() < deadline && !state.dialog) {
+    while (Date.now() < deadline && !state.dialog && this.attached(state)) {
       try {
         if (await this.documentReady(state)) return;
       } catch {
@@ -12619,7 +12696,15 @@ const SENSITIVE_CANDIDATE_SELECTOR = `[id], [name], [autocomplete], [aria-label]
  * page-protection.ts) that observations, captures and fill verification use,
  * applied to one element in the page. */
 const SENSITIVE_REASON_FUNCTION = `function(node) {
-  return (${SENSITIVE_FIELD_REASON_SOURCE})(String(node.tagName || "").toLowerCase(), Object.fromEntries(Array.from(node.attributes || [], (attr) => [attr.name, attr.value])), node.isContentEditable === true);
+  // The text of a field's labels, which its attributes do not carry.
+  const parts = Array.from(node.labels || [], (label) => String(label.textContent || ""));
+  const root = node.getRootNode ? node.getRootNode() : null;
+  for (const id of String((node.getAttribute && node.getAttribute("aria-labelledby")) || "").split(/\\s+/)) {
+    if (!id) continue;
+    const named = (root && typeof root.getElementById === "function" ? root.getElementById(id) : null) || node.ownerDocument?.getElementById(id);
+    if (named) parts.push(String(named.textContent || ""));
+  }
+  return (${SENSITIVE_FIELD_REASON_SOURCE})(String(node.tagName || "").toLowerCase(), Object.fromEntries(Array.from(node.attributes || [], (attr) => [attr.name, attr.value])), node.isContentEditable === true, "read", parts.join(" ").slice(0, 512));
 }`;
 
 /** Why an element's text or value must not leave the page: it is, sits in, or
@@ -13257,6 +13342,10 @@ const HIT_TARGET_GUARD_FUNCTION = `function(token) {
 
 // Chromium's replies when a remote object's execution context is gone: the
 // document that held the click guard was replaced or detached.
+/** A fill's read-back found its field's document gone: the input navigated
+ * the page or replaced the document. */
+const FILLED_DOCUMENT_GONE =
+  /Cannot find context with specified id|Could not find object with given id|Execution context was destroyed|Inspected target navigated or closed|Node with given id does not belong to the document|No node with given id found/i;
 const GUARD_DOCUMENT_GONE =
   /Cannot find context with specified id|Could not find object with given id|Execution context was destroyed|Inspected target navigated or closed/i;
 
@@ -14250,6 +14339,19 @@ const PAGE_FACTS_EXPRESSION = `(() => {
   return facts.revealed.length === 0 ? null : [JSON.stringify(facts), ...nodes];
 })()`;
 
+/** A text box whose accessible name (however the page labels it, shadow
+ * roots and custom elements included) calls it a password holds one, even
+ * when the page made it an ordinary text input. */
+function passwordNamedTextbox(node: CdpAxNode): "password" | undefined {
+  const role = isRecord(node.role) ? node.role.value : undefined;
+  if (role !== "textbox" && role !== "searchbox") return undefined;
+  const name = isRecord(node.name) ? node.name.value : undefined;
+  if (typeof name !== "string" || name === "") return undefined;
+  return sensitiveFieldReason("input", { "aria-label": name }, false) === "password"
+    ? "password"
+    : undefined;
+}
+
 /**
  * The text a container shows without its protected descendants, for a DOM
  * read of a container that holds some (a page's body nearly always holds a
@@ -14671,7 +14773,10 @@ const SET_RANGE_VALUE_FUNCTION = `async function(expected) {
 
 const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   await Promise.resolve();
-  if (!(this instanceof Element) || !this.isConnected) return false;
+  if (!(this instanceof Element)) return false;
+  // The page removed the field in reaction to the input (a one-time-code
+  // form that submits itself and re-renders): the input arrived.
+  if (!this.isConnected) return "removed";
   const tag = String(this.tagName || "").toLowerCase();
   if (tag === "input" || tag === "textarea") {
     const actual = String(this.value);
@@ -14882,15 +14987,24 @@ function dimensionsRecord(
   value: unknown,
   includeOffset: boolean,
 ): { x: number; y: number; width: number; height: number } {
-  if (!isRecord(value)) throw new Error("CDP returned invalid page dimensions");
+  if (!isRecord(value)) throw new PageNotLaidOutError();
   const width = numberField(value, includeOffset ? "clientWidth" : "width");
   const height = numberField(value, includeOffset ? "clientHeight" : "height");
   const x = includeOffset ? (numberField(value, "pageX") ?? 0) : 0;
   const y = includeOffset ? (numberField(value, "pageY") ?? 0) : 0;
   if (width === null || height === null || width <= 0 || height <= 0) {
-    throw new Error("CDP returned invalid page dimensions");
+    throw new PageNotLaidOutError();
   }
   return { x, y, width, height };
+}
+
+/** Chromium reported no usable page size: a tab a relaunched browser has just
+ * restored, or one still loading, has not laid out its page yet. */
+class PageNotLaidOutError extends Error {
+  constructor() {
+    super("CDP returned invalid page dimensions");
+    this.name = "PageNotLaidOutError";
+  }
 }
 
 function numberField(value: Record<string, unknown>, key: string): number | null {

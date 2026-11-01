@@ -57,7 +57,11 @@ mock.module("../../ui/dialog", () => ({
   Dialog: ({ open, children }: { open: boolean; children: ReactNode }) =>
     open ? <div>{children}</div> : null,
   DialogContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogDescription: ({ children }: { children: ReactNode }) => <p>{children}</p>,
+  DialogDescription: ({ children, className }: { children: ReactNode; className?: string }) => (
+    <p data-description className={className}>
+      {children}
+    </p>
+  ),
   DialogFooter: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DialogHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DialogTitle: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
@@ -151,6 +155,119 @@ describe("credit required prompt", () => {
     await render(true);
     expect(container.textContent).not.toContain("View upgrade options");
     expect(container.textContent).toContain("Use your own provider account");
+  });
+
+  test("own-key and API refusals offer their one fix, never another model or own key", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const render = async (
+      refusalCode: "byok_upgrade_required" | "byok_paid_credit_required" | "api_credits_required",
+      billingClient: object = client,
+    ) =>
+      act(async () =>
+        root!.render(
+          <CreditRequiredPromptView
+            client={billingClient as never}
+            open
+            workspaceId="workspace-a"
+            accountId="account-a"
+            canBuyCredits
+            refusalCode={refusalCode}
+            onOpenChange={() => undefined}
+          />,
+        ),
+      );
+    await render("byok_upgrade_required");
+    expect(container.querySelector("h2")!.textContent).toBe("Upgrade to Pro to use your own key");
+    expect([...container.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual([
+      "Upgrade to Pro",
+    ]);
+    await render("byok_paid_credit_required");
+    expect(container.querySelector("h2")!.textContent).toBe("Add credits to use your own key");
+    expect(container.textContent).not.toContain("Use your own provider account");
+    expect(container.textContent).not.toContain("choose another model");
+    // Without checkout here, Billing is still the one fix, not a dead end.
+    await render("api_credits_required", {
+      getBilling: mock(async () => ({ mode: "disabled" as const })),
+      createBillingCheckout,
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.querySelector("h2")!.textContent).toBe(
+      "API usage uses credits, not your plan credit",
+    );
+    expect([...container.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual([
+      "Add credits",
+    ]);
+    // The (visually hidden) description matches what is on screen.
+    expect(container.textContent).toContain("Add credits on Billing.");
+    expect(container.textContent).not.toContain("Stripe Checkout");
+  });
+
+  test("an own-key refusal offers no coupon, and a member is told who can fix it once", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const render = async (
+      refusalCode: "byok_paid_credit_required" | "api_credits_required",
+      canBuyCredits = true,
+    ) => {
+      await act(async () =>
+        root!.render(
+          <CreditRequiredPromptView
+            client={client as never}
+            open
+            workspaceId="workspace-a"
+            accountId="account-a"
+            canBuyCredits={canBuyCredits}
+            refusalCode={refusalCode}
+            onOpenChange={() => undefined}
+          />,
+        ),
+      );
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    };
+    // Add credits beside an own-key refusal opens the top-up with no coupon either.
+    await act(async () =>
+      root!.render(
+        <CreditRequiredPromptView
+          client={client as never}
+          purpose="topup"
+          refusalCode="byok_paid_credit_required"
+          open
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          onOpenChange={() => undefined}
+        />,
+      ),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(container.textContent).toContain("Add Opengeni credits");
+    expect(container.textContent).not.toContain("coupon");
+    expect(container.textContent).not.toContain("Have a code?");
+    // A coupon's credit can't pay the own-key fee: checkout is the one fix.
+    await render("byok_paid_credit_required");
+    expect(container.textContent).toContain("Choose an amount and pay in Stripe Checkout.");
+    expect(container.textContent).not.toContain("Have a code?");
+    // A coupon's unscoped credit does pay for API use.
+    await render("api_credits_required");
+    expect(container.textContent).toContain("Have a code?");
+    await render("byok_paid_credit_required", false);
+    expect(container.textContent!.split("Ask an organization owner to add credits.").length).toBe(
+      2,
+    );
+    // Shown once, and visibly: the description is the dialog's only body text.
+    const description = container.querySelector<HTMLElement>("[data-description]")!;
+    expect(description.textContent).toBe("Ask an organization owner to add credits.");
+    expect(description.className ?? "").not.toContain("sr-only");
+    expect(container.querySelectorAll("a, button")).toHaveLength(0);
   });
 
   test("the notice follows selected-model funding rather than the total credit balance", async () => {

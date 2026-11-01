@@ -28,6 +28,8 @@ export {
 } from "./scheduled-task-lifecycle";
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
+export * from "./session-resource-removal";
+import { admitRequestedRepositories } from "./session-resource-removal";
 export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
@@ -77,6 +79,7 @@ import {
   readOrganizationCodexUsage,
 } from "./organization-codex-usage";
 export * from "./organization-slack-bots";
+export * from "./slack-agents";
 export * from "./voice-transcription-settlement";
 import {
   connectionMetadataColumns,
@@ -177,6 +180,8 @@ import {
   sessionMetadataUnattended,
   withSessionUnattendedMetadata,
   type SessionUnattendedSetting,
+  parseSessionRemovedRepositories,
+  type SessionRemovedRepository,
 } from "@opengeni/contracts";
 import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
@@ -1327,6 +1332,7 @@ export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
 export * from "./skills";
+export * from "./organization-shared-workspaces";
 export * from "./learning-refusals";
 export * from "./session-tool-results";
 export type { SkillSourceReleaseReceipt } from "./skill-source-release";
@@ -12270,6 +12276,7 @@ async function organizationConnectorCapabilityRows(
     .where(
       and(
         eq(schema.organizationConnectors.status, "active"),
+        eq(schema.organizationConnectors.kind, "mcp"),
         sql`not exists (
           select 1 from ${schema.capabilityInstallations} installation
           where installation.workspace_id = ${workspaceId}::uuid
@@ -12322,6 +12329,15 @@ async function organizationConnectorCapabilityRows(
   });
 }
 
+/** A custom organization MCP server's definition; an API integration's has no MCP endpoint. */
+function organizationMcpServerDefinition(
+  definition: OrganizationConnectorRow["customDefinition"],
+): { name: string; description?: string | null; endpointUrl: string } {
+  if (!definition || "kind" in definition)
+    return { name: definition?.name ?? "", description: null, endpointUrl: "" };
+  return definition;
+}
+
 /** A custom organization server, defined for the reading workspace. */
 function organizationCustomCatalogItem(
   connector: Pick<
@@ -12330,7 +12346,7 @@ function organizationCustomCatalogItem(
   >,
   workspaceId: string | null,
 ): EnabledMcpCapabilityRow["item"] {
-  const definition = connector.customDefinition!;
+  const definition = organizationMcpServerDefinition(connector.customDefinition);
   return {
     id: connector.capabilityId,
     accountId: connector.accountId,
@@ -12689,6 +12705,7 @@ async function organizationConnectorServerIdRows(
         .where(
           and(
             eq(connector.status, "active"),
+            eq(connector.kind, "mcp"),
             sql`not exists (
               select 1 from ${schema.capabilityInstallations} installation
               where installation.workspace_id = ${workspaceId}::uuid
@@ -14276,6 +14293,8 @@ export type SlackBotUserLink = {
    * one-time onboarding hint, or `null` when the hint has not been shown.
    */
   firstTaskHintInteractionId: string | null;
+  /** When this person muted occasional update messages about new agents. */
+  updatesMutedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -14311,6 +14330,10 @@ export type SlackInteractionInboxEntry = {
   retryAt: Date | null;
   lastErrorCode: string | null;
   reactionContextCheckpoint: unknown | null;
+  /** A request passed on to one exact Slack agent by another chat. */
+  targetSlackAgentId?: string | null;
+  handoffFromInteractionId?: string | null;
+  handoffFromSlackAgentId?: string | null;
   processedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -14390,6 +14413,13 @@ export type SlackInteraction = {
    * and a workspace line on every message).
    */
   startMessageLine: string | null;
+  /** The Slack agent this chat was started for. Null for plain Opengeni. */
+  slackAgentId: string | null;
+  /** The agent whose chat passed this thread on, which it never hands back to. */
+  handoffFromSlackAgentId: string | null;
+  /** The latest Slack message this chat was given, and who sent it. */
+  lastInboundProviderEventId: string | null;
+  lastInboundSlackUserId: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -14467,7 +14497,10 @@ export async function saveSlackBotUserLink(
   db: Database,
   // The one-time onboarding hint claim is deliberately not writable here: a
   // re-link of the same Slack identity keeps whatever was already shown.
-  input: Omit<SlackBotUserLink, "id" | "createdAt" | "updatedAt" | "firstTaskHintInteractionId">,
+  input: Omit<
+    SlackBotUserLink,
+    "id" | "createdAt" | "updatedAt" | "firstTaskHintInteractionId" | "updatesMutedAt"
+  >,
 ): Promise<SlackBotUserLink> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -15012,6 +15045,10 @@ export async function getOrCreateSlackInteraction(
     // Owned by `bindSlackInteractionSession`, frozen with the bound session.
     | "sessionDefaultsLine"
     | "startMessageLine"
+    | "slackAgentId"
+    | "handoffFromSlackAgentId"
+    | "lastInboundProviderEventId"
+    | "lastInboundSlackUserId"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
@@ -15019,6 +15056,8 @@ export async function getOrCreateSlackInteraction(
   > & {
     initiatingSlackUserId?: string | null;
     routedWorkspaceLabel?: string | null;
+    slackAgentId?: string | null;
+    handoffFromSlackAgentId?: string | null;
   },
 ): Promise<{ created: boolean; interaction: SlackInteraction }> {
   const outcome = await withRlsContext(db, input, async (scopedDb) => {
@@ -15028,6 +15067,8 @@ export async function getOrCreateSlackInteraction(
         ...input,
         initiatingSlackUserId: input.initiatingSlackUserId ?? null,
         routedWorkspaceLabel: input.routedWorkspaceLabel ?? null,
+        slackAgentId: input.slackAgentId ?? null,
+        handoffFromSlackAgentId: input.handoffFromSlackAgentId ?? null,
       })
       .onConflictDoNothing()
       .returning();
@@ -15802,6 +15843,145 @@ export async function rekeySlackInteractionRoute(
   });
 }
 
+/**
+ * Free a thread's route key so another chat can take the thread over: a
+ * handoff to another Slack agent, or a person naming a different agent in the
+ * thread. The old chat keeps its channel and thread, so anything it still
+ * delivers lands in the same thread; it just no longer receives new messages.
+ *
+ * Idempotent for one interaction: the retired key is derived from its id.
+ */
+export async function retireSlackInteractionRoute(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "routeKey">,
+  /**
+   * Why the chat lost its thread. A hand-off retires to `:moved:<id>`, which
+   * lets the same chat finish an interrupted hand-off; a person moving the
+   * thread to another agent retires to `:switched:<id>`, which does not.
+   */
+  reason: "handoff" | "switch" = "handoff",
+): Promise<SlackInteraction | null> {
+  // Idempotent: a key that is already retired stays as it is.
+  const alreadyRetired =
+    input.routeKey.endsWith(`:moved:${input.id}`) ||
+    input.routeKey.endsWith(`:switched:${input.id}`);
+  const suffix = reason === "switch" ? `:switched:${input.id}` : `:moved:${input.id}`;
+  const retiredKey = alreadyRetired ? input.routeKey : `${input.routeKey.slice(0, 200)}${suffix}`;
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .update(schema.slackInteractions)
+      .set({ routeKey: retiredKey, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+        ),
+      )
+      .returning();
+    return row ? mapSlackInteraction(row) : null;
+  });
+}
+
+/** Remember the latest Slack message a chat was given and who sent it. */
+export async function recordSlackInteractionInbound(
+  db: Database,
+  input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId"> & {
+    providerEventId: string;
+    slackUserId: string;
+  },
+): Promise<void> {
+  await withRlsContext(db, input, async (scopedDb) => {
+    await scopedDb
+      .update(schema.slackInteractions)
+      .set({
+        lastInboundProviderEventId: input.providerEventId,
+        lastInboundSlackUserId: input.slackUserId,
+      })
+      .where(
+        and(
+          eq(schema.slackInteractions.id, input.id),
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+        ),
+      );
+  });
+}
+
+/**
+ * The Slack event a turn is answering, by its `slack:<provider event id>`
+ * client event id. A delivered user message has no `turn_id`; the turn points
+ * back at it through `trigger_event_id`, so that is read first.
+ *
+ * `turnFound` is false only when the turn is unknown. A known turn started by
+ * something other than a Slack message has a null `providerEventId`.
+ */
+export async function getSlackProviderEventIdForTurn(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string },
+): Promise<{ turnFound: boolean; providerEventId: string | null }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [trigger] = await scopedDb
+      .select({ clientEventId: schema.sessionEvents.clientEventId })
+      .from(schema.sessionTurns)
+      .leftJoin(
+        schema.sessionEvents,
+        and(
+          eq(schema.sessionEvents.id, schema.sessionTurns.triggerEventId),
+          eq(schema.sessionEvents.workspaceId, schema.sessionTurns.workspaceId),
+          eq(schema.sessionEvents.sessionId, schema.sessionTurns.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, input.turnId),
+        ),
+      )
+      .limit(1);
+    if (trigger?.clientEventId?.startsWith("slack:")) {
+      return { turnFound: true, providerEventId: trigger.clientEventId.slice("slack:".length) };
+    }
+    const [row] = await scopedDb
+      .select({ clientEventId: schema.sessionEvents.clientEventId })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.turnId, input.turnId),
+          sql`${schema.sessionEvents.clientEventId} like 'slack:%'`,
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    const fromTurnId = row?.clientEventId ? row.clientEventId.slice("slack:".length) : null;
+    return { turnFound: trigger !== undefined || fromTurnId !== null, providerEventId: fromTurnId };
+  });
+}
+
+/** The inbox row of one Slack event, read under the installation's HOME tenancy. */
+export async function getSlackInteractionInboxByProviderEvent(
+  db: Database,
+  home: { accountId: string; workspaceId: string },
+  input: { connectionId: string; providerEventId: string },
+): Promise<SlackInteractionInboxEntry | null> {
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackInteractionInbox)
+      .where(
+        and(
+          eq(schema.slackInteractionInbox.connectionId, input.connectionId),
+          eq(schema.slackInteractionInbox.providerEventId, input.providerEventId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackInteractionInbox(row) : null;
+  });
+}
+
 export async function claimSlackInteractionDelivery(
   db: Database,
   claimHolderId: string,
@@ -16090,6 +16270,17 @@ function mapSlackInteractionInbox(
     lastErrorCode: slackRowNullableString(row, "lastErrorCode", "last_error_code"),
     reactionContextCheckpoint:
       slackRowValue(row, "reactionContextCheckpoint", "reaction_context_checkpoint") ?? null,
+    targetSlackAgentId: slackRowNullableString(row, "targetSlackAgentId", "target_slack_agent_id"),
+    handoffFromInteractionId: slackRowNullableString(
+      row,
+      "handoffFromInteractionId",
+      "handoff_from_interaction_id",
+    ),
+    handoffFromSlackAgentId: slackRowNullableString(
+      row,
+      "handoffFromSlackAgentId",
+      "handoff_from_slack_agent_id",
+    ),
     processedAt: slackRowNullableDate(row, "processedAt", "processed_at"),
     createdAt: slackRowDate(row, "createdAt", "created_at"),
     updatedAt: slackRowDate(row, "updatedAt", "updated_at"),
@@ -16181,6 +16372,22 @@ function mapSlackInteraction(
       "session_defaults_line",
     ),
     startMessageLine: slackRowNullableString(row, "startMessageLine", "start_message_line"),
+    slackAgentId: slackRowNullableString(row, "slackAgentId", "slack_agent_id"),
+    handoffFromSlackAgentId: slackRowNullableString(
+      row,
+      "handoffFromSlackAgentId",
+      "handoff_from_slack_agent_id",
+    ),
+    lastInboundProviderEventId: slackRowNullableString(
+      row,
+      "lastInboundProviderEventId",
+      "last_inbound_provider_event_id",
+    ),
+    lastInboundSlackUserId: slackRowNullableString(
+      row,
+      "lastInboundSlackUserId",
+      "last_inbound_slack_user_id",
+    ),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
       row,
@@ -31672,6 +31879,36 @@ function mapSessionSpawnDenial(
   };
 }
 
+/**
+ * A child inherits its parent's repository removal records, read from the
+ * parent row the depth decision already holds FOR SHARE: a removal either
+ * commits first and is seen here, or waits for this create and then narrows
+ * the new child too. An agent cannot give a child a removed repository; a
+ * person (or API caller) creating the child with one attaches it again there.
+ */
+async function childSessionRemovedRepositories(
+  tx: Database,
+  input: SessionCreateInput,
+  parentSessionId: string,
+): Promise<SessionRemovedRepository[]> {
+  const [parent] = await tx
+    .select({ removedRepositories: schema.sessions.removedRepositories })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, parentSessionId),
+      ),
+    )
+    .for("share")
+    .limit(1);
+  return admitRequestedRepositories({
+    removedRepositories: parseSessionRemovedRepositories(parent?.removedRepositories),
+    requested: input.resources,
+    requester: input.createdByActor ? "agent" : "person",
+  }).removedRepositories;
+}
+
 async function parentSessionCodeSearchEnabled(
   tx: Database,
   workspaceId: string,
@@ -32455,6 +32692,9 @@ async function createSessionInTransaction(
     input.channelId == null && !input.parentSessionId
       ? await siteHomeChannelId(tx as unknown as Database, input.workspaceId, sessionMetadata)
       : (input.channelId ?? null);
+  const removedRepositories = input.parentSessionId
+    ? await childSessionRemovedRepositories(tx as unknown as Database, input, input.parentSessionId)
+    : [];
   try {
     const insertValues: typeof schema.sessions.$inferInsert = withLosslessContentWriteVersion(
       {
@@ -32466,6 +32706,7 @@ async function createSessionInTransaction(
         title: AUTOMATIC_SESSION_TITLE_FALLBACK,
         titleSource: "agent",
         resources: input.resources,
+        removedRepositories,
         skills: input.skills ?? [],
         tools: input.tools ?? [],
         toolPolicy: input.toolPolicy ?? {
@@ -32564,9 +32805,11 @@ async function createSessionInTransaction(
       // continuations) are included. SQL rechecks it against the locked turn
       // and the request's verified claims; another person never matches.
       const columns = getTableColumns(schema.sessions);
+      // The creation seam's column allow-list predates removal records; the
+      // inherited records are written right after, in this transaction.
       const valuesByColumn = Object.fromEntries(
         Object.entries(insertValues)
-          .filter(([, value]) => value !== undefined)
+          .filter(([key, value]) => value !== undefined && key !== "removedRepositories")
           .map(([key, value]) => {
             const column = columns[key as keyof typeof columns];
             return [column.name, agentChildCreationColumnValue(column, value)];
@@ -32580,9 +32823,15 @@ async function createSessionInTransaction(
         ${actor.turnId}::uuid, ${actor.attemptId}::uuid, ${actor.executionGeneration}::integer,
         ${JSON.stringify(valuesByColumn)}::jsonb
       )`);
-      insertedRows = created.length
-        ? await tx.select().from(schema.sessions).where(eq(schema.sessions.id, created[0]!.id))
-        : [];
+      insertedRows = !created.length
+        ? []
+        : removedRepositories.length > 0
+          ? await tx
+              .update(schema.sessions)
+              .set({ removedRepositories })
+              .where(eq(schema.sessions.id, created[0]!.id))
+              .returning()
+          : await tx.select().from(schema.sessions).where(eq(schema.sessions.id, created[0]!.id));
     } else {
       // Non-agent creates, unscoped legacy creates and turns with no initiating
       // human retain their original path. Never infer the request subject from
@@ -37048,13 +37297,13 @@ async function readSessionListForSubject(
           tx,
           workspaceId,
           [...pinnedRows, ...pageRows].map((row) => row.session),
-          !summary,
+          false,
         );
-        // Compact rows skip the unbounded effective-policy walk but still name
-        // the model with two fixed index probes per row.
-        const canonicalSessions = summary
-          ? await withSessionListModelPolicy(tx, workspaceId, canonicalRows)
-          : canonicalRows;
+        // Every list page names each row's model with two fixed index probes
+        // per row. The effective-policy walk can scan back over every turn
+        // started since the last settings write, which took seconds on long
+        // sessions; a single-session read still uses it.
+        const canonicalSessions = await withSessionListModelPolicy(tx, workspaceId, canonicalRows);
         const canonicalSessionById = new Map(
           canonicalSessions.map((session) => [session.id, session]),
         );
@@ -91462,6 +91711,7 @@ function sessionEventTypesAdvanceActivity(inputs: ReadonlyArray<{ type: string }
 
 function sessionMutationAdvancesActivity(update: {
   resources?: ResourceRef[];
+  removedRepositories?: SessionRemovedRepository[];
   tools?: ToolRef[];
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   agentConfig?: ResolvedAgentConfig | null;
@@ -93522,6 +93772,8 @@ type LockedSessionUpdateResult = {
   events: AppendEventInput[];
   update?: {
     resources?: ResourceRef[];
+    /** Repository removal records (migration 1140), written with `resources`. */
+    removedRepositories?: SessionRemovedRepository[];
     tools?: ToolRef[];
     firstPartyMcpTools?: FirstPartyMcpToolName[];
     /** Trusted host normalization; never accepted directly from a public update body. */
@@ -93702,6 +93954,9 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           .set({
             lastSequence: sequence,
             ...(update.resources !== undefined ? { resources: update.resources } : {}),
+            ...(update.removedRepositories !== undefined
+              ? { removedRepositories: update.removedRepositories }
+              : {}),
             ...(update.tools !== undefined ? { tools: update.tools } : {}),
             ...(update.firstPartyMcpTools !== undefined
               ? { firstPartyMcpTools: update.firstPartyMcpTools }
@@ -93932,6 +94187,7 @@ function mapSession(
     scopeSubjectId: sessionEndUserFromRow(row),
     memoryScope: sessionMemoryScopeFromRow(row),
     resources: row.resources as ResourceRef[],
+    ...sessionRemovedRepositoriesProjection(row.removedRepositories),
     skills: StoredSessionSkills.parse(row.skills ?? []),
     ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     tools: row.tools as ToolRef[],
@@ -94053,6 +94309,14 @@ function mapProjectedEvent(row: SessionEventProjectionRow): SessionEvent {
 
 function utf8JsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+/** Present only when the session has removal records, so other sessions read unchanged. */
+function sessionRemovedRepositoriesProjection(
+  value: unknown,
+): Pick<Session, "removedRepositories"> {
+  const removedRepositories = parseSessionRemovedRepositories(value);
+  return removedRepositories.length > 0 ? { removedRepositories } : {};
 }
 
 function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTurn {

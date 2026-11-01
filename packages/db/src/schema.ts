@@ -1,5 +1,6 @@
 import { subscriptionConnections } from "./subscription-core-schema";
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
+import type { StoredApiIntegrationRevision } from "./capability-integrations";
 import {
   commentaryExclusiveMeaningfulSessionEventSql,
   commentaryInclusiveMeaningfulSessionEventSql,
@@ -26,6 +27,7 @@ import type {
   PromptCacheDiagnostics,
   RigProviderImages,
   SessionMcpApprovalPolicy,
+  SessionRemovedRepository,
   SessionGoalChangeKind,
   SessionGoalMutationPolicy,
   SessionGoalSnapshot,
@@ -45,7 +47,12 @@ import {
 import { sql } from "drizzle-orm";
 export * from "./knowledge-entries-schema";
 export * from "./subscription-core-schema";
-import type { ResolvedAgentConfig, SessionAvatar, SessionToolPolicy } from "@opengeni/contracts";
+import type {
+  ApiIntegrationAuthPreview,
+  ResolvedAgentConfig,
+  SessionAvatar,
+  SessionToolPolicy,
+} from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import type { SessionEventPayloadTruncation } from "@opengeni/contracts";
 import {
@@ -2376,6 +2383,120 @@ export const slackInstallationBindings = pgTable(
 );
 
 /**
+ * A named Slack agent of one Slack installation.
+ *
+ * HOME (`accountId`/`workspaceId`/`connectionId`) is the installation binding,
+ * exactly like {@link slackChannelRoutes}. TARGET is the one fixed workspace the
+ * agent's chats run in; it never changes after creation. Everyone in the
+ * organization can read the directory; only the HOME tenancy writes.
+ */
+export const slackAgents = pgTable(
+  "slack_agents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    targetAccountId: uuid("target_account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    targetWorkspaceId: uuid("target_workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    nameKey: text("name_key").notNull(),
+    description: text("description").notNull(),
+    avatar: jsonb("avatar").$type<SessionAvatar>().notNull(),
+    instructions: text("instructions").notNull().default(""),
+    knowledgeCollectionId: uuid("knowledge_collection_id"),
+    open: boolean("open").notNull().default(false),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    nameKey: unique("slack_agents_name_key_uq").on(table.connectionId, table.nameKey),
+    workspaceAccount: foreignKey({
+      name: "slack_agents_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    targetWorkspaceAccount: foreignKey({
+      name: "slack_agents_target_workspace_account_fk",
+      columns: [table.targetWorkspaceId, table.targetAccountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    target: index("slack_agents_target_idx").on(table.targetWorkspaceId),
+    account: index("slack_agents_account_idx").on(table.accountId),
+    sameAccount: check(
+      "slack_agents_same_account_check",
+      sql`${table.targetAccountId} = ${table.accountId}`,
+    ),
+    bounded: check(
+      "slack_agents_bounds_check",
+      sql`octet_length(${table.slackTeamId}) between 1 and 64
+        and char_length(btrim(${table.name})) between 1 and 80
+        and ${table.nameKey} ~ '^[^[:space:]-]{1,80}$'
+        and char_length(btrim(${table.description})) between 1 and 200
+        and jsonb_typeof(${table.avatar}) = 'object'
+        and pg_column_size(${table.avatar}) <= 4096
+        and char_length(${table.instructions}) <= 8000
+        and octet_length(${table.createdBySubjectId}) between 1 and 1024
+        and ${table.version} > 0`,
+    ),
+  }),
+);
+
+/** Per Slack person and agent: the one-time "next time" hint and first use. */
+export const slackAgentUserStates = pgTable(
+  "slack_agent_user_states",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackAgentId: uuid("slack_agent_id")
+      .notNull()
+      .references(() => slackAgents.id, { onDelete: "cascade" }),
+    slackUserId: text("slack_user_id").notNull(),
+    hintInteractionId: uuid("hint_interaction_id"),
+    firstUsedAt: timestamp("first_used_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    agentUser: unique("slack_agent_user_states_agent_user_uq").on(
+      table.slackAgentId,
+      table.slackUserId,
+    ),
+    workspaceAccount: foreignKey({
+      name: "slack_agent_user_states_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    user: index("slack_agent_user_states_user_idx").on(table.connectionId, table.slackUserId),
+    bounded: check(
+      "slack_agent_user_states_bounds_check",
+      sql`octet_length(${table.slackUserId}) between 1 and 64`,
+    ),
+  }),
+);
+
+/**
  * Per-channel Slack workspace routing within one organization.
  *
  * HOME tenancy (`accountId`/`workspaceId`) is the installation binding's own
@@ -2412,6 +2533,11 @@ export const slackChannelRoutes = pgTable(
     decidedBySubjectId: text("decided_by_subject_id").notNull(),
     decidedBySlackUserId: text("decided_by_slack_user_id").notNull(),
     source: text("source").$type<"picker" | "admin">().notNull(),
+    // Set when the channel's answer is a Slack agent rather than plain Opengeni
+    // in the target workspace. The target then equals the agent's own target.
+    slackAgentId: uuid("slack_agent_id").references(() => slackAgents.id, {
+      onDelete: "cascade",
+    }),
     version: integer("version").notNull().default(1),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2675,6 +2801,8 @@ export const slackRoutePromptOptions = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     candidateLabel: text("candidate_label").notNull(),
+    // Set when the option is a Slack agent. Rechecked live when chosen.
+    candidateSlackAgentId: uuid("candidate_slack_agent_id"),
     position: integer("position").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -2698,10 +2826,11 @@ export const slackRoutePromptOptions = pgTable(
       columns: [table.candidateWorkspaceId, table.candidateAccountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("cascade"),
-    promptWorkspace: unique("slack_route_prompt_options_prompt_workspace_uq").on(
-      table.promptId,
-      table.candidateWorkspaceId,
-    ),
+    // An option is one choice: Opengeni in a workspace, or one Slack agent
+    // working there. The same workspace may appear once for each.
+    promptChoice: unique("slack_route_prompt_options_prompt_choice_uq")
+      .on(table.promptId, table.candidateWorkspaceId, table.candidateSlackAgentId)
+      .nullsNotDistinct(),
     promptPosition: unique("slack_route_prompt_options_prompt_position_uq").on(
       table.promptId,
       table.position,
@@ -2824,6 +2953,8 @@ export const slackBotUserLinks = pgTable(
     // The exact interaction id that won this identity's one-time onboarding
     // hint. NULL means the hint has not been shown yet.
     firstTaskHintInteractionId: uuid("first_task_hint_interaction_id"),
+    // Set when this person muted occasional update messages about new agents.
+    updatesMutedAt: timestamp("updates_muted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3063,6 +3194,11 @@ export const slackInteractionInbox = pgTable(
     targetAccountId: uuid("target_account_id"),
     targetWorkspaceId: uuid("target_workspace_id"),
     routePromptId: uuid("route_prompt_id"),
+    // A request routed to one exact Slack agent: a handoff from another chat.
+    // Rechecked when processed, like the target columns above.
+    targetSlackAgentId: uuid("target_slack_agent_id"),
+    handoffFromInteractionId: uuid("handoff_from_interaction_id"),
+    handoffFromSlackAgentId: uuid("handoff_from_slack_agent_id"),
     routePromptExpiresAt: timestamp("route_prompt_expires_at", {
       withTimezone: true,
     }),
@@ -3220,6 +3356,16 @@ export const slackInteractions = pgTable(
     // means the interaction keeps the previous message format (bound before
     // this column existed, or by an older image).
     startMessageLine: text("start_message_line"),
+    // The Slack agent this chat was started for, frozen when the thread binds.
+    slackAgentId: uuid("slack_agent_id").references(() => slackAgents.id, {
+      onDelete: "set null",
+    }),
+    // The agent whose chat passed this thread on, so it is never handed back.
+    handoffFromSlackAgentId: uuid("handoff_from_slack_agent_id"),
+    // The latest Slack message this chat was given and who sent it. A message
+    // that was itself passed on is never passed on again.
+    lastInboundProviderEventId: text("last_inbound_provider_event_id"),
+    lastInboundSlackUserId: text("last_inbound_slack_user_id"),
     progressCount: integer("progress_count").notNull().default(0),
     terminalDeliveryState: text("terminal_delivery_state")
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()
@@ -3242,6 +3388,9 @@ export const slackInteractions = pgTable(
     workspaceSession: uniqueIndex("slack_interactions_workspace_session_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.sessionId} is not null`),
+    slackAgent: index("slack_interactions_slack_agent_idx")
+      .on(table.slackAgentId, table.createdAt.desc())
+      .where(sql`${table.slackAgentId} is not null`),
     delivery: index("slack_interactions_delivery_idx").on(
       table.terminalDeliveryState,
       table.deliveryRetryAt,
@@ -4835,6 +4984,12 @@ export const sessions = pgTable(
     contentArchive: jsonb("content_archive").$type<Record<string, unknown>>(),
     contentArchivePurgedAt: timestamp("content_archive_purged_at", { withTimezone: true }),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
+    // Repositories a person removed from the session (migration 1140); see
+    // SessionRemovedRepository. Read with parseSessionRemovedRepositories.
+    removedRepositories: jsonb("removed_repositories")
+      .$type<SessionRemovedRepository[]>()
+      .notNull()
+      .default([]),
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
@@ -13632,14 +13787,49 @@ export const capabilityInstallations = pgTable(
 );
 
 /**
- * An organization's MCP connector, added once by an organization owner or
- * admin and served to the workspaces its reach selects: every shared workspace
+ * An organization's connector, added once by an organization owner or admin
+ * and served to the workspaces its reach selects: every shared workspace
  * (`allowedWorkspaceIds` null) or the listed ones, plus members' Personal
- * workspaces when `allowPersonalWorkspaces` is on. `config` has the shape of a
- * workspace installation's config; `customDefinition` holds a custom server's
- * name and endpoint and is null for a catalog connector. A workspace's own
- * installation of the same capability, on or off, wins (resolved by readers).
+ * workspaces when `allowPersonalWorkspaces` is on. A workspace's own setup of
+ * the same capability, on or off, wins (resolved by readers).
+ *
+ * `kind` "mcp": a remote MCP server. `config` has the shape of a workspace
+ * installation's config; `customDefinition` holds a custom server's name and
+ * endpoint and is null for a catalog connector.
+ * `kind` "api": an API integration. `customDefinition` is the reviewed,
+ * compiled definition every reached workspace runs; `config` holds how turns
+ * sign in and the tools that are on.
  */
+export type OrganizationMcpServerDefinition = {
+  name: string;
+  description?: string | null;
+  endpointUrl: string;
+};
+
+/** What an organization admin reviewed when adding an API integration. */
+export type OrganizationApiIntegrationDefinition = {
+  kind: "api";
+  name: string;
+  description: string | null;
+  definitionId: string;
+  definitionProvenance: "curated" | "workspace";
+  protocol: "openapi" | "graphql";
+  pluginKey: string;
+  /** The base server id a workspace installation of it would use. */
+  serverId: string;
+  provider: string | null;
+  providerDomain: string;
+  baseUrl: string;
+  sourceUrl: string | null;
+  /** The source it was compiled from, as a preview echoes it (never an inline document's text). */
+  source: Record<string, unknown>;
+  requiredScopes: string[];
+  /** How the API authenticates, as the preview showed it: what each person or the key provides. */
+  auth: ApiIntegrationAuthPreview;
+  authScheme: Record<string, unknown>;
+  revision: StoredApiIntegrationRevision;
+};
+
 export const organizationConnectors = pgTable(
   "organization_connectors",
   {
@@ -13648,11 +13838,10 @@ export const organizationConnectors = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     capabilityId: text("capability_id").notNull(),
-    customDefinition: jsonb("custom_definition").$type<{
-      name: string;
-      description?: string | null;
-      endpointUrl: string;
-    }>(),
+    kind: text("kind").$type<"mcp" | "api">().notNull().default("mcp"),
+    customDefinition: jsonb("custom_definition").$type<
+      OrganizationMcpServerDefinition | OrganizationApiIntegrationDefinition
+    >(),
     config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     status: text("status").$type<"active" | "disabled">().notNull().default("active"),
@@ -13672,6 +13861,10 @@ export const organizationConnectors = pgTable(
     statusCheck: check(
       "organization_connectors_status_chk",
       sql`${table.status} in ('active', 'disabled')`,
+    ),
+    kindCheck: check(
+      "organization_connectors_kind_chk",
+      sql`${table.kind} in ('mcp', 'api') and (${table.kind} = 'mcp' or ${table.customDefinition} is not null)`,
     ),
   }),
 );

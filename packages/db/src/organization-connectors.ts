@@ -26,6 +26,20 @@ import * as schema from "./schema";
  * workspace's own MCP setup is.
  */
 export type OrganizationConnectorRow = typeof schema.organizationConnectors.$inferSelect;
+export type {
+  OrganizationApiIntegrationDefinition,
+  OrganizationMcpServerDefinition,
+} from "./schema";
+
+/** An API organization connector's reviewed definition; null for an MCP server. */
+export function organizationApiIntegrationDefinition(
+  row: Pick<OrganizationConnectorRow, "kind" | "customDefinition">,
+): schema.OrganizationApiIntegrationDefinition | null {
+  const definition = row.customDefinition;
+  return row.kind === "api" && definition && "kind" in definition && definition.kind === "api"
+    ? definition
+    : null;
+}
 
 /** A trusted server callback that has already authenticated the acting person. */
 export type AuthorizeOrganizationConnectorAdministration = () => Promise<{
@@ -43,6 +57,21 @@ export class OrganizationConnectorWorkspaceNotInOrganizationError extends Error 
 /** Integration policy key every MCP setup checks; the generic catalog proves no provider identity. */
 const MCP_INTEGRATION_KEY = "custom:mcp";
 
+/**
+ * The integration policy key a connector is checked against, the same key a
+ * workspace setup of it checks: every MCP server is `custom:mcp`; an API
+ * integration is its curated definition id, or `custom:<protocol>`.
+ */
+export function organizationConnectorIntegrationKey(
+  row: Pick<OrganizationConnectorRow, "kind" | "customDefinition">,
+): string {
+  const definition = organizationApiIntegrationDefinition(row);
+  if (!definition) return MCP_INTEGRATION_KEY;
+  return definition.definitionProvenance === "curated"
+    ? definition.definitionId
+    : `custom:${definition.protocol}`;
+}
+
 /** How turns sign in, read from what the setup stores. */
 export function organizationConnectorLogin(
   config: Record<string, unknown>,
@@ -51,11 +80,28 @@ export function organizationConnectorLogin(
   const headers = config.headersEncrypted;
   if (headers && typeof headers === "object" && Object.keys(headers).length > 0)
     return "organization_key";
+  // An API integration's organization key: header, query or cookie placements.
+  if (Array.isArray(config.placementsEncrypted) && config.placementsEncrypted.length > 0)
+    return "organization_key";
   return "none";
 }
 
-/** Header names only; the encrypted values never leave the database layer through this. */
+/**
+ * The names an organization key is sent under (headers, or an API
+ * integration's header, query or cookie names). The encrypted values never
+ * leave the database layer through this.
+ */
 export function organizationConnectorHeaderNames(config: Record<string, unknown>): string[] {
+  if (Array.isArray(config.placementsEncrypted))
+    return [
+      ...new Set(
+        config.placementsEncrypted.flatMap((placement) =>
+          placement && typeof placement === "object" && typeof placement.name === "string"
+            ? [placement.name as string]
+            : [],
+        ),
+      ),
+    ].sort();
   const headers = config.headersEncrypted;
   return headers && typeof headers === "object" ? Object.keys(headers).sort() : [];
 }
@@ -98,7 +144,11 @@ async function withAdministrator<T>(
  * policy writer takes it exclusively, before membership rows) and check the
  * policy under it.
  */
-async function assertPolicyAllowsConnector(tx: Database, accountId: string): Promise<void> {
+async function assertPolicyAllowsConnector(
+  tx: Database,
+  accountId: string,
+  integrationKey: string,
+): Promise<void> {
   await tx.execute(
     sql`select pg_advisory_xact_lock_shared(hashtextextended(${`organization-integration-policy:${accountId}`}, 0))`,
   );
@@ -108,7 +158,7 @@ async function assertPolicyAllowsConnector(tx: Database, accountId: string): Pro
   );
   assertOrganizationIntegrationAllowed(
     OrganizationIntegrationPolicy.parse(row?.policy ?? {}),
-    MCP_INTEGRATION_KEY,
+    integrationKey,
   );
 }
 
@@ -180,6 +230,8 @@ export async function getOrganizationConnector(
 }
 
 export type NewOrganizationConnector = {
+  /** Defaults to "mcp". */
+  kind?: "mcp" | "api";
   capabilityId: string;
   customDefinition: OrganizationConnectorRow["customDefinition"];
   config: Record<string, unknown>;
@@ -196,12 +248,18 @@ export async function insertOrganizationConnector(
   authorize: AuthorizeOrganizationConnectorAdministration,
 ): Promise<OrganizationConnectorRow> {
   return await withAdministrator(db, scope.accountId, authorize, async (tx, subjectId) => {
-    await assertPolicyAllowsConnector(tx, scope.accountId);
+    const kind = input.kind ?? "mcp";
+    await assertPolicyAllowsConnector(
+      tx,
+      scope.accountId,
+      organizationConnectorIntegrationKey({ kind, customDefinition: input.customDefinition }),
+    );
     await assertSharedWorkspaces(tx, scope.accountId, input.allowedWorkspaceIds);
     const [row] = await tx
       .insert(schema.organizationConnectors)
       .values({
         accountId: scope.accountId,
+        kind,
         capabilityId: input.capabilityId,
         customDefinition: input.customDefinition,
         config: input.config,
@@ -237,7 +295,11 @@ export async function updateOrganizationConnector(
 ): Promise<OrganizationConnectorRow | null> {
   return await withAdministrator(db, scope.accountId, authorize, async (tx, subjectId) => {
     const [current] = await tx
-      .select({ status: schema.organizationConnectors.status })
+      .select({
+        status: schema.organizationConnectors.status,
+        kind: schema.organizationConnectors.kind,
+        customDefinition: schema.organizationConnectors.customDefinition,
+      })
       .from(schema.organizationConnectors)
       .where(
         and(
@@ -250,7 +312,11 @@ export async function updateOrganizationConnector(
     // Saving a connector that stays (or becomes) active is an acquisition;
     // turning it off never needs the policy.
     if ((change.status ?? current.status) === "active")
-      await assertPolicyAllowsConnector(tx, scope.accountId);
+      await assertPolicyAllowsConnector(
+        tx,
+        scope.accountId,
+        organizationConnectorIntegrationKey(current),
+      );
     if (change.allowedWorkspaceIds !== undefined)
       await assertSharedWorkspaces(tx, scope.accountId, change.allowedWorkspaceIds);
     const [row] = await rawRows<{ id: string }>(
@@ -299,19 +365,26 @@ export async function deleteOrganizationConnector(
 }
 
 /**
- * The active organization connectors that reach `workspaceId`, whatever the
- * workspace's own settings say (callers apply "the workspace's own setup
- * wins"). Row security decides reach; this read only narrows to active rows.
+ * The active organization connectors of one kind (MCP servers unless asked)
+ * that reach `workspaceId`, whatever the workspace's own settings say
+ * (callers apply "the workspace's own setup wins"). Row security decides
+ * reach; this read only narrows to active rows of that kind.
  */
 export async function listOrganizationConnectorsReachingWorkspace(
   db: Database,
   workspaceId: string,
+  kind: "mcp" | "api" = "mcp",
 ): Promise<OrganizationConnectorRow[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
     scopedDb
       .select()
       .from(schema.organizationConnectors)
-      .where(eq(schema.organizationConnectors.status, "active"))
+      .where(
+        and(
+          eq(schema.organizationConnectors.status, "active"),
+          eq(schema.organizationConnectors.kind, kind),
+        ),
+      )
       .orderBy(asc(schema.organizationConnectors.capabilityId)),
   );
 }

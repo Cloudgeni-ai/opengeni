@@ -21,7 +21,6 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 
-import type { GoogleDriveKnowledgeSourceDialogProps } from "@/components/capabilities/google-drive-knowledge-source-dialog";
 import { Badge } from "@opengeni/react/ui/badge";
 import { Button } from "@opengeni/react/ui/button";
 import {
@@ -58,7 +57,6 @@ type FacetMutationToken = {
   generation: number;
   sequence: number;
 };
-type GoogleDriveDialogProps = GoogleDriveKnowledgeSourceDialogProps;
 
 const KIND_DETAILS: Record<
   IntegrationFacetDefinitionSummary["kind"],
@@ -68,9 +66,12 @@ const KIND_DETAILS: Record<
     icon: ComponentType<{ className?: string }>;
   }
 > = {
+  // Retired: only facets saved before the retirement still appear, so they
+  // can be removed. Imported documents stay in Knowledge.
   knowledge_source: {
     label: "Knowledge source",
-    description: "Choose what this account contributes to searchable workspace knowledge.",
+    description:
+      "Knowledge sync is retired. Use this account's tools in an agent schedule instead; imported documents remain.",
     icon: BookOpenIcon,
   },
   inbound_trigger: {
@@ -96,22 +97,14 @@ export function IntegrationFacetsPanel({
   instance,
   facetCount,
   canManage,
-  canManagePersonalDestination,
-  canManageWorkspaceDestination,
-  canManageOrganizationDestination,
   refreshRevision,
-  GoogleDriveDialog,
 }: {
   client: OpenGeniBrowserClient;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
   facetCount: number;
   canManage: boolean;
-  canManagePersonalDestination: boolean;
-  canManageWorkspaceDestination: boolean;
-  canManageOrganizationDestination: boolean;
   refreshRevision: number;
-  GoogleDriveDialog: ComponentType<GoogleDriveDialogProps>;
 }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<IntegrationInstanceFacetsResponse | null>(null);
@@ -119,7 +112,6 @@ export function IntegrationFacetsPanel({
   const [error, setError] = useState<{ cause: unknown } | null>(null);
   const [busyFacetKeys, setBusyFacetKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [editor, setEditor] = useState<FacetEntry | null>(null);
-  const [googleDriveEditor, setGoogleDriveEditor] = useState<FacetEntry | null>(null);
   const [form, setForm] = useState<FacetFormState>({});
   const [removeTarget, setRemoveTarget] = useState<FacetEntry | null>(null);
   const operationGeneration = useRef(0);
@@ -160,7 +152,6 @@ export function IntegrationFacetsPanel({
       setBusyFacetKeys(new Set());
       setOpen(false);
       setEditor(null);
-      setGoogleDriveEditor(null);
       setRemoveTarget(null);
       seenRefreshRevision.current = refreshRevision;
     }
@@ -192,7 +183,6 @@ export function IntegrationFacetsPanel({
     setError(null);
     setBusyFacetKeys(new Set());
     setEditor(null);
-    setGoogleDriveEditor(null);
     setRemoveTarget(null);
     if (open) void load();
     // load is deliberately scoped to the current exact panel identity.
@@ -239,10 +229,7 @@ export function IntegrationFacetsPanel({
   }
 
   function edit(entry: FacetEntry): void {
-    if (isGoogleDriveKnowledgeSource(entry)) {
-      setGoogleDriveEditor(entry);
-      return;
-    }
+    if (isRetiredFacet(entry)) return;
     setEditor(entry);
     setForm(facetFormState(entry.definition, entry.binding));
   }
@@ -401,8 +388,10 @@ export function IntegrationFacetsPanel({
     }
   }
 
-  const activeCount =
-    data?.facets.filter((entry) => entry.binding?.status === "active").length ?? 0;
+  const visibleFacets = data ? visibleIntegrationFacets(data.facets) : [];
+  const activeCount = visibleFacets.filter(
+    (entry) => !isRetiredFacet(entry) && entry.binding?.status === "active",
+  ).length;
 
   return (
     <>
@@ -420,7 +409,7 @@ export function IntegrationFacetsPanel({
               Facets
               {data ? (
                 <span className="text-fg-subtle">
-                  {activeCount}/{data.facets.length}
+                  {activeCount}/{visibleFacets.length}
                 </span>
               ) : null}
             </span>
@@ -457,7 +446,7 @@ export function IntegrationFacetsPanel({
                 </ErrorMessage>
               )
             ) : data ? (
-              data.facets.map((entry) => (
+              visibleFacets.map((entry) => (
                 <FacetRow
                   key={entry.definition.facetKey}
                   entry={entry}
@@ -484,30 +473,6 @@ export function IntegrationFacetsPanel({
         onClose={() => setEditor(null)}
         onSubmit={save}
       />
-
-      {googleDriveEditor ? (
-        <GoogleDriveDialog
-          client={client}
-          workspaceId={workspaceId}
-          instance={instance}
-          entry={googleDriveEditor}
-          canManage={canManage}
-          canManagePersonalDestination={canManagePersonalDestination}
-          canManageWorkspaceDestination={canManageWorkspaceDestination}
-          canManageOrganizationDestination={canManageOrganizationDestination}
-          onClose={() =>
-            setGoogleDriveEditor((current) => (current === googleDriveEditor ? null : current))
-          }
-          onMutationStart={() => {
-            const token = beginMutation(googleDriveEditor.definition.facetKey);
-            return {
-              apply: (binding) => applyMutationBinding(token, binding),
-              isCurrent: () => isCurrentMutation(token),
-              finish: () => finishMutation(token),
-            };
-          }}
-        />
-      ) : null}
 
       <ConfirmDialog
         open={removeTarget !== null}
@@ -567,8 +532,9 @@ function FacetRow({
   const directlyOwned = binding?.directlyOwned === true;
   const otherOwners = otherFacetOwners(binding);
   const externallyManaged = configured && !directlyOwned;
-  const independentlyMutable = directlyOwned && otherOwners.length === 0;
-  const canConfigure = !configured && otherOwners.length === 0;
+  const retired = isRetiredFacet(entry);
+  const independentlyMutable = !retired && directlyOwned && otherOwners.length === 0;
+  const canConfigure = !retired && !configured && otherOwners.length === 0;
   return (
     <article
       className="rounded-lg border border-border bg-bg p-3"
@@ -581,7 +547,7 @@ function FacetRow({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
             <p className="text-xs font-semibold text-fg">{facetTitle(entry.definition)}</p>
-            <FacetStatusBadge binding={binding} />
+            <FacetStatusBadge binding={binding} retired={retired} />
             {otherOwners.length > 0 || externallyManaged ? (
               <Badge variant="outline" className="text-2xs text-fg-subtle">
                 {otherOwners.length > 0 ? "Shared" : "Managed"}
@@ -604,15 +570,21 @@ function FacetRow({
         {busy ? <Loader2Icon className="size-3.5 animate-spin text-brand" /> : null}
       </div>
       <div className="mt-2 flex flex-wrap gap-1">
-        <Button
-          type="button"
-          variant="ghost"
-          size="xs"
-          disabled={!canManage || busy || (!canConfigure && !independentlyMutable)}
-          onClick={onEdit}
-        >
-          {configured ? "Edit" : entry.definition.kind === "identity_link" ? "Enable" : "Configure"}
-        </Button>
+        {retired ? null : (
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            disabled={!canManage || busy || (!canConfigure && !independentlyMutable)}
+            onClick={onEdit}
+          >
+            {configured
+              ? "Edit"
+              : entry.definition.kind === "identity_link"
+                ? "Enable"
+                : "Configure"}
+          </Button>
+        )}
         {binding?.status === "active" && independentlyMutable ? (
           <Button
             type="button"
@@ -654,16 +626,24 @@ function FacetRow({
   );
 }
 
-function FacetStatusBadge({ binding }: { binding: IntegrationFacetBindingSummary | null }) {
-  const status = binding?.status ?? "not_configured";
+function FacetStatusBadge({
+  binding,
+  retired,
+}: {
+  binding: IntegrationFacetBindingSummary | null;
+  retired: boolean;
+}) {
+  const status = retired ? "retired" : (binding?.status ?? "not_configured");
   const label =
-    status === "active"
-      ? "Active"
-      : status === "paused"
-        ? "Paused"
-        : status === "needs_attention"
-          ? "Needs attention"
-          : "Not configured";
+    status === "retired"
+      ? "Retired"
+      : status === "active"
+        ? "Active"
+        : status === "paused"
+          ? "Paused"
+          : status === "needs_attention"
+            ? "Needs attention"
+            : "Not configured";
   return (
     <Badge
       variant="outline"
@@ -964,10 +944,15 @@ function objectValue(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function isGoogleDriveKnowledgeSource(entry: FacetEntry): boolean {
-  return (
-    entry.definition.facetKey === "drive-content" &&
-    entry.definition.kind === "knowledge_source" &&
-    entry.definition.capabilities.provider === "google-drive"
+/** Knowledge-source facets are retired; a saved one stays visible only so it can be removed. */
+function isRetiredFacet(entry: FacetEntry): boolean {
+  return entry.definition.kind === "knowledge_source";
+}
+
+export function visibleIntegrationFacets(
+  facets: IntegrationInstanceFacetsResponse["facets"],
+): IntegrationInstanceFacetsResponse["facets"] {
+  return facets.filter(
+    (entry) => !isRetiredFacet(entry) || (entry.binding && entry.binding.status !== "disabled"),
   );
 }

@@ -9,6 +9,7 @@ import {
   sharedPoolSubscriptionAuthoritySnapshotsInTransaction,
 } from "./accepted-subscription-authority";
 import { acceptSessionFileAttachments } from "./session-file-attachments";
+import { admitRequestedRepositories } from "./session-resource-removal";
 import { ArchivedSessionImportError } from "./archived-session-imports";
 import { SessionArchivedError } from "./session-archive-errors";
 import {
@@ -29,6 +30,7 @@ import {
   TimelineAnnotations,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
+  parseSessionRemovedRepositories,
   renderTimelineAnnotationsForModel,
   ResourceRef,
   resourceMountPath,
@@ -2420,6 +2422,14 @@ export async function submitHumanPromptInTransaction(
       receipt: reserved.receipt,
     });
   }
+  // Checked against the locked session row, so a removal committed while
+  // this request was on its way still applies: an agent cannot attach a
+  // repository a person removed, and a person attaching one ends its record.
+  const repositoryAdmission = admitRequestedRepositories({
+    removedRepositories: parseSessionRemovedRepositories(promptTarget?.removedRepositories),
+    requested: input.resources,
+    requester: input.actor.type === "agent_attempt" ? "agent" : "person",
+  });
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl,
   });
@@ -3230,6 +3240,9 @@ export async function submitHumanPromptInTransaction(
     .set({
       ...composerPolicy,
       resources: mergeResourceRefs(session.resources as ResourceRef[], input.resources),
+      ...(repositoryAdmission.changed
+        ? { removedRepositories: repositoryAdmission.removedRepositories }
+        : {}),
       tools: session.tools,
       activeTurnId: effectiveDelivery === "steer" ? liveCurrentTurnId : session.activeTurnId,
       status: nextStatus,
