@@ -12,11 +12,16 @@ import {
   getRigChange,
   initializeSessionStartAtomically,
   listRigVersions,
+  updateOrganizationRigReach,
   updateRigChangeStatus,
   withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
@@ -740,5 +745,78 @@ describe("rig route permission matrix", () => {
       name: "workspace-reach",
     });
     expect((await putReach(admin, workspaceRig.id, onlyTarget)).status).toBe(409);
+  });
+
+  test("organization owners list every organization rig, wherever it works", async () => {
+    if (!available) return;
+    const origin = await freshWorkspace();
+    const target = await freshWorkspace(origin.accountId);
+    const third = await freshWorkspace(origin.accountId);
+    const subjectId = `user:${crypto.randomUUID()}`;
+    await organizationMember([origin, target, third], subjectId);
+    const organizationRig = async (name: string) =>
+      await createRig(client.db, {
+        ...origin,
+        subjectId,
+        scope: "organization",
+        allowOrganization: true,
+        name,
+      });
+    const everywhere = await organizationRig("listed-everywhere");
+    const elsewhere = await organizationRig("listed-elsewhere");
+    await updateOrganizationRigReach(client.db, elsewhere.id, {
+      accountId: origin.accountId,
+      homeWorkspaceId: origin.workspaceId,
+      allowedWorkspaceIds: [third.workspaceId],
+      allowPersonalWorkspaces: false,
+      subjectId,
+    });
+    const workspaceRig = await createRig(client.db, {
+      ...target,
+      subjectId,
+      scope: "workspace",
+      name: "listed-workspace",
+    });
+    const http = app();
+    const list = async (permissions: Permission[]) => {
+      const response = await http.request(
+        `/v1/workspaces/${target.workspaceId}/organization-rigs`,
+        { headers: { authorization: await bearer(target, subjectId, permissions) } },
+      );
+      return {
+        status: response.status,
+        body: (await response.json()) as {
+          rigs?: Array<{ id: string; name: string; reach: unknown }>;
+          complete?: boolean;
+        },
+      };
+    };
+    const ids = (body: { rigs?: Array<{ id: string }> }) => body.rigs!.map((rig) => rig.id);
+    const owner = ["rigs:use", "account:admin"] as Permission[];
+
+    // Only organization owners, who decide where each works.
+    expect((await list(["rigs:use", "rigs:manage"])).status).toBe(403);
+
+    // Until the list is granted: the organization ones that work here.
+    const before = await list(owner);
+    expect(before.status).toBe(200);
+    expect(before.body.complete).toBe(false);
+    expect(ids(before.body)).toEqual([everywhere.id]);
+
+    await grantDeferredRuntimeAccess(shared!.admin);
+    const after = await list(owner);
+    expect(after.status).toBe(200);
+    expect(after.body.complete).toBe(true);
+    expect(ids(after.body).sort()).toEqual([everywhere.id, elsewhere.id].sort());
+    expect(ids(after.body)).not.toContain(workspaceRig.id);
+    expect(after.body.rigs!.find((rig) => rig.id === elsewhere.id)).toEqual({
+      id: elsewhere.id,
+      name: "listed-elsewhere",
+      reach: {
+        homeWorkspaceId: origin.workspaceId,
+        allowedWorkspaceIds: [third.workspaceId],
+        allowPersonalWorkspaces: false,
+      },
+    });
   });
 });

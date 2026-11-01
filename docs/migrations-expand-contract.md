@@ -260,7 +260,8 @@ withheld, with the same caller check; until it is granted the API lists only
 the organization vaults that work in the requested workspace and says the
 list is incomplete. 1211 created the names-only organization member list
 withheld, with the same caller check; until it is granted the API reports the
-list as unavailable.
+list as unavailable. 1224 created the organization machine and rig list
+withheld the same way as the vault list.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

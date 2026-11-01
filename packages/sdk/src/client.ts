@@ -792,6 +792,8 @@ import type {
   UpdateRigRequest,
   UpdateOrganizationComputeReachRequest,
   OrganizationComputeReachResponse,
+  ListOrganizationMachinesResponse,
+  ListOrganizationRigsResponse,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceModelAccessPolicyRequest,
   UpdateWorkspaceRequest,
@@ -2896,6 +2898,17 @@ export class OpenGeniClient {
       "PUT",
       `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/reach`,
       request,
+    );
+  }
+
+  /** Every organization Connected Machine, wherever it works, with where each
+   * works. Organization owners only; a workspace's machine list holds only
+   * the ones that work there. `complete` is false while the server can only
+   * list the ones that work in this workspace. */
+  async listOrganizationMachines(workspaceId: string): Promise<ListOrganizationMachinesResponse> {
+    return await this.requestJson<ListOrganizationMachinesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/organization-machines`,
     );
   }
 
@@ -8185,6 +8198,15 @@ export class OpenGeniClient {
       "PUT",
       `/v1/workspaces/${workspaceId}/rigs/${rigId}/reach`,
       request,
+    );
+  }
+
+  /** Every organization Sandbox Environment, wherever it works, with where
+   * each works. Organization owners only. `complete` as for machines. */
+  async listOrganizationRigs(workspaceId: string): Promise<ListOrganizationRigsResponse> {
+    return await this.requestJson<ListOrganizationRigsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/organization-rigs`,
     );
   }
 

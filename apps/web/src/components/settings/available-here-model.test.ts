@@ -370,7 +370,9 @@ describe("row words", () => {
         sample({ kind: "machine", owner: "workspace", name: "box", state: "Offline" }),
       ),
     ).toBe("Machine · Offline");
-    expect(availableValue(sample({ kind: "rig", owner: "workspace", name: "Web" }))).toBe("Rig");
+    expect(availableValue(sample({ kind: "rig", owner: "workspace", name: "Web" }))).toBe(
+      "Sandbox environment",
+    );
     expect(
       availableValue(sample({ kind: "skills", owner: "workspace", name: "Skills", count: 12 })),
     ).toBe("12");

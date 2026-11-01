@@ -91,6 +91,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_organization_vaults_v1(uuid, jsonb)",
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
+  "list_organization_compute_v1(uuid, uuid, text)",
 ] as const;
 
 /**
@@ -124,6 +125,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * get no names (as before).
  * 1153 withholds the Slack agent update sweeper's inventory; until it is
  * granted, the sweeper finds nothing and sends no update messages.
+ * 1224 withholds the organization machine and rig list the same way as the
+ * vault list.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -140,6 +143,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "list_organization_vaults_v1(uuid, jsonb)",
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
+  "list_organization_compute_v1(uuid, uuid, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -232,6 +236,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   "list_organization_vaults_v1(uuid, jsonb)": ["vaults", "vault_items"],
   "list_organization_member_names_v1(uuid)": ["organization_memberships", "auth_users"],
   "list_due_slack_agent_update_installations_v1(integer)": ["slack_agent_update_settings"],
+  "list_organization_compute_v1(uuid, uuid, text)": ["enrollments", "rigs", "sandboxes"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
