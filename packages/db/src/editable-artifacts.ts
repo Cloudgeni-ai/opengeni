@@ -574,6 +574,24 @@ export type PersistedEditableArtifactScopeAuthorizationHead = Readonly<{
   createRevision: number;
 }>;
 
+/**
+ * Who can open an artifact: the whole workspace, or only its owner ("Only
+ * me"). The owner is the person who may change it; workspace artifacts made
+ * before audiences existed have none and stay shared.
+ */
+export type PersistedEditableArtifactAudience = Readonly<{
+  visibility: "workspace_shared" | "user_private";
+  ownerSubjectId: string | null;
+}>;
+
+/** The audience change was refused because the caller does not own it. */
+export class EditableArtifactAudienceOwnerRequiredError extends Error {
+  constructor() {
+    super("Only the person who owns this artifact can change who can open it");
+    this.name = "EditableArtifactAudienceOwnerRequiredError";
+  }
+}
+
 export class EditableArtifactPersistenceError extends Error {
   constructor(
     readonly code:
@@ -689,6 +707,141 @@ export async function listEditableArtifactIdsForSession(
 }
 
 export const EDITABLE_ARTIFACT_INTENT_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * The stored audience of artifacts the caller already opened through
+ * `authorize_editable_artifact_actor`. Metadata only; it grants nothing.
+ */
+export async function readEditableArtifactAudiences(
+  db: Database,
+  scopeInput: PersistedEditableArtifactScope,
+  artifactIdsInput: readonly string[],
+): Promise<ReadonlyMap<string, PersistedEditableArtifactAudience>> {
+  const scope = validateScope(scopeInput);
+  const artifactIds = [...new Set(artifactIdsInput)].map((id) =>
+    validateStableId(id, "artifact id"),
+  );
+  if (!artifactIds.length) return new Map();
+  if (artifactIds.length > 256) throw new TypeError("Too many artifacts to read audiences for");
+  return await withRlsContext(
+    db,
+    scope,
+    async (tx) => {
+      const rows = await rawRows<{
+        id: string;
+        visibility: string;
+        owner_subject_id: string | null;
+      }>(
+        tx,
+        sql`select id, visibility, owner_subject_id
+          from editable_artifacts
+          where account_id = ${scope.accountId}::uuid
+            and workspace_id = ${scope.workspaceId}::uuid
+            and id in (${sql.join(
+              artifactIds.map((id) => sql`${id}`),
+              sql`, `,
+            )})`,
+      );
+      return new Map(rows.map((row) => [row.id, audienceFromRow(row)]));
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+}
+
+/**
+ * Change who can open an artifact. Only its owner can; anyone else gets the
+ * same answer as for an artifact that does not exist when it is Only me, or
+ * an owner-required refusal when it is shared with them. The change advances
+ * the artifact's authorization revision in the same transaction, so every
+ * open live session is re-decided. Whether the owner may make anything Only me
+ * is decided by the caller first.
+ */
+export async function setEditableArtifactAudience(
+  db: Database,
+  scopeInput: PersistedEditableArtifactScope,
+  input: {
+    artifactId: string;
+    callerSubjectId: string;
+    visibility: "workspace_shared" | "user_private";
+  },
+): Promise<PersistedEditableArtifactAudience> {
+  const scope = validateScope(scopeInput);
+  const artifactId = validateStableId(input.artifactId, "artifact id");
+  const caller = validateIdentity(input.callerSubjectId, "audience owner subject id");
+  if (input.visibility !== "workspace_shared" && input.visibility !== "user_private")
+    throw new TypeError("Unsupported editable artifact visibility");
+  const visibility = input.visibility;
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<{
+      visibility: string;
+      owner_subject_id: string | null;
+      authorization_revision: string | number | bigint;
+    }>(
+      tx,
+      sql`select visibility, owner_subject_id, authorization_revision
+        from editable_artifacts
+        where account_id = ${scope.accountId}::uuid
+          and workspace_id = ${scope.workspaceId}::uuid
+          and id = ${artifactId}
+        for update`,
+    );
+    if (!row || (row.visibility === "user_private" && row.owner_subject_id !== caller))
+      throw new EditableArtifactPersistenceError("not_found", "Editable artifact was not found");
+    if (row.owner_subject_id !== caller) throw new EditableArtifactAudienceOwnerRequiredError();
+    if (row.visibility === visibility) return audienceFromRow(row);
+    await tx.execute(sql`update editable_artifacts
+      set visibility = ${visibility}
+      where account_id = ${scope.accountId}::uuid
+        and workspace_id = ${scope.workspaceId}::uuid
+        and id = ${artifactId}`);
+    const revision = safeInteger(row.authorization_revision, "artifact authorization revision", 1);
+    const [advanced] = await rawRows<{ applied: boolean }>(
+      tx,
+      sql`select applied
+        from opengeni_private.advance_editable_artifact_authorization_revision(
+          ${scope.accountId}::uuid,
+          ${scope.workspaceId}::uuid,
+          ${artifactId},
+          ${revision},
+          ${revision + 1},
+          current_schema()
+        )`,
+    );
+    if (advanced?.applied !== true)
+      throw new EditableArtifactPersistenceError(
+        "conflict",
+        "Editable artifact authorization changed while its audience was changing",
+      );
+    return Object.freeze({ visibility, ownerSubjectId: caller });
+  });
+}
+
+function audienceFromRow(row: {
+  visibility: string;
+  owner_subject_id: string | null;
+}): PersistedEditableArtifactAudience {
+  return Object.freeze({
+    visibility: row.visibility === "user_private" ? "user_private" : "workspace_shared",
+    ownerSubjectId: row.owner_subject_id,
+  });
+}
+
+function validateAudience(
+  input: PersistedEditableArtifactAudience | undefined,
+): PersistedEditableArtifactAudience {
+  if (input === undefined)
+    return Object.freeze({ visibility: "workspace_shared", ownerSubjectId: null });
+  if (input.visibility !== "workspace_shared" && input.visibility !== "user_private")
+    throw new TypeError("Unsupported editable artifact visibility");
+  const ownerSubjectId =
+    input.ownerSubjectId === null
+      ? null
+      : validateIdentity(input.ownerSubjectId, "artifact owner subject id");
+  if (input.visibility === "user_private" && ownerSubjectId === null)
+    throw new TypeError("An Only me artifact needs an owner");
+  return Object.freeze({ visibility: input.visibility, ownerSubjectId });
+}
+
 export const EDITABLE_ARTIFACT_KERNEL_TAIL_MAX_TRANSACTIONS = 100_000;
 export const EDITABLE_ARTIFACT_KERNEL_TAIL_MAX_BYTES = 64 * 1024 * 1024;
 const EDITABLE_ARTIFACT_ORIGINAL_IMPORT_MAX_BYTES = 64 * 1024 * 1024;
@@ -1012,6 +1165,11 @@ export class PostgresEditableArtifactStore {
     expectedScopeAuthorizationRevision: number;
     initialArtifactAuthorizationRevision: number;
     createdBySubjectId: string;
+    /**
+     * Who can open it. Absent means the whole workspace with no owner, as
+     * every artifact had before audiences existed. Only me needs an owner.
+     */
+    audience?: PersistedEditableArtifactAudience;
     genesisSnapshot: PersistedEditableArtifactSnapshotMetadata;
     originalImport?: Readonly<{
       fileId: string;
@@ -1050,6 +1208,7 @@ export class PostgresEditableArtifactStore {
     const title = input.title;
     validateTitle(title);
     const createdBySubjectId = validateIdentity(input.createdBySubjectId, "creator subject id");
+    const audience = validateAudience(input.audience);
     if (!["spreadsheet", "presentation", "document"].includes(input.modality)) {
       throw new TypeError("Unsupported editable artifact modality");
     }
@@ -1183,7 +1342,8 @@ export class PostgresEditableArtifactStore {
             insert into editable_artifacts (
               account_id, workspace_id, id, modality, title, lifecycle_state,
               authorization_revision, head_sequence, causal_frontier, state_hash,
-              current_snapshot_id, created_by_subject_id, created_at, updated_at
+              current_snapshot_id, created_by_subject_id, visibility, owner_subject_id,
+              created_at, updated_at
             ) values (
               ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${artifactId},
               ${modality}, ${title}, 'active', ${initialArtifactAuthorizationRevision},
@@ -1197,7 +1357,8 @@ export class PostgresEditableArtifactStore {
                   : sql`null`
               }::jsonb,
               ${genesisSnapshot.stateHash}, ${genesisSnapshot.snapshotId},
-              ${createdBySubjectId}, ${createdAtIso}, ${createdAtIso}
+              ${createdBySubjectId}, ${audience.visibility}, ${audience.ownerSubjectId},
+              ${createdAtIso}, ${createdAtIso}
             )`);
           await tx.execute(sql`
             insert into editable_artifact_sequence_checkpoints (

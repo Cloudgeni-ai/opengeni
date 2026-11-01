@@ -231,6 +231,11 @@ export type SkillDescriptor = {
   scopeVersion: number;
   installationVersion: number | null;
   activationMode: "workspace_managed" | "session_selected";
+  /**
+   * The SKILL.md of a personal (user-scope) Skill that has no other files and
+   * fits the caller's byte cap; null otherwise. Present only when requested.
+   */
+  personalSkillMarkdown?: string | null;
 };
 
 /** Shared visibility predicate for descriptor reads and presence-only projections. */
@@ -254,7 +259,14 @@ function activeSkillDescriptorSource(context: SkillReadContext) {
 export async function listSkillDescriptors(
   db: Database,
   context: SkillReadContext,
+  options: {
+    /** Also return the SKILL.md of small single-file personal Skills, up to this many bytes. */
+    personalSkillMarkdownMaxBytes?: number;
+  } = {},
 ): Promise<SkillDescriptor[]> {
+  const cap = options.personalSkillMarkdownMaxBytes;
+  if (cap !== undefined && (!Number.isSafeInteger(cap) || cap <= 0))
+    throw new Error("personalSkillMarkdownMaxBytes must be a positive integer");
   const run = (tx: Database) =>
     rawRows<SkillDescriptor>(
       tx,
@@ -262,6 +274,17 @@ export async function listSkillDescriptors(
     SELECT h.id, h.stable_key AS "stableKey", r.title, r.description,
       r.id AS "revisionId", h.scope_version AS "scopeVersion", pi.version AS "installationVersion",
       coalesce(r.skill_activation_mode,'workspace_managed') AS "activationMode"
+      ${
+        cap === undefined
+          ? sql``
+          : sql`, CASE WHEN h.scope='user' THEN CASE
+          WHEN r.skill_files IS NULL THEN
+            CASE WHEN octet_length(r.content) <= ${cap}::int THEN r.content END
+          WHEN jsonb_array_length(r.skill_files)=1 AND r.skill_files->0->>'path'='SKILL.md'
+            AND octet_length(r.skill_files->0->>'content') <= ${cap}::int
+            THEN r.skill_files->0->>'content'
+        END END AS "personalSkillMarkdown"`
+      }
     ${activeSkillDescriptorSource(context)}
     ORDER BY h.stable_key,h.id
   `,

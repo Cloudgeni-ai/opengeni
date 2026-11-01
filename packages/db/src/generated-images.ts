@@ -12,6 +12,7 @@ import {
   getBillingBalance,
   getSpendableCreditBalance,
   planPostUseCreditAllocations,
+  toolCreditUsage,
 } from "./credit-balances";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 
@@ -1030,13 +1031,13 @@ async function admitImageGenerationCredits(
       "allowance_exhausted",
     );
   }
-  // Plan and trial grants covering the turn's model pay, as they do for chat;
-  // API work spends credits only.
+  // Plan credit (the Free plan's included) and grants covering the turn's
+  // model pay, as for every paid tool; API work spends credits only.
   const usageOrigin = attribution.kind === "turn" ? attribution.billingOrigin : undefined;
   const { balanceMicros } = await getSpendableCreditBalance(
     tx,
     operation.accountId,
-    operation.creditUsageModelId ?? undefined,
+    toolCreditUsage(operation.creditUsageModelId),
     undefined,
     settledAt,
     usageOrigin,
@@ -1085,8 +1086,8 @@ async function debitImageGenerationCredits(
   }
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${operation.accountId}))`);
   const settledAt = await beginPlanCreditSettlement(tx, operation.accountId);
-  // The monthly plan pays first, then grants covering the turn's model, then
-  // general credit, exactly as a settled chat response. API work: credits only.
+  // The monthly plan pays first (the Free plan's on any model), then grants
+  // covering the turn's model, then general credit. API work: credits only.
   const usageOrigin = operation.turnId
     ? ((await readTurnBillingOriginInTransaction(tx, operation)) ?? "app")
     : "app";
@@ -1095,7 +1096,7 @@ async function debitImageGenerationCredits(
       ? planPostUseCreditAllocations(
           await getBillingBalance(tx, operation.accountId, undefined, settledAt, true),
           operation.pricedCostMicros,
-          operation.creditUsageModelId ?? undefined,
+          toolCreditUsage(operation.creditUsageModelId),
         )
       : [];
   const now = new Date();

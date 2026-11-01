@@ -3508,6 +3508,13 @@ async function createSessionForRequestInFileScope(
         message: `unknown channelId: ${payload.channelId}`,
       });
     }
+    // Only its owner sees an Only me project, and it holds only their own
+    // Only me chats; the database leaves any other chat out of it.
+    if (channel.visibility === "private" && effectiveVisibility !== "user_private") {
+      throw new HTTPException(422, {
+        message: "An Only me project holds only your own Only me chats.",
+      });
+    }
     channelId = channel.id;
   }
   // A spawned worker is causally part of the exact turn that created it. Omitted

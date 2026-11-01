@@ -52,12 +52,12 @@ test("agent account labels use verified provider identity without changing exact
     metadata: { providerEmail: "alice@example.test", slackTeamName: "Community" },
   };
   const [binding] = mcpAccountBindingsFromVisibleConnections({ ...input, connections: [selected] });
-  expect(binding?.accountLabel).toBe("alice@example.test · Community · Only me");
+  expect(binding?.accountLabel).toBe("alice@example.test · Community · Yours");
   expect(binding?.connectionId).toBe(selected.id);
   const legacy = { ...connection(), metadata: { slackUserId: "U_ONE", slackTeamId: "T_ONE" } };
   expect(
     mcpAccountBindingsFromVisibleConnections({ ...input, connections: [legacy] })[0]?.accountLabel,
-  ).toBe("slack.example.test account · Only me");
+  ).toBe("slack.example.test account · Yours");
 });
 
 test("rejected pinned accounts retain safe structured identity and eligibility reason", () => {
@@ -152,7 +152,7 @@ test("workspace and two personal accounts attach with distinct exact routes", ()
     bindings.find((binding) => binding.subjectScope === "workspace")?.ownerSubjectId,
   ).toBeNull();
   expect(personalDelegationsForAccountBindings(bindings)).toHaveLength(2);
-  expect(bindings.map((binding) => binding.accountLabel)).toContain("Alice · Example · Only me");
+  expect(bindings.map((binding) => binding.accountLabel)).toContain("Alice · Example · Yours");
 });
 
 test("intentional catalog selectors accept workspace and personal accounts and freeze exact refs", () => {

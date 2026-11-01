@@ -241,7 +241,9 @@ export function PluginPage({
         ) : null}
         {!canManage ? (
           <p className="mt-2 mb-0 text-xs leading-4.5 text-fg-muted">
-            Only workspace admins can install, update and remove plugins.
+            {installed
+              ? "Ask a workspace admin to update or remove this plugin."
+              : "Ask a workspace admin to install this plugin."}
           </p>
         ) : null}
       </DetailSection>

@@ -7,7 +7,8 @@ import type {
 import type { ApiIntegrationRuntime } from "@opengeni/db";
 import { integrationDefinitionCategory } from "./capabilities";
 
-const ACCOUNT_SCOPE_SUFFIX = / · (?:Only me|This workspace)$/u;
+// Accepted turns keep the labels they were admitted with, including the older words.
+const ACCOUNT_SCOPE_SUFFIX = / · (?:Yours|Shared|Only me|This workspace)$/u;
 
 /**
  * The kind of need an account serves: its connector's catalog category. The
@@ -19,15 +20,21 @@ export function connectedAccountKind(category: string | null | undefined): strin
   return category && category !== "integrations" && category !== "custom" ? category : undefined;
 }
 
-/** "alice@example.com · Only me" → "alice@example.com". */
+/** "alice@example.com · Yours" → "alice@example.com". */
 export function accountIdentity(binding: McpConnectionAccountBinding): string {
   return binding.accountLabel.replace(ACCOUNT_SCOPE_SUFFIX, "") || binding.accountLabel;
+}
+
+/** Who can use the account, in the words people see: "Yours" or "Shared". */
+function accountScope(binding: McpConnectionAccountBinding): "Yours" | "Shared" {
+  return binding.subjectScope === "subject" ? "Yours" : "Shared";
 }
 
 /**
  * The labels of one connector's accounts in a turn. People only need the
  * account to tell several apart. Two accounts with the same identity (personal
- * and workspace) keep their scope to stay distinct.
+ * and workspace) keep their scope to stay distinct. The model always sees the
+ * scope, so a personal and a shared account never read the same.
  */
 function accountRouteLabels(
   connector: string,
@@ -42,9 +49,9 @@ function accountRouteLabels(
         ? undefined
         : identities.indexOf(identity) === identities.lastIndexOf(identity)
           ? identity
-          : binding.accountLabel;
+          : `${identity} · ${accountScope(binding)}`;
     return {
-      model: `${connector} — ${binding.subjectScope === "subject" ? "Personal" : "Workspace"}: ${binding.accountLabel}`,
+      model: `${connector} — ${identity} · ${accountScope(binding)}`,
       connector,
       providerDomain: binding.providerDomain,
       ...(account ? { account } : {}),

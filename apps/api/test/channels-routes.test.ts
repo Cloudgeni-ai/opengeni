@@ -65,16 +65,46 @@ async function bearer(
   workspace: { accountId: string; workspaceId: string },
   subjectId: string,
   permissions: Permission[],
+  principalKind: "human_session" | "service" = "human_session",
 ): Promise<string> {
   const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
     subjectId,
     permissions,
-    principalKind: "human_session",
+    principalKind,
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
   return `Bearer ${token}`;
+}
+
+/** A shared workspace with two members of its organization, each with a Personal workspace. */
+async function teamWorkspace() {
+  const ws = await freshWorkspace();
+  const owner = `user:${crypto.randomUUID()}`;
+  const colleague = `user:${crypto.randomUUID()}`;
+  const personal = [crypto.randomUUID(), crypto.randomUUID()] as const;
+  for (const id of personal)
+    await shared!
+      .admin`insert into workspaces(id,account_id,name) values(${id},${ws.accountId},'Personal')`;
+  await shared!
+    .admin`insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
+    values(${ws.accountId},${owner},'member','active',${personal[0]}),
+      (${ws.accountId},${colleague},'member','active',${personal[1]})`;
+  await shared!
+    .admin`insert into workspace_memberships(account_id,workspace_id,subject_id,role,permissions)
+    values(${ws.accountId},${ws.workspaceId},${owner},'member',
+        opengeni_private.workspace_member_role_permissions('member')),
+      (${ws.accountId},${ws.workspaceId},${colleague},'member',
+        opengeni_private.workspace_member_role_permissions('member'))`;
+  // The organization allows Only me work in its shared workspaces.
+  await shared!
+    .admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
+    values (${ws.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'channels-routes-test')`;
+  await shared!
+    .admin`insert into organization_private_session_settings (account_id, enabled, version, updated_by_membership_id)
+    values (${ws.accountId}, true, 1, null) on conflict (account_id) do update set enabled = true`;
+  return { ...ws, owner, colleague };
 }
 
 describe("channel routes", () => {
@@ -361,5 +391,95 @@ describe("channel routes", () => {
       letters: "UX",
       hue: 0,
     });
+  });
+
+  test("a project is shared or Only me; only its owner, signed in, shares it", async () => {
+    if (!available) return;
+    const ws = await teamWorkspace();
+    const permissions: Permission[] = ["sessions:read", "sessions:create", "sessions:control"];
+    const owner = {
+      "content-type": "application/json",
+      authorization: await bearer(ws, ws.owner, permissions),
+    };
+    const colleague = {
+      "content-type": "application/json",
+      authorization: await bearer(ws, ws.colleague, permissions),
+    };
+    const base = `/v1/workspaces/${ws.workspaceId}/channels`;
+    const create = async (headers: Record<string, string>, body: Record<string, unknown>) =>
+      await app().request(base, { method: "POST", headers, body: JSON.stringify(body) });
+    const names = async (headers: Record<string, string>) =>
+      ((await (await app().request(base, { headers })).json()) as Channel[]).map(
+        (row) => `${row.name}:${row.visibility}`,
+      );
+
+    // Omitted, a person's project is shared, as every project was before.
+    const team = await create(owner, { name: "Team" });
+    expect(team.status).toBe(201);
+    const teamProject = (await team.json()) as Channel;
+    expect(teamProject.visibility).toBe("workspace");
+
+    const mineCreated = await create(owner, { name: "Plans", visibility: "private" });
+    expect(mineCreated.status).toBe(201);
+    const mine = (await mineCreated.json()) as Channel;
+    expect(mine.visibility).toBe("private");
+
+    // Only its owner sees it; its name neither blocks nor reaches anyone else.
+    expect(await names(owner)).toEqual(["Team:workspace", "Plans:private"]);
+    expect(await names(colleague)).toEqual(["Team:workspace"]);
+    expect((await create(colleague, { name: "plans" })).status).toBe(201);
+    expect((await create(owner, { name: "Plans", visibility: "private" })).status).toBe(409);
+    expect(
+      (
+        await app().request(`${base}/${mine.id}`, {
+          method: "PATCH",
+          headers: colleague,
+          body: JSON.stringify({ name: "Taken over" }),
+        })
+      ).status,
+    ).toBe(404);
+
+    // A shared chat doesn't fit an Only me project.
+    const sharedChat = await createSession(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      initialMessage: "shared work",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const filed = await app().request(
+      `/v1/workspaces/${ws.workspaceId}/sessions/${sharedChat.id}/channel`,
+      { method: "PUT", headers: owner, body: JSON.stringify({ channelId: mine.id }) },
+    );
+    expect(filed.status).toBe(422);
+    expect(await filed.text()).toContain("An Only me project holds only your own Only me chats.");
+
+    // Sharing is the owner's own decision in the app; it never narrows.
+    const share = (headers: Record<string, string>, visibility: string, id = mine.id) =>
+      app().request(`${base}/${id}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ visibility }),
+      });
+    const service = {
+      "content-type": "application/json",
+      authorization: await bearer(ws, ws.owner, permissions, "service"),
+    };
+    expect((await share(service, "workspace")).status).toBe(403);
+    expect((await share(owner, "private", teamProject.id)).status).toBe(400);
+    // The colleague's shared "plans" holds the name among shared projects.
+    expect((await share(owner, "workspace")).status).toBe(409);
+    const renamed = await app().request(`${base}/${mine.id}`, {
+      method: "PATCH",
+      headers: owner,
+      body: JSON.stringify({ name: "Plans 2026", visibility: "workspace" }),
+    });
+    expect(renamed.status).toBe(200);
+    expect(((await renamed.json()) as Channel).visibility).toBe("workspace");
+    expect(await names(colleague)).toContain("Plans 2026:workspace");
   });
 });
