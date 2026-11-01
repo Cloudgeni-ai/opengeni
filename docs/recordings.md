@@ -600,6 +600,14 @@ A transcript that is already made and being charged and saved when the
 budget runs out is still saved, and a brief database error while saving it
 is retried at once.
 
+A retry never pays the provider twice for the same audio. Each piece of a
+track is kept with its version the moment the provider answers, before a
+text-only model's words are placed, keyed by what was asked: the model, the
+language, speaker and vocabulary options, the piece and a hash of the audio.
+When a worker is lost (a deploy, a crash) and the version is retried, every
+piece already answered is reused, and only the rest are asked for. Kept
+pieces are removed when the version completes or fails.
+
 Every track is diarized. When a recording has computer or tab audio (a
 `system` track), the microphone is the person recording's, but someone in
 the room with them may be on it too. One voice on the microphone is the
