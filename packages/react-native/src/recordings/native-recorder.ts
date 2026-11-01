@@ -284,12 +284,14 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
         native.addListener("onState", (event) => {
           if (event.recordingId !== recordingId) return;
           if (event.state === "interrupted" && snapshot.state === "recording") {
+            live?.setPaused(true);
             emit({ state: "paused", pauseReason: "interruption" });
           } else if (
             event.state === "recording" &&
             snapshot.state === "paused" &&
             snapshot.pauseReason === "interruption"
           ) {
+            live?.setPaused(false);
             emit({ state: "recording", pauseReason: null });
           }
         }),
@@ -329,6 +331,8 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
     pause() {
       if (snapshot.state !== "recording") return;
       native.pause();
+      // The live transcript reports the pause, so its time isn't counted as streamed.
+      live?.setPaused(true);
       emit({
         state: "paused",
         pauseReason: "person",
@@ -339,7 +343,10 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
     resume() {
       if (snapshot.state !== "paused") return;
       void native.resume().then(
-        () => emit({ state: "recording", pauseReason: null }),
+        () => {
+          live?.setPaused(false);
+          emit({ state: "recording", pauseReason: null });
+        },
         (error: unknown) => fail("capture_failed", message(error)),
       );
     },

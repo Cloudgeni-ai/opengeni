@@ -98,8 +98,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * it. 0988 withholds the queued-turn
  * hold summary; until it is granted, the control worker does not publish it.
  * 1002 withheld the held-browser inventory and 1093 granted it.
- * 1060 withholds the EU-only change function; until it is granted the setting
- * cannot be changed and stays off. 1091 withholds the secret history scrub's
+ * 1060 withheld the EU-only change function and 1210 granted it. 1091
+ * withholds the secret history scrub's
  * reader and cell writer; until they are granted, a scrub reports the cells
  * only they reach as pending. 1103 withheld the subscription
  * account-administrator grant and 1149 granted it. 1107 withholds the agent
@@ -110,7 +110,6 @@ export const RUNTIME_DEFINER_ROUTINES = [
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "summarize_queued_turns_by_hold()",
-  "update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "native_push_device_v2(text)",
@@ -2158,6 +2157,7 @@ export const FORCE_RLS_TABLES = [
   "recording_chunks",
   "recording_events",
   "recording_live_segments",
+  "recording_live_unbacked_hours",
   "recording_notes",
   "recording_people",
   "recording_segment_edits",
@@ -2547,6 +2547,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "pr_review_repository_bindings",
   "recording_chunks",
   "recording_live_segments",
+  "recording_live_unbacked_hours",
   "recording_notes",
   "recording_people",
   "recording_segment_edits",

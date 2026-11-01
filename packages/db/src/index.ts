@@ -103,19 +103,27 @@ export * from "./subscription-plans";
 import { beginPlanCreditSettlement } from "./subscription-plans";
 export * from "./subscription-plan-maintenance";
 import {
+  byokFeeFunding,
   chargeBillingOrigin,
   getBillingBalance,
   getSpendableCreditBalance,
+  paidCreditReceipt,
+  receiptCreatedAt,
   planCreditDebit,
   planPostUseCreditAllocations,
+  readBillingBalance,
   type CreditUsage,
 } from "./credit-balances";
+import { chainedReceipt, feeDebtRepaid, paidCreditMark } from "./paid-credit";
 export {
   apiSpendableCreditMicros,
+  byokFeeSpendableMicros,
   chargeBillingOrigin,
   getBillingBalance,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   spendableCreditMicros,
+  toolCreditUsage,
   VOICE_CREDIT_USAGE,
   type CreditUsage,
 } from "./credit-balances";
@@ -311,7 +319,11 @@ export {
 } from "./accepted-subscription-authority";
 
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
-import { storedBillingOrigin, type BillingOrigin } from "@opengeni/contracts";
+import {
+  BYOK_PLATFORM_FEE_TYPE,
+  storedBillingOrigin,
+  type BillingOrigin,
+} from "@opengeni/contracts";
 import {
   normalizeOrganizationAccessPolicy,
   type OrganizationAccessPolicy,
@@ -6666,6 +6678,18 @@ export async function applyCreditLedgerEntryOnce(
       // Funding and usage adjustments share the expiry boundary too.
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      // Paid-for credit, refunds of it and unpaid credit record what they
+      // change in paid credit (paid-credit.ts).
+      const receipt = await paidCreditReceipt(scopedDb, {
+        accountId: input.accountId,
+        settledAt,
+        type: input.type,
+        amountMicros: input.amountMicros,
+        eligibleModelIds: input.eligibleModelIds ?? null,
+        metadata: input.metadata,
+        sourceType: input.sourceType ?? null,
+        sourceId: input.sourceId ?? null,
+      });
       const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
@@ -6677,9 +6701,9 @@ export async function applyCreditLedgerEntryOnce(
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
           idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
+          metadata: { ...input.metadata, ...receipt.metadata },
           occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
+          createdAt: receipt.createdAt,
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
@@ -6899,6 +6923,9 @@ export async function applyCreditDebitAfterUse(
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
     throw new Error("post-use credit debit requires a positive, safe integer micro amount");
   }
+  if (input.type === BYOK_PLATFORM_FEE_TYPE) {
+    throw new Error("a bring-your-own-key fee settles with applyByokPlatformFeeDebit");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
@@ -6918,61 +6945,154 @@ export async function applyCreditDebitAfterUse(
           input.usage,
         );
       }
-      const inserted = await scopedDb
-        .insert(schema.creditLedgerEntries)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId ?? null,
-          type: input.type,
-          amountMicros: -input.amountMicros,
-          sourceType: input.sourceType,
-          sourceId: input.sourceId,
-          usageOrigin,
-          idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
-          occurredAt: input.occurredAt ?? new Date(),
-          createdAt: sql`${settledAt}::timestamptz`,
-        })
-        .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
-        .returning({ id: schema.creditLedgerEntries.id });
-      if (inserted.length === 0) {
-        const [prior] = await scopedDb
-          .select({
-            accountId: schema.creditLedgerEntries.accountId,
-            workspaceId: schema.creditLedgerEntries.workspaceId,
-            type: schema.creditLedgerEntries.type,
-            amountMicros: schema.creditLedgerEntries.amountMicros,
-            sourceType: schema.creditLedgerEntries.sourceType,
-            sourceId: schema.creditLedgerEntries.sourceId,
-          })
-          .from(schema.creditLedgerEntries)
-          .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
-        if (
-          !prior ||
-          prior.accountId !== input.accountId ||
-          prior.workspaceId !== (input.workspaceId ?? null) ||
-          prior.type !== input.type ||
-          prior.amountMicros !== -input.amountMicros ||
-          prior.sourceType !== input.sourceType ||
-          prior.sourceId !== input.sourceId
-        ) {
-          throw new Error(
-            "post-use credit debit idempotency key conflicts with a different charge",
-          );
-        }
-      } else if (allocations.length) {
+      const insertedId = await insertPostUseDebit(scopedDb, input, usageOrigin, settledAt);
+      if (insertedId && allocations.length) {
         await scopedDb.insert(schema.creditDebitAllocations).values(
           allocations.map((allocation) => ({
             ...allocation,
             accountId: input.accountId,
-            debitEntryId: inserted[0]!.id,
+            debitEntryId: insertedId,
           })),
         );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
-        debitedMicros: inserted.length ? input.amountMicros : 0,
+        debitedMicros: insertedId ? input.amountMicros : 0,
       };
+    },
+  );
+}
+
+/**
+ * Insert an already-consumed charge once. A replay of the same idempotency
+ * key must be the same charge. Returns the new row's id, or null on replay.
+ */
+async function insertPostUseDebit(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    type: string;
+    amountMicros: number;
+    sourceType: string;
+    sourceId: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+  },
+  usageOrigin: BillingOrigin,
+  settledAt: string,
+  createdAt: SQL = sql`${settledAt}::timestamptz`,
+): Promise<string | null> {
+  const inserted = await scopedDb
+    .insert(schema.creditLedgerEntries)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId ?? null,
+      type: input.type,
+      amountMicros: -input.amountMicros,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      usageOrigin,
+      idempotencyKey: input.idempotencyKey,
+      metadata: input.metadata ?? {},
+      occurredAt: input.occurredAt ?? new Date(),
+      createdAt,
+    })
+    .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
+    .returning({ id: schema.creditLedgerEntries.id });
+  if (inserted.length) return inserted[0]!.id;
+  const [prior] = await scopedDb
+    .select({
+      accountId: schema.creditLedgerEntries.accountId,
+      workspaceId: schema.creditLedgerEntries.workspaceId,
+      type: schema.creditLedgerEntries.type,
+      amountMicros: schema.creditLedgerEntries.amountMicros,
+      sourceType: schema.creditLedgerEntries.sourceType,
+      sourceId: schema.creditLedgerEntries.sourceId,
+    })
+    .from(schema.creditLedgerEntries)
+    .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
+  if (
+    !prior ||
+    prior.accountId !== input.accountId ||
+    prior.workspaceId !== (input.workspaceId ?? null) ||
+    prior.type !== input.type ||
+    prior.amountMicros !== -input.amountMicros ||
+    prior.sourceType !== input.sourceType ||
+    prior.sourceId !== input.sourceId
+  ) {
+    throw new Error("post-use credit debit idempotency key conflicts with a different charge");
+  }
+  return null;
+}
+
+/**
+ * Settle one bring-your-own-key platform fee (`byok_platform_fee`), payable
+ * only from paid credit: an active paid plan's credit first (app use), then
+ * paid credits; the rest is fee debt the next top-up repays. Its row records
+ * the split (`planPaidMicros`, `creditPaidMicros`, `unfundedMicros`) and a
+ * paid-credit mark (paid-credit.ts). One balance read under the account lock.
+ */
+export async function applyByokPlatformFeeDebit(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    amountMicros: number;
+    sourceType: string;
+    sourceId: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+    /** Funding origin; omitted resolves from the attribution (see resolveUsageOrigin). */
+    usageOrigin?: BillingOrigin;
+  },
+): Promise<{
+  debitedMicros: number;
+  planPaidMicros: number;
+  creditPaidMicros: number;
+  unfundedMicros: number;
+}> {
+  if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
+    throw new Error("post-use credit debit requires a positive, safe integer micro amount");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+      const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      const usageOrigin = await resolveUsageOrigin(scopedDb, input);
+      const { balance, paid } = await readBillingBalance(
+        scopedDb,
+        input.accountId,
+        undefined,
+        settledAt,
+        true,
+      );
+      const funding = byokFeeFunding(balance, paid, input.amountMicros, usageOrigin);
+      const insertedId = await insertPostUseDebit(
+        scopedDb,
+        {
+          ...input,
+          type: BYOK_PLATFORM_FEE_TYPE,
+          metadata: {
+            ...input.metadata,
+            ...chainedReceipt(
+              paid,
+              { type: BYOK_PLATFORM_FEE_TYPE, amountMicros: input.amountMicros },
+              { ...funding, ...paidCreditMark(paid), ...feeDebtRepaid(paid) },
+            ),
+          },
+        },
+        usageOrigin,
+        settledAt,
+        receiptCreatedAt(settledAt, paid),
+      );
+      return insertedId
+        ? { debitedMicros: input.amountMicros, ...funding }
+        : { debitedMicros: 0, planPaidMicros: 0, creditPaidMicros: 0, unfundedMicros: 0 };
     },
   );
 }
@@ -41610,10 +41730,10 @@ export type AcceptSessionHumanInputResponseResult =
   | { action: "not_found" };
 
 /**
- * One requires-action boundary may admit exactly one durable resume event.
- * Human-input responses and ordinary approval decisions share this gate: a
- * mixed parallel interruption batch must not accept one of each before the
- * workflow claims the first and advances the turn's trigger/generation.
+ * One requires-action boundary admits one question answer: only the trigger
+ * carries an answer into the resume. Approval decisions never block it; the
+ * peek resumes from the answer first, and that resume applies every approval
+ * decision of the pause recorded before it.
  */
 async function hasAcceptedRequiresActionAdvance(
   tx: Database,
@@ -41646,12 +41766,122 @@ async function hasAcceptedRequiresActionAdvance(
         eq(schema.sessionEvents.sessionId, input.sessionId),
         eq(schema.sessionEvents.turnId, input.turnId),
         eq(schema.sessionEvents.turnGeneration, input.turnGeneration),
-        inArray(schema.sessionEvents.type, ["user.approvalDecision", "user.humanInputResponse"]),
+        eq(schema.sessionEvents.type, "user.humanInputResponse"),
         gt(schema.sessionEvents.sequence, trigger.sequence),
       ),
     )
     .limit(1);
   return accepted !== undefined;
+}
+
+/** One approval's identity for one question round; rounds only for MCP questions. */
+function approvalDecisionKey(approvalId: string | null, round: number | undefined): string {
+  return `${approvalId ?? ""}\u0000${round ?? ""}`;
+}
+
+/** A recorded approval decision: the call it decides and the decision payload. */
+export type TurnApprovalDecision = {
+  eventId: string;
+  sequence: number;
+  approvalId: string;
+  /** The question round it answers or declined; none for an approval without one. */
+  elicitationRound?: number;
+  payload: Record<string, unknown>;
+};
+
+async function turnApprovalDecisionsTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    afterSequence?: number;
+    throughSequence?: number;
+  },
+): Promise<TurnApprovalDecision[]> {
+  const rows = await tx
+    .select({
+      id: schema.sessionEvents.id,
+      sequence: schema.sessionEvents.sequence,
+      payload: schema.sessionEvents.payload,
+      payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "user.approvalDecision"),
+        eq(schema.sessionEvents.turnId, input.turnId),
+        ...(input.afterSequence !== undefined
+          ? [gt(schema.sessionEvents.sequence, input.afterSequence)]
+          : []),
+        ...(input.throughSequence !== undefined
+          ? [lte(schema.sessionEvents.sequence, input.throughSequence)]
+          : []),
+      ),
+    )
+    .orderBy(asc(schema.sessionEvents.sequence));
+  return rows.flatMap((row) => {
+    const payload = sessionEventPayloadRecord(row.payload, row.payloadCodecVersion);
+    if (typeof payload.approvalId !== "string") return [];
+    const round = approvalDecisionRound(payload);
+    return [
+      {
+        eventId: row.id,
+        sequence: row.sequence,
+        approvalId: payload.approvalId,
+        ...(round !== undefined ? { elicitationRound: round } : {}),
+        payload,
+      },
+    ];
+  });
+}
+
+/** Keys of the approvals decided after the attempt's trigger: the next resume applies them. */
+async function approvalDecisionsAfterTriggerTx(
+  tx: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string; triggerEventId: string },
+): Promise<Set<string>> {
+  const [trigger] = await tx
+    .select({ sequence: schema.sessionEvents.sequence })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.id, input.triggerEventId),
+      ),
+    )
+    .limit(1);
+  if (!trigger) return new Set();
+  const decisions = await turnApprovalDecisionsTx(tx, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    afterSequence: trigger.sequence,
+  });
+  return new Set(
+    decisions.map((decision) =>
+      approvalDecisionKey(decision.approvalId, decision.elicitationRound),
+    ),
+  );
+}
+
+/**
+ * The approval decisions a resume applies besides its own trigger: every
+ * decision of the turn recorded up to the trigger, oldest first. A pause's
+ * decisions are applied together; one recorded later resumes the turn again.
+ */
+export async function listTurnApprovalDecisions(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string; throughSequence: number },
+): Promise<TurnApprovalDecision[]> {
+  return await withWorkspaceRls(
+    db,
+    input.workspaceId,
+    async (scopedDb) => await turnApprovalDecisionsTx(scopedDb, input),
+  );
 }
 
 async function humanInputResponseEventForRequest(
@@ -81509,7 +81739,15 @@ export async function peekSessionWork(
               gt(schema.sessionEvents.sequence, currentTrigger.sequence),
             ),
           )
-          .orderBy(desc(schema.sessionEvents.sequence), desc(schema.sessionEvents.id))
+          // One question answer is accepted per pause and only the trigger
+          // carries it, so it resumes first. Approval decisions are applied
+          // together by any resume (those up to its trigger), and one recorded
+          // after the trigger resumes the turn again.
+          .orderBy(
+            sql`(${schema.sessionEvents.type} = 'user.humanInputResponse') desc`,
+            desc(schema.sessionEvents.sequence),
+            desc(schema.sessionEvents.id),
+          )
           .limit(1);
         if (actionResponse) {
           return {
@@ -85121,6 +85359,25 @@ export async function applySessionTurnSettlement(
       }));
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
       let interactionRefusalEvent: AppendEventInput | null = null;
+      // Decisions recorded while this attempt resumed (after its trigger) are
+      // applied by the next resume. Their approvals stay in the frozen run
+      // state for it, but are never shown or announced as waiting again.
+      // When every approval was decided that way, the pause is still written
+      // as requires_action with nothing shown; the workflow's immediate
+      // re-peek resumes it from those decisions.
+      const decidedSinceTrigger =
+        input.runState && input.turnStatus === "requires_action"
+          ? await approvalDecisionsAfterTriggerTx(tx as unknown as Database, {
+              workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              triggerEventId: input.triggerEventId,
+            })
+          : null;
+      const undecided = (approval: unknown) =>
+        !decidedSinceTrigger?.has(
+          approvalDecisionKey(approvalIdentifier(approval), pendingApprovalRound(approval)),
+        );
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
           throw new Error("A frozen run state requires a requires_action settlement");
@@ -85282,9 +85539,9 @@ export async function applySessionTurnSettlement(
             if (!(error instanceof InteractionRequestRefusedError)) throw error;
             // The agent learns why as this call's result: the pause records
             // a system rejection, so the turn resumes at once instead of
-            // failing. One decision resumes a pause, so a second refused call
-            // stays pending; the worker's re-freeze after the first is
-            // answered passes it here again and it is refused the same way.
+            // failing. Only one refusal is recorded per pause, so a second
+            // refused call stays pending; a later resume's re-freeze passes
+            // it here again and it is refused the same way.
             interactionRefusalEvent ??= {
               type: "user.approvalDecision",
               payload: {
@@ -85310,7 +85567,7 @@ export async function applySessionTurnSettlement(
               turnId: input.turnId,
               turnGeneration: turn.executionGeneration,
               humanInputRequests,
-              pendingApprovals: input.runState.pendingApprovals,
+              pendingApprovals: input.runState.pendingApprovals.filter(undecided),
             },
           );
         }
@@ -85505,7 +85762,7 @@ export async function applySessionTurnSettlement(
               : {}),
           }
         : null;
-      const inputEvents =
+      const projectedInputEvents =
         input.dropProactiveCompactionRequest === undefined
           ? input.events
           : input.events.map((event) =>
@@ -85519,6 +85776,22 @@ export async function applySessionTurnSettlement(
                   }
                 : event,
             );
+      const inputEvents =
+        decidedSinceTrigger && decidedSinceTrigger.size > 0
+          ? projectedInputEvents.flatMap((event) => {
+              if (event.type !== "session.requiresAction") return [event];
+              const payload =
+                event.payload && typeof event.payload === "object"
+                  ? (event.payload as Record<string, unknown>)
+                  : {};
+              const approvals = Array.isArray(payload.approvals) ? payload.approvals : [];
+              const waiting = approvals.filter(undecided);
+              if (waiting.length === approvals.length) return [event];
+              return waiting.length > 0
+                ? [{ ...event, payload: { ...payload, approvals: waiting } }]
+                : [];
+            })
+          : projectedInputEvents;
       if (input.turnStatus === "completed") {
         await settleInterruptedCodemodeCallsInTransaction(tx as unknown as Database, {
           workspaceId,
@@ -91170,7 +91443,101 @@ export type AcceptSessionApprovalDecisionResult =
       events: SessionEvent[];
       workflowWakeRevision: number;
     }
-  | { action: "conflict"; sessionStatus: SessionStatus };
+  | {
+      action: "conflict";
+      sessionStatus: SessionStatus;
+      reason: SessionApprovalConflictReason;
+      /** What the person reads: why this decision cannot be taken. */
+      message: string;
+    };
+
+/**
+ * Why a decision was refused. A decision for an approval that is still
+ * undecided is never refused merely because the session is resuming from a
+ * sibling decision of the same pause.
+ */
+export type SessionApprovalConflictReason =
+  | "already_decided"
+  | "already_finished"
+  | "turn_ended"
+  | "not_pending";
+
+function approvalConflict(
+  sessionStatus: SessionStatus,
+  reason: SessionApprovalConflictReason,
+  decided?: unknown,
+): Extract<AcceptSessionApprovalDecisionResult, { action: "conflict" }> {
+  const message =
+    reason === "already_decided"
+      ? decided === "reject"
+        ? "This action was already declined."
+        : "This action was already approved."
+      : reason === "already_finished"
+        ? "This action already finished."
+        : reason === "turn_ended"
+          ? "This approval closed: the agent's turn ended before it was decided."
+          : "This approval is no longer waiting for a decision.";
+  return { action: "conflict", sessionStatus, reason, message };
+}
+
+/** The question round a decision answers; none for an approval without questions. */
+function approvalDecisionRound(payload: Record<string, unknown>): number | undefined {
+  return typeof payload.elicitationRound === "number" ? payload.elicitationRound : undefined;
+}
+
+/** The question round an approval currently asks; none when it asks no question. */
+function pendingApprovalRound(pending: unknown): number | undefined {
+  const elicitation =
+    pending && typeof pending === "object"
+      ? (pending as { elicitation?: unknown }).elicitation
+      : undefined;
+  if (elicitation === undefined) return undefined;
+  const parsed = McpElicitationApprovalRequest.safeParse(elicitation);
+  return parsed.success ? parsed.data.round : undefined;
+}
+
+/**
+ * The newest recorded decision for one approval and question round, within
+ * the live turn when there is one. Call ids are unique within a turn, and an
+ * MCP server asking again under the same id asks a new round, so this is the
+ * decision the person already made for exactly what they see.
+ */
+async function latestApprovalDecisionForRound(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    approvalId: string;
+    round: number | undefined;
+    /** The live turn: call ids are only unique within one turn. */
+    turnId?: string;
+  },
+): Promise<{
+  event: typeof schema.sessionEvents.$inferSelect;
+  payload: Record<string, unknown>;
+} | null> {
+  const rows = await tx
+    .select()
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "user.approvalDecision"),
+        input.turnId === undefined ? undefined : eq(schema.sessionEvents.turnId, input.turnId),
+        sql`${schema.sessionEvents.payload} ->> 'approvalId' = ${input.approvalId}`,
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.sequence))
+    .limit(16);
+  for (const row of rows) {
+    const payload = sessionEventPayloadRecord(row.payload, row.payloadCodecVersion);
+    if (payload.approvalId !== input.approvalId) continue;
+    if (approvalDecisionRound(payload) !== input.round) continue;
+    return { event: row, payload };
+  }
+  return null;
+}
 
 /** The answer to an approval's MCP server questions does not fit their forms. */
 export class SessionApprovalAnswerError extends Error {
@@ -91203,7 +91570,10 @@ function approvalDecisionPayloadWithAnswer(
     return payload;
   }
   const request = McpElicitationApprovalRequest.parse(elicitation);
-  if (payload.decision !== "approve") return withoutAnswer;
+  // A rejection needs no round from the client, but records the round it
+  // declined so a later question under the same call id is never taken as
+  // already declined.
+  if (payload.decision !== "approve") return { ...withoutAnswer, elicitationRound: request.round };
   if (elicitationRound !== request.round) {
     throw new SessionApprovalAnswerError(
       elicitationRound === undefined
@@ -91221,9 +91591,12 @@ function approvalDecisionPayloadWithAnswer(
 }
 
 /**
- * Accept exactly one decision for the currently waiting approval boundary.
- * The session and active turn are locked with the append so concurrent Pause,
- * Steer, and duplicate decisions cannot manufacture a second resume trigger.
+ * Accept one decision for an approval still open in the live turn's latest
+ * pause, whether the session waits or is resuming from a sibling decision.
+ * The same decision again is idempotent; a different one is refused as
+ * already decided. The session and active turn are locked with the append so
+ * concurrent Pause, Steer, and duplicate decisions stay serialized with the
+ * worker's settlement.
  */
 export async function acceptSessionApprovalDecision(
   db: Database,
@@ -91342,55 +91715,153 @@ export async function acceptSessionApprovalDecision(
         if (turnPreview && !turn) {
           throw new Error(`Active turn disappeared: ${turnPreview.id}`);
         }
-        if (session.status !== "requires_action" || turn?.status !== "requires_action") {
-          return {
-            action: "conflict",
-            sessionStatus: session.status as SessionStatus,
-          } as const;
-        }
-        if (
-          await hasAcceptedRequiresActionAdvance(tx as unknown as Database, {
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            turnGeneration: turn.executionGeneration,
-            triggerEventId: turn.triggerEventId,
-          })
-        ) {
-          return {
-            action: "conflict",
-            sessionStatus: "requires_action",
-          } as const;
-        }
+        const sessionStatus = session.status as SessionStatus;
         const approvalId = payload.approvalId;
-        const [runState] = await tx
-          .select({
-            turnId: schema.agentRunStates.turnId,
-            pendingApprovals: schema.agentRunStates.pendingApprovals,
-            pendingApprovalsCodecVersion: schema.agentRunStates.pendingApprovalsCodecVersion,
-          })
-          .from(schema.agentRunStates)
-          .where(
-            and(
-              eq(schema.agentRunStates.workspaceId, input.workspaceId),
-              eq(schema.agentRunStates.sessionId, input.sessionId),
-              eq(schema.agentRunStates.turnId, turn.id),
-            ),
-          )
-          .orderBy(desc(schema.agentRunStates.stateVersion))
-          .limit(1);
-        const pendingApproval =
-          typeof approvalId === "string" && runState
-            ? fromPostgresLosslessJson(
-                runState.pendingApprovals,
-                runState.pendingApprovalsCodecVersion,
-              ).find((pending) => approvalIdentifier(pending) === approvalId)
+        if (typeof approvalId !== "string") {
+          return approvalConflict(sessionStatus, "not_pending");
+        }
+        // Every approval of the turn's latest pause stays decidable until its
+        // call settles, also while the turn resumes from a sibling decision:
+        // a pause's decisions are applied together, and one recorded while
+        // the turn resumes is applied by the next resume.
+        const liveTurn =
+          turn &&
+          session.activeTurnId === turn.id &&
+          !isTerminalSessionTurnStatus(turn.status as SessionTurnStatus)
+            ? turn
             : undefined;
-        if (typeof approvalId !== "string" || pendingApproval === undefined) {
-          return {
-            action: "conflict",
-            sessionStatus: "requires_action",
-          } as const;
+        const [runState] = liveTurn
+          ? await tx
+              .select({
+                turnId: schema.agentRunStates.turnId,
+                pendingApprovals: schema.agentRunStates.pendingApprovals,
+                pendingApprovalsCodecVersion: schema.agentRunStates.pendingApprovalsCodecVersion,
+              })
+              .from(schema.agentRunStates)
+              .where(
+                and(
+                  eq(schema.agentRunStates.workspaceId, input.workspaceId),
+                  eq(schema.agentRunStates.sessionId, input.sessionId),
+                  eq(schema.agentRunStates.turnId, liveTurn.id),
+                ),
+              )
+              .orderBy(desc(schema.agentRunStates.stateVersion))
+              .limit(1)
+          : [];
+        const pendingApproval = runState
+          ? fromPostgresLosslessJson(
+              runState.pendingApprovals,
+              runState.pendingApprovalsCodecVersion,
+            ).find((pending) => approvalIdentifier(pending) === approvalId)
+          : undefined;
+        const [pendingCall] =
+          liveTurn && pendingApproval !== undefined
+            ? await tx
+                .select({
+                  interruptionKind: schema.sessionPendingToolCalls.interruptionKind,
+                  hasResult: sql<boolean>`${schema.sessionPendingToolCalls.resultItem} is not null`,
+                })
+                .from(schema.sessionPendingToolCalls)
+                .where(
+                  and(
+                    eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+                    eq(schema.sessionPendingToolCalls.turnId, liveTurn.id),
+                    eq(schema.sessionPendingToolCalls.callId, approvalId),
+                  ),
+                )
+                .limit(1)
+            : [];
+        const callSettled = pendingCall?.hasResult === true;
+        const waiting =
+          sessionStatus === "requires_action" && liveTurn?.status === "requires_action";
+        // The same decision again (a double click, a retry after a lost
+        // response) is the decision already recorded: accepted, nothing new.
+        const round =
+          pendingApproval !== undefined
+            ? pendingApprovalRound(pendingApproval)
+            : approvalDecisionRound(payload);
+        const prior = await latestApprovalDecisionForRound(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          approvalId,
+          round,
+          ...(liveTurn ? { turnId: liveTurn.id } : {}),
+        });
+        if (prior) {
+          // A decision the waiting pause should already have applied, for a
+          // call that is still open, was lost (a worker from before this
+          // change resumed only its own trigger): take the new one instead.
+          const [trigger] =
+            waiting && liveTurn && pendingCall && !callSettled
+              ? await tx
+                  .select({ sequence: schema.sessionEvents.sequence })
+                  .from(schema.sessionEvents)
+                  .where(
+                    and(
+                      eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                      eq(schema.sessionEvents.sessionId, input.sessionId),
+                      eq(schema.sessionEvents.id, liveTurn.triggerEventId),
+                    ),
+                  )
+                  .limit(1)
+              : [];
+          const lost = trigger !== undefined && prior.event.sequence <= trigger.sequence;
+          if (!lost) {
+            // A repeat that carries credentials to store is a different
+            // response: the recorded one already decided, so refuse it
+            // rather than report its credentials as stored.
+            if (
+              prior.payload.decision !== payload.decision ||
+              (input.mcpCredentialUpdates?.length ?? 0) > 0
+            ) {
+              return approvalConflict(sessionStatus, "already_decided", prior.payload.decision);
+            }
+            const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+              tx as unknown as Database,
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+                reason: "approval_decision",
+              },
+            );
+            return {
+              action: "accepted",
+              event: mapEvent(prior.event),
+              events: [],
+              workflowWakeRevision,
+            } as const;
+          }
+        }
+        if (!liveTurn) return approvalConflict(sessionStatus, "turn_ended");
+        if (pendingApproval === undefined) return approvalConflict(sessionStatus, "not_pending");
+        if (callSettled) return approvalConflict(sessionStatus, "already_finished");
+        if (!waiting) {
+          // Resuming: only a call the next resume can still apply. A model
+          // tool's open call, or a programmatic call still waiting on review.
+          const resumable =
+            pendingCall !== undefined
+              ? pendingCall.interruptionKind === "approval" ||
+                pendingCall.interruptionKind === "interaction_intervention"
+              : // Programmatic approval ids are operation UUIDs.
+                UUID_PATTERN.test(approvalId) &&
+                (
+                  await tx
+                    .select({ operationId: schema.sessionAttemptCodemodeCalls.operationId })
+                    .from(schema.sessionAttemptCodemodeCalls)
+                    .where(
+                      and(
+                        eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
+                        eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
+                        eq(schema.sessionAttemptCodemodeCalls.turnId, liveTurn.id),
+                        eq(schema.sessionAttemptCodemodeCalls.operationId, approvalId),
+                        eq(schema.sessionAttemptCodemodeCalls.state, "waiting_for_approval"),
+                      ),
+                    )
+                    .limit(1)
+                ).length > 0;
+          if (!resumable) return approvalConflict(sessionStatus, "not_pending");
         }
         payload = approvalDecisionPayloadWithAnswer(pendingApproval, payload);
         if (input.interactionIntervention) {
@@ -91458,8 +91929,8 @@ export async function acceptSessionApprovalDecision(
                 accountId: session.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
-                turnId: turn.id,
-                turnGeneration: turn.executionGeneration,
+                turnId: liveTurn.id,
+                turnGeneration: liveTurn.executionGeneration,
                 turnAssociation: "current",
                 sequence: session.lastSequence + 1,
                 type: "user.approvalDecision",
@@ -91479,8 +91950,8 @@ export async function acceptSessionApprovalDecision(
             input.workspaceId,
             session,
             {
-              turnId: turn.id,
-              turnGeneration: turn.executionGeneration,
+              turnId: liveTurn.id,
+              turnGeneration: liveTurn.executionGeneration,
               requestId: null,
               approvalId,
               outcome: approvalDecision === "approve" ? "approved" : "rejected",
@@ -91509,7 +91980,7 @@ export async function acceptSessionApprovalDecision(
               and(
                 eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
                 eq(schema.connectorActionRequests.sessionId, input.sessionId),
-                eq(schema.connectorActionRequests.turnId, turn.id),
+                eq(schema.connectorActionRequests.turnId, liveTurn.id),
                 eq(schema.connectorActionRequests.approvalId, approvalId),
                 eq(schema.connectorActionRequests.status, "pending"),
               ),

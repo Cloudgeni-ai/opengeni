@@ -54,6 +54,13 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { cn } from "@opengeni/react/app/lib/utils";
+import {
+  isSeatLimitError,
+  planSeatsFull,
+  seatUpgradeFor,
+  seatUpgradeFromError,
+  type SeatUpgrade,
+} from "@opengeni/react/app/lib/subscription-plans";
 import { PlanSeats, SeatLimitNotice } from "./plan-seats";
 import type {
   OrganizationInvitation,
@@ -106,20 +113,25 @@ export function OrganizationPeoplePage({
   person,
   invitation,
   view,
+  canManageBilling,
 }: {
   workspaceId: string;
   person?: string;
   invitation?: string;
   view?: "invite";
+  /** Whether the signed-in person can change the plan; defaults to owners. */
+  canManageBilling?: boolean;
 }) {
   const directory = useOrganizationDirectory();
   const nav = useOrganizationNavigation(workspaceId);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
-  const actions = usePeopleActions(directory, setConfirm);
+  const billing = canManageBilling ?? directory.actorRole === "owner";
+  const actions = usePeopleActions(directory, setConfirm, billing);
 
   let page;
-  if (view === "invite") page = <InvitePage nav={nav} />;
-  else if (person) page = <PersonPage key={person} id={person} nav={nav} actions={actions} />;
+  if (view === "invite") {
+    page = <InvitePage nav={nav} canManageBilling={billing} />;
+  } else if (person) page = <PersonPage key={person} id={person} nav={nav} actions={actions} />;
   else if (invitation) {
     page = <InvitationPage key={invitation} id={invitation} nav={nav} actions={actions} />;
   } else page = <PeopleList nav={nav} actions={actions} />;
@@ -151,6 +163,7 @@ interface PeopleActions {
 function usePeopleActions(
   directory: OrganizationDirectory,
   setConfirm: (confirm: Confirm) => void,
+  canManageBilling: boolean,
 ): PeopleActions {
   return useMemo(
     () => ({
@@ -165,7 +178,7 @@ function usePeopleActions(
           });
         } catch (error) {
           toast.error(`Couldn't restore ${memberName(member)}`, {
-            description: userErrorText(error),
+            description: seatRefusalText(error, directory, canManageBilling),
           });
         }
       },
@@ -184,8 +197,25 @@ function usePeopleActions(
         }
       },
     }),
-    [directory, setConfirm],
+    [directory, setConfirm, canManageBilling],
   );
+}
+
+/** A seat refusal tells people who can't change the plan to ask an owner. */
+function seatRefusalText(
+  error: unknown,
+  directory: OrganizationDirectory,
+  canManageBilling: boolean,
+): string {
+  // Directory actions wrap the API error; the refusal is its cause.
+  const refusal = error instanceof Error && error.cause !== undefined ? error.cause : error;
+  if (canManageBilling || !isSeatLimitError(refusal, directory.plan)) return userErrorText(error);
+  const upgrade = seatUpgradeFor(directory.plan, directory.plans) ?? seatUpgradeFromError(refusal);
+  return upgrade?.key === "enterprise"
+    ? `Ask an organization owner about ${upgrade.label}.`
+    : upgrade
+      ? `Ask an organization owner to upgrade to ${upgrade.label}.`
+      : "Ask an organization owner to upgrade the plan.";
 }
 
 function activeOwnerCount(members: readonly OrganizationMember[]): number {
@@ -1063,13 +1093,22 @@ function InvitationPage({
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function InvitePage({ nav }: { nav: OrganizationNavigation }) {
+function InvitePage({
+  nav,
+  canManageBilling,
+}: {
+  nav: OrganizationNavigation;
+  canManageBilling: boolean;
+}) {
   const directory = useOrganizationDirectory();
   const [emails, setEmails] = useState<string[]>([]);
   const [role, setRole] = useState<OrganizationMembershipRole>("member");
   const [workspaceIds, setWorkspaceIds] = useState<string[]>([]);
   const [showErrors, setShowErrors] = useState(false);
-  const [seatLimitError, setSeatLimitError] = useState<string | null>(null);
+  const [seatLimitError, setSeatLimitError] = useState<{
+    message: string;
+    upgrade: SeatUpgrade | null;
+  } | null>(null);
   const organizationName = directory.overview.value?.organization.name ?? "the organization";
   const workspaces = directory.overview.value?.workspaces ?? [];
 
@@ -1091,6 +1130,12 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
   });
   const problems = chips.filter((chip) => chip.problem);
   const count = Math.max(1, chips.length - problems.length);
+  // The catalog picks the plan with room for everyone in the form (the
+  // server names a plan for one more person); the server's plan is the
+  // fallback without a catalog. A full plan says so up front.
+  const seatUpgrade =
+    seatUpgradeFor(directory.plan, directory.plans, count) ?? seatLimitError?.upgrade ?? null;
+  const seatsFull = seatLimitError !== null || planSeatsFull(directory.plan);
   const emailError =
     emails.length === 0
       ? showErrors
@@ -1135,13 +1180,18 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
           setEmails(result.failed.map((each) => each.email));
           const seatFailure = result.failed.find((each) => each.seatLimitReached);
           if (seatFailure) {
-            setSeatLimitError(seatFailure.message);
-            return false;
+            setSeatLimitError({
+              message: seatFailure.message,
+              upgrade: seatFailure.upgrade ?? null,
+            });
           }
+          // Other failures still say why, next to the seat notice.
+          const other = result.failed.filter((each) => !each.seatLimitReached);
+          if (other.length === 0) return false;
           throw new Error(
-            result.failed.length === 1
-              ? `Couldn't invite ${result.failed[0]!.email}. ${result.failed[0]!.message}`
-              : `Couldn't invite ${joinNames(result.failed.map((each) => each.email))}. ${result.failed[0]!.message}`,
+            other.length === 1
+              ? `Couldn't invite ${other[0]!.email}. ${other[0]!.message}`
+              : `Couldn't invite ${joinNames(other.map((each) => each.email))}. ${other[0]!.message}`,
           );
         }
         nav.openSection("people");
@@ -1150,14 +1200,15 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
     >
       <FieldStack>
         <PlanSeats plan={directory.plan} />
-        {seatLimitError && directory.plan ? (
+        {seatsFull && directory.plan ? (
           <SeatLimitNotice
-            canManage={directory.actorRole === "owner"}
+            canManage={canManageBilling}
+            upgrade={seatUpgrade}
             onUpgrade={() => nav.openSection("billing")}
           />
         ) : seatLimitError ? (
           <Notice tone="waiting" title="Couldn't send the invitation" live="assertive">
-            {seatLimitError}
+            {seatLimitError.message}
           </Notice>
         ) : null}
         <Field

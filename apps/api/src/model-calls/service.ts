@@ -10,6 +10,7 @@ import {
 import { codexUpstreamModelSlugs, type ConfiguredModel, type Settings } from "@opengeni/config";
 import {
   API_CREDITS_REQUIRED_CODE,
+  BYOK_PAID_CREDIT_REQUIRED_CODE,
   modelCallProcessingResidency,
   type ModelCallProcessingResidencyV1,
   type EntitlementsPort,
@@ -167,6 +168,8 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
       const subscription = source.kind === "connected_subscription" ? source.provider : null;
       const chargesOpenGeniCredits = model.billing.metering === "opengeni_credits";
       const countsTowardTokenCap = model.billing.upstreamPayer === "deployment";
+      // The person's own key or subscription: pays the platform fee.
+      const byok = !chargesOpenGeniCredits && model.billing.upstreamPayer !== "deployment";
       // a call made by a live agent attempt (its grant was verified
       // by the attempt boundary) counts against that task's usage limit and is
       // refused once the limit is reached. Other callers have no task.
@@ -222,12 +225,17 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
           countsTowardTokenCap,
           subjectId: input.subjectId,
           billingOrigin,
+          byok,
         });
         if (!admission.allowed) {
           throw new ModelCallError({
             status: admission.denial === "insufficient_credits" ? 402 : 429,
             type: "insufficient_quota",
-            code: admission.apiCreditsRequired ? API_CREDITS_REQUIRED_CODE : admission.denial,
+            code: admission.apiCreditsRequired
+              ? API_CREDITS_REQUIRED_CODE
+              : admission.byokPaidCreditRequired
+                ? BYOK_PAID_CREDIT_REQUIRED_CODE
+                : admission.denial,
             message: admission.message,
           });
         }
@@ -333,6 +341,7 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
             },
             debitMetadata: { modelCallId: input.requestId },
             billingOrigin,
+            byok,
           }),
         ).catch(async (error: unknown) => {
           logSettlementFailure(error);

@@ -132,6 +132,11 @@ import {
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
+import {
+  createPrivacyFactsAttemptToolDefinition,
+  loadPrivacyFactsLive,
+  privacyFactsRouteForTurn,
+} from "./privacy-facts";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
 import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
@@ -222,6 +227,8 @@ export type PrepareTurnToolRuntimeDeps = {
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
   /** The workspace allows Opengeni credits; paid web tools are omitted when not. */
   workspaceCreditModelsAllowed: GovernanceModelOk["workspaceCreditModelsAllowed"];
+  /** Hosted paid tools would run on Opengeni's bill; provider web tools replace hosted search. */
+  hostedToolsBillCredits: GovernanceModelOk["hostedToolsBillCredits"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
@@ -337,6 +344,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     resolvedModel,
     lazyToolTransport,
     workspaceCreditModelsAllowed,
+    hostedToolsBillCredits,
     turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
     activeSandboxBackend,
@@ -879,18 +887,26 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     hasSkills: skillCatalog.length > 0,
   });
   // Provider web search: only where the turn has no hosted search (or the
-  // operator chose `replace`), only when a provider is configured, and only
-  // when the session's agent configuration allows web search (filtered below).
+  // operator chose `replace`, or hosted search would run on Opengeni's bill),
+  // only when a provider is configured, and only when the session's agent
+  // configuration allows web search (filtered below).
   const webSearchTools = webSearchToolDefinitions({
     settings: runSettings,
-    tools: turnWebSearchPlan(resolvedModel, runSettings, workspaceCreditModelsAllowed)
-      .providerTools,
+    tools: turnWebSearchPlan(
+      resolvedModel,
+      runSettings,
+      workspaceCreditModelsAllowed,
+      hostedToolsBillCredits,
+    ).providerTools,
     scope: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       turnId: turn.id,
       attemptId: input.attemptId,
+      // A turn whose paid hosted tools bill credits pays its web tools from
+      // the plan and grants covering its model first, like its Gateway images.
+      ...(hostedToolsBillCredits ? { creditUsageModelId: turnExecutionPolicy.productModelId } : {}),
     },
     billing: createWebSearchBilling({ db, settings: runSettings }),
     observability,
@@ -959,6 +975,36 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           modelNotes: currentCatalog.modelNotes,
         };
       },
+    }),
+    createPrivacyFactsAttemptToolDefinition({
+      route: privacyFactsRouteForTurn({
+        settings: runSettings,
+        policy: turnExecutionPolicy,
+        resolved: resolvedModel,
+      }),
+      deployment: {
+        privacyPolicyUrl: runSettings.legalPrivacyPolicyUrl ?? null,
+        termsOfServiceUrl: runSettings.legalTermsOfServiceUrl ?? null,
+        supportEmail: runSettings.supportEmail ?? null,
+        subprocessorsUrl: runSettings.legalSubprocessorsUrl ?? null,
+        dataHostingLocation: runSettings.dataHostingLocation ?? null,
+        sandboxes: {
+          backend: runSettings.sandboxBackend,
+          regions: runSettings.modalRegions ?? null,
+        },
+        // Archiving needs object storage; without it the worker never archives.
+        sessionArchiveIdleDays:
+          runSettings.sessionArchiveEnabled && deps.objectStorage
+            ? runSettings.sessionArchiveIdleDays
+            : null,
+      },
+      loadLive: async () =>
+        await loadPrivacyFactsLive({
+          db,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          deploymentEuOnly: runSettings.requiredModelGeography === "eu",
+        }),
     }),
     ...(titleToolPlan.promoteTitleTool
       ? [

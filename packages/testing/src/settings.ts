@@ -13,6 +13,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     microsoftTeamsToolsEnabled: false,
     microsoftTeamsAllowedWorkspaceIds: [],
     billingLegacyAccountIds: [...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS],
+    paidHostedToolsCreditBilling: true,
     teamsBotEnabled: false,
     teamsBotAllowedTenantIds: [],
     teamsBotAllowedChannelIds: [],
@@ -92,6 +93,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
     billingMode: "disabled",
     subscriptionPlansEnabled: false,
+    // Off in fixtures; bring-your-own-key fee tests opt in.
+    byokPlatformFeeBps: 0,
     verifiedSignupTrialCreditsEnabled: false,
     creditPromotionPolicy: { offers: {} },
     sandboxWarmBillingMode: "usage_only",

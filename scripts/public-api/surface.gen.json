@@ -11740,11 +11740,15 @@
         "$.accountId": "string!",
         "$.apiDebtMicros": "integer?",
         "$.balanceMicros": "integer!",
+        "$.byokFeeDebtMicros": "integer?",
+        "$.byokPlatformFeeMonthMicros": "integer?",
         "$.creditsMicros": "integer?",
         "$.currency": "const!=[\"\\\"usd\\\"\"]",
         "$.generalBalanceMicros": "integer?",
         "$.heldCreditMicros": "integer?",
         "$.heldGeneralCreditMicros": "integer?",
+        "$.paidCreditsMicros": "integer?",
+        "$.paidPlanCreditMicros": "integer?",
         "$.plan": "ref(BillingPlanBalance)? null",
         "$.promotionDecision": "enum?=[\"\\\"denied\\\"\",\"\\\"eligible\\\"\",\"\\\"held\\\"\",\"\\\"verification_required\\\"\"]",
         "$.promotionalCredits": "array?",
@@ -24438,7 +24442,7 @@
         "$.name": "string!",
         "$.providerId": "string!",
         "$.providerName": "string!",
-        "$.unavailableReason": "enum? null=[\"\\\"region_restricted\\\"\"]",
+        "$.unavailableReason": "ref(RecordingTranscriptionUnavailableReason)? null",
         "$.usdPerHour": "number! null"
       }
     },
@@ -24470,6 +24474,14 @@
         "$.maxSpeakers": "integer?",
         "$.model": "string?",
         "$.providerId": "string?"
+      }
+    },
+    "RecordingTranscriptionUnavailableReason": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"region_restricted\\\"\",\"\\\"unpriced\\\"\"]"
       }
     },
     "RecordingVoiceprintConsent": {
@@ -36629,6 +36641,7 @@
       "applyPatchOps": "value",
       "applyPatchOpsFromToolItem": "value",
       "applySessionCapabilityAccess": "value",
+      "approvalsDecidable": "value",
       "approvalsFromRequiresAction": "value",
       "ApprovalSurface": "value",
       "ApprovalSurfaceMessages": "type",
@@ -38537,6 +38550,7 @@
       "admissionControlNeedsRefresh": "value",
       "admissionRecheckControl": "value",
       "AgentMessageItem": "type",
+      "approvalsDecidable": "value",
       "approvalsFromRequiresAction": "value",
       "ApprovedElsewhereCopy": "type",
       "ApprovedMachineChoice": "type",
@@ -39803,6 +39817,11 @@
       "usageResets": "value",
       "usageValueText": "value",
       "UsageWindowReading": "type"
+    },
+    "@opengeni/react/ui/window-bar-title": {
+      "PageHeaderWindowBarContext": "value",
+      "useWindowBarTitle": "value",
+      "WindowBarTitleBoundary": "value"
     },
     "@opengeni/react/usage": {
       "allowanceLabels": "value",

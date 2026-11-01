@@ -7,8 +7,10 @@ import {
 import {
   API_CREDITS_REQUIRED_CODE,
   API_CREDITS_REQUIRED_MESSAGE,
+  BYOK_PAID_CREDIT_REQUIRED_CODE,
   type BillingOrigin,
 } from "@opengeni/contracts";
+import { byokPaidCreditRefusalMessage, byokPlatformFeeActive } from "./byok-platform-fee";
 import type {
   LimitAction,
   LimitDecision,
@@ -23,6 +25,7 @@ import {
   countScheduledTasksForWorkspace,
   countWorkspacesForAccount,
   chargeBillingOrigin,
+  getByokFeeSpendableBalance,
   getSpendableCreditBalance,
   isCodexBilledTurn,
   readSubscriptionCoreFunding,
@@ -74,10 +77,11 @@ export type LimitCheckInput = {
   billingOrigin?: BillingOrigin | null;
 };
 
-/** Credit refusals: both are payment stops (402) with an Add credits action. */
+/** Credit refusals: payment stops (402) with an Add credits action. */
 export const CREDIT_REFUSAL_CODES: ReadonlySet<string> = new Set([
   "insufficient_credits",
   API_CREDITS_REQUIRED_CODE,
+  BYOK_PAID_CREDIT_REQUIRED_CODE,
 ]);
 
 export function modelFundingForAdmission(
@@ -90,11 +94,15 @@ export function modelFundingForAdmission(
    * keeps the legacy answer.
    */
   coreRoutedFunding?: boolean,
-): { fundedWithoutCredits: boolean; countsTowardTokenCap: boolean } {
+): { fundedWithoutCredits: boolean; countsTowardTokenCap: boolean; byok: boolean } {
   const resolvedModel = model ? resolveModelProviderForTurn(settings, model)?.model : null;
   const codexSubscriptionModel =
     resolvedModel?.credentialSource.kind === "connected_subscription" &&
     resolvedModel.credentialSource.provider === "codex";
+  const fundedWithoutCredits =
+    codexBilled ||
+    (coreRoutedFunding ??
+      (resolvedModel != null && !codexSubscriptionModel && resolvedModel.cost !== "credits"));
   return {
     // A Codex namespace/definition never bypasses credits by itself: the live
     // workspace credential predicate above remains authoritative. Claude's
@@ -102,12 +110,15 @@ export function modelFundingForAdmission(
     // worker/provider admission owns live account selection before any
     // upstream request can occur. On the core route (the only SuperGrok
     // route) the core's funding answer is authoritative instead.
-    fundedWithoutCredits:
-      codexBilled ||
-      (coreRoutedFunding ??
-        (resolvedModel != null && !codexSubscriptionModel && resolvedModel.cost !== "credits")),
+    fundedWithoutCredits,
     countsTowardTokenCap:
       !codexBilled && resolvedModel != null && resolvedModel.billing.upstreamPayer === "deployment",
+    // The person's own key or subscription serves it: it pays the platform
+    // fee from paid credit. A deployment-funded free model does not.
+    byok:
+      fundedWithoutCredits &&
+      (codexBilled ||
+        (resolvedModel != null && resolvedModel.billing.upstreamPayer !== "deployment")),
   };
 }
 
@@ -193,13 +204,13 @@ export async function checkLimit(
         ...(input.acceptedTurn ? { acceptedTurn: input.acceptedTurn } : {}),
       })
     : undefined;
-  const { fundedWithoutCredits, countsTowardTokenCap } = modelFundingForAdmission(
+  const { fundedWithoutCredits, countsTowardTokenCap, byok } = modelFundingForAdmission(
     deps.settings,
     input.model,
     codexBilled,
     coreFunding,
   );
-  const creditDecision = await checkCreditBalance(deps, input, fundedWithoutCredits);
+  const creditDecision = await checkCreditBalance(deps, input, fundedWithoutCredits, byok);
   if (!creditDecision.allowed) {
     return creditDecision;
   }
@@ -225,9 +236,18 @@ async function checkCreditBalance(
   deps: LimitDependencies,
   input: LimitCheckInput,
   externallyBilled: boolean,
+  byok = false,
 ): Promise<LimitDecision> {
   if (externallyBilled) {
-    return { allowed: true }; // paid outside Opengeni — zero Opengeni credits
+    // Paid outside Opengeni; the person's own key still pays the platform fee.
+    if (
+      byok &&
+      byokPlatformFeeActive(deps.settings, input.accountId) &&
+      isCostlyAction(input.action)
+    ) {
+      return await checkByokPaidCredit(deps, input.accountId, input.billingOrigin);
+    }
+    return { allowed: true };
   }
   if (!usesCreditLimits(deps) || !isCostlyAction(input.action)) {
     return { allowed: true };
@@ -258,6 +278,25 @@ async function checkCreditBalance(
       ? "No credits available for this model. Choose a model covered by your promotional credits or add credits."
       : "No general credits available. Promotional credits cover eligible models only.",
   };
+}
+
+/**
+ * Bring-your-own-key admission: the platform fee is payable only from paid
+ * credit (a paid plan's credit for app use, then paid-for credits).
+ */
+export async function checkByokPaidCredit(
+  deps: Pick<LimitDependencies, "db">,
+  accountId: string,
+  billingOrigin?: BillingOrigin | null,
+): Promise<LimitDecision> {
+  const balance = await getByokFeeSpendableBalance(deps.db, accountId, billingOrigin);
+  return balance.balanceMicros > 0
+    ? { allowed: true }
+    : {
+        allowed: false,
+        code: BYOK_PAID_CREDIT_REQUIRED_CODE,
+        message: byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(billingOrigin)),
+      };
 }
 
 async function checkStaticCaps(

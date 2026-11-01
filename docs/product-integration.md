@@ -213,6 +213,9 @@ never changes an existing membership. It also never runs for SDK per-user
 workspaces (external source `opengeni-sdk:user-isolation:*`): those stay
 single-user, and the SDK adds their owner explicitly with a stable onboarding
 key. It never runs when the request needs a permission outside the defaults.
+That includes renaming a workspace, its instructions and its custom model
+entries: those take people who can start chats there acting as themselves,
+which a product's user never is, so a refused request creates nothing.
 The identity is re-checked as active under the same lock, and the grant
 writes the same receipt and `organization_workspace_lifecycle_events` row as
 explicit onboarding, attributed to the key. A user removed from a shared
