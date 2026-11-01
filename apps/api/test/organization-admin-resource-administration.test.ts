@@ -186,6 +186,13 @@ describe("organization admins manage organization vaults, environments and machi
     expect(await vault(admin, other.workspaceId)).toBe(403);
     expect(await vault(admin, acme.workspaceId)).toBe(201);
     expect(await vault(owner, acme.workspaceId)).toBe(201);
+    // Every organization vault, wherever it works: the people who manage them.
+    const everyVault = (person: Person, workspaceId: string) =>
+      send(person, at(workspaceId, "/organization-vaults"), "GET");
+    expect(await everyVault(member, acme.workspaceId)).toBe(403);
+    expect(await everyVault(admin, other.workspaceId)).toBe(403);
+    expect(await everyVault(admin, acme.workspaceId)).toBe(200);
+    expect(await everyVault(owner, acme.workspaceId)).toBe(200);
 
     // Organization-owned 1Password connections.
     const onePassword = (person: Person, workspaceId: string) =>
