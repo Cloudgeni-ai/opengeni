@@ -27,6 +27,8 @@ export type SubscriptionAccountMenuRow = {
   disabled?: boolean;
   /** Per-window readings, not an aggregate capacity/eligibility estimate. */
   usageSummary?: string | undefined;
+  /** The row's most-used window, drawn as a small bar beside the summary. */
+  usageBar?: { label: string; usedPercent: number } | undefined;
 };
 
 export type SubscriptionAccountUsageWindow = {
@@ -79,6 +81,26 @@ function UsageRow({ label, usedPercent, detail }: SubscriptionAccountUsageWindow
       </div>
       {detail ? <p>{detail}</p> : null}
     </div>
+  );
+}
+
+function RowUsageBar({ label, usedPercent }: { label: string; usedPercent: number }) {
+  const pct = Math.min(100, Math.max(0, usedPercent));
+  return (
+    <span
+      className="h-1 w-10 shrink-0 overflow-hidden rounded-full bg-surface-2"
+      role="progressbar"
+      aria-label={`${label} used`}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={pct}
+      aria-valuetext={`${Math.round(usedPercent)}% used`}
+    >
+      <span
+        className={cn("block h-full rounded-full", pct >= 90 ? "bg-status-waiting" : "bg-brand")}
+        style={{ width: `${pct}%` }}
+      />
+    </span>
   );
 }
 
@@ -141,8 +163,11 @@ export function SubscriptionAccountMenu({
       <span className="min-w-0 flex-1">
         <span className="block truncate">{account.label}</span>
         {account.usageSummary ? (
-          <span className="block truncate text-2xs text-fg-subtle" title={account.usageSummary}>
-            {account.usageSummary}
+          <span className="flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle">
+            {account.usageBar ? <RowUsageBar {...account.usageBar} /> : null}
+            <span className="min-w-0 truncate" title={account.usageSummary}>
+              {account.usageSummary}
+            </span>
           </span>
         ) : null}
       </span>

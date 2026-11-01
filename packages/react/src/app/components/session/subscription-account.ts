@@ -4,6 +4,8 @@
 // so every provider shows the same structure and copy. Only names, marks and
 // plan labels differ.
 import type { ClientModel, ModelAccountChoiceRefusal } from "@opengeni/sdk";
+import { isClaudeSubscriptionModelId } from "@opengeni/contracts/claude-subscription-model-ids";
+import { connectedSubscriptionProvider } from "../../../model-policy";
 import { isCodexProductModel } from "../../lib/session-model";
 import type { BillingClass } from "../billing-class-mark";
 import type {
@@ -224,6 +226,20 @@ function nearLimit(usage: SubscriptionAccountUsage | null | undefined): boolean 
   );
 }
 
+/** The most-used window with a known reading: the one that runs out first. */
+function tightestWindow(
+  windows: SubscriptionAccountUsageWindow[] | undefined,
+): { label: string; usedPercent: number } | undefined {
+  let tightest: { label: string; usedPercent: number } | undefined;
+  for (const window of windows ?? []) {
+    if (window.usedPercent === null || !Number.isFinite(window.usedPercent)) continue;
+    if (!tightest || window.usedPercent > tightest.usedPercent) {
+      tightest = { label: window.label, usedPercent: window.usedPercent };
+    }
+  }
+  return tightest;
+}
+
 /**
  * Whether there is anything to show or choose. A chat whose provider offers
  * no accounts to this person, with nothing chosen, serving or waiting, shows
@@ -243,14 +259,17 @@ export function showsSubscriptionAccountMenu(state: SubscriptionAccountState): b
 /**
  * The subscription whose accounts a chat's header offers, or null for a chat
  * that does not run on a subscription. Codex product models are Codex
- * subscriptions even before the catalog lists them.
+ * subscriptions even before the catalog lists them, and so are Claude
+ * subscription model ids. The workspace catalog leaves `credentialSource`
+ * out, so its public provider id and rail decide for the rest.
  */
 export function subscriptionAccountProvider(
   modelId: string,
-  credentialSource: ClientModel["credentialSource"],
+  model: Pick<ClientModel, "id" | "provider" | "source" | "credentialSource"> | null | undefined,
 ): string | null {
   if (isCodexProductModel(modelId)) return "codex";
-  return credentialSource?.kind === "connected_subscription" ? credentialSource.provider : null;
+  if (isClaudeSubscriptionModelId(modelId)) return "claude";
+  return model ? connectedSubscriptionProvider(model) : null;
 }
 
 /** Everything the account menu shows, from the neutral state. */
@@ -296,28 +315,32 @@ export function subscriptionAccountMenuContent(state: SubscriptionAccountState) 
       : state.usageCheck === "failed"
         ? { unavailable: true }
         : subscriptionAccountUsage(current.usage);
-  const accounts: SubscriptionAccountMenuRow[] = state.accounts.map((account) => ({
-    id: account.id,
-    label: accountLabel(account),
-    plan: account.plan,
-    status: accountStatus(account),
-    detail: [
-      accountLabel(account),
-      account.email,
-      account.plan,
-      accountSource(account),
-      accountStatus(account),
-    ]
-      .filter(Boolean)
-      .join(" · "),
-    personal: account.source === "personal",
-    disabled: !account.choosable,
+  const accounts: SubscriptionAccountMenuRow[] = state.accounts.map((account) => {
     // The current account's usage is already shown above the list.
-    usageSummary:
+    const rowUsage =
       account.id === current?.id || state.usageCheck === "checking"
         ? undefined
-        : subscriptionAccountUsage(account.usage).summary,
-  }));
+        : subscriptionAccountUsage(account.usage);
+    return {
+      id: account.id,
+      label: accountLabel(account),
+      plan: account.plan,
+      status: accountStatus(account),
+      detail: [
+        accountLabel(account),
+        account.email,
+        account.plan,
+        accountSource(account),
+        accountStatus(account),
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      personal: account.source === "personal",
+      disabled: !account.choosable,
+      usageSummary: rowUsage?.summary,
+      usageBar: rowUsage?.summary ? tightestWindow(rowUsage.windows) : undefined,
+    };
+  });
   return {
     ariaLabel: [
       `${name} account`,
