@@ -562,9 +562,9 @@ export function useRecorder(
     levels: useCallback(() => recorderRef.current?.levels() ?? {}, []),
     importAudio: useCallback(
       async (input: ImportRecordingAudioInput) => {
-        const options = optionsRef.current;
+        const current = optionsRef.current;
         const title = input.title?.trim();
-        const externalRef = input.externalRef ?? options.externalRef;
+        const externalRef = input.externalRef ?? current.externalRef;
         return await new Promise<string>((resolve, reject) => {
           uploadRecordingAudio({
             uploader: uploader(),
