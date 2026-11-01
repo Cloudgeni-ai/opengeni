@@ -39,6 +39,8 @@ import { startSteerWatch, type SteerWatch } from "./steer-watch";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
+  HostedSearchEvidenceEchoGuard,
+  isHostedSearchEvidenceEchoText,
   normalizeModelCallUsage,
   normalizeSdkEvent,
   withMcpToolDisplayMetadata,
@@ -220,6 +222,7 @@ import type {
 } from "@opengeni/contracts";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
+import type { TurnSearchRecords } from "../search-record-form";
 import type {
   AttemptIdentityState,
   BillingState,
@@ -348,6 +351,8 @@ export type TurnStreamAttemptDeps = {
     items: Array<Record<string, unknown>>,
   ) => Promise<Array<Record<string, unknown>>>;
   modelHistoryProjector: ModelHistoryAttachmentProjector;
+  /** The turn's hosted web-search record form; turn input settles it. */
+  searchRecords: TurnSearchRecords;
   compactionModeOptions: NonNullable<Parameters<typeof maybeCompactContext>[5]>;
   initialRunCredentialMaterial: NormalizedRunCredentialMaterial | null;
   initialGitCredentials: MintedRunGitCredentials | undefined;
@@ -494,6 +499,7 @@ export async function runTurnStreamAttempt(
     compactionModelHistoryProjector,
     generatedImageHistoryProjector,
     modelHistoryProjector,
+    searchRecords,
     compactionModeOptions,
     initialRunCredentialMaterial,
     sandboxEnvironment,
@@ -676,6 +682,7 @@ export async function runTurnStreamAttempt(
         projectCanonicalHistory: generatedImageHistoryProjector,
         materializeModelHistory: media.materializeScreenshotHistory,
         projectModelHistory: modelHistoryProjector,
+        searchRecords,
         onPreparationPhase: (measurement) => {
           recordTurnStartupPhase(observability, {
             phase: `history_${measurement.phase}`,
@@ -959,6 +966,7 @@ export async function runTurnStreamAttempt(
     // undeclared messages the SDK runs past (same response asks for tools)
     // are commentary. Every SDK event of this stream is normalized once.
     const messagePhases = new AssistantMessagePhaseTracker();
+    const evidenceEchoGuard = new HostedSearchEvidenceEchoGuard();
     // Text of the newest assistant message this stream completed durably.
     let latestStreamedAssistantText: string | null = null;
     // Actual input tokens of the most recent model response this turn; the
@@ -1119,6 +1127,8 @@ export async function runTurnStreamAttempt(
           ...(attemptSecretValues
             ? { secretMaskingInputFilter: secretValueModelInputFilter(attemptSecretValues) }
             : {}),
+          // Settled by turn input above; the same for every model call of the run.
+          searchRecordForm: searchRecords.form,
           onModelVisibleContext: async (rawSnapshot) => {
             const snapshot = attemptSecretValues
               ? attemptSecretValues.mask(rawSnapshot, "model_context_snapshot")
@@ -1816,7 +1826,8 @@ export async function runTurnStreamAttempt(
                 }
               : { messagePhases },
           );
-        for (const event of normalized) {
+        // A model-written copy of a search record is never shown as chat text.
+        for (const event of evidenceEchoGuard.filter(normalized)) {
           if (event.type === "agent.toolCall.created") {
             const preparedServers = eventing.preparedTools?.mcpServers ?? [];
             // Display metadata and the content-free analytics family are
@@ -2339,6 +2350,7 @@ export async function runTurnStreamAttempt(
                                 workspaceId: input.workspaceId,
                                 sessionId: input.sessionId,
                                 settings: eventing.modelRunSettings,
+                                cards: eventing.appActionApprovalCards,
                               },
                             ),
                           ),
@@ -2433,9 +2445,13 @@ export async function runTurnStreamAttempt(
       return claimedResult({ status: "idle" });
     }
     const inputWaitYielded = eventing.preparedTools?.inputWaitYield?.yielded === true;
-    const finalOutput = String(
+    const streamFinalOutput = String(
       requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
     );
+    // A copied web-search record is not a reply: treat it as empty so the
+    // turn asks for a real answer instead of publishing the copy.
+    const suppressedEcho = isHostedSearchEvidenceEchoText(streamFinalOutput);
+    const finalOutput = suppressedEcho ? "" : streamFinalOutput;
     const durableReplyFacts =
       !inputWaitYielded && finalOutput.trim().length === 0
         ? await sessionTurnFinalReplyFacts(db, input.workspaceId, input.sessionId, activeTurnId)
@@ -2450,6 +2466,7 @@ export async function runTurnStreamAttempt(
         maintenance: turn.source === "compaction",
         toolsExecuted: toolsExecuted || finalReplyNudged || durableReplyFacts.toolsExecuted,
         completedGoal: durableReplyFacts.completedGoal,
+        suppressedEcho,
       })
     ) {
       await historySink.reconcileConversationTruth({ requireDurable: true });

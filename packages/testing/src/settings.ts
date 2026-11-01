@@ -13,6 +13,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     microsoftTeamsToolsEnabled: false,
     microsoftTeamsAllowedWorkspaceIds: [],
     billingLegacyAccountIds: [...DEFAULT_BILLING_LEGACY_ACCOUNT_IDS],
+    paidHostedToolsCreditBilling: true,
     teamsBotEnabled: false,
     teamsBotAllowedTenantIds: [],
     teamsBotAllowedChannelIds: [],

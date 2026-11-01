@@ -203,6 +203,22 @@ async function addPasskey(rt: Runtime, cookie: string) {
 }
 
 describe("passkey sign-in and passkey-only accounts", () => {
+  test("an address taken off the allowed list gets a typed refusal, not a generic one", async () => {
+    const rt = runtime();
+    const person = await passwordFixture();
+    const { passkey, response } = await addPasskey(rt, await legacyCookie(rt, person.token));
+    expect(response.status).toBe(200);
+
+    const restricted = runtime({ allowedUserEmails: ["someone-else@example.test"] });
+    const refused = await signIn(restricted, passkey);
+    expect(refused.response.status).toBe(403);
+    expect(await refused.response.json()).toEqual({
+      code: "SIGN_IN_EMAIL_NOT_ALLOWED",
+      message: "This email can't sign in here",
+    });
+    expect(sessionCookie(refused.response)).not.toContain("session_token=");
+  }, 60_000);
+
   test("the client config offers passkeys only on a secure address, and sign-up only when enabled", async () => {
     const config = async (rt: Runtime) =>
       (

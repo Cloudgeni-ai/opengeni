@@ -385,6 +385,7 @@ export class RestGitHub implements GitHub {
 
   async readFiles(ref: string, paths: string[]) {
     const files = new Map<string, RepoFile>();
+    const truncated: string[] = [];
     if (!/^[0-9a-f]{40}$/.test(ref)) throw new Error(`Not a commit SHA: ${ref}`);
     const [owner, name] = this.repository.split("/");
     const directory = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
@@ -434,9 +435,26 @@ export class RestGitHub implements GitHub {
           mode,
           text: blob.isBinary || blob.isTruncated ? null : blob.text,
         });
+        if (!blob.isBinary && blob.isTruncated) truncated.push(path);
       });
     }
+    // GraphQL truncates the text of a large blob; the blob API returns it whole.
+    for (const path of truncated) {
+      const file = files.get(path)!;
+      file.text = await this.blobText(file.oid);
+    }
     return files;
+  }
+
+  /** A blob's full UTF-8 text, or null when it is not valid UTF-8. */
+  private async blobText(oid: string): Promise<string | null> {
+    const blob = await this.get<{ content: string; encoding: string }>(`git/blobs/${oid}`);
+    if (blob.encoding !== "base64") return null;
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(blob.content, "base64"));
+    } catch {
+      return null;
+    }
   }
 
   async branches(prefix: string) {

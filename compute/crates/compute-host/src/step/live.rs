@@ -123,8 +123,10 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// Records what the memory of `vm`, just started from `image` or booted
     /// fresh if `None`, is based on, for an agent that restarts while it
     /// runs (see [`record_base`]). Without it, that agent's first save of
-    /// the VM holds every page.
+    /// the VM holds every page. Marks it its sandbox's only copy if it is
+    /// ([`Self::mark_only_copy`]).
     pub(super) async fn record_started(&self, vm: &E::Vm, image: Option<&Verified>) {
+        self.mark_only_copy(vm);
         let process = match self.engine.process_identity(vm) {
             Ok(process) => process,
             Err(error) => {
@@ -375,11 +377,17 @@ impl Reconnected {
 /// write lost since the VM started. The VM's engine keeps the same
 /// description for as long as the VM lives ([`Engine::hold`]), so an agent
 /// that restarts beside the VM gets it back ([`Engine::held`]) and sees
-/// all the same. Before the VMM can sync the disk, a check marker is made
-/// durable in the host-only sandbox directory, and only a clean sync
-/// removes it: a sync that reported an error to an agent that stopped
+/// all the same. Only the watch's own sync can take an error from that
+/// description, so only it runs under a check marker, made durable in the
+/// host-only sandbox directory just before it and removed once it comes
+/// back clean: a sync that reported an error to an agent that stopped
 /// before it could act ran under the marker, which the next agent finds.
-/// A failure is final for the VM: no snapshot of it is trusted again.
+/// An agent that stops anywhere else, such as while the VMM takes a
+/// snapshot and syncs its own description, leaves every error for the next
+/// sync through the kept one, and a snapshot no sync vouched for is never
+/// used. So stopping the agent to upgrade it costs a VM its trust only if
+/// that one sync was under way. A failure is final for the VM: no snapshot
+/// of it is trusted again.
 ///
 /// [`Engine::hold`]: compute_engine::Engine::hold
 /// [`Engine::held`]: compute_engine::Engine::held
@@ -445,7 +453,10 @@ impl DiskWatch {
     }
 
     /// A new descriptor for the watch's open file description, for the
-    /// engine to keep; `None` if the watch has none.
+    /// engine to keep; `None` if the watch has none. Nothing may sync
+    /// through it or any other copy of the description but
+    /// [`DiskWatch::sync`]: the check marker covers that sync alone, so
+    /// any other would take errors from the watch unseen.
     pub(super) fn description(&self) -> io::Result<Option<OwnedFd>> {
         self.file
             .as_ref()
@@ -453,21 +464,26 @@ impl DiskWatch {
             .transpose()
     }
 
-    /// Starts a check, before anything may sync the disk.
+    /// Starts a check, before a snapshot the check is to vouch for: fails
+    /// once the watch has failed, so no snapshot of the VM is taken. It
+    /// writes nothing, since nothing before [`DiskWatch::sync`] can take an
+    /// error from the watch's description.
     pub(crate) fn begin(&self) -> io::Result<()> {
         if self.failed() {
             return Err(self.lost());
         }
-        crate::layout::write_atomic(&self.marker, b"")
+        Ok(())
     }
 
     /// Flushes the disk, failing if any write to it was lost since the
-    /// watch was opened, and ends the check that [`DiskWatch::begin`]
-    /// started if none was.
+    /// watch was opened, under the check marker, which it removes if none
+    /// was. If the marker cannot be made durable it does not sync, and the
+    /// watch has not failed.
     pub(crate) fn sync(&self) -> io::Result<()> {
         let Some(file) = self.file.as_ref().filter(|_| !self.failed()) else {
             return Err(self.lost());
         };
+        crate::layout::write_atomic(&self.marker, b"")?;
         if let Err(error) =
             crate::layout::failpoint(&self.disk, "sync").and_then(|()| file.sync_all())
         {

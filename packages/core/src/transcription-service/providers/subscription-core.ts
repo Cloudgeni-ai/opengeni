@@ -28,6 +28,7 @@ export function withoutFallback(error: TranscriptionServiceError): Transcription
     status: error.status,
     retryable: error.retryable,
     fallbackSafe: false,
+    providerCode: error.providerCode,
   });
 }
 

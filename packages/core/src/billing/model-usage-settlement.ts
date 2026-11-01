@@ -31,6 +31,7 @@ import {
 } from "@opengeni/db";
 import type { ModelCallUsageNormalization, ModelResponseUsage } from "@opengeni/runtime";
 import type { ModelUsageInput } from "@opengeni/config";
+import { settleHostedWebSearchUsage } from "../domain/web-search-billing";
 import {
   byokListEquivalent,
   byokPlatformFeeActive,
@@ -78,6 +79,13 @@ export type ModelUsageSettlementInput = {
   countsTowardTokenCap: boolean;
   creditPolicyRevision?: number | undefined;
   gatewayBilling?: ModelResponseUsage["gatewayBilling"];
+  /**
+   * Searches the provider ran with its own hosted search tool for this
+   * response (`ModelResponseUsage.webSearchRequests`). On a credit-billed
+   * turn response while billing is active they are charged as a separate
+   * web-search debit, unless a Gateway reported the response cost.
+   */
+  hostedWebSearchRequests?: number | undefined;
   normalizedUsage: ModelCallUsageNormalization;
   /** Durable source identity (for a turn, `${turnId}:${sourceKey}`). */
   sourceId: string;
@@ -462,7 +470,27 @@ export async function settleModelUsage(
     };
   }
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+  // Hosted provider searches are not in the token price. A Gateway-reported
+  // cost is the provider's whole bill for the response, search included, so
+  // it is never charged again. The searches run on the provider's search
+  // backend, so the model route's residency claim is not recorded on them.
+  const settleHostedWebSearch = async () => {
+    const requests = input.hostedWebSearchRequests ?? 0;
+    if (gatewayBilling || requests <= 0 || !input.turnId || !input.sessionId) return;
+    await settleHostedWebSearchUsage(db, settings, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId ?? null,
+      sourceId: input.sourceId,
+      model: input.model,
+      requests,
+      ...(input.billingOrigin ? { billingOrigin: input.billingOrigin } : {}),
+    });
+  };
   if (!shouldDebit || (totalTokens === 0 && !gatewayBilling)) {
+    if (shouldDebit) await settleHostedWebSearch();
     return {
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
@@ -521,6 +549,7 @@ export async function settleModelUsage(
       // The debit is committed; metrics are best-effort only.
     }
   }
+  await settleHostedWebSearch();
   return {
     billingPath: "opengeni_credits",
     pricedCostMicros: costMicros,

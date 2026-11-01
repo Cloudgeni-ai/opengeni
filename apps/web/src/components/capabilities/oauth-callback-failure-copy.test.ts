@@ -70,9 +70,14 @@ test("MCP duplicate failures give actionable guidance without raw codes", () => 
     "account_mismatch",
     "account_already_connected",
     "account_identity_unavailable",
+    "account_reconnect_required",
   ]) {
     const message = oauthCallbackFailureMessage(reason);
     expect(message).not.toContain(reason);
     expect(message.toLowerCase()).toContain("reconnect");
   }
+  // A service that can't identify accounts allows one; the way out is disconnecting it.
+  const single = oauthCallbackFailureMessage("account_limit_one");
+  expect(single).not.toContain("account_limit_one");
+  expect(single).toContain("Disconnect it to use a different one.");
 });

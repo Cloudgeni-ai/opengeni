@@ -88,11 +88,13 @@ export const SECTION_KEYS = [
   "list-row",
   "detail-sheet",
   "empty-state",
+  "available-here",
   // Selection
   "setting-row",
   "switch",
   "segmented-control",
   "choice-cards",
+  "workspace-reach",
   "select",
   "disclosure",
   // Status
@@ -111,6 +113,7 @@ export const SECTION_KEYS = [
   "access-list",
   // Chat
   "chat-approvals",
+  "chat-app-actions",
   "chat-questions",
   "chat-connect",
   "chat-answers",
@@ -358,6 +361,16 @@ export const SECTIONS: readonly SectionMeta[] = [
     load: () => import("./empty-state"),
   },
 
+  {
+    key: "available-here",
+    group: "Lists",
+    title: "Available here",
+    purpose:
+      "What agents in one workspace can use, grouped by who it belongs to, with who manages each.",
+    usedOn: "Workspace settings › Available here",
+    load: () => import("./available-here"),
+  },
+
   // ---------------------------------------------------------------- Selection
   {
     key: "setting-row",
@@ -471,6 +484,16 @@ export const SECTIONS: readonly SectionMeta[] = [
       },
     ],
     load: () => import("./choice-cards"),
+  },
+  {
+    key: "workspace-reach",
+    group: "Selection",
+    title: "Available in",
+    purpose:
+      "Where a thing an organization, a workspace or a person shares can be used, with its owner and who manages it, in the same words for every kind.",
+    usedOn:
+      "Model account Available in, Connect provider, vault Available in, Slack bot, organization keys and connected agents (workspace list)",
+    load: () => import("./workspace-reach"),
   },
   {
     key: "select",
@@ -711,6 +734,14 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Ask the person to allow or decline one action the agent wants to take.",
     usedOn: "Chat, embedded chat, inbox and phone",
     load: () => import("./chat-approvals"),
+  },
+  {
+    key: "chat-app-actions",
+    group: "Chat",
+    title: "App action approvals",
+    purpose: "Ask the person to allow a change in Opengeni itself, naming exactly what it changes.",
+    usedOn: "Chat, embedded chat, inbox, phone and Slack",
+    load: () => import("./chat-app-actions"),
   },
   {
     key: "chat-questions",

@@ -103,6 +103,11 @@ sandboxes created at once all pay it at the same time.
   the new length through its VMM, which it takes up, growing its file
   system, as it next runs; a template's copy for a fresh create is
   lengthened the same way, its guest told before the first wake's resume.
+  The guest's kernel handles that change a moment after the resume, which
+  can be after the restore notice arrives, so the notice says the disk's
+  length too, and the guest answers it only once its kernel sees that
+  length and its file system fills it: the create's answer, and the first
+  command, find all the room it asked for.
   So templates stay per image and shape whatever disk a create asks for.
   These are the only VM settings a claim changes; sleep settings and the rest
   live in the record, and the identity and reseed contract is unchanged,

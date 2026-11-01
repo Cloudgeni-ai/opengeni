@@ -769,6 +769,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fileAuthoritySubjectId,
             humanInputResume,
             turnExecutionPolicy,
+            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
             requiredGeneratedVideoFiles,
           });
           if ("exit" in governance) return governance.exit;
@@ -789,6 +790,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             workspaceMemory,
             buildCompanyBrainContributionReceiptFor,
             logicalSandboxSettings,
@@ -803,6 +805,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelHistoryProjector,
             generatedImageHistoryProjector,
             compactionModelHistoryProjector,
+            searchRecords,
           } = governance.ok;
 
           // A codex-subscription turn resolves the bearer for THIS turn's effective
@@ -1773,6 +1776,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             resolvedModel,
             lazyToolTransport,
             workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             turnTools,
             connectionScope,
             sandboxArtifactRuntime,
@@ -1834,6 +1838,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceCreditModelsAllowed,
+            hostedToolsBillCredits,
             workspaceMemory,
             rigVersion,
             rigName,
@@ -2226,6 +2231,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               compactionModelHistoryProjector,
               generatedImageHistoryProjector,
               modelHistoryProjector,
+              searchRecords,
               compactionModeOptions,
               initialRunCredentialMaterial,
               initialGitCredentials,
