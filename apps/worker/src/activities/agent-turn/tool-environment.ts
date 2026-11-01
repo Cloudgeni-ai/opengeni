@@ -150,7 +150,7 @@ import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
 import {
   attemptSecretResolver,
-  secretsCapabilityEnabled,
+  taskVaultSecretCaptureEnabled,
   type AttemptVaultAccess,
 } from "./secret-resolver";
 import {
@@ -1159,7 +1159,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     db,
     encryptionKey: maskingKey,
     principal: maskingPrincipal,
-    enabled: secretsCapabilityEnabled(session.agent),
+    enabled: taskVaultSecretCaptureEnabled(session.agent, session.firstPartyMcpPermissions),
     observability,
   });
   try {
