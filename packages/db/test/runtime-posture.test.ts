@@ -2080,7 +2080,7 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
-          // 1211 transcribed pieces kept for a version's retries: full DML, FORCE RLS.
+          // 1213 transcribed pieces kept for a version's retries: full DML, FORCE RLS.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -2245,7 +2245,7 @@ describe("runtime database posture evaluator", () => {
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
           1 + // 1195 where organization Skills work.
-          1 + // 1211 transcribed pieces kept for a version's retries.
+          1 + // 1213 transcribed pieces kept for a version's retries.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
@@ -2264,7 +2264,7 @@ describe("runtime database posture evaluator", () => {
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
           1 + // 1195 where organization Skills work.
-          1 + // 1211 transcribed pieces kept for a version's retries.
+          1 + // 1213 transcribed pieces kept for a version's retries.
           1 + // 1106 external member revocation markers.
           1 + // 1092 chat share links.
           3 + // 0981-0982 promotional funding and signed machine evidence.
