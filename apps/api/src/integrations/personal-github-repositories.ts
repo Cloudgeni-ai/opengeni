@@ -392,7 +392,12 @@ export function personalGitHubRepositoryProviderHttpError(
       });
     case "connection_inactive":
     case "provider_denied":
-      return new HTTPException(401, { message: "personal GitHub must be reconnected" });
+      // Not 401: that status means the person's Opengeni session ended, and
+      // clients answer it with "sign in again". GitHub refused the stored
+      // grant, so the person reconnects GitHub instead.
+      return new HTTPException(409, {
+        message: "Reconnect your GitHub account to keep working as you",
+      });
     case "provider_rate_limited":
       return new HTTPException(503, { message: "GitHub is temporarily rate limited" });
     case "repository_not_found":
