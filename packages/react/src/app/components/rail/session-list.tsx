@@ -2081,6 +2081,8 @@ export function SessionList() {
           sessionId: session.id,
           archived: updated.archived,
         });
+        // Recent chats drop it now too, not on a later read.
+        rememberChats(context.accessContext.subjectId, [updated]);
         archivedResult = updated;
         await refreshSessionPages();
       } catch (archiveError) {

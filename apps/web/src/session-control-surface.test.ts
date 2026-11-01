@@ -118,6 +118,8 @@ describe("session control surface architecture", () => {
       'className={cn("mb-1 w-full shrink-0 has-[>div:empty]:hidden", gutter)}',
     );
     expect(route.match(/\bgutter,\n\s+readOnlyArchive && "hidden"/g)).toHaveLength(1);
+    // An archived chat is read-only, so a failed last turn offers no Retry.
+    expect(route).toMatch(/const failureRecovery =\s*!props\.hasNewer &&\s*!readOnlyArchive &&/);
     // The wait status is a chip in SessionChrome, not a separate banner row.
     expect(route).not.toContain("<LazySessionWaitStatus");
   });

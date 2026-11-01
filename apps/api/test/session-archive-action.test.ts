@@ -266,6 +266,32 @@ describe("archiving a chat", () => {
     expect(await pauseEvents(chat.sessionId)).toBe(0);
   });
 
+  test("the Archived view lists archived chats newest archive first", async () => {
+    if (!available) return;
+    const chat = await freshChat();
+    const authorization = await bearer(chat, OWNER);
+    await archive(chat, authorization);
+    const response = await app.request(
+      `http://x/v1/workspaces/${chat.workspaceId}/sessions?view=page&projection=summary&archiveStatus=archived&sortBy=archivedAt`,
+      { headers: { authorization } },
+    );
+    expect(response.status).toBe(200);
+    const page = (await response.json()) as {
+      sortBy: string;
+      archiveStatus: string;
+      sessions: Array<{ id: string }>;
+    };
+    expect(page.sortBy).toBe("archivedAt");
+    expect(page.archiveStatus).toBe("archived");
+    expect(page.sessions.map((row) => row.id)).toContain(chat.sessionId);
+    // Active chats have no archive date to sort by.
+    const active = await app.request(
+      `http://x/v1/workspaces/${chat.workspaceId}/sessions?view=page&sortBy=archivedAt`,
+      { headers: { authorization } },
+    );
+    expect(active.status).toBe(400);
+  });
+
   test("a colleague who can control chats archives a shared chat; without control it is refused", async () => {
     if (!available) return;
     const chat = await freshChat("idle");
