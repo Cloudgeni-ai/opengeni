@@ -31,7 +31,8 @@ import {
   userErrorText,
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
-import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 
 /** What failed, and the error behind it: the UI shows advice, never the raw API string. */
 type SkillsFailure = { title: string; cause: unknown };
@@ -111,8 +112,11 @@ export function SkillsPanelContent({
         (scope === "workspace" &&
           hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage")) ||
         (scope === "organization" &&
-          grant &&
-          hasAccountPermission(context.accessContext, grant.accountId, "account:admin"))),
+          canAdministerOrganization({
+            accessContext: context.accessContext,
+            clientConfig: context.clientConfig,
+            accountId: grant?.accountId,
+          }))),
     );
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
