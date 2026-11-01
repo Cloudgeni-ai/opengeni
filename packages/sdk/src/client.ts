@@ -579,6 +579,7 @@ import type {
   RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationAdministrationMembersResponse,
+  ListOrganizationMemberNamesResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
   AcceptOrganizationRecoveryCustodyRequest,
@@ -6675,6 +6676,16 @@ export class OpenGeniClient {
     organizationId: string,
   ): Promise<ListOrganizationAdministrationMembersResponse> {
     return await this.listOrganizationAdministrationMembers(organizationId);
+  }
+
+  /** Who is in the organization, by name only; any member may read it. */
+  async listOrganizationMemberNames(
+    organizationId: string,
+  ): Promise<ListOrganizationMemberNamesResponse> {
+    return await this.requestJson<ListOrganizationMemberNamesResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/member-names`,
+    );
   }
 
   /** Canonical organization identity and every non-personal workspace access roster. */

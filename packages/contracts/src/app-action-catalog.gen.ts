@@ -5632,6 +5632,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "listOrganizationMemberNames",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/member-names",
+    "request": [],
+    "response": [
+      "ListOrganizationMemberNamesResponse"
+    ]
+  },
+  {
     "id": "listOrganizationMemberships",
     "method": "GET",
     "path": "/v1/organization-memberships",

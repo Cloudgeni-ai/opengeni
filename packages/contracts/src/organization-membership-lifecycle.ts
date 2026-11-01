@@ -113,6 +113,21 @@ export const OrganizationAdministrationMember = /* @__PURE__ */ defineSchema(() 
 );
 export type OrganizationAdministrationMember = z.infer<typeof OrganizationAdministrationMember>;
 
+/**
+ * Who is in the organization, for every member: an active person's display
+ * name and whether it is you. No email, role, status or workspace access;
+ * owners and admins read those from the administration listing.
+ */
+export const OrganizationMemberName = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** The organization membership id. */
+    id: primitives.uuid,
+    name: z.string().min(1).max(1024).nullable(),
+    you: primitives.boolean,
+  }),
+);
+export type OrganizationMemberName = z.infer<typeof OrganizationMemberName>;
+
 export const OrganizationSummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: primitives.uuid,
@@ -739,6 +754,19 @@ export const ListOrganizationAdministrationMembersResponse = /* @__PURE__ */ def
     members: z.array(OrganizationAdministrationMember).max(1000),
   }),
 );
+/**
+ * `available` is false until the deployment's database grants the names
+ * list; `members` is then empty.
+ */
+export const ListOrganizationMemberNamesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    available: primitives.boolean,
+    members: z.array(OrganizationMemberName).max(1000),
+  }),
+);
+export type ListOrganizationMemberNamesResponse = z.infer<
+  typeof ListOrganizationMemberNamesResponse
+>;
 export const ListSelfOrganizationMembershipsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     memberships: z.array(OrganizationMember),

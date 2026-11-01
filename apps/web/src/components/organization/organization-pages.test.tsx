@@ -224,6 +224,14 @@ function makeClient(overrides: Record<string, unknown> = {}) {
       ...invitation("member"),
       status: "revoked",
     })),
+    listOrganizationMemberNames: mock(async () => ({
+      available: true,
+      members: [
+        { id: "maria", name: "Maria Chen", you: true },
+        { id: "owner", name: "Olivia Owner", you: false },
+        { id: "nameless", name: null, you: false },
+      ],
+    })),
     ...overrides,
   };
 }
@@ -1095,6 +1103,71 @@ describe("People page", () => {
       "You're the only owner. Make someone else an owner first.",
     );
     await view.unmount();
+  });
+
+  test("a member sees colleagues by name only, never the administration list", async () => {
+    const client = makeClient();
+    const view = mount(null);
+    await view.render(
+      <Provider
+        client={client}
+        actorRole="member"
+        identity={{ ...identityA, subjectId: "user:maria" }}
+      >
+        <OrganizationPeoplePage workspaceId="workspace-a" />
+      </Provider>,
+    );
+    await flush();
+    expect(client.listOrganizationMemberNames).toHaveBeenCalledWith("org-a");
+    expect(client.listOrganizationAdministrationMembers).not.toHaveBeenCalled();
+    expect(client.listOrganizationInvitationsForOrganization).not.toHaveBeenCalled();
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Maria Chen");
+    expect(text).toContain("You");
+    expect(text).toContain("Olivia Owner");
+    expect(text).toContain("Unnamed person");
+    // No emails, roles, invitations or admin actions.
+    expect(text).not.toContain("@example.test");
+    for (const adminText of ["Admin", "Member", "Invite", "Suspend", "Platform engineering"]) {
+      expect(text).not.toContain(adminText);
+    }
+    expect(view.container.querySelector('[role="menuitem"]')).toBeNull();
+    await view.unmount();
+  });
+
+  test("a member sees why the list is empty while the server doesn't offer it", async () => {
+    const client = makeClient({
+      listOrganizationMemberNames: mock(async () => ({ available: false, members: [] })),
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client} actorRole="member">
+        <OrganizationPeoplePage workspaceId="workspace-a" />
+      </Provider>,
+    );
+    await flush();
+    expect(view.container.textContent).toContain(
+      "Only owners and admins can see who's in this organization.",
+    );
+    expect(client.listOrganizationAdministrationMembers).not.toHaveBeenCalled();
+    await view.unmount();
+  });
+
+  test("owners and admins keep the full directory and never load the names list", async () => {
+    for (const actorRole of ["owner", "admin"] as const) {
+      const client = makeClient();
+      const view = mount(null);
+      await view.render(
+        <Provider client={client} actorRole={actorRole}>
+          <OrganizationPeoplePage workspaceId="workspace-a" />
+        </Provider>,
+      );
+      await flush();
+      expect(client.listOrganizationMemberNames).not.toHaveBeenCalled();
+      expect(client.listOrganizationAdministrationMembers).toHaveBeenCalled();
+      expect(view.container.textContent).toContain("maria@example.test");
+      await view.unmount();
+    }
   });
 });
 

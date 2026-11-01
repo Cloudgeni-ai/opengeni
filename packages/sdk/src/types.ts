@@ -6453,6 +6453,18 @@ export type ListOrganizationMembersResponse = {
 export type ListOrganizationAdministrationMembersResponse = {
   members: OrganizationAdministrationMember[];
 };
+/** An active person in the organization, by name only. */
+export type OrganizationMemberName = {
+  /** The organization membership id. */
+  id: string;
+  name: string | null;
+  you: boolean;
+};
+/** `available` is false until the deployment's database grants the names list. */
+export type ListOrganizationMemberNamesResponse = {
+  available: boolean;
+  members: OrganizationMemberName[];
+};
 export type AcceptOrganizationInvitationResponse = {
   invitation: OrganizationInvitation;
   membership: OrganizationMember;

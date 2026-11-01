@@ -290,14 +290,16 @@ describe("settings rail", () => {
     try {
       // Models shows a member their own Personal workspace's model settings.
       expect(linkLabels(view.section("organization"))).toEqual([
+        // People lists everyone by name only.
+        "People",
         "Organization identity",
         "Models",
         // Every member connects their own coding agents.
         "Connected agents",
         "Security & data",
       ]);
-      // A short list stays one group, not lone rows.
-      expect(view.section("organization")!.querySelectorAll("ul")).toHaveLength(1);
+      // The organization and its people, then what it provides and protects.
+      expect(view.section("organization")!.querySelectorAll("ul")).toHaveLength(2);
       // Insights needs workspace admin.
       expect(linkLabels(view.section("workspace"))).toContain("General");
       expect(linkLabels(view.section("workspace"))).not.toContain("Insights");
@@ -406,11 +408,9 @@ describe("settings rail", () => {
 
   test("a page this person can't use falls back to the first organization page they can", async () => {
     acmeRole = "member";
-    const view = await renderShell({ kind: "organization", section: "people" });
+    const view = await renderShell({ kind: "organization", section: "workspaces" });
     try {
-      expect(view.rail().querySelector('a[aria-current="page"]')?.textContent).toBe(
-        "Organization identity",
-      );
+      expect(view.rail().querySelector('a[aria-current="page"]')?.textContent).toBe("People");
     } finally {
       await view.unmount();
     }
