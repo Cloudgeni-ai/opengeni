@@ -608,6 +608,9 @@ fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
         guest: renewer.guest.clone(),
         // A host of this release keeps its pointers in the service.
         pointers_in_service: true,
+        // What it is configured with now, which a restart in place may
+        // have changed under the registration it kept.
+        info: Some(renewer.info.clone()),
     }
 }
 

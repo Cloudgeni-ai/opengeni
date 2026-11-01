@@ -373,6 +373,27 @@ export function transcribeAgainModelOptions(
   }));
 }
 
+/**
+ * What transcribing a meeting again costs at a model's hourly price. Each
+ * recorded track (a microphone beside computer audio, say) is transcribed and
+ * billed on its own, so a two-track hour costs two hours.
+ */
+export function transcribeAgainEstimate(
+  recording: Pick<Recording, "durationMilliseconds" | "tracks">,
+  usdPerHour: number | null | undefined,
+): { usd: number; tracks: number } | null {
+  if (usdPerHour == null) return null;
+  const recorded = recording.tracks.filter(
+    (track) => track.chunkCount > 0 && track.durationMilliseconds > 0,
+  );
+  const milliseconds =
+    recorded.length > 0
+      ? recorded.reduce((total, track) => total + track.durationMilliseconds, 0)
+      : recording.durationMilliseconds;
+  if (milliseconds <= 0) return null;
+  return { usd: (usdPerHour * milliseconds) / 3_600_000, tracks: Math.max(1, recorded.length) };
+}
+
 function TranscribeAgainDialog({
   open,
   recording,
@@ -417,10 +438,8 @@ function TranscribeAgainDialog({
   }, [open, initialModel]);
   const modelOptions = transcribeAgainModelOptions(models, msg);
   const selected = models.find((entry) => `${entry.providerId}/${entry.model}` === model);
-  const estimate =
-    selected?.usdPerHour != null && recording.durationMilliseconds > 0
-      ? (selected.usdPerHour * recording.durationMilliseconds) / 3_600_000
-      : null;
+  const estimate = transcribeAgainEstimate(recording, selected?.usdPerHour);
+  const duration = formatDuration(recording.durationMilliseconds, msg);
   const languageOptions = meetingLanguageOptions(language, undefined, msg);
   const speakerCount = speakers.trim() ? Number(speakers) : undefined;
   const speakersInvalid =
@@ -459,14 +478,18 @@ function TranscribeAgainDialog({
           label={msg("meetings.detailPage.model")}
           hint={
             estimate !== null
-              ? estimate < 0.01
-                ? msg("meetings.detailPage.aboutLessThan001", {
-                    duration: formatDuration(recording.durationMilliseconds, msg),
-                  })
-                : msg("meetings.detailPage.aboutEstimateForThisDuration", {
-                    estimate: estimate.toFixed(2),
-                    duration: formatDuration(recording.durationMilliseconds, msg),
-                  })
+              ? estimate.usd < 0.01
+                ? msg("meetings.detailPage.aboutLessThan001", { duration })
+                : estimate.tracks > 1
+                  ? msg("meetings.detailPage.aboutEstimateForTracks", {
+                      estimate: estimate.usd.toFixed(2),
+                      duration,
+                      count: estimate.tracks,
+                    })
+                  : msg("meetings.detailPage.aboutEstimateForThisDuration", {
+                      estimate: estimate.usd.toFixed(2),
+                      duration,
+                    })
               : undefined
           }
         >

@@ -95,6 +95,14 @@ delivery can be late or missed.
   failed refresh leaves the last good template in use. The clone's token
   is given to that one command, never written to the disk the template
   keeps.
+  The builder takes one of the pool's places, so the pool and its builder
+  never hold more sandboxes than `--max` and a host sized for the pool is
+  never asked for one more. It takes a place only while GitHub has
+  assigned the pool fewer jobs than `--max`, and idle runners make way for
+  it. While it holds the place the pool keeps at most one runner fewer and
+  tells GitHub it takes one job fewer, and when the builder gives the
+  place back the pool scales at once. A job beyond the rest waits for the
+  refresh to end.
   `actions/checkout` cleans untracked files by default, which would delete
   the prepared dependencies: warm workflows check out with `clean: false`.
 - **A build cache in object storage.** The service serves Turborepo's
@@ -122,5 +130,8 @@ delivery can be late or missed.
   their own, with its own cache or none.
 - Warm templates keep the guest version of the sandbox they were prepared
   in (ADR 22); refreshing from a base of a newer release moves them on.
+- A refresh costs the pool one place while it runs: on a pool kept full of
+  jobs it waits for a quieter moment, and on a busy one a job may wait for
+  it, at most once per `--warm-every`.
 - Only GitHub Actions is served. Other CI systems with just-in-time
   runners (GitLab, Buildkite) would be further services of the same shape.

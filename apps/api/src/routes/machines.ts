@@ -48,7 +48,6 @@ import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
 import {
   grantHasAgentAttemptAuthority,
-  mayStartOnlyMe,
   requireAccessGrant,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -268,14 +267,6 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     return grant;
   }
 
-  // The new owner's Workspace schedules on the machine become Only me when
-  // they may have Only me schedules; otherwise they pause.
-  async function schedulesMayBeOnlyMe(workspaceId: string, ownerSubjectId: string | null) {
-    return ownerSubjectId === null
-      ? false
-      : await mayStartOnlyMe(db, settings, workspaceId, ownerSubjectId);
-  }
-
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/audience/preview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAudienceCaller(c, workspaceId);
@@ -290,7 +281,6 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       enrollmentId,
       target: body.audience,
       ownerSubjectId,
-      schedulesMayBeOnlyMe: await schedulesMayBeOnlyMe(workspaceId, ownerSubjectId),
     });
     if (typeof preview === "string") throw machineAudienceRefusalError(preview);
     return c.json(machineAudiencePreview(preview));
@@ -310,7 +300,6 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       enrollmentId,
       target: body.audience,
       ownerSubjectId,
-      schedulesMayBeOnlyMe: await schedulesMayBeOnlyMe(workspaceId, ownerSubjectId),
       expectedGeneration: body.expectedGeneration,
     });
     return c.json(machineAudienceChangeResponse(changed));

@@ -61,6 +61,9 @@ pub enum Input {
         sandbox: SandboxId,
         /// What it may take of host memory.
         size: Size,
+        /// How it will sleep: its first wake books its next save only if
+        /// the host may save it unasked ([`SleepPolicy::saves`]).
+        policy: SleepPolicy,
         /// Whether its first wake fetches it from object storage, as an
         /// adopted sandbox's does, and so books its fetch too.
         remote: bool,
@@ -904,17 +907,10 @@ impl Host {
             Input::Creating {
                 sandbox,
                 size,
+                policy,
                 remote,
                 until,
-            } => self.creating(
-                now,
-                sandbox,
-                FirstWake {
-                    size,
-                    remote,
-                    until,
-                },
-            ),
+            } => self.creating(now, sandbox, FirstWake::new(size, policy, remote, until)),
             Input::Remove { sandbox } => self.remove(sandbox, out),
             Input::Spare {
                 sandbox,

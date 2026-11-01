@@ -70,7 +70,12 @@ pub struct Terms {
     pub rate_error_ppm: u32,
 }
 
-/// What a host is, fixed while it runs. Fields it does not know are
+/// What a host is. It registers with it, and tells it again with what it
+/// can take on ([`Capacity::info`]), since an agent restarted or upgraded
+/// in place keeps its registration while what it is configured with (its
+/// address, memory, processors, disk or offers) may have changed: the
+/// service takes all of that, keeping the name and boot the host
+/// registered with ([`HostInfo::told_again`]). Fields it does not know are
 /// ignored, so hosts can describe more than an older service reads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostInfo {
@@ -90,7 +95,8 @@ pub struct HostInfo {
     /// Memory it gives sandboxes, in MiB.
     pub memory_mib: u64,
     /// Processor time it guarantees sandboxes at once, in millicores, as
-    /// it started. What it guarantees now is [`Capacity::cpu_millis`].
+    /// its agent started. What it guarantees now is
+    /// [`Capacity::cpu_millis`].
     pub cpu_millis: u64,
     /// Disk it gives sandboxes, in MiB.
     pub disk_mib: u64,
@@ -110,6 +116,21 @@ pub struct HostInfo {
     /// before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot: Option<Boot>,
+}
+
+impl HostInfo {
+    /// This description, told again by a host that registered with
+    /// `registered`: all of it but the name, which identifies the host,
+    /// and the boot, which the service compares with what the host's cloud
+    /// says ran since it registered.
+    #[must_use]
+    pub fn told_again(&self, registered: &HostInfo) -> HostInfo {
+        HostInfo {
+            name: registered.name.clone(),
+            boot: registered.boot.clone(),
+            ..self.clone()
+        }
+    }
 }
 
 /// One boot of a host's machine, as its cloud was told of it.
@@ -198,6 +219,26 @@ pub struct Capacity {
     /// release.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pointers_in_service: bool,
+    /// What the host is now, as it would register: told here for the same
+    /// reason as [`Capacity::guest`], so that a host whose configuration
+    /// changed under a kept registration is placed on what it is. The
+    /// service keeps it with the host's description
+    /// ([`Capacity::split`]). `None` from a host of an earlier release,
+    /// whose registration then stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<HostInfo>,
+}
+
+impl Capacity {
+    /// What it can take on, without the description it carries, and that
+    /// description: the service keeps the one with the host's description,
+    /// the other with what it can take on.
+    #[must_use]
+    pub fn split(&self) -> (Capacity, Option<HostInfo>) {
+        let mut capacity = self.clone();
+        let info = capacity.info.take();
+        (capacity, info)
+    }
 }
 
 /// A sandbox a registering host still has, under the owner epoch its
@@ -518,6 +559,48 @@ mod tests {
         assert!(!boot("b", 3).follows(&first), "not counted later");
         assert!(!boot("b", 1).follows(&first), "counted earlier");
         assert!(!boot("a", 4).follows(&first), "the same boot");
+    }
+
+    /// A host tells what it is with what it can take on, which a service
+    /// of an earlier release ignores and one of this release keeps apart,
+    /// under the name and boot the host registered with; a host of an
+    /// earlier release tells nothing.
+    #[test]
+    fn a_host_tells_what_it_is_now_with_what_it_can_take_on() {
+        let older = r#"{"memory_free_mib":1,"cpu_millis":1,"cpu_free_millis":1,
+            "disk_free_mib":1,"awake":0,"sandboxes":0}"#;
+        let capacity: Capacity = serde_json::from_str(older).unwrap();
+        assert_eq!(capacity.split(), (capacity.clone(), None));
+        let registered: HostInfo = serde_json::from_str(
+            r#"{"name":"h","address":"h:1","zone":"z","profile":"nested",
+            "cpu_template":"none","memory_mib":1,"cpu_millis":1,"disk_mib":1,
+            "boot":{"id":"b","nth":2}}"#,
+        )
+        .unwrap();
+        let now = HostInfo {
+            name: "renamed".into(),
+            address: "h:2".into(),
+            memory_mib: 2,
+            offers: vec!["previews".into()],
+            boot: None,
+            ..registered.clone()
+        };
+        let told = Capacity {
+            info: Some(now.clone()),
+            ..capacity.clone()
+        };
+        let wire = serde_json::to_value(&told).unwrap();
+        assert_eq!(wire["info"]["memory_mib"], 2);
+        assert_eq!(serde_json::from_value::<Capacity>(wire).unwrap(), told);
+        assert_eq!(told.split(), (capacity, Some(now.clone())));
+        assert_eq!(
+            now.told_again(&registered),
+            HostInfo {
+                name: "h".into(),
+                boot: registered.boot.clone(),
+                ..now
+            }
+        );
     }
 
     #[test]
