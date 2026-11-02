@@ -174,6 +174,8 @@ function isSubsequence(short: readonly string[], long: readonly string[]): boole
  */
 export function isIntegrationNearSpelling(word: string, name: string): boolean {
   if (Math.abs(word.length - name.length) > 2) return false;
+  // A plural of the name is the ordinary word it is ("snowflakes").
+  if (word === `${name}s` || word === `${name}es`) return false;
   const w = Array.from(word);
   const n = Array.from(name);
   if (n.length < 5 || w[0] !== n[0] || word === name) return false;
@@ -201,7 +203,8 @@ export function isIntegrationNearSpelling(word: string, name: string): boolean {
  * name of several words written as one ("unspaced": "wisprflow" for Wispr
  * Flow); a one-word name written as its parts ("joined": "hub spot" for
  * HubSpot); a near spelling of it ("near_spelling"); or its vendor's domain
- * word ("domain": "jira" for Atlassian at jira.com).
+ * word ("domain": "jira" for Atlassian at jira.com), unless differently named
+ * products share that domain (see sharedVendorDomains).
  */
 export type IntegrationMentionKind = "name" | "unspaced" | "joined" | "near_spelling" | "domain";
 
@@ -214,11 +217,16 @@ export type IntegrationMention = {
   capitalised: boolean;
 };
 
-type QueryWord = { word: string; capitalised: boolean };
+/** A query word, lower case, and whether it was capitalised mid-sentence. */
+export type IntegrationQueryWord = { word: string; capitalised: boolean };
 
-function queryWords(query: string): QueryWord[] {
+/**
+ * The query's words, lower case, each marked when it starts with a capital
+ * where a sentence does not start ("search Linear issues").
+ */
+export function integrationQueryWords(query: string): IntegrationQueryWord[] {
   const text = query.normalize("NFKC");
-  const words: QueryWord[] = [];
+  const words: IntegrationQueryWord[] = [];
   let previousEnd = 0;
   for (const match of text.matchAll(/[\p{L}\p{N}]+/gu)) {
     const start = match.index ?? 0;
@@ -242,6 +250,72 @@ export type IntegrationMentionMatcher = (integration: {
   providerDomain?: string | null | undefined;
 }) => IntegrationMention[];
 
+type IntegrationNameShape = {
+  nameWords: string[];
+  compact: string;
+  spacedName: string;
+  parts: string;
+  firstLetter: string;
+  vendorWord: string | null;
+  registrableDomain: string | null;
+};
+
+// Catalog ranking reads the same few thousand entries for every query.
+const nameShapes = new Map<string, IntegrationNameShape | null>();
+const MAX_CACHED_NAME_SHAPES = 20_000;
+
+function integrationNameShape(
+  name: string,
+  providerDomain: string | null | undefined,
+): IntegrationNameShape | null {
+  const key = `${name}\u0000${providerDomain ?? ""}`;
+  const cached = nameShapes.get(key);
+  if (cached !== undefined) return cached;
+  const nameWords = integrationNameWords(name);
+  const compact = nameWords.join("");
+  const shape: IntegrationNameShape | null = nameWords.length
+    ? {
+        nameWords,
+        compact,
+        spacedName: nameWords.join(" "),
+        parts: namePartWords(name).join(" "),
+        firstLetter: Array.from(compact)[0]!,
+        vendorWord: integrationVendorWord(providerDomain),
+        registrableDomain: providerDomain ? registrableHostDomain(providerDomain) : null,
+      }
+    : null;
+  if (nameShapes.size >= MAX_CACHED_NAME_SHAPES) nameShapes.clear();
+  nameShapes.set(key, shape);
+  return shape;
+}
+
+/** Whether two integration names agree: equal, or one the other's start ("Atlassian (v1)"). */
+export function integrationNamesAgree(first: string, second: string): boolean {
+  const a = integrationNameWords(first).join("");
+  const b = integrationNameWords(second).join("");
+  return Boolean(a && b) && (a.startsWith(b) || b.startsWith(a));
+}
+
+/**
+ * Registrable domains that several products with different names share
+ * (microsoft.com for Teams, Excel and OneDrive). Their vendor word names
+ * none of them; jira.com for Atlassian and Atlassian (v1) is one product.
+ */
+export function sharedVendorDomains(
+  integrations: Iterable<{ name: string; providerDomain?: string | null | undefined }>,
+): Set<string> {
+  const firstName = new Map<string, string>();
+  const shared = new Set<string>();
+  for (const { name, providerDomain } of integrations) {
+    const domain = integrationNameShape(name, providerDomain)?.registrableDomain;
+    if (!domain || shared.has(domain)) continue;
+    const seen = firstName.get(domain);
+    if (seen === undefined) firstName.set(domain, name);
+    else if (!integrationNamesAgree(seen, name)) shared.add(domain);
+  }
+  return shared;
+}
+
 /**
  * Reads the query once and returns a function that lists every way it names
  * a given integration, in query order. Catalog ranking asks about thousands
@@ -249,27 +323,28 @@ export type IntegrationMentionMatcher = (integration: {
  * word, and whose vendor word is not a query word, is rejected before any
  * spelling comparison.
  */
-export function integrationMentionMatcher(query: string): IntegrationMentionMatcher {
-  const words = queryWords(query);
+export function integrationMentionMatcher(
+  query: string,
+  options: { sharedDomains?: ReadonlySet<string> } = {},
+): IntegrationMentionMatcher {
+  const words = integrationQueryWords(query);
   const firstLetters = new Set(words.map(({ word }) => word[0]));
   const writtenWords = new Set(words.map(({ word }) => word));
   return (integration) => {
     if (!words.length) return [];
-    const nameWords = integrationNameWords(integration.name);
-    if (!nameWords.length) return [];
-    const compact = nameWords.join("");
-    const vendorWord = integrationVendorWord(integration.providerDomain);
+    const shape = integrationNameShape(integration.name, integration.providerDomain);
+    if (!shape) return [];
+    const { nameWords, compact, spacedName, parts, vendorWord } = shape;
     const domainWord =
       vendorWord &&
       vendorWord !== compact &&
       !nameWords.includes(vendorWord) &&
-      writtenWords.has(vendorWord)
+      writtenWords.has(vendorWord) &&
+      !options.sharedDomains?.has(shape.registrableDomain ?? "")
         ? vendorWord
         : null;
-    const nameFirstLetter = Array.from(compact)[0]!;
+    const nameFirstLetter = shape.firstLetter;
     if (!domainWord && !firstLetters.has(nameFirstLetter)) return [];
-    const spacedName = nameWords.join(" ");
-    const parts = namePartWords(integration.name).join(" ");
     const mentions: IntegrationMention[] = [];
     const widest = Math.min(Math.max(nameWords.length, parts.split(" ").length) + 1, 4);
     for (let start = 0; start < words.length; start += 1) {
@@ -304,8 +379,9 @@ export function integrationMentionMatcher(query: string): IntegrationMentionMatc
 export function integrationMentionsIn(
   query: string,
   integration: { name: string; providerDomain?: string | null | undefined },
+  options: { sharedDomains?: ReadonlySet<string> } = {},
 ): IntegrationMention[] {
-  return integrationMentionMatcher(query)(integration);
+  return integrationMentionMatcher(query, options)(integration);
 }
 
 /**

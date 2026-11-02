@@ -57,9 +57,11 @@ import { isRecord } from "@opengeni/contracts/values";
 import {
   integrationMentionsIn,
   integrationNameWords,
+  integrationQueryWords,
   integrationVendorWord,
   isDistinctiveIntegrationMention,
   registrableHostDomain,
+  sharedVendorDomains,
 } from "@opengeni/capabilities";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
@@ -267,13 +269,27 @@ function integrationNamedIn(
   query: string,
   integration: { name: string; providerDomain?: string | undefined },
   distinctive = false,
+  sharedDomains?: ReadonlySet<string>,
 ): boolean {
   if (isOperationWord(integration.name)) return false;
   const vendorWord = integrationVendorWord(integration.providerDomain);
-  return integrationMentionsIn(query, integration).some(
+  return integrationMentionsIn(query, integration, sharedDomains ? { sharedDomains } : {}).some(
     (mention) =>
       !(mention.kind === "domain" && vendorWord && isOperationWord(vendorWord)) &&
       (!distinctive || isDistinctiveIntegrationMention(mention, integration.name)),
+  );
+}
+
+/**
+ * Whether a search that strongly matched installed tools could still name an
+ * integration the person has not installed: a word capitalised mid-sentence
+ * ("on Slack"), or a word of four or more letters no installed tool uses
+ * ("whisperflow", "jira"). Searches made only of the installed tools' own
+ * lower-case words skip the catalog read.
+ */
+function mayNameUninstalledIntegration(query: string, index: ToolSearchIndex): boolean {
+  return integrationQueryWords(query).some(
+    ({ word, capitalised }) => capitalised || (word.length >= 4 && !index.knowsWord(word)),
   );
 }
 
@@ -305,17 +321,20 @@ function ownsIntegration(owner: IntegrationOwner, integration: ConnectableIntegr
  * The catalog matches the query names (see integrationNamedIn), at most
  * three, in catalog order. With `distinctive`, only distinctive mentions
  * count: the search already matched installed tools strongly, so an ordinary
- * word that happens to be a name ("close the ticket") must not add a card.
+ * word that happens to be a name ("close the ticket") must not add a card. A
+ * vendor word that several differently named matches share ("microsoft" for
+ * Teams, Excel and OneDrive) names none of them.
  */
 export function connectableIntegrationsNamedIn(
   query: string,
   matches: readonly ConnectableIntegration[],
   distinctive = false,
 ): ConnectableIntegration[] {
+  const sharedDomains = sharedVendorDomains(matches);
   const named: ConnectableIntegration[] = [];
   for (const match of matches) {
     if (
-      integrationNamedIn(query, match, distinctive) &&
+      integrationNamedIn(query, match, distinctive, sharedDomains) &&
       !named.some((n) => n.capabilityId === match.capabilityId)
     )
       named.push(match);
@@ -456,8 +475,14 @@ export function connectableIntegrationsFromCatalogResult(
 
 /** Bounded so a slow catalog read never holds a search result back for long. */
 const CONNECTABLE_LOOKUP_TIMEOUT_MS = 2_000;
-/** How long a search that strongly matched installed tools waits for the catalog. */
-const BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS = 300;
+/**
+ * How long a search that strongly matched installed tools waits for the
+ * catalog: above a typical read (about half a second on staging, rarely over
+ * a second), below the general bound. Such a search reads the catalog only
+ * when the query has a word that could name something the person has not
+ * installed (see mayNameUninstalledIntegration).
+ */
+const BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS = 1_500;
 
 /** The promise's result, or a rejection once the signal aborts, whichever comes first. */
 function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -1170,7 +1195,10 @@ export class LazyToolRuntime {
     const setup = integrationSetupToolNames(pool);
     const owners = this.integrationOwners(strong);
     const lookup: Promise<ConnectableIntegration[]> =
-      named.length || setup.length < 2 || owners.some((owner) => integrationNamedIn(query, owner))
+      named.length ||
+      setup.length < 2 ||
+      owners.some((owner) => integrationNamedIn(query, owner)) ||
+      (strong.length > 0 && !mayNameUninstalledIntegration(query, this.searchIndex))
         ? Promise.resolve([])
         : this.connectableIntegrations(query, owners, strong.length > 0, signal);
     // Rejects only on cancellation, which the search itself observes.
@@ -1398,12 +1426,10 @@ export class LazyToolRuntime {
       const lookup = this.connectableLookup(query, bounded);
       const matches =
         bounded && bounded !== signal ? await untilAborted(lookup, bounded) : await lookup;
-      return connectableIntegrationsNamedIn(
-        query,
-        matches.filter(
-          (integration) => !owners.some((owner) => ownsIntegration(owner, integration)),
-        ),
-        besideStrongMatches,
+      // Named among every match, so an installed sibling still shows that
+      // its vendor domain is shared, then without the strong matches' own.
+      return connectableIntegrationsNamedIn(query, matches, besideStrongMatches).filter(
+        (integration) => !owners.some((owner) => ownsIntegration(owner, integration)),
       );
     } catch {
       // Cancellation belongs to the owning turn; any other failure only means

@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   integrationMentionsIn,
+  integrationNamesAgree,
   integrationVendorWord,
   isDistinctiveIntegrationMention,
   isIntegrationNearSpelling,
   registrableHostDomain,
+  sharedVendorDomains,
 } from "../src";
 
 const kinds = (query: string, name: string, providerDomain?: string) =>
@@ -62,6 +64,32 @@ describe("integration names in a query", () => {
       ["bxo", "box"],
     ] as const)
       expect(isIntegrationNearSpelling(word, name)).toBe(false);
+  });
+
+  test("a plural of a name is the ordinary word", () => {
+    expect(kinds("draw snowflakes", "Snowflake")).toEqual([]);
+    expect(kinds("list the mailchimps", "Mailchimp")).toEqual([]);
+    expect(kinds("query snowflake", "Snowflake")).toEqual(["name"]);
+  });
+
+  test("a vendor domain several differently named products share is no one's", () => {
+    const products = [
+      { name: "Microsoft Teams", providerDomain: "microsoft.com" },
+      { name: "OneDrive", providerDomain: "microsoft.com" },
+      { name: "Atlassian", providerDomain: "jira.com" },
+      { name: "Atlassian (v1)", providerDomain: "jira.com" },
+    ];
+    const sharedDomains = sharedVendorDomains(products);
+    expect([...sharedDomains]).toEqual(["microsoft.com"]);
+    expect(integrationNamesAgree("Atlassian (v1)", "Atlassian")).toBe(true);
+    expect(integrationNamesAgree("Microsoft Teams", "Microsoft Excel")).toBe(false);
+    const named = (query: string) =>
+      products
+        .filter((product) => integrationMentionsIn(query, product, { sharedDomains }).length)
+        .map((product) => product.name);
+    expect(named("check my Microsoft account settings")).toEqual([]);
+    expect(named("post in Microsoft Teams")).toEqual(["Microsoft Teams"]);
+    expect(named("find my jira tickets")).toEqual(["Atlassian", "Atlassian (v1)"]);
   });
 
   test("words never join across function words, determiners or other parts", () => {

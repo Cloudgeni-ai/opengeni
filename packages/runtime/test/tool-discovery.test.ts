@@ -1373,13 +1373,11 @@ describe("searches that name an integration the person can connect", () => {
         const without = await runtimeWith(transport).prepareSearch(args);
         expect(withLookup).toEqual(without);
       }
-      // Strong first-party matches belong to no integration, so the query is
-      // still looked up; one that names a tool or loads names never is.
-      expect(queries).toEqual([
-        "create a scheduled message in this chat",
-        "notify the person on their phone",
-        "Search workspace Knowledge by subject",
-      ]);
+      // Strong first-party matches belong to no integration, so a query that
+      // could name an uninstalled one (a capitalised word mid-sentence) is
+      // still looked up. One made of the installed tools' own lower-case
+      // words, or that names a tool or loads names, never is.
+      expect(queries).toEqual(["Search workspace Knowledge by subject"]);
     });
 
     test(`${transport}: unnamed matches, lookup failures and chats without setup tools change nothing`, async () => {
@@ -2007,9 +2005,23 @@ describe("searches that name an integration their strong matches do not belong t
       name,
       providerDomain: "microsoft.com",
     });
+    // Live catalog names of products on microsoft.com.
     const TEAMS = microsoft("mcp:microsoft-teams", "Microsoft Teams");
     const EXCEL = microsoft("mcp:microsoft-excel", "Microsoft Excel");
-    const ONEDRIVE = microsoft("mcp:microsoft-onedrive", "Microsoft OneDrive");
+    const ONEDRIVE = microsoft("mcp:onedrive", "OneDrive");
+    const SHAREPOINT = microsoft("mcp:sharepoint", "SharePoint");
+    const OUTLOOK_MAIL = microsoft("mcp:outlook-mail", "Outlook Mail");
+    const OUTLOOK_CALENDAR = microsoft("mcp:outlook-calendar", "Outlook Calendar");
+    const products = [TEAMS, EXCEL, ONEDRIVE, SHAREPOINT, OUTLOOK_MAIL, OUTLOOK_CALENDAR];
+    // The shared vendor word "microsoft" names none of them.
+    for (const [query, expected] of [
+      ["post the update in Microsoft Teams", [TEAMS]],
+      ["open the Microsoft Excel sheet", [EXCEL]],
+      ["check my Microsoft account settings", []],
+    ] as const) {
+      expect(connectableIntegrationsNamedIn(query, products)).toEqual([...expected]);
+      expect(connectableIntegrationsNamedIn(query, products, true)).toEqual([...expected]);
+    }
     const extra = [candidate(TEAMS_SEND, "Send a message to a Microsoft Teams channel.")];
     const accounts = new Map<string, ConnectedToolAccount>([
       [
@@ -2024,7 +2036,9 @@ describe("searches that name an integration their strong matches do not belong t
     ]);
     const query = "send the Microsoft Excel totals as a message to the Teams channel";
     expect(strongly(query, false, extra)).toContain(TEAMS_SEND);
-    const { queries, lookup } = recording([TEAMS, EXCEL, ONEDRIVE]);
+    // The Teams entry is the strong match's own; the others still show that
+    // microsoft.com is shared.
+    const { queries, lookup } = recording([TEAMS, EXCEL, ONEDRIVE, SHAREPOINT, OUTLOOK_MAIL]);
     const result = await runtimeWith("generic_dispatch", { lookup, extra, accounts }).prepareSearch(
       { query },
     );
@@ -2069,7 +2083,27 @@ describe("searches that name an integration their strong matches do not belong t
     }
   });
 
-  test("beside strong matches the search waits for the catalog only briefly", async () => {
+  test("beside strong matches only a word the installed tools do not use reads the catalog", async () => {
+    // "whisperflow" is no installed tool's word: looked up, and named.
+    const unknown = "search recorded meetings about whisperflow";
+    expect(strongly(unknown)).toContain(MEETINGS);
+    const first = recording([WISPR_FLOW]);
+    const named = await runtimeWith("generic_dispatch", { lookup: first.lookup }).prepareSearch({
+      query: unknown,
+    });
+    expect(first.queries).toEqual([unknown]);
+    expect(JSON.parse(named.output).notConnected).toBe(notice(WISPR_FLOW));
+    // Only the installed tools' own lower-case words: no catalog read.
+    const known = "search recorded meetings by speaker";
+    expect(strongly(known)).toContain(MEETINGS);
+    const second = recording([WISPR_FLOW]);
+    await runtimeWith("generic_dispatch", { lookup: second.lookup }).prepareSearch({
+      query: known,
+    });
+    expect(second.queries).toEqual([]);
+  });
+
+  test("beside strong matches the search waits at most 1.5 seconds for the catalog", async () => {
     let lookupSignal: AbortSignal | undefined;
     // A catalog read that never answers, and ignores its signal.
     const lookup: ConnectableIntegrationLookup = (_query, signal) => {
@@ -2080,7 +2114,7 @@ describe("searches that name an integration their strong matches do not belong t
     const result = await runtimeWith("generic_dispatch", { lookup }).prepareSearch({
       query: LINEAR_QUERY,
     });
-    expect(performance.now() - startedAt).toBeLessThan(1_500);
+    expect(performance.now() - startedAt).toBeLessThan(1_900);
     expect(lookupSignal?.aborted).toBe(true);
     expect(loaded(result)[0]).toBe(MEETINGS);
     expect(loaded(result)).not.toContain(CARD);

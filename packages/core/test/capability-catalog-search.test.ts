@@ -444,8 +444,28 @@ describe("agent capability catalog search", () => {
         metadata: { mcpProbe: row.probe },
       }),
     );
+    // Connectable Microsoft products share microsoft.com with Microsoft Learn,
+    // under their live catalog names.
+    const microsoft = [
+      "Microsoft Teams",
+      "Microsoft Excel",
+      "OneDrive",
+      "SharePoint",
+      "Outlook Mail",
+      "Outlook Calendar",
+      "Outlook Contacts",
+    ].map((name) =>
+      item({
+        id: `mcp:${name.toLowerCase().replaceAll(" ", "-")}`,
+        name,
+        source: "built_in",
+        providerDomain: "microsoft.com",
+        authKind: "oauth2",
+      }),
+    );
     const catalog = [
       ...shared,
+      ...microsoft,
       item({
         id: "mcp:whisprflow-12vcsia",
         name: "Whisprflow",
@@ -489,6 +509,36 @@ describe("agent capability catalog search", () => {
       const query = "add the new lead to hub spot";
       expect(named(query)).toEqual(["HubSpot"]);
       expect(named(query, true)).toEqual([]);
+    });
+
+    for (const [query, expected] of [
+      ["post the update in Microsoft Teams", ["Microsoft Teams"]],
+      ["open the Microsoft Excel sheet", ["Microsoft Excel"]],
+      ["check my Microsoft account settings", []],
+    ] as const) {
+      test(`a vendor word several products share names none of them: ${JSON.stringify(query)}`, () => {
+        expect(named(query)).toEqual([...expected]);
+        expect(named(query, true)).toEqual([...expected]);
+      });
+    }
+
+    test("an ordinary-word or operation-word name is not ranked as named", () => {
+      for (const [query, name] of [
+        ["send a message to the channel", "Send"],
+        ["make a spreadsheet", "Make"],
+        ["read the guru article", "Guru"],
+        ["drop box the files", "Box"],
+        ["draw snowflakes", "Snowflake"],
+      ] as const) {
+        const match = searchCapabilityCatalogItems(catalog, query, 20).find(
+          (result) => result.item.name === name,
+        );
+        expect(match === undefined || match.score < 10_000).toBe(true);
+      }
+      // Capitalised as a name, it is one.
+      expect(searchCapabilityCatalogItems(catalog, "read the Guru article", 5)[0]?.item.name).toBe(
+        "Guru",
+      );
     });
 
     for (const [query, name] of [

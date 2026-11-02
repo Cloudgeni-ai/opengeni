@@ -8,8 +8,10 @@ import {
 import { personalWorkspaceOwnerOriginConnections } from "./personal-connection-delegations";
 import {
   integrationMentionMatcher,
+  isDistinctiveIntegrationMention,
   isIntegrationDefinitionEnabled,
   registrableHostDomain,
+  sharedVendorDomains,
   type IntegrationDefinition,
 } from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
@@ -3433,7 +3435,16 @@ export function searchCapabilityCatalogItems(
   if (tokens.length === 0) return [];
   const compactPhrase = phrase.replaceAll(" ", "");
   const fuzzyTokens = tokens.slice(0, FUZZY_MAX_TOKENS);
-  const mentionsOf = integrationMentionMatcher(query);
+  const trusted = items.filter((item) => capabilityCatalogItemIsTrustedForExposure(item));
+  // A vendor word names an entry only when its domain is one product's.
+  const mentionsOf = integrationMentionMatcher(query, {
+    sharedDomains: sharedVendorDomains(
+      trusted.map((item) => ({
+        name: item.name,
+        providerDomain: capabilityCatalogSearchProviderDomain(item),
+      })),
+    ),
+  });
   const boundedLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
   const weightedFields = (item: CapabilityCatalogItem) =>
     [
@@ -3445,8 +3456,7 @@ export function searchCapabilityCatalogItems(
       ["description", item.description ?? "", 15],
     ] as const;
 
-  return items
-    .filter((item) => capabilityCatalogItemIsTrustedForExposure(item))
+  return trusted
     .flatMap((item): CapabilityCatalogSearchMatch[] => {
       let score = 0;
       let approximate = true;
@@ -3502,12 +3512,13 @@ export function searchCapabilityCatalogItems(
       }
       // An entry the query names (its name, a near spelling of it or its
       // vendor's domain word) ranks above entries that only share ordinary
-      // words with a sentence ("dictate this note with whisperflow").
+      // words with a sentence ("dictate this note with whisperflow"). Only
+      // a distinctive mention counts: "send a message" does not name Send.
       if (
         mentionsOf({
           name: item.name,
           providerDomain: capabilityCatalogSearchProviderDomain(item),
-        }).length
+        }).some((mention) => isDistinctiveIntegrationMention(mention, item.name))
       ) {
         if (score === 0) matchedOn.add("name");
         score += NAMED_ENTRY_BONUS;
