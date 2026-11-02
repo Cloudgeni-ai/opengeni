@@ -9,7 +9,7 @@ import { sessionAutomationWaitWords } from "../../../components/automations/auto
 import { type SessionAutomationWait, type SessionListRow } from "../../../session-list-model";
 import { t } from "../console-text";
 import { railRowCreator, type CreatorRef } from "../creator-initials";
-import { summarizeRailNodes, type RailAggregateStatus } from "../sessions-group";
+import { summarizeRailRow, type RailAggregateStatus } from "../sessions-group";
 import type { ChatRecord } from "./chat-directory";
 
 /** How long a row read from the server still describes the chat. */
@@ -27,8 +27,8 @@ export type ChatStatus = {
 export function chatRowStatus(row: SessionListRow, now: Date = new Date()): ChatStatus {
   const automationWait = sessionAutomationWaitWords(t, row, { now });
   return {
-    summary: summarizeRailNodes(
-      [{ session: row, children: [], hasActiveDescendant: false }],
+    summary: summarizeRailRow(
+      { session: row, children: [], hasActiveDescendant: false },
       undefined,
       now,
     ),
