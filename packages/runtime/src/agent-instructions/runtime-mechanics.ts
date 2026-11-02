@@ -44,20 +44,37 @@ const WAITING_WITHOUT_WAIT_FOR_INPUT =
 
 const COMPACTION = `When earlier context is compacted, continue from the supplied summary and durable session history. Do not restart from scratch, redo completed work, or repeat progress updates already delivered; treat work spanning compaction as one logical chain. Summaries and assistant claims locate evidence; they do not prove current state. Reuse authoritative evidence only while relevant and valid for its requirement, scope, version, and state; recheck changed, stale, uncertain, or insufficient evidence. Preserve full reconciliation or comprehensive audits when requested by the goal, user, or applicable Skill, when uncertainty or recovery warrants them, or when required by risk or gates. Always retain the full completion audit and required completion evidence.`;
 
-const BACKGROUND_COMMANDS = `For a yielded command, use \`command_read\` to read available output and status, or \`command_wait\` to wait briefly using the same command interface. Keep the command ID and output cursor. A terminal read suppresses any still-pending completion notification; a running read does not. A command that finishes while you work reports its exit status and output on its own, after a later tool result or as input, so do not poll only to learn that it finished. Earlier tool results and delivered messages never change. Use \`command_input\` only to send input where supported, not to poll output. An unsupported input capability does not imply output is unavailable. Give foreground commands a realistic requested wait; default to 10 seconds (yield_time_ms: 10000). An internal polling slice is not a reason to return a background handle.
+const BACKGROUND_COMMANDS = `For a yielded command, use \`command_read\` to read available output and status, or \`command_wait\` to wait briefly using the same command interface. Keep the command ID and output cursor. A terminal read suppresses any still-pending completion notification; a running read does not. Earlier tool results and delivered messages never change. Use \`command_input\` only to send input where supported, not to poll output. An unsupported input capability does not imply output is unavailable. Give foreground commands a realistic requested wait; default to 10 seconds (yield_time_ms: 10000). An internal polling slice is not a reason to return a background handle.
 
 Command completion alone resumes you only while you have an explicit \`wait_for_input\` registered. For ordinary background commands, register that session-level wait before ending your turn. Exception: pending Codemode calls need the current live attempt; keep observing them with \`command_wait\`/\`command_read\` instead of ending the turn. If you finish normally, command results remain retained and can accompany later input, but do not start another turn by themselves. No per-command dismissal is required.`;
 
+/** Rendered only when the runtime delivers finished commands on its own. */
+const COMMAND_COMPLETION_DELIVERY =
+  "A command that finishes while you work reports its exit status and output on its own, after a later tool result or as input, so do not poll only to learn that it finished.";
+
+/** Anchor the delivery sentence follows in the full-availability text. */
+const TERMINAL_READ_SENTENCE =
+  "A terminal read suppresses any still-pending completion notification; a running read does not.";
+
 /**
  * Background-command guidance, unchanged unless `command_read`, `command_wait`
- * or `wait_for_input` is proven absent. `command_input` is a local sandbox
+ * or `wait_for_input` is proven absent, plus one sentence when finished
+ * commands are delivered on their own. `command_input` is a local sandbox
  * adapter and always keeps its sentences.
  */
 function backgroundCommands(context: AgentPromptContext): string {
   const read = toolAvailable(context, "command_read");
   const wait = toolAvailable(context, "command_wait");
   const waitForInput = toolAvailable(context, "wait_for_input");
-  if (read && wait && waitForInput) return BACKGROUND_COMMANDS;
+  const delivery = context.resources.commandCompletionDelivery === true;
+  if (read && wait && waitForInput) {
+    return delivery
+      ? BACKGROUND_COMMANDS.replace(
+          TERMINAL_READ_SENTENCE,
+          `${TERMINAL_READ_SENTENCE} ${COMMAND_COMPLETION_DELIVERY}`,
+        )
+      : BACKGROUND_COMMANDS;
+  }
   const observe =
     read && wait ? "`command_wait`/`command_read`" : read ? "`command_read`" : "`command_wait`";
   return blocks(
@@ -72,7 +89,7 @@ function backgroundCommands(context: AgentPromptContext): string {
       (read || wait) && "Keep the command ID and output cursor.",
       (read || wait) &&
         "A terminal read suppresses any still-pending completion notification; a running read does not.",
-      "A command that finishes while you work reports its exit status and output on its own, after a later tool result or as input, so do not poll only to learn that it finished.",
+      delivery && COMMAND_COMPLETION_DELIVERY,
       "Earlier tool results and delivered messages never change.",
       "Use `command_input` only to send input where supported, not to poll output.",
       "An unsupported input capability does not imply output is unavailable.",

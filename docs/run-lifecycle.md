@@ -3710,8 +3710,11 @@ together. For a nonterminal session, one dedupe-keyed
 unless command completion was already observed. The result carries the start
 and end of the retained output as text (`output`: at most 8 KiB of output read
 from at most 16 rows, with the command_read marker naming any omitted middle
-and its cursor), so the turn it wakes or reaches needs no extra read; a failed
-or oversized read leaves `output` absent and never blocks the settlement. A
+and its cursor; the omitted-row count stops at 1,000 rows), so the turn it
+wakes or reaches needs no extra read; a failed or oversized read leaves
+`output` absent and never blocks the settlement. A `lost` result (sandbox gone
+or contained, often settled in bulk) carries no `output`; its output stays
+readable. A
 command completion registers
 a workflow wake only for a current explicit session input wait. Otherwise the
 result stays available without starting a model turn, including failures and
@@ -3731,19 +3734,25 @@ worker-history delivery handshake; a crash between observation and receipt
 preservation is an accepted tradeoff.
 A running turn also delivers results itself (`settings.experimentCutPolling`,
 on by default). After each function tool or hosted `apply_patch` edit the
-worker takes the session's still-pending command results, oldest first within
-16 KiB, observing each command and superseding its pending result in one
+worker takes the session's still-pending command results, oldest first, each
+that fits the room the tool's own output leaves in the model's tool-output
+budget (at most 16 KiB; nothing below 1 KiB, so a large tool output never has
+its end pushed into the truncated middle), observing each command and superseding its pending result in one
 transaction exactly as a terminal read does, and appends them (summary,
 command ID, output) to that plain-text tool result, which the model reads with
-its next call. A cheap unlocked probe skips the session lock when nothing is
+its next call. The appended text is masked for known secret values first
+(hosted `apply_patch` results bypass the function-tool masking). A cheap
+unlocked probe skips the session lock when nothing is
 pending. JSON, image and structured results are left unchanged, nothing is
 taken once the turn is cancelled, and nothing is taken in a model step after a
 `wait_for_input` started (that wait could otherwise end the turn with a result
 the model has not read and that no longer wakes it). A `wait_for_input` in a
 step whose other results already carried command results is refused with a
-short explanation, and the turn continues. The appended text is part of the
+short explanation (its reply was not shown, so the model sends it again), and
+the turn continues. The appended text is part of the
 stored tool result, so history and the prompt-cache prefix never change; the
-timeline shows the tool's own output. Results not taken during the turn stay
+timeline shows the tool's own output. The prompt's do-not-poll sentence
+renders only when this delivery is on. Results not taken during the turn stay
 pending and arrive as ordinary input, as above. A crash between taking and
 storing the tool result loses only that copy, as with a terminal read; the
 output stays readable.

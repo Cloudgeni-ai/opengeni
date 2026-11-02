@@ -20,6 +20,7 @@
  * as ordinary input instead.
  */
 import type { CallModelInputFilter, Tool } from "@openai/agents";
+import { modelToolTextBudgetBytes } from "./tool-result-spill";
 
 /** One finished command, as its durable result describes it. */
 export type BackgroundCommandCompletion = {
@@ -34,10 +35,22 @@ export type BackgroundCommandCompletion = {
 /** Where finished commands come from: the worker's durable command results. */
 export type CommandCompletionSource = {
   /**
-   * Take the session's pending command results whose text fits `maxBytes`
-   * (the first always fits), recording them as observed. Empty when none.
+   * Take the session's pending command results whose text fits `maxBytes`,
+   * recording them as observed. Empty when none fit.
    */
   take(input: { maxBytes: number }): Promise<BackgroundCommandCompletion[]>;
+  /**
+   * UTF-8 bytes one model-visible tool result may use before its middle is
+   * cut (see `modelToolTextBudgetBytes`). Results are attached only within
+   * the room the tool's own output leaves, so they never push its end into
+   * the cut. Omitted: the default budget.
+   */
+  maxTextBytes?: () => number;
+  /**
+   * Mask known secret values in the notice before it is appended (and stored),
+   * for tools whose results the generic masking does not wrap.
+   */
+  mask?(text: string): Promise<string>;
   /** The turn's cancellation: nothing is taken once it is cancelled. */
   signal?: AbortSignal | undefined;
   /** The exact text appended to a tool result (unique: it names each command). */
@@ -48,7 +61,7 @@ export type CommandCompletionSource = {
 
 /** Model text for a wait refused because results it has not read arrived in this step. */
 export const WAIT_AFTER_UNREAD_COMMAND_RESULTS =
-  "Not waiting: a background command finished during this step and its result is in another tool result of this step. Read it first, then wait again if you still need to.";
+  "Not waiting, and your reply was not shown: a background command finished during this step and its result is in another tool result of this step. Read it first, then wait again with your full reply if you still need to.";
 
 /**
  * One attempt's delivery state. Results are attached only while the model
@@ -80,26 +93,32 @@ export class CommandCompletionDelivery {
 
   /** The tool output followed by any finished commands, in its own shape. */
   async deliverWith(output: unknown): Promise<unknown> {
-    if (
-      this.turnEndingCallStarted ||
-      this.source.signal?.aborted ||
-      appendToPlainTextToolOutput(output, "") === null
-    ) {
+    const own = plainTextToolOutputText(output);
+    if (this.turnEndingCallStarted || this.source.signal?.aborted || own === null) {
       return output;
     }
-    const take = this.source.take({ maxBytes: COMMAND_COMPLETION_NOTICE_MAX_BYTES });
+    const maxBytes = commandCompletionRoomBytes(
+      Buffer.byteLength(own, "utf8"),
+      this.source.maxTextBytes?.() ?? modelToolTextBudgetBytes(),
+    );
+    if (maxBytes < COMMAND_COMPLETION_NOTICE_MIN_ROOM_BYTES) return output;
+    const take = (async () => {
+      const completions = await this.source.take({ maxBytes });
+      if (completions.length === 0) return null;
+      const notice = renderCommandCompletionNotice(completions);
+      return this.source.mask ? await this.source.mask(notice) : notice;
+    })();
     this.takes.add(take);
-    let completions: BackgroundCommandCompletion[];
+    let notice: string | null;
     try {
-      completions = await take;
+      notice = await take;
     } catch (error) {
       this.source.onError?.(error);
       return output;
     } finally {
       this.takes.delete(take);
     }
-    if (completions.length === 0) return output;
-    const notice = renderCommandCompletionNotice(completions);
+    if (notice === null) return output;
     const next = appendToPlainTextToolOutput(output, notice);
     if (next === null) return output;
     this.deliveredInStep = true;
@@ -110,6 +129,27 @@ export class CommandCompletionDelivery {
 
 /** Room for command results in one tool result, well inside the model's tool-output budget. */
 export const COMMAND_COMPLETION_NOTICE_MAX_BYTES = 16_384;
+
+/** Below this room nothing is taken: the results wait for a smaller tool result or arrive as input. */
+export const COMMAND_COMPLETION_NOTICE_MIN_ROOM_BYTES = 1_024;
+
+/** Headroom kept between the tool output plus notices and the cut. */
+const COMMAND_COMPLETION_NOTICE_MARGIN_BYTES = 512;
+
+/**
+ * Bytes the notices may use after `ownBytes` of tool output within a model
+ * text budget of `budgetBytes`: at most the notice cap, and never into the
+ * part of the result the model's tool-output truncation would cut.
+ */
+export function commandCompletionRoomBytes(ownBytes: number, budgetBytes: number): number {
+  return Math.max(
+    0,
+    Math.min(
+      COMMAND_COMPLETION_NOTICE_MAX_BYTES,
+      budgetBytes - ownBytes - COMMAND_COMPLETION_NOTICE_MARGIN_BYTES,
+    ),
+  );
+}
 
 /** Tools whose result ends the turn: results attached to them would wait for the next turn. */
 const TURN_ENDING_TOOL_SUFFIXES = ["wait_for_input"] as const;
@@ -152,6 +192,12 @@ function parsesAsJson(text: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The text of a plain-text tool output, or null when it is not plain text. */
+function plainTextToolOutputText(output: unknown): string | null {
+  if (appendToPlainTextToolOutput(output, "") === null) return null;
+  return typeof output === "string" ? output : (output as { text: string }).text;
 }
 
 /**

@@ -7769,6 +7769,8 @@ export type SessionSystemUpdatePayload =
         eventType: "sandbox.command.output.delta";
         commandId: string;
       };
+      /** Bounded start and end of the output (absent for lost commands and older results). */
+      output?: string | undefined;
       [key: string]: unknown;
     }
   | ({

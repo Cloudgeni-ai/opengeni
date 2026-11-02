@@ -7,9 +7,11 @@ import {
   settleConnectedMachineSessionBackgroundCommand,
   type DbClient,
 } from "../src";
+import { withRlsContext } from "../src/database";
 import {
   BACKGROUND_COMMAND_RESULT_OUTPUT_BYTES,
   claimPendingBackgroundCommandResults as claim,
+  commandOutputRowsBetween,
   observeSessionBackgroundCommandCompletion as observe,
   readSessionBackgroundCommandOutput as read,
 } from "../src/session-background-commands";
@@ -201,7 +203,7 @@ test("parallel claims and terminal reads deliver every result exactly once", asy
   }
 });
 
-test("a claim stays within its byte budget, always taking the first result", async () => {
+test("a claim stays within its byte budget; what does not fit stays pending", async () => {
   const owner = await session();
   const commands = [];
   for (let index = 0; index < 3; index++) {
@@ -210,14 +212,70 @@ test("a claim stays within its byte budget, always taking the first result", asy
     await settleConnectedMachineSessionBackgroundCommand(client.db, command);
     commands.push(command);
   }
-  const tiny = await claim(client.db, { ...owner, maxBytes: 10 });
-  expect(tiny.map((entry) => entry.commandId)).toEqual([commands[0]!.commandId]);
+  expect(await claim(client.db, { ...owner, maxBytes: 10 })).toEqual([]);
+  for (const command of commands) expect((await result(command.commandId)).state).toBe("pending");
   const two = await claim(client.db, { ...owner, maxBytes: 6_500 });
   expect(two.map((entry) => entry.commandId)).toEqual([
+    commands[0]!.commandId,
     commands[1]!.commandId,
-    commands[2]!.commandId,
   ]);
-  expect((await result(commands[2]!.commandId)).state).toBe("superseded");
+  expect((await result(commands[2]!.commandId)).state).toBe("pending");
+
+  // A smaller later result goes ahead of one too large for this room.
+  const small = await connected(owner);
+  await output(small, "ok\n");
+  await settleConnectedMachineSessionBackgroundCommand(client.db, small);
+  const room = await claim(client.db, { ...owner, maxBytes: 1_000 });
+  expect(room.map((entry) => entry.commandId)).toEqual([small.commandId]);
+  expect((await result(commands[2]!.commandId)).state).toBe("pending");
+});
+
+test("malformed pending rows never hold the claim's slots", async () => {
+  const owner = await session();
+  const malformed = [];
+  for (let index = 0; index < 17; index++) {
+    const command = await connected(owner);
+    await settleConnectedMachineSessionBackgroundCommand(client.db, command);
+    malformed.push(command.commandId);
+  }
+  await shared.admin`update session_system_updates set dedupe_key='malformed:' || source_id
+    where source_id in ${shared.admin(malformed)}`;
+  const valid = await connected(owner);
+  await settleConnectedMachineSessionBackgroundCommand(client.db, valid);
+  const taken = await claim(client.db, { ...owner, ...budget });
+  expect(taken.map((entry) => entry.commandId)).toEqual([valid.commandId]);
+});
+
+test("a lost command's result carries no output; it stays readable", async () => {
+  const owner = await session();
+  const lost = await connected(owner);
+  await output(lost, "partial\n");
+  await settleConnectedMachineSessionBackgroundCommand(client.db, {
+    ...lost,
+    outcome: "lost",
+    exitCode: null,
+  } as never);
+  const { payload } = await result(lost.commandId);
+  expect(payload.state).toBe("lost");
+  expect(payload).not.toHaveProperty("output");
+  const [taken] = await claim(client.db, { ...owner, ...budget });
+  expect(taken).toMatchObject({ commandId: lost.commandId, output: null });
+  expect((await read(client.db, lost)).chunks.map((chunk) => chunk.chunk).join("")).toBe(
+    "partial\n",
+  );
+});
+
+test("the omitted-row count can stop at a limit", async () => {
+  const owner = await session();
+  const command = await connected(owner);
+  for (let index = 0; index < 12; index++) await output(command, `${index}\n`);
+  const count = (limit?: number) =>
+    withRlsContext(client.db, owner, (tx) =>
+      commandOutputRowsBetween(tx as never, command, 0, 2_000_000_000, limit),
+    );
+  expect(await count()).toBe(12);
+  expect(await count(5)).toBe(5);
+  expect(await count(50)).toBe(12);
 });
 
 test("a claim never takes another session's results or already delivered results", async () => {

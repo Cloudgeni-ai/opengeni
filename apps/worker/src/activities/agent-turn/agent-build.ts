@@ -22,6 +22,7 @@ import {
   type BuildAgentOptions,
   CommandCompletionDelivery,
   type ConnectorActionPolicyHooks,
+  modelToolTextBudgetBytes,
   type SandboxFileDownload,
   type TurnSandboxCommandSession,
 } from "@opengeni/runtime";
@@ -913,6 +914,18 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                     sessionId: input.sessionId,
                     maxBytes,
                   }),
+                maxTextBytes: () =>
+                  modelToolTextBudgetBytes(
+                    eventing.modelRunSettings.modelToolOutputTruncationTokens,
+                  ),
+                // Masked here too: `apply_patch` results bypass the function-tool masking.
+                mask: async (text) => {
+                  const memory = currentAttemptSecretValues();
+                  if (!memory) return text;
+                  await memory.refresh();
+                  await memory.captureShapes(text, "tool_result");
+                  return memory.maskToolOutputText(text, "tool_result");
+                },
                 signal: cancellationSignal,
                 onDelivered: (appended) => {
                   eventing.commandCompletionNotices.add(appended);

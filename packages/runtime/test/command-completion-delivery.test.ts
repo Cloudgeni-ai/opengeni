@@ -12,6 +12,7 @@ import {
 } from "@openai/agents";
 import {
   appendToPlainTextToolOutput,
+  commandCompletionRoomBytes,
   CommandCompletionDelivery,
   commandCompletionDeliveringTool,
   commandCompletionModelCallFilter,
@@ -189,7 +190,38 @@ describe("finished commands follow the next tool result", () => {
     expect(errors).toHaveLength(1);
   });
 
+  test("notices only use the room the tool's own output leaves in the model budget", async () => {
+    const results = pendingResults([finished("a")]);
+    const delivery = new CommandCompletionDelivery({
+      ...results.source,
+      maxTextBytes: () => 8_192,
+    });
+    const small = commandCompletionDeliveringTool(textTool("small", "x".repeat(1_000)), delivery);
+    const large = commandCompletionDeliveringTool(textTool("large", "y".repeat(7_000)), delivery);
+    // 8192 - 7000 - 512 leaves less than the minimum room: nothing is taken.
+    expect(await invoke(large)).toBe("y".repeat(7_000));
+    expect(results.takes).toEqual([]);
+    expect(results.pending).toHaveLength(1);
+    expect(String(await invoke(small))).toContain("Command ID: a");
+    expect(results.takes).toEqual([8_192 - 1_000 - 512]);
+    expect(commandCompletionRoomBytes(0, 1_000_000)).toBe(16_384);
+    expect(commandCompletionRoomBytes(50_000, 40_000)).toBe(0);
+  });
+
+  test("the notice is masked before it is appended, and the timeline strips the masked text", async () => {
+    const results = pendingResults([finished("a", "token=hunter2\n")]);
+    const delivery = new CommandCompletionDelivery({
+      ...results.source,
+      mask: async (text) => text.replaceAll("hunter2", "[masked]"),
+    });
+    const output = String(await invoke(commandCompletionDeliveringTool(textTool("ls"), delivery)));
+    expect(output).toContain("token=[masked]");
+    expect(output).not.toContain("hunter2");
+    expect(withoutAppendedCommandCompletions(output, new Set(results.delivered))).toBe("ls done");
+  });
+
   test("a wait in a step whose results already carried commands is refused; the next step may wait", async () => {
+    expect(WAIT_AFTER_UNREAD_COMMAND_RESULTS).toContain("your reply was not shown");
     const results = pendingResults([finished("a")]);
     const delivery = new CommandCompletionDelivery(results.source);
     let waits = 0;

@@ -2887,6 +2887,11 @@ export function agentPromptResourcesFor(
     ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
     ...(options.unattended ? { unattended: true } : {}),
     ...(settings.githubPersonalOauthEnabled ? { personalGitHub: true } : {}),
+    // The worker attaches finished commands to later tool results whenever a
+    // sandbox is active and cut polling is on (see installCommandCompletionDelivery).
+    ...(backend !== "none" && settings.experimentCutPolling
+      ? { commandCompletionDelivery: true }
+      : {}),
     ...(repositoryIdentities.length > 0 ? { repositoryIdentities } : {}),
   };
 }

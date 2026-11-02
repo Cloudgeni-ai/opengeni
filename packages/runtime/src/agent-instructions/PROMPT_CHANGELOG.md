@@ -5,9 +5,12 @@ left running finishes during the turn, its exit status and the start and end
 of its output follow the next plain-text tool result, and the durable
 `background_command_result` input now carries the same output, so the agent
 no longer needs a `command_read` only to learn that a command finished.
-Background commands gains one sentence (about 170 bytes) saying so, in every
-tool-availability variant; the `command_read` and `command_wait` descriptions
-gain the same point. The legacy text is unchanged.
+When a sandbox is active and cut polling is on (new `commandCompletionDelivery`
+resource fact), Background commands gains one sentence (about 170 bytes)
+saying so, in every tool-availability variant; with
+`OPENGENI_EXPERIMENT_CUT_POLLING=false` the section is unchanged. The
+`command_read` and `command_wait` descriptions say that a finished command's
+result reaches the session on its own. The legacy text is unchanged.
 
 ```diff
 + A command that finishes while you work reports its exit status and output on its own, after a later tool result or as input, so do not poll only to learn that it finished.

@@ -91242,12 +91242,17 @@ function backgroundCommandTerminalMutation(input: {
                     : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
       // The result carries the start and end of the output, so the turn it
       // wakes or reaches needs no extra read to learn what the command did.
-      const output = await backgroundCommandResultOutputInTransaction(tx, {
-        accountId: session.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        commandId: command.id,
-      });
+      // A lost command (its sandbox gone, or contained) carries none: those
+      // settle in bulk under lease locks, and its output stays readable.
+      const output =
+        command.state === "lost"
+          ? null
+          : await backgroundCommandResultOutputInTransaction(tx, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              commandId: command.id,
+            });
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,
