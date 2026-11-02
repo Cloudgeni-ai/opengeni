@@ -52,17 +52,17 @@ describe("an agent's Memory", () => {
     ).toBe(false);
   });
 
-  test("a chat with Memory scope off neither reads nor writes, and is not told to search", () => {
+  test("a chat with Memory scope off (open use) reads but never writes", () => {
     const access = agentMemoryAccess(shared, chat({ memoryOff: true }));
     expect(access).toMatchObject({
-      read: false,
+      read: true,
       write: false,
       listChats: true,
       readOnlyReason: "memory_off_for_chat",
     });
     const guidance = agentMemoryGuidance(access)!;
-    expect(guidance).toContain("slack_agent_chats");
-    expect(guidance).not.toContain("knowledge_search");
+    expect(guidance).toContain(`groupId ${COLLECTION}`);
+    expect(guidance).toContain("cannot save to your Memory");
   });
 
   test("a Slack DM saves no Knowledge at all, whatever the agent's Memory", () => {

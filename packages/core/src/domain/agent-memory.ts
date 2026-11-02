@@ -6,7 +6,7 @@ import type { AgentRecord } from "@opengeni/db";
  * personal scope for an Only me one) and its chats may read its other shared
  * chats. Off, neither.
  *
- * Every chat of the agent with Knowledge tools reads its Memory. Only chats
+ * Every chat of the agent reads its Memory. Only chats
  * whose audience matches the collection write to it: a shared agent's shared
  * chats, or an Only me agent's owner in a private chat. Private chats (Slack
  * DMs included) of a shared agent, open-use chats and chats with Memory scope
@@ -79,8 +79,9 @@ export function agentMemoryAccess(
       : ("private_chat" as const);
   return {
     collectionId,
-    // A chat with Memory scope off has no Knowledge tools to read with.
-    read: collectionId !== null && !chat.memoryOff,
+    // The agent's switch alone decides reads: an open-use chat (Memory scope
+    // off) still reads its agent's Memory.
+    read: collectionId !== null,
     write: collectionId !== null && readOnlyReason === null,
     listChats: true,
     readOnlyReason,

@@ -137,13 +137,14 @@ type Fixture = Awaited<ReturnType<typeof workspaceWithAgent>>;
 async function agentChat(
   db: ReturnType<typeof createDb>["db"],
   fixture: Fixture,
-  options: { private: boolean; slackDm?: boolean },
+  options: { private: boolean; slackDm?: boolean; memoryScope?: "off" },
 ) {
   const session = await createSession(db, {
     ...fixture.home,
     createdBy: { kind: "subject" as const, subjectId: fixture.subjectId },
     subjectId: fixture.subjectId,
     ...(options.private ? { visibility: "user_private" as const } : {}),
+    ...(options.memoryScope ? { memoryScope: options.memoryScope } : {}),
     agent: { id: fixture.agentId },
     initialMessage: "When do releases go out?",
     resources: [],
@@ -288,6 +289,14 @@ describe("an agent's Memory (real PostgreSQL)", () => {
         // The timeline is told it was not saved.
         expect(JSON.stringify(refused._meta ?? {})).toContain("not_permitted");
       }
+      // Nor is the DM's own text retained as a source.
+      const retained = await dm.callTool({ name: "knowledge_retain_message", arguments: {} });
+      expect(errorOf(retained)).toMatchObject({ code: "agent_memory_read_only" });
+      const file = await dm.callTool({
+        name: "knowledge_retain_file",
+        arguments: { fileId: crypto.randomUUID() },
+      });
+      expect(errorOf(file)).toMatchObject({ code: "agent_memory_read_only" });
       const read = await dm.callTool({
         name: "knowledge_browse",
         arguments: { groupId: fixture.collectionId },
@@ -322,6 +331,23 @@ describe("an agent's Memory (real PostgreSQL)", () => {
       expect(row?.scope).toBe("personal");
     } finally {
       await own.close();
+    }
+  }, 180_000);
+
+  test("an open-use chat (Memory scope off) reads the Memory but never saves to it", async () => {
+    if (!app) return;
+    const fixture = await workspaceWithAgent(app.db);
+    const open = await agentChat(app.db, fixture, { private: false, memoryScope: "off" });
+    try {
+      const read = await open.callTool({
+        name: "knowledge_search",
+        arguments: { query: "Release day", groupId: fixture.collectionId },
+      });
+      expect(read.isError, JSON.stringify(read.content)).toBeFalsy();
+      const refused = await open.callTool(saveFact("Open note", [fixture.collectionId]));
+      expect(errorOf(refused)).toMatchObject({ code: "agent_memory_read_only" });
+    } finally {
+      await open.close();
     }
   }, 180_000);
 

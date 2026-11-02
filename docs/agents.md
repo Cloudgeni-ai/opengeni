@@ -219,12 +219,14 @@ own Knowledge collection and its chats may read its other shared chats
   worker a chat started is checked as its root chat's.
 - A Slack DM is private through its Slack interaction while its session row is
   shared, so anything it saved would land in workspace Knowledge. An agent's
-  Slack DM therefore saves no Knowledge at all (`agent_memory_read_only`); it
-  may still archive outside the agent's Memory. This closes the old leak,
+  Slack DM therefore saves no Knowledge at all (`agent_memory_read_only`),
+  including `knowledge_retain_message` and `knowledge_retain_file`; it may
+  still archive outside the agent's Memory. This closes the old leak,
   where Slack agents were told to save with workspace scope from DMs too.
 - With Memory off, nothing is saved into the collection, `knowledge_search`
-  and `knowledge_browse` on it and `knowledge_get` of it or its entries are
-  refused (`agent_memory_off`), and `slack_agent_chats` lists nothing.
+  and `knowledge_browse` on it and `knowledge_get` of it or its direct entries
+  are refused (`agent_memory_off`; collections nested inside it stay ordinary
+  workspace Knowledge), and `slack_agent_chats` lists nothing.
 - `slack_agent_chats` never lists Only me chats or Slack DMs.
 - The chat is told its collection and whether it may save when it starts:
   Slack agent chats in their Slack instructions, app chats in their own

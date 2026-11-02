@@ -213,15 +213,16 @@ export function registerKnowledgeEntryTools(
     });
     return state?.agentChat ? agentMemoryAccess(state.agent, state.chat) : null;
   }
-  /** Groups of an entry, published or pending; empty when unreadable. */
+  /** Groups of an entry, published and pending together; empty when unreadable. */
   async function entryGroups(context: KnowledgeContext, entryId: string): Promise<string[]> {
+    const groups = new Set<string>();
     for (const view of ["published", "needs_review"] as const) {
       const existing = await getKnowledgeEntry(deps.db, context, entryId, { view }).catch(
         () => null,
       );
-      if (existing) return existing.revision.entry.groupIds ?? [];
+      for (const id of existing?.revision.entry.groupIds ?? []) groups.add(id);
     }
-    return [];
+    return [...groups];
   }
   /**
    * Whether any of these groups is the collection or sits inside it (a
@@ -249,7 +250,8 @@ export function registerKnowledgeEntryTools(
   }
   /**
    * Refuse a Knowledge write this agent chat may not make: any save from a
-   * Slack DM (it would land in workspace scope), and a write into the agent's
+   * Slack DM, including retaining a message or file (it would land in
+   * workspace scope), and a write into the agent's
    * Memory collection when the chat may only read it (a private chat of a
    * shared agent, Memory scope off, or the agent's Memory off). A write
    * touches the collection when it names the collection or a collection
@@ -447,7 +449,14 @@ export function registerKnowledgeEntryTools(
       },
     },
     ({ fileId, purpose }) =>
-      run((context) => prepareKnowledgeFile(deps, context, fileId, purpose), "knowledge", "write"),
+      run(
+        async (context) => {
+          await requireAgentMemoryWrite(context, { kind: "save" });
+          return prepareKnowledgeFile(deps, context, fileId, purpose);
+        },
+        "knowledge",
+        "write",
+      ),
   );
   server.registerTool(
     "knowledge_retain_message",
@@ -457,7 +466,14 @@ export function registerKnowledgeEntryTools(
       inputSchema: { messageId: z.uuid().optional() },
     },
     ({ messageId }) =>
-      run((context) => retainKnowledgeMessage(deps.db, context, messageId), "knowledge", "write"),
+      run(
+        async (context) => {
+          await requireAgentMemoryWrite(context, { kind: "save" });
+          return retainKnowledgeMessage(deps.db, context, messageId);
+        },
+        "knowledge",
+        "write",
+      ),
   );
   server.registerTool(
     "knowledge_save",
