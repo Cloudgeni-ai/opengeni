@@ -3642,20 +3642,9 @@ async function cancelSessionSubtreeInTransaction(
     let sequence = session.lastSequence + (session.id === input.rootSessionId ? 1 : 0);
     const cancelledTurns = cancelledTurnsBySession.get(session.id) ?? [];
     const preinsertedEvents: Array<{ id: string; sequence: number }> = [];
-    const eventValues: SessionEventInsertWithPayload[] = [];
-    for (const update of (systemUpdatesBySession.get(session.id) ?? []).sort((left, right) =>
-      left.id.localeCompare(right.id),
-    )) {
-      eventValues.push({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: session.id,
-        sequence: ++sequence,
-        type: "system.update.cancelled",
-        payload: { updateId: update.id, reason: "session_cancelled" },
-        occurredAt: now,
-      });
-    }
+    // Closing a turn's pending tool calls inserts its events right away, so
+    // it comes before every event batched below: the cursor accepts only
+    // inserts that continue it exactly.
     for (const turn of cancelledTurns) {
       const closedTools = await closePendingSessionToolCallsInTransaction(db, {
         accountId: input.accountId,
@@ -3673,6 +3662,22 @@ async function cancelSessionSubtreeInTransaction(
           sequence: event.sequence,
         })),
       );
+    }
+    const eventValues: SessionEventInsertWithPayload[] = [];
+    for (const update of (systemUpdatesBySession.get(session.id) ?? []).sort((left, right) =>
+      left.id.localeCompare(right.id),
+    )) {
+      eventValues.push({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+        sequence: ++sequence,
+        type: "system.update.cancelled",
+        payload: { updateId: update.id, reason: "session_cancelled" },
+        occurredAt: now,
+      });
+    }
+    for (const turn of cancelledTurns) {
       for (const humanInput of (humanInputsByTurn.get(turn.id) ?? []).sort((left, right) =>
         left.id.localeCompare(right.id),
       )) {
