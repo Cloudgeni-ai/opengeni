@@ -7,6 +7,7 @@ import { archiveActionLabel, requestSessionArchive } from "../../lib/archive-ses
 import { t } from "../../lib/console-text";
 import { useSessionListHintRefresh } from "../../lib/use-session-list-hint-refresh";
 import { useSiteOpenedListener } from "../../lib/site-opened";
+import { publishSiteSidebarBridge } from "../../lib/site-sidebar-bridge";
 import { useOpenGeni } from "../../../session-context";
 import { useChannels } from "../../../hooks/use-channels";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
@@ -2307,6 +2308,25 @@ export function SessionList() {
         : null,
     [context.client, onArchiveSite, onMoveSite, onPinSite],
   );
+  // The open Site's page offers the same Pin and Archive as its row.
+  const pinnedSiteIds = useMemo(
+    () =>
+      new Set(
+        (siteGroups ?? [])
+          .filter((group) => "pinned" in group && group.pinned === true)
+          .map((group) => group.siteId),
+      ),
+    [siteGroups],
+  );
+  useEffect(() => {
+    if (!siteRowActions) return;
+    return publishSiteSidebarBridge({
+      workspaceId: rail.workspaceId,
+      pinnedSiteIds,
+      pin: siteRowActions.pin,
+      archive: siteRowActions.archive,
+    });
+  }, [pinnedSiteIds, rail.workspaceId, siteRowActions]);
   const onDeleteSession = useCallback(async (): Promise<boolean> => {
     if (!sessionPendingDelete) return false;
     try {

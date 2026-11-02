@@ -3,11 +3,15 @@ import { Link } from "../../lib/navigation";
 import {
   ArchiveIcon,
   ChevronRightIcon,
+  CopyIcon,
   EllipsisIcon,
   FolderIcon,
+  InfoIcon,
+  LinkIcon,
   PanelsTopLeftIcon,
   PinIcon,
 } from "lucide-react";
+import { OpenPublishedSiteItem, useSiteActions } from "../artifacts/site-actions";
 import { RailTrailingMetadata } from "./session-row-content";
 import {
   RAIL_ROW_OVERFLOW_TRIGGER_CLASS,
@@ -229,36 +233,15 @@ export function SiteSessionGroupHeading({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-40" data-site-menu={origin.siteId}>
-              <DropdownMenuItem onSelect={() => actions.pin(origin, !pinned)}>
-                <PinIcon className={pinned ? "size-4 fill-current" : "size-4"} />
-                {pinLabel}
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => actions.archive(origin)}>
-                <ArchiveIcon className="size-4" />
-                Archive
-              </DropdownMenuItem>
-              {canMove ? (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuLabel>Move to project</DropdownMenuLabel>
-                  {moveTargets.map((channel) => {
-                    const current = (channelId ?? null) === channel.id;
-                    return (
-                      <DropdownMenuItem
-                        key={channel.id ?? "default"}
-                        aria-current={current ? "true" : undefined}
-                        onSelect={() => {
-                          if (!current) move?.(origin, channelId ?? null, channel.id);
-                        }}
-                      >
-                        <FolderIcon aria-hidden="true" />
-                        <span className="min-w-0 flex-1 truncate">{channel.name}</span>
-                        <DropdownMenuCheck checked={current} />
-                      </DropdownMenuItem>
-                    );
-                  })}
-                </>
-              ) : null}
+              <SiteRowMenuItems
+                menu="dropdown"
+                origin={origin}
+                workspaceId={workspaceId}
+                pinned={pinned}
+                actions={actions}
+                moveTargets={moveTargets}
+                channelId={channelId}
+              />
             </DropdownMenuContent>
           </DropdownMenu>
         </>
@@ -270,37 +253,105 @@ export function SiteSessionGroupHeading({
     <ContextMenu>
       <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
       <ContextMenuContent className="min-w-40" data-site-menu={origin.siteId}>
-        <ContextMenuItem onSelect={() => actions.pin(origin, !pinned)}>
-          <PinIcon className={pinned ? "size-4 fill-current" : "size-4"} />
-          {pinLabel}
-        </ContextMenuItem>
-        <ContextMenuItem onSelect={() => actions.archive(origin)}>
-          <ArchiveIcon className="size-4" />
-          Archive
-        </ContextMenuItem>
-        {canMove ? (
-          <>
-            <ContextMenuSeparator />
-            <ContextMenuLabel>Move to project</ContextMenuLabel>
-            {moveTargets.map((channel) => {
-              const current = (channelId ?? null) === channel.id;
-              return (
-                <ContextMenuItem
-                  key={channel.id ?? "default"}
-                  aria-current={current ? "true" : undefined}
-                  onSelect={() => {
-                    if (!current) move?.(origin, channelId ?? null, channel.id);
-                  }}
-                >
-                  <FolderIcon aria-hidden="true" />
-                  <span className="min-w-0 flex-1 truncate">{channel.name}</span>
-                  <DropdownMenuCheck checked={current} />
-                </ContextMenuItem>
-              );
-            })}
-          </>
-        ) : null}
+        <SiteRowMenuItems
+          menu="context"
+          origin={origin}
+          workspaceId={workspaceId}
+          pinned={pinned}
+          actions={actions}
+          moveTargets={moveTargets}
+          channelId={channelId}
+        />
       </ContextMenuContent>
     </ContextMenu>
+  );
+}
+
+/**
+ * A Site row's menu, the same for right-click and "…": what a chat row
+ * offers that fits a Site (Copy link, Copy title, Pin, Archive, Move to
+ * project), plus the Site's own: Duplicate, Site details and, once known to
+ * be on the web, Open published Site. Renaming has no place here: a Site is
+ * named by what it publishes.
+ */
+function SiteRowMenuItems({
+  menu,
+  origin,
+  workspaceId,
+  pinned,
+  actions,
+  moveTargets,
+  channelId,
+}: {
+  menu: "context" | "dropdown";
+  origin: SessionSiteOrigin;
+  workspaceId: string;
+  pinned: boolean;
+  actions: SiteRowActions;
+  moveTargets: readonly { id: string | null; name: string }[];
+  channelId: string | null | undefined;
+}) {
+  const site = useSiteActions(workspaceId, origin);
+  const Item = (menu === "context" ? ContextMenuItem : DropdownMenuItem) as typeof DropdownMenuItem;
+  const Separator = menu === "context" ? ContextMenuSeparator : DropdownMenuSeparator;
+  const Label = menu === "context" ? ContextMenuLabel : DropdownMenuLabel;
+  return (
+    <>
+      <Item data-site-action="copy-link" onSelect={site.copyLink}>
+        <LinkIcon className="size-4" />
+        Copy link
+      </Item>
+      <Item data-site-action="copy-title" onSelect={site.copyTitle}>
+        <CopyIcon className="size-4" />
+        Copy title
+      </Item>
+      <Item onSelect={() => actions.pin(origin, !pinned)}>
+        <PinIcon className={pinned ? "size-4 fill-current" : "size-4"} />
+        {pinned ? "Unpin" : "Pin"}
+      </Item>
+      {site.duplicate ? (
+        <Item
+          data-site-action="duplicate"
+          disabled={site.duplicate.busy}
+          onSelect={site.duplicate.run}
+        >
+          <CopyIcon className="size-4" />
+          {site.duplicate.busy ? "Duplicating…" : "Duplicate"}
+        </Item>
+      ) : null}
+      <Item asChild data-site-action="details">
+        <Link {...site.details}>
+          <InfoIcon className="size-4" />
+          Site details
+        </Link>
+      </Item>
+      <OpenPublishedSiteItem item={Item} workspaceId={workspaceId} siteId={origin.siteId} />
+      <Item onSelect={() => actions.archive(origin)}>
+        <ArchiveIcon className="size-4" />
+        Archive
+      </Item>
+      {moveTargets.length > 0 ? (
+        <>
+          <Separator />
+          <Label>Move to project</Label>
+          {moveTargets.map((channel) => {
+            const current = (channelId ?? null) === channel.id;
+            return (
+              <Item
+                key={channel.id ?? "default"}
+                aria-current={current ? "true" : undefined}
+                onSelect={() => {
+                  if (!current) actions.move?.(origin, channelId ?? null, channel.id);
+                }}
+              >
+                <FolderIcon aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate">{channel.name}</span>
+                <DropdownMenuCheck checked={current} />
+              </Item>
+            );
+          })}
+        </>
+      ) : null}
+    </>
   );
 }

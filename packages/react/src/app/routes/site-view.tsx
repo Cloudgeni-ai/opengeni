@@ -6,8 +6,11 @@ import {
 import type { Session, SessionEvent, SessionListResponse } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
+  ArchiveIcon,
   ArrowLeftIcon,
+  CopyIcon,
   InfoIcon,
+  LinkIcon,
   Maximize2Icon,
   MoreHorizontalIcon,
   PanelLeftCloseIcon,
@@ -16,6 +19,7 @@ import {
   PanelRightCloseIcon,
   PanelRightIcon,
   PanelRightOpenIcon,
+  PinIcon,
   PlusIcon,
 } from "lucide-react";
 import {
@@ -29,6 +33,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
   type RefObject,
 } from "react";
 import { SiteView } from "../../artifacts";
@@ -41,11 +46,20 @@ import type {
 } from "../../hooks/use-new-conversation";
 import { Button } from "../../ui/button";
 import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "../../ui/context-menu";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../../ui/dropdown-menu";
+import { useSiteActions } from "../components/artifacts/site-actions";
+import { useSiteSidebarActions } from "../lib/site-sidebar-bridge";
 import { ResizeHandle } from "../../ui/resize-handle";
 import { Skeleton } from "../../ui/skeleton";
 import { useAppContext, type SessionCreationHandoff } from "../app-context";
@@ -303,6 +317,18 @@ export function SiteViewRoute({
               onSiteLocationChange={onSiteLocationChange}
               toolbarStart={backControl}
               showTitle={!titleInWindowBar || fullScreen}
+              renderTitle={
+                artifact
+                  ? (title) => (
+                      <SiteTitleMenu
+                        workspaceId={workspaceId}
+                        origin={{ siteId, title: artifact.title }}
+                      >
+                        {title}
+                      </SiteTitleMenu>
+                    )
+                  : undefined
+              }
               // The one publication control. The Site view never says "Live":
               // it stays current, and says so only while Updating or Reconnecting.
               liveStatus={
@@ -317,6 +343,12 @@ export function SiteViewRoute({
                     item={{ kind: "site", id: siteId }}
                     className="size-8 rounded-md text-fg-muted hover:text-fg"
                   />
+                  {artifact ? (
+                    <SiteActionsMenu
+                      workspaceId={workspaceId}
+                      origin={{ siteId, title: artifact.title }}
+                    />
+                  ) : null}
                 </>
               }
               versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
@@ -365,6 +397,102 @@ export function SiteViewRoute({
         />
       </ChatFileDropRelayProvider>
     </div>
+  );
+}
+
+/** Right-click the Site's title: copy it or the Site's address. */
+function SiteTitleMenu({
+  workspaceId,
+  origin,
+  children,
+}: {
+  workspaceId: string;
+  origin: { siteId: string; title: string };
+  children: ReactNode;
+}) {
+  const site = useSiteActions(workspaceId, origin);
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuContent className="min-w-40" data-site-title-menu="">
+        <ContextMenuItem onSelect={site.copyTitle}>
+          <CopyIcon className="size-4" />
+          Copy title
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={site.copyLink}>
+          <LinkIcon className="size-4" />
+          Copy link
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+/**
+ * The Site's "…", as a chat's header has one: Copy title, the sidebar's Pin
+ * and Archive (while the sidebar lists Sites), Duplicate and Site details.
+ * Copy link and the published address keep their own controls beside it.
+ */
+function SiteActionsMenu({
+  workspaceId,
+  origin,
+}: {
+  workspaceId: string;
+  origin: { siteId: string; title: string };
+}) {
+  const site = useSiteActions(workspaceId, origin);
+  const sidebar = useSiteSidebarActions(workspaceId, origin);
+  return (
+    <span data-site-actions-root="" className="contents">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="More Site actions"
+            title="More"
+            data-site-actions-menu=""
+            className="size-8 rounded-md text-fg-muted hover:text-fg pointer-coarse:size-11"
+          >
+            <MoreHorizontalIcon aria-hidden="true" className="size-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-52">
+          <DropdownMenuItem onSelect={site.copyTitle}>
+            <CopyIcon aria-hidden="true" />
+            Copy title
+          </DropdownMenuItem>
+          {sidebar ? (
+            <DropdownMenuItem onSelect={sidebar.togglePin}>
+              <PinIcon aria-hidden="true" className={sidebar.pinned ? "fill-current" : undefined} />
+              {sidebar.pinned ? "Unpin" : "Pin"}
+            </DropdownMenuItem>
+          ) : null}
+          {site.duplicate ? (
+            <DropdownMenuItem disabled={site.duplicate.busy} onSelect={site.duplicate.run}>
+              <CopyIcon aria-hidden="true" />
+              {site.duplicate.busy ? "Duplicating…" : "Duplicate"}
+            </DropdownMenuItem>
+          ) : null}
+          <DropdownMenuItem asChild>
+            <Link {...site.details}>
+              <InfoIcon aria-hidden="true" />
+              Site details
+            </Link>
+          </DropdownMenuItem>
+          {sidebar ? (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={sidebar.archive}>
+                <ArchiveIcon aria-hidden="true" />
+                Archive
+              </DropdownMenuItem>
+            </>
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </span>
   );
 }
 
@@ -842,19 +970,6 @@ function SiteChatPanel({
                   </Link>
                 </DropdownMenuItem>
               ) : null}
-              <DropdownMenuItem asChild>
-                <Link
-                  to="/workspaces/$workspaceId/artifacts/$artifactId"
-                  params={{ workspaceId, artifactId: siteId }}
-                  // Its details are by tab; without one the address opens
-                  // the Site view again. Settings shows Versions to people
-                  // who can't manage it.
-                  search={{ tab: "settings" }}
-                >
-                  <InfoIcon aria-hidden="true" />
-                  Site details
-                </Link>
-              </DropdownMenuItem>
               {/* Beside the Site only on wide screens; narrower ones stack the chat below. */}
               <DropdownMenuItem
                 className="max-lg:hidden"

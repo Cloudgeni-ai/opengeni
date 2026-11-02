@@ -1420,7 +1420,8 @@ test("a Site row moves to another project or Default like a chat row, by menu or
   await page.goto(`${url}?scenario=sites&theme=light`);
   await siteInProject("Website redesign", pricingSiteId).waitFor();
 
-  // Right-click offers the chat row's Move to project list, current project checked.
+  // Right-click offers the Site's actions and the chat row's Move to project
+  // list, current project checked.
   await siteInProject("Website redesign", pricingSiteId)
     .locator("a")
     .first()
@@ -1428,7 +1429,11 @@ test("a Site row moves to another project or Default like a chat row, by menu or
   const menu = page.getByRole("menu");
   await menu.getByText("Move to project", { exact: true }).waitFor();
   expect(await menu.getByRole("menuitem").allInnerTexts()).toEqual([
+    "Copy link",
+    "Copy title",
     "Pin",
+    "Duplicate",
+    "Site details",
     "Archive",
     "Default",
     "Website redesign",

@@ -5557,6 +5557,7 @@ export const englishMessages = {
   "timeline.screenshotLightbox.zoomOut": "Zoom out",
   "timeline.shared.bytesOmitted_one": "{bytes} byte omitted",
   "timeline.shared.bytesOmitted_other": "{bytes} bytes omitted",
+  "timeline.shared.copyStep": "Copy step",
   "timeline.shared.expandScreenshot": "Expand screenshot",
   "timeline.shared.fullEvidence": "full evidence",
   "timeline.shared.imageUnavailable": "image unavailable",

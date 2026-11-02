@@ -32,3 +32,13 @@ export async function copyLink(url: string): Promise<void> {
     toast.error("Couldn't copy the link.", { description: errorMessage(error) });
   }
 }
+
+/** Copies a chat's or Site's title and says so, as `copyLink` does for links. */
+export async function copyTitle(title: string): Promise<void> {
+  try {
+    await writeClipboard(title);
+    toast.success("Title copied");
+  } catch (error) {
+    toast.error("Couldn't copy the title.", { description: errorMessage(error) });
+  }
+}

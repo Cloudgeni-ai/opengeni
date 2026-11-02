@@ -3,14 +3,21 @@
 // traffic lights, and the bar's row, the page's title line. The bar itself is
 // drawn by the app's stylesheet (`html[data-desktop]::before`), as are the
 // rules that lift a row into it (`[data-window-bar-row] > [data-titlebar]`).
-import { ChevronsLeftIcon, ChevronsRightIcon, PanelLeftIcon } from "lucide-react";
-import { useMemo, useState, type ReactNode, type RefObject } from "react";
+import { ChevronsLeftIcon, ChevronsRightIcon, CopyIcon, PanelLeftIcon } from "lucide-react";
+import { useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
 import { Button } from "../../ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "../../ui/context-menu";
 import { PageHeaderWindowBarContext } from "../../ui/window-bar-title";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
 import { useActionShortcut } from "../lib/actions/actions-provider";
+import { copyTitle } from "../lib/copy-link";
 import { desktopPlatform } from "../lib/desktop";
 import { useWindowBarRowLeft } from "../lib/window-bar-row";
 import { TooltipWithKeys } from "./command-menu/keycaps";
@@ -122,6 +129,7 @@ export function SidebarToggleButton({
  * on the canvas (`useWindowBarRow`).
  */
 export function WindowBarTitle({ children }: { children: ReactNode }) {
+  const text = useRef<HTMLSpanElement>(null);
   return (
     <header
       data-window-drag
@@ -129,13 +137,27 @@ export function WindowBarTitle({ children }: { children: ReactNode }) {
       data-window-bar-title
       className="flex min-w-0 shrink-0 items-center gap-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))]"
     >
-      {/* The page's own header keeps the page's heading for assistive tech. */}
-      <span
-        aria-hidden="true"
-        className="min-w-0 truncate text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg"
-      >
-        {children}
-      </span>
+      {/* The page's own header keeps the page's heading for assistive tech.
+          The words themselves aren't part of the drag region, so they can be
+          selected, and right-clicked to copy. */}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <span
+            ref={text}
+            aria-hidden="true"
+            data-window-bar-title-text=""
+            className="min-w-0 truncate text-[15px] font-semibold leading-6 tracking-[-0.01em] text-fg [-webkit-app-region:no-drag] [app-region:no-drag]"
+          >
+            {children}
+          </span>
+        </ContextMenuTrigger>
+        <ContextMenuContent className="min-w-40">
+          <ContextMenuItem onSelect={() => void copyTitle(text.current?.textContent?.trim() ?? "")}>
+            <CopyIcon className="size-4" />
+            Copy title
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     </header>
   );
 }

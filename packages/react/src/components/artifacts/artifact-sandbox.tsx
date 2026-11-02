@@ -6,7 +6,14 @@ import {
   RefreshCwIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import type { SiteViewer } from "@opengeni/sdk";
 
 import { cn } from "../../lib/cn";
@@ -45,6 +52,11 @@ export type ArtifactSandboxProps = {
   title: string;
   /** Hide the visible title/icon while retaining the accessible iframe title. */
   showTitle?: boolean | undefined;
+  /**
+   * Wraps the visible title, so a host can attach its own menu to it (the
+   * Site view's Copy title). Returns the title itself when absent.
+   */
+  renderTitle?: ((title: ReactElement) => ReactNode) | undefined;
   showLiveStatus?: boolean | undefined;
   /**
    * Replaces the "Live" indicator, for example with the host's link to the
@@ -200,9 +212,10 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
               <Globe2Icon className="size-3.5" />
             </span>
           ) : null}
-          {props.showTitle !== false && (
-            <span className="truncate text-xs font-semibold text-fg">{props.title}</span>
-          )}
+          {props.showTitle !== false &&
+            (props.renderTitle ?? identityTitle)(
+              <span className="truncate text-xs font-semibold text-fg">{props.title}</span>,
+            )}
           {props.headerControls ? (
             <PortalContainerProvider
               container={focused && frameElement ? frameElement : inheritedPortal}
@@ -389,4 +402,8 @@ function LiveLabel({
       <span className={status ? "max-sm:sr-only" : undefined}>{text}</span>
     </span>
   );
+}
+
+function identityTitle(title: ReactElement): ReactNode {
+  return title;
 }
