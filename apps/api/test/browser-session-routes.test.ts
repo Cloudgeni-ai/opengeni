@@ -1494,7 +1494,7 @@ describe("BrowserSession route discipline", () => {
     expect(source).toContain('operation === "browser.end" && expectedPlacementInstanceId');
   });
 
-  test("retires a stale Connected Machine placement instead of advertising a retryable 409", async () => {
+  test("keeps a browser its task left on another machine, with a final 409 that says where it is", async () => {
     const source = await readFile(routeUrl, "utf8");
     const placement = source.slice(
       source.indexOf("async function withBrowserPlacement"),
@@ -1502,15 +1502,14 @@ describe("BrowserSession route discipline", () => {
     );
     const active = source.slice(
       source.indexOf("async function withActiveBrowserController"),
-      source.indexOf("async function recoverActiveBrowserController"),
+      source.indexOf("async function browserControllerGone"),
     );
-    expect(placement).toContain("throwBrowserSourcePlacementChanged");
-    expect(active).toContain("terminalizeStaleConnectedInteractionPlacement");
-    expect(active.indexOf("terminalizeStaleConnectedInteractionPlacement")).toBeLessThan(
-      active.indexOf('sourcePlacementChangedApiError("browser_session")'),
-    );
-    expect(source).toContain('interactionFailureCode: "source_placement_changed"');
-    expect(source).toContain('interactionLifecycle: "lost"');
+    // Using it while the task runs elsewhere must not end or retire it: the
+    // task gets it back when it returns to that machine.
+    expect(placement).toContain("sourcePlacementElsewhereApiError(");
+    expect(active).toContain("sourcePlacementElsewhereApiError(");
+    expect(source).not.toContain("terminalizeStaleConnectedInteractionPlacement");
+    expect(source).toContain('interactionFailureCode: "source_placement_elsewhere"');
     expect(source).toContain("retryable: false");
   });
 
@@ -1530,7 +1529,7 @@ describe("BrowserSession route discipline", () => {
     const source = await readFile(routeUrl, "utf8");
     const active = source.slice(
       source.indexOf("async function withActiveBrowserController"),
-      source.indexOf("async function throwBrowserSourcePlacementChanged"),
+      source.indexOf("async function browserControllerGone"),
     );
     // The source-session check and Channel-A's machine-route check prove the
     // same live attempt back to back; the controller call and anything after

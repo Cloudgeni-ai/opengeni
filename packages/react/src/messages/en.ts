@@ -933,6 +933,8 @@ export const englishMessages = {
   "browserViewer.thisBrowserProfileIsNo":
     "This browser profile is no longer available. Refresh and choose another.",
   "browserViewer.thisChatMovedToAnother": "This chat moved to another computer.",
+  "browserViewer.chatIsOnAnotherComputer":
+    "This chat is working on another computer right now. The browser keeps running on its own computer and is available again when the chat moves back.",
   "browserViewer.thisChromeProfileIsLive":
     "This Chrome profile is live again, but the previous browser cannot move to the new connection. Use Browser → New browser → Connected Chrome.",
   "browserViewer.thisMachineOnly": "This machine only",
