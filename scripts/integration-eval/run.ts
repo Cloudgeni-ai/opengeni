@@ -5,10 +5,11 @@
  * receipts (forensic session events), not from the answer text alone.
  *
  *   bun scripts/integration-eval/run.ts list [--cases core]
- *   bun scripts/integration-eval/run.ts models
- *   bun scripts/integration-eval/run.ts run --out DIR [--cells all|core-cells|model@effort,...]
+ *   bun scripts/integration-eval/run.ts models [--cells SPEC]
+ *   bun scripts/integration-eval/run.ts run --out DIR [--cells all|subscription|model@effort|model@*|model@default,...]
  *       [--cases core|all|<id or prefix>,...] [--repeats N] [--concurrency N]
  *       [--skip-integrations a,b] [--rerun DIR/results.jsonl [--failed-only]]
+ *   bun scripts/integration-eval/run.ts regrade --out DIR   (re-read stored chats; no new runs)
  *   bun scripts/integration-eval/run.ts report --out DIR
  *
  * Environment: OPENGENI_EVAL_API_URL, and OPENGENI_EVAL_API_KEY (billed as
@@ -25,7 +26,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join } from "node:path";
 import { authFromEnv, OpengeniApi, type SessionEvent } from "./api";
 import { CASES, DEFAULT_SCOPE } from "./catalogue";
-import { gradeCase } from "./grade";
+import { gradeCase, type Verification } from "./grade";
 import { INTEGRATIONS } from "./integrations";
 import { parseReceipts } from "./receipts";
 import type { EvalCase, Grade, RunRecord } from "./types";
@@ -37,6 +38,7 @@ type Job = { testCase: EvalCase; cell: Cell; repeat: number };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const RUN_TIMEOUT_MS = Number(process.env.OPENGENI_EVAL_RUN_TIMEOUT_MS ?? 20 * 60_000);
 const POLL_MS = 4_000;
+const WAKE_GRACE_MS = 30_000;
 
 function args(argv: string[]): { command: string; flags: Map<string, string> } {
   const [command = "help", ...rest] = argv;
@@ -96,30 +98,57 @@ export function selectCases(
 type ModelConfig = {
   id: string;
   cost?: string;
-  capabilities?: { reasoning?: { efforts?: string[]; runnable?: boolean } };
+  capabilities?: {
+    reasoning?: { efforts?: string[]; defaultEffort?: string; runnable?: boolean };
+  };
 };
 
-/** Every model this workspace can run on credits, at every effort it offers. */
-export function cellsFromConfig(config: Record<string, unknown>): Cell[] {
+function configModels(config: Record<string, unknown>): ModelConfig[] {
   const allowed = new Set((config.allowedModels as string[] | undefined) ?? []);
-  const models = ((config.models as ModelConfig[] | undefined) ?? []).filter(
-    (model) => (allowed.size === 0 || allowed.has(model.id)) && model.cost !== "subscription",
+  return ((config.models as ModelConfig[] | undefined) ?? []).filter(
+    (model) => allowed.size === 0 || allowed.has(model.id),
   );
-  return models.flatMap((model) => {
-    const efforts = model.capabilities?.reasoning?.efforts ?? [];
-    return (efforts.length > 0 ? efforts : ["medium"]).map((effort) => ({
-      model: model.id,
-      effort,
-    }));
-  });
 }
 
-function parseCells(spec: string | undefined, config: Record<string, unknown>): Cell[] {
+function modelEfforts(model: ModelConfig | undefined): string[] {
+  const efforts = model?.capabilities?.reasoning?.efforts ?? [];
+  return efforts.length > 0 ? efforts : ["medium"];
+}
+
+/**
+ * Every model this workspace can run, at every effort it offers: credit models
+ * by default, or models served through a connected subscription (`codex/*`).
+ */
+export function cellsFromConfig(
+  config: Record<string, unknown>,
+  source: "credit" | "subscription" = "credit",
+): Cell[] {
+  return configModels(config)
+    .filter((model) => (model.cost === "subscription") === (source === "subscription"))
+    .flatMap((model) => modelEfforts(model).map((effort) => ({ model: model.id, effort })));
+}
+
+/**
+ * `all` (credit models), `subscription`, or comma-separated `model@effort`,
+ * where effort `*` means every effort the model offers and `default` its
+ * default effort.
+ */
+export function parseCells(spec: string | undefined, config: Record<string, unknown>): Cell[] {
   if (!spec || spec === "all") return cellsFromConfig(config);
-  return spec.split(",").map((part) => {
+  const models = configModels(config);
+  return spec.split(",").flatMap((part) => {
+    if (part === "all") return cellsFromConfig(config);
+    if (part === "subscription") return cellsFromConfig(config, "subscription");
     const at = part.lastIndexOf("@");
     if (at <= 0) throw new Error(`cell "${part}" must be model@effort`);
-    return { model: part.slice(0, at), effort: part.slice(at + 1) };
+    const model = part.slice(0, at);
+    const effort = part.slice(at + 1);
+    const known = models.find((candidate) => candidate.id === model);
+    if (effort === "*") return modelEfforts(known).map((each) => ({ model, effort: each }));
+    if (effort === "default") {
+      return [{ model, effort: known?.capabilities?.reasoning?.defaultEffort ?? "medium" }];
+    }
+    return [{ model, effort }];
   });
 }
 
@@ -185,14 +214,65 @@ async function driveSession(
       }
     }
     const ended = events.some((event) => /^turn\.(completed|failed|cancelled)$/.test(event.type));
+    // The agent may end a turn with wait_for_input (for example to retry after
+    // a rate limit); its wake starts another turn, so the chat is not done
+    // until shortly after that deadline.
+    const inputWait = snapshot.inputWait as { deadlineAt?: string } | null | undefined;
+    const wakeAt = inputWait?.deadlineAt ? Date.parse(inputWait.deadlineAt) : Number.NaN;
+    const awaitingWake = Number.isFinite(wakeAt) && Date.now() < wakeAt + WAKE_GRACE_MS;
     const resting =
-      !snapshot.activeTurnId && !["running", "queued", "requires_action"].includes(snapshot.status);
+      !awaitingWake &&
+      !snapshot.activeTurnId &&
+      !["running", "queued", "requires_action"].includes(snapshot.status);
     if (ended && resting && page.events.length === 0) {
       stableIdlePolls += 1;
       if (stableIdlePolls >= 2) return { events, timedOut: false };
     } else stableIdlePolls = 0;
   }
   return { events, timedOut: true };
+}
+
+type GradedFields = Pick<
+  RunRecord,
+  "grade" | "toolsUsed" | "cards" | "approvals" | "finalAnswerExcerpt" | "usage"
+>;
+
+/** Grades one finished chat from its events; shared by `run` and `regrade`. */
+function gradeEvents(
+  testCase: EvalCase,
+  events: SessionEvent[],
+  timedOut: boolean,
+  verification: Verification | null,
+  receiptsFile: string,
+): GradedFields {
+  mkdirSync(join(receiptsFile, ".."), { recursive: true });
+  const receipts = parseReceipts(events);
+  writeFileSync(receiptsFile, JSON.stringify(receipts, null, 2));
+  let grade: Grade = timedOut
+    ? { pass: false, category: "harness_error", reasons: ["run timed out"] }
+    : gradeCase(testCase, receipts, verification);
+  if (
+    !timedOut &&
+    receipts.tools.length === 0 &&
+    receipts.finalAnswer === "" &&
+    receipts.cards.length === 0
+  ) {
+    grade = {
+      pass: false,
+      category: "harness_error",
+      reasons: ["no answer and no tool calls", ...grade.reasons],
+    };
+  }
+  return {
+    grade,
+    toolsUsed: receipts.tools.map((tool) => `${tool.effectiveName}${tool.errored ? "!" : ""}`),
+    cards: receipts.cards.map((card) => card.capabilityName ?? card.capabilityId ?? "?"),
+    approvals: receipts.approvals.map(
+      (approval) => `${approval.name}:${approval.decision ?? "pending"}`,
+    ),
+    finalAnswerExcerpt: receipts.finalAnswer.slice(0, 600),
+    usage: receipts.usage,
+  };
 }
 
 async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRecord> {
@@ -250,39 +330,21 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
     base.sessionId = session.id;
     base.chatUrl = `${appUrl}/workspaces/${workspaceId}/sessions/${session.id}`;
     const { events, timedOut } = await driveSession(api, workspaceId, session.id);
-    mkdirSync(join(outDir, "receipts"), { recursive: true });
-    const receipts = parseReceipts(events);
-    writeFileSync(join(outDir, "receipts", `${marker}.json`), JSON.stringify(receipts, null, 2));
     const verification = testCase.kind === "write" ? await verify(testCase.verify, marker) : null;
-    let grade: Grade = timedOut
-      ? { pass: false, category: "harness_error", reasons: ["run timed out"] }
-      : gradeCase(testCase, receipts, verification);
-    if (
-      !timedOut &&
-      receipts.tools.length === 0 &&
-      receipts.finalAnswer === "" &&
-      receipts.cards.length === 0
-    ) {
-      grade = {
-        pass: false,
-        category: "harness_error",
-        reasons: ["no answer and no tool calls", ...grade.reasons],
-      };
-    }
+    const graded = gradeEvents(
+      testCase,
+      events,
+      timedOut,
+      verification,
+      join(outDir, "receipts", `${marker}.json`),
+    );
     const finished = Date.now();
     return {
       ...base,
       finishedAt: new Date(finished).toISOString(),
       durationMs: finished - started,
-      grade,
       verification,
-      toolsUsed: receipts.tools.map((tool) => `${tool.effectiveName}${tool.errored ? "!" : ""}`),
-      cards: receipts.cards.map((card) => card.capabilityName ?? card.capabilityId ?? "?"),
-      approvals: receipts.approvals.map(
-        (approval) => `${approval.name}:${approval.decision ?? "pending"}`,
-      ),
-      finalAnswerExcerpt: receipts.finalAnswer.slice(0, 600),
-      usage: receipts.usage,
+      ...graded,
       error: null,
     };
   } catch (error) {
@@ -360,22 +422,94 @@ async function runAll(flags: Map<string, string>) {
   }
 
   const concurrency = Math.max(1, Number(flags.get("concurrency") ?? 4));
-  let next = 0;
+  // `--integration-concurrency slack=1,linear=2` caps parallel chats that
+  // reach one service (its API rate limits), apart from not_connected rows.
+  const caps = new Map(
+    (flags.get("integration-concurrency") ?? "")
+      .split(",")
+      .filter(Boolean)
+      .map((part) => {
+        const [name = "", limit = "1"] = part.split("=");
+        return [name, Math.max(1, Number(limit) || 1)] as const;
+      }),
+  );
+  const running = new Map<string, number>();
+  const capped = (job: Job) =>
+    job.testCase.kind === "not_connected" ? null : (job.testCase.integration as string);
+  const takeNext = (): Job | undefined => {
+    const index = pending.findIndex((job) => {
+      const key = capped(job);
+      const limit = key ? caps.get(key) : undefined;
+      return limit === undefined || (running.get(key!) ?? 0) < limit;
+    });
+    return index >= 0 ? pending.splice(index, 1)[0] : undefined;
+  };
+  const total = pending.length;
   let finished = 0;
   await Promise.all(
     Array.from({ length: concurrency }, async () => {
-      while (next < pending.length) {
-        const job = pending[next++]!;
-        const record = await runJob(api, job, outDir);
+      while (pending.length > 0) {
+        const job = takeNext();
+        if (!job) {
+          await sleep(1_000);
+          continue;
+        }
+        const key = capped(job);
+        if (key) running.set(key, (running.get(key) ?? 0) + 1);
+        let record: RunRecord;
+        try {
+          record = await runJob(api, job, outDir);
+        } finally {
+          if (key) running.set(key, (running.get(key) ?? 1) - 1);
+        }
         appendFileSync(resultsFile, `${JSON.stringify(record)}\n`);
         finished += 1;
         const verdict = record.grade.pass ? "PASS" : `FAIL ${record.grade.category}`;
         console.log(
-          `[${finished}/${pending.length}] ${verdict} ${record.caseId} ${record.model}@${record.effort} #${record.repeat} ${record.chatUrl ?? record.error ?? ""}`,
+          `[${finished}/${total}] ${verdict} ${record.caseId} ${record.model}@${record.effort} #${record.repeat} ${record.chatUrl ?? record.error ?? ""}`,
         );
       }
     }),
   );
+  writeReport(outDir);
+}
+
+/**
+ * Regrades every recorded chat from its session events with the current
+ * catalogue and grader, without new chats. Write rows keep the verification
+ * they had; runs that failed before grading are left as they were.
+ */
+async function regradeAll(flags: Map<string, string>) {
+  const outDir = flags.get("out") ?? env("OPENGENI_EVAL_OUT");
+  const resultsFile = join(outDir, "results.jsonl");
+  const api = await new OpengeniApi(env("OPENGENI_EVAL_API_URL"), authFromEnv()).init();
+  const updated: RunRecord[] = [];
+  let changed = 0;
+  for (const record of readRecords(resultsFile)) {
+    const testCase = CASES.find((item) => item.id === record.caseId);
+    const timedOut = record.grade.reasons.includes("run timed out");
+    if (!testCase || !record.sessionId || record.error) {
+      updated.push(record);
+      continue;
+    }
+    try {
+      const { events } = await api.events(record.workspaceId, record.sessionId, 0);
+      const graded = gradeEvents(
+        testCase,
+        events,
+        timedOut,
+        record.verification,
+        join(outDir, "receipts", `${record.runId}.json`),
+      );
+      if (graded.grade.pass !== record.grade.pass) changed += 1;
+      updated.push({ ...record, ...graded });
+    } catch (error) {
+      console.warn(`regrade ${record.runId} failed: ${String(error)}`);
+      updated.push(record);
+    }
+  }
+  writeFileSync(resultsFile, updated.map((record) => `${JSON.stringify(record)}\n`).join(""));
+  console.log(`regraded ${updated.length} runs; ${changed} changed verdict`);
   writeReport(outDir);
 }
 
@@ -546,11 +680,12 @@ async function main() {
   }
   if (command === "models") {
     const api = await new OpengeniApi(env("OPENGENI_EVAL_API_URL"), authFromEnv()).init();
-    for (const cell of cellsFromConfig(api.clientConfig))
+    for (const cell of parseCells(flags.get("cells"), api.clientConfig))
       console.log(`${cell.model}@${cell.effort}`);
     return;
   }
   if (command === "run") return runAll(flags);
+  if (command === "regrade") return regradeAll(flags);
   if (command === "report") return writeReport(flags.get("out") ?? env("OPENGENI_EVAL_OUT"));
   console.log(readFileSync(new URL(import.meta.url), "utf8").split("*/")[0]);
 }

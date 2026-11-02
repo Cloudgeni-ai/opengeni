@@ -22,13 +22,22 @@ excluded from pass rates).
 
 ## Setup
 
-1. An organization with **API credits**. API work is paid from credits only;
-   a plan's monthly credit never pays for it.
+1. An organization that can run the chosen models. With an API key, credit
+   models are paid from purchased API credits only (a plan's monthly credit
+   never pays for API use). Models served through a connected subscription
+   (`codex/*` with a connected ChatGPT account) run without credits. A
+   signed-in test person (`OPENGENI_EVAL_LOGIN_EMAIL` and
+   `OPENGENI_EVAL_LOGIN_PASSWORD` instead of the key) is billed as app use.
 2. Two workspaces: one with the integrations connected, one with none.
-3. Test accounts for each service, seeded with the synthetic "Halcyon" fixtures
+3. In the connected workspace, set each connection's change tools to **Ask
+   first** (Capabilities → the connection → Tool permissions). Connector
+   writes run without approval under the default policy, and write rows
+   check the approval round trip. Mark a row `approval: "optional"` to accept
+   either.
+4. Test accounts for each service, seeded with the synthetic "Halcyon" fixtures
    that the catalogue's expected answers name (see the comment at the top of
    `catalogue.ts`). Use test accounts and synthetic data only.
-4. An API key for the organization.
+5. An API key for the organization.
 
 ```sh
 export OPENGENI_EVAL_API_URL=https://app.example.com
@@ -43,10 +52,21 @@ export VERIFY_LINEAR_API_KEY=...
 
 ```sh
 bun run eval:integrations list                       # every row (add --cases core for the grid set)
-bun run eval:integrations models                     # the grid: every credit model at every effort
+bun run eval:integrations models                     # every credit model at every effort (or --cells SPEC)
 bun run eval:integrations run --out results/grid --cells all --cases core --repeats 1 --concurrency 4
 bun run eval:integrations run --out results/ref --cells some-model@medium --cases all --repeats 2
 bun run eval:integrations report --out results/grid
+```
+
+`--cells` takes `all` (credit models at every effort), `subscription`
+(connected-subscription models at every effort), or comma-separated
+`model@effort`, where the effort may be `*` (every effort the model offers)
+or `default`. A smaller grid sweeps every effort for one or two models and
+runs the others at their defaults:
+
+```sh
+bun run eval:integrations run --out results/codex --cases core --repeats 2 \
+  --cells 'codex/gpt-6.1-sol@*,codex/gpt-6-luna@*,codex/gpt-6.1-terra@default,codex/gpt-6-astra@default'
 ```
 
 `--cases` takes `core`, `all`, or comma-separated ids or prefixes

@@ -3,7 +3,7 @@ import { CASES } from "./catalogue";
 import { gradeCase } from "./grade";
 import { INTEGRATIONS } from "./integrations";
 import { parseReceipts, type EventLike } from "./receipts";
-import { cellsFromConfig, selectCases, wilson } from "./run";
+import { cellsFromConfig, parseCells, selectCases, wilson } from "./run";
 import type { EvalCase } from "./types";
 
 const linearRead: EvalCase = {
@@ -123,6 +123,46 @@ describe("gradeCase", () => {
     });
     expect(grade.pass).toBe(false);
   });
+
+  test("names the integration from the MCP server info when the call has no family", () => {
+    const receipts = parseReceipts(
+      events(
+        {
+          type: "agent.toolCall.created",
+          payload: { id: "c1", name: "mcp_f00__list_issues", arguments: "{}" },
+        },
+        {
+          type: "agent.toolCall.output",
+          payload: {
+            id: "c1",
+            output:
+              '{"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"linear"}},"content":[{"text":"HAL-5 Checkout times out"}]}',
+          },
+        },
+        { type: "agent.message.completed", payload: { text: "HAL-5: Checkout times out." } },
+      ),
+    );
+    expect(receipts.tools[0]?.integration).toBe("linear");
+    expect(gradeCase(linearRead, receipts, null).pass).toBe(true);
+  });
+
+  test("names the integration from the call's display provider domain", () => {
+    const receipts = parseReceipts(
+      events(
+        {
+          type: "agent.toolCall.created",
+          payload: {
+            id: "c1",
+            name: "mcp_f00__save_issue",
+            arguments: "{}",
+            display: { connector: "Linear", providerDomain: "mcp.linear.app" },
+          },
+        },
+        { type: "agent.toolCall.output", payload: { id: "c1", output: '{"id":"HAL-9"}' } },
+      ),
+    );
+    expect(receipts.tools[0]?.integration).toBe("linear");
+  });
 });
 
 describe("catalogue", () => {
@@ -161,6 +201,29 @@ describe("grid", () => {
     expect(cells).toEqual([
       { model: "a", effort: "low" },
       { model: "a", effort: "high" },
+    ]);
+  });
+
+  test("cell specs select subscription models, every effort or the default", () => {
+    const config = {
+      models: [
+        { id: "a", cost: "credits", capabilities: { reasoning: { efforts: ["low", "high"] } } },
+        {
+          id: "codex/b",
+          cost: "subscription",
+          capabilities: { reasoning: { efforts: ["low", "max"], defaultEffort: "low" } },
+        },
+      ],
+    };
+    expect(parseCells("subscription", config)).toEqual([
+      { model: "codex/b", effort: "low" },
+      { model: "codex/b", effort: "max" },
+    ]);
+    expect(parseCells("a@*,codex/b@default,a@medium", config)).toEqual([
+      { model: "a", effort: "low" },
+      { model: "a", effort: "high" },
+      { model: "codex/b", effort: "low" },
+      { model: "a", effort: "medium" },
     ]);
   });
 

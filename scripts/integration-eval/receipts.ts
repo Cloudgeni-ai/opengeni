@@ -74,6 +74,22 @@ function accountLabelsFromOutputs(outputs: readonly string[]): Map<string, Integ
 const OGTOOL_CALL = /\bogtool\s+call\s+([A-Za-z0-9_.:/-]+)/;
 
 /**
+ * The MCP server's own name from a tool result (`_meta` serverInfo), such as
+ * "linear". Some model routes record connector calls without a tool family,
+ * and generic tool names (`list_issues`) name no integration on their own.
+ */
+export function mcpServerName(output: string | null): string | null {
+  if (!output) return null;
+  const meta = record(record(parseJson(output))._meta);
+  const name = record(meta["io.modelcontextprotocol/serverInfo"]).name;
+  if (typeof name === "string") return name;
+  return (
+    /"io\.modelcontextprotocol\/serverInfo"\s*:\s*\{\s*"name"\s*:\s*"([^"]+)"/.exec(output)?.[1] ??
+    null
+  );
+}
+
+/**
  * Rebuild tool calls, approvals, connect cards and the answer from a
  * session's forensic events. The events are the source of truth: grading
  * never trusts the answer text alone.
@@ -192,11 +208,20 @@ export function parseReceipts(events: readonly EventLike[]): Receipts {
     }
     const family = typeof payload.toolFamily === "string" ? payload.toolFamily : null;
     const display = record(payload.display);
+    const outputPayload = outputs.get(callId);
+    const output = outputPayload ? text(outputPayload.output) : null;
     let integration =
       (effectiveName === name ? integrationForFamily(family) : null) ??
+      (effectiveName === name && typeof display.providerDomain === "string"
+        ? integrationForFamily(`integration:${display.providerDomain}`)
+        : null) ??
       labelled.get(effectiveName) ??
       integrationForLabel(typeof display.serverLabel === "string" ? display.serverLabel : null) ??
-      integrationForToolName(effectiveName);
+      (effectiveName === name
+        ? integrationForLabel(typeof display.connector === "string" ? display.connector : null)
+        : null) ??
+      integrationForToolName(effectiveName) ??
+      integrationForLabel(mcpServerName(output));
     if (!integration && name === "exec_command") {
       const command = typeof record(args).cmd === "string" ? (record(args).cmd as string) : "";
       const path = OGTOOL_CALL.exec(command)?.[1];
@@ -206,8 +231,6 @@ export function parseReceipts(events: readonly EventLike[]): Receipts {
           labelled.get(shortToolName(path)) ?? integrationForLabel(path.replace(/[._/]/g, " "));
       }
     }
-    const outputPayload = outputs.get(callId);
-    const output = outputPayload ? text(outputPayload.output) : null;
     tools.push({
       callId,
       name,
