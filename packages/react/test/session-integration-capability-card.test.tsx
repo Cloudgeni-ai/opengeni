@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { renderToStaticMarkup } from "react-dom/server";
 import { mountWithRealScheduling, registerDom } from "./render-hook";
 
 registerDom();
@@ -283,4 +284,22 @@ test("the card never waits for leftovers to finish", async () => {
   } finally {
     await view.unmount();
   }
+});
+
+test("a SharePoint setup card shows the SharePoint mark and name, not a letter", () => {
+  // Server markup: the test DOM cannot load the bundled file, which would show the fallback.
+  const html = renderToStaticMarkup(
+    <SessionIntegrationCapabilityCard
+      client={backend().client as never}
+      workspaceId="ws-1"
+      sessionId="session-1"
+      capabilityId="api:integration:microsoft-sharepoint"
+      name="SharePoint"
+      returnUrl="https://app.example.com/chat"
+    />,
+  );
+  expect(html).toMatch(
+    /class="og-session-capability-logo"[^>]*><img [^>]*src="[^"]*sharepoint[^"]*"/,
+  );
+  expect(html).toContain("Connect SharePoint");
 });

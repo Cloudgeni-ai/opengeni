@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { electronStub } from "./electron-stub";
+import { electronStub, FakeBrowserWindow, FakeWebContents } from "./electron-stub";
 
 mock.module("electron", () => electronStub);
 
@@ -33,7 +33,8 @@ import { handleMeetingDetectionIpc } from "../src/main/meeting-detection/ipc";
 import { ENGLISH_MEETING_WORDS } from "../src/main/meeting-detection/words";
 
 // These import Electron, which the stub stands in for.
-const { cardAnswer, cardBounds } = await import("../src/main/meeting-detection/card");
+const { cardAnswer, cardBounds, MeetingPromptCard } =
+  await import("../src/main/meeting-detection/card");
 const { meetingDetectionFileLog } = await import("../src/main/meeting-detection/electron");
 const { meetingDetectionBridge } = await import("../src/preload/meeting-detection");
 
@@ -789,5 +790,81 @@ describe("meetingDetectionBridge", () => {
     ]);
     bridge.setRecording(true);
     expect(ipc.sent.at(-1)).toEqual([DESKTOP_IPC.meetingDetectionRecording, true]);
+  });
+});
+
+describe("the card outlives its page", () => {
+  const call: MeetingPrompt = {
+    kind: "record",
+    app: { id: "zoom", name: "Zoom", browser: false, title: "Zoom meeting" },
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+  function card(answer: (code: string) => Promise<unknown>) {
+    FakeBrowserWindow.made = [];
+    FakeWebContents.answer = answer;
+    const logged: string[] = [];
+    const view = new MeetingPromptCard({
+      platform: "darwin",
+      icon: () => null,
+      log: (message) => logged.push(message),
+      answerMs: 20,
+    });
+    const showing = () => FakeBrowserWindow.made.filter((window) => window.visible);
+    return { view, logged, showing };
+  }
+  const unanswered = (code: string) =>
+    code === "answer()" ? new Promise<unknown>(() => undefined) : Promise.resolve(120);
+
+  test("a page that died while hidden: the next question shows in a fresh window", async () => {
+    const c = card(unanswered);
+    c.view.show(call, () => undefined).close();
+    await settle();
+    const first = FakeBrowserWindow.made[0]!;
+    first.webContents.emit("render-process-gone", {}, { reason: "oom", exitCode: 0 });
+
+    c.view.show(call, () => undefined);
+    await settle();
+
+    expect(first.destroyed).toBe(true);
+    expect(FakeBrowserWindow.made).toHaveLength(2);
+    expect(c.showing()).toEqual([FakeBrowserWindow.made[1]!]);
+    expect(c.logged.join("\n")).toContain("oom");
+    c.view.destroy();
+  });
+
+  test("a page that dies while asking asks again in a fresh window, which answers", async () => {
+    const c = card(unanswered);
+    const outcomes: MeetingPromptOutcome[] = [];
+    c.view.show(call, (outcome) => outcomes.push(outcome));
+    await settle();
+    FakeWebContents.answer = (code) =>
+      code === "answer()" ? Promise.resolve("act/1") : unanswered(code);
+    FakeBrowserWindow.made[0]!.webContents.emit("unresponsive");
+    await settle();
+
+    expect(FakeBrowserWindow.made).toHaveLength(2);
+    expect(FakeBrowserWindow.made[0]!.destroyed).toBe(true);
+    expect(FakeBrowserWindow.made[1]!.shows).toBe(1);
+    // The fresh window's button answered the question, which hid the card.
+    expect(outcomes).toEqual(["chosen"]);
+    expect(c.showing()).toEqual([]);
+    c.view.destroy();
+  });
+
+  test("a render that never answers is shown once more in a fresh window", async () => {
+    const c = card(unanswered);
+    c.view.show(call, () => undefined).close();
+    await settle();
+    FakeBrowserWindow.made[0]!.webContents.answer = () => new Promise(() => undefined);
+
+    c.view.show(call, () => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(FakeBrowserWindow.made[0]!.destroyed).toBe(true);
+    expect(c.showing()).toEqual([FakeBrowserWindow.made[1]!]);
+    expect(c.logged.some((message) => message.includes("failed"))).toBe(true);
+    c.view.destroy();
+    FakeWebContents.answer = async () => 200;
   });
 });
