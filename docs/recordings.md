@@ -1147,7 +1147,7 @@ this; their `language` option (and `ComposerTranscriptionControl`'s
 `useVoiceInput`'s `keyterms` the words it listens for. Taking
 the text deletes the dictation first and inserts the text only
 if that delete succeeded or couldn't reach the server, so two tabs never
-insert the same speech twice. Cancel or Escape deletes the dictation, while
+insert the same speech twice. Cancel deletes the dictation, while
 it records or while it is being heard, so nothing offers it again; a host
 that keeps speech (the desktop app) gets its copy first, through `onAudio`
 with `cancelled: true`, when it is longer than three seconds. Something
@@ -1181,7 +1181,14 @@ only in the app's recent dictations. The pieces:
 - The person can list a vocabulary (names and terms, one per line) that
   every dictation listens for, and set two more shortcuts: one that
   transcribes the last dictation again and types it, and one that cancels
-  the dictation in progress (Escape always does).
+  the dictation in progress, as the window's Cancel button does. Escape is
+  left to the app the person is typing in.
+- Each shortcut can also pick its own model from the workspace's
+  `voiceInput.models` (client config). A dictation recording may name a
+  `providerId` and `model` in its `transcription`; the server accepts only a
+  model it offers for dictation, and that dictation is heard by exactly
+  that model, with no fallback to another provider. A dictation that names
+  none uses the workspace's voice input provider, as before.
 - The last 50 dictations are kept on the computer, each with its text and
   its speech (up to 32 MB each, readable only by the person). From the
   settings page the person can copy a text, play its speech, or transcribe

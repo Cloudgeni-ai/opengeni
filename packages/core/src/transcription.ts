@@ -1,5 +1,9 @@
 import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
-import type { TranscribeAudioResponse, VoiceInputErrorCode } from "@opengeni/contracts";
+import type {
+  DictationModelOption,
+  TranscribeAudioResponse,
+  VoiceInputErrorCode,
+} from "@opengeni/contracts";
 import type { CreditDebitAttribution, Database, UsageEventProcessingResidency } from "@opengeni/db";
 import type { RecordingTranscriptionErrorCode } from "./recording-transcription";
 
@@ -38,6 +42,11 @@ export type TranscriptionRequest = {
   providerDeadlineAt?: Date | undefined;
   /** Exact provider selected before a resumable segment is first sent upstream. */
   providerId?: string | undefined;
+  /**
+   * The exact model on `providerId` a dictation named; the provider's own
+   * dictation model when omitted. A named model never falls over to another.
+   */
+  model?: string | undefined;
   preferredProvider?: string | null | undefined;
   fallbackEnabled?: boolean | undefined;
   excludedProviders?: readonly string[] | undefined;
@@ -255,6 +264,8 @@ export type TranscriptionService = {
   /** True when at least one ready provider can serve requests. */
   available(context?: TranscriptionAvailabilityContext): boolean | Promise<boolean>;
   availableProviderIds?(context: TranscriptionAvailabilityContext): Promise<string[]>;
+  /** Every model a dictation may name, of each ready provider, in the deployment's order. */
+  availableModels?(context: TranscriptionAvailabilityContext): Promise<DictationModelOption[]>;
   /** Select one provider before a durable segment attempt; retries pin this id. */
   selectProvider?(
     context: TranscriptionAvailabilityContext,
