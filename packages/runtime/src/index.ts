@@ -10352,6 +10352,8 @@ export type RunAgentStreamOptions = {
   onSandboxSessionReady?: (session: SandboxSessionLike) => Promise<void> | void;
   contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
+  /** Drain completed SDK events before the host raises this compaction signal. */
+  onCompactionHandover?: (error: import("./context-compaction").CompactionNeededError) => void;
   /** Stored-size and per-request image compaction triggers. */
   contextHistoryFootprint?: HistoryFootprintCompactionOptions;
   // Host-managed git credential renewal registration. Called only after the
@@ -10603,8 +10605,10 @@ export async function runAgentStream(
         ...(overrides.modelPreemption ? { modelPreemption: overrides.modelPreemption } : {}),
       },
       () =>
-        withPreparedCompactionRequest(agent, () =>
-          runAgentStreamInternal(agent, input, settings, overrides, scope),
+        withPreparedCompactionRequest(
+          agent,
+          () => runAgentStreamInternal(agent, input, settings, overrides, scope),
+          overrides.onCompactionHandover,
         ),
     );
     // Observe the SDK's own settlement promise before exposing the stream. Do

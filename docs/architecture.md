@@ -376,6 +376,9 @@ Replay: [notices/catalogs](run-lifecycle.md),
 shares prepared prefixes with both Responses compaction modes; Chat retains
 its transcript adapter. Both modes retain recent system-role input batches
 within existing budgets, preserving chronological accepted goal snapshots.
+At a worker compaction boundary, the SDK finishes through model-step handover
+so queued tool events drain before the original compaction signal is raised.
+Tool outputs and receipts are published before compaction can retire their history.
 
 Failed-session retry (`packages/db/src/session-retry.ts`) fences failure identity,
 reserves actor-scoped receipts, rejects unresolved execution/safety refusals,
