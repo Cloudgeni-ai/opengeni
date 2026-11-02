@@ -14,6 +14,11 @@ privacy read withholds output rather than assuming a page is public.
 Only password and primary card-field values enter known-value memory; hidden
 metadata, private prose, expiry options and field labels do not. Card numbers
 and security codes remain remembered even when unrelated values age out.
+A text that is a whole address keeps its scheme, host and port (its user info,
+path, query and fragment are still masked), so a tab's address remains a valid
+URL even when a short security code's digits appear in its port. Elsewhere a
+remembered number is masked even where other digits touch it, because pages
+join neighbouring elements (a card number beside its expiry) without spaces.
 
 Once payment fields or known card data are encountered, that browser tab withholds
 screenshots, live-view images and recording frames. Unrelated tabs remain usable.

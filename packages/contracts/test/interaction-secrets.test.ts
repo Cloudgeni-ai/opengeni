@@ -313,6 +313,64 @@ describe("redactInteractionSecretValues", () => {
       field: INTERACTION_REDACTED_SECRET,
     });
   });
+
+  test("a known card number or security code joined to other digits is still hidden", () => {
+    // Synthetic fixtures. Pages join neighbouring elements without spaces (a
+    // card number beside its expiry), so a known number is masked even where
+    // other digits touch it; only an address's host and port are kept.
+    const secrets = { number: "4000000000000002", cvc: "731" };
+    expect(
+      redactInteractionSecretValues(
+        {
+          joined: "40000000000000021227",
+          groupedJoined: "4000 0000 0000 000212/27",
+          cvcJoined: "CVC7311227",
+          encoded: "https://example.test/pay?cvc%20731&n=4000%200000%200000%200002",
+          clipped: "Card 40000000",
+        },
+        secrets,
+      ),
+    ).toEqual({
+      joined: `${INTERACTION_REDACTED_SECRET}1227`,
+      groupedJoined: `${INTERACTION_REDACTED_SECRET}12/27`,
+      cvcJoined: `CVC${INTERACTION_REDACTED_SECRET}1227`,
+      encoded: `https://example.test/pay?cvc%20${INTERACTION_REDACTED_SECRET}&n=${INTERACTION_REDACTED_SECRET}`,
+      clipped: `Card ${INTERACTION_REDACTED_SECRET}`,
+    });
+  });
+
+  test("an address keeps its host and port but not a typed value elsewhere in it", () => {
+    const secrets = {
+      cvc: "731",
+      pan: "4000000000000002",
+      password: PASSWORD,
+      atPassword: "fake@pass-word-9",
+    };
+    const result = redactInteractionSecretValues(
+      {
+        url: "http://127.0.0.1:731/pay/731?card=4000000000000002#731",
+        devServer: "http://localhost:4000",
+        host: "https://731.example.test/",
+        userInfo: `https://user:${PASSWORD}@example.test/`,
+        atUserInfo: "https://user:fake@pass-word-9@example.test",
+        ipv6: "http://[::1]:731/731",
+        text: "Opened http://127.0.0.1:731/ for 731",
+      },
+      secrets,
+    );
+    expect(result).toEqual({
+      url: `http://127.0.0.1:731/pay/${INTERACTION_REDACTED_SECRET}?card=${INTERACTION_REDACTED_SECRET}#${INTERACTION_REDACTED_SECRET}`,
+      devServer: "http://localhost:4000",
+      host: "https://731.example.test/",
+      userInfo: `https://user:${INTERACTION_REDACTED_SECRET}@example.test/`,
+      atUserInfo: `https://user:${INTERACTION_REDACTED_SECRET}@example.test`,
+      ipv6: `http://[::1]:731/${INTERACTION_REDACTED_SECRET}`,
+      // Only a text that is a whole address keeps its host.
+      text: `Opened http://127.0.0.1:${INTERACTION_REDACTED_SECRET}/ for ${INTERACTION_REDACTED_SECRET}`,
+    });
+    for (const url of [result.url, result.devServer, result.host, result.userInfo, result.ipv6])
+      expect(() => new URL(url)).not.toThrow();
+  });
 });
 
 describe("passkey sync contracts", () => {
