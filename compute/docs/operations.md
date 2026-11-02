@@ -357,7 +357,19 @@ installs three units:
 - `compute-host.service`, the agent, which checks before every start that
   the mounted state volume is the recorded one and that its certificate,
   Firecracker, kernel and base image are there (`check-host`), and runs
-  with `KillMode=process` so a restart leaves its VMs running.
+  with `KillMode=process` so a restart leaves its VMs running. Each start
+  records what it uses (`agent-inputs`: the release, `installed.env`,
+  `host.env`, `ca.pem`, the base image and the unit as systemd loaded it)
+  under `/run`, with the start's invocation id, and `install.sh` restarts
+  an agent only when that changed, when the running agent's start is not
+  the one recorded (a start by an earlier release's unit after a rollback
+  records nothing), or when the agent does not answer within a minute of
+  being left running; it logs why it restarts. So the startup script that
+  installs again at every boot on GCP leaves the agent systemd just
+  started running, rather than stopping its lease renewals and cutting
+  short the wakes it began. Files `host.env` names (such as credentials)
+  and `systemctl set-environment` are not part of what is recorded: after
+  changing only those, restart the agent yourself.
 
 #### A host that shares its machine
 
@@ -1151,7 +1163,8 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   `--config`, the installed
   configuration stays):
   it installs the release beside the old ones, points
-  `/opt/compute/current` at it and restarts the agent; VMs keep running.
+  `/opt/compute/current` at it and restarts the agent (unless it runs all
+  of that already); VMs keep running.
   A release whose binary does not run on the host is refused first, and
   the running release, guard and agent are left as they are: the guard
   handed over to a binary that cannot start would let the watchdog reset
