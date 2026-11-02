@@ -385,7 +385,7 @@ export function ComposerMobilePlusPanel(
             >
               <SettingsIcon className="size-4" />
               Chat settings
-              <DropdownMenuMeta>Agent tab</DropdownMenuMeta>
+              <DropdownMenuMeta>Settings tab</DropdownMenuMeta>
             </DropdownMenuItem>
           ) : props.draftChatSettings ? (
             <DropdownMenuItem

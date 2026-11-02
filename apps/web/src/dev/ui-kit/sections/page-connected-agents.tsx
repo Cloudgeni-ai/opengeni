@@ -297,10 +297,10 @@ export default function PageConnectedAgentsSection() {
   return (
     <KitSection sectionKey="page-connected-agents">
       <KitBlock
-        title="Connected agents"
-        description="Organization settings > Connected agents. How to add the MCP server to each client, then the agents: each row says whose agent it is, what it can do and where. A row opens the agent's page."
+        title="Connected apps"
+        description="Organization settings > Connected apps. How to add the MCP server to each client, then the agents: each row says whose agent it is, what it can do and where. A row opens the agent's page."
       >
-        <PagePreview label="Connected agents" height={980}>
+        <PagePreview label="Connected apps" height={980}>
           <AgentsPreview initial={CONNECTIONS} />
         </PagePreview>
       </KitBlock>

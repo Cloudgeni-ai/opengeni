@@ -26,8 +26,8 @@ import { ProjectGlyph } from "../rail/project-glyph";
 import type { RunsOnChoices } from "./new-session-settings-menu";
 
 /*
- * The strip above a new chat's message: where the chat is filed (its project),
- * where it runs and who can see it. Each chip shows only when there is
+ * The strip above a new chat's message: who answers (Opengeni or an agent),
+ * where the chat is filed (its project), where it runs and who can see it. Each chip shows only when there is
  * something to choose, so the composer's footer stays an action row.
  */
 
@@ -49,11 +49,14 @@ export type SessionSetupSetting = {
 // per-chat settings live under “+” at every width.
 export function SessionSetupStrip({
   disabled,
+  agent,
   project,
   runsOn,
   visibility,
 }: {
   disabled: boolean;
+  /** Who answers: the agent chip, first in the strip. */
+  agent?: ReactNode | undefined;
   project: {
     channels: Channel[];
     selectedChannelId: string | null;
@@ -71,6 +74,7 @@ export function SessionSetupStrip({
       // to a letter; one chip longer than the row still truncates.
       className="flex min-w-0 flex-wrap items-center gap-1.5 border-b border-border/70 px-3 py-2 sm:px-4"
     >
+      {agent}
       {project ? (
         <SessionFolderPicker
           channels={project.channels}

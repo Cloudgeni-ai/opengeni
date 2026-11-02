@@ -1930,7 +1930,7 @@ function SessionDockPanel(props: SessionDockProps) {
   if (props.session) {
     trailingTabs.push({
       id: "agent",
-      label: "Agent",
+      label: "Settings",
       icon: <BotIcon />,
       content: (
         <LazyPart fallback={<LoadingPanel label="Opening agent settings" />}>

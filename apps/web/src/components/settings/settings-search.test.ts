@@ -51,7 +51,7 @@ const SECTIONS: SettingsRailSection[] = [
           },
           {
             id: "organization:agents",
-            label: "Connected agents",
+            label: "Connected apps",
             icon: BotIcon,
             link: link({ section: "agents" }),
           },
@@ -111,10 +111,10 @@ describe("settings search", () => {
 
   test("finds the MCP setup by the words people use for it", () => {
     for (const query of ["mcp", "claude code", "Cursor", "coding agent", "install"]) {
-      expect(labels(query)).toContain("Connected agents");
+      expect(labels(query)).toContain("Connected apps");
     }
     // The setup by its own name first, then its page.
-    expect(labels("mcp").slice(0, 2)).toEqual(["Opengeni MCP server", "Connected agents"]);
+    expect(labels("mcp").slice(0, 2)).toEqual(["Opengeni MCP server", "Connected apps"]);
     expect(labels("opengeni mcp")[0]).toBe("Opengeni MCP server");
   });
 

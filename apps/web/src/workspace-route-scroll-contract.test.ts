@@ -9,7 +9,6 @@ const workspaceRouteContracts = {
   workspaceIndexRoute: { kind: "redirect" },
   workspaceAgentRoute: { kind: "redirect" },
   workspaceRetiredPriorityRoute: { kind: "redirect" },
-  workspaceRetiredAgentsRoute: { kind: "redirect" },
   workspaceSessionsRoute: {
     kind: "self-managed",
     source: "../../../packages/react/src/app/routes/sessions-index.tsx",
@@ -43,7 +42,12 @@ const workspaceRouteContracts = {
   workspaceAutomationDetailRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceAutomationEditRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceAutomationTemplatesRoute: { kind: "page", source: "routes/automations.tsx" },
-  workspaceBotTemplatesRoute: { kind: "page", source: "routes/bot-templates.tsx" },
+  workspaceAgentsRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentNewRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentDetailRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentEditRoute: { kind: "page", source: "routes/agents.tsx" },
+  // Bot templates became agents.
+  workspaceBotTemplatesRoute: { kind: "redirect" },
   workspaceEventSourcesRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceEventSourceNewRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceEventSourceDetailRoute: { kind: "page", source: "routes/automations.tsx" },

@@ -2069,7 +2069,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           submission: effectiveSubmission,
           instructions: options?.instructions,
           installedSkillIds: options?.installedSkillIds,
-          bot: options?.bot,
+          agent: options?.agent,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
           newSessionDraftToolPolicy: options?.newSessionDraftToolPolicy,

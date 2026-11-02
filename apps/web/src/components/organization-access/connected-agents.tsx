@@ -271,7 +271,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     );
   } else if (visible === null) {
     body = (
-      <RowList label="Connected agents" columns={COLUMNS} busy flush>
+      <RowList label="Connected apps" columns={COLUMNS} busy flush>
         <ListRowSkeleton count={2} />
       </RowList>
     );
@@ -285,7 +285,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     );
   } else {
     body = (
-      <RowList label="Connected agents" columns={COLUMNS} nameLabel="Agent" flush>
+      <RowList label="Connected apps" columns={COLUMNS} nameLabel="App" flush>
         {visible.map((connection) => {
           const status = mcpConnectionStatus(connection);
           return (
@@ -349,7 +349,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
         />
       ) : null}
       <Section
-        title={canManageAll ? "All agents" : "Your agents"}
+        title={canManageAll ? "All apps" : "Your apps"}
         description={
           canManageAll
             ? "Outside agents people connected to this organization."
@@ -495,7 +495,7 @@ export function ConnectedAgentPage({
     () => Boolean(connection && draft && !samePolicy(connection.policy, draft)),
     [connection, draft],
   );
-  const back = { label: "Connected agents", onClick: onClose };
+  const back = { label: "Connected apps", onClick: onClose };
 
   if (!connection || !draft) {
     return (

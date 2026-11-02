@@ -3,7 +3,7 @@
 //   /                                        → remembered/default workspace redirect
 //   /workspaces/:id                          → sessions redirect
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
-//   /workspaces/:id/priority, /agents        → sessions redirect (retired "For you" and Agents pages)
+//   /workspaces/:id/priority                 → sessions redirect (retired "For you" page)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
 //   /sessions/:sessionId                     → authorized compatibility redirect
@@ -24,7 +24,11 @@
 //   /workspaces/:id/automations/:automationId/edit → edit automation
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
 //   /workspaces/:id/automations/templates    → templates: built in and saved in the workspace
-//   /workspaces/:id/bot-templates            → bot templates saved in the workspace (start, import, export)
+//   /workspaces/:id/agents                   → agents (all or yours; new, import)
+//   /workspaces/:id/agents/new               → new agent (?sourceSessionId: Make this an agent)
+//   /workspaces/:id/agents/:agentId          → one agent (chats, instructions, memory, Slack)
+//   /workspaces/:id/agents/:agentId/edit     → edit agent
+//   /workspaces/:id/bot-templates            → old links, redirect to agents
 //   /workspaces/:id/schedules[/…]            → old links, redirect to the same automation page
 //   /workspaces/:id/meetings                 → meetings list with the recorder
 //   /workspaces/:id/meetings/:recordingId    → one meeting (player, transcript, speakers)
@@ -264,10 +268,10 @@ const LazyAutomationTemplatesRoute = lazyRouteComponent(
   () => import("@/routes/automations"),
   "AutomationTemplatesRoute",
 );
-const LazyBotTemplatesRoute = lazyRouteComponent(
-  () => import("@/routes/bot-templates"),
-  "BotTemplatesRoute",
-);
+const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
+const LazyAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentRoute");
+const LazyNewAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "NewAgentRoute");
+const LazyEditAgentRoute = lazyRouteComponent(() => import("@/routes/agents"), "EditAgentRoute");
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
   () => import("@/routes/playground"),
@@ -539,16 +543,11 @@ const workspaceAgentRoute = createRoute({
   path: "agent",
   component: WorkspaceIndexRedirect,
 });
-// The "For you" feed and the Agents page were retired. Attention now lives in
-// the sessions rail ("Needs you" view), so their old links land on sessions.
+// The "For you" feed was retired. Attention now lives in the sessions rail
+// ("Needs you" view), so its old links land on sessions.
 const workspaceRetiredPriorityRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "priority",
-  component: WorkspaceIndexRedirect,
-});
-const workspaceRetiredAgentsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "agents",
   component: WorkspaceIndexRedirect,
 });
 const workspaceSessionsRoute = createRoute({
@@ -784,10 +783,35 @@ const workspaceAutomationTemplatesRoute = createRoute({
   path: "automations/templates",
   component: AutomationTemplates,
 });
+const workspaceAgentsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents",
+  component: Agents,
+});
+const workspaceAgentNewRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/new",
+  validateSearch: (search: Record<string, unknown>): { sourceSessionId?: string } =>
+    typeof search.sourceSessionId === "string" && search.sourceSessionId.length > 0
+      ? { sourceSessionId: search.sourceSessionId }
+      : {},
+  component: AgentNew,
+});
+const workspaceAgentDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/$agentId",
+  component: AgentDetail,
+});
+const workspaceAgentEditRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/$agentId/edit",
+  component: AgentEdit,
+});
+// Bot templates became agents; old links land on Agents.
 const workspaceBotTemplatesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "bot-templates",
-  component: BotTemplates,
+  component: BotTemplatesRedirect,
 });
 // Automations were called Schedules; their links in old messages and
 // bookmarks still land on the same page.
@@ -1072,7 +1096,6 @@ const routeTree = rootRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
     workspaceRetiredPriorityRoute,
-    workspaceRetiredAgentsRoute,
     workspaceSessionsRoute,
     workspaceSessionRoute,
     workspaceSecretsRoute.addChildren([
@@ -1098,6 +1121,10 @@ const routeTree = rootRoute.addChildren([
     workspaceEventSourceNewRoute,
     workspaceEventSourceDetailRoute,
     workspaceAutomationTemplatesRoute,
+    workspaceAgentsRoute,
+    workspaceAgentNewRoute,
+    workspaceAgentDetailRoute,
+    workspaceAgentEditRoute,
     workspaceBotTemplatesRoute,
     workspaceLegacySchedulesRoute,
     workspaceLegacyScheduleNewRoute,
@@ -1356,9 +1383,30 @@ function AutomationTemplates() {
   return <LazyAutomationTemplatesRoute workspaceId={workspaceId} />;
 }
 
-function BotTemplates() {
+function Agents() {
+  const { workspaceId } = workspaceAgentsRoute.useParams();
+  return <LazyAgentsRoute workspaceId={workspaceId} />;
+}
+
+function AgentNew() {
+  const { workspaceId } = workspaceAgentNewRoute.useParams();
+  const { sourceSessionId } = workspaceAgentNewRoute.useSearch();
+  return <LazyNewAgentRoute workspaceId={workspaceId} sourceSessionId={sourceSessionId} />;
+}
+
+function AgentDetail() {
+  const { workspaceId, agentId } = workspaceAgentDetailRoute.useParams();
+  return <LazyAgentRoute workspaceId={workspaceId} agentId={agentId} />;
+}
+
+function AgentEdit() {
+  const { workspaceId, agentId } = workspaceAgentEditRoute.useParams();
+  return <LazyEditAgentRoute workspaceId={workspaceId} agentId={agentId} />;
+}
+
+function BotTemplatesRedirect() {
   const { workspaceId } = workspaceBotTemplatesRoute.useParams();
-  return <LazyBotTemplatesRoute workspaceId={workspaceId} />;
+  return <Navigate to="/workspaces/$workspaceId/agents" params={{ workspaceId }} replace />;
 }
 
 function LegacyReadOnlyChatsRedirect() {

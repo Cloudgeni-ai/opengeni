@@ -138,6 +138,7 @@ import { useAppContext, useLatestCallback } from "../app-context";
 import { useBrowserAccountBridgeBlocker } from "../lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
+  composerLaunchAgentId,
   composerLaunchSearchKey,
   continueArchivedChatMessage,
   modelProvidedAfterLaunch,
@@ -236,9 +237,13 @@ import {
 } from "./sessions-index-hydration";
 import type { SandboxBackend, Session } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
-import { BotLaunchStrip, type BotLaunchState } from "../components/bots/bot-launch-strip";
-import { BotTemplateShortcuts } from "../components/bots/bot-template-shortcuts";
-import { useBotTemplates } from "../lib/bot-templates";
+import {
+  ComposerAgentChip,
+  type ComposerAgentSelection,
+} from "../components/agents/composer-agent-chip";
+import { agentAvatar } from "../lib/agent-avatar";
+import { rememberAgentPrefill, rememberedAgentPrefill, useAgents } from "../lib/agents";
+import type { Agent } from "@opengeni/sdk";
 import { useWindowBarTitle } from "../../ui/window-bar-title";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -355,50 +360,55 @@ function SessionsIndexRouteContent({
   const [projectAudienceDraft, setProjectAudienceDraft] = useState<ProjectAudience>("workspace");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
-  // ?botTemplateId= starts this chat as a bot: the template's setup
-  // instructions fill the composer (to read and change before sending), and
-  // the chat is created with its name, description and avatar, kept live.
-  const launchBotTemplateId = launch.botTemplateId;
-  const workspaceBotTemplates = useBotTemplates(workspaceId);
-  const [botLaunch, setBotLaunch] = useState<{
-    id: string;
-    state: BotLaunchState;
-  } | null>(null);
+  // ?agent= (or an older ?botTemplateId= link) starts this chat with an
+  // agent: its First message fills the composer (to read and change before
+  // sending), and the chat follows the agent's Instructions and shows its icon.
+  const launchAgentId = composerLaunchAgentId(launch);
+  const workspaceAgents = useAgents(workspaceId);
+  const [agentLaunch, setAgentLaunch] = useState<
+    | { id: string; state: { kind: "loading" } }
+    | { id: string; state: { kind: "ready"; agent: Agent } }
+    | { id: string; state: { kind: "error"; message: string } }
+    | null
+  >(null);
   useEffect(() => {
-    if (!launchBotTemplateId) {
-      setBotLaunch(null);
+    if (!launchAgentId) {
+      setAgentLaunch(null);
       return;
     }
     let live = true;
-    setBotLaunch({ id: launchBotTemplateId, state: { kind: "loading" } });
-    context.client.getBotTemplate(workspaceId, launchBotTemplateId).then(
-      (template) => {
-        if (live)
-          setBotLaunch({
-            id: launchBotTemplateId,
-            state: { kind: "ready", template },
-          });
+    setAgentLaunch({ id: launchAgentId, state: { kind: "loading" } });
+    context.client.getAgent(workspaceId, launchAgentId).then(
+      (agent) => {
+        if (live) setAgentLaunch({ id: launchAgentId, state: { kind: "ready", agent } });
       },
       (error: unknown) => {
-        if (live)
-          setBotLaunch({
-            id: launchBotTemplateId,
-            state: { kind: "error", message: userErrorText(error) },
-          });
+        if (!live) return;
+        const message = userErrorText(error);
+        setAgentLaunch({ id: launchAgentId, state: { kind: "error", message } });
+        toast.error("Couldn't open the agent", { description: message });
       },
     );
     return () => {
       live = false;
     };
-  }, [context.client, launchBotTemplateId, workspaceId]);
-  const botTemplate = botLaunch?.state.kind === "ready" ? botLaunch.state.template : null;
-  const newSessionBot = botTemplate
-    ? {
-        name: botTemplate.name,
-        description: botTemplate.description,
-        avatar: botTemplate.avatar,
-      }
+  }, [context.client, launchAgentId, workspaceId]);
+  const launchedAgent = agentLaunch?.state.kind === "ready" ? agentLaunch.state.agent : null;
+  const newSessionAgent = launchedAgent
+    ? { id: launchedAgent.id, avatar: agentAvatar(launchedAgent) }
     : undefined;
+  const agentSelection: ComposerAgentSelection | null = !agentLaunch
+    ? null
+    : agentLaunch.state.kind === "ready"
+      ? {
+          kind: "ready",
+          id: agentLaunch.id,
+          name: agentLaunch.state.agent.name,
+          avatar: agentAvatar(agentLaunch.state.agent),
+        }
+      : agentLaunch.state.kind === "error"
+        ? { kind: "error", id: agentLaunch.id, message: agentLaunch.state.message }
+        : { kind: "loading", id: agentLaunch.id };
   const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
@@ -1388,7 +1398,7 @@ function SessionsIndexRouteContent({
                     installedSkillIds: launch.skillCapabilityId
                       ? [launch.skillCapabilityId]
                       : undefined,
-                    bot: newSessionBot,
+                    agent: newSessionAgent,
                     startMode: "realtime",
                     expectedNewSessionDraftRevision: flushed.revision,
                     newSessionDraftToolPolicy: persistedToolPolicy,
@@ -1470,7 +1480,7 @@ function SessionsIndexRouteContent({
                   installedSkillIds: launch.skillCapabilityId
                     ? [launch.skillCapabilityId]
                     : undefined,
-                  bot: newSessionBot,
+                  agent: newSessionAgent,
                   expectedNewSessionDraftRevision: flushed.revision,
                   newSessionDraftToolPolicy: persistedToolPolicy,
                   agentLearning: draft.agentLearning,
@@ -1595,54 +1605,64 @@ function SessionsIndexRouteContent({
     },
   );
 
-  // A bot template's setup instructions fill an empty composer once its saved
-  // draft has loaded, so the remote draft cannot overwrite them. Text the
-  // person already typed stays; they can still start the bot with it.
-  const prefilledBotTemplateRef = useRef<string | null>(null);
-  // The instructions this page put in the composer, so leaving the bot launch
-  // (dismissing it, or a link without the template) takes them out again
-  // instead of leaving them behind as an ordinary chat's first message.
-  const prefilledBotInstructionsRef = useRef<string | null>(null);
-  const fillBotInstructions = useCallback((instructions: string) => {
-    prefilledBotInstructionsRef.current = instructions;
-    setMessage(instructions);
-  }, []);
+  // An agent's First message fills an empty composer once its saved draft has
+  // loaded, so the remote draft cannot overwrite it. Text the person already
+  // typed stays; they can still start the chat with it.
+  const prefilledAgentRef = useRef<string | null>(null);
+  // The text this page put in the composer, so switching agents or going back
+  // to Opengeni replaces or takes it out instead of leaving it behind.
+  const prefilledTextRef = useRef<string | null>(null);
+  const fillAgentFirstMessage = useCallback(
+    (text: string) => {
+      prefilledTextRef.current = text || null;
+      rememberAgentPrefill(workspaceId, text || null);
+      setMessage(text);
+    },
+    [workspaceId],
+  );
   useEffect(() => {
-    if (!botTemplate || newSessionDraft.loading) return;
-    if (prefilledBotTemplateRef.current === botTemplate.id) return;
-    prefilledBotTemplateRef.current = botTemplate.id;
-    if (message.trim().length === 0 || message === botTemplate.setupInstructions) {
-      fillBotInstructions(botTemplate.setupInstructions);
-    } else {
+    if (!launchedAgent || newSessionDraft.loading) return;
+    if (prefilledAgentRef.current === launchedAgent.id) return;
+    prefilledAgentRef.current = launchedAgent.id;
+    const firstMessage = launchedAgent.firstMessage;
+    if (
+      message.trim().length === 0 ||
+      message === firstMessage ||
+      message === prefilledTextRef.current
+    ) {
+      if (firstMessage || prefilledTextRef.current !== null) fillAgentFirstMessage(firstMessage);
+    } else if (firstMessage) {
       toast.info("Kept your unsent message", {
-        description: "Clear it to use the template's setup instructions instead.",
+        description: `Clear it to use ${launchedAgent.name}'s first message instead.`,
         action: {
-          label: "Use setup instructions",
-          onClick: () => fillBotInstructions(botTemplate.setupInstructions),
+          label: "Use first message",
+          onClick: () => fillAgentFirstMessage(firstMessage),
         },
       });
     }
-  }, [botTemplate, fillBotInstructions, message, newSessionDraft.loading]);
+  }, [fillAgentFirstMessage, launchedAgent, message, newSessionDraft.loading]);
   useEffect(() => {
-    if (launchBotTemplateId) return;
-    prefilledBotTemplateRef.current = null;
-    const prefilled = prefilledBotInstructionsRef.current;
-    prefilledBotInstructionsRef.current = null;
-    if (prefilled !== null) setMessage((current) => (current === prefilled ? "" : current));
-  }, [launchBotTemplateId]);
-  // After a reload the page no longer knows it filled the composer, but the
-  // saved draft still holds the instructions. Untouched instructions of a
-  // template, without that template's launch, are taken out the same way.
-  const leftoverBotInstructionsCheckedRef = useRef(false);
-  useEffect(() => {
-    if (leftoverBotInstructionsCheckedRef.current) return;
-    if (newSessionDraft.loading || workspaceBotTemplates.templates === undefined) return;
-    leftoverBotInstructionsCheckedRef.current = true;
-    if (launchBotTemplateId || message.length === 0) return;
-    if (workspaceBotTemplates.templates.some((entry) => entry.setupInstructions === message)) {
-      setMessage("");
+    if (launchAgentId) return;
+    prefilledAgentRef.current = null;
+    const prefilled = prefilledTextRef.current;
+    prefilledTextRef.current = null;
+    if (prefilled !== null) {
+      rememberAgentPrefill(workspaceId, null);
+      setMessage((current) => (current === prefilled ? "" : current));
     }
-  }, [launchBotTemplateId, message, newSessionDraft.loading, workspaceBotTemplates.templates]);
+  }, [launchAgentId, workspaceId]);
+  // After a reload the page no longer knows it filled the composer, but the
+  // saved draft still holds the First message. Untouched, without the agent
+  // in the URL, it is taken out the same way.
+  const leftoverPrefillCheckedRef = useRef(false);
+  useEffect(() => {
+    if (leftoverPrefillCheckedRef.current || newSessionDraft.loading) return;
+    leftoverPrefillCheckedRef.current = true;
+    const remembered = rememberedAgentPrefill(workspaceId);
+    if (launchAgentId || remembered === null) return;
+    rememberAgentPrefill(workspaceId, null);
+    if (message === remembered) setMessage("");
+  }, [launchAgentId, message, newSessionDraft.loading, workspaceId]);
   // ?continueSessionId= (an archived chat's "Continue in a new chat") starts
   // the composer with a link to that chat once the saved draft has loaded,
   // ahead of anything the person already typed, then leaves the URL.
@@ -1670,17 +1690,21 @@ function SessionsIndexRouteContent({
       replace: true,
     });
   }, [launchContinueSessionId, navigate, newSessionDraft.loading, page, workspaceId]);
-  const dismissBotLaunch = useCallback(() => {
-    void navigate({
-      to: "/workspaces/$workspaceId/sessions",
-      params: { workspaceId },
-      search: (previous: Record<string, unknown>) => {
-        const { botTemplateId: _dropped, ...rest } = previous;
-        return rest;
-      },
-      replace: true,
-    });
-  }, [navigate, workspaceId]);
+  // The agent chip: `?agent=<id>` for an agent, nothing for Opengeni itself.
+  const selectComposerAgent = useCallback(
+    (agentId: string | null) => {
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId },
+        search: (previous: Record<string, unknown>) => {
+          const { botTemplateId: _legacy, agent: _current, ...rest } = previous;
+          return agentId ? { ...rest, agent: agentId } : rest;
+        },
+        replace: true,
+      });
+    },
+    [navigate, workspaceId],
+  );
 
   // URL launch: ?model=&effort=&latency= prefill the composer; +?realtime= also
   // creates a realtime-first session and autostarts voice on the session page.
@@ -1721,6 +1745,7 @@ function SessionsIndexRouteContent({
         search: {
           ...(launch.channelId ? { channelId: launch.channelId } : {}),
           ...(launchSkillCapabilityId ? { skillCapabilityId: launchSkillCapabilityId } : {}),
+          ...(launch.agent ? { agent: launch.agent } : {}),
           ...(launch.botTemplateId ? { botTemplateId: launch.botTemplateId } : {}),
         },
         replace: true,
@@ -1745,6 +1770,7 @@ function SessionsIndexRouteContent({
     launchRealtime,
     launchSkillCapabilityId,
     launchKey,
+    launch.agent,
     launch.botTemplateId,
     launch.channelId,
     navigate,
@@ -1913,6 +1939,23 @@ function SessionsIndexRouteContent({
         ),
       }
     : null;
+
+  // Who answers: Opengeni or one of the workspace's agents. Shown once there
+  // is an agent to pick (or one is already in the URL).
+  const agentChip =
+    agentSelection !== null ||
+    (workspaceAgents.supported && (workspaceAgents.agents?.length ?? 0) > 0) ? (
+      <ComposerAgentChip
+        workspaceId={workspaceId}
+        agents={workspaceAgents.agents}
+        selection={agentSelection}
+        disabled={setupDisabled}
+        onSelect={selectComposerAgent}
+        onBrowse={() =>
+          void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } })
+        }
+      />
+    ) : null;
 
   return createElement(
     LightboxProvider,
@@ -2227,37 +2270,27 @@ function SessionsIndexRouteContent({
               </>
             }
             header={
-              chatList || botLaunch || runsOnSetup || visibilitySetup ? (
-                <>
-                  {botLaunch ? (
-                    <BotLaunchStrip
-                      state={botLaunch.state}
-                      workspaceId={workspaceId}
-                      onDismiss={dismissBotLaunch}
-                    />
-                  ) : null}
-                  {chatList || runsOnSetup || visibilitySetup ? (
-                    <SessionSetupStrip
-                      disabled={busy || newSessionDraft.loading}
-                      project={
-                        chatList
-                          ? {
-                              channels: canCreatePrivateChat
-                                ? channelsQuery.channels
-                                : channelsQuery.channels.filter(
-                                    (channel) => channel.visibility !== "private",
-                                  ),
-                              selectedChannelId,
-                              onChange: selectProject,
-                              onCreate: () => setProjectDialogOpen(true),
-                            }
-                          : null
-                      }
-                      runsOn={runsOnSetup}
-                      visibility={visibilitySetup}
-                    />
-                  ) : null}
-                </>
+              chatList || agentChip || runsOnSetup || visibilitySetup ? (
+                <SessionSetupStrip
+                  disabled={busy || newSessionDraft.loading}
+                  agent={agentChip}
+                  project={
+                    chatList
+                      ? {
+                          channels: canCreatePrivateChat
+                            ? channelsQuery.channels
+                            : channelsQuery.channels.filter(
+                                (channel) => channel.visibility !== "private",
+                              ),
+                          selectedChannelId,
+                          onChange: selectProject,
+                          onCreate: () => setProjectDialogOpen(true),
+                        }
+                      : null
+                  }
+                  runsOn={runsOnSetup}
+                  visibility={visibilitySetup}
+                />
               ) : undefined
             }
           />
@@ -2350,13 +2383,6 @@ function SessionsIndexRouteContent({
           />
         </div>
 
-        {!botLaunch ? (
-          <BotTemplateShortcuts
-            workspaceId={workspaceId}
-            templates={workspaceBotTemplates.templates}
-            disabled={busy}
-          />
-        ) : null}
         {chatList ? <RecentSessions workspaceId={workspaceId} /> : null}
         {starters ? (
           <NewSessionStarters
