@@ -1625,12 +1625,14 @@ computeControl:
     nodePort: null
     annotations: {}
     loadBalancerSourceRanges: []
-  # The store's daily sweep (`compute-control sweep --delete`, ADR 17 and
-  # 25), from the same image, with the same identity and database. It
-  # deletes on any archive: gs://, az:// and s3:// alike.
+  # The store's hourly sweep (`compute-control sweep --delete`, ADR 17, 25
+  # and 28), from the same image, with the same identity and database. It
+  # deletes on any archive: gs://, az:// and s3:// alike. Replaced copies
+  # (each sandbox's earlier checkpoints) stay stored until a sweep at least
+  # an hour after the hour they were written in, so run it hourly.
   sweep:
     enabled: true
-    schedule: "17 3 * * *"
+    schedule: "17 * * * *"
   resources:
     requests:
       cpu: 100m
