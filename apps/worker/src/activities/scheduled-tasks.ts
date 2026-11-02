@@ -158,6 +158,8 @@ import type { Database } from "@opengeni/db";
 import type { CreateSessionMcpServerInput } from "@opengeni/db";
 import type { ScheduledTaskAgentConfig } from "@opengeni/contracts";
 
+const KNOWLEDGE_SOURCE_SYNC_REMOVED_ERROR = "knowledge_source_sync_retired";
+
 /**
  * The unattended setting for a chat this task starts: nobody answers during a
  * scheduled or event-triggered run unless the task says otherwise.
@@ -442,6 +444,21 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           }
           throw new Error("scheduled agent run is missing accepted execution truth");
         }
+        // A queued run accepted for a Knowledge source sync schedule (removed)
+        // settles failed once instead of recovering a session.
+        if (
+          priorRun.status === "queued" &&
+          (acceptedExecution.task.action.kind !== "agent_turn" ||
+            acceptedExecution.task.agentConfig.knowledgeSource)
+        ) {
+          await markScheduledTaskRunFailedIfQueued(
+            db,
+            priorRun.workspaceId,
+            priorRun.id,
+            KNOWLEDGE_SOURCE_SYNC_REMOVED_ERROR,
+          );
+          return scheduledRunTerminalResult(KNOWLEDGE_SOURCE_SYNC_REMOVED_ERROR);
+        }
         await recordScheduledTaskFiredUsage(db, acceptedExecution, priorRun);
         if (priorRun.status === "dispatched") {
           return await replayScheduledTaskDispatch({
@@ -509,6 +526,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // unbounded retry loop for work that no longer exists.
       if (!task) {
         return { action: "deleted" };
+      }
+      // Schedules only run agent turns. A Knowledge source sync task can only
+      // be a stray row from a release before its removal; it never runs and
+      // never starts a chat.
+      if (task.action.kind !== "agent_turn" || task.agentConfig.knowledgeSource) {
+        return { action: "blocked", reason: "scheduled_execution_unrepresentable" };
       }
       if (task.status !== "active") {
         return { action: "blocked", reason: "scheduled_task_paused" };
@@ -580,15 +603,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         }
         return scheduledAdmissionRefusalResult(receipt);
       };
-      // Schedules only run agent turns. A Knowledge source sync task can only
-      // be a stray row from a release before its removal; it never runs.
-      if (task.action.kind !== "agent_turn" || task.agentConfig.knowledgeSource) {
-        return await refuseAdmission(
-          "scheduled_authority_unavailable",
-          false,
-          "Knowledge source sync schedules were removed",
-        );
-      }
       if (
         task.action.kind === "agent_turn" &&
         ((taskRevisionAuthority?.subjectId ?? null) !== taskAuthoritySubjectId ||
