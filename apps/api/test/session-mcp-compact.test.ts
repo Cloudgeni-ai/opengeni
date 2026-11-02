@@ -133,17 +133,13 @@ describe("compact-by-default MCP allowlists and byte regressions", () => {
     }
   });
 
-  test("private and archived rows say so; shared, live rows stay minimal", () => {
+  test("visibility and archive facts stay out of compact rows and appear in full rows", () => {
     const source = page(3);
     source.sessions[1]!.visibility = "private";
     source.sessions[2]!.archived = true;
-    const compact = capSessionDiscoveryCompactPage(source);
-    expect(compact.sessions[0]).not.toHaveProperty("visibility");
-    expect(compact.sessions[0]).not.toHaveProperty("archived");
-    expect(compact.sessions[1]).toMatchObject({ visibility: "private" });
-    expect(compact.sessions[1]).not.toHaveProperty("archived");
-    expect(compact.sessions[2]).toMatchObject({ archived: true });
-    expect(compact.sessions[2]).not.toHaveProperty("visibility");
+    for (const row of capSessionDiscoveryCompactPage(source).sessions) {
+      expect(keys(row)).toEqual(["id", "status", "title", "updatedAt"]);
+    }
     const full = capSessionDiscoveryPage(source, false);
     expect(full.sessions.map((row) => row.visibility)).toEqual([
       "workspace",

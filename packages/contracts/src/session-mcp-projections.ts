@@ -92,9 +92,6 @@ export type SessionMcpListSource = {
   id: string;
   title: string | null;
   titleOriginalChars?: number | null;
-  /** private (owner only) or workspace (everyone in the workspace); compact rows show only private. */
-  visibility?: "private" | "workspace";
-  archived?: boolean;
   status: SessionStatus;
   parentSessionId: string | null;
   effectiveControl: SessionMcpControlSource;
@@ -141,8 +138,6 @@ export function compactSessionMcpListRow(
     title: title.text,
     status: session.status,
     ...(title.truncated ? { titleTruncated: true } : {}),
-    ...(session.visibility === "private" ? { visibility: "private" as const } : {}),
-    ...(session.archived ? { archived: true } : {}),
     ...(session.parentSessionId ? { parentSessionId: session.parentSessionId } : {}),
     ...(goal
       ? {
