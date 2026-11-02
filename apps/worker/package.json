@@ -91,7 +91,7 @@
     "ws": "8.21.1"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@openai/agents-core": "0.14.3",
     "@opengeni/testing": "workspace:*",
     "openai": "6.47.0",

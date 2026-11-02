@@ -45,7 +45,7 @@
     "@keeper-security/secrets-manager-core": "17.6.0",
     "@llamaindex/liteparse": "2.14.2",
     "@microsoft/teams.apps": "2.1.1",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/artifact-tool": "workspace:*",
     "@opengeni/capabilities": "workspace:*",
