@@ -4368,7 +4368,7 @@ export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 3;
 /** Identifier-like keys keep their strings untouched (generations, refs,
  * digests, image payloads, timestamps): redacting inside them would corrupt
  * the result rather than protect anything. URLs are text: a page can put a
- * typed value into its address. */
+ * typed value into its address, though an address keeps its host and port. */
 const NON_TEXT_KEY = /^(id|ref|data|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
 
 /** How browser and desktop results are masked: the shared known-value engine
@@ -4388,6 +4388,8 @@ export const INTERACTION_SECRET_MASK_OPTIONS: SecretValueMaskOptions = {
   // An observed field or label clipped to its width ends partway through.
   clippedTextEndMinChars: 0,
   skipKey: (key) => NON_TEXT_KEY.test(key),
+  // A short code inside a host or port would leave a tab with no valid address.
+  keepUrlHosts: true,
 };
 
 /** Deep copy with every occurrence of a supplied secret value in a text

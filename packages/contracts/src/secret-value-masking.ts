@@ -101,6 +101,13 @@ export type SecretValueMaskOptions = {
    * of a text type are searched decoded and encoded again.
    */
   skipKey?: (key: string) => boolean;
+  /**
+   * A text that is a whole absolute address (`https://host:port/path`) keeps
+   * its scheme, host and port: they name where the browser is, not text a
+   * page or a person typed, and masking inside them leaves no usable address.
+   * Its user info, path, query and fragment are masked as usual. Default false.
+   */
+  keepUrlHosts?: boolean;
 };
 
 export type SecretValueMaskDiagnostic = {
@@ -310,6 +317,7 @@ const TRUNCATION_MARK = /\.\.\.|\u2026/gu;
 export type CompiledSecretValueMasks = {
   /** Known long numeric values, allowing only digit-grouping separators. */
   readonly formattedNumbers: ReadonlyArray<{ pattern: RegExp; label: string }>;
+  readonly keepUrlHosts: boolean;
   readonly empty: boolean;
   readonly minChars: number;
   readonly skipKey: ((key: string) => boolean) | undefined;
@@ -439,6 +447,7 @@ export function compileSecretValueMasks(
         );
   return {
     formattedNumbers,
+    keepUrlHosts: options.keepUrlHosts === true,
     empty: forms.length === 0,
     minChars,
     skipKey: options.skipKey,
@@ -500,9 +509,27 @@ function keptRanges(text: string, pattern: RegExp): Array<[number, number]> {
   return kept;
 }
 
+/** An absolute address: scheme, optional user info (up to the authority's
+ * last `@`, so a password containing one is all user info), host and port,
+ * then the rest. */
+const ABSOLUTE_URL = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)(?:([^/?#\s]*)@)?([^/?#@\s]*)([^\s]*)$/u;
+
 /** Mask one text with compiled entries. */
 export function maskSecretValuesInText(text: string, masks: CompiledSecretValueMasks): string {
   if (masks.empty || masks.pattern === null || text.length < masks.minChars) return text;
+  if (masks.keepUrlHosts) {
+    const address = ABSOLUTE_URL.exec(text);
+    if (address) {
+      const [, scheme, userInfo, host, rest] = address;
+      const inner = { ...masks, keepUrlHosts: false };
+      return (
+        scheme! +
+        (userInfo === undefined ? "" : `${maskSecretValuesInText(userInfo, inner)}@`) +
+        host! +
+        maskSecretValuesInText(rest!, inner)
+      );
+    }
+  }
   for (const { pattern, label } of masks.formattedNumbers) {
     const kept = keptRanges(text, masks.pattern);
     text = text.replace(pattern, (match, at: number) =>
