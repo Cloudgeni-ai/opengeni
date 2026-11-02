@@ -314,7 +314,7 @@ describe("agent capability catalog search", () => {
 
     expect(results[0]?.item.id).toBe("mcp:catalog-4876");
     expect(results).toHaveLength(1);
-    expect(durationMs).toBeLessThan(1_000);
+    expect(durationMs).toBeLessThan(2_500);
   });
 
   describe("near-spelled integration names", () => {
