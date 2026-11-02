@@ -7276,18 +7276,16 @@ export function slackDeliveryTextsCoalesce(left: string, right: string): boolean
 }
 
 /**
- * Whether a session control actor is Opengeni itself (an agent attempt, the
- * system or a service) rather than a person. People act under their own
- * subject from the app, the API or Slack. An unknown or unprefixed actor
- * counts as a person, so a doubtful stop stays silent.
+ * Whether a session control actor is Opengeni itself (an agent attempt or the
+ * system) rather than a person. People act under their own subject from the
+ * app, the API or Slack. `service:` ids are free text that an outside
+ * integration can choose, so they count as people too: any unknown or
+ * unprefixed actor does, and a doubtful stop stays silent.
  */
 export function slackControlActorIsOpengeni(actor: string | null): boolean {
   return (
     actor !== null &&
-    (actor.startsWith("attempt:") ||
-      actor.startsWith("system:") ||
-      actor.startsWith("service:") ||
-      actor.startsWith("opengeni:"))
+    (actor.startsWith("attempt:") || actor.startsWith("system:") || actor.startsWith("opengeni:"))
   );
 }
 
@@ -7301,6 +7299,11 @@ export function slackControlActorIsOpengeni(actor: string | null): boolean {
  * It is not posted when a person paused or cancelled the work (archiving it,
  * stopping it in the app, through the API or from Slack) either: they already
  * know.
+ *
+ * Who stopped it is read from the session's control state when the event is
+ * delivered, not when it was cancelled. A late delivery that finds a person's
+ * pause or cancel recorded since then stays silent, which errs toward the
+ * unsolicited post not happening.
  */
 async function slackStopNoticeWarranted(
   deps: ApiRouteDeps,

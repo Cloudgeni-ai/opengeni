@@ -55,6 +55,7 @@ import {
   saveSlackBotUserLink,
   setWorkspaceAllowance,
   setMemberAllowance,
+  settleSessionAttemptInterruptions,
   synchronizeCanonicalHumanLoginBindings,
   mutateSessionControlInTransaction,
   updateSlackTaskPolicy,
@@ -7139,13 +7140,6 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
   };
   const stopNotices = (value: SlackFixture) =>
     value.slack.posts.filter((post) => post.text.includes("stopped this task"));
-  const turnCancelledCount = async (workspaceId: string, sessionId: string) =>
-    (
-      await shared!.admin<{ count: number }[]>`
-        select count(*)::int as count from session_events
-        where workspace_id = ${workspaceId} and session_id = ${sessionId}
-          and type = 'turn.cancelled'`
-    )[0]!.count;
   const deliveryState = async (workspaceId: string, interactionId: string) =>
     (
       await shared!.admin<{ terminal_delivery_state: string }[]>`
@@ -7158,28 +7152,57 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         select last_delivered_session_event_sequence as sequence from slack_interactions
         where workspace_id = ${workspaceId} and id = ${interactionId}`
     )[0]!.sequence;
-  const cancelAsPerson = async (value: SlackFixture, sessionId: string, reason: string) =>
+  const cancelSession = async (
+    value: SlackFixture,
+    sessionId: string,
+    reason: string,
+    actor: Parameters<typeof mutateSessionControlInTransaction>[1]["actor"] = {
+      type: "human",
+      subjectId: value.owner.subjectId,
+    },
+  ) =>
     await withWorkspaceSessionActivityRls(client.db, value.owner.workspaceId, (db) =>
       mutateSessionControlInTransaction(db, {
         accountId: value.owner.accountId,
         workspaceId: value.owner.workspaceId,
         sessionId,
-        actor: { type: "human", subjectId: value.owner.subjectId },
-        operationKey: `archive-stop:${sessionId}:${crypto.randomUUID()}`,
+        actor,
+        operationKey: `stop-notice:${sessionId}:${crypto.randomUUID()}`,
         action: "cancel",
         reason,
       }),
     );
+  const claimRunningTurn = async (value: SlackFixture, sessionId: string) => {
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`not claimable: ${claimed.reason}`);
+    return { turn: claimed.turn, attemptId };
+  };
 
-  test("archiving a task stopped from Slack posts no stop notice for its queued turns", async () => {
+  test("archiving a task stopped from Slack posts no stop notice for any of its turns", async () => {
     if (!available) return;
     const value = await fixture();
     const channelId = "D_STOP_NOTICE_ARCHIVE";
     const rootTs = "1760200000.000001";
     const { route, sessionId, send } = await startStopNoticeTask(value, channelId, rootTs);
+    const running = await claimRunningTurn(value, sessionId);
     // Stopped from Slack: a pause, so the task's delivery stays open for Resume.
     await send("1760200000.000002", "stop", true);
     await drainAll(value.deps);
+    // The worker settles the pause; the paused turn stays the session's current one.
+    await settleSessionAttemptInterruptions(
+      client.db,
+      value.owner.workspaceId,
+      sessionId,
+      running.attemptId,
+    );
     // Follow-ups keep arriving in the thread and queue behind the pause.
     for (const ts of ["1760200000.000003", "1760200000.000004", "1760200000.000005"]) {
       await send(ts, `One more thing ${ts}`, true);
@@ -7189,10 +7212,15 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(await deliveryState(value.owner.workspaceId, route.id)).toBe("open");
     const postsBefore = value.slack.posts.length;
 
-    // Weeks later the person archives the chat in the app, which cancels every
-    // queued turn at once (one turn.cancelled each).
-    await cancelAsPerson(value, sessionId, "Archived");
-    expect(await turnCancelledCount(value.owner.workspaceId, sessionId)).toBeGreaterThanOrEqual(4);
+    // Weeks later the person archives the chat in the app, which cancels the
+    // paused turn and every queued one at once (one turn.cancelled each).
+    await cancelSession(value, sessionId, "Archived");
+    const cancelled = await shared!.admin<{ turn_id: string; turn_association: string | null }[]>`
+      select turn_id, turn_association from session_events
+      where workspace_id = ${value.owner.workspaceId} and session_id = ${sessionId}
+        and type = 'turn.cancelled' order by sequence`;
+    expect(cancelled.length).toBeGreaterThanOrEqual(4);
+    expect(cancelled).toContainEqual({ turn_id: running.turn.id, turn_association: "current" });
     await drainAll(value.deps);
 
     // Nothing is posted into the thread, and the stale delivery is closed so it
@@ -7212,23 +7240,14 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       "D_STOP_NOTICE_APP_CANCEL",
       "1760300000.000001",
     );
-    const attemptId = crypto.randomUUID();
-    const claimed = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
-      sessionId,
-      workflowId: `session-${sessionId}`,
-      workflowRunId: crypto.randomUUID(),
-      dispatchId: crypto.randomUUID(),
-      attemptId,
-      trigger: { kind: "next" },
-    });
-    if (claimed.action !== "claimed") throw new Error(`not claimable: ${claimed.reason}`);
+    const running = await claimRunningTurn(value, sessionId);
     const postsBefore = value.slack.posts.length;
-    await cancelAsPerson(value, sessionId, "Stopped in the app");
+    await cancelSession(value, sessionId, "Stopped in the app");
     // The worker settles the running turn's cancellation.
     await appendSessionEvents(client.db, value.owner.workspaceId, sessionId, [
       {
         type: "turn.cancelled",
-        turnId: claimed.turn.id,
+        turnId: running.turn.id,
         turnAssociation: "current",
         payload: { reason: "session_cancelled" },
       },
@@ -7236,6 +7255,37 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     await drainAll(value.deps);
     expect(stopNotices(value)).toEqual([]);
     expect(value.slack.posts).toHaveLength(postsBefore);
+    expect(await deliveryState(value.owner.workspaceId, route.id)).toBe("cancelled");
+  }, 60_000);
+
+  test("the agent stopping its own running Slack task posts one stop notice", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const { route, sessionId } = await startStopNoticeTask(
+      value,
+      "D_STOP_NOTICE_AGENT_CANCEL",
+      "1760350000.000001",
+    );
+    const running = await claimRunningTurn(value, sessionId);
+    const postsBefore = value.slack.posts.length;
+    await cancelSession(value, sessionId, "Stopped by the agent", {
+      type: "agent_attempt",
+      attemptId: running.attemptId,
+      sessionId,
+      turnId: running.turn.id,
+      executionGeneration: running.turn.executionGeneration,
+    });
+    await appendSessionEvents(client.db, value.owner.workspaceId, sessionId, [
+      {
+        type: "turn.cancelled",
+        turnId: running.turn.id,
+        turnAssociation: "current",
+        payload: { reason: "session_cancelled" },
+      },
+    ]);
+    await drainAll(value.deps);
+    expect(stopNotices(value)).toHaveLength(1);
+    expect(value.slack.posts).toHaveLength(postsBefore + 1);
     expect(await deliveryState(value.owner.workspaceId, route.id)).toBe("cancelled");
   }, 60_000);
 
@@ -7293,6 +7343,24 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     await drainAll(value.deps);
     expect(stopNotices(value)).toHaveLength(1);
     expect(value.slack.posts).toHaveLength(postsBefore + 1);
+
+    // The same turn's cancellation recorded again later, in another delivery
+    // pass under a new sequence, still posts nothing more.
+    await shared!.admin`
+      update slack_interactions set terminal_delivery_state = 'open'
+      where workspace_id = ${value.owner.workspaceId} and id = ${route.id}`;
+    await appendSessionEvents(client.db, value.owner.workspaceId, sessionId, [
+      {
+        type: "turn.cancelled",
+        turnId: turn!.id,
+        turnAssociation: "current",
+        payload: { reason: "authority_changed" },
+      },
+    ]);
+    await drainAll(value.deps);
+    expect(stopNotices(value)).toHaveLength(1);
+    expect(value.slack.posts).toHaveLength(postsBefore + 1);
+    expect(await deliveryState(value.owner.workspaceId, route.id)).toBe("cancelled");
   }, 60_000);
 
   test("a session link from another deployment is named as such instead of looked up here", async () => {
