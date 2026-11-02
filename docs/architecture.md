@@ -448,6 +448,10 @@ into bounded snippets/cursors, not histories. See
 Docker/local SDK processes expose bounded-wait, turn-scoped handles, stay
 cancellation-fenced and stop before finalization; agents can test preview
 servers without awaiting exit.
+The Unix-local/Docker durable supervisor retains terminal run directories for
+one day. Cleanup runs independently of command launch with a PID/start-identity
+lock, so a slow disk or large history cannot consume the command response deadline;
+a later launcher recovers a dead cleanup owner without treating commands as lost.
 
 Interactive ttyd input readiness is separate from command execution proof.
 `agent/native/terminal-ready` owns the stock image's Bash 5.2 Readline producer;
