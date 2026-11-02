@@ -5,6 +5,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createWorkspaceWebhook,
   getMemberNotificationsAllowed,
   grantWorkspaceAccess,
   initializeSessionStartAtomically,
@@ -171,6 +172,37 @@ describe("notifying another member of the workspace", () => {
     expect(posted.map((event) => event.payload)).toEqual([
       expect.objectContaining({ key: "ready", undeliveredReason: "no_human_recipient" }),
     ]);
+  });
+
+  test("an owner-less notification an integration webhook receives is reported as handed to it", async () => {
+    if (!shared) return;
+    const { scope, notify } = await setup({ creator: "service:nightly" });
+    // Subscribed to something else: still nobody to deliver it.
+    await createWorkspaceWebhook(client.db, {
+      ...scope,
+      url: "https://integration.example/turns",
+      secretEncrypted: "sealed",
+      eventTypes: ["turn.completed"],
+      enabled: true,
+      description: null,
+      createdBySubjectId: null,
+    });
+    expect(await notify({ title: "First", key: "first" })).toMatchObject({
+      delivered: false,
+      undeliveredReason: "no_human_recipient",
+    });
+    await createWorkspaceWebhook(client.db, {
+      ...scope,
+      url: "https://integration.example/notifications",
+      secretEncrypted: "sealed",
+      eventTypes: ["session.notification.posted"],
+      enabled: true,
+      description: null,
+      createdBySubjectId: null,
+    });
+    const sent = await notify({ title: "Ready", key: "ready" });
+    expect(sent).toMatchObject({ ok: true, delivered: true, deliveredVia: "integration" });
+    expect(sent).not.toHaveProperty("undeliveredReason");
   });
 
   test("once allowed, it reaches the member, says who sent it, and keeps per-person copies", async () => {
