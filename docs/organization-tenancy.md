@@ -1348,7 +1348,8 @@ Member also edits the workspace instructions
 and reviews the agent's proposed changes to them (`sessions:create`, see
 [workspace instruction policies](workspace-instruction-policies.md)), renames a
 shared workspace (`PATCH /v1/workspaces/:workspaceId` with `name`; its `slug`
-stays Admin-only and a Personal workspace keeps its name), and adds or removes
+stays Admin-only; a Personal workspace is renamed only by its verified owner,
+acting as themselves, the same check as its other settings), and adds or removes
 its custom model entries (Gateway, OpenRouter, Opper and Claude custom models;
 the keys and subscriptions they run on stay Admin-only).
 Settings-class powers stay Admin-only:

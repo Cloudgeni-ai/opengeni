@@ -331,14 +331,15 @@ function WorkspaceGeneralSettings({
     "workspace:admin",
   );
   // Anyone who can start chats in a shared workspace renames it; a Personal
-  // workspace keeps its name.
-  const canRename =
-    !personal &&
-    canContributeWorkspaceContent(
-      context.accessContext,
-      activeWorkspace,
-      context.managedSelfContext,
-    );
+  // workspace is renamed by whoever manages its settings: its owner, acting as
+  // themselves. Mirrors PATCH /v1/workspaces/:id.
+  const canRename = personal
+    ? canManageSettings
+    : canContributeWorkspaceContent(
+        context.accessContext,
+        activeWorkspace,
+        context.managedSelfContext,
+      );
   const canDeleteWorkspace = canAdminister;
   // Deleting the account's only workspace is refused server-side; disable the
   // affordance when this is the only workspace in the active account.
@@ -391,9 +392,9 @@ function WorkspaceGeneralSettings({
           label="Name"
           description={<RowValue>{activeWorkspace.name}</RowValue>}
           control={
-            // A Personal workspace keeps its name: no button that could only
-            // say it isn't allowed.
-            personal ? undefined : (
+            // In a Personal workspace only its owner could ever rename it, so
+            // anyone else gets no button that could only say it isn't allowed.
+            personal && !canRename ? undefined : (
               <DisabledReasonTooltip
                 reason={
                   canRename

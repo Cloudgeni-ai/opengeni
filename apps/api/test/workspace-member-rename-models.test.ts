@@ -20,8 +20,9 @@ import { createApp, type AppDependencies } from "../src/app";
  * things: a Member (who can start chats there), signed in as themselves,
  * renames it and adds and removes its custom models through the real app and
  * PostgreSQL as the restricted application role. Its slug stays with admins,
- * a Personal workspace keeps its name, a Viewer can't, and tokens that only
- * carry sessions:create (an agent's or a worker's) are refused.
+ * a Personal workspace is renamed only by its own verified owner, a Viewer
+ * can't, and tokens that only carry sessions:create (an agent's or a worker's)
+ * are refused.
  */
 
 const ORIGIN = "https://opengeni.example";
@@ -254,11 +255,48 @@ test("a Member renames a shared workspace and manages its custom models; others 
     ).toBe(403);
   }
 
-  // A Personal workspace keeps its name, even for its owner.
+  // A Personal workspace is renamed by its owner, signed in as themselves, and
+  // by nobody else: not a colleague, not the organization's owner, and not a
+  // token that only carries the owner's sessions:create. Its slug stays put.
+  const personal = `/v1/workspaces/${membership!.personal}`;
+  const mine = await call(as(owner), "PATCH", personal, { name: "  Ida's corner  " });
+  expect(mine.status).toBe(200);
+  expect(mine.body.name).toBe("Ida's corner");
+  expect(mine.body.kind).toBe("personal");
+  expect([403, 404]).toContain(
+    (await call(as(colleague), "PATCH", personal, { name: "Taken" })).status,
+  );
+  expect((await call(as(owner), "PATCH", personal, { slug: "ida" })).status).toBe(403);
+  const ownerToken = await signDelegatedAccessToken(SECRET, {
+    accountId,
+    workspaceId: membership!.personal,
+    subjectId: owner.subjectId,
+    permissions: ["workspace:read", "sessions:create"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 600,
+  });
   expect(
-    (await call(as(owner), "PATCH", `/v1/workspaces/${membership!.personal}`, { name: "Mine" }))
+    (await call({ authorization: `Bearer ${ownerToken}` }, "PATCH", personal, { name: "Bot" }))
       .status,
   ).toBe(403);
+  const [colleaguePersonal] = await shared.admin<Array<{ workspaceId: string }>>`
+    select personal_workspace_id as "workspaceId" from organization_memberships
+    where account_id = ${accountId} and subject_id = ${colleague.subjectId}`;
+  expect([403, 404]).toContain(
+    (
+      await call(as(owner), "PATCH", `/v1/workspaces/${colleaguePersonal!.workspaceId}`, {
+        name: "Admin's now",
+      })
+    ).status,
+  );
+  const renamedByColleague = await call(
+    as(colleague),
+    "PATCH",
+    `/v1/workspaces/${colleaguePersonal!.workspaceId}`,
+    { name: "Notes" },
+  );
+  expect(renamedByColleague.status).toBe(200);
+  expect((await call(as(owner), "GET", personal)).body.name).toBe("Ida's corner");
 
   // The Member can't reach another organization's workspace.
   const stranger = await signUp(true);
