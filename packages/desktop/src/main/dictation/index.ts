@@ -131,6 +131,36 @@ export interface DictationDeps {
   log?: (message: string, error?: unknown) => void;
 }
 
+/**
+ * How dictation is going, for the menu bar: ready, getting the microphone,
+ * listening, writing the speech down, or failed. "done" is told once, when a
+ * dictation's text has gone where it was going; dictation is idle again.
+ */
+export type DictationActivity =
+  | { phase: "idle" }
+  | { phase: "starting" }
+  | { phase: "recording" }
+  | { phase: "transcribing" }
+  | { phase: "failed"; message: string; retryable: boolean }
+  | { phase: "done" };
+
+/** What the menu bar offers for dictation while it is on. */
+export interface DictationMenu {
+  activity: Exclude<DictationActivity, { phase: "done" }>;
+  profiles: readonly DesktopDictationProfile[];
+  mode: DesktopDictationSettings["mode"];
+  /** A recent dictation has text to copy again. */
+  canCopyLast: boolean;
+}
+
+export type DictationMenuAction =
+  | { kind: "start"; profileId: string }
+  | { kind: "finish" }
+  | { kind: "cancel" }
+  | { kind: "retry" }
+  | { kind: "dismiss" }
+  | { kind: "copyLast" };
+
 type Phase = "starting" | "recording" | "transcribing" | "failed";
 
 interface Active {
@@ -153,6 +183,8 @@ interface Active {
    * kept dictation's, and is typed only when the retry shortcut asked for it.
    */
   again: { entryId: string; type: boolean } | null;
+  /** Why it failed, while it has. */
+  failure: { message: string; retryable: boolean } | null;
 }
 
 export class Dictation {
@@ -178,6 +210,8 @@ export class Dictation {
     { target: DictationTarget; profile: DesktopDictationProfile; at: number }
   >();
   private readonly listeners = new Set<() => void>();
+  private readonly activityListeners = new Set<(activity: DictationActivity) => void>();
+  private lastActivity = "";
 
   constructor(private readonly deps: DictationDeps) {
     deps.hud.onAction((action) => this.onHudAction(action));
@@ -204,6 +238,61 @@ export class Dictation {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  /** Told each time the activity changes, and "done" when a dictation's text is delivered. */
+  onActivity(listener: (activity: DictationActivity) => void): () => void {
+    this.activityListeners.add(listener);
+    return () => {
+      this.activityListeners.delete(listener);
+    };
+  }
+
+  activity(): Exclude<DictationActivity, { phase: "done" }> {
+    if (this.waiting) return { phase: "starting" };
+    const active = this.active;
+    if (!active) return { phase: "idle" };
+    if (active.phase === "failed") {
+      return { phase: "failed", ...(active.failure ?? { message: "", retryable: false }) };
+    }
+    return { phase: active.phase };
+  }
+
+  /** The menu bar's dictation section; null while dictation is off or unavailable. */
+  menu(): DictationMenu | null {
+    const settings = this.settings;
+    if (!settings.enabled || !this.deps.platform) return null;
+    return {
+      activity: this.activity(),
+      profiles: settings.profiles,
+      mode: settings.mode,
+      canCopyLast: this.deps.store.history().some((entry) => entry.text.trim() !== ""),
+    };
+  }
+
+  /** What the menu bar's dictation items do. */
+  menuAction(action: DictationMenuAction): void {
+    switch (action.kind) {
+      case "start":
+        if (this.active?.phase === "failed") this.dismiss();
+        if (!this.active && !this.waiting) this.begin(action.profileId, false);
+        return;
+      case "finish":
+        this.finishSpeaking();
+        return;
+      case "cancel":
+        this.cancelFromKeys();
+        return;
+      case "retry":
+        this.retry();
+        return;
+      case "dismiss":
+        if (this.active?.phase === "failed") this.dismiss();
+        return;
+      case "copyLast":
+        void this.copyLast();
+        return;
+    }
   }
 
   /** Something the status reads changed outside the controller (a permission). */
@@ -430,6 +519,7 @@ export class Dictation {
       paste: null,
       throttled,
       again: null,
+      failure: null,
       watchdog: setTimeout(() => {
         if (this.active?.id === id && this.active.phase === "starting") {
           this.send({ kind: "cancel", dictationId: id });
@@ -488,6 +578,7 @@ export class Dictation {
       paste: null,
       throttled: null,
       again: { entryId, type },
+      failure: null,
       // A page that can't transcribe kept speech never answers.
       watchdog: setTimeout(() => {
         if (this.active?.id === id && this.active.watchdog) {
@@ -609,6 +700,7 @@ export class Dictation {
     const active = this.active;
     if (active?.phase !== "failed") return;
     active.phase = "transcribing";
+    active.failure = null;
     this.registerEscape();
     this.preparePaste();
     this.show({ kind: "transcribing", label: this.label(active.profile) });
@@ -620,6 +712,7 @@ export class Dictation {
     if (!active) return;
     this.clearWatchdog();
     active.phase = "failed";
+    active.failure = { message, retryable };
     active.paste?.cancel();
     active.paste = null;
     this.show({
@@ -650,6 +743,7 @@ export class Dictation {
       if (!active.again.type) {
         paste?.cancel();
         this.show({ kind: "hidden" });
+        this.tellActivity({ phase: "done" });
         return;
       }
     } else {
@@ -674,6 +768,7 @@ export class Dictation {
         .catch((caught: unknown) => this.deps.log?.("dictation copy failed", caught));
       if (output === "copy") {
         this.notice("success", this.words().copiedOnly);
+        this.tellActivity({ phase: "done" });
         return;
       }
       const support = await this.deps.platform?.pasteSupport().catch(() => null);
@@ -701,6 +796,7 @@ export class Dictation {
       return;
     }
     this.show({ kind: "hidden" });
+    this.tellActivity({ phase: "done" });
     if (previous !== null) {
       // Put the person's clipboard back once the app has read the text, unless
       // they copied something else meanwhile.
@@ -756,6 +852,7 @@ export class Dictation {
     }
     this.active = null;
     this.unregisterEscape();
+    this.activityChanged();
   }
 
   private clearWaiting(): void {
@@ -797,6 +894,40 @@ export class Dictation {
     if (this.noticeTimer) clearTimeout(this.noticeTimer);
     this.noticeTimer = null;
     this.deps.hud.show(state);
+    this.activityChanged();
+  }
+
+  /** Tell the menu bar when the activity is not what it last heard. */
+  private activityChanged(): void {
+    const activity = this.activity();
+    const key = JSON.stringify(activity);
+    if (key === this.lastActivity) return;
+    this.lastActivity = key;
+    this.tellActivity(activity);
+  }
+
+  private tellActivity(activity: DictationActivity): void {
+    for (const listener of this.activityListeners) {
+      try {
+        listener(activity);
+      } catch (caught) {
+        this.deps.log?.("dictation activity listener failed", caught);
+      }
+    }
+  }
+
+  /** Put the newest dictation's text on the clipboard again. */
+  private async copyLast(): Promise<void> {
+    const newest = this.deps.store.history().find((entry) => entry.text.trim() !== "");
+    // The menu offers this only when there is one.
+    if (!newest) return;
+    try {
+      await this.deps.clipboard.writeText(newest.text);
+    } catch (caught) {
+      this.deps.log?.("dictation copy failed", caught);
+      return;
+    }
+    if (!this.active) this.notice("success", this.words().copiedOnly);
   }
 
   private notice(

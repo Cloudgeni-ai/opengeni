@@ -777,6 +777,113 @@ describe("dictation", () => {
   });
 });
 
+describe("dictation in the menu bar", () => {
+  test("tells each phase once, and done when the text is typed", async () => {
+    const h = harness();
+    const told: string[] = [];
+    h.dictation.onActivity((activity) => told.push(activity.phase));
+    h.dictation.start();
+    await tick();
+    h.dictation.listen(h.target, true);
+    expect(h.dictation.menu()?.activity).toEqual({ phase: "idle" });
+
+    h.dictation.menuAction({ kind: "start", profileId: "default" });
+    expect(h.sent.at(-1)).toMatchObject({ kind: "start", profileId: "default" });
+    h.dictation.report(h.target, {
+      dictationId: "d1",
+      phase: "recording",
+      startedAt: 1,
+      level: 0.2,
+    });
+    h.dictation.report(h.target, {
+      dictationId: "d1",
+      phase: "recording",
+      startedAt: 1,
+      level: 0.6,
+    });
+    expect(h.dictation.menu()?.activity).toEqual({ phase: "recording" });
+    h.dictation.menuAction({ kind: "finish" });
+    expect(h.sent.at(-1)).toEqual({ kind: "stop", dictationId: "d1" });
+    h.dictation.report(h.target, { dictationId: "d1", phase: "done", text: "Hello" });
+    await wait(10);
+
+    expect(told).toEqual(["starting", "recording", "transcribing", "idle", "done"]);
+    expect(h.dictation.menu()).toMatchObject({ activity: { phase: "idle" }, canCopyLast: true });
+    h.dictation.stop();
+  });
+
+  test("a failure says why and whether it can be retried; retry and dismiss act on it", async () => {
+    const h = harness();
+    h.dictation.start();
+    await tick();
+    h.dictation.listen(h.target, true);
+    h.dictation.menuAction({ kind: "start", profileId: "default" });
+    h.dictation.report(h.target, {
+      dictationId: "d1",
+      phase: "recording",
+      startedAt: 1,
+      level: null,
+    });
+    h.dictation.menuAction({ kind: "finish" });
+    h.dictation.report(h.target, {
+      dictationId: "d1",
+      phase: "failed",
+      message: "Transcription failed.",
+      retryable: true,
+    });
+    expect(h.dictation.activity()).toEqual({
+      phase: "failed",
+      message: "Transcription failed.",
+      retryable: true,
+    });
+
+    h.dictation.menuAction({ kind: "retry" });
+    expect(h.sent.at(-1)).toEqual({ kind: "retry", dictationId: "d1" });
+    expect(h.dictation.activity()).toEqual({ phase: "transcribing" });
+
+    h.dictation.report(h.target, {
+      dictationId: "d1",
+      phase: "failed",
+      message: "Still failing.",
+      retryable: false,
+    });
+    h.dictation.menuAction({ kind: "dismiss" });
+    expect(h.sent.at(-1)).toEqual({ kind: "dismiss", dictationId: "d1" });
+    expect(h.dictation.activity()).toEqual({ phase: "idle" });
+    h.dictation.stop();
+  });
+
+  test("cancel throws a dictation away; copy puts the last text on the clipboard again", async () => {
+    const h = harness();
+    h.dictation.start();
+    await tick();
+    h.dictation.listen(h.target, true);
+    expect(h.dictation.menu()?.canCopyLast).toBe(false);
+    h.dictation.menuAction({ kind: "start", profileId: "default" });
+    h.dictation.menuAction({ kind: "cancel" });
+    expect(h.sent.at(-1)).toEqual({ kind: "cancel", dictationId: "d1" });
+    expect(h.dictation.activity()).toEqual({ phase: "idle" });
+
+    h.history.unshift({
+      id: "old",
+      text: "Kept text",
+      at: "",
+      profileName: "Dictate",
+      language: null,
+    });
+    h.board.text = "something else";
+    h.dictation.menuAction({ kind: "copyLast" });
+    await tick();
+    expect(h.board.text).toBe("Kept text");
+    expect(h.last()).toMatchObject({ kind: "notice", tone: "success" });
+    h.dictation.stop();
+  });
+
+  test("is not in the menu while dictation is off", () => {
+    expect(harness({ settings: { enabled: false } }).dictation.menu()).toBeNull();
+  });
+});
+
 describe("dictation settings", () => {
   test("are off by default: Control and Fn on a Mac, a key combination elsewhere", () => {
     expect(defaultDictationSettings("darwin")).toEqual({
