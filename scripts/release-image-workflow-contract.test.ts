@@ -1645,7 +1645,7 @@ ${parser}`,
           typeof step === "object" &&
           step !== null &&
           "uses" in step &&
-          step.uses === "docker/build-push-action@v7.3.0",
+          step.uses === "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
       ).map((step) => ({
         jobName,
         name: step.name,
@@ -1657,37 +1657,37 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "fd47898c1119624dbafa8e62926cbbfbb950f541e41167765257f9ba01247cd6",
+        fingerprint: "98e43fe1aeaccf440b120045b977220880071f1ba8abac89158aea96b76ed980",
       },
       {
         jobName: "worker-image",
         name: "Build worker image",
-        fingerprint: "30caf29d97ddcbc7262219ff597c0febd8d99771e8a5d76c656fc3ba3189f9ba",
+        fingerprint: "0a13f844b2c87a5551b41c06b58e246363c2ee21a9f835325b2a987af2c280ea",
       },
       {
         jobName: "web-image",
         name: "Build web image",
-        fingerprint: "80eb5b15cc4d529a9b3b8cb3582f19465b34a288791f4233d734ebb7f1010e05",
+        fingerprint: "5736dc1b51fcbee06c29956af88027acd2cde555b84553825b44edac1909b0f2",
       },
       {
         jobName: "artifact-materializer-image",
         name: "Build artifact materializer image",
-        fingerprint: "41973667fdf57ab9af89ba5d7aa497dd74378f559e26de644131f5a18e1ce849",
+        fingerprint: "093fba916094be8fa14f95c792637edecae20f8a5ecd459b3a0e4f5395dceb90",
       },
       {
         jobName: "artifact-outbox-dispatcher-image",
         name: "Build artifact outbox dispatcher image",
-        fingerprint: "d9653c9b324d2bf40c226c54784492d740d6000465f0aeb8571218d226d7f394",
+        fingerprint: "b2565ef0e8bc9461a8094f77ac3bae0b086cb8aed0c799a25adee67cbb0a66b2",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "146554993b13ba0e9cbb9776ffdeb4006c7ba98f81ca05f46d8f3abbf5fa67b1",
+        fingerprint: "86b61f8abbb6a04b6949a45292f6d96ccd14b5b506d292f5b7951e034d09d42e",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "de1ae66fe410cd78f9965fe23e5d80d5506d1132c68cfec7a4c5c93e103fcd7d",
+        fingerprint: "694f2a67944c94e20f791dfad9a25da65e184bd790da9f87a39757657e4a2c80",
       },
     ]);
 
