@@ -308,3 +308,69 @@ test("a custom OpenAPI source keeps the explicit tool review", async () => {
   expect(html).toContain("Add selected tools");
   expect(html).not.toContain("Finishing setup");
 });
+
+test("setup the person authorized carries on without its dialog", async () => {
+  const { connectSetupContinuesWithoutDialog, continueConnectSetup } =
+    await import("../src/connect-setup-model");
+  const signingIn: ConnectAttempt = {
+    id: "attempt",
+    workspaceId: "workspace",
+    providerId: "microsoft-sharepoint",
+    ownership: "personal",
+    revision: 1,
+    state: "requires_user_action",
+    nextAction: { type: "authorize", url: "https://login.microsoftonline.com/authorize" },
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "integration",
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  // Closing before signing in leaves nothing running; after, it carries on.
+  expect(connectSetupContinuesWithoutDialog(signingIn, false)).toBe(false);
+  expect(connectSetupContinuesWithoutDialog(signingIn, true)).toBe(true);
+  expect(
+    connectSetupContinuesWithoutDialog(
+      { ...signingIn, state: "connected_but_incomplete", nextAction: { type: "none" } },
+      false,
+    ),
+  ).toBe(true);
+  expect(
+    connectSetupContinuesWithoutDialog(
+      {
+        ...signingIn,
+        state: "connected_but_incomplete",
+        nextAction: { type: "none" },
+        error: { code: "failed", message: "failed", retryable: true },
+      },
+      true,
+    ),
+  ).toBe(false);
+  // The provider callback finished setup: nothing is left to do but read it.
+  const complete: ConnectAttempt = {
+    ...signingIn,
+    revision: 2,
+    state: "complete",
+    nextAction: { type: "none" },
+    credentialsCommitted: true,
+    integrationInstalled: true,
+  };
+  let reads = 0;
+  const advances: unknown[] = [];
+  const transport = {
+    get: async () => (++reads < 2 ? signingIn : complete),
+    advance: async (...args: unknown[]) => {
+      advances.push(args);
+      return complete;
+    },
+  };
+  expect(await continueConnectSetup(transport, signingIn)).toEqual(complete);
+  expect(advances).toEqual([]);
+  // A setup that needs the person again stays resumable instead.
+  expect(
+    await continueConnectSetup(transport, {
+      ...signingIn,
+      state: "account_selection",
+      nextAction: { type: "select_account", accounts: [] },
+    }),
+  ).toBeNull();
+});

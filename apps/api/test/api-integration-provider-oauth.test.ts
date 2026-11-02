@@ -139,6 +139,7 @@ type TokenPlan = {
 
 function providerFixture() {
   let sourceTitle = "OneDrive fixture";
+  let sourceAvailable = true;
   let beforeTokenReply: (() => Promise<void>) | undefined;
   const microsoftPlans: TokenPlan[] = [];
   const tokenRequests: Array<{
@@ -161,6 +162,7 @@ function providerFixture() {
         },
       });
     if (url.href === MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.source.url) {
+      if (!sourceAvailable) return new Response("unavailable", { status: 503 });
       return Response.json({
         openapi: "3.0.3",
         info: { title: sourceTitle, version: "1" },
@@ -218,6 +220,10 @@ function providerFixture() {
     fetch,
     setSourceTitle(value: string) {
       sourceTitle = value;
+    },
+    /** The provider's API description cannot be read (the callback then saves only the account). */
+    setSourceAvailable(value: boolean) {
+      sourceAvailable = value;
     },
     setBeforeTokenReply(hook: (() => Promise<void>) | undefined) {
       beforeTokenReply = hook;
@@ -619,7 +625,11 @@ describe("API Integration provider OAuth", () => {
     expect(replayBegin.status).toBe(200);
     expect(await replayBegin.json()).toEqual(attempt);
     const secondState = new URL(attempt.nextAction.url).searchParams.get("state")!;
+    // The reviewed tools cannot be read during the callback: it saves the
+    // account and leaves the install step to the app, as before.
+    fixture.setSourceAvailable(false);
     const completed = await callback(fixture, secondState);
+    fixture.setSourceAvailable(true);
     expect(completed.headers.get("location")).toBe(returnUrl);
     const exchanges = fixture.tokenRequests.length;
     expect((await callback(fixture, secondState)).headers.get("location")).toBe(returnUrl);
@@ -1241,7 +1251,9 @@ describe("API Integration provider OAuth", () => {
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
     };
     const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
-    const connectAndPreview = async (
+    // Begin and sign in. The callback finishes setup by itself when the
+    // person who started it could have installed the tools.
+    const connect = async (
       input: Record<string, unknown>,
       requestHeaders: Record<string, string> = headers,
     ) => {
@@ -1263,6 +1275,16 @@ describe("API Integration provider OAuth", () => {
       const attempt = await begun.json();
       const state = new URL(attempt.nextAction.url).searchParams.get("state")!;
       await callback(fixture, state);
+      const current = await (
+        await app.request(`${base}/${attempt.id}`, { headers: requestHeaders })
+      ).json();
+      return { attempt, current };
+    };
+    // The manual step the app takes when the callback could not finish.
+    const previewAndInstall = async (
+      attempt: { id: string },
+      requestHeaders: Record<string, string> = headers,
+    ) => {
       const advance = (body: unknown) =>
         app.request(`${base}/${attempt.id}/advance`, {
           method: "POST",
@@ -1278,34 +1300,32 @@ describe("API Integration provider OAuth", () => {
       ).json();
       if (preview.state !== "preview")
         throw new Error(`preview failed: ${JSON.stringify(preview)}`);
-      return {
-        attempt,
-        install: () =>
-          advance({
-            expectedRevision: preview.revision,
-            idempotencyKey: crypto.randomUUID(),
-            action: {
-              type: "install",
-              previewId: preview.nextAction.previewId,
-              contentHash: preview.nextAction.contentHash,
-              operationIds: preview.nextAction.operations.map(
-                (operation: { id: string }) => operation.id,
-              ),
-            },
-          }),
-      };
+      return advance({
+        expectedRevision: preview.revision,
+        idempotencyKey: crypto.randomUUID(),
+        action: {
+          type: "install",
+          previewId: preview.nextAction.previewId,
+          contentHash: preview.nextAction.contentHash,
+          operationIds: preview.nextAction.operations.map(
+            (operation: { id: string }) => operation.id,
+          ),
+        },
+      });
     };
+    const instances = () =>
+      listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId);
 
     // Their own account, in a fresh instance named after the attempt.
-    const own = await connectAndPreview({ ownership: "personal" });
+    const own = await connect({ ownership: "personal" });
     expect(own.attempt.installationTarget).toEqual({
       instanceKey: `account-${own.attempt.id}`,
       displayName: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.name,
     });
-    const installed = await own.install();
-    expect(installed.status).toBe(200);
-    expect(await installed.json()).toMatchObject({
+    expect(own.current).toMatchObject({
+      revision: 2,
       state: "complete",
+      credentialsCommitted: true,
       integrationInstalled: true,
     });
 
@@ -1318,13 +1338,8 @@ describe("API Integration provider OAuth", () => {
         "workspace:read",
       ]),
     };
-    const narrow = await connectAndPreview({ ownership: "personal" }, narrowHeaders);
-    const narrowInstalled = await narrow.install();
-    expect(narrowInstalled.status).toBe(200);
-    expect(await narrowInstalled.json()).toMatchObject({
-      state: "complete",
-      integrationInstalled: true,
-    });
+    const narrow = await connect({ ownership: "personal" }, narrowHeaders);
+    expect(narrow.current).toMatchObject({ state: "complete", integrationInstalled: true });
     // ...but never a workspace account.
     fixture.microsoftPlans.length = 0;
     const narrowShared = await app.request(base, {
@@ -1340,30 +1355,33 @@ describe("API Integration provider OAuth", () => {
     expect(narrowShared.status).toBe(403);
 
     // A member (connections:write) adds a workspace account integration too.
-    const instances = () =>
-      listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId);
     const before = new Set((await instances()).map((instance) => instance.instanceKey));
-    const workspaceOwned = await connectAndPreview({ ownership: "workspace" });
-    const sharedInstall = await workspaceOwned.install();
-    expect(sharedInstall.status).toBe(200);
-    expect(await sharedInstall.json()).toMatchObject({
+    const workspaceOwned = await connect({ ownership: "workspace" });
+    expect(workspaceOwned.current).toMatchObject({
       state: "complete",
       integrationInstalled: true,
     });
     // ...but a member's add is create only: binding an instance that is
     // already set up (here the workspace one) stays integration management.
+    // The callback cannot finish it and keeps the account; the manual install
+    // is refused.
     const sharedInstance = (await instances()).find(
       (instance) => !before.has(instance.instanceKey),
     );
     expect(sharedInstance).toBeDefined();
-    const rebind = await connectAndPreview({
+    const rebind = await connect({
       ownership: "personal",
       installationTarget: {
         instanceKey: sharedInstance!.instanceKey,
         displayName: "OneDrive",
       },
     });
-    const rebound = await rebind.install();
+    expect(rebind.current).toMatchObject({
+      state: "connected_but_incomplete",
+      credentialsCommitted: true,
+      integrationInstalled: false,
+    });
+    const rebound = await previewAndInstall(rebind.attempt);
     expect(rebound.status).toBe(403);
     expect(await rebound.text()).toContain("Only an admin can change it");
     expect(
@@ -1372,17 +1390,95 @@ describe("API Integration provider OAuth", () => {
     ).toBe(sharedInstance!.connectionRef?.connectionId);
 
     // Binding an instance this account is not already bound to is adding an
-    // integration, which the narrow "connect my own account" permission is not.
-    const other = await connectAndPreview(
+    // integration, which the narrow "connect my own account" permission is not:
+    // the callback never finishes it with the person's wider membership rights.
+    const other = await connect(
       {
         ownership: "personal",
         installationTarget: { instanceKey: "account-someone-else", displayName: "OneDrive" },
       },
       narrowHeaders,
     );
-    const otherInstall = await other.install();
+    expect(other.current).toMatchObject({
+      state: "connected_but_incomplete",
+      integrationInstalled: false,
+    });
+    expect(
+      (await instances()).some((instance) => instance.instanceKey === "account-someone-else"),
+    ).toBe(false);
+    const otherInstall = await previewAndInstall(other.attempt, narrowHeaders);
     expect(otherInstall.status).toBe(403);
     expect(await otherInstall.text()).toContain("connections:write");
+  }, 60_000);
+
+  test("a built-in integration finishes setup in its callback, with no step left for the app", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const app = testApp(fixture);
+    const headers = {
+      authorization: await bearer(workspace),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const begun = await app.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "personal",
+        returnUrl: "https://host.example/capabilities",
+        idempotencyKey: crypto.randomUUID(),
+        installationTarget: { instanceKey: "account-sharepoint", displayName: "OneDrive" },
+      }),
+    });
+    expect(begun.status).toBe(200);
+    const attempt = await begun.json();
+    expect(attempt.state).toBe("requires_user_action");
+    // The person signs in and the browser comes back; the app that started
+    // setup is gone (dialog closed, page reloaded, desktop app quit). Nothing
+    // but the provider's redirect reaches the API.
+    const state = new URL(attempt.nextAction.url).searchParams.get("state")!;
+    const returned = await callback(fixture, state);
+    expect(returned.status).toBe(302);
+    expect(returned.headers.get("location")).toBe("https://host.example/capabilities");
+
+    const current = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
+    expect(current).toMatchObject({
+      id: attempt.id,
+      revision: 2,
+      state: "complete",
+      credentialsCommitted: true,
+      integrationInstalled: true,
+      nextAction: { type: "none" },
+      account: { ownership: "personal", status: "connected", label: "Microsoft User" },
+    });
+    expect(current.error).toBeUndefined();
+    const installed = (await instances()).find(
+      (instance) => instance.instanceKey === "account-sharepoint",
+    );
+    expect(installed).toMatchObject({
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+      displayName: "OneDrive",
+      connectionRef: { connectionId: current.account.id },
+    });
+    // Every reviewed tool, exactly as the app's automatic install chose.
+    expect(installed!.allowedTools).toHaveLength(2);
+    // Nothing is pending for the app to resume.
+    const pending = await (await app.request(base, { headers })).json();
+    expect(JSON.stringify(pending)).not.toContain(attempt.id);
+    // A replayed callback changes nothing.
+    expect((await callback(fixture, state)).headers.get("location")).toBe(
+      "https://host.example/capabilities",
+    );
+    expect(await (await app.request(`${base}/${attempt.id}`, { headers })).json()).toEqual(current);
+    expect(fixture.tokenRequests).toHaveLength(1);
+
+    function instances() {
+      return listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId);
+    }
   }, 60_000);
 
   test("a non-human principal cannot request personal ownership", async () => {

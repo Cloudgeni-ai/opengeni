@@ -51,6 +51,14 @@ import {
   microsoftAdminConsentUrl,
   microsoftAuthorizationNotGranted,
 } from "./microsoft-admin-consent";
+import type { ConnectAttempt } from "@opengeni/contracts/connect";
+import {
+  curatedConnectFinishEligible,
+  curatedConnectFinishPermissions,
+  installCuratedConnectTools,
+  resolveCuratedConnectTools,
+  type CuratedConnectFinishPermission,
+} from "./curated-connect-finish";
 
 import {
   assertConnectionOwnershipAllowedForPrincipal,
@@ -98,6 +106,8 @@ type ProviderOAuthState = {
   connectionId?: string;
   connectionVersion?: number;
   expectedProviderPrincipalId?: string;
+  /** What the person who started setup may do to finish it here (see curated-connect-finish). */
+  finishPermissions?: CuratedConnectFinishPermission[];
   nonce: string;
   iat: number;
 };
@@ -153,6 +163,12 @@ export async function startApiIntegrationProviderOAuth(
     personalOwnershipAllowed: boolean;
     externalContinuation?: ExternalActorContinuation;
     connectAttemptId?: string;
+    /**
+     * The starting request's own permissions that let its callback finish a
+     * built-in integration's setup. Signed into the state, since the callback
+     * has no request of its own; it still re-checks the owner's live authority.
+     */
+    finishPermissions?: CuratedConnectFinishPermission[];
     requestUrl: string;
     payload: ApiIntegrationOAuthStartRequest;
   },
@@ -230,6 +246,9 @@ export async function startApiIntegrationProviderOAuth(
     tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
     returnPath,
     ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
+    ...(input.connectAttemptId && input.finishPermissions?.length
+      ? { finishPermissions: [...input.finishPermissions] }
+      : {}),
     ...(input.externalContinuation
       ? {
           encryptedExternalContinuation: encryptEnvironmentValue(
@@ -285,6 +304,8 @@ export async function completeApiIntegrationProviderOAuth(
   let state: ProviderOAuthState | null = null;
   let exactReturnUrl: string | undefined;
   let connectOperation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
+  // A built-in integration's setup finishes here, not in the app that started it.
+  let curatedAttempt: ConnectAttempt | null = null;
   try {
     state = readProviderOAuthState(input.state, deps.settings);
     if (state.connectAttemptId) {
@@ -295,6 +316,7 @@ export async function completeApiIntegrationProviderOAuth(
       )
         throw new ProviderOAuthCallbackError("state_invalid");
       exactReturnUrl = stored.returnUrl;
+      if (curatedConnectFinishEligible(stored.attempt)) curatedAttempt = stored.attempt;
       connectOperation = {
         attemptId: state.connectAttemptId,
         operationId: `oauth:${state.nonce}`,
@@ -494,17 +516,33 @@ export async function completeApiIntegrationProviderOAuth(
     const persist = (database: import("@opengeni/db").Database) =>
       persistProviderOAuthConnection(database, persistenceInput);
     if (connectOperation) {
+      // Read the reviewed tools before the commit (no remote reads inside it).
+      // Null leaves the install step to the app, exactly as before.
+      const owner = state;
+      const finishPermissions = owner.finishPermissions ?? [];
+      const tools =
+        curatedAttempt && finishPermissions.length > 0
+          ? await resolveCuratedConnectTools(deps, owner, definition.id)
+          : null;
+      let origin: ExternalActorContinuation | null = null;
       await finishOAuthAcquisition(
         deps.db,
         state,
         {
           ...connectOperation,
-          authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, callbackPermission(state!), origin),
+          authorize: (tx, _attempt, attemptOrigin) => {
+            origin = attemptOrigin;
+            return requireConnectOwnerAuthority(
+              tx,
+              owner,
+              callbackPermission(owner),
+              attemptOrigin,
+            );
+          },
           commit: async (tx, current) => {
             const connection = await persist(tx);
             if (!connection) throw new ProviderOAuthCallbackError("connection_conflict");
-            return {
+            const connected: ConnectAttempt = {
               ...current,
               revision: current.revision + 1,
               state: "connected_but_incomplete",
@@ -518,6 +556,26 @@ export async function completeApiIntegrationProviderOAuth(
                 status: "connected",
               },
             };
+            const installed =
+              tools &&
+              curatedConnectFinishEligible(current) &&
+              (await installCuratedConnectTools(tx, {
+                settings: deps.settings,
+                owner,
+                origin,
+                finishPermissions,
+                attempt: connected,
+                connectionId: connection.id,
+                resolved: tools,
+              }));
+            return installed
+              ? {
+                  ...connected,
+                  state: "complete",
+                  integrationInstalled: true,
+                  error: undefined,
+                }
+              : connected;
           },
         },
         definition.id,
@@ -763,6 +821,9 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     ...(optionalString(payload.expectedProviderPrincipalId)
       ? { expectedProviderPrincipalId: optionalString(payload.expectedProviderPrincipalId)! }
+      : {}),
+    ...(Array.isArray(payload.finishPermissions)
+      ? { finishPermissions: curatedConnectFinishPermissions(payload.finishPermissions) }
       : {}),
     nonce: requiredStateString(payload.nonce),
     iat,

@@ -1,4 +1,8 @@
-import { adminApprovalLink } from "../../../connect-setup-model";
+import {
+  adminApprovalLink,
+  connectSetupContinuesWithoutDialog,
+  continueConnectSetup,
+} from "../../../connect-setup-model";
 import { connectionServicePresentation } from "../../../connection-service-presentation";
 import { useEffect, useState, useRef } from "react";
 import {
@@ -89,6 +93,10 @@ export function NativeConnectSetup({
   );
   const navigation = useRef<AbortController | null>(null);
   const completedAttempt = useRef<string | null>(null);
+  // The person opened the provider's sign-in for this attempt.
+  const signInStarted = useRef(false);
+  const latestComplete = useRef(onComplete);
+  latestComplete.current = onComplete;
   // Consent-gated connect journey: started when the dialog begins setup,
   // finished by the attempt's settled state, `abandoned` when closed first.
   const journey = useRef<IntegrationConnectTracker | null>(null);
@@ -109,6 +117,7 @@ export function NativeConnectSetup({
       return;
     }
     const next = new ConnectController(transport, workspaceId);
+    signInStarted.current = false;
     setController(next);
     setFailed(false);
     setPreparing(true);
@@ -177,7 +186,22 @@ export function NativeConnectSetup({
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) onClose();
+        if (open) return;
+        // Closing never stops setup the person already authorized: it carries
+        // on without the dialog and reports completion the same way.
+        const attempt = controller?.getSnapshot().attempt;
+        if (
+          attempt &&
+          completedAttempt.current !== attempt.id &&
+          connectSetupContinuesWithoutDialog(attempt, signInStarted.current)
+        ) {
+          completedAttempt.current = attempt.id;
+          const complete = latestComplete.current;
+          void continueConnectSetup(transport, attempt).then((done) => {
+            if (done) complete(done);
+          });
+        }
+        onClose();
       }}
     >
       <CapabilityDialogContent
@@ -313,6 +337,7 @@ export function NativeConnectSetup({
                   }
                 : {})}
               onAuthorize={async (attempt) => {
+                signInStarted.current = true;
                 const result = await authorizeConnectAttempt(
                   transport,
                   attempt,

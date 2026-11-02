@@ -12,6 +12,7 @@ import {
   NativeConnectSetup,
   type NativeConnectRequest,
 } from "@opengeni/react/app/components/capabilities/native-connect-setup";
+import type { ConnectAttempt } from "@opengeni/connect";
 import { toast } from "sonner";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
@@ -293,13 +294,20 @@ export function useApiIntegrationAccounts({
   const connectTransport = useMemo(() => client.connectTransport(), [client]);
   const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
   const [newConnection, setNewConnection] = useState<NativeConnectRequest | null>(null);
-  const completeConnect = useCallback(() => {
-    setConnectRequest(null);
-    void refresh?.().catch(() =>
-      toast.error("Account connected, but refreshing the catalog failed"),
-    );
-    onRuntimeChanged?.();
-  }, [refresh, onRuntimeChanged]);
+  const connectName = definitions.find((candidate) => candidate.id === definitionId)?.name;
+  const completeConnect = useCallback(
+    (attempt: ConnectAttempt) => {
+      setConnectRequest(null);
+      toast.success(
+        `${attempt.installationTarget?.displayName ?? connectName ?? "Account"} connected`,
+      );
+      void refresh?.().catch(() =>
+        toast.error("Account connected, but refreshing the catalog failed"),
+      );
+      onRuntimeChanged?.();
+    },
+    [refresh, onRuntimeChanged, connectName],
+  );
   useEffect(() => {
     setConnectRequest(null);
     setNewConnection(null);

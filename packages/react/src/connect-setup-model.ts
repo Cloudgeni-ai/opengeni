@@ -4,9 +4,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ConnectPopupClosedError,
+  pollConnectAttempt,
   type ConnectAdvance,
   type ConnectAttempt,
   type ConnectController,
+  type ConnectTransport,
 } from "@opengeni/connect";
 import { useConnect, type ConnectView } from "./hooks/use-connect";
 import { useOpenGeniText, type OpenGeniText } from "./messages/runtime";
@@ -64,6 +66,98 @@ export function curatedAutoAdvance(attempt: ConnectAttempt): ConnectAdvance | nu
       operationIds: next.operations.map((operation) => operation.id),
     };
   return null;
+}
+
+/**
+ * Whether setup the person already authorized can carry on without its
+ * dialog: the sign-in was started (or came back) and what remains is waiting
+ * for it or a built-in integration's automatic steps.
+ */
+export function connectSetupContinuesWithoutDialog(
+  attempt: ConnectAttempt,
+  signInStarted: boolean,
+): boolean {
+  if (
+    attempt.error ||
+    ["complete", "cancelled", "expired", "failed", "uncertain"].includes(attempt.state)
+  )
+    return false;
+  if (curatedAutoAdvance(attempt)) return true;
+  return signInStarted && ["authorize", "wait"].includes(attempt.nextAction.type);
+}
+
+/**
+ * Carry a setup on after its dialog closed or the person moved on: wait for
+ * the sign-in to come back and take a built-in integration's automatic steps.
+ * Closing the dialog never stops setup the person already authorized. The
+ * server normally finishes a built-in integration in its own callback, so this
+ * usually only waits. Resolves with the completed attempt, or null when setup
+ * needs the person again (or could not be read); it then stays resumable.
+ */
+export async function continueConnectSetup(
+  transport: Pick<ConnectTransport, "get" | "advance">,
+  attempt: ConnectAttempt,
+  options: { signal?: AbortSignal; settleMs?: number } = {},
+): Promise<ConnectAttempt | null> {
+  const signal = options.signal ? { signal: options.signal } : {};
+  let current = attempt;
+  try {
+    // Sign-in, then at most a preview and an install, plus a step the closed
+    // dialog may still have had in flight.
+    for (let step = 0; step < 6; step++) {
+      if (current.state === "complete") return current;
+      if (current.error) return null;
+      const advance = curatedAutoAdvance(current);
+      if (advance) {
+        try {
+          current = await transport.advance(
+            current.workspaceId,
+            current.id,
+            {
+              expectedRevision: current.revision,
+              idempotencyKey: crypto.randomUUID(),
+              action: advance,
+            },
+            signal,
+          );
+        } catch {
+          // The dialog's own step can still be running or already applied:
+          // continue from wherever the attempt is once it moves.
+          current = await settledConnectAttempt(transport, current, options);
+        }
+        continue;
+      }
+      if (!["authorize", "wait"].includes(current.nextAction.type)) return null;
+      current = await pollConnectAttempt(transport, current.workspaceId, current.id, {
+        ...signal,
+        minimumRevision: current.revision,
+        expiresAt: current.expiresAt,
+      });
+    }
+    return current.state === "complete" ? current : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The attempt once it moved past `attempt`'s revision; throws if it does not in time. */
+async function settledConnectAttempt(
+  transport: Pick<ConnectTransport, "get">,
+  attempt: ConnectAttempt,
+  options: { signal?: AbortSignal; settleMs?: number },
+): Promise<ConnectAttempt> {
+  const deadline = Date.now() + (options.settleMs ?? 60_000);
+  while (true) {
+    options.signal?.throwIfAborted();
+    const fresh = await transport.get(attempt.workspaceId, attempt.id, {
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    if (fresh.id !== attempt.id || fresh.workspaceId !== attempt.workspaceId)
+      throw new Error("Connect response scope mismatch");
+    if (fresh.revision > attempt.revision) return fresh;
+    if (Date.now() >= deadline) throw new Error("Connect setup did not move");
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
 }
 
 const MICROSOFT_APPROVAL_LINK = /https:\/\/login\.microsoftonline\.com\/[^\s]+/;

@@ -35,7 +35,6 @@ import {
   IntegrationChangeRequiresAdminError,
   listConnectionsMetadata,
   getConnectionMetadata,
-  listInstalledApiIntegrations,
   createConnection,
   updateConnection,
   encryptEnvironmentValue,
@@ -87,6 +86,10 @@ import {
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
+import {
+  curatedConnectFinishPermissions,
+  isOwnAccountInstall,
+} from "../integrations/curated-connect-finish";
 import { assertMcpCredentialContentFlowAllowed, executeConnectOperation } from "@opengeni/core";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import {
@@ -157,54 +160,6 @@ async function requireConnectAuthorization(
   throw new MissingPermissionRefusal("workspace:admin", {
     message: WORKSPACE_SETTINGS_REFUSAL,
   });
-}
-
-/**
- * Installing a deployment-reviewed integration's tools for the caller's own
- * personal account is connecting that account, so it needs only the right to
- * connect your own accounts (connections:personal, included in
- * connections:write), like connecting Gmail. The instance resolves
- * credentials for that person alone. Anything else (a workspace account, a
- * custom source, or an instance not already bound to this same account)
- * is adding an integration (connections:write, which members hold).
- */
-async function isOwnAccountInstall(
-  deps: ApiRouteDeps,
-  scope: { workspaceId: string; subjectId: string },
-  attempt: {
-    id: string;
-    providerId: string;
-    ownership: string;
-    source?: unknown;
-    account?: { id: string } | undefined;
-    installationTarget?: { instanceKey: string } | undefined;
-  },
-): Promise<boolean> {
-  if (attempt.ownership !== "personal" || attempt.source !== undefined || !attempt.account)
-    return false;
-  if (
-    !CORE_INTEGRATION_DEFINITIONS.some((definition) => definition.id === attempt.providerId) ||
-    !integrationAvailable(deps.settings, scope.workspaceId, attempt.providerId)
-  )
-    return false;
-  const connection = await getConnectionMetadata(
-    deps.db,
-    scope.workspaceId,
-    attempt.account.id,
-    scope.subjectId,
-  );
-  if (!connection || connection.subjectId !== scope.subjectId) return false;
-  const instanceKey = attempt.installationTarget?.instanceKey;
-  // A fresh instance named after this attempt cannot replace anyone's.
-  if (!instanceKey || instanceKey === `account-${attempt.id}`) return true;
-  // Reconnecting reuses only an instance already bound to this same account.
-  const installed = await listInstalledApiIntegrations(deps.db, scope.workspaceId, scope.subjectId);
-  return installed.some(
-    (instance) =>
-      instance.instanceKey === instanceKey &&
-      instance.definitionId === attempt.providerId &&
-      instance.connectionRef?.connectionId === attempt.account!.id,
-  );
 }
 
 /** Shared durable setup entry. Provider completion is distinct from
@@ -787,7 +742,8 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         ? "connections:write"
         : action.type === "credentials"
           ? connectSetupPermission(before)
-          : action.type === "install" && (await isOwnAccountInstall(deps, scope, before))
+          : action.type === "install" &&
+              (await isOwnAccountInstall(deps.db, deps.settings, scope, before))
             ? "connections:personal"
             : permission;
     if (!hasPermission(authorization.grant.permissions, advancePermission))
@@ -2136,6 +2092,12 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                             isPersonalConnectionOwnerPrincipal(authorization),
                           ...(continuation ? { externalContinuation: continuation } : {}),
                           connectAttemptId: id,
+                          // Lets the callback finish setup with exactly this request's rights.
+                          finishPermissions: curatedConnectFinishPermissions((permission) =>
+                            permission === "capabilities:manage"
+                              ? hasIntegrationAdminPermission(authorization.grant)
+                              : hasPermission(authorization.grant.permissions, permission),
+                          ),
                           requestUrl: c.req.url,
                           payload: {
                             definitionId: input.providerId,
