@@ -822,6 +822,58 @@ test("stale pagination completion does not restore focus or grow a new browse ge
   expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
 }, 30_000);
 
+test("a chat's unread reply shows over its working sub-sessions, which still say so", async () => {
+  const row = (number: number) =>
+    page.locator(
+      `a[data-session-row="00000000-0000-4000-9000-${String(number).padStart(12, "0")}"]`,
+    );
+  const marker = (number: number) => row(number).locator("[data-session-row-metadata] [title]");
+  for (const desktop of ["browser", "macos"]) {
+    for (const theme of ["light", "dark"]) {
+      await page.goto(`${url}?scenario=unread-reply&theme=${theme}&desktop=${desktop}`);
+      await row(4001).waitFor();
+      // The disclosure is remembered across the reloads below.
+      const more = page.getByRole("button", { name: /^Show 3 more sessions/ });
+      if (await more.count()) await more.click();
+      await row(4009).waitFor();
+
+      // The manager answered while two workers run and it waits on them.
+      expect(await marker(4001).getAttribute("title")).toBe("1 unread · 2 working");
+      expect(await marker(4001).locator(".bg-session-update").count()).toBe(1);
+      expect(await marker(4001).locator(".animate-spin, .lucide-hourglass").count()).toBe(0);
+      expect(await row(4001).getAttribute("aria-label")).toContain("1 unread · 2 working");
+      // The same with a worker running, and with its own next turn.
+      expect(await marker(4004).getAttribute("title")).toBe("1 unread · 1 working");
+      expect(await marker(4005).getAttribute("title")).toBe("1 unread · 1 working");
+      // Without an unread reply the row still shows the work.
+      expect(await marker(4006).getAttribute("title")).toBe("1 working");
+      expect(await marker(4006).locator(".animate-spin").count()).toBe(1);
+      expect(await marker(4008).locator(".lucide-hourglass").count()).toBe(1);
+      // Something that needs you still comes first.
+      expect(await marker(4007).getAttribute("title")).toBe("1 needs you");
+      expect(await marker(4009).getAttribute("title")).toBe("1 unread");
+      await capture(`unread-reply-${desktop}-${theme}`);
+
+      // Expanded, each worker keeps its own spinner.
+      await row(4001)
+        .locator("xpath=..")
+        .getByRole("button", { name: "Expand spawned sessions" })
+        .click();
+      await row(4002).waitFor();
+      // Focus on the toggle swaps the row's metadata for its quick actions.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      for (const worker of [4002, 4003])
+        expect(await marker(worker).locator(".animate-spin").count()).toBe(1);
+      await capture(`unread-reply-${desktop}-${theme}-expanded`);
+      await row(4001)
+        .locator("xpath=..")
+        .getByRole("button", { name: "Collapse spawned sessions" })
+        .click();
+      await row(4002).waitFor({ state: "detached" });
+    }
+  }
+}, 60_000);
+
 test("the row hover explains status, model and activity from the compact list row", async () => {
   await page.goto(`${url}?scenario=hover&theme=light`);
   const row = (number: number) =>

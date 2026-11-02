@@ -226,6 +226,7 @@ import {
   visibleForestRows,
   visibleTreeRows,
   summarizeRailNodes,
+  summarizeRailRow,
   summarizeRailStatusCounts,
   sessionProjectTotals,
   type RailStatusCounts,
@@ -4952,7 +4953,7 @@ function SessionTreeRow(props: {
   const childCount = Math.max(node.session.treeStats?.totalDescendants ?? 0, node.children.length);
   const childCountTruncated = node.session.treeStats?.truncated ?? false;
   const hasChildren = directChildCount > 0 || node.children.length > 0;
-  const aggregateStatus = summarizeRailNodes([node], props.localDeliveryAttention);
+  const aggregateStatus = summarizeRailRow(node, props.localDeliveryAttention);
   const isExpanded = props.expanded.has(node.session.id);
   const childPage = props.childPages.get(node.session.id);
   // A collapsed branch keeps only its selected descendant visible, rendered as

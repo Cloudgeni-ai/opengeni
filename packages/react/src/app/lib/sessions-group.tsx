@@ -308,6 +308,36 @@ export function summarizeRailNodes(
   return summarizeRailStatusCounts(counts, now);
 }
 
+/**
+ * The marker for one chat's row: the chat and everything it started.
+ *
+ * Like {@link summarizeRailNodes}, except that the chat's own unread reply
+ * outranks work in progress. A manager that has answered you while its
+ * workers still run (or while it waits on them) shows the unread dot, not a
+ * spinner or hourglass that reads as "nothing for you yet". What the dot now
+ * covers stays in its label ("1 unread · 2 working"), and an expanded row's
+ * workers keep their own markers. Anything that needs you, a failure and an
+ * unsent message still come first. Section headers and Site rows summarize
+ * many chats and keep the plain order.
+ */
+export function summarizeRailRow(
+  node: SessionTreeNode,
+  localDeliveryAttention: ReadonlyMap<string, number> = new Map(),
+  now: Date = new Date(),
+): RailAggregateStatus {
+  const counts = railStatusCounts(node, localDeliveryAttention);
+  const summary = summarizeRailStatusCounts(counts, now);
+  if (node.siteGroup || !node.session.unread) return summary;
+  if (summary.kind !== "active" && summary.kind !== "queued" && summary.kind !== "waiting")
+    return summary;
+  return {
+    kind: "unread",
+    count: counts.unread,
+    total: counts.total,
+    label: `${counts.unread} unread · ${summary.label}`,
+  };
+}
+
 /** Shared presentation for complete server metadata and loaded node summaries. */
 export function summarizeRailStatusCounts(
   counts: RailStatusCounts,
