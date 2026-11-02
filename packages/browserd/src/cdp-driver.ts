@@ -9140,6 +9140,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         error
       );
     });
+    // A cover still animating away (a dialog fading out after its close
+    // button was pressed in the same batch) is waited out, as a person waits.
+    if (
+      requireHit &&
+      !(await this.hitsAtCenter(state, backendDOMNodeId)) &&
+      (await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        ANIMATING_COVER_CLEARS_FUNCTION,
+        [{ value: ANIMATING_COVER_WAIT_MS }],
+        frameId === undefined || this.engine === "lightpanda" ? {} : { isolatedFrameId: frameId },
+      ).catch(() => false)) === true
+    )
+      point = await this.centerPoint(state, backendDOMNodeId);
     if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
       const visible =
         (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
@@ -13455,6 +13469,47 @@ const STICKY_COVER_FUNCTION = `function() {
   }
   return false;
 }`;
+
+// Resolves true once nothing covers the target's centre, waiting only while
+// what covers it (or a box around that) is still animating: a dialog fading
+// out after its close button was pressed, a toast or menu sliding away. A
+// cover with no running animation is not waited for. Polled on timers, not
+// frames, since a hidden tab may not render frames.
+const ANIMATING_COVER_CLEARS_FUNCTION = `function(limitMs) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  ${HIT_HELPERS}
+  const animating = (node) => {
+    if (typeof document.getAnimations !== "function") return false;
+    const targets = new Set();
+    for (const animation of document.getAnimations()) {
+      if (animation.playState !== "running" && !animation.pending) continue;
+      const target = animation.effect && animation.effect.target;
+      if (target) targets.add(target);
+    }
+    for (let current = node; current instanceof Element; ) {
+      if (targets.has(current)) return true;
+      const parentRoot = current.getRootNode();
+      current = current.parentElement ?? (parentRoot instanceof ShadowRoot ? parentRoot.host : null);
+    }
+    return false;
+  };
+  const start = performance.now();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (!element.isConnected) return resolve(false);
+      const rect = element.getBoundingClientRect();
+      const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+      if (hit && owns(element, hit)) return resolve(true);
+      if (!hit || !animating(hit) || performance.now() - start >= limitMs) return resolve(false);
+      setTimeout(check, 50);
+    };
+    check();
+  });
+}`;
+
+/** How long a click waits for a cover that is animating away. */
+const ANIMATING_COVER_WAIT_MS = 1_500;
 
 const SCROLL_INTO_VIEW_FUNCTION = `function(alignment) {
   const element = this instanceof Element ? this : this.parentElement;
