@@ -211,6 +211,7 @@ export * from "./event-triggers";
 export * from "./automation-templates";
 export * from "./bots";
 export * from "./slack-agents";
+export * from "./agents";
 export * from "./slack-agent-updates";
 export * from "./mcp-elicitation";
 import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
@@ -16727,6 +16728,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     description: primitives.nullableString.default(null),
     /** Avatar shown with the title; display metadata, never sent to the model. */
     avatar: SessionAvatar.nullable().default(null),
+    /**
+     * The agent this chat was started with (see `./agents`); null for an
+     * ordinary chat. Fixed at create. Omitted by older servers.
+     */
+    agentId: primitives.uuid.nullable().optional(),
     // Per-session agent persona/system instructions supplied at create. Org-visible
     // metadata (exposed like title/goal), never a secret and never a timeline event.
     // null when the session carried none.
@@ -20510,6 +20516,12 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
          * inherited by child sessions; a fork reads as attended.
          */
         unattended: primitives.optionalBoolean,
+        /**
+         * Start the chat with an agent the caller can use: it follows the
+         * agent's current Instructions (and later edits). The agent's First
+         * message is not sent; the app puts it in the composer instead.
+         */
+        agentId: primitives.optionalUuid,
         /** The new chat's name, description and avatar, as if a person set them
          * (a bot started from a template, for example). Display metadata only;
          * never sent to the model. */

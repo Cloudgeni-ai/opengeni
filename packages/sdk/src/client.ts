@@ -71,6 +71,23 @@ import type {
 } from "./artifact-catalog";
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
+  Agent,
+  AgentChatsFilter,
+  AgentListFilter,
+  AgentResponse,
+  AgentSlackAvailabilityResponse,
+  AgentSlackChannelListResponse,
+  AgentSlackIntroRequest,
+  AgentSlackIntroResponse,
+  AgentSummary,
+  CreateAgentRequest,
+  DeleteAgentResponse,
+  ListAgentChatsResponse,
+  ListAgentRevisionsResponse,
+  ListAgentSlackInstallsResponse,
+  ListAgentsResponse,
+  PutAgentSlackAvailabilityRequest,
+  UpdateAgentRequest,
   AutomationTemplateResponse,
   BotTemplateResponse,
   CreateBotTemplateRequest,
@@ -8374,6 +8391,163 @@ export class OpenGeniClient {
     await this.requestJson<unknown>(
       "DELETE",
       `/v1/workspaces/${workspaceId}/bot-templates/${templateId}`,
+    );
+  }
+
+  // --- Agents ----------------------------------------------------------------
+  // An agent is a name, icon and description, standing Instructions every one
+  // of its chats follows, an optional First message the app puts in the
+  // composer, and an optional Memory. It lives in one workspace, is Only me or
+  // shared with that workspace, and can also be available in Slack. Bot
+  // templates and Slack agents are agents too (same ids); their endpoints
+  // keep working. Start a chat with one through `createSession({ agentId })`.
+
+  async listAgents(
+    workspaceId: string,
+    options: { filter?: AgentListFilter } = {},
+  ): Promise<AgentSummary[]> {
+    const query = options.filter ? `?${new URLSearchParams({ filter: options.filter })}` : "";
+    const response = await this.requestJson<ListAgentsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents${query}`,
+    );
+    return response.agents;
+  }
+
+  async getAgent(workspaceId: string, agentId: string): Promise<Agent> {
+    const response = await this.requestJson<AgentResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}`,
+    );
+    return response.agent;
+  }
+
+  async createAgent(workspaceId: string, request: CreateAgentRequest): Promise<Agent> {
+    const response = await this.requestJson<AgentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/agents`,
+      request,
+    );
+    return response.agent;
+  }
+
+  /** Changes only what the request names, at `expectedVersion`. */
+  async updateAgent(
+    workspaceId: string,
+    agentId: string,
+    request: UpdateAgentRequest,
+  ): Promise<Agent> {
+    const response = await this.requestJson<AgentResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}`,
+      request,
+    );
+    return response.agent;
+  }
+
+  /** Deletes the agent. Its chats stay and continue as ordinary chats. */
+  async deleteAgent(workspaceId: string, agentId: string): Promise<DeleteAgentResponse> {
+    return await this.requestJson<DeleteAgentResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}`,
+    );
+  }
+
+  /** Saved versions of the agent's Instructions and First message, newest first. */
+  async listAgentRevisions(
+    workspaceId: string,
+    agentId: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<ListAgentRevisionsResponse> {
+    const query = new URLSearchParams();
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<ListAgentRevisionsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/revisions${suffix}`,
+    );
+  }
+
+  /** The agent's chats, newest first: the reader's own, or everyone's they can open. */
+  async listAgentChats(
+    workspaceId: string,
+    agentId: string,
+    options: { filter?: AgentChatsFilter; cursor?: string; limit?: number } = {},
+  ): Promise<ListAgentChatsResponse> {
+    const query = new URLSearchParams();
+    if (options.filter) query.set("filter", options.filter);
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<ListAgentChatsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/chats${suffix}`,
+    );
+  }
+
+  /** The connected Slack workspaces the agent can be available in, and where it is. */
+  async listAgentSlackInstalls(
+    workspaceId: string,
+    agentId: string,
+  ): Promise<ListAgentSlackInstallsResponse> {
+    return await this.requestJson<ListAgentSlackInstallsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/slack`,
+    );
+  }
+
+  /** Make the agent available in one Slack workspace, or change how (open use). */
+  async putAgentSlackAvailability(
+    workspaceId: string,
+    agentId: string,
+    connectionId: string,
+    request: PutAgentSlackAvailabilityRequest = {},
+  ): Promise<AgentSlackAvailabilityResponse> {
+    return await this.requestJson<AgentSlackAvailabilityResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/slack/${encodeURIComponent(connectionId)}`,
+      request,
+    );
+  }
+
+  /** Stop the agent answering in one Slack workspace. The agent and its chats stay. */
+  async deleteAgentSlackAvailability(
+    workspaceId: string,
+    agentId: string,
+    connectionId: string,
+  ): Promise<AgentSlackAvailabilityResponse> {
+    return await this.requestJson<AgentSlackAvailabilityResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/slack/${encodeURIComponent(connectionId)}`,
+    );
+  }
+
+  /** Slack channels the Opengeni app is in, where the agent can be introduced. */
+  async listAgentSlackChannels(
+    workspaceId: string,
+    agentId: string,
+    connectionId: string,
+    cursor?: string,
+  ): Promise<AgentSlackChannelListResponse> {
+    const query = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+    return await this.requestJson<AgentSlackChannelListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/slack/${encodeURIComponent(connectionId)}/channels${query}`,
+    );
+  }
+
+  /** Post a short intro of the agent, under its name, in each chosen channel. */
+  async postAgentSlackIntro(
+    workspaceId: string,
+    agentId: string,
+    connectionId: string,
+    request: AgentSlackIntroRequest,
+  ): Promise<AgentSlackIntroResponse> {
+    return await this.requestJson<AgentSlackIntroResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/agents/${encodeURIComponent(agentId)}/slack/${encodeURIComponent(connectionId)}/intro`,
+      request,
     );
   }
 
