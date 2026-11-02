@@ -43,7 +43,10 @@
 //! instead of staying a day or two: a store then holds about what its
 //! copies name, not what its busiest sandboxes wrote over two days. Only
 //! the same new bytes written in different periods are stored more than
-//! once.
+//! once. What a store wrote itself in an earlier period it copies within
+//! the store when it writes those bytes again, so an archive a fence
+//! stopped keeps what it stored: the copy is a write of the current
+//! period's name like any other, and the earlier object stays unnamed.
 //!
 //! Objects in the old layout, named by content alone, are never written
 //! again. One no pointer names is deleted once it was last stored more

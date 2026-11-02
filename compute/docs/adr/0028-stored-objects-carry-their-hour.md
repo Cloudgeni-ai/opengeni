@@ -39,6 +39,14 @@ before it began, whatever the period's length.
   alike.
 - **The sweep runs hourly** (the chart's `computeControl.sweep.schedule`
   defaults to `17 * * * *`). One at a time, as before.
+- **An archive a fence stopped keeps what it stored.** A store remembers
+  the chunks it stored itself and the hour of each, up to 262,144 of them.
+  Storing one of those again in a later hour, as an archive started again
+  after a fence does, it copies the earlier object within the store under
+  this hour's name instead of uploading the bytes, and checks the copy as
+  it checks an upload. When the earlier object is gone (a sweep took it),
+  the copy does not check, or the store cannot copy, it uploads as before.
+  The copy is a write of this hour's name, so the rule above covers it.
 
 ## Consequences
 
@@ -53,7 +61,19 @@ before it began, whatever the period's length.
   where they were once per day. What an archive reuses of the copy before
   it, or of its image, is unaffected.
 - Each sweep fences every pointer, so an archive in flight across a sweep
-  starts again once an hour instead of once a day; it reuses what it
-  already stored that hour.
+  starts again once an hour instead of once a day. Started again, it
+  copies what it stored in an earlier hour and uploads only what a sweep
+  took meanwhile: one copy request per chunk carried across an hour, and
+  on S3 and Azure a read of it to check it (GCS checks it by its
+  checksums). A store with no copy uploads it again. Remembering the
+  chunks costs up to about 20 MB a host.
+- That keeps up only so far. The archive copies a chunk when it reaches
+  it, so what it uploads again first delays the rest; past about two
+  hours of uploads in one try, a sweep has taken those too by then, and
+  the archive never publishes. With a daily sweep that limit was about a
+  day.
+- Any two clocks must stay within `CLOCK_SKEW` of each other, where a
+  day's margin hid a disagreement of two hours. In a fleet every host and
+  sweep reads the database's clock.
 - A sweep lists the whole store each hour: about eight minutes and a few
   thousand list requests for 2.5 million objects.

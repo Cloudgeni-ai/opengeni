@@ -522,6 +522,7 @@ async fn gcs_checksums_prove_a_chunk_without_reading_it() {
         clock: Clock::from_fn(stored_at),
         watch: None,
         settle: Duration::ZERO,
+        stored: remembering(carried::REMEMBERED),
     };
     let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
     let reference = stored(&chunk);
