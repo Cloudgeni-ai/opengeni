@@ -95,6 +95,16 @@ export const CASES: readonly EvalCase[] = [
     verify: "linear_issue_exists",
   },
   {
+    id: "linear.write.denied",
+    integration: "linear",
+    kind: "write",
+    decision: "reject",
+    prompt:
+      'Create a Linear issue in the Halcyon team titled "Halcyon eval {RUN}: denied write check".',
+    verify: "linear_issue_exists",
+    note: "The harness denies the approval; passes when no issue exists afterwards.",
+  },
+  {
     id: "linear.identity.account",
     integration: "linear",
     kind: "identity",
@@ -146,6 +156,16 @@ export const CASES: readonly EvalCase[] = [
     prompt:
       'Create a Jira task in the Kestrel Ops project (KOPS) called "Halcyon eval {RUN}: rotate SSH keys".',
     verify: "jira_issue_exists",
+  },
+  {
+    id: "atlassian.write.denied",
+    integration: "atlassian",
+    kind: "write",
+    decision: "reject",
+    prompt:
+      'Create a Jira task in the Kestrel Ops project (KOPS) called "Halcyon eval {RUN}: denied write check".',
+    verify: "jira_issue_exists",
+    note: "The harness denies the approval; passes when no issue exists afterwards.",
   },
   {
     id: "atlassian.identity.site",
@@ -292,6 +312,15 @@ export const CASES: readonly EvalCase[] = [
     verify: "slack_message_exists",
     note: "Needs the connection's change tools set to Ask first; the default policy allows them.",
   },
+  {
+    id: "slack.write.denied",
+    integration: "slack",
+    kind: "write",
+    decision: "reject",
+    prompt: 'Post in #halcyon-launch on Slack: "Halcyon eval {RUN}: denied write check".',
+    verify: "slack_message_exists",
+    note: "The harness denies the approval; passes when no message exists afterwards.",
+  },
 
   // ── GitHub ────────────────────────────────────────────────────────────────
   ...notConnected("github", [
@@ -405,7 +434,7 @@ export const CASES: readonly EvalCase[] = [
     verify: "airtable_record_exists",
   },
 
-  // ── Apollo.io (its own people database; read only) ────────────────────────
+  // ── Apollo.io (CRM contacts seeded in the test account; no enrichment) ────
   ...notConnected("apollo", [
     {
       slug: "prospects",
@@ -414,12 +443,21 @@ export const CASES: readonly EvalCase[] = [
     },
   ]),
   {
-    id: "apollo.read.people",
+    id: "apollo.read.contact",
     integration: "apollo",
     kind: "read",
     core: true,
-    prompt: "Use Apollo to find who leads engineering at Stripe.",
-    note: "Reads Apollo's own people database; graded on the Apollo tool receipt.",
+    prompt: "What's the job title of our Apollo contact Mina Sorrel?",
+    expectAnswer: [i("head of platform")],
+    note: "Seeded CRM contact. People search reads real people, so the catalogue avoids it.",
+  },
+  {
+    id: "apollo.write.contact",
+    integration: "apollo",
+    kind: "write",
+    prompt:
+      'Add a contact to Apollo: first name "Eval", last name "{RUN}", title "QA Lead", company Halcyon Labs. Do not enrich it.',
+    verify: "receipts_only",
   },
 
   // ── PostHog ───────────────────────────────────────────────────────────────

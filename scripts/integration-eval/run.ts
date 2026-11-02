@@ -178,6 +178,7 @@ async function driveSession(
   api: OpengeniApi,
   workspaceId: string,
   sessionId: string,
+  decision: "approve" | "reject" = "approve",
 ): Promise<{ events: SessionEvent[]; timedOut: boolean }> {
   const events: SessionEvent[] = [];
   const decided = new Set<string>();
@@ -195,7 +196,7 @@ async function driveSession(
       if (approval.decision !== null || decided.has(approval.approvalId)) continue;
       decided.add(approval.approvalId);
       try {
-        await api.decideApproval(workspaceId, sessionId, approval.approvalId, "approve");
+        await api.decideApproval(workspaceId, sessionId, approval.approvalId, decision);
       } catch (error) {
         console.warn(`approval ${approval.approvalId} failed: ${String(error)}`);
       }
@@ -329,7 +330,12 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
     });
     base.sessionId = session.id;
     base.chatUrl = `${appUrl}/workspaces/${workspaceId}/sessions/${session.id}`;
-    const { events, timedOut } = await driveSession(api, workspaceId, session.id);
+    const { events, timedOut } = await driveSession(
+      api,
+      workspaceId,
+      session.id,
+      testCase.decision ?? "approve",
+    );
     const verification = testCase.kind === "write" ? await verify(testCase.verify, marker) : null;
     const graded = gradeEvents(
       testCase,

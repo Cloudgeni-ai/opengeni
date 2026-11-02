@@ -32,12 +32,16 @@ async function json(url: string, init: RequestInit = {}): Promise<unknown> {
 }
 
 /** Search indexes lag a little; retry a few times before calling it missing. */
-async function poll(find: () => Promise<string | null>, what: string): Promise<Verification> {
+async function poll(
+  find: () => Promise<string | { detail: string; count: number } | null>,
+  what: string,
+): Promise<Verification> {
   let lastError = "";
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
       const found = await find();
-      if (found) return { ran: true, ok: true, detail: found };
+      if (typeof found === "string") return { ran: true, ok: true, detail: found };
+      if (found) return { ran: true, ok: true, detail: found.detail, count: found.count };
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
     }
@@ -69,8 +73,9 @@ const VERIFIERS: Record<string, Verifier> = {
           variables: { q: run },
         }),
       })) as { data?: { issues?: { nodes?: { identifier: string; title: string }[] } } };
-      const node = body.data?.issues?.nodes?.[0];
-      return node ? `${node.identifier} ${node.title}` : null;
+      const nodes = body.data?.issues?.nodes ?? [];
+      const node = nodes[0];
+      return node ? { detail: `${node.identifier} ${node.title}`, count: nodes.length } : null;
     }, "Linear issue");
   },
 
@@ -86,8 +91,11 @@ const VERIFIERS: Record<string, Verifier> = {
         `${env.VERIFY_JIRA_BASE_URL!.replace(/\/+$/, "")}/rest/api/3/search/jql?jql=${jql}&fields=summary`,
         { headers: { authorization: `Basic ${auth}`, accept: "application/json" } },
       )) as { issues?: { key: string; fields?: { summary?: string } }[] };
-      const issue = body.issues?.[0];
-      return issue ? `${issue.key} ${issue.fields?.summary ?? ""}` : null;
+      const issues = body.issues ?? [];
+      const issue = issues[0];
+      return issue
+        ? { detail: `${issue.key} ${issue.fields?.summary ?? ""}`, count: issues.length }
+        : null;
     }, "Jira issue");
   },
 
@@ -149,8 +157,8 @@ const VERIFIERS: Record<string, Verifier> = {
         { headers: { authorization: `Bearer ${env.VERIFY_SLACK_TOKEN}` } },
       )) as { ok?: boolean; error?: string; messages?: { ts: string; text?: string }[] };
       if (body.ok === false) throw new Error(body.error ?? "slack error");
-      const message = body.messages?.find((item) => (item.text ?? "").includes(run));
-      return message ? `ts ${message.ts}` : null;
+      const matches = (body.messages ?? []).filter((item) => (item.text ?? "").includes(run));
+      return matches[0] ? { detail: `ts ${matches[0].ts}`, count: matches.length } : null;
     }, "Slack message");
   },
 

@@ -174,6 +174,53 @@ describe("gradeCase", () => {
     const grade = gradeCase({ ...linearRead, kind: "routing" }, receipts, null);
     expect(grade.category).toBe("tool_error");
   });
+
+  const writeCase: EvalCase = {
+    id: "linear.write.y",
+    integration: "linear",
+    kind: "write",
+    prompt: "?",
+  };
+  const approvedWrite = (decision: "approve" | "reject", answer: string) =>
+    parseReceipts(
+      events(
+        {
+          type: "session.requiresAction",
+          payload: {
+            approvals: [
+              { id: "c1", name: "mcp_abc__save_issue", toolFamily: "integration:mcp.linear.app" },
+            ],
+          },
+        },
+        { type: "user.approvalDecision", payload: { approvalId: "c1", decision } },
+        ...linearCall("c1", decision === "approve" ? '{"id":"HAL-9"}' : "Rejected by the user."),
+        { type: "agent.message.completed", payload: { text: answer } },
+      ),
+    );
+
+  test("a denied write passes only when the service has nothing", () => {
+    const denied = { ...writeCase, decision: "reject" as const };
+    const receipts = approvedWrite("reject", "I didn't create it because the request was denied.");
+    expect(
+      gradeCase(denied, receipts, { ran: true, ok: false, detail: "Linear issue not found" }).pass,
+    ).toBe(true);
+    const leaked = gradeCase(denied, receipts, { ran: true, ok: true, detail: "HAL-9", count: 1 });
+    expect(leaked.category).toBe("approval_problem");
+  });
+
+  test("an approved write applied twice is an approval problem", () => {
+    const receipts = approvedWrite("approve", "Created HAL-9.");
+    const grade = gradeCase(writeCase, receipts, {
+      ran: true,
+      ok: true,
+      detail: "HAL-9",
+      count: 2,
+    });
+    expect(grade.category).toBe("approval_problem");
+    expect(
+      gradeCase(writeCase, receipts, { ran: true, ok: true, detail: "HAL-9", count: 1 }).pass,
+    ).toBe(true);
+  });
 });
 
 describe("catalogue", () => {

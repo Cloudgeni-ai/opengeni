@@ -87,6 +87,11 @@ export type EvalCase = {
    * (for example personal Slack under the Recommended policy). Default required.
    */
   approval?: "required" | "optional";
+  /**
+   * Write: how the harness answers the approval, as the test user. `reject`
+   * checks that a denied write leaves the service unchanged. Default approve.
+   */
+  decision?: "approve" | "reject";
   /** Write: name of the verifier in verify.ts that confirms the result in the service. */
   verify?: string;
   /** Included in the model × effort grid (the core set). */
