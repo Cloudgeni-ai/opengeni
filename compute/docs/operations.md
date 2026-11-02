@@ -1010,7 +1010,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   - `compute.step.oldest_age` above the step's usual time, for example
     ten minutes for an archive.
   - `compute.sandbox.unhealthy` above zero: sandboxes broken, blocked or
-    unsavable need a person.
+    unsavable need a person. A sandbox blocked as `not recovered` after
+    an agent restart is tried again on its own (log lines `sandbox still
+    not recovered; trying again later` and `recovered a sandbox on a later
+    try`); one that stays blocked holds its full size on the host until
+    it is removed.
   - any increase of `compute.export.dropped`: the collector is slow, away
     or refusing; events are still in the journal.
   - `compute.memory.stalled` above zero in its `severe` bucket (40 % and

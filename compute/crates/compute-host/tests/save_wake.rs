@@ -173,6 +173,7 @@ async fn restart_with<S: Store>(
         guard_freezes: None,
         observer: setup.observer,
         summary_every: HostConfig::SUMMARY_EVERY,
+        recovery_retry: HostConfig::RECOVERY_RETRY,
         agent_link: None,
         processor_share: None,
         prepare: None,

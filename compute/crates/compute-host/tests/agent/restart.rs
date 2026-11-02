@@ -578,6 +578,87 @@ async fn a_vm_not_taken_back_books_all_its_processors() {
     lab.assert_clean();
 }
 
+/// A VM whose VMM does not answer when the agent restarts, such as one the
+/// guard holds frozen until the lease is renewed, is taken back once it
+/// answers: its sandbox is no longer blocked, its guest kept running with
+/// what it held, and the processors and memory booked for it while it was
+/// not managed come back, so the host admits new sandboxes again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vm_that_answers_later_is_taken_back() {
+    let policy = HostPolicy {
+        cpu_budget: Some(1500),
+        ..HostPolicy::default()
+    };
+    let lab = Lab::new(Delays::default(), policy).await;
+    let sandbox = id(45);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set alive"]).await;
+    let reserved = |status: &compute_host::protocol::HostStatus| status.cpu.unwrap().reserved;
+    let (root, world) = lab.stop().await;
+    world.unadoptable.lock().unwrap().insert(vm_name(sandbox));
+
+    let lab = Lab::start(root, world, Delays::default(), policy).await;
+    let status = lab.status().await;
+    assert_eq!(status.blocked.len(), 1, "{status:?}");
+    assert_eq!(reserved(&status), 1000, "{status:?}");
+    // Still not answering: tried again, and still blocked.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let status = lab.status().await;
+    assert_eq!(status.blocked.len(), 1, "{status:?}");
+    assert_eq!(reserved(&status), 1000, "{status:?}");
+
+    lab.world.unadoptable.lock().unwrap().clear();
+    lab.wait_until("the sandbox to be taken back", |status| {
+        status.blocked.is_empty() && status.sandboxes.iter().any(|s| s.id == sandbox)
+    })
+    .await;
+    lab.wait_until("its VM's processors to come back", |status| {
+        reserved(status) == 100
+    })
+    .await;
+    assert_eq!(lab.run(sandbox, &["get"]).await, ["alive"]);
+    assert_eq!(
+        lab.world.boots.load(Ordering::Relaxed),
+        1,
+        "never booted again"
+    );
+    let other = id(46);
+    lab.create(other, NEVER).await;
+    assert_eq!(lab.run(other, &["get"]).await, [""]);
+    lab.assert_clean();
+}
+
+/// A sandbox removed while its recovery waits to be tried again is not
+/// tried again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_removed_while_blocked_is_not_tried_again() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(47);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set alive"]).await;
+    let (root, world) = lab.stop().await;
+    world.unadoptable.lock().unwrap().insert(vm_name(sandbox));
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    assert_eq!(lab.status().await.blocked.len(), 1);
+    let reply = lab
+        .client
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done);
+    lab.world.unadoptable.lock().unwrap().clear();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let status = lab.status().await;
+    assert!(status.blocked.is_empty(), "{status:?}");
+    assert!(status.sandboxes.is_empty(), "{status:?}");
+    assert!(!lab.world.live.lock().unwrap().contains(&vm_name(sandbox)));
+    lab.assert_clean();
+}
+
 /// A removal gives its VM's processors back as soon as the VM has ended:
 /// while the store is still deleting its copy, and when that then fails.
 /// Only its id stays blocked, until removing it again.

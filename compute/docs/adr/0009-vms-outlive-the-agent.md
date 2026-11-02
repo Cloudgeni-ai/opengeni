@@ -17,7 +17,13 @@ died with it, every upgrade would interrupt every sandbox on the host.
   newer state.
 - On start, the agent first settles every record on disk, then takes each VM
   back from its record. A VM it cannot prove healthy is kept and reported as
-  blocked, not killed on a guess.
+  blocked, not killed on a guess. A blocked VM is booked at its full size
+  (memory and all its processors) while the agent does not manage it, so a
+  failure that may pass, such as a VMM that does not answer in time while
+  it restores or while the guard holds it frozen, is tried again while the
+  lease holds, after a wait that doubles up to a cap; taken back, the
+  sandbox is managed again and its booking returns. A record this host
+  refuses stays blocked until it is removed.
 - A small holder process per VM keeps a descriptor to its disk open, so a disk
   write error that happens while the agent is down is still seen.
 - One agent per host, enforced by a lock file.

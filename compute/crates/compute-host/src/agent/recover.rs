@@ -21,11 +21,23 @@ use crate::step::{Base, DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
 
 use super::holds::{Holds, UNREADABLE, hold_id};
-use super::{HostAgent, HostError, Leftover, unix_ms_now};
+use super::{HostAgent, HostConfig, HostError, Leftover, unix_ms_now};
 
 /// A VM found still running after an agent restart, with what it is doing
 /// and, if its memory is paged, the agent's side of its pager.
 type FoundVm<E> = (<E as Engine>::Vm, Found, Option<Reconnected>);
+
+/// How a blocked sandbox's problem starts when recovery could not take it
+/// back but may on a later try.
+const NOT_RECOVERED: &str = "not recovered: ";
+
+/// When a sandbox whose recovery failed is tried again, and how many
+/// tries have failed.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Retry {
+    at: tokio::time::Instant,
+    failures: u32,
+}
 
 /// For a VM found running that recovery leaves as it is, blocked: the
 /// memory its pager still misses keeps coming, so its guest never waits
@@ -194,28 +206,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let vm = found
                 .remove(&id.0)
                 .unwrap_or_else(|| Err(HostError::Io("no result from looking for the VM".into())));
-            // A VM found, or not known to be gone, keeps its memory even if
-            // the sandbox cannot be taken back.
-            let live = !matches!(vm, Ok(None));
-            let size = live.then(|| self.record_size(&record));
-            let vcpus = record.config.vcpus;
-            let result = match broken_networks.get(&id.0) {
-                // A VM found running is left as it is: its guest's programs
-                // matter more than its network, and its memory keeps coming.
-                Some(error) => {
-                    keep_serving::<E>(vm);
-                    Err(HostError::Io(format!("network not repaired: {error}")))
-                }
-                None => self.recover_one(record, vm).await,
-            };
-            match result {
+            let broken = broken_networks.get(&id.0).cloned();
+            match self.recover_found(record, vm, broken, false).await {
                 Ok(true) => adopted += 1,
                 Ok(false) => {}
-                Err(error) => {
-                    tracing::error!(%id, %error, "could not recover sandbox; blocking it and leaving it on disk");
-                    self.block(id, format!("not recovered: {error}"));
-                    if let Some(size) = size {
-                        self.unmanaged(id, size, vcpus);
+                Err(retry) => {
+                    if retry {
+                        let at = tokio::time::Instant::now() + self.recovery_retry;
+                        self.retrying.insert(id.0, Retry { at, failures: 1 });
                     }
                 }
             }
@@ -224,11 +222,157 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sandboxes = self.slots.len(),
             adopted,
             blocked = self.blocked.len(),
+            retrying = self.retrying.len(),
             settle_ms,
             find_ms,
             take_ms = began.elapsed().as_millis() - find_ms,
             "recovered"
         );
+    }
+
+    /// Takes back the sandbox `record` describes, whose VM was looked for
+    /// as `vm`, and whose network could not be repaired if `broken` says
+    /// why; `again` if an earlier try failed. Returns whether its VM still
+    /// ran; or, once it is blocked, whether trying again may take it back.
+    async fn recover_found(
+        &mut self,
+        record: Record,
+        vm: Result<Option<FoundVm<E>>, HostError>,
+        broken: Option<String>,
+        again: bool,
+    ) -> Result<bool, bool> {
+        let id = record.id;
+        // A VM found, or not known to be gone, keeps its memory even if
+        // the sandbox cannot be taken back.
+        let live = !matches!(vm, Ok(None));
+        let size = live.then(|| self.record_size(&record));
+        let vcpus = record.config.vcpus;
+        let result = match broken {
+            // A VM found running is left as it is: its guest's programs
+            // matter more than its network, and its memory keeps coming.
+            Some(error) => {
+                keep_serving::<E>(vm);
+                Err(HostError::Io(format!("network not repaired: {error}")))
+            }
+            None => self.recover_one(record, vm).await,
+        };
+        result.map_err(|error| {
+            tracing::error!(%id, %error, "could not recover sandbox; blocking it and leaving it on disk");
+            // A record whose settings this host refuses stays refused.
+            let retry = !matches!(error, HostError::Invalid(_));
+            self.block(id, format!("{NOT_RECOVERED}{error}"));
+            match size {
+                Some(size) => self.unmanaged(id, size, vcpus),
+                // Its VM, which a try before booked, is known to be gone.
+                None if again => self.managed_again(id),
+                None => {}
+            }
+            retry
+        })
+    }
+
+    /// When the next sandbox whose recovery failed is tried again.
+    pub(super) fn next_recovery_retry(&self) -> Option<tokio::time::Instant> {
+        self.retrying.values().map(|retry| retry.at).min()
+    }
+
+    /// Tries again to take back each sandbox whose recovery failed and
+    /// whose time has come, as a restart of the agent would: a VMM that
+    /// did not answer in time, such as one the guard held frozen while the
+    /// lease had run out, or a network that could not be repaired, may
+    /// since have recovered. Until then the sandbox stays blocked, its VM
+    /// left as it is and booked at its full size, and it is tried again
+    /// later, each wait twice the one before. One removed meanwhile is not
+    /// tried again. Looking for the VMs holds the agent up to the time a
+    /// VMM is given to answer.
+    pub(super) async fn retry_recovery(&mut self) {
+        let now = tokio::time::Instant::now();
+        let due: Vec<SandboxId> = self
+            .retrying
+            .iter()
+            .filter(|(_, retry)| retry.at <= now)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut records = Vec::new();
+        for id in due {
+            let blocked_by_recovery = self
+                .blocked
+                .get(&id)
+                .is_some_and(|problem| problem.starts_with(NOT_RECOVERED));
+            match self.records.get(Id(id)) {
+                Some(record)
+                    if blocked_by_recovery
+                        && !self.slots.contains_key(&id)
+                        && !self.destroying.contains_key(&id) =>
+                {
+                    records.push(record);
+                }
+                _ => {
+                    self.retrying.remove(&id);
+                }
+            }
+        }
+        if records.is_empty() {
+            return;
+        }
+        let (mut found, broken_networks) =
+            tokio::join!(self.find_vms(&records), self.ensure_networks(&records));
+        for record in records {
+            let id = record.id;
+            let vm = found
+                .remove(&id.0)
+                .unwrap_or_else(|| Err(HostError::Io("no result from looking for the VM".into())));
+            let broken = broken_networks.get(&id.0).cloned();
+            // Taken back, nothing may refuse it for its old problem.
+            let problem = self.blocked.remove(&id.0);
+            match self.recover_found(record, vm, broken, true).await {
+                Ok(adopted) => {
+                    self.retrying.remove(&id.0);
+                    self.managed_again(id);
+                    tracing::info!(%id, adopted, was = problem.as_deref().unwrap_or_default(), "recovered a sandbox on a later try");
+                }
+                Err(true) => {
+                    let failures = self
+                        .retrying
+                        .get(&id.0)
+                        .map_or(1, |retry| retry.failures.saturating_add(1));
+                    let wait = self
+                        .recovery_retry
+                        .saturating_mul(1_u32 << failures.min(16).saturating_sub(1))
+                        .min(
+                            self.recovery_retry
+                                .saturating_mul(HostConfig::RECOVERY_RETRY_SPAN),
+                        );
+                    tracing::warn!(%id, failures, wait_ms = wait.as_millis(), "sandbox still not recovered; trying again later");
+                    self.retrying.insert(
+                        id.0,
+                        Retry {
+                            at: tokio::time::Instant::now() + wait,
+                            failures,
+                        },
+                    );
+                }
+                Err(false) => {
+                    self.retrying.remove(&id.0);
+                }
+            }
+        }
+    }
+
+    /// Stops booking sandbox `id`'s VM as one this agent does not manage
+    /// ([`Self::unmanaged`]): it is managed now, or known to have ended.
+    fn managed_again(&mut self, id: Id) {
+        self.inputs([
+            Input::Unmanaged {
+                sandbox: id.0,
+                bytes: 0,
+                cpu: 0,
+            },
+            Input::Writes {
+                key: id.0,
+                disk: DiskSpace::default(),
+            },
+        ]);
     }
 
     /// Every record as found, with what its file durably holds or why that
@@ -321,40 +465,45 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         /// Enough to hide each lookup's round trip to its VMM without
         /// opening thousands of descriptors at once.
         const CONCURRENT: usize = 64;
-        futures::stream::iter(records)
-            .map(|record| async move {
-                let paths = Paths::of(&self.root, record);
-                let spec = vm_spec(record, &paths, &self.images);
-                let found = match record.disk {
-                    Disk::Local => {
-                        let found = self.adopt_local(record.id, &spec, &paths).await;
-                        // Marked by this agent as its record says: the mark
-                        // the agent before set holds no more, and an agent
-                        // of an earlier release, which knew no marks, may
-                        // have archived it since (its record, rewritten
-                        // before the store saw anything, then says so).
-                        if let Ok(Some((vm, _, _))) = &found
-                            && let Err(error) = self.engine.set_only_copy(vm, record.only_copy)
-                        {
-                            tracing::error!(id = %record.id, %error, only_copy = record.only_copy, "the VM's mark as its sandbox's only copy could not be set as its record says");
-                        }
-                        found.map_err(|error| HostError::Io(error.to_string()))
-                    }
-                    // An eviction that could not delete everything left
-                    // files nothing relies on.
-                    Disk::Remote => match self.engine.clean_up(&spec).await {
-                        Ok(()) => crate::step::clear_local(&paths)
-                            .await
-                            .map(|()| None)
-                            .map_err(|error| HostError::Io(error.to_string())),
-                        Err(error) => Err(HostError::Io(error.to_string())),
-                    },
-                };
-                (record.id.0, found)
-            })
+        // Made first, so the stream holds no closure: one would keep the
+        // compiler from showing the agent's loop is `Send`.
+        let lookups: Vec<_> = records.iter().map(|record| self.find_vm(record)).collect();
+        futures::stream::iter(lookups)
             .buffer_unordered(CONCURRENT)
             .collect()
             .await
+    }
+
+    /// [`Self::find_vms`] for one sandbox.
+    async fn find_vm(&self, record: &Record) -> (SandboxId, Result<Option<FoundVm<E>>, HostError>) {
+        let paths = Paths::of(&self.root, record);
+        let spec = vm_spec(record, &paths, &self.images);
+        let found = match record.disk {
+            Disk::Local => {
+                let found = self.adopt_local(record.id, &spec, &paths).await;
+                // Marked by this agent as its record says: the mark
+                // the agent before set holds no more, and an agent
+                // of an earlier release, which knew no marks, may
+                // have archived it since (its record, rewritten
+                // before the store saw anything, then says so).
+                if let Ok(Some((vm, _, _))) = &found
+                    && let Err(error) = self.engine.set_only_copy(vm, record.only_copy)
+                {
+                    tracing::error!(id = %record.id, %error, only_copy = record.only_copy, "the VM's mark as its sandbox's only copy could not be set as its record says");
+                }
+                found.map_err(|error| HostError::Io(error.to_string()))
+            }
+            // An eviction that could not delete everything left
+            // files nothing relies on.
+            Disk::Remote => match self.engine.clean_up(&spec).await {
+                Ok(()) => crate::step::clear_local(&paths)
+                    .await
+                    .map(|()| None)
+                    .map_err(|error| HostError::Io(error.to_string())),
+                Err(error) => Err(HostError::Io(error.to_string())),
+            },
+        };
+        (record.id.0, found)
     }
 
     /// Takes back the VM left running for a sandbox whose disk is local.
