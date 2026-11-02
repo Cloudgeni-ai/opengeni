@@ -149,8 +149,12 @@ impl Embedder {
             ));
         }
         let scale_samples = meta(&session, "normalize_samples").as_deref() == Some("0");
-        let subtract_mean =
-            meta(&session, "feature_normalize_type").as_deref() == Some("global-mean");
+        // 3D-Speaker exports say so in their metadata; WeSpeaker models were
+        // trained on mean-normalized features too but their exports don't
+        // say it, and without it every voice scores alike.
+        let subtract_mean = meta(&session, "feature_normalize_type").as_deref()
+            == Some("global-mean")
+            || meta(&session, "framework").as_deref() == Some("wespeaker");
         let fbank = Fbank::new(16_000, 80);
         Ok(Self {
             session,
