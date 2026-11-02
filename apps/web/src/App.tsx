@@ -220,6 +220,10 @@ const LazySubscriptionPlansPreview = lazyRouteComponent(
   () => import("@/dev/subscription-plans-preview"),
   "SubscriptionPlansPreview",
 );
+const LazyImageTagsPreview = lazyRouteComponent(
+  () => import("@/dev/image-tags-preview"),
+  "ImageTagsPreview",
+);
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyReadOnlyChatsRoute = lazyRouteComponent(
   () => import("@/routes/read-only-chats"),
@@ -488,6 +492,11 @@ const onboardingPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/onboarding",
   component: LazyOnboardingPreviewRoute,
+});
+const imageTagsPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/image-tags",
+  component: LazyImageTagsPreview,
 });
 const subscriptionPlansPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -1058,6 +1067,7 @@ const routeTree = rootRoute.addChildren([
         composerChromeGalleryRoute,
         onboardingPreviewRoute,
         subscriptionPlansPreviewRoute,
+        imageTagsPreviewRoute,
         devSessionTimelineRoute,
       ]
     : []),

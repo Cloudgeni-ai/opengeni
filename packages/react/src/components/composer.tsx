@@ -77,6 +77,7 @@ import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
 import { TooltipProvider } from "./tooltip";
 import { useOpenGeniText } from "../messages/runtime";
+import { reconcileImageMarkers } from "../lib/image-markers";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 export type { ResponsiveBasis } from "../lib/composer-responsive-context";
@@ -191,6 +192,13 @@ export type UseChatComposerControllerOptions = {
   running?: boolean | undefined;
   /** Up in an empty composer pulls the latest waiting prompt back for editing. */
   queuedRecall?: ComposerQueuedRecall | undefined;
+  /**
+   * Opt-in: each attached image gets a numbered tag, `[Image 1]`, in the text
+   * where the person was writing, and its chip shows that number, so they can
+   * say which comment goes with which image. The tags are plain text; image N
+   * is the Nth image, the order the images reach the agent. Off by default.
+   */
+  imageTags?: boolean | undefined;
 };
 
 /**
@@ -333,6 +341,7 @@ export function useChatComposerController({
   runControl = "pause",
   running = false,
   queuedRecall,
+  imageTags = false,
 }: UseChatComposerControllerOptions) {
   const t = useOpenGeniText();
   const commands = useMemo(() => commandsProp ?? defaultCommands(t), [commandsProp, t]);
@@ -409,6 +418,40 @@ export function useChatComposerController({
     [setDeliveryValue],
   );
   const visibleValue = deliveryChanged ? deliveryValue : renderedValue;
+
+  const imageIds = useMemo(
+    () =>
+      (attachments?.attachments ?? [])
+        .filter((attachment) => attachment.contentType.startsWith("image/"))
+        .map((attachment) => attachment.id),
+    [attachments?.attachments],
+  );
+  const imageNumbers = useMemo(
+    () => (imageTags ? new Map(imageIds.map((id, index) => [id, index + 1])) : undefined),
+    [imageIds, imageTags],
+  );
+  const previousImageIdsRef = useRef(imageIds);
+  const imageIdsKey = imageIds.join("\n");
+  useEffect(() => {
+    const previous = previousImageIdsRef.current;
+    previousImageIdsRef.current = imageIds;
+    if (!imageTags) return;
+    const value = liveValueRef.current;
+    const textarea = textareaRef.current;
+    const edit = reconcileImageMarkers(
+      value,
+      previous,
+      imageIds,
+      textarea ? textarea.selectionStart : value.length,
+    );
+    if (!edit) return;
+    setComposerValue(edit.text);
+    window.requestAnimationFrame(() => {
+      const current = textareaRef.current;
+      if (current && current.value === edit.text) current.setSelectionRange(edit.caret, edit.caret);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the image list itself
+  }, [imageIdsKey, imageTags]);
 
   useLayoutEffect(() => {
     if (renderedValue !== liveValueRef.current) {
@@ -903,6 +946,7 @@ export function useChatComposerController({
     id,
     rootRef,
     textareaRef,
+    imageNumbers,
     pauseButtonRef,
     fileInputRef,
     listboxId,
@@ -1186,6 +1230,7 @@ export function Attachments() {
       onRetry={controller.attachments.retry}
       onRetainPreview={controller.attachments.retainPreview}
       onLoadPreview={controller.attachments.loadPreview}
+      imageNumbers={controller.imageNumbers}
     />
   );
 }
@@ -2161,6 +2206,7 @@ function AttachmentChips({
   onRetry,
   onRetainPreview,
   onLoadPreview,
+  imageNumbers,
 }: {
   attachments: UseFileAttachmentsResult["attachments"];
   messages: ChatComposerMessages;
@@ -2169,6 +2215,8 @@ function AttachmentChips({
   onRetry?: ((id: string) => void) | undefined;
   onRetainPreview: UseFileAttachmentsResult["retainPreview"];
   onLoadPreview: UseFileAttachmentsResult["loadPreview"];
+  /** With image tags on, the number each image's tag in the text carries. */
+  imageNumbers?: ReadonlyMap<string, number> | undefined;
 }) {
   const t = useOpenGeniText();
   const lightbox = useLightboxOptional();
@@ -2310,6 +2358,7 @@ function AttachmentChips({
         // conversation as little height as possible; states that need words
         // (failures, app-shots) keep their two-line layout.
         const compact = !appShot && !failed && !previewFailed;
+        const imageNumber = imageNumbers?.get(attachment.id);
         const thumbSize = appShot ? "h-10 w-16" : compact ? "size-6" : "size-8";
         return (
           <div
@@ -2386,7 +2435,19 @@ function AttachmentChips({
             )}
             {compact ? (
               <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
-                <span className="truncate font-medium text-og-fg">{displayName}</span>
+                {imageNumber !== undefined ? (
+                  <span data-image-tag="" className="shrink-0 font-medium text-og-fg tabular-nums">
+                    {t("composer.imageTag", { number: imageNumber })}
+                  </span>
+                ) : null}
+                <span
+                  className={cn(
+                    "truncate",
+                    imageNumber === undefined ? "font-medium text-og-fg" : "text-og-fg-muted",
+                  )}
+                >
+                  {displayName}
+                </span>
                 <span className="shrink-0 text-og-xs text-og-fg-subtle tabular-nums">
                   {statusText}
                 </span>
