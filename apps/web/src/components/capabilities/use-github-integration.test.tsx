@@ -37,11 +37,13 @@ mock.module("./personal-github-dialog", () => ({
   },
 }));
 
+// Before the adapter loads: Radix decides at import whether it can use layout
+// effects, and without a document its dialogs never mount.
+GlobalRegistrator.register();
 const { useGitHubIntegration } = await import("./use-github-integration");
 const { markPersonalGitHubRepositoryChooser } = await import("@/lib/personal-github-oauth");
 
 beforeAll(() => {
-  GlobalRegistrator.register();
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -370,15 +372,30 @@ for (const count of [1, 2])
     }));
     window.open = open as unknown as typeof window.open;
     try {
-      await act(async () => {
-        if (count === 1) rendered.model().access!.onEdit!();
-        else
-          for (const option of rendered.model().options) {
-            if (option.kind === "link" && option.id.startsWith("github-repositories-"))
-              option.action.onClick();
-          }
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
+      if (count === 1) {
+        await act(async () => {
+          rendered.model().access!.onEdit!();
+          // A double-click while the link is minted opens one tab.
+          rendered.model().access!.onEdit!();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+      } else {
+        // One row per installation, and no shared header link that would open only the first.
+        expect(rendered.model().access?.onEdit).toBeUndefined();
+        const ids = rendered
+          .model()
+          .options.filter(
+            (option) => option.kind === "link" && option.id.startsWith("github-repositories-"),
+          )
+          .map((option) => option.id);
+        for (const id of ids) {
+          await act(async () => {
+            const option = rendered.model().options.find((candidate) => candidate.id === id);
+            if (option?.kind === "link") option.action.onClick();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          });
+        }
+      }
       expect(open).toHaveBeenCalledTimes(count);
       expect(getGitHubApp).toHaveBeenCalledTimes(count);
       // Never the copy captured when the page loaded.
@@ -420,8 +437,15 @@ test("several installations each unlink on their own, after a confirm", async ()
     expect(rows.map((row) => row.label)).toEqual(["Cloudgeni-ai", "benyhh"]);
     const benyhh = rows[1]!;
     if (benyhh.kind !== "link") throw new Error("expected a link row");
-    expect(benyhh.secondaryAction).toMatchObject({ label: "Unlink", destructive: true });
-    await act(async () => benyhh.secondaryAction!.onClick());
+    expect(benyhh.secondaryAction).toMatchObject({
+      label: "Unlink",
+      ariaLabel: "Unlink benyhh",
+      destructive: true,
+    });
+    await act(async () => {
+      benyhh.secondaryAction!.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
     // Nothing is unlinked until the confirm.
     expect(unlinked).toEqual([]);
     expect(document.body.textContent).toContain("Unlink benyhh?");
@@ -433,6 +457,58 @@ test("several installations each unlink on their own, after a confirm", async ()
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(unlinked).toEqual([81]);
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("installations that are no longer active stay unlinkable", async () => {
+  const context = appContext(
+    ["github:manage"],
+    mock(async () => ({})),
+  );
+  // Every installation suspended: GitHub reports the workspace unbound, but it is still linked.
+  context.githubStatus.status = "unbound";
+  context.githubStatus.installations = [
+    {
+      ...context.githubStatus.installations[0]!,
+      installationId: 71,
+      accountLogin: "Cloudgeni-ai",
+      lifecycle: "suspended",
+    },
+  ];
+  const unlinked: number[] = [];
+  const rendered = await renderAdapter({
+    ...context,
+    personalGitHubStatus: { enabled: true, connection: null, reviewUrl: null },
+    disconnectGitHubInstallation: async (_workspaceId: string, installationId: number) => {
+      unlinked.push(installationId);
+      return true;
+    },
+  } as typeof context);
+  try {
+    const model = rendered.model();
+    const row = model.options.find((option) => option.id === "github-repositories-71");
+    if (row?.kind !== "link") throw new Error("expected an installation row");
+    expect(row.description).toContain("Not active");
+    expect(row.secondaryAction?.ariaLabel ?? row.action.ariaLabel).toBe("Unlink Cloudgeni-ai");
+    expect(model.footer).toMatchObject({
+      kind: "actions",
+      secondary: { label: "Disconnect Opengeni app" },
+    });
+    await act(async () => {
+      (row.secondaryAction ?? row.action).onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(document.body.textContent).toContain("Unlink Cloudgeni-ai?");
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Unlink",
+    );
+    await act(async () => {
+      confirm!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(unlinked).toEqual([71]);
   } finally {
     await rendered.unmount();
   }

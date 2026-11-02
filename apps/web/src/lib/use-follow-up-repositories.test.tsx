@@ -129,4 +129,59 @@ describe("repository catalog refresh", () => {
     expect(context.refreshGitHub).toHaveBeenCalledTimes(2);
     await hook.unmount();
   });
+
+  test("refreshes and syncs once the person is back from a GitHub flow, skipping the cooldown", async () => {
+    let now = 200_000;
+    spyOn(Date, "now").mockImplementation(() => now);
+    const context = fixture(["github:use", "github:manage", "connections:read"]);
+    const hook = await renderHook(
+      () => useRepositoryCatalogRefresh("workspace-1", context),
+      undefined,
+    );
+    await hook.result.current.onOpenRefresh();
+    expect(context.refreshGitHub).toHaveBeenCalledTimes(1);
+    // Focus without having left for GitHub changes nothing.
+    window.dispatchEvent(new Event("focus"));
+    await Promise.resolve();
+    expect(context.refreshGitHub).toHaveBeenCalledTimes(1);
+
+    hook.result.current.onLeaveForGitHub();
+    now += 5_000;
+    window.dispatchEvent(new Event("focus"));
+    await Promise.resolve();
+    expect(context.refreshGitHub).toHaveBeenCalledTimes(2);
+    expect(context.refreshGitHub).toHaveBeenLastCalledWith("workspace-1", undefined, {
+      sync: true,
+      userInitiated: false,
+    });
+    expect(context.refreshPersonalGitHub).toHaveBeenCalledTimes(2);
+    // One refresh per return: the next focus and opening the menu are throttled again.
+    window.dispatchEvent(new Event("focus"));
+    await hook.result.current.onOpenRefresh();
+    expect(context.refreshGitHub).toHaveBeenCalledTimes(2);
+    await hook.unmount();
+  });
+
+  test("a composer mounted after the GitHub settings page refreshes at once", async () => {
+    const context = fixture(["github:use"]);
+    const first = await renderHook(
+      () => useRepositoryCatalogRefresh("workspace-1", context),
+      undefined,
+    );
+    first.result.current.onLeaveForGitHub();
+    await first.unmount();
+    expect(context.refreshGitHub).not.toHaveBeenCalled();
+    const second = await renderHook(
+      () => useRepositoryCatalogRefresh("workspace-1", context),
+      undefined,
+    );
+    await Promise.resolve();
+    expect(context.refreshGitHub).toHaveBeenCalledTimes(1);
+    // Readers keep catalog reads: no sync without github:manage.
+    expect(context.refreshGitHub).toHaveBeenLastCalledWith("workspace-1", undefined, {
+      sync: false,
+      userInitiated: false,
+    });
+    await second.unmount();
+  });
 });

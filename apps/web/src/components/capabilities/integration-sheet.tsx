@@ -451,6 +451,7 @@ function OptionRow({ option }: { option: IntegrationOption }) {
             type="button"
             onClick={option.action.onClick}
             disabled={option.disabled || (option.kind !== "link" && option.busy)}
+            aria-label={option.kind === "link" ? option.action.ariaLabel : undefined}
             aria-describedby={describedBy(option.disclosureId)}
             className="mt-1 text-2xs font-medium og-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
           >
@@ -462,6 +463,7 @@ function OptionRow({ option }: { option: IntegrationOption }) {
             type="button"
             onClick={option.secondaryAction.onClick}
             disabled={option.disabled}
+            aria-label={option.secondaryAction.ariaLabel}
             className={cn(
               "mt-1 ml-3 text-2xs font-medium og-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline",
               option.secondaryAction.destructive && "text-fg-muted hover:text-status-failed",

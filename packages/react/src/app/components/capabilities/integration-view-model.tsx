@@ -134,12 +134,14 @@ export type IntegrationLinkOption = {
   label: string;
   description?: string | undefined;
   disabled?: boolean | undefined;
-  action: { label: string; onClick: () => void };
+  /** `ariaLabel` names the action when its label alone is ambiguous (e.g. "Unlink"). */
+  action: { label: string; onClick: () => void; ariaLabel?: string | undefined };
   /** A second, usually destructive, action for the same row (e.g. "Unlink"). */
   secondaryAction?:
     | {
         label: string;
         onClick: () => void;
+        ariaLabel?: string | undefined;
         /** Renders in the destructive tone (still confirm before destroying). */
         destructive?: boolean | undefined;
       }

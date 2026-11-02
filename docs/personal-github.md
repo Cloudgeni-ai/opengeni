@@ -107,7 +107,10 @@ one identity and the picker does not mention it. Account management lives on
 the GitHub settings page above, behind one **Manage GitHub access** row; with
 nothing connected and nothing to pick, the picker offers **Your GitHub**
 (**Connect**) and **Opengeni app** (**Install**) with the same one-line
-descriptions. Choosing a personal repository both selects the exact repository
+descriptions. The list has no Refresh button: it updates in the background when
+the picker opens (at most once every 30 seconds) and as soon as you come back
+from GitHub or the GitHub settings page; a failed load offers **Try again**.
+Choosing a personal repository both selects the exact repository
 and grants this workspace reusable access to the connection for that user; the
 OAuth token is not copied into the session. A repository already mounted
 through one identity cannot also be mounted through the other at the same path.

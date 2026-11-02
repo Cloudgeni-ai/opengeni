@@ -96,6 +96,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const repositories = context.githubRepos;
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [unlinkInstallationId, setUnlinkInstallationId] = useState<number | null>(null);
+  const [openingInstallationId, setOpeningInstallationId] = useState<number | null>(null);
+  const openingInstallation = useRef<number | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [personalOpen, setPersonalOpen] = useState(false);
   const [personalDisconnectOpen, setPersonalDisconnectOpen] = useState(false);
@@ -127,6 +129,9 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     personalConnection && personalConnection.status !== "active",
   );
   const bound = status?.status === "bound" && installations.length > 0;
+  // Stored installations stay unlinkable even when none is active (suspended,
+  // deleted or unverified leave the workspace "unbound" but still linked).
+  const linked = status !== null && installations.length > 0;
   const broken = bound && installations.some((installation) => installation.lifecycle !== "active");
   const chip =
     personalNeedsAttention || broken || loadFailed
@@ -331,7 +336,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   // its one action, and the header keeps only Disconnect for the App.
   const sectioned = context.personalGitHubStatus?.enabled === true;
   const footer: IntegrationFooter = sectioned
-    ? bound && canManage
+    ? linked && canManage
       ? {
           kind: "actions",
           secondary: {
@@ -350,46 +355,68 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const configureUrl = configurableInstallations[0]?.configureUrl ?? null;
   // Installation settings links carry ten-minute signed state, so the copy in
   // the loaded status may be stale: open the tab inside the click, then mint a
-  // fresh link for it.
+  // fresh link for it. One at a time, so a double-click opens one tab.
   function openInstallationRepositories(installationId: number) {
+    if (openingInstallation.current !== null) return;
     const tab = openBlankTab();
+    openingInstallation.current = installationId;
+    setOpeningInstallationId(installationId);
     openGitHubInstallationSettings(context.client, workspaceId, installationId, (url) => {
       if (tab) tab.location.replace(url);
       else window.location.assign(url);
-    }).catch((error: unknown) => {
-      tab?.close();
-      toast.error("Couldn't open GitHub", { description: userErrorText(error, "Try again.") });
-    });
+    })
+      .catch((error: unknown) => {
+        tab?.close();
+        toast.error("Couldn't open GitHub", { description: userErrorText(error, "Try again.") });
+      })
+      .finally(() => {
+        openingInstallation.current = null;
+        setOpeningInstallationId(null);
+      });
   }
 
   // With several installations, one shared "Change repositories" link would
   // silently open only the first installation's GitHub settings; emit one
   // action per installation instead, each with its own Unlink. (One
-  // installation unlinks with "Disconnect Opengeni app".)
+  // active installation unlinks with "Disconnect Opengeni app"; installations
+  // that are no longer active are always listed so they stay unlinkable.)
   const installationOptions: IntegrationOption[] =
-    bound && canManage && installations.length > 1
+    linked && canManage && (installations.length > 1 || !bound)
       ? installations.map((installation) => {
+          const account =
+            installation.accountLogin ?? `GitHub installation ${installation.installationId}`;
           const unlink = {
             label: "Unlink",
+            ariaLabel: `Unlink ${account}`,
             onClick: () => setUnlinkInstallationId(installation.installationId),
             destructive: true,
           };
           return {
             kind: "link" as const,
             id: `github-repositories-${installation.installationId}`,
-            label:
-              installation.accountLogin ?? `GitHub installation ${installation.installationId}`,
-            disabled: busy,
+            label: account,
+            disabled: busy || openingInstallationId !== null,
+            ...(installation.lifecycle !== "active"
+              ? { description: "Not active. Unlink it to remove it from this workspace." }
+              : installation.configureUrl
+                ? { description: "Choose which repositories this installation shares." }
+                : {}),
             ...(installation.configureUrl
               ? {
-                  description: "Choose which repositories this installation shares.",
                   action: {
                     label: "Change repositories",
+                    ariaLabel: `Change repositories for ${account}`,
                     onClick: () => openInstallationRepositories(installation.installationId),
                   },
                   secondaryAction: unlink,
                 }
-              : { action: { label: unlink.label, onClick: unlink.onClick } }),
+              : {
+                  action: {
+                    label: unlink.label,
+                    ariaLabel: unlink.ariaLabel,
+                    onClick: unlink.onClick,
+                  },
+                }),
           };
         })
       : [];
@@ -532,7 +559,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
             emptyMessage: catalogLoading
               ? "Loading repositories…"
               : githubEmptyRepositoriesMessage(installations),
-            ...(canManage && configureUrl && configurableInstallations.length === 1
+            // Several installations each get their own row instead.
+            ...(canManage && configureUrl && installations.length === 1
               ? {
                   editLabel: "Change repositories",
                   onEdit: () =>

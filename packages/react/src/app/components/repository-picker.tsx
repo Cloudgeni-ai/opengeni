@@ -10,6 +10,7 @@ import {
   Settings2Icon,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useAppHost } from "../lib/app-host";
 import { toast } from "../lib/toast";
 import { REPOSITORY_PANEL_CLASS } from "./repository-picker-layout";
 import {
@@ -140,9 +141,20 @@ export type RepositoryContextPickerProps = {
    */
   githubLoadFailed?: boolean | undefined;
   githubAppBusy: boolean;
+  /**
+   * Reloads both catalogs now (a manager's reload also syncs from GitHub). The
+   * list refreshes itself on open and after GitHub flows; this backs the
+   * "Try again" shown after a failed load.
+   */
   onRefresh: () => Promise<void>;
   /** Passive open refresh. Caller owns provider-sync permissions and throttling. */
   onOpenRefresh?: (() => Promise<void>) | undefined;
+  /**
+   * The person is leaving to change GitHub access (on GitHub or the GitHub
+   * settings page). The caller refreshes both catalogs, unthrottled, once they
+   * are back.
+   */
+  onLeaveForGitHub?: (() => void) | undefined;
   /** False when the current principal cannot read either repository catalog. */
   refreshAllowed?: boolean | undefined;
   onToggleRepo: (repo: GitHubRepository) => void;
@@ -276,7 +288,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
   // anything is connected.
   const manageVisible =
     Boolean(props.githubSettingsUrl) &&
-    (personalActive || appBound || props.installations.length > 0);
+    (personalActive || appBound || props.installations.length > 0 || loadFailed);
 
   const onboardingEntries: ReactNode[] = [];
   if (onboarding && personalEnabled) {
@@ -293,14 +305,19 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
         {personalActive ? (
           props.personalGitHubManageUrl ? (
             <Button asChild variant="ghost" size="xs">
-              <a href={props.personalGitHubManageUrl}>Choose repos</a>
+              <AppPageLink href={props.personalGitHubManageUrl} onClick={props.onLeaveForGitHub}>
+                Choose repos
+              </AppPageLink>
             </Button>
           ) : null
         ) : (
           <Button
             type="button"
             size="xs"
-            onClick={props.onConnectPersonalGitHub}
+            onClick={() => {
+              props.onLeaveForGitHub?.();
+              props.onConnectPersonalGitHub?.();
+            }}
             disabled={props.pending || props.personalGitHubBusy || !props.onConnectPersonalGitHub}
           >
             Connect
@@ -310,7 +327,11 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
     );
   }
   const operatorSetup = props.setupMode === "operator" && !props.configured;
-  if (onboarding && !appBound && (props.setupMode === "operator" || props.status === "unbound")) {
+  // An operator without the app yet keeps Create app even once other repositories are listed.
+  if (
+    (onboarding && !appBound && (props.setupMode === "operator" || props.status === "unbound")) ||
+    (operatorSetup && !loadFailed)
+  ) {
     const connectable = Boolean(bindingPresentation.connectUrl);
     onboardingEntries.push(
       <div key="app" className="space-y-2 px-2.5 py-2">
@@ -330,7 +351,10 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
               type="button"
               size="xs"
               className="shrink-0"
-              onClick={props.onConnectWorkspaceApp}
+              onClick={() => {
+                props.onLeaveForGitHub?.();
+                props.onConnectWorkspaceApp();
+              }}
               disabled={props.pending}
             >
               {bindingPresentation.connectLabel}
@@ -355,7 +379,10 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             <Button
               type="button"
               size="sm"
-              onClick={props.onStartGitHubApp}
+              onClick={() => {
+                props.onLeaveForGitHub?.();
+                props.onStartGitHubApp();
+              }}
               disabled={props.githubAppBusy}
               className="h-8 text-xs"
             >
@@ -417,15 +444,19 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             <div className="px-2.5 py-2" role="status">
               <p className="text-sm text-fg">Couldn't load GitHub</p>
               <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">
-                {canRefresh
-                  ? "Refresh the list to try again."
-                  : "Your repositories show here once it loads."}
+                {canRefresh ? (
+                  <RetryLink onClick={() => void refreshList()} disabled={refreshBusy} />
+                ) : (
+                  "Your repositories show here once it loads."
+                )}
               </p>
             </div>
           ) : props.repoBusy ? (
             // First load only: rows that hold the menu's size. A refresh with
-            // repositories already listed updates them in place.
-            <ComposerMenuRowsSkeleton rows={4} label="Loading repositories" />
+            // repositories already listed updates them in place, quietly.
+            allRowGroups.length > 0 ? null : (
+              <ComposerMenuRowsSkeleton rows={4} label="Loading repositories" />
+            )
           ) : allRowGroups.length === 0 && !(personalActive && props.personalGitHubBusy) ? (
             connectPrompt ? (
               <p className="px-2.5 pt-2 pb-1 text-sm text-fg">
@@ -451,7 +482,9 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                 <div className="truncate text-sm font-medium text-fg" title={repo.uri}>
                   {repo.uri}
                 </div>
-                <div className="truncate text-xs text-fg-subtle">{repo.ref} · No longer shared</div>
+                <div className="truncate text-xs text-fg-subtle">
+                  {repo.ref} · {personalActive ? "No longer shared" : "Reconnect your GitHub"}
+                </div>
               </div>
               <MetaChip dot="idle" rounded="full">
                 {props.onRemoveMountedRepository ? null : (
@@ -577,33 +610,28 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
               </div>
             </Collapsible>
           )}
-          {/* A list that can't be refreshed (GitHub unavailable) has no Refresh action. */}
-          {canRefresh && !(connectPrompt && !personalActive) ? (
-            <button
-              type="button"
-              className={MENU_BUTTON_CLASS}
-              onClick={() => void refreshList()}
-              disabled={props.repoBusy || refreshBusy}
-            >
-              <RefreshCwIcon
-                className={cn(
-                  (props.repoBusy || refreshBusy) && "animate-spin motion-reduce:animate-none",
-                )}
-              />
-              Refresh list
-            </button>
-          ) : null}
-          {refreshError ? (
+          {/* The list refreshes itself on open and after GitHub flows; only a failure offers a retry. */}
+          {refreshError && !loadFailed ? (
             <p className="px-2.5 text-xs text-status-failed" role="alert">
-              Couldn't refresh the list. {refreshError}
+              Couldn't update the list. {refreshError}
+              {canRefresh ? (
+                <>
+                  {" "}
+                  <RetryLink onClick={() => void refreshList()} disabled={refreshBusy} />
+                </>
+              ) : null}
             </p>
           ) : null}
-          {manageVisible ? (
+          {manageVisible && props.githubSettingsUrl ? (
             <div className="border-t border-border/60 pt-1">
-              <a href={props.githubSettingsUrl} className={MENU_BUTTON_CLASS}>
+              <AppPageLink
+                href={props.githubSettingsUrl}
+                className={MENU_BUTTON_CLASS}
+                onClick={props.onLeaveForGitHub}
+              >
                 <Settings2Icon />
                 Manage GitHub access
-              </a>
+              </AppPageLink>
             </div>
           ) : null}
           {props.newChatUrl &&
@@ -613,9 +641,9 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             0 ? (
             <p className="px-2.5 text-xs leading-4.5 text-fg-muted">
               To change the branch of a repository already in this chat,{" "}
-              <a href={props.newChatUrl} className="og-link">
+              <AppPageLink href={props.newChatUrl} className="og-link">
                 start a new chat
-              </a>
+              </AppPageLink>
               .
             </p>
           ) : null}
@@ -720,6 +748,46 @@ export function defaultRepositoryIdentity(row: RepositoryPickerRow): "personal" 
   return row.personal.selectedAccess === "write" ? "personal" : "app";
 }
 
+/** Inline retry after a failed load or background update. */
+function RetryLink(props: { onClick: () => void; disabled: boolean }) {
+  return (
+    <button
+      type="button"
+      className="og-link disabled:opacity-60"
+      onClick={props.onClick}
+      disabled={props.disabled}
+    >
+      Try again
+    </button>
+  );
+}
+
+/**
+ * A link to another app page. Goes through the host's navigation, so an
+ * embedded session UI opens it beside the host page instead of resolving it
+ * against the host's origin; plain anchor when no navigation is configured.
+ */
+function AppPageLink(props: {
+  href: string;
+  className?: string | undefined;
+  onClick?: (() => void) | undefined;
+  children: ReactNode;
+}) {
+  const HostLink = useAppHost().navigation?.Link;
+  if (!HostLink) {
+    return (
+      <a href={props.href} className={props.className} onClick={props.onClick}>
+        {props.children}
+      </a>
+    );
+  }
+  return (
+    <HostLink href={props.href} className={props.className} onClick={props.onClick}>
+      {props.children}
+    </HostLink>
+  );
+}
+
 function githubLoginLabel(login: unknown): string {
   return typeof login === "string" && login.length > 0 ? `@${login}` : "Connected";
 }
@@ -784,13 +852,17 @@ function RepositoryPickerRowView(props: {
     select(identity);
   }
 
-  const login = githubLoginLabel(picker.personalGitHubStatus?.connection?.metadata.githubLogin);
+  const rawLogin = picker.personalGitHubStatus?.connection?.metadata.githubLogin;
+  const you = typeof rawLogin === "string" && rawLogin.length > 0 ? `You (@${rawLogin})` : "You";
   const showIdentityChoice = checked && !locked && app !== null && canUsePersonal;
   // With your GitHub connected there are two identities, so a selected
   // repository always says which one it works as. Without it there is only
   // the app, and nothing to explain.
   const showIdentity =
-    checked && !locked && picker.personalGitHubStatus?.connection?.status === "active";
+    checked &&
+    !locked &&
+    picker.personalGitHubStatus?.enabled === true &&
+    picker.personalGitHubStatus.connection?.status === "active";
   const readOnly = actingAs === "personal" && personal?.selectedAccess === "read";
   // A selected row shows its branch in the field below; the subtitle would repeat it.
   const editing = checked && !locked;
@@ -868,7 +940,7 @@ function RepositoryPickerRowView(props: {
                 disabled={picker.pending || personalBusy}
                 onValueChange={switchIdentity}
                 options={[
-                  { value: "personal", label: `You (${login})` },
+                  { value: "personal", label: you },
                   { value: "app", label: "Opengeni app" },
                 ]}
               />
@@ -877,7 +949,7 @@ function RepositoryPickerRowView(props: {
             <div className="flex items-center gap-2 text-xs">
               <span className="shrink-0 text-fg-subtle">Acts as</span>
               <span className="min-w-0 truncate text-fg-muted">
-                {actingAs === "personal" ? `You (${login})` : "Opengeni app"}
+                {actingAs === "personal" ? you : "Opengeni app"}
               </span>
             </div>
           ) : null}

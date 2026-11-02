@@ -534,6 +534,7 @@ export function OptionRow({ option }: { option: IntegrationOption }) {
       <div className="flex shrink-0 flex-wrap justify-end gap-2">
         <RowButton
           disabled={option.disabled}
+          aria-label={option.action.ariaLabel}
           aria-describedby={describedBy(option.disclosureId)}
           onClick={option.action.onClick}
         >
@@ -542,6 +543,7 @@ export function OptionRow({ option }: { option: IntegrationOption }) {
         {option.secondaryAction ? (
           <RowButton
             disabled={option.disabled}
+            aria-label={option.secondaryAction.ariaLabel}
             onClick={option.secondaryAction.onClick}
             className={
               option.secondaryAction.destructive ? "text-fg-muted hover:text-danger" : undefined

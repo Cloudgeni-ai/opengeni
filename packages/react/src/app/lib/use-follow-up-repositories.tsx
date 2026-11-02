@@ -6,7 +6,7 @@ import {
   resourceMountPath,
   stableJson,
 } from "@opengeni/contracts";
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "./toast";
 
 import type {
@@ -105,7 +105,23 @@ type RepositoryRefreshContext = Pick<
   | "personalGitHubBusy"
 >;
 
-/** Keep this above the lazily mounted menu so rapid reopenings share one cooldown. */
+/**
+ * Workspaces whose GitHub access the person left to change (on GitHub or the
+ * GitHub settings page). Module scope, so the mark outlives a composer that
+ * unmounted while they were on the settings page.
+ */
+const githubAccessChanges = new Set<string>();
+
+/** Opening the menu refreshes at most this often; returning from a GitHub flow skips it. */
+export const REPOSITORY_OPEN_REFRESH_COOLDOWN_MS = 30_000;
+
+/**
+ * Keep this above the lazily mounted menu so rapid reopenings share one cooldown.
+ * There is no Refresh action: the menu refreshes on open (throttled), and once
+ * the person is back from changing GitHub access (window focus, or the composer
+ * mounting again after the settings page) it refreshes at once and, for an App
+ * manager, syncs from GitHub so newly shared repositories show up.
+ */
 export function useRepositoryCatalogRefresh(
   workspaceId: string,
   context: RepositoryRefreshContext,
@@ -138,21 +154,30 @@ export function useRepositoryCatalogRefresh(
         canReadPersonal,
       ]);
       const previous = gate.current;
+      // Back from changing GitHub access: skip the cooldown and pick up the change.
+      const returning = !explicit && githubAccessChanges.has(workspaceId);
       if (previous?.key === key) {
         if (previous.inFlight) return previous.inFlight;
-        if (!explicit && Date.now() - previous.attemptedAt < 30_000) return;
+        if (
+          !explicit &&
+          !returning &&
+          Date.now() - previous.attemptedAt < REPOSITORY_OPEN_REFRESH_COOLDOWN_MS
+        )
+          return;
       }
       if ((canUseGitHub && context.repoBusy) || (canReadPersonal && context.personalGitHubBusy))
         return;
+      githubAccessChanges.delete(workspaceId);
       const accepted = { key, attemptedAt: Date.now(), inFlight: null as Promise<void> | null };
       gate.current = accepted;
-      // Opening is read-only. Explicit refresh may sync for an App manager;
-      // ordinary users keep catalog reads. Context retains its async ownership fences.
+      // Opening is read-only. A retry, or coming back from a GitHub flow, may
+      // sync for an App manager; ordinary users keep catalog reads. Context
+      // retains its async ownership fences.
       const request = Promise.all([
         ...(canUseGitHub
           ? [
               context.refreshGitHub(workspaceId, undefined, {
-                sync: explicit && canManageGitHub,
+                sync: (explicit || returning) && canManageGitHub,
                 userInitiated: explicit,
               }),
             ]
@@ -170,10 +195,31 @@ export function useRepositoryCatalogRefresh(
     },
     [context, workspaceId, canUseGitHub, canManageGitHub, canReadPersonal],
   );
+  const passiveRefresh = useRef(() => refresh(false));
+  passiveRefresh.current = () => refresh(false);
+  // The person went to GitHub (install, choose repositories) in another tab or
+  // window, or to the GitHub settings page: refresh as soon as they are back,
+  // before they reopen the menu.
+  useEffect(() => {
+    const onReturn = () => {
+      if (document.visibilityState === "hidden" || !githubAccessChanges.has(workspaceId)) return;
+      void passiveRefresh.current().catch(() => undefined);
+    };
+    onReturn();
+    window.addEventListener("focus", onReturn);
+    document.addEventListener("visibilitychange", onReturn);
+    return () => {
+      window.removeEventListener("focus", onReturn);
+      document.removeEventListener("visibilitychange", onReturn);
+    };
+  }, [workspaceId]);
   return {
     refreshAllowed: canUseGitHub || canReadPersonal,
     onOpenRefresh: useCallback(() => refresh(false), [refresh]),
     onRefresh: useCallback(() => refresh(true), [refresh]),
+    onLeaveForGitHub: useCallback(() => {
+      githubAccessChanges.add(workspaceId);
+    }, [workspaceId]),
   };
 }
 
