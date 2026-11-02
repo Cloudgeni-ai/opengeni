@@ -501,7 +501,9 @@ const RESTRICTED_INTRO_ERRORS = new Set([
   "team_access_not_granted",
 ]);
 
-export function slackAgentIntroFailureStatus(error: unknown): SlackAgentIntroResponse["results"][number]["status"] {
+export function slackAgentIntroFailureStatus(
+  error: unknown,
+): SlackAgentIntroResponse["results"][number]["status"] {
   if (!(error instanceof SlackBotProviderError)) return "failed";
   if (error.code === "not_in_channel" || error.code === "channel_not_found") {
     return "not_in_channel";

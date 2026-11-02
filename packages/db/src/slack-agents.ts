@@ -534,7 +534,10 @@ export async function recordSlackAgentIntroPost(
         postedBySubjectId: input.postedBySubjectId,
       })
       .onConflictDoUpdate({
-        target: [schema.slackAgentIntroPosts.slackAgentId, schema.slackAgentIntroPosts.slackChannelId],
+        target: [
+          schema.slackAgentIntroPosts.slackAgentId,
+          schema.slackAgentIntroPosts.slackChannelId,
+        ],
         set: { postedBySubjectId: input.postedBySubjectId, updatedAt: sql`now()` },
       });
   });

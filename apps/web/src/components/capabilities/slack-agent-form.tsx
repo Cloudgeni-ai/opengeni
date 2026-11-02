@@ -401,11 +401,7 @@ export function SlackAgentFormPage({
             onOpenChange={setPickerOpen}
           />
           <div className="min-w-0 flex-1">
-            <Field
-              label="Name"
-              error={errors.name ?? undefined}
-              hint={nameHint}
-            >
+            <Field label="Name" error={errors.name ?? undefined} hint={nameHint}>
               <TextInput
                 value={name}
                 maxLength={SLACK_AGENT_NAME_MAX_LENGTH}
@@ -554,7 +550,9 @@ export function SlackAgentIntroPage({
           if (!cursor) break;
         }
         if (live) {
-          setChannels(sortIntroChannels([...new Map(collected.map((row) => [row.id, row])).values()]));
+          setChannels(
+            sortIntroChannels([...new Map(collected.map((row) => [row.id, row])).values()]),
+          );
         }
       } catch (failure) {
         if (live) setLoadError(failure);
@@ -589,7 +587,8 @@ export function SlackAgentIntroPage({
     if (!channels || !needle) return channels;
     return channels.filter(
       (channel) =>
-        selected.includes(channel.id) || (channel.name ?? channel.id).toLowerCase().includes(needle),
+        selected.includes(channel.id) ||
+        (channel.name ?? channel.id).toLowerCase().includes(needle),
     );
   }, [channels, query, selected]);
   const full = selected.length >= SLACK_AGENT_INTRO_CHANNELS_MAX;

@@ -349,7 +349,8 @@ describe("Slack agents administration", () => {
     expect(created.status).toBe(201);
     const { agent } = (await created.json()) as { agent: { id: string; version: number } };
     // An agent named before the stricter rules: its name is stored as is.
-    await shared!.admin`update slack_agents set name = 'Test', name_key = 'test' where id = ${agent.id}`;
+    await shared!
+      .admin`update slack_agents set name = 'Test', name_key = 'test' where id = ${agent.id}`;
     const unchanged = await app().request(`${base}/${agent.id}`, {
       method: "PATCH",
       headers: admin,

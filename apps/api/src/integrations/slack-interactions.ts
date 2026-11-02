@@ -3680,7 +3680,9 @@ export async function suggestSlackAgentForChat(
   }
   // Only a chat that owns an ordinary thread posts there; a private task moved
   // to someone's DM keeps its privacy.
-  if (interaction.routeKey !== slackRouteKey(interaction.slackChannelId, interaction.slackThreadTs)) {
+  if (
+    interaction.routeKey !== slackRouteKey(interaction.slackChannelId, interaction.slackThreadTs)
+  ) {
     return refuse("This chat cannot suggest agents. Answer the request yourself.");
   }
   const loaded = await loadSlackAgentsForConnection(deps, home, interaction.connectionId);
@@ -7490,14 +7492,18 @@ async function deliverSlackSessionEvents(
       }
       // A chat's suggestion of another agent follows its answer. It is extra:
       // a failure here never holds back the answer's delivery.
-      await postSlackAgentSuggestionAfterAnswer(deps, client, interaction, home, event.turnId).catch(
-        (error: unknown) => {
-          console.warn("[slack-agent-suggestion] could not post the suggestion", {
-            interactionId: interaction.id,
-            error: error instanceof Error ? error.name : "unknown",
-          });
-        },
-      );
+      await postSlackAgentSuggestionAfterAnswer(
+        deps,
+        client,
+        interaction,
+        home,
+        event.turnId,
+      ).catch((error: unknown) => {
+        console.warn("[slack-agent-suggestion] could not post the suggestion", {
+          interactionId: interaction.id,
+          error: error instanceof Error ? error.name : "unknown",
+        });
+      });
       terminal = "completed";
     } else if (event.type === "turn.failed") {
       await withSlackPreviousContinuationCopy(

@@ -463,7 +463,7 @@ App Home stays home, so it lists the installation workspace's tasks rather than 
 
 ## Slack agents
 
-A Slack agent is a named teammate people call through the one Opengeni app: a name, an icon, a one-line description, a fixed target workspace, instructions and a shared Memory. Each new top-level request starts a new chat in the agent's workspace and thread replies continue it, but all of an agent's chats share its Memory and can list each other, so it behaves like one teammate when several people ask at once. Agents are not bot templates; a template can prefill a new agent once ("Use in Slack") with no lasting link.
+A Slack agent is a named teammate people ask through the one Opengeni app with `@Opengeni <Name>`, for example `@Opengeni Data team`: a name, an icon, a one-sentence description ("What it helps with"), a fixed target workspace, instructions and a shared Memory. Each new top-level request starts a new chat in the agent's workspace and thread replies continue it, but all of an agent's chats share its Memory and can list each other, so it behaves like one teammate when several people ask at once. Agents are not bot templates; a template can prefill a new agent once ("Use in Slack") with no lasting link.
 
 Agents need workspace routing (`OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`). With routing off, or with no agents defined, every message is read and routed exactly as before: the agent list is empty, the name matcher returns nothing, and no agent text is added to any chat.
 
@@ -473,6 +473,9 @@ Agents need workspace routing (`OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`). With
 
 - `slack_channel_routes.slack_agent_id`: the channel's "who answers" setting may name an agent. Deleting the agent deletes that setting.
 - `slack_interactions.slack_agent_id` is frozen when a thread binds. `handoff_from_slack_agent_id` records who passed it on, and `last_inbound_*` says which message the chat is answering.
+- `slack_agent_update_settings.announcement_channel_id` is the channel new agents are introduced in by default (migration 1233).
+- `slack_agent_intro_posts` records, per agent and channel, that its intro was posted there, so the intro page marks those channels (home tenancy, migration 1233).
+- `slack_agent_suggestions` holds a chat's suggestion of another agent, one per answered turn: the agent, the interaction and turn, the Slack message it answered and its sender, channel and thread (home tenancy, migration 1233).
 - `slack_agent_user_states` holds the one-time "next time" hint, the one-time open-agent notice (`open_notice_interaction_id`) and first use per person and agent.
 - `slack_bot_user_links.updates_muted_at` is the per-person mute for update messages.
 - `slack_agent_proposals` holds agents proposed from Slack (see [Creating agents from Slack](#creating-agents-from-slack)): the proposed name, description, avatar, instructions and target workspace, the card's channel, thread and message, and the status (`pending`, `creating`, `created`, `cancelled`) with who decided. Home tenancy, like `slack_agents`.
@@ -482,30 +485,41 @@ Agents need workspace routing (`OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`). With
 
 Deterministic, before any agent runs; there is no model-based choice. First match wins:
 
-1. A mapped thread keeps its chat. A plain mention continues the thread's agent; an explicit name in the thread switches it to that agent, retiring the old route like a handoff. Only the person who started the thread, or someone who can use its current workspace, can switch it. An unknown `+name` in a thread is ordinary text and continues the thread.
+1. A mapped thread keeps its chat. A plain mention continues the thread's agent. Clearly addressing another agent switches the thread to it, retiring the old route like a handoff: `+name`, the name as the whole message, or the name followed by `,` or `:` ("Data, take this"). A bare name that only starts a sentence ("data looks fine now") continues the thread. Only the person who started the thread, or someone who can use its current workspace, can switch it. An unknown `+name` in a thread is ordinary text and continues the thread.
 2. `in <Workspace>:` exactly as before.
-3. **An agent name** at the start of what the person typed: the longest agent name, or `+name`. Case, spaces and hyphens are ignored, so `+data-team`, `+DataTeam` and `Data Team` all match "Data Team". `+name` also tolerates one typo when exactly one agent is that close; a bare name must match exactly and only right after a leading mention or in a slash command. `+` followed by anything but a letter (`+1`, `+100`, `+ also…`) is ordinary text, so a name starting with a digit matches only when typed exactly. In channels only a message that mentions Opengeni (or a slash command) is read; `+name` without a mention counts in a DM. Names start and end with a letter or digit. The name is stripped from the request like the `in X:` prefix. Reserved names: in, info, stop, help, create, opengeni, here, channel, everyone.
+3. **An agent name** at the start of what the person typed: the longest agent name, or `+name`. Case, spaces and hyphens are ignored, so `+data-team`, `+DataTeam` and `Data Team` all match "Data Team". `+name` also tolerates one typo when exactly one agent is that close; a bare name must match exactly and only right after a leading mention or in a slash command. `+` followed by anything but a letter (`+1`, `+100`, `+ also…`) is ordinary text, so a name starting with a digit matches only when typed exactly. In channels only a message that mentions Opengeni (or a slash command) is read; `+name` without a mention counts in a DM. Names start and end with a letter or digit. `+name` is stripped from the request like the `in X:` prefix; a bare name is kept, because it can be part of the request ("Data is wrong on the dashboard"). Reserved names: in, info, stop, help, create, opengeni, here, channel, everyone. A new or renamed agent also needs at least two letters and may not be a word people start sentences with (what, how, why, can, could, please, hi, hey, hello, thanks, I, a, the, is, are, do, ok, yes, no, test and similar). The form warns, without blocking, that a one-word name catches every message starting with that word. Saving an agent whose name did not change checks only the format rules, so older agents still save.
+
+People are shown one way to ask an agent: `@Opengeni <Name>` with the name as the admin wrote it (`slackAgentCallText` in contracts). `+name` keeps working but is never advertised.
 4. **The channel setting**, "Who answers in #channel": an agent or "Opengeni in <Workspace>". Administrators set it under Capabilities → Slack, and the picker can remember it.
 5. DM rules, then a sole candidate, as before.
 6. The picker, which in a channel now lists agents before workspaces, with the choice remembered for the channel.
 
-When nothing names an agent, routing is unchanged, and the chat still knows the agent list so it can hand off.
+When nothing names an agent, routing is unchanged, and the chat still knows the agent list so it can hand off or suggest one.
+
+In a channel whose "Who answers" is an agent, `in <Workspace>:` (step 2) still reaches Opengeni itself. The one-time hint says so when the channel setting chose the agent.
 
 ### Identity and context
 
-An agent's Slack posts use the agent's name and icon (`chat:write.customize`), read from the agent record rather than the session title; a deleted agent's chats post as Opengeni. Chats keep normal titles; in the app they show the agent's avatar and a "Slack agent: <name>" chip. The first message reads "<Agent> is on it", plus "Passed on by <Agent>" after a handoff, plus a one-time hint per person and agent: "<Agent> · next time: @Opengeni +name" (not shown when they already used the name).
+An agent's Slack posts use the agent's name and icon (`chat:write.customize`), read from the agent record rather than the session title; a deleted agent's chats post as Opengeni. Chats keep normal titles; in the app they show the agent's avatar and a "Slack agent: <name>" chip. The first message reads "<Agent> is on it", plus "Passed on by <Agent>" after a handoff, plus a one-time hint per person and agent when they reached it without its name: "_Data team: <description> Next time, ask directly with @Opengeni Data team._". When the channel's setting chose the agent (and it isn't open), the hint adds "To ask Opengeni itself here, start with `in <Workspace>:`". There is no per-channel first-use line.
 
-Every chat started from Slack in an installation with agents is told its own identity and instructions (when it is an agent), the other agents (name, description, workspace) and how to hand off, and to check its Memory and its recent chats when context is missing and save lasting facts to Memory. The existing attached channel history is the only channel context; chats do not re-read channels.
+Every chat started from Slack in an installation with agents is told its own identity and instructions (when it is an agent), how it was reached (by name, by the channel's setting, or without naming an agent), the other agents (name, description, workspace), the hand-off rule, and to check its Memory and its recent chats when context is missing and save lasting facts to Memory. The existing attached channel history is the only channel context; chats do not re-read channels.
 
 **Memory** is a workspace Knowledge collection named after the agent, created with it. When the target workspace saves Knowledge for review first, the agent settings say Memory writes go to review. `slack_agent_chats` lists the agent's recent chats in its workspace, filtered by agent id and excluding private DM chats.
 
 ### Handoff
 
-`slack_agent_handoff({ agent, note? })` exists only in Slack-started chats of an installation with agents. It re-runs the ordinary interaction pipeline for the same Slack message in the target agent's workspace and rebinds the thread to the new chat. At most one hop per incoming message, never to itself and never back to the agent that handed off. The handing-off chat ends with `NO_REPLY`; the receiving agent's first message says who passed it on. The asker's access to the target is checked first: if they cannot use it they get a private reply naming the agent and its workspace with a request-access link, and no chat is created. The message passed on is the one the calling turn is answering, with the first agent's address removed, and its sender is the person whose access is checked. A retried call reports the same hand-off without queuing it twice. Files on the original message are not re-attached.
+`slack_agent_handoff({ agent, note?, reason? })` exists only in Slack-started chats of an installation with agents. A chat answers itself by default and hands off only when the person asks for that agent by name, team or role, even misspelled. It never hands off greetings, tests, small talk, questions about Opengeni or its agents, or messages that merely contain a word that is also an agent's name; this applies equally when the channel's "Who answers" chose Opengeni. The server enforces the core: the message being answered must contain the agent's name (one typo allowed for names of four or more letters; Slack mentions are ignored) or `+name`, otherwise the call is refused with "Answer it yourself; you may suggest the agent." `reason` is only logged. It re-runs the ordinary interaction pipeline for the same Slack message in the target agent's workspace and rebinds the thread to the new chat. At most one hop per incoming message, never to itself and never back to the agent that handed off. The handing-off chat ends with `NO_REPLY`; the receiving agent's first message says who passed it on. The asker's access to the target is checked first: if they cannot use it they get a private reply naming the agent and its workspace with a request-access link, and no chat is created. The message passed on is the one the calling turn is answering, with the first agent's address removed, and its sender is the person whose access is checked. A retried call reports the same hand-off without queuing it twice. Files on the original message are not re-attached.
+
+### Suggestions
+
+When a request fits an agent the person didn't name, the chat answers itself and calls `slack_agent_suggest({ agent })`. Nothing moves. After the answer is posted, delivery posts one more line in the thread, "<Agent> handles questions like this.", with an **Ask <Agent>** button (`opengeni.agent_suggestion.ask`). The copy and the button are the server's; the chat only names the agent.
+
+- Only for a Slack message the current turn answers, in a thread the chat owns (not open chats, not private tasks moved to a DM), and only for an agent the person who asked can use (an open agent, or `sessions:create` in its workspace). One suggestion per turn; the first wins.
+- The button carries only the suggestion id. A click must come from the suggestion's own message in the same installation and channel. It queues the answered message again, addressed to the agent (`target_slack_agent_id`), as the person who clicked, in the same thread: the same path as choosing the agent on the Ask form, so the clicker's access is checked and the thread moves to the agent. The suggestion line then reads "<@person> asked <Agent>."
 
 ### Access
 
-By default an agent answers only people who can start work in its workspace. Otherwise a private reply says "<Agent> works in the <Workspace> workspace, which you don't have access to. Request access: …". An unknown `+name` gets "No agent called X. Available: +a, +b." Neither starts a chat.
+By default an agent answers only people who can start work in its workspace. Otherwise a private reply says "<Agent> works in the <Workspace> workspace, which you don't have access to. Request access: …". An unknown `+name` gets "No agent called X. Available: Data team, Analytics." Neither starts a chat.
 
 #### Open agents
 
@@ -528,7 +542,13 @@ Open chats count against the workspace's usage like any other chat.
 
 ### Managing agents
 
-**Capabilities → Slack → Slack agents**. Admins of the target workspace create, edit and delete its agents; edit rights follow the current admins, not the creator. Anyone in the organization sees the list; instructions, Memory and creator are shown only to people who can read the agent's workspace. Intro channels are channels the app is in and that are not shared outside the Slack workspace; private ones are offered only to admins of the installation's workspace. Creating checks that the Opengeni Slack app is available in the workspace (`slack_bot_unavailable` otherwise, with an offer to turn it on). After creating, an admin can post an intro, under the agent's name, in channels the app is already in; nobody is DMed. Deleting a workspace deletes its agents and their channel settings, and the delete confirmation lists them.
+**Capabilities → Slack → Slack agents**. Admins of the target workspace create, edit and delete its agents; edit rights follow the current admins, not the creator. Anyone in the organization sees the list; instructions, Memory and creator are shown only to people who can read the agent's workspace. Intro channels are channels the app is in and that are not shared outside the Slack workspace; private ones are offered only to admins of the installation's workspace. Creating checks that the Opengeni Slack app is available in the workspace (`slack_bot_unavailable` otherwise, with an offer to turn it on). After creating, an admin can post an intro, under the agent's name, in channels the app is already in; nobody is DMed. The intro reads:
+
+> Hi, I'm *Data team*, an Opengeni agent. Answers questions about our metrics and dashboards.
+> Ask me in any channel: @Opengeni Data team, then your question.
+> _Added by @admin_
+
+(real mentions; "Added by" only when the admin linked Slack). The text comes from `slackAgentIntroLines` in contracts, which also drives the "Preview in Slack" under the description field and at the top of the intro page. The description is punctuated as a sentence and never filled in for the admin. The intro page sorts channels, searches long lists, marks channels that already have this agent's intro, and preselects the announcement channel. A channel where Slack lets only some people post (`restricted_action*`, archived, Slack Connect) reports `restricted`, which a retry won't fix; `not_in_channel` means the app isn't in it. Deleting a workspace deletes its agents and their channel settings, and the delete confirmation lists them.
 
 API: `GET|POST /v1/workspaces/:workspaceId/integrations/slack/agents`, `PATCH|DELETE …/agents/:agentId`, `GET …/agents/:agentId/channels`, `POST …/agents/:agentId/intro`. Channel routes carry `slackAgentId`.
 
@@ -573,7 +593,7 @@ The buttons carry only the proposal id. A click must match the stored proposal's
 - **Cancel** is open to an admin or the person who asked.
 - Creating claims the proposal (`creating`), then calls `createSlackAgent`, the same function as `POST …/integrations/slack/agents`. It applies the name rules, `slack_bot_unavailable` and Memory collection creation.
 - The agent's id is the proposal's id and the Memory collection is created only when missing, so repeated or concurrent clicks create one agent (a click that loses the race finds that agent and settles the card too). A failure (name taken, app not available in that workspace) returns the proposal to `pending` and tells the clicker privately.
-- On success the card becomes "<Agent> is ready" with "Ask it with @Opengeni +name". A cancelled card reads "<Agent> was not created." Settled cards ignore further clicks.
+- On success the card becomes "<Agent> is ready" with "Ask it with @Opengeni <Name>". A cancelled card reads "<Agent> was not created." Settled cards ignore further clicks.
 
 An icon is required, in the session avatar form: `emoji` (with a hue), `icon` (a built-in icon with a hue), `letters`, or `image` (an artifact id). The tool description and the agents' Slack instructions tell the chat to generate an icon and pass `{ kind: "image", artifactId }` when it has an image-generation tool, and otherwise to ask the person for an emoji. An image icon must be a file in the agent's workspace that everyone there can see, so it works only when that is the chat's own workspace; otherwise the chat is told to use an emoji or built-in icon. Proposals do not expire.
 
@@ -597,8 +617,9 @@ Each message is at most three lines plus two buttons: **See all agents** opens t
 
 - **Tell people about new agents** turns update messages on or off. Default off: unprompted direct messages in a company's Slack should be an explicit choice.
 - **Channel posts only**: Opengeni announces agents only through channel intro posts and never sends these direct messages.
+- **Announce new agents in**: the channel the intro page picks by default for every new agent. Optional.
 
-API: `GET /v1/workspaces/:workspaceId/integrations/slack/agent-updates?connectionId=` (anyone in the organization; `viewerCanManage` says whether the caller may change it) and `PUT …/agent-updates` with `{ connectionId, updatesEnabled, channelPostsOnly }` (organization admins).
+API: `GET /v1/workspaces/:workspaceId/integrations/slack/agent-updates?connectionId=` (anyone in the organization; `viewerCanManage` says whether the caller may change it) and `PUT …/agent-updates` with `{ connectionId, updatesEnabled, channelPostsOnly, announcementChannelId? }` (organization admins; omitting `announcementChannelId` keeps it, `null` clears it).
 
 **Send me a preview.** An organization admin who has linked their own Slack account can get a message now, at any time and with updates off: the **Send me a preview** button, or `POST …/agent-updates/preview` with `{ connectionId, kind? }` where `kind` is `update` (default), `welcome` or `dormant`. It names the agents the admin can use (or every agent when they can use none), goes only to the caller's own DM, ignores the schedule, the switch and mute, and records nothing, so it never counts toward anyone's limits. `409` when the caller hasn't linked Slack or there are no agents. Its Mute button really mutes the admin; Undo turns updates back on.
 

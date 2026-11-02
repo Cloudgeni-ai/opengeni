@@ -138,9 +138,7 @@ export function slackAgentNameProblem(name: string): SlackAgentNameProblem | nul
  * made of characters a name can be typed with. Saving an agent whose name did
  * not change checks only these.
  */
-export function slackAgentNameFormatProblem(
-  name: string,
-): "empty" | "reserved" | "invalid" | null {
+export function slackAgentNameFormatProblem(name: string): "empty" | "reserved" | "invalid" | null {
   const trimmed = name.trim();
   const key = slackAgentNameKey(trimmed);
   if (key.length === 0) return "empty";

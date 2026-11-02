@@ -2,7 +2,11 @@
  * How an agent's intro looks in Slack: its icon, name and APP badge over the
  * exact lines the API posts, built by the same contracts function.
  */
-import { slackAgentIntroLines, type SlackAgentMessageSegment } from "@opengeni/contracts";
+import {
+  slackAgentIntroLines,
+  slackAgentMessagePlainText,
+  type SlackAgentMessageSegment,
+} from "@opengeni/contracts";
 import type { SessionAvatar as SessionAvatarValue } from "@opengeni/sdk";
 
 import { SessionAvatar } from "@opengeni/react/app/components/session/session-avatar";
@@ -13,6 +17,18 @@ function Mention({ children }: { children: string }) {
       {children}
     </span>
   );
+}
+
+function segmentKey(segment: SlackAgentMessageSegment): string {
+  switch (segment.kind) {
+    case "text":
+    case "bold":
+      return `${segment.kind}:${segment.text}`;
+    case "opengeni":
+      return "opengeni";
+    case "person":
+      return `person:${segment.name}`;
+  }
 }
 
 function Segment({ segment }: { segment: SlackAgentMessageSegment }) {
@@ -83,13 +99,13 @@ export function SlackAgentIntroPreview({
               APP
             </span>
           </div>
-          {lines.map((line, index) => (
+          {lines.map((line) => (
             <p
-              key={index}
+              key={slackAgentMessagePlainText([line])}
               className={line.italic ? "break-words text-fg italic" : "break-words text-fg"}
             >
-              {line.segments.map((segment, part) => (
-                <Segment key={part} segment={segment} />
+              {line.segments.map((segment) => (
+                <Segment key={segmentKey(segment)} segment={segment} />
               ))}
             </p>
           ))}

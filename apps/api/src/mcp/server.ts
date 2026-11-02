@@ -2948,7 +2948,7 @@ function registerSlackBotTools(
     "slack_agent_suggest",
     {
       description:
-        "After answering a Slack request yourself, suggest a Slack agent that handles requests like it when the person did not ask for one. Name the agent. Opengeni then posts one line under your answer (\"<Agent> handles questions like this.\") with a button that sends the same message to that agent. Only agents the person can use are shown, and only one suggestion per answer. Do not mention the suggestion in your answer.",
+        'After answering a Slack request yourself, suggest a Slack agent that handles requests like it when the person did not ask for one. Name the agent. Opengeni then posts one line under your answer ("<Agent> handles questions like this.") with a button that sends the same message to that agent. Only agents the person can use are shown, and only one suggestion per answer. Do not mention the suggestion in your answer.',
       inputSchema: { agent: z4.string().min(1).max(120) },
     },
     async ({ agent }) => {

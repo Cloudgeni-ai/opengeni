@@ -941,7 +941,9 @@ describe("Introduce in channels", () => {
     );
     const view = await render(<SlackAgentIntroPage agent={agent()} onClose={() => undefined} />);
     await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
-    const search = view.host.querySelector<HTMLInputElement>('input[aria-label="Search channels"]')!;
+    const search = view.host.querySelector<HTMLInputElement>(
+      'input[aria-label="Search channels"]',
+    )!;
     await type(search, "metr");
     expect(view.host.textContent).toContain("#metrics");
     expect(view.host.textContent).not.toContain("#team-1");

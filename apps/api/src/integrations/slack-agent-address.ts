@@ -90,10 +90,7 @@ function wordKey(value: string): string {
  * ignored. This is the server's check before a chat may hand a message off;
  * the chat's instructions decide the rest.
  */
-export function slackTextNamesAgent(
-  text: string,
-  agent: Pick<SlackRoutingAgent, "name">,
-): boolean {
+export function slackTextNamesAgent(text: string, agent: Pick<SlackRoutingAgent, "name">): boolean {
   const target = wordKey(agent.name);
   if (target.length === 0) return false;
   const words = (text.replace(/<[^>]*>/gu, " ").match(/[\p{L}\p{N}]+/gu) ?? []).map(wordKey);
