@@ -122,6 +122,34 @@ fn find(parent: &mut [usize], mut node: usize) -> usize {
     node
 }
 
+/// The mean of `vectors`, or an empty vector when there are none.
+pub fn mean(vectors: &[Vec<f32>]) -> Vec<f32> {
+    let mut mean = vec![0f32; vectors.first().map_or(0, Vec::len)];
+    for vector in vectors {
+        for (total, value) in mean.iter_mut().zip(vector) {
+            *total += value;
+        }
+    }
+    for value in &mut mean {
+        *value /= vectors.len() as f32;
+    }
+    mean
+}
+
+/// Cluster sums measured from `mean`: a sum of `count` vectors loses `count`
+/// times the mean, so its direction is the cluster centre minus the mean.
+pub fn centred_sums(sums: &[Vec<f32>], counts: &[usize], mean: &[f32]) -> Vec<Vec<f32>> {
+    sums.iter()
+        .zip(counts)
+        .map(|(sum, &count)| {
+            sum.iter()
+                .zip(mean)
+                .map(|(total, value)| total - count as f32 * value)
+                .collect()
+        })
+        .collect()
+}
+
 /// Centroid linkage over cluster sums: repeatedly joins the two clusters
 /// whose centres are closest while their cosine distance is below
 /// `threshold`, never going below `min_clusters`. Each sum is the sum of a
@@ -272,5 +300,21 @@ mod tests {
         assert_eq!(*labels.iter().max().unwrap() + 1, 5);
         // A zero threshold merges nothing.
         assert_eq!(merge_centroids(&sums, 0.0, 1), vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn centring_separates_voices_that_share_a_microphone() {
+        // Two voices whose embeddings are dominated by the same room.
+        let a = normalized(vec![0.9, 0.3, 0.0, 0.0]);
+        let b = normalized(vec![0.9, 0.0, 0.3, 0.0]);
+        let vectors = vec![a.clone(), a.clone(), a.clone(), b.clone(), b.clone()];
+        let sums = vec![
+            a.iter().map(|value| value * 3.0).collect::<Vec<f32>>(),
+            b.iter().map(|value| value * 2.0).collect(),
+        ];
+        assert_eq!(merge_centroids(&sums, 0.8, 1), vec![0, 0]);
+        let centred = centred_sums(&sums, &[3, 2], &mean(&vectors));
+        assert_eq!(merge_centroids(&centred, 0.8, 1), vec![0, 1]);
+        assert!(mean(&[]).is_empty());
     }
 }
