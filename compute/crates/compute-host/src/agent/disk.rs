@@ -14,6 +14,11 @@
 //! [`compute_core::Host::disk_awaits_reading`]): it waits for the next
 //! reading, about a second away, which decides it.
 //!
+//! So does work that fits only once disk relief frees what the host keeps
+//! without needing it (ADR 29; see [`super::relief`]): it books what it
+//! waits for ([`compute_core::Input::Wants`]), which has the core free
+//! that, and the readings after decide it.
+//!
 //! A guest also frees space while its VM runs, since its disk takes
 //! discards: the space comes back to the host's disk, but stays the
 //! guest's to take again. A guest may free and write at any moment, and
@@ -40,7 +45,7 @@ use crate::disk_growth::{self, Headroom};
 use crate::layout::{Paths, copy_size, vm_spec};
 use crate::protocol::SandboxConfig;
 use crate::state::Record;
-use crate::store::{OwnerEpoch, Store};
+use crate::store::{Claimed, OwnerEpoch, Store};
 
 use super::{HostAgent, HostError, Reply};
 use crate::protocol::{Id, ImageId};
@@ -87,6 +92,15 @@ pub(super) fn lengthen(path: &Path, length: u64) -> io::Result<u64> {
     disk.set_len(length)?;
     disk.sync_all()?;
     Ok(length)
+}
+
+/// Ends what work named `key` waited for disk relief to free, if it did
+/// (see [`Input::Wants`]): it goes on, booking what it writes, or ends.
+pub(super) fn unwanted(key: SandboxId) -> Input {
+    Input::Wants {
+        key,
+        disk: DiskSpace::default(),
+    }
 }
 
 /// The disk of a ready sandbox a create claims, which the claim makes as
@@ -140,6 +154,10 @@ pub(super) enum AfterReading {
     /// An adopt whose first wake may not fit, with whether it is from the
     /// copy's files alone; its id is reserved meanwhile.
     Adopt(Id, Box<SandboxConfig>, OwnerEpoch, bool, Reply<()>),
+    /// An adopt that claimed the store's copy, as `Claimed` says, whose
+    /// first wake with the copy's disk fits only once disk relief is in
+    /// (see [`HostAgent::copy_claimed`]); its id is reserved meanwhile.
+    Claimed(Box<Record>, Box<Claimed>, Reply<()>),
     /// The fetch of an image whose file is `length` bytes long.
     Fetch(ImageId, u64),
     /// A request, under `generation` if one is named, that sandbox `id`
@@ -367,6 +385,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
+    /// Books `disk` that work named `key` waits for disk relief to free
+    /// (see [`Input::Wants`]), so the core frees it and nothing else takes
+    /// it.
+    pub(super) fn want_disk(&mut self, key: SandboxId, disk: DiskSpace) {
+        self.input(Input::Wants { key, disk });
+    }
+
     /// Has `work` wait for the next disk reading.
     pub(super) fn after_reading(&mut self, work: AfterReading) {
         if let AfterReading::Create(id, ..) | AfterReading::Adopt(id, ..) = &work {
@@ -379,13 +404,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn resume_after_reading(&mut self) {
         for work in std::mem::take(&mut self.after_reading) {
             match work {
+                // What each waited for is booked again if it still waits:
+                // its own counts as free for its check either way.
                 AfterReading::Create(id, config, owner, reply) => {
                     self.preparing.remove(&id.0);
+                    self.input(unwanted(id.0));
                     self.create_fresh(id, *config, owner, reply);
                 }
                 AfterReading::Adopt(id, config, owner, from_files, reply) => {
                     self.preparing.remove(&id.0);
+                    self.input(unwanted(id.0));
                     self.adopt(id, *config, owner, from_files, reply);
+                }
+                AfterReading::Claimed(record, claimed, reply) => {
+                    self.copy_claimed(*record, *claimed, reply);
                 }
                 AfterReading::Fetch(image, length) => self.image_sized(image, Ok(Some(length))),
                 AfterReading::Sleep(id, generation, level, reply) => {
@@ -412,7 +444,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
                 AfterReading::Adopt(id, _, _, _, reply) => {
                     self.preparing.remove(&id.0);
+                    self.input(unwanted(id.0));
                     let _ = reply.send(Err(error.clone()));
+                }
+                AfterReading::Claimed(record, _, reply) => {
+                    // Its first wake and what it waited for are unbooked.
+                    let (id, ordinal) = (record.id, record.ordinal);
+                    self.prepared(id, ordinal, Err(error.clone()), reply, None, None);
                 }
                 AfterReading::Fetch(image, _) => self.fetch_ended(image, &Err(error.clone())),
                 AfterReading::Sleep(.., reply) | AfterReading::HandOff(.., reply) => {

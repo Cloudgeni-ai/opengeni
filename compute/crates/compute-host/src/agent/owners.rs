@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
-use compute_core::{Durability, Input, Level, SandboxId};
+use compute_core::{Durability, Host, Input, Level, SandboxId};
 use compute_engine::Engine;
 use compute_protocol::fleet::{Ruling, Verdict};
 use tokio::sync::oneshot;
@@ -36,7 +36,7 @@ use crate::protocol::{Id, SandboxConfig};
 use crate::state::{Change, Disk, Record};
 use crate::store::{Claimed, Owned, OwnerEpoch, Stamp, Store};
 
-use super::disk::{AfterReading, Room};
+use super::disk::{AfterReading, Room, unwanted};
 use super::remove::unmake;
 use super::{Command, Event, HostAgent, HostError, Reply};
 use crate::fleet::Admission;
@@ -371,9 +371,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let unclaimed = self.size(&config, Some(0));
         let policy = match self.can_create(id, &config, unclaimed, true) {
             Ok((Room::Now, policy)) => policy,
-            Ok((Room::AfterReading, _)) => {
+            Ok((Room::AfterReading, policy)) => {
                 let waiting = AfterReading::Adopt(id, Box::new(config), owner, from_files, reply);
                 self.after_reading(waiting);
+                // Booked meanwhile, so disk relief frees it.
+                self.want_disk(id.0, Host::first_wake_disk(unclaimed, policy, true));
                 return;
             }
             Err(error) => {
@@ -398,7 +400,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         self.preparing.insert(id.0);
         let by_ms = self.first_wake_by_ms();
-        self.input(self.first_wake(id, unclaimed, policy, true, by_ms));
+        self.inputs([
+            unwanted(id.0),
+            self.first_wake(id, unclaimed, policy, true, by_ms),
+        ]);
         let mut record = Record::new(id, ordinal, allocation, config);
         record.first_wake_by_ms = Some(by_ms);
         self.claim_copy(id, record, owner, from_files, reply);
@@ -464,9 +469,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// before it is admitted and its files are whole.
     pub(super) fn copy_claimed(&mut self, record: Record, claimed: Claimed, reply: Reply<()>) {
         let (id, ordinal) = (record.id, record.ordinal);
-        if let Err(refused) = self.adopted_room(&record) {
-            self.prepared(id, ordinal, Err(refused), reply, None, None);
-            return;
+        match self.adopted_room(&record) {
+            Ok(Room::Now) => {}
+            Ok(Room::AfterReading) => {
+                let waiting = AfterReading::Claimed(Box::new(record), Box::new(claimed), reply);
+                self.after_reading(waiting);
+                return;
+            }
+            Err(refused) => {
+                self.prepared(id, ordinal, Err(refused), reply, None, None);
+                return;
+            }
         }
         let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);

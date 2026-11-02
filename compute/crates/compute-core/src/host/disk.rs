@@ -1,14 +1,25 @@
 //! Whether the host's local disk can take everything its sandboxes may
 //! still write: the next save of every VM whose state is not saved yet,
 //! what the disks of awake VMs may grow by, and what wakes from object
-//! storage still write locally; and the background relief that keeps it
-//! so; see [`crate::DiskPolicy`].
+//! storage still write locally; and the relief that makes room for it;
+//! see [`crate::DiskPolicy`].
+//!
+//! Disk relief frees what the host can lose without losing anything: the
+//! local copies of idle sandboxes whose state object storage holds, and
+//! what the host keeps only to go faster, such as templates and cached
+//! images ([`crate::Input::Cache`]). What it frees, as the host agent
+//! measures it, counts as room for a create, an adopt or a wake, as instant
+//! memory relief does (ADR 29): one that fits only with it books its room,
+//! relief frees what it needs, least recently used first across every
+//! kind, and the readings after decide it.
 
 use core::fmt;
 
+use super::{Action, Input, Size};
 use super::{CreateRoom, Host};
-use crate::ids::SandboxId;
+use crate::ids::{CacheId, SandboxId};
 use crate::level::{Durability, Level, Step};
+use crate::policy::SleepPolicy;
 use crate::sandbox::Sandbox;
 use crate::time::At;
 
@@ -60,11 +71,19 @@ impl DiskSpace {
         }
     }
 
-    pub(super) fn add(self, other: Self) -> Self {
+    /// Both together.
+    #[must_use]
+    pub const fn add(self, other: Self) -> Self {
         Self {
             bytes: self.bytes.saturating_add(other.bytes),
             inodes: self.inodes.saturating_add(other.inodes),
         }
+    }
+
+    /// Whether it is no space at all.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.bytes == 0 && self.inodes == 0
     }
 
     pub(super) fn saturating_sub(self, other: Self) -> Self {
@@ -166,6 +185,43 @@ impl DiskRoom {
         i128::from(need.bytes) <= self.bytes + i128::from(unread.bytes)
             && i128::from(need.inodes) <= self.inodes + i128::from(unread.inodes)
     }
+
+    /// Books `need` if it fits now, or charges it (see [`Self::charge`])
+    /// if it would fit once `relief` is in: what readings may show free
+    /// and disk relief frees. Returns whether it did either.
+    pub(super) fn book(&mut self, need: DiskSpace, relief: DiskSpace) -> bool {
+        if self.take(need).is_ok() {
+            return true;
+        }
+        let fits = self.may_take(need, relief);
+        if fits {
+            self.charge(need);
+        }
+        fits
+    }
+
+    /// What is missing for `need` to fit.
+    fn shortfall(&self, need: DiskSpace) -> DiskSpace {
+        let missing = |need: u64, room: i128| u64::try_from(i128::from(need) - room).unwrap_or(0);
+        DiskSpace {
+            bytes: missing(need.bytes, self.bytes),
+            inodes: missing(need.inodes, self.inodes),
+        }
+    }
+}
+
+/// Something the host keeps on local disk only to go faster; see
+/// [`crate::Input::Cache`].
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Cache {
+    /// What removing it frees at least.
+    disk: DiskSpace,
+    /// When it was last used.
+    last_used: At,
+    /// Asked to be removed for disk relief.
+    removing: bool,
+    /// Whether [`Action::RemoveCache`] went out for it.
+    sent: bool,
 }
 
 impl Sandbox {
@@ -263,7 +319,8 @@ impl Host {
     /// [`DiskCapacity::booked`]), and what spare VMs may, such as a
     /// template build its snapshot. What any booking that ended since that
     /// reading stood for stays booked until the next one, which shows what
-    /// was written.
+    /// was written. Work waiting for disk relief books what it waits for
+    /// (see [`crate::Input::Wants`]).
     #[must_use]
     pub fn disk(&self) -> Option<DiskCapacity> {
         let policy = self.policy.disk?;
@@ -278,6 +335,7 @@ impl Host {
             .writes
             .values()
             .chain(self.removed_disk.values())
+            .chain(self.wants.values())
             .fold(booked, |sum, disk| sum.add(*disk));
         let booked = self
             .creating
@@ -345,6 +403,7 @@ impl Host {
         self.disk = Some(available);
         self.disk_fresh = true;
         self.disk_spent = DiskSpace::default();
+        self.disk_freed = DiskSpace::default();
     }
 
     /// Takes in [`crate::Input::Writes`].
@@ -462,13 +521,197 @@ impl Host {
         }
     }
 
-    /// While the disk cannot book what is booked already, what the wakes
-    /// refused and still held need and what queued checkpoints add, has
-    /// idle sandboxes that may live in object storage give up their local
+    /// What the first wake of a new sandbox of `size` that sleeps by
+    /// `policy`, from object storage with `remote`, books on local disk, as
+    /// [`Self::create_room`] counts it: for the host agent to book with
+    /// [`crate::Input::Wants`] while a create waits for disk relief.
+    #[must_use]
+    pub fn first_wake_disk(size: Size, policy: SleepPolicy, remote: bool) -> DiskSpace {
+        super::admission::FirstWake::new(size, policy, remote, At::ZERO).disk()
+    }
+
+    /// Whether work named `key` that may write `disk` to local disk, such
+    /// as the fetch of an image a create needs, fits next to every wake
+    /// already queued, as [`Self::create_room`] decides for a create: what
+    /// `key` waits for already ([`crate::Input::Wants`]) counts as free for
+    /// it. Fits on a host that books no disk.
+    #[must_use]
+    pub fn disk_room_for(&self, now: At, key: SandboxId, disk: DiskSpace) -> CreateRoom {
+        let Some((mut room, relief)) = self.queued_disk_room(now) else {
+            return CreateRoom::Fits;
+        };
+        if let Some(wanted) = self.wants.get(&key) {
+            room.give_back(*wanted);
+        }
+        match room.take(disk) {
+            Ok(()) => CreateRoom::Fits,
+            Err(short) if room.may_take(disk, relief) => {
+                CreateRoom::AwaitsReading(short.resource, short.needed, short.free)
+            }
+            Err(short) => CreateRoom::Short(short.resource, short.needed, short.free),
+        }
+    }
+
+    /// What wakes may still book in one decision once every wake already
+    /// queued for memory has booked its disk, each that fits now or once
+    /// relief is in, with that relief: what bookings that ended since the
+    /// last reading stood for, and what disk relief frees ([`Self::disk_relief`]).
+    /// A queued wake short even so is refused, so it takes nothing.
+    /// `None` without a disk policy.
+    pub(super) fn queued_disk_room(&self, now: At) -> Option<(DiskRoom, DiskSpace)> {
+        let mut room = self.disk_room()?;
+        let relief = self.disk_spent.add(self.disk_relief(now));
+        for slot in self.queued_wakes() {
+            room.book(slot.disk_need(), relief);
+        }
+        Some((room, relief))
+    }
+
+    /// Bytes beyond [`DiskCapacity::free`] that a new sandbox could book
+    /// now by disk relief, as [`Self::create_room`] counts it: what relief
+    /// under way frees and what more it could, less what an overdrawn disk
+    /// and the wakes already queued take of that first. What bookings that
+    /// ended since the last reading stood for is not counted: only the
+    /// next reading shows whether it is free. Zero without a disk policy.
+    /// Placement counts it as free.
+    #[must_use]
+    pub fn reclaimable_disk(&self, now: At) -> u64 {
+        let Some((room, _)) = self.queued_disk_room(now) else {
+            return 0;
+        };
+        let relief = i128::from(self.disk_relief(now).bytes);
+        u64::try_from((room.bytes + relief).max(0) - room.bytes.max(0)).unwrap_or(0)
+    }
+
+    /// What disk relief frees without losing anything: what relief under
+    /// way frees (see [`Self::disk_coming`]) and what more it could.
+    /// That is the local copies of idle sandboxes whose copy object
+    /// storage holds (see [`gives_up_copy`]) as measured, and the caches
+    /// nothing uses. A copy not measured, or only saved locally, counts
+    /// for nothing.
+    pub(super) fn disk_relief(&self, now: At) -> DiskSpace {
+        if self.policy.disk.is_none() {
+            return DiskSpace::default();
+        }
+        let grace = self.busy_grace();
+        let copies = self
+            .sandboxes
+            .values()
+            .filter(|slot| slot.state.level == Level::Archived && gives_up_copy(slot, now, grace))
+            .fold(self.disk_coming(now), |sum, slot| {
+                sum.add(slot.local_disk.copy)
+            });
+        self.caches
+            .values()
+            .filter(|cache| !cache.removing)
+            .fold(copies, |sum, cache| sum.add(cache.disk))
+    }
+
+    /// What relief under way frees that no reading shows yet: archived
+    /// local copies on their way out, caches being removed, and what went
+    /// since the last reading. A copy whose eviction failed and backs off
+    /// counts for nothing until it is tried again.
+    fn disk_coming(&self, now: At) -> DiskSpace {
+        let leaving = self
+            .sandboxes
+            .values()
+            .filter(|slot| {
+                slot.floor == Level::Remote
+                    && slot.state.level == Level::Archived
+                    && !slot.backing_off(now)
+                    && !slot.wants_awake()
+            })
+            .fold(self.disk_freed, |sum, slot| sum.add(slot.local_disk.copy));
+        self.caches
+            .values()
+            .filter(|cache| cache.removing)
+            .fold(leaving, |sum, cache| sum.add(cache.disk))
+    }
+
+    /// Takes in what disk relief needs to know: [`Input::Wants`],
+    /// [`Input::Cache`], [`Input::CacheRemoved`] and [`Input::LocalCopy`].
+    pub(super) fn relief_input(&mut self, input: Input) {
+        match input {
+            Input::Wants { key, disk } if disk.is_empty() => {
+                self.wants.remove(&key);
+            }
+            Input::Wants { key, disk } => {
+                self.wants.insert(key, disk);
+            }
+            Input::Cache {
+                cache,
+                disk,
+                last_used,
+            } => self.cache(cache, disk, last_used),
+            Input::CacheRemoved { cache } => self.cache_removed(cache),
+            Input::LocalCopy { sandbox, disk } => {
+                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+                    slot.local_disk.copy = disk;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Takes in [`Input::Cache`].
+    fn cache(&mut self, id: CacheId, disk: DiskSpace, last_used: At) {
+        if disk.is_empty() {
+            self.caches.remove(&id);
+            return;
+        }
+        let cache = self.caches.entry(id).or_insert(Cache {
+            disk,
+            last_used,
+            removing: false,
+            sent: false,
+        });
+        cache.disk = disk;
+        cache.last_used = last_used;
+    }
+
+    /// Takes in [`Input::CacheRemoved`]: what it held is free, as only
+    /// the next reading shows.
+    fn cache_removed(&mut self, id: CacheId) {
+        if let Some(cache) = self.caches.remove(&id) {
+            self.disk_freed = self.disk_freed.add(cache.disk);
+        }
+    }
+
+    /// Tells the host agent to remove the caches disk relief chose since.
+    pub(super) fn remove_caches(&mut self, out: &mut Vec<Action>) {
+        let mut chosen: Vec<CacheId> = self
+            .caches
+            .iter_mut()
+            .filter(|(_, cache)| cache.removing && !cache.sent)
+            .map(|(id, cache)| {
+                cache.sent = true;
+                *id
+            })
+            .collect();
+        chosen.sort_unstable();
+        out.extend(
+            chosen
+                .into_iter()
+                .map(|cache| Action::RemoveCache { cache }),
+        );
+    }
+
+    /// Frees local disk while it cannot book what is booked already and
+    /// what the wakes queued, and those refused and still held, need, and
+    /// what queued checkpoints add, counting what readings may yet show
+    /// free and the relief under way: archived local copies of idle
+    /// sandboxes and caches nothing uses go, least recently used first
+    /// across both, until what they hold, as measured, covers what is
+    /// short. Work waiting for disk relief books what it waits for (see
+    /// [`crate::Input::Wants`]), so this frees it too.
+    ///
+    /// When they cannot cover it, as before any copy is measured, idle
+    /// sandboxes that may live in object storage give up their local
     /// copies, least recently used first, as many at once as may be
-    /// evicted. Waits for those to finish and for a reading taken after
-    /// them before giving up more, since what a local copy takes is only
-    /// known from the disk. Returns whether any floor changed.
+    /// evicted, saved ones uploading theirs first; it then waits for those
+    /// to finish and for a reading taken after them before giving up more,
+    /// since only the disk shows what they freed. Returns whether any
+    /// floor changed or any cache is to go.
     pub(super) fn keep_disk(&mut self, now: At) -> bool {
         let Some(mut room) = self.disk_room() else {
             return false;
@@ -477,17 +720,24 @@ impl Host {
             .refused
             .iter()
             .filter_map(|id| self.sandboxes.get(id))
+            .chain(self.queued_wakes())
             .fold(DiskSpace::default(), |sum, slot| sum.add(slot.disk_need()));
         let held = self.queues[Step::Checkpoint.index()]
             .iter()
             .filter_map(|key| self.sandboxes.get(&key.sandbox))
             .fold(held, |sum, slot| sum.add(slot.checkpoint_need()));
+        room.give_back(self.disk_spent.add(self.disk_coming(now)));
+        let short = room.shortfall(held);
+        if short.is_empty() {
+            return false;
+        }
+        let (short, mut changed) = self.free_measured(now, short);
         let leaving = self
             .sandboxes
             .values()
             .any(|slot| slot.floor == Level::Remote);
-        if room.take(held).is_ok() || leaving || !self.disk_fresh {
-            return false;
+        if short.is_empty() || leaving || !self.disk_fresh {
+            return changed;
         }
         let grace = self.busy_grace();
         let mut candidates: Vec<(At, SandboxId)> = self
@@ -497,19 +747,84 @@ impl Host {
             .map(|(id, slot)| (slot.last_activity, *id))
             .collect();
         candidates.sort_unstable();
-        let mut changed = false;
+        let mut evicted = false;
         for (_, id) in candidates
             .into_iter()
             .take(self.policy.limits.get(Step::Evict) as usize)
         {
             if let Some(slot) = self.sandboxes.get_mut(&id) {
                 slot.floor = Level::Remote;
-                changed = true;
+                evicted = true;
                 self.mark(id);
             }
         }
-        self.disk_fresh = !changed;
+        self.disk_fresh = !evicted;
+        changed |= evicted;
         changed
+    }
+
+    /// Has archived local copies of idle sandboxes and caches nothing uses
+    /// go, least recently used first across both, until what they hold, as
+    /// measured, covers `short`; none if all of them would not. Returns
+    /// what is still short, and whether any went.
+    fn free_measured(&mut self, now: At, mut short: DiskSpace) -> (DiskSpace, bool) {
+        /// What disk relief may free.
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        enum Freeable {
+            Copy(SandboxId),
+            Cache(CacheId),
+        }
+        let grace = self.busy_grace();
+        let copies = self
+            .sandboxes
+            .iter()
+            .filter(|(_, slot)| {
+                slot.state.level == Level::Archived
+                    && !slot.local_disk.copy.is_empty()
+                    && gives_up_copy(slot, now, grace)
+            })
+            .map(|(id, slot)| {
+                (
+                    slot.last_activity,
+                    Freeable::Copy(*id),
+                    slot.local_disk.copy,
+                )
+            });
+        let caches = self
+            .caches
+            .iter()
+            .filter(|(_, cache)| !cache.removing)
+            .map(|(id, cache)| (cache.last_used, Freeable::Cache(*id), cache.disk));
+        let mut candidates: Vec<(At, Freeable, DiskSpace)> = copies.chain(caches).collect();
+        let all = candidates
+            .iter()
+            .fold(DiskSpace::default(), |sum, (.., disk)| sum.add(*disk));
+        if !short.saturating_sub(all).is_empty() {
+            return (short, false);
+        }
+        candidates.sort_unstable_by_key(|&(at, which, _)| (at, which));
+        let mut changed = false;
+        for (_, which, disk) in candidates {
+            if short.is_empty() {
+                break;
+            }
+            short = short.saturating_sub(disk);
+            changed = true;
+            match which {
+                Freeable::Copy(id) => {
+                    if let Some(slot) = self.sandboxes.get_mut(&id) {
+                        slot.floor = Level::Remote;
+                    }
+                    self.mark(id);
+                }
+                Freeable::Cache(id) => {
+                    if let Some(cache) = self.caches.get_mut(&id) {
+                        cache.removing = true;
+                    }
+                }
+            }
+        }
+        (short, changed)
     }
 }
 

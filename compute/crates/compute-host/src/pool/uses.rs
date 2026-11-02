@@ -85,6 +85,11 @@ impl Uses {
         Some((self.dir.clone(), self.mark(shape)))
     }
 
+    /// When `shape` was last used, as far as its mark says.
+    pub fn last(&self, shape: Shape) -> Option<SystemTime> {
+        self.last.get(&shape).copied()
+    }
+
     /// The shapes unused for the whole retirement period by `now`.
     pub fn unused(&self, now: SystemTime) -> Vec<Shape> {
         let mut unused: Vec<Shape> = self

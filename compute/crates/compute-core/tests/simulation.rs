@@ -291,6 +291,7 @@ impl World {
             }
             Action::Lend { loan } => panic!("{loan:?} lent, but nothing borrows here"),
             Action::Discard { sandbox } => panic!("{sandbox:?} discarded, but nothing is spare"),
+            Action::RemoveCache { cache } => panic!("{cache:?} removed, but nothing is cached"),
             Action::Shrink { sandbox, .. }
             | Action::EndForMemory { sandbox, .. }
             | Action::Bound { sandbox, .. } => {
