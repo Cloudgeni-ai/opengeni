@@ -603,6 +603,40 @@ test("streamed cache creation TTL details survive SDK usage without double count
 });
 
 describe("Claude full-history Messages adapter", () => {
+  test("an empty reply recorded by another provider is left out instead of sent as an empty text block", () => {
+    const messages = anthropicMessages([
+      { type: "message", role: "user", content: "Check the accounts" },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Checking." }],
+      },
+      { type: "message", role: "developer", content: "A goal update" },
+      // Another provider's final answer with no words in it.
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "" }],
+        providerData: { phase: "final_answer" },
+      },
+      { type: "message", role: "developer", content: "Another update" },
+      { type: "message", role: "user", content: "Continue" },
+    ] as any);
+    for (const message of messages)
+      for (const block of message.content)
+        if (block.type === "text") expect(block.text.length).toBeGreaterThan(0);
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "system",
+      "user",
+    ]);
+    expect(messages[2]!.content.map((block) => block.text)).toEqual([
+      "A goal update",
+      "Another update",
+    ]);
+  });
+
   test("stable tool/system prefixes, three cache breakpoints, no thread references or mutation", () => {
     const req = request();
     req.tools = [
