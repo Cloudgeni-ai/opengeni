@@ -96,10 +96,7 @@ describe("a chat's own unread reply in its sidebar row", () => {
     ).toMatchObject({ kind: "unread", label: "1 unread · 1 waiting to resume" });
   });
 
-  test("outranks the chat's own next turn and a queued sub-session", () => {
-    expect(
-      summarizeRailRow(row(session({ id: "running", unread: true, status: "running" }))),
-    ).toMatchObject({ kind: "unread", label: "1 unread · 1 working" });
+  test("outranks a queued sub-session", () => {
     expect(
       summarizeRailRow(
         row(
@@ -111,6 +108,33 @@ describe("a chat's own unread reply in its sidebar row", () => {
         ),
       ),
     ).toMatchObject({ kind: "unread", label: "1 unread · 1 waiting to run" });
+  });
+
+  test("gives way to the chat's own running or queued turn, which posts progress mid-turn", () => {
+    expect(
+      summarizeRailRow(row(session({ id: "running", unread: true, status: "running" }))),
+    ).toMatchObject({ kind: "active", label: "1 working" });
+    expect(
+      summarizeRailRow(row(session({ id: "queued", unread: true, status: "queued" }))),
+    ).toMatchObject({ kind: "queued" });
+    expect(
+      summarizeRailRow(
+        row(
+          session({
+            id: "manager",
+            unread: true,
+            status: "running",
+            treeStats: tree({ directChildren: 1, totalDescendants: 1, runningDescendants: 1 }),
+          }),
+        ),
+      ),
+    ).toMatchObject({ kind: "active", label: "2 working" });
+  });
+
+  test("keeps the plain unread label over background work alone", () => {
+    expect(
+      summarizeRailRow(row(session({ id: "commands", unread: true, activelyWorking: true }))),
+    ).toMatchObject({ kind: "unread", label: "1 unread" });
   });
 
   test("counts unread sub-sessions with the chat's own reply", () => {

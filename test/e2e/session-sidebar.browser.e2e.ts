@@ -842,9 +842,11 @@ test("a chat's unread reply shows over its working sub-sessions, which still say
       expect(await marker(4001).locator(".bg-session-update").count()).toBe(1);
       expect(await marker(4001).locator(".animate-spin, .lucide-hourglass").count()).toBe(0);
       expect(await row(4001).getAttribute("aria-label")).toContain("1 unread · 2 working");
-      // The same with a worker running, and with its own next turn.
+      // The same with a worker running.
       expect(await marker(4004).getAttribute("title")).toBe("1 unread · 1 working");
-      expect(await marker(4005).getAttribute("title")).toBe("1 unread · 1 working");
+      // Its own turn keeps the spinner: progress posted mid-turn is not the answer.
+      expect(await marker(4005).getAttribute("title")).toBe("1 working");
+      expect(await marker(4005).locator(".animate-spin").count()).toBe(1);
       // Without an unread reply the row still shows the work.
       expect(await marker(4006).getAttribute("title")).toBe("1 working");
       expect(await marker(4006).locator(".animate-spin").count()).toBe(1);
