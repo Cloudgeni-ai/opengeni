@@ -1,7 +1,8 @@
 //! Kaldi-compatible log mel filterbank features, the input speaker-embedding
-//! models (WeSpeaker, 3D-Speaker, NeMo TitaNet as exported for sherpa-onnx)
-//! were trained on: 25 ms Povey-windowed frames every 10 ms, pre-emphasis
-//! 0.97, a 512-point FFT and 80 mel bins from 20 Hz to Nyquist, no dither.
+//! models (WeSpeaker and 3D-Speaker as exported for sherpa-onnx) were trained
+//! on: 25 ms Povey-windowed frames every 10 ms, pre-emphasis 0.97, a 512-point
+//! FFT and 80 mel bins from 20 Hz to Nyquist, no dither. NeMo TitaNet takes
+//! differently shaped and normalized features and is not supported.
 
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 use std::sync::Arc;
