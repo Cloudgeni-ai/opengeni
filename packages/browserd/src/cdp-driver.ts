@@ -721,6 +721,10 @@ type TargetState = {
   /** The document an input action resolved its element in. The action's first
    * input event goes out only while that document is still the current one. */
   inputFence: string | null;
+  /** The page-frame field a fill is writing and the value it writes, from its
+   * first input on. When the tab's debugging ends under the fill, the next
+   * attachment reads the field back (see fillHeldOnNewAttachment). */
+  pendingFill?: { backendDOMNodeId: number; value: string };
   /** The document already known to draw, so input sent to it while its tab
    * is hidden reaches the page (see drawHiddenTabForInput). */
   inputDrawnDocument?: string;
@@ -3179,7 +3183,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
     }).catch(async (error: unknown) => {
       const failure = await this.actionFailure(error, effects);
-      if (effects) await this.observeOnNewAttachment(failure, effects.state, command, secretValues);
+      if (effects) {
+        await this.observeOnNewAttachment(failure, effects.state, command, secretValues);
+        // The fill's field holds the requested value on the new attachment:
+        // the fill completed, and the receipt shows the page as it left it.
+        if (
+          failure instanceof InteractionOutcomeUnknownDriverError &&
+          failure.observation &&
+          (await this.fillHeldOnNewAttachment(failure, effects.state, command))
+        )
+          return failure.observation as BrowserObservationValue;
+      }
       throw failure;
     });
     this.refreshSubscribedFrame(targetId);
@@ -3219,7 +3233,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ) {
       return new InteractionOutcomeUnknownDriverError(
         "outcome_unknown",
-        "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
+        TAB_DISCONNECTED_UNDER_INPUT,
       );
     }
     return error;
@@ -3257,6 +3271,34 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     } catch {
       // Optional context only.
+    }
+  }
+
+  /**
+   * Whether a single fill whose tab's debugging ended under it (Chrome ends it
+   * when another extension adds a frame as the field gets focus, as password
+   * managers' card and login menus do) left its field holding the requested
+   * value, read on the tab's new attachment. Only then is the fill known to be
+   * complete; anything else stays unknown.
+   */
+  private async fillHeldOnNewAttachment(
+    failure: InteractionOutcomeUnknownDriverError,
+    state: TargetState,
+    command: BrowserActionCommandValue,
+  ): Promise<boolean> {
+    const fill = state.pendingFill;
+    if (failure.message !== TAB_DISCONNECTED_UNDER_INPUT || command.action.type !== "fill" || !fill)
+      return false;
+    const current = this.states.get(state.targetId);
+    if (!current || current === state || current.nodeRoute) return false;
+    try {
+      return (
+        (await this.callOnNode(current, fill.backendDOMNodeId, CONFIRM_EDITABLE_VALUE_FUNCTION, [
+          { value: fill.value },
+        ])) === true
+      );
+    } catch {
+      return false;
     }
   }
 
@@ -7193,10 +7235,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       }
       case "fill": {
+        delete state.pendingFill;
         const node = await this.resolveActionLocator(state, action.locator);
         if (await this.fillNativeDateTimeInput(state, node.backendDOMNodeId, action.value)) return;
         if (await this.fillSlider(state, node.backendDOMNodeId, action.value)) return;
         await this.assertFillableTarget(state, node.backendDOMNodeId);
+        // Only a field in the page's own frame: a node of a cross-origin
+        // frame is addressed through that frame's attachment.
+        if (node.backendDOMNodeId !== null && !state.nodeRoute)
+          state.pendingFill = { backendDOMNodeId: node.backendDOMNodeId, value: action.value };
         await this.focusNode(state, node.backendDOMNodeId);
         await this.selectAllAndDelete(state, node.backendDOMNodeId);
         if (action.value || this.engine === "lightpanda")
@@ -14770,6 +14817,9 @@ const SET_RANGE_VALUE_FUNCTION = `async function(expected) {
   await Promise.resolve();
   return this.isConnected && Number(this.value) === Number(expected) ? { kind: "set" } : { kind: "lost" };
 }`;
+
+const TAB_DISCONNECTED_UNDER_INPUT =
+  "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.";
 
 const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
   await Promise.resolve();
