@@ -9134,6 +9134,35 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // the target is measured only once it has stopped moving.
     if (!unscrolled)
       await this.settleAfterScroll(state, backendDOMNodeId, frameId ?? settleFrameId);
+    // The page can still be moving when the target is scrolled to: after an
+    // earlier click in the same batch opened a section, the page animates its
+    // own scroll to that section (or the section grows) and carries the
+    // target back out of the window. Once it stops moving, it is scrolled
+    // into view again, as a person follows it.
+    if (
+      requireHit &&
+      !(await this.hitsAtCenter(state, backendDOMNodeId)) &&
+      (await this.callOnNode(state, backendDOMNodeId, UNREACHABLE_REASON_FUNCTION, []).catch(
+        () => null,
+      )) === "outside"
+    ) {
+      await this.settleAfterScroll(state, backendDOMNodeId, frameId ?? settleFrameId);
+      // As above: a scroll that moved nothing is no effect, so a refusal of a
+      // target no scroll can reach stays definite.
+      const retryBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
+      const effectsBeforeRetry = state.actionEffectCount;
+      await this.sendActionTarget(state, "DOM.scrollIntoViewIfNeeded", {
+        backendNodeId: backendDOMNodeId,
+      }).catch((error: unknown) => {
+        if (error instanceof CdpProtocolError && error.code === -32_001) throw error;
+      });
+      if (
+        retryBefore !== null &&
+        (await this.scrollPositions(state, backendDOMNodeId, frameId)) === retryBefore
+      )
+        state.actionEffectCount = effectsBeforeRetry;
+      else await this.settleAfterScroll(state, backendDOMNodeId, frameId ?? settleFrameId);
+    }
     let point = await this.centerPoint(state, backendDOMNodeId).catch(async (error: unknown) => {
       throw (
         (await this.unmeasuredRefusal(state, backendDOMNodeId, frameId ?? settleFrameId, error)) ??
