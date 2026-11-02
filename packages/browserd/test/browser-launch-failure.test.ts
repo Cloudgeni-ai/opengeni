@@ -16,6 +16,12 @@ describe("browser launch failures", () => {
     expect(failure).toBeInstanceOf(InteractionDefiniteDriverError);
     expect(failure).toMatchObject({ code: "unsupported", retryable: false });
     expect((failure as Error).message).toContain("No Google Chrome or Chromium is installed");
+    // The fix it names is one the built-in browser then finds, never a
+    // browser unpacked into the user's project.
+    expect((failure as Error).message).toContain("system-wide");
+    expect((failure as Error).message).toContain(
+      "Do not install a browser or its libraries inside a project folder.",
+    );
   });
 
   test("a browser that crashed on startup carries the driver's reason", () => {

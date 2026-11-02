@@ -4938,7 +4938,7 @@ export function browserLaunchFailure(error: unknown): unknown {
   if (/^Chrome not found\b/u.test(error.driverMessage)) {
     return new InteractionDefiniteDriverError(
       "unsupported",
-      "No Google Chrome or Chromium is installed on this machine, so a browser cannot start here. Install Google Chrome on it, or open the browser on another placement.",
+      "No Google Chrome or Chromium is installed on this machine, so a browser cannot start here. Install Google Chrome or Chromium system-wide, for example with the system package manager so google-chrome or chromium is on the PATH, and open the browser again, or open it on another placement. Do not install a browser or its libraries inside a project folder.",
     );
   }
   const reason = error.driverMessage.slice(0, BROWSER_LAUNCH_REASON_MAX_CHARS);
