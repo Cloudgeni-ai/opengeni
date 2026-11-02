@@ -26,6 +26,11 @@ export type OwnReachTarget = {
   workspaceId: string;
   resourceKind: OwnResourceReachKind;
   resourceId: string;
+  /**
+   * Rows already loaded (by "My things"): shown at once, without asking again.
+   * "Try again" after a failure still reads them fresh.
+   */
+  initialWorkspaces?: readonly OwnResourceReachWorkspace[] | undefined;
 };
 
 type ReachState =
@@ -49,12 +54,19 @@ export function useOwnResourceReach({
   workspaceId,
   resourceKind,
   resourceId,
+  initialWorkspaces,
 }: OwnReachTarget) {
-  const [state, setState] = useState<ReachState>({ status: "loading" });
+  const [state, setState] = useState<ReachState>(
+    initialWorkspaces
+      ? { status: "ready", workspaces: [...initialWorkspaces] }
+      : { status: "loading" },
+  );
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const [rowErrors, setRowErrors] = useState<Readonly<Record<string, string>>>({});
   const [attempt, setAttempt] = useState(0);
   const live = useRef(true);
+  // The target the initial rows describe. Any other target, or a retry, reads.
+  const seeded = useRef(initialWorkspaces ? `${workspaceId}:${resourceKind}:${resourceId}` : null);
 
   useEffect(() => {
     live.current = true;
@@ -64,6 +76,7 @@ export function useOwnResourceReach({
   }, []);
 
   useEffect(() => {
+    if (attempt === 0 && seeded.current === `${workspaceId}:${resourceKind}:${resourceId}`) return;
     let current = true;
     setState({ status: "loading" });
     client

@@ -269,10 +269,12 @@ describe("settings rail", () => {
         iconOf(view.section("account"), "Security"),
       );
 
-      expect(linkLabels(view.section("account"))).toEqual(["Security"]);
-      expect(view.section("account")?.querySelector("a")?.getAttribute("href")).toBe(
-        "/settings/security",
-      );
+      // My things opens through this workspace; Security opens outside it.
+      expect(linkLabels(view.section("account"))).toEqual(["My things", "Security"]);
+      const accountLinks = Array.from(view.section("account")?.querySelectorAll("a") ?? []);
+      // The mocked Link drops search params; the route is this workspace's settings.
+      expect(accountLinks[0]?.getAttribute("href")).toBe(`${base}/settings`);
+      expect(accountLinks[1]?.getAttribute("href")).toBe("/settings/security");
       // No separate jump out to an organization shell any more.
       expect(view.rail().textContent).not.toContain("Organization settings for");
       for (const label of ["Members", "Memory", "Danger zone", "Capabilities"]) {

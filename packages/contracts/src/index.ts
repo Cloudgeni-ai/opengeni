@@ -1777,12 +1777,41 @@ export const SetOwnResourceReachResponse = /* @__PURE__ */ defineSchema(() =>
     workspace: OwnResourceReachWorkspace,
   }),
 );
+/**
+ * One of your own logins, model plans or machines, with where it works. "My
+ * things" lists them all at once for the organization.
+ */
+export const OwnResource = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    resourceKind: OwnResourceReachKind,
+    resourceId: primitives.uuid,
+    /** A login's or plan's account (its email when known), or a machine's name. */
+    name: z.string(),
+    /**
+     * Login: the service it signs in to (its provider domain). Plan: the
+     * provider (`codex`, `claude`, `xai`). Machine: null.
+     */
+    provider: z.string().nullable(),
+    /** Plan only: the plan the provider reports, when known. */
+    plan: z.string().nullable(),
+    /** Personal first, then by name. Only workspaces where you can see it. */
+    workspaces: z.array(OwnResourceReachWorkspace),
+  }),
+);
+export const OwnResourcesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** Logins, then plans, then machines, each by name. */
+    resources: z.array(OwnResource),
+  }),
+);
 export type OwnResourceReachKind = z.infer<typeof OwnResourceReachKind>;
 export type OwnResourceReachQuery = z.infer<typeof OwnResourceReachQuery>;
 export type OwnResourceReachWorkspace = z.infer<typeof OwnResourceReachWorkspace>;
 export type OwnResourceReachResponse = z.infer<typeof OwnResourceReachResponse>;
 export type SetOwnResourceReachRequest = z.infer<typeof SetOwnResourceReachRequest>;
 export type SetOwnResourceReachResponse = z.infer<typeof SetOwnResourceReachResponse>;
+export type OwnResource = z.infer<typeof OwnResource>;
+export type OwnResourcesResponse = z.infer<typeof OwnResourcesResponse>;
 export type UserResourceAuthorityGrant = z.infer<typeof UserResourceAuthorityGrant>;
 export type UserResourceAuthoritySummary = z.infer<typeof UserResourceAuthoritySummary>;
 export type ListUserResourceAuthoritiesQuery = z.infer<typeof ListUserResourceAuthoritiesQuery>;

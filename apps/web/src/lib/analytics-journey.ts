@@ -88,6 +88,7 @@ const SECTIONS = new Set([
   "capabilities",
   "available",
   "shared",
+  "mine",
 ]);
 
 /** Every `page` value `journeyPage` can report. */

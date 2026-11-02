@@ -149,6 +149,12 @@ or off in the path's workspace. `resourceKind` is `connection`,
 Anything that isn't the caller's own answers `404`; turning a login or plan off
 in its owner's Personal workspace answers `422`.
 
+**My things** (account menu, or Settings under Your account) lists all of a
+person's own logins, plans and machines in the organization together, each
+with where it works, and opens the same switches.
+`GET /v1/workspaces/:workspaceId/own-resources` returns that list: logins, then
+plans, then machines, each with the same workspace rows as the reach endpoint.
+
 Logins that existed before this rule start on in every shared workspace their
 owner belonged to, so nothing that worked stops working.
 
