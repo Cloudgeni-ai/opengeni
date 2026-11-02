@@ -144,7 +144,12 @@ never comes back. It offers one of two things:
   does this work. A `create` whose name a bot or template already has is
   declined with the existing ones listed, so the agent can suggest reusing one.
 
-The tool changes nothing. It records the newest suggestion on the chat
+Everyone who can open a chat can read its card and the tool's result, so a shared
+chat may only name shared bots and templates, never its person's own Only me ones;
+an Only me chat may also name that person's. The stored suggestion is written once
+(`bot_suggestion IS NULL` in the update), so concurrent calls leave one card.
+
+The tool changes nothing. It records the suggestion on the chat
 (`sessions.bot_suggestion`, migration `1219_session_bot_suggestion.sql`, display
 state that never reaches the model, returned as `Session.botSuggestion`) and the
 chat shows it as a card. **Make it a bot** sets the chat's name, description

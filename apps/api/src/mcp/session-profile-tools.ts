@@ -19,12 +19,12 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  claimSessionBotSuggestion,
   countSessionHumanRequests,
   getSessionForSubject,
   getSessionVisibility,
   listBotTemplates,
   listWorkspaceBotSessions,
-  setSessionBotSuggestion,
   storedSessionAvatar,
 } from "@opengeni/db";
 import { randomUUID } from "node:crypto";
@@ -281,7 +281,13 @@ function registerBotSuggestTool(input: {
           `A bot is for work that keeps coming back: wait until at least ${BOT_SUGGESTION_MIN_SIMILAR_REQUESTS} requests in a row are the same kind of work.`,
         );
       }
+      // The card and this receipt are read by everyone who can open the chat, so
+      // a shared chat may only name shared bots and templates: never this
+      // person's own Only me ones, whose names others must not see.
       const viewer = await botTemplateViewerForGrant(deps.db, grant);
+      const sharedChat =
+        (await getSessionVisibility(deps.db, grant.workspaceId, sessionId)) !== "user_private";
+      const templateReader = sharedChat ? null : viewer.subjectId;
       let suggestion: SessionBotSuggestion;
       if (request.kind === "reuse") {
         if (Boolean(request.sessionId) === Boolean(request.templateId)) {
@@ -300,7 +306,11 @@ function registerBotSuggestTool(input: {
             request.sessionId,
             grant.subjectId,
           );
-          if (!bot || !bot.title || (!bot.avatar && !bot.description)) {
+          const hiddenFromChat =
+            sharedChat &&
+            (await getSessionVisibility(deps.db, grant.workspaceId, request.sessionId)) !==
+              "workspace_shared";
+          if (!bot || hiddenFromChat || !bot.title || (!bot.avatar && !bot.description)) {
             return notSuggested("not_a_bot", "That chat is not a bot this person can open.");
           }
           suggestion = {
@@ -316,8 +326,7 @@ function registerBotSuggestTool(input: {
             createdAt: new Date().toISOString(),
           };
         } else {
-          // Only templates this person can see: never someone else's Only me one.
-          const templates = await listBotTemplates(deps.db, grant.workspaceId, viewer.subjectId);
+          const templates = await listBotTemplates(deps.db, grant.workspaceId, templateReader);
           const template = templates.find((entry) => entry.id === request.templateId);
           if (!template) return notSuggested("not_found", "That bot template does not exist.");
           suggestion = {
@@ -346,9 +355,10 @@ function registerBotSuggestTool(input: {
           listWorkspaceBotSessions(deps.db, {
             workspaceId: grant.workspaceId,
             subjectId: grant.subjectId,
+            sharedOnly: sharedChat,
             limit: 50,
           }),
-          listBotTemplates(deps.db, grant.workspaceId, viewer.subjectId),
+          listBotTemplates(deps.db, grant.workspaceId, templateReader),
         ]);
         if (
           bots.some((bot) => sameName(bot.title, name)) ||
@@ -387,11 +397,15 @@ function registerBotSuggestTool(input: {
           createdAt: new Date().toISOString(),
         };
       }
-      await setSessionBotSuggestion(deps.db, {
+      // The check above is only the cheap path: this write decides a race.
+      const claimed = await claimSessionBotSuggestion(deps.db, {
         workspaceId: grant.workspaceId,
         sessionId,
         suggestion,
       });
+      if (!claimed) {
+        return notSuggested("already_suggested", "This chat already offered a bot.");
+      }
       return input.json({
         type: BOT_SUGGESTION_RECEIPT_TYPE,
         status: "suggested",

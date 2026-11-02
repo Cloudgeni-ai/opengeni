@@ -224,12 +224,14 @@ export function storedSessionBotSuggestion(value: unknown): SessionBotSuggestion
 }
 
 /**
- * Record (or clear) the newest bot suggestion in a chat. Display state: it is
- * not activity, so the chat's `updated_at` is left as it was.
+ * Record a chat's bot suggestion, once: only the write that finds none stored
+ * succeeds, so concurrent calls can't replace a card someone already saw or
+ * dismissed. False when the chat has one already, or does not exist. Display
+ * state, not activity, so the chat's `updated_at` is left as it was.
  */
-export async function setSessionBotSuggestion(
+export async function claimSessionBotSuggestion(
   db: Database,
-  input: { workspaceId: string; sessionId: string; suggestion: SessionBotSuggestion | null },
+  input: { workspaceId: string; sessionId: string; suggestion: SessionBotSuggestion },
 ): Promise<boolean> {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
     const rows = await scoped
@@ -242,6 +244,7 @@ export async function setSessionBotSuggestion(
         and(
           eq(schema.sessions.workspaceId, input.workspaceId),
           eq(schema.sessions.id, input.sessionId),
+          isNull(schema.sessions.botSuggestion),
         ),
       )
       .returning({ id: schema.sessions.id });
@@ -265,7 +268,13 @@ export interface WorkspaceBotSession {
  */
 export async function listWorkspaceBotSessions(
   db: Database,
-  input: { workspaceId: string; subjectId: string; limit?: number },
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    /** Leave out Only me chats, for text everyone in a shared chat can read. */
+    sharedOnly?: boolean;
+    limit?: number;
+  },
 ): Promise<WorkspaceBotSession[]> {
   const limit = Math.min(Math.max(input.limit ?? 20, 1), 50);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scoped) => {
@@ -282,6 +291,7 @@ export async function listWorkspaceBotSessions(
           eq(schema.sessions.workspaceId, input.workspaceId),
           isNotNull(schema.sessions.title),
           isNull(schema.sessions.contentArchiveState),
+          input.sharedOnly ? eq(schema.sessions.visibility, "workspace_shared") : undefined,
           or(isNotNull(schema.sessions.avatar), isNotNull(schema.sessions.description)),
         ),
       )
