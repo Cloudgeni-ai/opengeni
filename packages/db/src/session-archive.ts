@@ -259,6 +259,20 @@ export async function beginSessionArchive(
             ${Math.floor(input.idleSeconds)}, 1, ${scope.sessionId}::uuid)`,
         );
         if (eligible.length !== 1) return false;
+        // A wake still waiting to reach the chat's workflow (for example the
+        // one cancelling its work) must be delivered first: once archiving
+        // starts, the outbox row can no longer be updated, and the dispatcher
+        // claims rows in batches, so one such row would hold back every wake.
+        const [pendingWake] = await rawRows<{ pending: boolean }>(
+          tx,
+          sql`select exists (
+            select 1 from ${schema.sessionWorkflowWakeOutbox}
+            where workspace_id = ${scope.workspaceId}::uuid
+              and session_id = ${scope.sessionId}::uuid
+              and wake_revision > delivered_revision
+          ) as pending`,
+        );
+        if (pendingWake?.pending) return false;
         const updated = await tx
           .update(schema.sessions)
           .set({

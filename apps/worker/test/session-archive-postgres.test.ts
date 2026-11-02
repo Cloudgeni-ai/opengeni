@@ -110,8 +110,17 @@ async function idleSession(into?: { accountId: string; workspaceId: string; subj
     await sql`update sessions set created_at = created_at - interval '40 days',
         updated_at = updated_at - interval '40 days'
       where workspace_id = ${scope.workspaceId} and id = ${scope.sessionId}`;
+    // Its workflow got every wake long ago.
+    await sql`update session_workflow_wake_outbox set delivered_revision = wake_revision
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
   });
   return scope;
+}
+
+/** The session workflow received every wake registered so far. */
+async function deliverWakes(scope: { workspaceId: string; sessionId: string }) {
+  await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision
+    where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
 }
 
 function lines(bytes: Uint8Array): Record<string, unknown>[] {
@@ -308,8 +317,16 @@ describe("idle-session archive worker", () => {
     const first = await activities.archiveIdleSessions();
     expect(first.failed).toBe(0);
 
-    const second = await activities.archiveIdleSessions();
-    expect(second.failed).toBe(0);
+    // The cancel's wake has not reached the workflow yet: storing waits for
+    // it, so the wake outbox never holds an undeliverable row.
+    await activities.archiveIdleSessions();
+    expect(
+      (await getSession(client.db, scope.workspaceId, scope.sessionId))?.retention?.archive,
+    ).toBeNull();
+    await deliverWakes(scope);
+
+    const third = await activities.archiveIdleSessions();
+    expect(third.failed).toBe(0);
     const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
     expect(session?.retention?.archive?.state).toBe("archived");
   }, 120_000);
@@ -341,6 +358,7 @@ describe("idle-session archive worker", () => {
     const [update] = await shared.admin`select state from session_system_updates
       where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
     expect(update!.state).toBe("cancelled");
+    await deliverWakes(scope);
     expect((await activities.archiveIdleSessions()).failed).toBe(0);
     const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
     expect(session?.retention?.archive?.state).toBe("archived");
@@ -396,6 +414,7 @@ describe("idle-session archive worker", () => {
     const [goal] = await shared.admin`select status from session_goals
       where workspace_id = ${child.workspaceId} and session_id = ${child.sessionId}`;
     expect(goal!.status).toBe("paused");
+    await deliverWakes(child);
     await activities.archiveIdleSessions();
     const session = await getSession(client.db, child.workspaceId, child.sessionId);
     expect(session?.retention?.archive?.state).toBe("archived");
