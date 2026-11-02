@@ -16,7 +16,9 @@ import {
   type ReactNode,
 } from "react";
 import type { SessionListRow } from "../../../session-list-model";
+import { OpenGeniRecordingsClient } from "@opengeni/sdk/recordings";
 import { useMeetingRecorderControls } from "../../../meetings/recorder-context";
+import { useMeetingOnScreen } from "../../../meetings/meeting-on-screen";
 import { useAppContext } from "../../app-context";
 import { useRail } from "../../components/rail/rail-context";
 import { requestConversationFind } from "../conversation-find-event";
@@ -32,6 +34,7 @@ import { workspacesByOrganization } from "../org";
 import { hasWorkspacePermission } from "../permissions";
 import { readChatDirectory, recordChatVisit, rememberChats } from "./chat-directory";
 import { sitePath } from "./site-directory";
+import { meetingPath } from "./meeting-directory";
 import {
   extendChatSwitcher,
   isSwitcherKey,
@@ -52,7 +55,7 @@ import {
   type Chord,
   type ChordPlatform,
 } from "./chords";
-import { useChatOperations } from "./chat-operations";
+import { copyLinkWithToast, useChatOperations } from "./chat-operations";
 import {
   FORK_CURRENT_CHAT_EVENT,
   OPEN_COMMAND_MENU_EVENT,
@@ -170,6 +173,8 @@ export function ActionsProvider(props: { children: ReactNode }) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const routeChatId = /\/sessions\/([^/]+)/.exec(pathname)?.[1] ?? null;
   const routeSiteId = /\/sites\/([^/]+)/.exec(pathname)?.[1] ?? null;
+  const routeMeetingId = /\/meetings\/([^/]+)/.exec(pathname)?.[1] ?? null;
+  const meetingOnScreen = useMeetingOnScreen(uiEvents);
   const currentChat =
     app.session && app.session.id === routeChatId && app.session.workspaceId === workspaceId
       ? app.session
@@ -228,6 +233,56 @@ export function ActionsProvider(props: { children: ReactNode }) {
       },
     };
   }, [recorder, rail, navigate, workspaceId]);
+
+  // The Meetings pages exist wherever the host mounts the recorder, including
+  // in a browser that can't record (the page says so and lists meetings).
+  const recordingsClient = useMemo(
+    () =>
+      typeof app.client?.requestJson === "function"
+        ? new OpenGeniRecordingsClient(app.client)
+        : null,
+    [app.client],
+  );
+  const meetingPages = useMemo<ActionEnv["meetingPages"]>(() => {
+    if (!recorder || !recordingsClient) return null;
+    const link = (recordingId: string) =>
+      `${page.origin()}${meetingPath(workspaceId, recordingId)}`;
+    const onScreen =
+      routeMeetingId && meetingOnScreen?.recordingId === routeMeetingId ? meetingOnScreen : null;
+    return {
+      openList: () => {
+        rail.setDrawerOpen(false);
+        void navigate({ to: "/workspaces/$workspaceId/meetings", params: { workspaceId } });
+      },
+      open: (recordingId) => {
+        rail.setDrawerOpen(false);
+        void navigate({
+          to: "/workspaces/$workspaceId/meetings/$recordingId",
+          params: { workspaceId, recordingId },
+        });
+      },
+      link,
+      copyLink: (recordingId) => copyLinkWithToast(link(recordingId)),
+      list: async (options) => {
+        const { signal, ...rest } = options;
+        const answer = await recordingsClient.listRecordings(workspaceId, {
+          ...rest,
+          ...(signal ? { signal } : {}),
+        });
+        return answer.recordings;
+      },
+      current: routeMeetingId ? { recordingId: routeMeetingId, ask: onScreen?.ask ?? null } : null,
+    };
+  }, [
+    recorder,
+    recordingsClient,
+    page,
+    workspaceId,
+    routeMeetingId,
+    meetingOnScreen,
+    rail,
+    navigate,
+  ]);
 
   const [menu, setMenu] = useState<{
     open: boolean;
@@ -326,6 +381,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
       workspaces,
       canForkCurrentChat,
       meetings,
+      meetingPages,
       newChat: () => rail.startNewSession(),
       openChat: (chatId, inWorkspaceId) => openChatForTyping(chatId, inWorkspaceId),
       openSite: (siteId) => {
@@ -377,6 +433,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
       canForkCurrentChat,
       reachable,
       meetings,
+      meetingPages,
       inspectorOpen,
       setInspectorOpen,
       rail,

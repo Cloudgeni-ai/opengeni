@@ -46,6 +46,18 @@ async function writeClipboard(text: string): Promise<void> {
   if (!copied) throw new Error("The browser blocked copying.");
 }
 
+/** Copies a link and says so, or says why it couldn't. */
+export async function copyLinkWithToast(url: string): Promise<void> {
+  try {
+    await writeClipboard(url);
+    toast.success("Link copied");
+  } catch (error) {
+    toast.error("Couldn't copy the link.", {
+      description: errorMessage(error),
+    });
+  }
+}
+
 export function useChatOperations(): ChatOperations {
   const context = useAppContext();
   const page = usePage();
@@ -55,16 +67,7 @@ export function useChatOperations(): ChatOperations {
     [page],
   );
   const copyLink = useCallback(
-    async (chat: Pick<SessionListRow, "id" | "workspaceId">) => {
-      try {
-        await writeClipboard(linkTo(chat));
-        toast.success("Link copied");
-      } catch (error) {
-        toast.error("Couldn't copy the link.", {
-          description: errorMessage(error),
-        });
-      }
-    },
+    (chat: Pick<SessionListRow, "id" | "workspaceId">) => copyLinkWithToast(linkTo(chat)),
     [linkTo],
   );
   const setPinned = useCallback(

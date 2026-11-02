@@ -1,13 +1,14 @@
 /**
- * The ⌘K menu: find a chat or a Site by its title, or run any action, from
- * one field.
+ * The ⌘K menu: find a chat, a Site or a meeting, or run any action, from one
+ * field.
  *
  * It opens instantly from what the app already knows (chats and Sites the
  * sidebar has loaded and the chats opened recently) and merges the server's
  * title searches as they arrive. Chats in the person's other workspaces show too, tagged with
  * their workspace, and so do workspaces to switch to. Tab on a chat shows that
  * chat's actions; the chords of chat actions work on the highlighted chat
- * while the menu is open.
+ * while the menu is open. Meetings are found by title, by who spoke, by words
+ * said in them and by when they happened.
  */
 import {
   useCallback,
@@ -25,9 +26,11 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import {
   ArchiveIcon,
   ArrowUpRightIcon,
+  AudioLinesIcon,
   ChevronRightIcon,
   CornerDownLeftIcon,
   LockIcon,
+  MessageCircleQuestionIcon,
   MessageSquareIcon,
   PanelsTopLeftIcon,
   PinIcon,
@@ -51,6 +54,19 @@ import {
   type SiteRecord,
 } from "../../lib/actions/site-directory";
 import { rankSites, recentSites } from "../../lib/actions/site-rank";
+import {
+  meetingRecords,
+  readRecentMeetings,
+  rememberRecentMeetings,
+  useMeetingDirectoryVersion,
+  type MeetingRecord,
+} from "../../lib/actions/meeting-directory";
+import {
+  meetingDateRange,
+  rankMeetings,
+  recentMeetings,
+  type FoundMeeting,
+} from "../../lib/actions/meeting-search";
 import { useAppActions } from "../../lib/actions/actions-provider";
 import {
   foldForSearch,
@@ -64,6 +80,7 @@ import {
   actionTitle,
   type ActionEnv,
   type AppAction,
+  type MeetingPages,
   type WorkspaceChoice,
 } from "../../lib/actions/registry";
 import { cn } from "../../lib/utils";
@@ -110,6 +127,16 @@ const SERVER_SITE_LIMIT = 10;
 /** Shorter queries match only the Sites the sidebar has loaded. */
 const MIN_SERVER_SITE_QUERY = 2;
 const NO_SITES: readonly SiteRecord[] = [];
+/** Meetings before anything is typed: the newest few, never the whole list. */
+const RECENT_MEETING_LIMIT = 3;
+/** Newest meetings the menu asks for each time it opens (one spare for the one on screen). */
+const RECENT_MEETING_FETCH = RECENT_MEETING_LIMIT + 1;
+const MEETING_RESULT_LIMIT = 5;
+/** Meetings the server returns per kind of match. */
+const SERVER_MEETING_LIMIT = 8;
+/** Shorter queries match only the meetings the menu already knows. */
+const MIN_SERVER_MEETING_QUERY = 2;
+const NO_MEETINGS: readonly FoundMeeting[] = [];
 const SERVER_DEBOUNCE_MS = 120;
 /** Other workspaces whose titles the server searches too, most used first. */
 const OTHER_WORKSPACES_SEARCHED = 9;
@@ -393,6 +420,114 @@ export default function CommandMenu(props: {
   );
 }
 
+/**
+ * Each open asks for the workspace's newest meetings, so the empty menu lists
+ * them (from the last answer at once, then this one). A failure keeps the last list.
+ */
+function useRecentMeetingsRefresh(
+  meetingPages: MeetingPages | null,
+  subjectId: string,
+  workspaceId: string,
+  open: boolean,
+) {
+  const list = meetingPages?.list;
+  useEffect(() => {
+    if (!open || !list) return;
+    const controller = new AbortController();
+    list({ limit: RECENT_MEETING_FETCH, signal: controller.signal })
+      .then((recordings) => {
+        if (controller.signal.aborted) return;
+        rememberRecentMeetings(subjectId, workspaceId, meetingRecords(recordings));
+      })
+      .catch(() => {
+        // The rest of the menu still works; meetings are an addition.
+      });
+    return () => controller.abort();
+    // Once per open: a new `list` from the recorder's state changing isn't a reason to ask again.
+  }, [open, subjectId, workspaceId, Boolean(list)]); // eslint-disable-line react-hooks/exhaustive-deps
+}
+
+/**
+ * The server's meeting search in this workspace, three ways at once: words in
+ * titles and transcripts, someone who spoke by name, and, when the query is a
+ * date, the meetings that started then. Each answer joins as it arrives.
+ */
+function useServerMeetingSearch(meetingPages: MeetingPages | null, query: string, open: boolean) {
+  const list = meetingPages?.list;
+  const listRef = useRef(list);
+  listRef.current = list;
+  const [state, setState] = useState<{
+    key: string;
+    found: readonly FoundMeeting[];
+    loading: boolean;
+  }>({ key: "", found: NO_MEETINGS, loading: false });
+  const trimmed = query.trim();
+  const enabled = open && Boolean(list) && trimmed.length >= MIN_SERVER_MEETING_QUERY;
+  useEffect(() => {
+    if (!enabled) {
+      setState((current) =>
+        current.loading || current.found.length > 0
+          ? { key: "", found: NO_MEETINGS, loading: false }
+          : current,
+      );
+      return;
+    }
+    setState((current) => ({ ...current, loading: true }));
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      const search = listRef.current;
+      if (!search) return;
+      const range = meetingDateRange(trimmed);
+      const requests: Array<[FoundMeeting["match"], Parameters<MeetingPages["list"]>[0]]> = [
+        ["words", { query: trimmed, limit: SERVER_MEETING_LIMIT }],
+        ["person", { person: trimmed, limit: SERVER_MEETING_LIMIT }],
+      ];
+      if (range) {
+        requests.push([
+          "date",
+          {
+            startedFrom: range.from.toISOString(),
+            startedTo: range.to.toISOString(),
+            limit: SERVER_MEETING_LIMIT,
+          },
+        ]);
+      }
+      let pending = requests.length;
+      let first = true;
+      const settle = (found: FoundMeeting[]) => {
+        if (controller.signal.aborted) return;
+        pending -= 1;
+        const replace = first;
+        first = false;
+        setState((current) => ({
+          key: trimmed,
+          found: replace || current.key !== trimmed ? found : [...current.found, ...found],
+          loading: pending > 0,
+        }));
+      };
+      for (const [match, options] of requests) {
+        search({ ...options, signal: controller.signal })
+          .then((recordings) =>
+            settle(meetingRecords(recordings).map((meeting) => ({ meeting, match }))),
+          )
+          .catch(() => settle([]));
+      }
+    }, SERVER_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [enabled, trimmed]);
+  const current = state.key === trimmed;
+  return {
+    found: current ? state.found : NO_MEETINGS,
+    // While the next answer loads, the last one's meetings stay candidates (by
+    // their title alone), so a meeting does not blink out on every keystroke.
+    previous: current ? NO_MEETINGS : state.found,
+    loading: state.loading,
+  };
+}
+
 function CommandMenuDialog(props: {
   open: boolean;
   pickWorkspace: boolean;
@@ -406,6 +541,8 @@ function CommandMenuDialog(props: {
   const { workspaceId, subjectId, platform, surface, workspaces } = env;
   const directoryVersion = useChatDirectoryVersion(subjectId);
   const siteDirectoryVersion = useSiteDirectoryVersion(subjectId);
+  const meetingDirectoryVersion = useMeetingDirectoryVersion(subjectId);
+  const meetingPages = env.meetingPages;
   const [query, setQuery] = useState("");
   const [focusChat, setFocusChat] = useState<ChatRecord | null>(null);
   const [pickingWorkspace, setPickingWorkspace] = useState(props.pickWorkspace);
@@ -448,6 +585,12 @@ function CommandMenuDialog(props: {
   );
   const serverSites = useServerSiteSearch(
     workspaceId,
+    focusChat || pickingWorkspace ? "" : query,
+    props.open,
+  );
+  useRecentMeetingsRefresh(meetingPages, subjectId, workspaceId, props.open);
+  const serverMeetings = useServerMeetingSearch(
+    meetingPages,
     focusChat || pickingWorkspace ? "" : query,
     props.open,
   );
@@ -505,6 +648,31 @@ function CommandMenuDialog(props: {
     [close, env, surface],
   );
 
+  const openMeeting = useCallback(
+    (meeting: MeetingRecord, newTab: boolean) => {
+      if (!meetingPages) return;
+      ranAction.current = true;
+      close();
+      if (newTab && surface === "web") {
+        window.open(meetingPages.link(meeting.id), "_blank", "noopener");
+        return;
+      }
+      meetingPages.open(meeting.id);
+    },
+    [close, meetingPages, surface],
+  );
+
+  const askAboutMeeting = useCallback(
+    (question: string) => {
+      const ask = meetingPages?.current?.ask;
+      if (!ask) return;
+      // Asked once the menu has handed focus back, as an action that opens a dialog.
+      afterClose.current = () => ask(question);
+      close();
+    },
+    [close, meetingPages],
+  );
+
   const openWorkspace = useCallback(
     (id: string) => {
       ranAction.current = true;
@@ -539,9 +707,12 @@ function CommandMenuDialog(props: {
   const groups = useMemo<Group[]>(() => {
     void directoryVersion;
     void siteDirectoryVersion;
+    void meetingDirectoryVersion;
     const now = Date.now();
     const directory = readChatDirectory(subjectId, workspaceId);
     const knownSites = readSidebarSites(subjectId, workspaceId);
+    const knownMeetings = meetingPages ? readRecentMeetings(subjectId, workspaceId) : [];
+    const currentMeetingId = meetingPages?.current?.recordingId ?? null;
     const current = env.currentChat;
     const sidebarIds = new Set([...directory.sidebarOrder, ...directory.pinnedOrder]);
 
@@ -572,6 +743,21 @@ function CommandMenuDialog(props: {
             ? formatRelativeTime(site.updatedAt, { now })
             : undefined,
       run: ({ newTab }) => openSite(site, newTab),
+    });
+
+    const meetingItem = (meeting: MeetingRecord, group: string, highlight?: string): Item => ({
+      key: `meeting:${meeting.id}`,
+      group,
+      icon: AudioLinesIcon,
+      title: meeting.title,
+      highlight,
+      meta:
+        currentMeetingId === meeting.id
+          ? "Open now"
+          : meeting.startedAt
+            ? formatRelativeTime(meeting.startedAt, { now })
+            : undefined,
+      run: ({ newTab }) => openMeeting(meeting, newTab),
     });
 
     const workspaceItem = (choice: WorkspaceChoice, group: string, highlight?: string): Item => ({
@@ -701,6 +887,14 @@ function CommandMenuDialog(props: {
           best: 0,
         });
       }
+      const meetings = recentMeetings(knownMeetings, currentMeetingId, RECENT_MEETING_LIMIT);
+      if (meetings.length > 0) {
+        result.push({
+          label: "Recent meetings",
+          items: meetings.map((meeting) => meetingItem(meeting, "Recent meetings")),
+          best: 0,
+        });
+      }
       if (current) {
         const chatActions = appActions().filter(
           (action) =>
@@ -717,9 +911,22 @@ function CommandMenuDialog(props: {
           });
         }
       }
+      // The meeting on screen's own actions (ask about it, copy its link).
+      const meetingActions = appActions().filter(
+        (action) =>
+          action.forMeeting && action.inCommandMenu !== false && action.available(env, null),
+      );
+      if (meetingActions.length > 0) {
+        result.push({
+          label: "This meeting",
+          items: meetingActions.map((action) => actionItem(action, null, "This meeting")),
+          best: 0,
+        });
+      }
       const general = appActions().filter(
         (action) =>
           !action.forChat &&
+          !action.forMeeting &&
           action.inCommandMenu !== false &&
           action.id !== "commandMenu.open" &&
           action.available(env, null),
@@ -784,11 +991,26 @@ function CommandMenuDialog(props: {
       serverSites.sites,
       trimmed,
     );
+    const knownMeetingIds = new Set(knownMeetings.map((meeting) => meeting.id));
+    const meetingScores = meetingPages
+      ? rankMeetings(
+          [
+            ...knownMeetings,
+            ...serverMeetings.previous
+              .map((entry) => entry.meeting)
+              .filter((meeting) => !knownMeetingIds.has(meeting.id)),
+          ],
+          serverMeetings.found,
+          trimmed,
+          meetingDateRange(trimmed, new Date(now)),
+        )
+      : [];
     // Letters-in-order guesses only help when nothing really matches; next to
     // real matches they are noise ("pin" → "Postgres … investigation").
     const hasRealMatch =
       scored.some((entry) => !entry.loose) ||
       siteScores.some((entry) => !entry.loose) ||
+      meetingScores.some((entry) => !entry.loose) ||
       actionScores.some((entry) => !entry.loose) ||
       workspaceScores.some((entry) => !entry.loose);
     const chats = scored
@@ -798,6 +1020,9 @@ function CommandMenuDialog(props: {
     const sitesFound = siteScores
       .filter((entry) => !hasRealMatch || !entry.loose)
       .slice(0, SITE_RESULT_LIMIT);
+    const meetingsFound = meetingScores
+      .filter((entry) => !hasRealMatch || !entry.loose)
+      .slice(0, MEETING_RESULT_LIMIT);
     const actionsFound = actionScores
       .filter((entry) => !hasRealMatch || !entry.loose)
       .sort((a, b) => b.rank - a.rank)
@@ -844,6 +1069,38 @@ function CommandMenuDialog(props: {
         chatsAt >= 0 ? chatsAt + 1 : result.findIndex((group) => group.best < sitesGroup.best);
       result.splice(at >= 0 ? at : result.length, 0, sitesGroup);
     }
+    if (meetingsFound.length > 0) {
+      const meetingsGroup: Group = {
+        label: "Meetings",
+        items: meetingsFound.map((entry) => meetingItem(entry.meeting, "Meetings", trimmed)),
+        best: meetingsFound[0]!.rank,
+      };
+      // Like Sites: after the chats and Sites; with neither, placed by match.
+      const lastFound = Math.max(
+        result.findIndex((group) => group.label === "Chats"),
+        result.findIndex((group) => group.label === "Sites"),
+      );
+      const at =
+        lastFound >= 0
+          ? lastFound + 1
+          : result.findIndex((group) => group.best < meetingsGroup.best);
+      result.splice(at >= 0 ? at : result.length, 0, meetingsGroup);
+    }
+    if (meetingPages?.current?.ask) {
+      result.push({
+        label: "This meeting",
+        best: -Infinity,
+        items: [
+          {
+            key: "ask-meeting",
+            group: "This meeting",
+            icon: MessageCircleQuestionIcon,
+            title: `Ask about this meeting: “${trimmed}”`,
+            run: () => askAboutMeeting(trimmed),
+          },
+        ],
+      });
+    }
     result.push({
       label: "Messages",
       best: -Infinity,
@@ -863,11 +1120,15 @@ function CommandMenuDialog(props: {
     return result;
   }, [
     actionItem,
+    askAboutMeeting,
     close,
     directoryVersion,
     env,
     focusChat,
+    meetingDirectoryVersion,
+    meetingPages,
     openChat,
+    openMeeting,
     openSite,
     openWorkspace,
     pickingWorkspace,
@@ -875,6 +1136,8 @@ function CommandMenuDialog(props: {
     reachable,
     server.query,
     server.rows,
+    serverMeetings.found,
+    serverMeetings.previous,
     serverSites.sites,
     serverSites.previous,
     siteDirectoryVersion,
@@ -897,7 +1160,7 @@ function CommandMenuDialog(props: {
     Boolean(query.trim()) &&
     !focusChat &&
     !pickingWorkspace &&
-    (server.loading || serverSites.loading);
+    (server.loading || serverSites.loading || serverMeetings.loading);
 
   // Typing starts at the best match; the workspace list starts at the current workspace's neighbour.
   useEffect(() => {
@@ -1024,7 +1287,9 @@ function CommandMenuDialog(props: {
     ? "Search actions…"
     : pickingWorkspace
       ? "Switch to workspace…"
-      : "Search chats and Sites, or run an action…";
+      : meetingPages
+        ? "Search chats, Sites and meetings, or run an action…"
+        : "Search chats and Sites, or run an action…";
   const optionId = (item: Item) => `${listId}-${item.key.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 
   return (
@@ -1107,7 +1372,9 @@ function CommandMenuDialog(props: {
                   ? `Actions for ${focusChat.title}`
                   : pickingWorkspace
                     ? "Search workspaces"
-                    : "Search chats, Sites and actions"
+                    : meetingPages
+                      ? "Search chats, Sites, meetings and actions"
+                      : "Search chats, Sites and actions"
               }
               autoComplete="off"
               autoCorrect="off"

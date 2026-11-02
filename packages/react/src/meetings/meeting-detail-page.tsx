@@ -118,8 +118,10 @@ import {
 } from "./meeting-transcript";
 import { liveSpeakerName, RecordingBar, recorderLiveLines, useOnline } from "./recorder-panel";
 import { LiveTranscript, liveStatus } from "./live-transcript";
-import { MeetingAsk, type MeetingAskResult } from "./meeting-ask";
+import { MeetingAsk, type MeetingAskRequest, type MeetingAskResult } from "./meeting-ask";
 import { meetingMentionResolver } from "./meeting-mentions";
+import { useAnnounceMeetingOnScreen } from "./meeting-on-screen";
+import { useUiEventTarget } from "../app/lib/ui-events";
 import { MeetingNotepad, MeetingNotesSection, MeetingSummary } from "./meeting-notes";
 import { useMeetingRecorder, type MeetingRecorder } from "./recorder-context";
 import { MeetingsOverlayScope } from "./overlay-scope";
@@ -1054,6 +1056,23 @@ function MeetingDetailPageForRecording({
     setOpeningTab(openingMeetingTab(notes.notes));
   }
   const tab = chosenTab ?? openingTab;
+  // The ⌘K menu's "Ask about this meeting": the Ask field shows on Summary and
+  // Transcript, so a question from the Notepad tab moves to Summary first.
+  const [askRequest, setAskRequest] = useState<MeetingAskRequest | null>(null);
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const askFromMenu = useCallback((question: string | null) => {
+    if (tabRef.current === "notepad") setChosenTab("summary");
+    setAskRequest((current) => ({ question, nonce: (current?.nonce ?? 0) + 1 }));
+  }, []);
+  const recordingOnScreenHere =
+    recording?.state === "capturing" &&
+    ["recording", "paused"].includes(meetingHereStatus(recorder, recordingId, online) ?? "");
+  useAnnounceMeetingOnScreen(
+    useUiEventTarget("document"),
+    recordingId,
+    onAsk && recording && !recordingOnScreenHere ? askFromMenu : null,
+  );
   const slots = useMemo(() => speakerColorSlots(transcript.segments), [transcript.segments]);
   const mentionTracks = recording?.tracks;
   const mentions = useMemo(
@@ -1918,7 +1937,11 @@ function MeetingDetailPageForRecording({
               </>
             )}
             {askable && onAsk && tab !== "notepad" ? (
-              <MeetingAsk onAsk={(question) => onAsk(recording.id, question)} />
+              <MeetingAsk
+                onAsk={(question) => onAsk(recording.id, question)}
+                request={askRequest}
+                onRequestTaken={() => setAskRequest(null)}
+              />
             ) : null}
           </div>
         ) : (
