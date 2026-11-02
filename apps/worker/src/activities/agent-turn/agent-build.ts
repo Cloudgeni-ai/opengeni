@@ -20,10 +20,12 @@ import {
   type AgentPromptToolAvailability,
   type AttemptConnectorActionBinding,
   type BuildAgentOptions,
+  CommandCompletionDelivery,
   type ConnectorActionPolicyHooks,
   type SandboxFileDownload,
   type TurnSandboxCommandSession,
 } from "@opengeni/runtime";
+import { claimPendingBackgroundCommandResults } from "@opengeni/db/session-background-commands";
 import {
   serviceTierForLatencyMode,
   WORKSPACE_GATEWAY_PROVIDER_ID,
@@ -899,6 +901,29 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         }),
         // Every tool result is masked with the attempt's known secret values.
         secretValueMemory: currentAttemptSecretValues() ?? null,
+        // Commands that finish while the model works arrive with its next
+        // plain-text tool result instead of waiting for a read or a later turn.
+        ...(eventing.modelRunSettings.sandboxBackend !== "none"
+          ? {
+              commandCompletionDelivery: new CommandCompletionDelivery({
+                take: async ({ maxBytes }) =>
+                  await claimPendingBackgroundCommandResults(db, {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    maxBytes,
+                  }),
+                signal: cancellationSignal,
+                onDelivered: (appended) => {
+                  eventing.commandCompletionNotices.add(appended);
+                },
+                onError: (error) =>
+                  observability.warn("Finished background commands were not attached", {
+                    error: error instanceof Error ? error.message : String(error),
+                  }),
+              }),
+            }
+          : {}),
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;
         },

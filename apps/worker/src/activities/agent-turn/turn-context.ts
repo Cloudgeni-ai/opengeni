@@ -206,6 +206,11 @@ export type EventingState = {
    * same.
    */
   appActionApprovalCards: Map<string, AppActionApprovalCard>;
+  /**
+   * Finished-command text appended to tool results for the model and not yet
+   * matched to its result event; the timeline shows each tool's own output.
+   */
+  commandCompletionNotices: Set<string>;
 };
 
 /** Rig telemetry: set once the session loads; empty string for a rig-less
@@ -405,6 +410,7 @@ export function createTurnContext(input: {
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
       appActionApprovalCards: new Map(),
+      commandCompletionNotices: new Set(),
     },
     workspaceRefs: {
       rigId: "",

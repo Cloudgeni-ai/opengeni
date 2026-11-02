@@ -3707,7 +3707,12 @@ The exact terminal transition is also the fallback agent-input boundary: changin
 command to `exited|lost` and appending `session.command.finished` commit
 together. For a nonterminal session, one dedupe-keyed
 `background_command_result` and `system.update.pending` join that transaction
-unless command completion was already observed. A command completion registers
+unless command completion was already observed. The result carries the start
+and end of the retained output as text (`output`: at most 8 KiB of output read
+from at most 16 rows, with the command_read marker naming any omitted middle
+and its cursor), so the turn it wakes or reaches needs no extra read; a failed
+or oversized read leaves `output` absent and never blocks the settlement. A
+command completion registers
 a workflow wake only for a current explicit session input wait. Otherwise the
 result stays available without starting a model turn, including failures and
 results queued before the preceding turn finished. Eligible new input can carry
@@ -3724,6 +3729,24 @@ may still arrive once; delivered history and earlier running tool receipts remai
 unchanged. Observation happens while serving the read, without a separate
 worker-history delivery handshake; a crash between observation and receipt
 preservation is an accepted tradeoff.
+A running turn also delivers results itself (`settings.experimentCutPolling`,
+on by default). After each function tool or hosted `apply_patch` edit the
+worker takes the session's still-pending command results, oldest first within
+16 KiB, observing each command and superseding its pending result in one
+transaction exactly as a terminal read does, and appends them (summary,
+command ID, output) to that plain-text tool result, which the model reads with
+its next call. A cheap unlocked probe skips the session lock when nothing is
+pending. JSON, image and structured results are left unchanged, nothing is
+taken once the turn is cancelled, and nothing is taken in a model step after a
+`wait_for_input` started (that wait could otherwise end the turn with a result
+the model has not read and that no longer wakes it). A `wait_for_input` in a
+step whose other results already carried command results is refused with a
+short explanation, and the turn continues. The appended text is part of the
+stored tool result, so history and the prompt-cache prefix never change; the
+timeline shows the tool's own output. Results not taken during the turn stay
+pending and arrive as ordinary input, as above. A crash between taking and
+storing the tool result loses only that copy, as with a terminal read; the
+output stays readable.
 Subsequent retained reads reuse the persisted completion-observation receipt
 without reacquiring session/event write locks. They still perform the same scoped
 command and output reads; the first observation retains settlement/claim locking.

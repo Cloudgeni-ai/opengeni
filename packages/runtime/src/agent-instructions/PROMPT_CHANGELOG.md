@@ -1,5 +1,18 @@
 # Modular prompt changelog
 
+Finished background commands report themselves. When a command the agent
+left running finishes during the turn, its exit status and the start and end
+of its output follow the next plain-text tool result, and the durable
+`background_command_result` input now carries the same output, so the agent
+no longer needs a `command_read` only to learn that a command finished.
+Background commands gains one sentence (about 170 bytes) saying so, in every
+tool-availability variant; the `command_read` and `command_wait` descriptions
+gain the same point. The legacy text is unchanged.
+
+```diff
++ A command that finishes while you work reports its exit status and output on its own, after a later tool result or as input, so do not poll only to learn that it finished.
+```
+
 The agent knows both GitHub identities. When personal GitHub sign-in is
 enabled on the deployment (new `personalGitHub` resource fact) and
 `github_connect_link` is available, the admin module adds one sentence (about
