@@ -921,9 +921,9 @@ export type AgentChatRecord = {
 /**
  * An agent's chats in its home workspace, newest first: chats bound to it
  * (`sessions.agent_id`), plus chats an older release started for it in Slack
- * that only its Slack interaction names. Only me chats are listed only to
- * their owner; `yours` keeps the reader's own chats; `sharedOnly` lists no Only
- * me chat at all (for an agent's other chats).
+ * that only its Slack interaction names. Only me chats and Slack DMs are listed
+ * only to their owner; `yours` keeps the reader's own chats; `sharedOnly` lists
+ * neither (for an agent's other chats).
  */
 export async function listAgentChats(
   db: Database,
@@ -955,6 +955,7 @@ export async function listAgentChats(
       slack_channel_id: string | null;
       slack_thread_ts: string | null;
       initiating_slack_user_id: string | null;
+      slack_private: boolean;
     }>(
       tx,
       sql`with bound as (
@@ -971,7 +972,7 @@ export async function listAgentChats(
         select s.id::text as id, s.title, s.visibility, s.created_by_subject_id,
           s.owner_subject_id, s.created_at, s.updated_at,
           si.connection_id::text as connection_id, si.slack_channel_id, si.slack_thread_ts,
-          si.initiating_slack_user_id
+          si.initiating_slack_user_id, dm.owning_subject_id is not null as slack_private
         from bound b
         join sessions s on s.id = b.id and s.workspace_id = ${home.workspaceId}::uuid
         left join lateral (
@@ -981,16 +982,30 @@ export async function listAgentChats(
           order by i.created_at, i.id
           limit 1
         ) si on true
+        -- A Slack DM is private through its interaction, not the session row
+        -- (docs/slack-bot.md): only the person it belongs to sees it listed.
+        left join lateral (
+          select p.owning_subject_id
+          from slack_interactions p
+          where p.workspace_id = s.workspace_id
+            and p.session_reservation_id = s.root_session_id
+            and p.visibility = 'private'
+          order by p.created_at, p.id
+          limit 1
+        ) dm on true
         where s.archived_at is null
           and s.parent_session_id is null
           and ${
             input.sharedOnly || viewer === null
-              ? sql`s.visibility = 'workspace_shared'`
-              : sql`(s.visibility = 'workspace_shared' or s.owner_subject_id = ${viewer})`
+              ? sql`s.visibility = 'workspace_shared' and dm.owning_subject_id is null`
+              : sql`((s.visibility = 'workspace_shared' and dm.owning_subject_id is null)
+                  or (s.visibility = 'user_private' and s.owner_subject_id = ${viewer})
+                  or dm.owning_subject_id = ${viewer})`
           }
           ${
             input.filter === "yours"
-              ? sql`and (s.owner_subject_id = ${viewer} or s.created_by_subject_id = ${viewer})`
+              ? sql`and (s.owner_subject_id = ${viewer} or s.created_by_subject_id = ${viewer}
+                  or dm.owning_subject_id = ${viewer})`
               : sql``
           }
           ${input.excludeSessionId ? sql`and s.id <> ${input.excludeSessionId}::uuid` : sql``}
@@ -1005,7 +1020,7 @@ export async function listAgentChats(
     return rows.map((row) => ({
       sessionId: row.id,
       title: row.title,
-      visibility: row.visibility === "user_private" ? "private" : "workspace",
+      visibility: row.visibility === "user_private" || row.slack_private ? "private" : "workspace",
       createdBySubjectId: row.created_by_subject_id,
       ownerSubjectId: row.owner_subject_id,
       slack:

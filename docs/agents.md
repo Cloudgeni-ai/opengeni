@@ -120,7 +120,7 @@ path is the agent's home.
 | `POST /agents` | `sessions:create`; Only me needs a person who is a member of the organization |
 | `PATCH /agents/:id` (`expectedVersion` required), `DELETE /agents/:id` | `sessions:create`, and whoever made it or a workspace admin |
 | `GET /agents/:id/revisions?cursor&limit` | `sessions:read` |
-| `GET /agents/:id/chats?filter=yours\|everyone&cursor&limit` | `sessions:read`; Only me chats only for their owner |
+| `GET /agents/:id/chats?filter=yours\|everyone&cursor&limit` | `sessions:read`; Only me chats and Slack DMs only for their owner |
 | `GET /agents/:id/slack` | `sessions:read` |
 | `PUT` and `DELETE /agents/:id/slack/:connectionId` | `workspace:admin`; turning `open` on also needs an organization admin |
 | `GET /agents/:id/slack/:connectionId/channels`, `POST .../intro` | `workspace:admin` |

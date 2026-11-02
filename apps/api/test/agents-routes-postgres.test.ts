@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Permission } from "@opengeni/contracts";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { createDb, createSession, type DbClient } from "@opengeni/db";
+import { createDb, createSession, listSlackAgentChats, type DbClient } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -399,6 +399,38 @@ describe("agents through the API (real PostgreSQL)", () => {
       agentId: agent.id,
     });
     expect(bobs.status).toBe(202);
+    // Alice's Slack DM with the agent: a shared session row, private through
+    // its interaction, so listed only to her as well.
+    const slackDm = await createSession(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      initialMessage: "A private question",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: "user:alice" },
+      subjectId: "user:alice",
+      agent: { id: agent.id },
+    });
+    const [connection] = await shared.admin<Array<{ id: string }>>`
+      insert into connections (
+        account_id, workspace_id, provider_domain, kind, status, credential_encrypted
+      ) values (${workspace.accountId}, ${workspace.workspaceId}, 'slack.com', 'app_install',
+        'active', 'sealed')
+      returning id`;
+    await shared.admin`
+      insert into slack_interactions (
+        account_id, workspace_id, connection_id, slack_team_id, slack_channel_id,
+        slack_thread_ts, route_key, triggering_provider_event_id, owning_subject_id,
+        visibility, session_reservation_id, session_id
+      ) values (
+        ${workspace.accountId}, ${workspace.workspaceId}, ${connection!.id}, 'T1', 'D1', '1.1',
+        ${`route-${crypto.randomUUID()}`}, ${`evt-${crypto.randomUUID()}`},
+        'user:alice', 'private', ${slackDm.id}, ${slackDm.id}
+      )`;
 
     const ids = (response: { json: any }) =>
       (response.json.chats as Array<{ sessionId: string }>).map((entry) => entry.sessionId).sort();
@@ -407,14 +439,29 @@ describe("agents through the API (real PostgreSQL)", () => {
       "GET",
       `${agents}/${agent.id}/chats?filter=everyone`,
     );
-    expect(ids(everyoneForAlice)).toEqual([chat.json.id, privateChat.id, bobs.json.id].sort());
+    expect(ids(everyoneForAlice)).toEqual(
+      [chat.json.id, privateChat.id, bobs.json.id, slackDm.id].sort(),
+    );
     expect(
       everyoneForAlice.json.chats.find((entry: any) => entry.sessionId === privateChat.id),
     ).toMatchObject({ visibility: "private", source: "app", slack: null });
+    expect(
+      everyoneForAlice.json.chats.find((entry: any) => entry.sessionId === slackDm.id),
+    ).toMatchObject({ visibility: "private", source: "slack" });
     expect(ids(await call(bob, "GET", `${agents}/${agent.id}/chats?filter=everyone`))).toEqual(
       [chat.json.id, bobs.json.id].sort(),
     );
     expect(ids(await call(bob, "GET", `${agents}/${agent.id}/chats`))).toEqual([bobs.json.id]);
+    // An agent's other chats never see either private chat.
+    const shared_ = await listSlackAgentChats(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      slackAgentId: agent.id,
+      limit: 50,
+    });
+    expect(shared_.map((entry) => entry.sessionId).sort()).toEqual(
+      [chat.json.id, bobs.json.id].sort(),
+    );
     // Paged newest first.
     const first = await call(alice, "GET", `${agents}/${agent.id}/chats?filter=everyone&limit=2`);
     expect(first.json.chats).toHaveLength(2);
@@ -424,6 +471,6 @@ describe("agents through the API (real PostgreSQL)", () => {
       `${agents}/${agent.id}/chats?filter=everyone&limit=2&cursor=${first.json.nextCursor}`,
     );
     expect(rest.json).toMatchObject({ nextCursor: null });
-    expect(rest.json.chats).toHaveLength(1);
+    expect(rest.json.chats).toHaveLength(2);
   }, 180_000);
 });
