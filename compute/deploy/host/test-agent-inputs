@@ -8,11 +8,16 @@
 #   so install.sh leaves it running, as the one systemd starts at boot
 #   before the startup script installs the same release again;
 # - it is not current once anything it starts with changed (the release
-#   current names, a file of that release, installed.env, host.env, ca.pem,
-#   the base image, the unit), when it does not run, when its start
-#   recorded nothing, or when a part cannot be read;
-# - a start that cannot read every part records nothing, and never fails
-#   for it in a way that matters: the unit runs it with "-".
+#   current names, that release's SHA256SUMS, installed.env, host.env,
+#   ca.pem, the base image, the unit), when it does not run, when its start
+#   recorded nothing, when a part cannot be read, when the record is of
+#   another start than the running agent's (as after a rollback started an
+#   earlier release's unit, which records nothing), or while a change of
+#   the unit awaits a daemon-reload;
+# - and then says why;
+# - a start that cannot read every part, that systemd did not start, or
+#   whose unit changed on disk since it was loaded records nothing, and
+#   never fails for it in a way that matters: the unit runs it with "-".
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -26,13 +31,17 @@ bad() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
 export COMPUTE_ETC=$work/etc COMPUTE_OPT=$work/opt COMPUTE_VAR=$work/var COMPUTE_RUN=$work/run
 mkdir -p "$work/bin" "$COMPUTE_ETC" "$COMPUTE_OPT/releases/a" "$COMPUTE_OPT/releases/b" \
   "$COMPUTE_VAR" "$COMPUTE_RUN"
-# systemctl: compute-host.service is active while $work/active exists, and
-# its unit (with drop-ins) is $work/unit.
+# systemctl: compute-host.service is active while $work/active exists, its
+# unit (with drop-ins) is $work/unit, its start's invocation id is in
+# $work/invocation, and a change of the unit awaits a daemon-reload while
+# $work/reload exists.
 cat >"$work/bin/systemctl" <<EOF
 #!/usr/bin/env bash
-case "\$1" in
-  is-active) [ -e "$work/active" ] ;;
-  cat) cat "$work/unit" ;;
+case "\$1 \$2 \$3" in
+  "is-active "*) [ -e "$work/active" ] ;;
+  "cat "*) cat "$work/unit" ;;
+  "show -p InvocationID") cat "$work/invocation" ;;
+  "show -p NeedDaemonReload") if [ -e "$work/reload" ]; then echo yes; else echo no; fi ;;
   *) echo "systemctl shim: unexpected \$*" >&2; exit 2 ;;
 esac
 EOF
@@ -50,9 +59,11 @@ echo "image guest-sha256:1" >"$COMPUTE_VAR/base.ref"
 echo "[Service]" >"$work/unit"
 touch "$work/active"
 
-current() { "$script" current; }
-# Starts the agent as the unit does, from the state as it is now.
-start() { "$script" started; }
+current() { "$script" current >/dev/null; }
+# Starts the agent as systemd does: a new invocation id, which the unit's
+# "agent-inputs started" records with the state as it is now.
+invoke() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n' >"$work/invocation"; }
+start() { invoke && INVOCATION_ID=$(cat "$work/invocation") "$script" started; }
 
 start
 if current; then ok "an agent started with what it would start with now is current"; else bad "not current right after its start"; fi
@@ -64,7 +75,7 @@ touch "$work/active"
 # Each change, then a start that takes it in, which is current again.
 changes=(
   "the release current names|ln -sfn $COMPUTE_OPT/releases/b $COMPUTE_OPT/current"
-  "a file of the release|echo changed >>$COMPUTE_OPT/releases/b/SHA256SUMS"
+  "the release's SHA256SUMS|echo changed >>$COMPUTE_OPT/releases/b/SHA256SUMS"
   "installed.env|echo COMPUTE_KERNEL=k2 >>$COMPUTE_ETC/installed.env"
   "host.env|echo COMPUTE_HOST_ARGS=--x >>$COMPUTE_ETC/host.env"
   "ca.pem|echo renewed >>$COMPUTE_ETC/ca.pem"
@@ -98,6 +109,36 @@ mv "$work/installed.env" "$COMPUTE_ETC/installed.env"
 if current; then bad "current although the last start recorded nothing"; else ok "still not current until a start records"; fi
 start
 if current; then ok "recorded again, current"; else bad "not current after recording again"; fi
+
+# A start that does not record, such as one by an earlier release's unit
+# after a rollback, leaves the record of the start before; rolled forward
+# again, what an agent would start with is as recorded, but the agent that
+# runs is not the one that recorded it.
+invoke
+if current; then bad "current although the running agent's start recorded nothing"; else ok "a record of an earlier start is not current"; fi
+why=$("$script" current) || true
+if [ -n "$why" ]; then ok "and says why: $why"; else bad "no reason given"; fi
+start
+why=$("$script" current) || bad "not current after a recording start"
+if [ -z "$why" ]; then ok "a current agent says nothing"; else bad "a current agent printed: $why"; fi
+
+# A start systemd did not make records nothing.
+if (unset INVOCATION_ID; "$script" started 2>/dev/null); then bad "a start without an invocation id recorded"; else ok "a start without an invocation id fails"; fi
+if [ -e "$COMPUTE_RUN/compute-host.inputs" ]; then bad "a record was left without an invocation id"; else ok "and leaves no record"; fi
+start
+
+# A change of the unit that systemd has not loaded yet: a start meanwhile
+# runs the unit as loaded, so it records nothing, and nothing is current
+# until the reload.
+echo 'ExecStart=new' >>"$work/unit"
+touch "$work/reload"
+if current; then bad "current while the unit awaits a daemon-reload"; else ok "a unit awaiting a daemon-reload is not current"; fi
+if start 2>/dev/null; then bad "a start recorded while the unit awaits a daemon-reload"; else ok "a start while the unit awaits a daemon-reload fails"; fi
+if [ -e "$COMPUTE_RUN/compute-host.inputs" ]; then bad "a record was left while the unit awaits a daemon-reload"; else ok "and leaves no record"; fi
+rm "$work/reload"
+if current; then bad "current after the reload without a start that records"; else ok "after the reload, not current until a start records"; fi
+start
+if current; then ok "started after the reload, current"; else bad "not current after starting after the reload"; fi
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures failed" >&2

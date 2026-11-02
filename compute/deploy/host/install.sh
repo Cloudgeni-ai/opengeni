@@ -319,17 +319,28 @@ if [ -n "$start" ]; then
   # boot before a startup script installed again, is left running: a
   # restart would only stop its lease renewals and cut short the wakes it
   # started (see agent-inputs).
-  if /opt/compute/current/agent-inputs current; then
+  restarted=no
+  if why=$(/opt/compute/current/agent-inputs current); then
     log "the agent runs release $version as installed already"
   else
+    log "restarting the agent: ${why:-what it runs is not known}"
     systemctl restart compute-host.service
+    restarted=yes
   fi
-  for _ in $(seq 60); do
-    if /opt/compute/current/compute-host status >/dev/null 2>&1; then
-      log "the agent of release $version is up"
-      exit 0
-    fi
-    sleep 1
+  # An agent left running that does not answer is restarted once, as an
+  # install always did before.
+  for _ in 1 2; do
+    for _ in $(seq 60); do
+      if /opt/compute/current/compute-host status >/dev/null 2>&1; then
+        log "the agent of release $version is up"
+        exit 0
+      fi
+      sleep 1
+    done
+    [ "$restarted" = no ] || break
+    log "the agent left running did not answer within a minute; restarting it"
+    systemctl restart compute-host.service
+    restarted=yes
   done
   journalctl -u compute-host.service -n 50 --no-pager >&2 || true
   fail "the agent did not answer within a minute"

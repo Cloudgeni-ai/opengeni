@@ -4,10 +4,12 @@
 #
 #   agent-inputs started   run by compute-host.service before each start:
 #                          records what this start uses in
-#                          /run/compute-host.inputs
-#   agent-inputs current   exits 0 when compute-host.service runs, and its
-#                          start recorded what an agent would start with
-#                          now
+#                          /run/compute-host.inputs, with the start's
+#                          invocation id
+#   agent-inputs current   exits 0 when compute-host.service runs, and the
+#                          start of the agent that runs now recorded what
+#                          an agent would start with now; otherwise prints
+#                          why not
 #
 # What it starts with: the release /opt/compute/current names and that
 # release's files (its SHA256SUMS), /etc/compute/installed.env, host.env
@@ -22,7 +24,12 @@
 # still restoring does not answer the restarted agent, which then cannot
 # take its sandbox back at once. The record is under /run, so it never
 # outlives the boot, and a start that could not record anything leaves
-# none: anything unknown counts as changed.
+# none: anything unknown counts as changed. A record counts only for the
+# start that wrote it (systemd's invocation id): a start by another unit,
+# such as an earlier release's after a rollback, records nothing and so
+# leaves an older record that no longer describes the agent. The unit
+# counts as systemd loaded it: while a change of it on disk awaits a
+# daemon-reload, nothing is recorded or current.
 #
 # COMPUTE_ETC, COMPUTE_OPT, COMPUTE_VAR and COMPUTE_RUN (tests) stand for
 # /etc/compute, /opt/compute, /var/lib/compute and /run.
@@ -57,18 +64,52 @@ digest() {
   printf '%s\n' "$parts" | sha256sum | cut -d' ' -f1
 }
 
+# Whether systemd runs the unit as it is on disk.
+loaded() {
+  [ "$(systemctl show -p NeedDaemonReload --value compute-host.service)" = no ]
+}
+
 case "${1:-}" in
   started)
     rm -f "$record"
+    if [ -z "${INVOCATION_ID:-}" ]; then
+      echo "agent-inputs: not started by systemd; recording nothing" >&2
+      exit 1
+    fi
+    if ! loaded; then
+      echo "agent-inputs: the unit changed on disk since systemd loaded it; recording nothing" >&2
+      exit 1
+    fi
     now=$(digest) || exit 1
-    echo "$now" >"$record.part"
+    echo "$INVOCATION_ID $now" >"$record.part"
     mv "$record.part" "$record"
     ;;
   current)
-    systemctl is-active -q compute-host.service || exit 1
-    recorded=$(cat "$record" 2>/dev/null) || exit 1
-    now=$(digest 2>/dev/null) || exit 1
-    [ -n "$recorded" ] && [ "$recorded" = "$now" ]
+    if ! systemctl is-active -q compute-host.service; then
+      echo "the agent does not run"
+      exit 1
+    fi
+    if ! { read -r invocation recorded <"$record"; } 2>/dev/null; then
+      echo "its start recorded nothing"
+      exit 1
+    fi
+    running=$(systemctl show -p InvocationID --value compute-host.service) || running=
+    if [ -z "$running" ] || [ "$invocation" != "$running" ]; then
+      echo "the record is not of the start of the agent that runs"
+      exit 1
+    fi
+    if ! loaded; then
+      echo "its unit changed on disk since systemd loaded it"
+      exit 1
+    fi
+    if ! now=$(digest 2>/dev/null); then
+      echo "a part of what it starts with cannot be read"
+      exit 1
+    fi
+    if [ -z "${recorded:-}" ] || [ "$recorded" != "$now" ]; then
+      echo "what it starts with changed"
+      exit 1
+    fi
     ;;
   *)
     echo "usage: agent-inputs started|current" >&2

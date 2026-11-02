@@ -359,11 +359,17 @@ installs three units:
   Firecracker, kernel and base image are there (`check-host`), and runs
   with `KillMode=process` so a restart leaves its VMs running. Each start
   records what it uses (`agent-inputs`: the release, `installed.env`,
-  `host.env`, `ca.pem`, the base image and the unit) under `/run`, and
-  `install.sh` restarts an agent only when that changed. So the startup
-  script that installs again at every boot on GCP leaves the agent
-  systemd just started running, rather than stopping its lease renewals
-  and cutting short the wakes it began.
+  `host.env`, `ca.pem`, the base image and the unit as systemd loaded it)
+  under `/run`, with the start's invocation id, and `install.sh` restarts
+  an agent only when that changed, when the running agent's start is not
+  the one recorded (a start by an earlier release's unit after a rollback
+  records nothing), or when the agent does not answer within a minute of
+  being left running; it logs why it restarts. So the startup script that
+  installs again at every boot on GCP leaves the agent systemd just
+  started running, rather than stopping its lease renewals and cutting
+  short the wakes it began. Files `host.env` names (such as credentials)
+  and `systemctl set-environment` are not part of what is recorded: after
+  changing only those, restart the agent yourself.
 
 #### A host that shares its machine
 
