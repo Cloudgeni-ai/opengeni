@@ -463,7 +463,7 @@ function fakeSlack(
           is_restricted: guest,
           is_ultra_restricted: false,
           ...(SLACK_TEST_DISPLAY_NAMES.has(userId)
-            ? { profile: { display_name: SLACK_TEST_DISPLAY_NAMES.get(userId) } }
+            ? { name: "sam.lee", profile: { display_name: SLACK_TEST_DISPLAY_NAMES.get(userId) } }
             : {}),
         },
       });
@@ -3269,7 +3269,9 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(prepared).toMatchObject({
       status: "prepared",
       version: 1,
-      organizationMemberLink: { slackAccountLabel: "@Sam Lee" },
+      organizationMemberLink: {
+        slackAccountLabel: "@Sam Lee (sam.lee) in Slack interaction test Slack",
+      },
     });
     expect(
       await getSlackBotUserLink(client.db, value.owner.workspaceId, value.connectionId, "U0SAM"),
@@ -3279,7 +3281,9 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     });
     expect(await polled.json()).toMatchObject({
       status: "prepared",
-      organizationMemberLink: { slackAccountLabel: "@Sam Lee" },
+      organizationMemberLink: {
+        slackAccountLabel: "@Sam Lee (sam.lee) in Slack interaction test Slack",
+      },
     });
 
     // A stale confirmation changes nothing.
@@ -3299,6 +3303,27 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       status: "completed",
       version: 2,
     });
+
+    // A cancelled request asks for a fresh link rather than refusing the member.
+    const cancelledSlackUserId = `U_CANCELLED_${crypto.randomUUID()}`;
+    const toCancel = await prepare(memberId, cancelledSlackUserId);
+    const cancelled = await value.app.request(`${basePath}/${toCancel.id}/cancel`, {
+      method: "POST",
+      headers: as(memberId),
+      body: JSON.stringify({ expectedVersion: 1, idempotencyKey: crypto.randomUUID() }),
+    });
+    expect(cancelled.status).toBe(200);
+    const afterCancel = await link(memberId, toCancel.id, 2);
+    expect(afterCancel.status).toBe(400);
+    expect(await afterCancel.text()).toContain("Request a fresh link from Slack");
+    expect(
+      await getSlackBotUserLink(
+        client.db,
+        value.owner.workspaceId,
+        value.connectionId,
+        cancelledSlackUserId,
+      ),
+    ).toBeNull();
 
     // Someone outside the organization is not offered it and can't force it.
     const outsiderSlackUserId = `U_OUTSIDER_${crypto.randomUUID()}`;
@@ -11869,6 +11894,40 @@ describe("Slack agents", () => {
     expect(session!.initial_message).toContain("how did revenue do? Ask Analytics.");
     expect(session!.initial_message).not.toContain("+ops-desk");
     expect(session!.initial_message).not.toContain("churn");
+  }, 90_000);
+
+  test("handing off again for someone who can't use the agent still refuses, telling them once", async () => {
+    if (!available) return;
+    const { value } = await agentFixture({ linkOther: true });
+    await mention(
+      value,
+      "C_DENIED_TWICE",
+      "1765000009.000100",
+      "+ops-desk how did revenue do? Ask Analytics.",
+      undefined,
+      value.otherSlackUserId,
+    );
+    const [opsChat] = await agentInteractions(value.owner.workspaceId);
+    const [turn] = await shared!.admin<{ id: string }[]>`
+      select id from session_turns where session_id = ${opsChat!.session_id} order by created_at limit 1`;
+    const grant = { ...value.owner, metadata: { turnId: turn!.id } } as unknown as AccessGrant;
+    const handOff = () =>
+      handOffSlackAgentChat(value.deps, {
+        grant,
+        sessionId: opsChat!.session_id!,
+        agent: "Analytics",
+      });
+    expect(await handOff()).toMatchObject({ status: "refused" });
+    // A later attempt mints a different link; the person was already told.
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    expect(await handOff()).toMatchObject({ status: "refused" });
+    const refusals = value.slack.posts.filter(
+      (post) =>
+        post.channel === `D_${value.otherSlackUserId}` &&
+        post.text.includes("which you don't have access to"),
+    );
+    expect(refusals).toHaveLength(1);
+    expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(0);
   }, 90_000);
 
   test("a chat whose thread was moved to another agent cannot hand it off", async () => {

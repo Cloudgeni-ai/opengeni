@@ -1350,6 +1350,28 @@ export class OpenGeniSlackBotClient {
     });
   }
 
+  /**
+   * How a Slack account is named when someone confirms linking it to
+   * themselves: "@Kari (Kari Nordmann, kari.n) in Acme Slack". Display and
+   * real names are chosen by their owner, so the username, unique in this
+   * Slack workspace, is included too. Null when Slack doesn't return the user.
+   */
+  async userLinkLabel(userId: string) {
+    return await this.withAudit("users.list", async (headers) => {
+      const payload = await this.call(headers, "users.info", { user: userId });
+      const user = projectUser(payload.user);
+      const primary = user?.id === userId && (user.displayName || user.realName || user.name);
+      if (!user || !primary) return { label: null };
+      const others = [...new Set([user.realName, user.name])].filter(
+        (name) => name && name !== primary,
+      );
+      const label = `@${primary}${others.length > 0 ? ` (${others.join(", ")})` : ""} in ${
+        this.metadata.slackTeamName
+      } Slack`;
+      return { label: label.slice(0, 256) };
+    });
+  }
+
   async channelHistory(input: {
     channelId: string;
     limit?: number;

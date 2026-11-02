@@ -545,7 +545,7 @@ export function WorkspaceShellRouteContent({
                     <strong className="font-medium text-fg">
                       {slackAccessRequest.organizationMemberLink.slackAccountLabel}
                     </strong>{" "}
-                    in Slack to your Opengeni account.
+                    to your Opengeni account.
                   </>
                 ) : (
                   "Link this Slack account to your Opengeni account."

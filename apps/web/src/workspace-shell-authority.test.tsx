@@ -268,7 +268,7 @@ describe("workspace shell authority", () => {
       completedAt: null,
       createdAt: "2026-08-20T08:00:00.000Z",
       updatedAt: "2026-08-20T08:00:00.000Z",
-      organizationMemberLink: { slackAccountLabel: "@ada" },
+      organizationMemberLink: { slackAccountLabel: "@ada in Acme Slack" },
     };
     const { context } = testContext({
       workspaces: [],
@@ -295,7 +295,7 @@ describe("workspace shell authority", () => {
 
     const text = rendered.container.textContent ?? "";
     expect(text).toContain("Link your Slack account");
-    expect(text).toContain("Link @ada in Slack to your Opengeni account.");
+    expect(text).toContain("Link @ada in Acme Slack to your Opengeni account.");
     expect(text).not.toContain("Request access");
     expect(linkCalls).toHaveLength(0);
     const linkButton = [...rendered.container.querySelectorAll("button")].find(

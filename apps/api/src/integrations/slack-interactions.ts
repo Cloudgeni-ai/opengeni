@@ -731,15 +731,24 @@ async function slackOrganizationMemberLinkOffer(
   });
   if (!mayLink) return null;
   // Best effort: without a name the confirmation still asks.
-  const name = await createOpenGeniSlackBotInteractionClient(deps, {
+  const label = await createOpenGeniSlackBotInteractionClient(deps, {
     ...installation.identityHome,
     connectionId: installation.connectionId,
     subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
   })
-    .then((client) => client.userDisplayNames([input.slackUserId]))
-    .then((result) => result.names.find((entry) => entry.id === input.slackUserId)?.name ?? null)
+    .then(async (client) => (await client.userLinkLabel(input.slackUserId)).label)
     .catch(() => null);
-  return { slackAccountLabel: name ? `@${name}`.slice(0, 256) : null };
+  return { slackAccountLabel: label };
+}
+
+/**
+ * A repeated hand-off of the same message posts the same refusal again under
+ * the same operation id; its fresh link changes the text, which Slack's post
+ * ledger reports as a conflict. The person was already told, so that is fine.
+ */
+function alreadyToldOnRepeat(error: unknown): void {
+  if (error instanceof SlackBotOperationConflictError) return;
+  throw error;
 }
 
 /** The installation a stored link request belongs to, from its own Slack team. */
@@ -1093,6 +1102,10 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
           linkAsOrganizationMember: { expectedVersion: payload.expectedVersion },
         });
         if (!linked) throw freshSlackLinkRequired();
+        // Expired, cancelled or already decided: only a fresh link can link now.
+        if (!["completed", "prepared", "pending"].includes(linked.status)) {
+          throw freshSlackLinkRequired();
+        }
         if (linked.status !== "completed") {
           throw new HTTPException(403, {
             message: "Only members of this organization can link without workspace access.",
@@ -3790,25 +3803,27 @@ export async function handOffSlackAgentChat(
       connectionId: interaction.connectionId,
       subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
     });
-    await client.postMessage({
-      operationId: deterministicUuid(
-        `slack-agent-handoff-open-refused:${interaction.id}:${inbound}:${target.id}`,
-      ),
-      userId: askerSlackUserId,
-      text: openSlackAgentPersonRefusalText(
-        deps,
-        target,
-        openPerson.refusal,
-        {
-          workspaceId: home.workspaceId,
-          connectionId: interaction.connectionId,
-          slackTeamId: interaction.slackTeamId,
-          slackUserId: askerSlackUserId,
-        },
-        // Minted now: the turn handing off may have run past the link's life.
-        Date.now(),
-      ),
-    });
+    await client
+      .postMessage({
+        operationId: deterministicUuid(
+          `slack-agent-handoff-open-refused:${interaction.id}:${inbound}:${target.id}`,
+        ),
+        userId: askerSlackUserId,
+        text: openSlackAgentPersonRefusalText(
+          deps,
+          target,
+          openPerson.refusal,
+          {
+            workspaceId: home.workspaceId,
+            connectionId: interaction.connectionId,
+            slackTeamId: interaction.slackTeamId,
+            slackUserId: askerSlackUserId,
+          },
+          // Minted now: the turn handing off may have run past the link's life.
+          Date.now(),
+        ),
+      })
+      .catch(alreadyToldOnRepeat);
     return refuse(
       openPerson.refusal === "not_linked"
         ? `The person who asked cannot use ${target.name} until they link their Slack account, and was told so privately with a link. Answer what you can yourself.`
@@ -3821,27 +3836,29 @@ export async function handOffSlackAgentChat(
       connectionId: interaction.connectionId,
       subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
     });
-    await client.postMessage({
-      operationId: deterministicUuid(
-        `slack-agent-handoff-denied:${interaction.id}:${inbound}:${target.id}`,
-      ),
-      userId: askerSlackUserId,
-      text: boundedOutput(
-        slackNoAccessToAgentText(
-          routingAgent,
-          linkUrl(
-            deps,
-            {
-              workspaceId: target.targetWorkspaceId,
-              connectionId: interaction.connectionId,
-              slackTeamId: interaction.slackTeamId,
-              slackUserId: askerSlackUserId,
-            },
-            Date.now(),
+    await client
+      .postMessage({
+        operationId: deterministicUuid(
+          `slack-agent-handoff-denied:${interaction.id}:${inbound}:${target.id}`,
+        ),
+        userId: askerSlackUserId,
+        text: boundedOutput(
+          slackNoAccessToAgentText(
+            routingAgent,
+            linkUrl(
+              deps,
+              {
+                workspaceId: target.targetWorkspaceId,
+                connectionId: interaction.connectionId,
+                slackTeamId: interaction.slackTeamId,
+                slackUserId: askerSlackUserId,
+              },
+              Date.now(),
+            ),
           ),
         ),
-      ),
-    });
+      })
+      .catch(alreadyToldOnRepeat);
     return refuse(
       `The person who asked cannot use ${target.name}, and was told so privately with a link to request access. Answer what you can yourself.`,
     );
