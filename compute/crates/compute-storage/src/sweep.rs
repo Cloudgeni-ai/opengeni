@@ -7,14 +7,14 @@
 //! A sweep reads every pointer, keeping it again so no archive begun
 //! earlier can replace it, asks which objects each one names, and deletes
 //! the other chunks and manifests whose period ended a clock disagreement
-//! before it began ([`crate::fresh::sweepable`]); one of the old layout once it was
-//! last stored more than [`LEGACY_SWEEP_AFTER`] before, and the pointers
-//! were kept where the sweep reads them for as long. Deletes carry no
-//! condition: nothing writes those names again. [`crate::fresh`] explains
-//! why that is safe while archives run. Anything it cannot read stops it
-//! before it deletes anything: a pointer it could not read may name
-//! objects it would otherwise delete. Keys of a layout it does not know
-//! are never deleted.
+//! before it began ([`crate::fresh::sweepable`]); one of the old layout
+//! once it was last stored more than [`LEGACY_SWEEP_AFTER`] before, and
+//! the pointers were kept where the sweep reads them for as long. Deletes
+//! carry no condition: nothing writes those names again. [`crate::fresh`]
+//! explains why that is safe while archives run. Anything it cannot read
+//! stops it before it deletes anything: a pointer it could not read may
+//! name objects it would otherwise delete. Keys of a layout it does not
+//! know are never deleted.
 //!
 //! Its memory grows with the number of objects stored, and it writes each
 //! pointer once; one sweep covers one store prefix.

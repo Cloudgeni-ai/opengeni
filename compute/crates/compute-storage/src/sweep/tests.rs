@@ -9,14 +9,16 @@ use object_store::path::Path;
 use super::*;
 use crate::chunk::EncodedChunk;
 use crate::fake::{Bucket, Fake, Object, Rng};
-use crate::fresh::{CLOCK_SKEW, Clock, LEGACY_SWEEP_AFTER, day_of};
+use crate::fresh::{CLOCK_SKEW, Clock, FIRST_HOUR, LEGACY_SWEEP_AFTER, day_of, period_of};
 use crate::store::{Begun, Put, Rewrite, TEST_EPOCH, next_save, unstamped};
 
 const SECOND: Duration = Duration::from_secs(1);
+const MINUTE: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(3_600);
 const DAY: Duration = Duration::from_secs(86_400);
 
-/// The simulated time: tokio's paused clock, from 08:00 UTC of a day.
+/// The simulated time: tokio's paused clock, from 08:00 UTC of a day, the
+/// start of an hour.
 fn paused_clock() -> Clock {
     skewed_clock(0)
 }
@@ -95,43 +97,113 @@ async fn old_unnamed_objects_go_and_named_or_recent_ones_stay() {
     assert!(!present(&fake, &key_of(&old)) && !present(&fake, &key_of(&older)));
 }
 
-/// What was written yesterday stays until the day after tomorrow begins,
-/// however early today's sweep runs: an archive that began after the
-/// sweep took stock may have written it on a clock behind the sweep's.
+/// What was written in an hour stays until that hour ended a clock
+/// disagreement before a sweep began, however late in its hour it was
+/// written: an archive that began after the sweep took stock may have
+/// written it on a clock behind the sweep's.
 #[tokio::test(start_paused = true)]
-async fn an_object_stays_until_the_day_after_tomorrow() {
+async fn an_hours_object_stays_until_its_hour_ended_the_skew_before() {
     let fake = Fake::new(paused_clock());
     let store = ChunkStore::over_fake(&fake, "p");
+    // 08:30, in the hour that ends at 09:00.
+    tokio::time::advance(30 * MINUTE).await;
     let written = put(&store, &chunk(1)).await;
-    // From 08:00 to the last second of the next day.
-    tokio::time::advance((DAY + 16 * HOUR).checked_sub(SECOND).unwrap()).await;
+    let hour = written.reference.day.unwrap();
+    assert!(hour >= FIRST_HOUR, "named by its hour");
+    assert_eq!(hour, period_of(store.now()));
+    // To 09:59:59: the hour ended less than the skew before.
+    tokio::time::advance((30 * MINUTE + CLOCK_SKEW).checked_sub(SECOND).unwrap()).await;
     let late = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!((late.recent, late.deleted), (1, 0));
     assert!(present(&fake, &key_of(&written)));
+    // 10:00: the hour ended the skew before.
     tokio::time::advance(SECOND).await;
     let next = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
         .await
         .unwrap();
     assert_eq!((next.recent, next.deleted), (0, 1));
+    assert!(!present(&fake, &key_of(&written)));
 }
 
-/// The same bytes stored again the same day are found there and reused;
-/// the next day they are stored anew under that day's name, and nothing
-/// writes the earlier day's name again.
+/// What an archive writes on a clock behind the sweep's by nearly the
+/// allowed disagreement is named with an hour that ended up to that long
+/// before the sweep began; a sweep that begins just after keeps it, late
+/// in its hour or early.
 #[tokio::test(start_paused = true)]
-async fn the_same_bytes_are_reused_the_same_day_and_stored_anew_the_next() {
+async fn what_a_clock_behind_by_the_skew_writes_stays_through_a_sweep_just_after() {
+    let fake = Fake::new(paused_clock());
+    let sweeper = ChunkStore::over_fake(&fake, "p");
+    let behind = i64::try_from(CLOCK_SKEW.checked_sub(SECOND).unwrap().as_millis()).unwrap();
+    let writer = ChunkStore::over_fake(&fake, "p").with_clock(skewed_clock(-behind));
+    let mut written = Vec::new();
+    // From 08:00 to 08:01, 08:30 and 08:59: the writer's clock reads 07:01,
+    // 07:30 and 07:59, and names the hour that ended at 08:00.
+    for (n, (step, minute)) in [(1, 1), (29, 30), (29, 59)].into_iter().enumerate() {
+        tokio::time::advance(step * MINUTE).await;
+        let put = put(&writer, &chunk(u8::try_from(n).unwrap())).await;
+        assert!(
+            put.reference.day < Some(period_of(sweeper.now())),
+            "an hour before"
+        );
+        written.push(put);
+        let swept = sweep(&sweeper, listed_names, true, SystemTime::UNIX_EPOCH)
+            .await
+            .unwrap();
+        assert_eq!(swept.deleted, 0, "at minute {minute}: {swept:?}");
+    }
+    assert!(written.iter().all(|put| present(&fake, &key_of(put))));
+}
+
+/// An object a host of an earlier release named with its day, no pointer
+/// naming it, stays until that day ended a clock disagreement before a
+/// sweep began, and then goes; one named with an hour since stays by its
+/// own hour.
+#[tokio::test(start_paused = true)]
+async fn an_earlier_releases_day_named_object_goes_once_its_day_ended_the_skew_before() {
+    let fake = Fake::new(paused_clock());
+    let store = ChunkStore::over_fake(&fake, "p");
+    let old = chunk(1);
+    let day = day_of(store.now());
+    assert!(day < FIRST_HOUR, "a day, as an earlier release names it");
+    let key = old.reference.on_day(day).key();
+    fake.put_raw(&format!("p/{key}"), Bytes::from(old.bytes.clone()));
+    // From 08:00 to 00:30 the next day, when this release writes an hour.
+    tokio::time::advance(16 * HOUR + 30 * MINUTE).await;
+    let recent = put(&store, &chunk(2)).await;
+    // To 00:59:59: the day ended less than the skew before.
+    tokio::time::advance((30 * MINUTE).checked_sub(SECOND).unwrap()).await;
+    let late = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+        .await
+        .unwrap();
+    assert_eq!((late.recent, late.deleted), (2, 0), "{late:?}");
+    assert!(present(&fake, &key));
+    // 01:00: the day ended the skew before; the hour of 00:00 not yet.
+    tokio::time::advance(SECOND).await;
+    let next = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
+        .await
+        .unwrap();
+    assert_eq!((next.recent, next.deleted), (1, 1), "{next:?}");
+    assert!(!present(&fake, &key));
+    assert!(present(&fake, &key_of(&recent)));
+}
+
+/// The same bytes stored again the same hour are found there and reused;
+/// the next hour they are stored anew under that hour's name, and nothing
+/// writes the earlier hour's name again.
+#[tokio::test(start_paused = true)]
+async fn the_same_bytes_are_reused_the_same_hour_and_stored_anew_the_next() {
     let fake = Fake::new(paused_clock());
     let store = ChunkStore::over_fake(&fake, "p");
     let content = chunk(5);
     let first = put(&store, &content).await;
     assert!(first.new);
-    assert_eq!(first.reference.day, Some(day_of(store.now())));
+    assert_eq!(first.reference.day, Some(period_of(store.now())));
     let stored = |put: &Put| fake.object(&format!("p/{}", key_of(put))).unwrap();
     let generation = stored(&first).generation;
-    // 23:00 the same day.
-    tokio::time::advance(15 * HOUR).await;
+    // 08:59 the same hour.
+    tokio::time::advance(59 * MINUTE).await;
     let again = put(&store, &content).await;
     assert_eq!(
         again,
@@ -141,8 +213,8 @@ async fn the_same_bytes_are_reused_the_same_day_and_stored_anew_the_next() {
         }
     );
     assert_eq!(stored(&first).generation, generation, "not stored again");
-    // 01:00 the next day.
-    tokio::time::advance(2 * HOUR).await;
+    // 09:01 the next hour.
+    tokio::time::advance(2 * MINUTE).await;
     let next = put(&store, &content).await;
     assert!(next.new);
     assert_eq!(next.reference.day, first.reference.day.map(|day| day + 1));
@@ -234,7 +306,7 @@ async fn a_first_archive_held_up_past_a_delete_and_a_sweep_finds_the_sandbox_del
 }
 
 /// The race a deadline cannot close: an archive reuses a chunk another
-/// write stored the same day, its pointer write is held up in flight for
+/// write stored the same hour, its pointer write is held up in flight for
 /// days, and a sweep that cannot see it deletes the chunk. The sweep
 /// fenced the pointer first, so the write is refused when it arrives,
 /// however late, and the archive started again stores the chunk anew.
@@ -286,17 +358,18 @@ async fn a_publication_held_up_past_a_sweep_never_lands() {
     store.get_chunk(&anew.reference).await.unwrap();
 }
 
-/// Why an archive never reuses an object of an earlier day it finds by
+/// Why an archive never reuses an object of an earlier hour it finds by
 /// its name: a sweep that took stock before the archive began deletes it
 /// all the same, and the archive's pointer then names what is gone. What
-/// the archive stores itself, under today's name, the sweep leaves.
+/// the archive stores itself, under this hour's name, the sweep leaves.
 #[tokio::test(start_paused = true)]
-async fn an_earlier_days_object_found_by_name_is_not_safe_to_reuse() {
+async fn an_earlier_hours_object_found_by_name_is_not_safe_to_reuse() {
     let fake = Fake::new(paused_clock());
     let store = ChunkStore::over_fake(&fake, "p");
     let content = chunk(3);
     let old = put(&store, &content).await;
-    tokio::time::advance(2 * DAY).await;
+    // 10:00: the hour of 08:00 ended the skew before.
+    tokio::time::advance(HOUR + CLOCK_SKEW).await;
     // Held up between taking stock and deleting.
     *fake.stall.lock().unwrap() = Some(("chunks/", HOUR));
     let sweeping = tokio::spawn({
@@ -316,7 +389,7 @@ async fn an_earlier_days_object_found_by_name_is_not_safe_to_reuse() {
         .unwrap();
     let archive = store.begin_test("b").await.unwrap();
     let anew = put(&store, &content).await;
-    assert!(anew.new, "today's name is a new object");
+    assert!(anew.new, "this hour's name is a new object");
     store
         .publish(archive, pointer(&[key_of(&anew)]))
         .await
@@ -333,7 +406,7 @@ async fn an_earlier_days_object_found_by_name_is_not_safe_to_reuse() {
 
 /// A sweep's delete held up in flight, however long, after the sweep gave
 /// up, takes only the name it meant: the same bytes stored since are
-/// under a later day's name, so no delete needs a condition.
+/// under a later hour's name, so no delete needs a condition.
 #[tokio::test(start_paused = true)]
 async fn a_delete_held_up_in_flight_takes_nothing_written_since() {
     let fake = Fake::new(paused_clock());
@@ -649,7 +722,7 @@ fn pointers_stay_whole(objects: &BTreeMap<String, Object>, name: &str) -> bool {
 struct Outcome {
     published: usize,
     superseded: usize,
-    /// Chunks found stored the same day by another write.
+    /// Chunks found stored the same hour by another write.
     reused: usize,
     deleted: usize,
     /// Deletes of what a stored pointer named, and pointers published
@@ -672,10 +745,10 @@ fn skew(rng: &mut Rng) -> i64 {
 
 /// Six archives at a time over about a week, each archiving one of its
 /// two sandboxes again and again: reusing part of what its last copy
-/// named, storing (or finding stored the same day) up to three of sixteen
-/// chunks, and now and then held up for up to two days before it
-/// publishes; sometimes deleting a copy. One sweep after another runs
-/// beside them. Each archive and the sweep read their own clock, off the
+/// named, storing (or finding stored the same hour) up to three of sixteen
+/// chunks over some minutes, and now and then held up for up to two days
+/// before it publishes; sometimes deleting a copy. One sweep after another
+/// runs beside them, about hourly. Each archive and the sweep read their own clock, off the
 /// store's by up to the allowed disagreement, and every request waits up
 /// to three seconds, as the seed picks. With `fenced` false, archives
 /// replace their pointers unconditionally.
@@ -709,14 +782,14 @@ async fn simulate(seed: u64, fenced: bool) -> Outcome {
                     let put = store.put_chunk(chunk).await.unwrap();
                     outcome.lock().unwrap().reused += usize::from(!put.new);
                     keys.push(put.reference.key());
-                    tokio::time::sleep(within(&mut rng, HOUR)).await;
+                    tokio::time::sleep(within(&mut rng, 5 * MINUTE)).await;
                 }
                 keys.sort();
                 keys.dedup();
                 let held = if rng.below(4) == 0 {
                     48 * HOUR
                 } else {
-                    2 * HOUR
+                    10 * MINUTE
                 };
                 tokio::time::sleep(within(&mut rng, held)).await;
                 let published = if fenced {
@@ -752,8 +825,8 @@ async fn simulate(seed: u64, fenced: bool) -> Outcome {
     let sweeper = async {
         let mut rng = Rng(!seed);
         let store = ChunkStore::over_fake(&fake, "p").with_clock(skewed_clock(skew(&mut rng)));
-        for _ in 0..32 {
-            tokio::time::sleep(within(&mut rng, 8 * HOUR)).await;
+        for _ in 0..200 {
+            tokio::time::sleep(within(&mut rng, 2 * HOUR)).await;
             let report = sweep(&store, listed_names, true, SystemTime::UNIX_EPOCH)
                 .await
                 .unwrap();
@@ -770,7 +843,7 @@ async fn simulate(seed: u64, fenced: bool) -> Outcome {
 }
 
 /// Under the rules, no seed ever deletes what a pointer names, while the
-/// sweeps do delete, archives do find chunks stored the same day, and
+/// sweeps do delete, archives do find chunks stored the same hour, and
 /// some archives must start again.
 #[tokio::test(start_paused = true)]
 async fn sweeps_never_take_what_archives_in_flight_will_name() {

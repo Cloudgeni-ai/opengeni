@@ -296,7 +296,10 @@ mod tests {
         let hour = period_of(midnight);
         // The hour before midnight ended just now.
         assert!(!sweepable(hour - 1, midnight));
-        assert!(!sweepable(hour - 1, midnight + CLOCK_SKEW - Duration::from_secs(1)));
+        assert!(!sweepable(
+            hour - 1,
+            midnight + CLOCK_SKEW - Duration::from_secs(1)
+        ));
         assert!(sweepable(hour - 1, midnight + CLOCK_SKEW));
         assert!(sweepable(hour - 2, midnight + CLOCK_SKEW));
         assert!(!sweepable(hour, midnight + CLOCK_SKEW), "this hour's");
@@ -316,10 +319,16 @@ mod tests {
     fn a_days_object_is_swept_once_the_day_ended_the_skew_before() {
         let midnight = SystemTime::UNIX_EPOCH + 20_392 * DAY;
         assert!(!sweepable(20_391, midnight), "yesterday's ended just now");
-        assert!(!sweepable(20_391, midnight + CLOCK_SKEW - Duration::from_secs(1)));
+        assert!(!sweepable(
+            20_391,
+            midnight + CLOCK_SKEW - Duration::from_secs(1)
+        ));
         assert!(sweepable(20_391, midnight + CLOCK_SKEW));
         assert!(sweepable(20_390, midnight));
-        assert!(!sweepable(20_392, midnight + DAY - Duration::from_secs(1)), "today's");
+        assert!(
+            !sweepable(20_392, midnight + DAY - Duration::from_secs(1)),
+            "today's"
+        );
         // A host of an earlier release, which names days, writing just
         // after a sweep's fence with its clock behind by the skew, writes
         // a day the sweep keeps.

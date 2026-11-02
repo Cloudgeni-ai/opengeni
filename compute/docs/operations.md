@@ -915,8 +915,8 @@ before users move to compute from Modal:
   their pointer entry together with their working-set pack, and their
   chunks go at a following sweep under the same rule.
 - **Every store's sweep deletes.** No delete is conditional: a host writes
-  only names of its current day, so a late delete of an older day's name
-  never takes a newer write.
+  only names of its current hour (a day on an earlier release), so a late
+  delete of an older name never takes a newer write.
 - **Provider retention comes on top.** GCS soft delete keeps deleted
   objects 7 days by default; set the bucket's policy to what we promise.
 - **Quarantined objects** (stored copies that failed their checksum, kept
@@ -924,8 +924,9 @@ before users move to compute from Modal:
   lifecycle rule, for example deletion after 30 days.
 - **Watch the sweep.** It stops before deleting anything when a pointer or
   manifest cannot be read, by design: deleting around an unreadable entry
-  could take chunks it names. Alert when no sweep has succeeded for two
-  days; its error names the key that stopped it.
+  could take chunks it names. Alert when no sweep has succeeded for three
+  hours: what replaced copies named piles up meanwhile. Its error names
+  the key that stopped it.
 
 ## Observing
 
