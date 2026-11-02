@@ -221,3 +221,50 @@ test("keyboard focus stays on the card once the account is connected", async () 
     await view.unmount();
   }
 });
+
+test("a setup left without its tools finishes when the card shows, and joins this chat", async () => {
+  const fake = backend();
+  const finishCalls: string[] = [];
+  const continued: unknown[] = [];
+  const updates: unknown[] = [];
+  const transport = fake.client.connectTransport() as Record<string, unknown>;
+  // The person signed in earlier and closed the app on "Finishing setup…";
+  // opening the chat finishes it on the server.
+  transport.finishUnfinished = async (workspaceId: string) => {
+    finishCalls.push(workspaceId);
+    fake.finish();
+    return [await (transport.get as () => Promise<unknown>)()];
+  };
+  const client = {
+    ...fake.client,
+    connectTransport: () => transport,
+    getSession: async () => ({
+      id: "session-1",
+      tools: [],
+      toolPolicy: { mode: "explicit" },
+      toolPolicyVersion: 1,
+      firstPartyMcpTools: [],
+    }),
+    updateSessionToolPolicy: async (...args: unknown[]) => {
+      updates.push(args);
+      return {};
+    },
+    continueAfterCapabilitySetup: async (...args: unknown[]) => {
+      continued.push(args);
+      return { outcome: "queued", updateId: "update-1" };
+    },
+  };
+  const view = mountWithRealScheduling(card(client));
+  try {
+    await waitFor(
+      () => text().includes("Your account is connected"),
+      "The card did not show the finished setup as connected",
+    );
+    expect(finishCalls).toEqual(["ws-1"]);
+    await waitFor(() => continued.length === 1, "The agent was not told to continue");
+    expect(updates).toHaveLength(1);
+    expect(button("Connect Outlook Mail")).toBeUndefined();
+  } finally {
+    await view.unmount();
+  }
+});

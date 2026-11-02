@@ -2097,7 +2097,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                           finishPermissions: curatedConnectFinishPermissions((permission) =>
                             permission === "capabilities:manage"
                               ? hasIntegrationAdminPermission(authorization.grant)
-                              : hasPermission(authorization.grant.permissions, permission),
+                              : hasPermission(
+                                  authorization.grant.permissions,
+                                  permission,
+                                  authorization.grant.permissionMode,
+                                ),
                           ),
                           requestUrl: c.req.url,
                           payload: {
@@ -2200,7 +2204,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     const finishPermissions = curatedConnectFinishPermissions((permission) =>
       permission === "capabilities:manage"
         ? hasIntegrationAdminPermission(authorization.grant)
-        : hasPermission(authorization.grant.permissions, permission),
+        : hasPermission(
+            authorization.grant.permissions,
+            permission,
+            authorization.grant.permissionMode,
+          ),
     );
     return c.json(await finishUnfinishedCuratedSetups(deps, actor.scope, finishPermissions));
   });

@@ -333,13 +333,17 @@ export function useApiIntegrationAccounts({
   const connectName = definitions.find((candidate) => candidate.id === definitionId)?.name;
   const completeConnect = useCallback(
     (attempt: ConnectAttempt) => {
-      setConnectRequest(null);
+      // Setup can finish after its dialog closed: leave a newer one open.
+      setConnectRequest((current) =>
+        current &&
+        current.installationTarget?.instanceKey !== attempt.installationTarget?.instanceKey
+          ? current
+          : null,
+      );
       toast.success(
         `${attempt.installationTarget?.displayName ?? connectName ?? "Account"} connected`,
       );
-      void refresh?.().catch(() =>
-        toast.error("Account connected, but refreshing the catalog failed"),
-      );
+      void refresh?.().catch(() => toast.error("Couldn't refresh integrations"));
       onRuntimeChanged?.();
     },
     [refresh, onRuntimeChanged, connectName],

@@ -120,9 +120,11 @@ export async function continueConnectSetup(
             },
             signal,
           );
-        } catch {
-          // The dialog's own step can still be running or already applied:
-          // continue from wherever the attempt is once it moves.
+        } catch (error) {
+          // A refusal (permission, policy, invalid step) needs the person.
+          if (!connectStepMayHaveMoved(error)) return null;
+          // A conflict or lost response: the dialog's own step can still be
+          // running or already applied. Continue once the attempt moves.
           current = await settledConnectAttempt(transport, current, options);
         }
         continue;
@@ -138,6 +140,15 @@ export async function continueConnectSetup(
   } catch {
     return null;
   }
+}
+
+/** A conflict, server or network failure: the step may have run (or still be running). */
+function connectStepMayHaveMoved(error: unknown): boolean {
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? (error as { status: unknown }).status
+      : undefined;
+  return typeof status !== "number" || status === 409 || status >= 500;
 }
 
 /** The attempt once it moved past `attempt`'s revision; throws if it does not in time. */

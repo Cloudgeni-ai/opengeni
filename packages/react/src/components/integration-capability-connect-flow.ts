@@ -219,6 +219,14 @@ export function useIntegrationCapabilityConnect({
     const live = () => !abort.signal.aborted;
     setAvailability({ kind: "loading" });
     void (async () => {
+      // A setup the person signed in to but whose tools were never added (the
+      // app closed before the last step) finishes first, so this card reads
+      // the result. Nothing shows unless it finishes this integration.
+      const finishedNow = await (
+        controller.transport.finishUnfinished?.(workspaceId, { signal: abort.signal }) ??
+        Promise.resolve([])
+      ).catch(() => []);
+      if (!live()) return;
       const [providers, installed] = await Promise.all([
         controller.transport.catalog(workspaceId, { signal: abort.signal }),
         client.listApiIntegrations(workspaceId),
@@ -238,6 +246,14 @@ export function useIntegrationCapabilityConnect({
         if (!live()) return;
         if (recovered?.state === "complete" && recovered.integrationInstalled) return;
         if (!recovered || connectedNow) hints.forget(storageKey);
+      }
+      // Finished just now: add its tools to this chat and let the agent
+      // continue, exactly as when setup completes on this card.
+      const leftover = finishedNow.find((entry) => entry.providerId === definitionId);
+      if (leftover) {
+        const recovered = await controller.recover(leftover.id).catch(() => null);
+        if (!live()) return;
+        if (recovered?.state === "complete" && recovered.integrationInstalled) return;
       }
       if (connectedNow) {
         setAvailability({ kind: "connected" });

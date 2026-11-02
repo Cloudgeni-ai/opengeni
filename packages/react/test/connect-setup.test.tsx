@@ -374,3 +374,47 @@ test("setup the person authorized carries on without its dialog", async () => {
     }),
   ).toBeNull();
 });
+
+test("background setup stops at a refusal and when it is aborted", async () => {
+  const { continueConnectSetup } = await import("../src/connect-setup-model");
+  const connected: ConnectAttempt = {
+    id: "attempt",
+    workspaceId: "workspace",
+    providerId: "microsoft-sharepoint",
+    ownership: "workspace",
+    revision: 2,
+    state: "connected_but_incomplete",
+    nextAction: { type: "none" },
+    credentialsCommitted: true,
+    integrationInstalled: false,
+    completionRequirement: "integration",
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  let reads = 0;
+  const refused = Object.assign(new Error("Forbidden"), { status: 403 });
+  const transport = {
+    get: async () => {
+      reads += 1;
+      return connected;
+    },
+    advance: async () => {
+      throw refused;
+    },
+  };
+  // A permission or policy refusal needs the person: no waiting for a move.
+  const started = Date.now();
+  expect(await continueConnectSetup(transport, connected, { settleMs: 5_000 })).toBeNull();
+  expect(Date.now() - started).toBeLessThan(1_000);
+  expect(reads).toBe(0);
+  // A conflict waits for the attempt to move, until it is aborted.
+  const conflict = { ...transport, advance: async () => Promise.reject({ status: 409 }) };
+  const abort = new AbortController();
+  const continuing = continueConnectSetup(conflict, connected, {
+    signal: abort.signal,
+    settleMs: 60_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  abort.abort();
+  expect(await continuing).toBeNull();
+  expect(reads).toBeGreaterThan(0);
+});

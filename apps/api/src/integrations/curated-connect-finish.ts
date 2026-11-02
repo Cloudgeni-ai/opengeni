@@ -54,7 +54,7 @@ export function curatedConnectFinishPermissions(
 }
 
 /** How long a callback waits for the reviewed tools before leaving the rest to the app. */
-export const CURATED_CONNECT_RESOLVE_TIMEOUT_MS = 20_000;
+export const CURATED_CONNECT_RESOLVE_TIMEOUT_MS = 10_000;
 
 /** A reviewed integration definition's own setup: nothing custom to review. */
 export function curatedConnectFinishEligible(
@@ -253,10 +253,21 @@ export async function installCuratedConnectTools(
     console.warn("[connect] could not finish built-in integration setup in its callback", {
       attemptId: attempt.id,
       providerId: attempt.providerId,
-      error: error instanceof Error ? error.name : "unknown",
+      ...finishFailure(error),
     });
     return false;
   }
+}
+
+/** Enough to tell a refusal, a conflict and a database failure apart; no content. */
+function finishFailure(error: unknown): Record<string, string | number> {
+  if (!(error instanceof Error)) return { error: "unknown" };
+  const detail: Record<string, string | number> = { error: error.name };
+  const { status, code } = error as { status?: unknown; code?: unknown };
+  if (typeof status === "number") detail.status = status;
+  if (typeof code === "string") detail.code = code.slice(0, 64);
+  if (error instanceof CuratedConnectFinishRefusedError) detail.reason = error.message;
+  return detail;
 }
 
 /** A built-in integration's setup that saved the account but not its tools. */
@@ -358,7 +369,7 @@ export async function finishUnfinishedCuratedSetup(
     console.warn("[connect] could not finish an unfinished built-in integration setup", {
       attemptId: attempt.id,
       providerId: attempt.providerId,
-      error: error instanceof Error ? error.name : "unknown",
+      ...finishFailure(error),
     });
     return { outcome: "not_finished" };
   }

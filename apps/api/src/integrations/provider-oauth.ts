@@ -400,6 +400,13 @@ export async function completeApiIntegrationProviderOAuth(
     ) {
       throw new ProviderOAuthCallbackError("client_unavailable");
     }
+    // Read a built-in integration's reviewed tools while the code is
+    // exchanged (they need no token), never inside the commit below.
+    const finishPermissions = state.finishPermissions ?? [];
+    const reviewedTools =
+      connectOperation && curatedAttempt && finishPermissions.length > 0
+        ? resolveCuratedConnectTools(deps, state, definition.id)
+        : Promise.resolve(null);
     const key = requireEnvironmentEncryption(deps.settings);
     const verifier = decryptEnvironmentValue(key, state.encryptedPkceVerifier);
     const redirectUri = `${apiBaseUrl}${providerOAuthCallbackPath(definition)}`;
@@ -517,14 +524,9 @@ export async function completeApiIntegrationProviderOAuth(
     const persist = (database: import("@opengeni/db").Database) =>
       persistProviderOAuthConnection(database, persistenceInput);
     if (connectOperation) {
-      // Read the reviewed tools before the commit (no remote reads inside it).
-      // Null leaves the install step to the app, exactly as before.
+      // Null (unreadable in time) saves the account and finishes it later.
       const owner = state;
-      const finishPermissions = owner.finishPermissions ?? [];
-      const tools =
-        curatedAttempt && finishPermissions.length > 0
-          ? await resolveCuratedConnectTools(deps, owner, definition.id)
-          : null;
+      const tools = await reviewedTools;
       let origin: ExternalActorContinuation | null = null;
       const settled = await finishOAuthAcquisition(
         deps.db,
