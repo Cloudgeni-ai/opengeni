@@ -34,6 +34,7 @@ import {
   setSessionGoalStatusWithEvent,
   sessionWorkstreamHasActiveWork,
   readSessionArchiveTree,
+  archivedSessionsHavePendingInput,
   getSessionEvent,
   getWorkspaceControlEvent,
   getSessionQueueSnapshot,
@@ -1086,8 +1087,10 @@ export async function archiveHumanSessionWorkstream(
  * Once an Archive's undo window has ended, stop what still runs in the chat
  * and its sub-chats so the archiver can store them: one-time waits are
  * retired, active goals paused, and running work cancelled (as the person who
- * archived it). Does nothing when the Archive was undone or the chat is
- * stored already. Returns whether the chat is still waiting to be stored.
+ * archived it), which also settles undelivered updates, unanswered questions
+ * and input waits. Works the same for a sub-chat archived on its own. Does
+ * nothing when the Archive was undone or the chat is stored already. Returns
+ * whether the chat is still waiting to be stored.
  */
 export async function stopArchivedSessionWork(
   deps: {
@@ -1130,9 +1133,14 @@ export async function stopArchivedSessionWork(
     });
     if (events.length > 0) await deps.bus.publish(input.workspaceId, session.id, events);
   }
-  const active = await withWorkspaceSessionActivityRls(deps.db, input.workspaceId, (scoped) =>
-    sessionWorkstreamHasActiveWork(scoped, input.workspaceId, input.sessionId),
-  );
+  const active =
+    (await withWorkspaceSessionActivityRls(deps.db, input.workspaceId, (scoped) =>
+      sessionWorkstreamHasActiveWork(scoped, input.workspaceId, input.sessionId),
+    )) ||
+    (await archivedSessionsHavePendingInput(deps.db, {
+      workspaceId: input.workspaceId,
+      sessionIds: live.map((row) => row.id),
+    }));
   if (active) {
     const result = await runSessionCommandPersistenceTransaction(
       deps,

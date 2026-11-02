@@ -955,7 +955,12 @@ export async function undoSessionArchive(
   );
 }
 
-/** A chat and its sub-chats with their archive state, for the step after the undo window. */
+/**
+ * A chat and its sub-chats (at any depth) with their archive state, for the
+ * step after the undo window and for the archive pass. It follows parent
+ * links from the given chat, so it also works for a sub-chat that was
+ * archived on its own (for example under a chat that is stored already).
+ */
 export async function readSessionArchiveTree(
   db: Database,
   scope: { workspaceId: string; sessionId: string },
@@ -967,20 +972,65 @@ export async function readSessionArchiveTree(
     contentArchiveState: "archiving" | "archived" | null;
   }>
 > {
-  return await withWorkspaceSessionActivityRls(db, scope.workspaceId, async (scoped) =>
-    (scoped as unknown as Database)
-      .select({
-        id: schema.sessions.id,
-        archivedAt: schema.sessions.archivedAt,
-        archiveRequestedBy: schema.sessions.archiveRequestedBy,
-        contentArchiveState: schema.sessions.contentArchiveState,
-      })
-      .from(schema.sessions)
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, scope.workspaceId),
-          eq(schema.sessions.rootSessionId, scope.sessionId),
-        ),
-      ),
+  const rows = await withWorkspaceSessionActivityRls(db, scope.workspaceId, async (scoped) =>
+    rawRows<{
+      id: string;
+      archived_at: Date | string | null;
+      archive_requested_by: string | null;
+      content_archive_state: "archiving" | "archived" | null;
+    }>(
+      scoped as unknown as Database,
+      sql`with recursive tree(id) as (
+          select id from sessions
+          where workspace_id = ${scope.workspaceId}::uuid and id = ${scope.sessionId}::uuid
+          union
+          select child.id from sessions child join tree on child.parent_session_id = tree.id
+          where child.workspace_id = ${scope.workspaceId}::uuid
+        )
+        select session.id, session.archived_at, session.archive_requested_by,
+          session.content_archive_state
+        from sessions session join tree on tree.id = session.id
+        where session.workspace_id = ${scope.workspaceId}::uuid`,
+    ),
   );
+  return rows.map((row) => ({
+    id: row.id,
+    archivedAt: row.archived_at === null ? null : new Date(row.archived_at),
+    archiveRequestedBy: row.archive_requested_by,
+    contentArchiveState: row.content_archive_state,
+  }));
+}
+
+/**
+ * Whether any of these not-yet-stored chats still holds input it would act on
+ * in a later turn: an undelivered update, an unanswered question or an input
+ * wait. An archived chat never runs again, so this input keeps it from being
+ * stored until its work is cancelled, which settles all three.
+ */
+export async function archivedSessionsHavePendingInput(
+  db: Database,
+  scope: { workspaceId: string; sessionIds: string[] },
+): Promise<boolean> {
+  if (scope.sessionIds.length === 0) return false;
+  const ids = sql.join(
+    scope.sessionIds.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  );
+  const [row] = await withWorkspaceSessionActivityRls(db, scope.workspaceId, async (scoped) =>
+    rawRows<{ pending: boolean }>(
+      scoped as unknown as Database,
+      sql`select (
+          exists (select 1 from sessions
+            where workspace_id = ${scope.workspaceId}::uuid and id in (${ids})
+              and input_wait_until is not null)
+          or exists (select 1 from session_system_updates
+            where workspace_id = ${scope.workspaceId}::uuid and session_id in (${ids})
+              and state = 'pending')
+          or exists (select 1 from session_human_input_requests
+            where workspace_id = ${scope.workspaceId}::uuid and session_id in (${ids})
+              and status = 'pending')
+        ) as pending`,
+    ),
+  );
+  return row?.pending === true;
 }

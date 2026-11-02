@@ -337,9 +337,9 @@ export function createSessionArchiveActivities(
   /**
    * An archived chat the listing returned but that could not be stored yet
    * still has work running (its own stop step was lost, or a migration
-   * archived it): stop that work so a later pass stores it. Only the chat
-   * that started a tree does this, for the whole tree; anything else is left
-   * for the pass to retry.
+   * archived it): stop that work, in it and its sub-chats, so a later pass
+   * stores it. A sub-chat does this for itself too, because the chat above it
+   * may be stored already and never come back to it.
    */
   async function stopSettlingArchive(scope: SessionArchiveScope): Promise<void> {
     const { db } = await services();
