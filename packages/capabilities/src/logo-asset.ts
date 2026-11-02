@@ -114,8 +114,53 @@ export function svgActiveContentReason(contentType: string, bytes: Uint8Array): 
 }
 
 /**
+ * Elements a generated letter avatar is drawn from. Anything else (a path, a
+ * shape other than the backing rectangle, an embedded image) is a real mark.
+ */
+const GENERATED_PLACEHOLDER_ELEMENTS: ReadonlySet<string> = new Set([
+  "svg",
+  "rect",
+  "text",
+  "tspan",
+  "title",
+  "desc",
+  "g",
+]);
+
+/**
+ * Detects a generated letter avatar served in place of a logo.
+ *
+ * Logo hosts such as integrations.sh answer an unknown domain with HTTP 200
+ * and an SVG that is only a coloured square and one or two letters. Accepting
+ * it would show a fake logo, and because it is a real image, the UI's own
+ * monogram would never take over. Treat it as "no logo" instead.
+ */
+export function generatedPlaceholderReason(contentType: string, bytes: Uint8Array): string | null {
+  if (contentType !== "image/svg+xml") {
+    return null;
+  }
+  const text = new TextDecoder("utf-8", { fatal: false })
+    .decode(bytes)
+    .replace(/<\?xml[\s\S]*?\?>/g, "")
+    .replace(/<!--[\s\S]*?-->/g, "");
+  const elements = [...text.matchAll(/<\s*([a-zA-Z][\w:-]*)/g)].map((match) =>
+    match[1]!.toLowerCase(),
+  );
+  if (!elements.includes("text")) {
+    return null;
+  }
+  if (elements.some((element) => !GENERATED_PLACEHOLDER_ELEMENTS.has(element))) {
+    return null;
+  }
+  const letters = [...text.matchAll(/<\s*(?:text|tspan)\b[^>]*>([^<]*)/gi)]
+    .map((match) => match[1]!.trim())
+    .join("");
+  return [...letters].length <= 3 ? "generated_letter_placeholder" : null;
+}
+
+/**
  * A servable image content type, at most `MAX_LOGO_BYTES`, and no active
- * content inside an SVG.
+ * content inside an SVG. A generated letter avatar is not a logo.
  */
 export function validateLogoAsset(input: {
   contentType: string | null | undefined;
@@ -132,6 +177,10 @@ export function validateLogoAsset(input: {
   const activeContent = svgActiveContentReason(contentType.contentType, input.bytes);
   if (activeContent) {
     return { ok: false, reason: activeContent };
+  }
+  const placeholder = generatedPlaceholderReason(contentType.contentType, input.bytes);
+  if (placeholder) {
+    return { ok: false, reason: placeholder };
   }
   return {
     ok: true,

@@ -2,6 +2,28 @@
   "version": 1,
   "entries": [
     {
+      "capabilityId": "mcp:integrations-sh:accessapproval-googleapis-com-065b1fa17cca",
+      "domain": "accessapproval.googleapis.com",
+      "mcpUrl": "https://accessapproval.googleapis.com/mcp",
+      "file": "accessapproval-googleapis-com-065b1fa17cca.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:43.358Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:agilitycms-com-cc65cd3ca7e6",
+      "domain": "agilitycms.com",
+      "mcpUrl": "https://mcp.agilitycms.com/api/mcp",
+      "file": "agilitycms-com-cc65cd3ca7e6.jpg",
+      "sourceUrl": "https://integrations.sh/logo/agilitycms.com",
+      "sha256": "f1f311493f2f577a906f852becfcf59b7b9af2e4a22b416498351039df987ead",
+      "contentType": "image/jpeg",
+      "sizeBytes": 793,
+      "fetchedAt": "2026-11-02T12:26:43.441Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:ahrefs-com-5dd420d3478d",
       "domain": "ahrefs.com",
       "mcpUrl": "https://api.ahrefs.com/mcp/mcp",
@@ -11,6 +33,17 @@
       "contentType": "image/svg+xml",
       "sizeBytes": 697,
       "fetchedAt": "2026-08-17T12:23:14.936Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:airbyte-com-59e1cc5b7672",
+      "domain": "airbyte.com",
+      "mcpUrl": "https://mcp.airbyte.ai/mcp",
+      "file": "airbyte-com-59e1cc5b7672.jpg",
+      "sourceUrl": "https://integrations.sh/logo/airbyte.com",
+      "sha256": "a1d3c74c3366d20e65c2fe48f52da6dc50dda4d532a3d400c0bfb636379c2aec",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1752,
+      "fetchedAt": "2026-11-02T12:26:43.527Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:airtable-com-c6ce8ea28476",
@@ -24,6 +57,17 @@
       "fetchedAt": "2026-08-17T12:23:15.735Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:algolia-com-623052c6c21a",
+      "domain": "algolia.com",
+      "mcpUrl": "https://mcp.algolia.com/mcp",
+      "file": "algolia-com-623052c6c21a.jpg",
+      "sourceUrl": "https://integrations.sh/logo/algolia.com",
+      "sha256": "97ad64dd3c17fe057d7206109071423dc96ae6f466687bb1e090fe2414d10253",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1428,
+      "fetchedAt": "2026-11-02T12:26:43.616Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:amplitude-com-5e9bc43a43df",
       "domain": "amplitude.com",
       "mcpUrl": "https://mcp.amplitude.com/mcp",
@@ -33,6 +77,39 @@
       "contentType": "image/jpeg",
       "sizeBytes": 1410,
       "fetchedAt": "2026-08-17T12:23:16.634Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:analyticsadmin-googleapis-com-86a85146e437",
+      "domain": "analyticsadmin.googleapis.com",
+      "mcpUrl": "https://analyticsadmin.googleapis.com/mcp",
+      "file": "analyticsadmin-googleapis-com-86a85146e437.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googleanalytics",
+      "sha256": "242fb58cb4e361af3e443f4fba463ca872af93e35075782d73d9a65dca303fa4",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 753,
+      "fetchedAt": "2026-11-02T12:26:43.671Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:androidmanagement-googleapis-com-c52cea4b089f",
+      "domain": "androidmanagement.googleapis.com",
+      "mcpUrl": "https://androidmanagement.googleapis.com/mcp",
+      "file": "androidmanagement-googleapis-com-c52cea4b089f.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/android",
+      "sha256": "51d4ae61989350eac5f8fd945b100947f9bb3426be719874794eddd0fca1535b",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 1099,
+      "fetchedAt": "2026-11-02T12:26:43.686Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:apigee-googleapis-com-d4218470c44a",
+      "domain": "apigee.googleapis.com",
+      "mcpUrl": "https://apigee.googleapis.com/mcp",
+      "file": "apigee-googleapis-com-d4218470c44a.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:43.703Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:apollo-io-d01f2e303bb1",
@@ -46,6 +123,28 @@
       "fetchedAt": "2026-08-17T12:23:17.342Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:app-fullstackgtm-com-f7b9ccc6f075",
+      "domain": "app.fullstackgtm.com",
+      "mcpUrl": "https://app.fullstackgtm.com/mcp",
+      "file": "app-fullstackgtm-com-f7b9ccc6f075.png",
+      "sourceUrl": "https://integrations.sh/logo/fullstackgtm.com",
+      "sha256": "8caa819052fd07b7387cb379fd13f84fbcad8ecd93b4e61bc7b2b38f09453d25",
+      "contentType": "image/png",
+      "sizeBytes": 1793,
+      "fetchedAt": "2026-11-02T12:26:43.782Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:arcjet-com-f0c3d578ae82",
+      "domain": "arcjet.com",
+      "mcpUrl": "https://api.arcjet.com/mcp",
+      "file": "arcjet-com-f0c3d578ae82.jpg",
+      "sourceUrl": "https://integrations.sh/logo/arcjet.com",
+      "sha256": "749cbe14d2ef5af0cd63bf30ffa4ab1ff275aa3495abbd308bd5e11fa9ad3abc",
+      "contentType": "image/jpeg",
+      "sizeBytes": 963,
+      "fetchedAt": "2026-11-02T12:26:43.822Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:asana-com-6dc9a36f55c3",
       "domain": "asana.com",
       "mcpUrl": "https://mcp.asana.com/v2/mcp",
@@ -57,6 +156,94 @@
       "fetchedAt": "2026-08-17T12:23:18.063Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:avo-app-d7c4a8a7077b",
+      "domain": "avo.app",
+      "mcpUrl": "https://mcp.avo.app/mcp",
+      "file": "avo-app-d7c4a8a7077b.png",
+      "sourceUrl": "https://integrations.sh/logo/avo.app",
+      "sha256": "708806ac06ef432b83de171c8da6781d46fe280fc2d0888ac3c78a70e3d2b034",
+      "contentType": "image/png",
+      "sizeBytes": 1045,
+      "fetchedAt": "2026-11-02T12:26:43.872Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:axiom-co-6558a4797291",
+      "domain": "axiom.co",
+      "mcpUrl": "https://mcp.axiom.co/mcp",
+      "file": "axiom-co-6558a4797291.jpg",
+      "sourceUrl": "https://integrations.sh/logo/axiom.co",
+      "sha256": "911a9441c40b14cbef9ba7c6dac03ddd9fa9163fc32eaa51b3f11f82cfaf9012",
+      "contentType": "image/jpeg",
+      "sizeBytes": 703,
+      "fetchedAt": "2026-11-02T12:26:43.911Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:berlin-group-org-83879736ae01",
+      "domain": "berlin-group.org",
+      "mcpUrl": "https://www.berlin-group.org/_api/mcp",
+      "file": "berlin-group-org-83879736ae01.png",
+      "sourceUrl": "https://integrations.sh/logo/berlin-group.org",
+      "sha256": "8302e0385417c38dc832a2a75e55b19d778debee2bb28f06f85921fe91aee142",
+      "contentType": "image/png",
+      "sizeBytes": 1087,
+      "fetchedAt": "2026-11-02T12:26:43.936Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:betterstack-com-cdbc8c4ec605",
+      "domain": "betterstack.com",
+      "mcpUrl": "https://mcp.betterstack.com/",
+      "file": "betterstack-com-cdbc8c4ec605.jpg",
+      "sourceUrl": "https://integrations.sh/logo/betterstack.com",
+      "sha256": "52a62b0fff43d63cb96fa216c03a1109bfb938e8f76e59cf0ea65829815e0996",
+      "contentType": "image/jpeg",
+      "sizeBytes": 876,
+      "fetchedAt": "2026-11-02T12:26:43.980Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:bigquery-googleapis-com-4486501b5216",
+      "domain": "bigquery.googleapis.com",
+      "mcpUrl": "https://bigquery.googleapis.com/mcp",
+      "file": "bigquery-googleapis-com-4486501b5216.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlebigquery",
+      "sha256": "a26f6aafc25bfab0ab984274eeca019e4562809e6d6b3464810a520b697e6e59",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 717,
+      "fetchedAt": "2026-11-02T12:26:43.995Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:bigquerydatatransfer-googleapis-com-a201947c8dd4",
+      "domain": "bigquerydatatransfer.googleapis.com",
+      "mcpUrl": "https://bigquerydatatransfer.googleapis.com/mcp",
+      "file": "bigquerydatatransfer-googleapis-com-a201947c8dd4.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlebigquery",
+      "sha256": "a26f6aafc25bfab0ab984274eeca019e4562809e6d6b3464810a520b697e6e59",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 717,
+      "fetchedAt": "2026-11-02T12:26:44.016Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:bigtableadmin-googleapis-com-d461e7f598be",
+      "domain": "bigtableadmin.googleapis.com",
+      "mcpUrl": "https://bigtableadmin.googleapis.com/mcp",
+      "file": "bigtableadmin-googleapis-com-d461e7f598be.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlebigtable",
+      "sha256": "48d86b0a5f50a24bfb3dc0474a024ee7ea16f091648cd45137c563028981fe0a",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 1913,
+      "fetchedAt": "2026-11-02T12:26:44.032Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:billingbudgets-googleapis-com-11a73cc3ec21",
+      "domain": "billingbudgets.googleapis.com",
+      "mcpUrl": "https://billingbudgets.googleapis.com/mcp",
+      "file": "billingbudgets-googleapis-com-11a73cc3ec21.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:44.048Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:box-com-a8738646c5a8",
       "domain": "box.com",
       "mcpUrl": "https://mcp.box.com/",
@@ -66,6 +253,72 @@
       "contentType": "image/jpeg",
       "sizeBytes": 1132,
       "fetchedAt": "2026-08-17T12:23:18.713Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:box-dev-6e5a85e1052b",
+      "domain": "box.dev",
+      "mcpUrl": "https://box.main-kill-isr.mintlify.me/mcp",
+      "file": "box-dev-6e5a85e1052b.png",
+      "sourceUrl": "https://integrations.sh/logo/box.dev",
+      "sha256": "993f14093b22dee9dc669e4da6cebb1157c6df8914106b0f51f1978f10f583b8",
+      "contentType": "image/png",
+      "sizeBytes": 2885,
+      "fetchedAt": "2026-11-02T12:26:44.117Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:brevo-com-c1af6fcfd575",
+      "domain": "brevo.com",
+      "mcpUrl": "https://mcp.brevo.com/v1/brevo/mcp",
+      "file": "brevo-com-c1af6fcfd575.jpg",
+      "sourceUrl": "https://integrations.sh/logo/brevo.com",
+      "sha256": "89a6d43a4a0b94bff67e0070602503834cc1121533aaf5bbea45e266b4146954",
+      "contentType": "image/jpeg",
+      "sizeBytes": 924,
+      "fetchedAt": "2026-11-02T12:26:44.158Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:buf-build-3d3832b1a8ea",
+      "domain": "buf.build",
+      "mcpUrl": "https://buf.build/mcp",
+      "file": "buf-build-3d3832b1a8ea.png",
+      "sourceUrl": "https://integrations.sh/logo/buf.build",
+      "sha256": "1b1a1a31d32dbeac13195acaf0a417a5ecd8de43a587bc82b61ccb794141af51",
+      "contentType": "image/png",
+      "sizeBytes": 1152,
+      "fetchedAt": "2026-11-02T12:26:44.184Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:buildwithfern-com-ea63bd1cea9b",
+      "domain": "buildwithfern.com",
+      "mcpUrl": "https://buildwithfern.com/learn/_mcp/server",
+      "file": "buildwithfern-com-ea63bd1cea9b.png",
+      "sourceUrl": "https://integrations.sh/logo/buildwithfern.com",
+      "sha256": "290ff2c6960c6c6ae003c4eca3d7b04089164e1c71f7d2fd970b65523c98349a",
+      "contentType": "image/png",
+      "sizeBytes": 1825,
+      "fetchedAt": "2026-11-02T12:26:44.205Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:bump-sh-64b2be628983",
+      "domain": "bump.sh",
+      "mcpUrl": "https://developers.bump.sh/doc/portal/mcp",
+      "file": "bump-sh-64b2be628983.svg",
+      "sourceUrl": "https://integrations.sh/logo/bump.sh",
+      "sha256": "8b30cc33c8548f14a439581651ac6104a31589847f562387308e921b757be5a3",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 2078,
+      "fetchedAt": "2026-11-02T12:26:44.231Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:cal-com-372c65462754",
+      "domain": "cal.com",
+      "mcpUrl": "https://mcp.cal.com/mcp",
+      "file": "cal-com-372c65462754.png",
+      "sourceUrl": "https://integrations.sh/logo/cal.com",
+      "sha256": "e720147f7377f18d54ab81f9eccc5b5557855849f8383d044d2ccd1722bc9706",
+      "contentType": "image/png",
+      "sizeBytes": 2804,
+      "fetchedAt": "2026-11-02T12:26:44.252Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:calendly-com-39ab4bb106db",
@@ -90,6 +343,61 @@
       "fetchedAt": "2026-08-17T12:23:20.289Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:carbonarc-ai-aff08baa52d3",
+      "domain": "carbonarc.ai",
+      "mcpUrl": "https://mcp.carbonarc.ai/",
+      "file": "carbonarc-ai-aff08baa52d3.svg",
+      "sourceUrl": "https://integrations.sh/logo/carbonarc.ai",
+      "sha256": "8349d4492e6df31475fc5023bb37b39146d0abbfc063a3af6cb7d2138bfe5acd",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 1932,
+      "fetchedAt": "2026-11-02T12:26:44.338Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:cartesia-ai-7e9447cc7250",
+      "domain": "cartesia.ai",
+      "mcpUrl": "https://mcp.cartesia.ai/mcp",
+      "file": "cartesia-ai-7e9447cc7250.jpg",
+      "sourceUrl": "https://integrations.sh/logo/cartesia.ai",
+      "sha256": "af79b4d76a9241a1df811e2ae52bc6195d80494d928b7ffb82cde20f91a00885",
+      "contentType": "image/jpeg",
+      "sizeBytes": 797,
+      "fetchedAt": "2026-11-02T12:26:44.366Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:chartmogul-com-06d43cc6ead0",
+      "domain": "chartmogul.com",
+      "mcpUrl": "https://mcp.chartmogul.com/",
+      "file": "chartmogul-com-06d43cc6ead0.jpg",
+      "sourceUrl": "https://integrations.sh/logo/chartmogul.com",
+      "sha256": "2377d9faf021596421ac980bb9718adec2c1aace439adc840dbef804b90dd2dd",
+      "contentType": "image/jpeg",
+      "sizeBytes": 953,
+      "fetchedAt": "2026-11-02T12:26:44.391Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:checklyhq-com-2b9affdf22ad",
+      "domain": "checklyhq.com",
+      "mcpUrl": "https://api.checklyhq.com/mcp",
+      "file": "checklyhq-com-2b9affdf22ad.jpg",
+      "sourceUrl": "https://integrations.sh/logo/checklyhq.com",
+      "sha256": "b58a8985bd4bf15bd3e2b8897ca6d47e147b30b57a50c6052af63e4065b4c8c0",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1995,
+      "fetchedAt": "2026-11-02T12:26:44.417Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:checkr-com-dbeaaa3502ed",
+      "domain": "checkr.com",
+      "mcpUrl": "https://mcp.checkr.com/",
+      "file": "checkr-com-dbeaaa3502ed.jpg",
+      "sourceUrl": "https://integrations.sh/logo/checkr.com",
+      "sha256": "c8bd83996e9384232ef96d216050144a81985f7097e1aa8ede86a38c8ed49bf6",
+      "contentType": "image/jpeg",
+      "sizeBytes": 923,
+      "fetchedAt": "2026-11-02T12:26:44.460Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:clickup-com-4fe70a38996e",
       "domain": "clickup.com",
       "mcpUrl": "https://mcp.clickup.com/mcp",
@@ -99,6 +407,28 @@
       "contentType": "image/jpeg",
       "sizeBytes": 1627,
       "fetchedAt": "2026-08-17T12:23:21.106Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:cloudasset-googleapis-com-e11a3d44d0aa",
+      "domain": "cloudasset.googleapis.com",
+      "mcpUrl": "https://cloudasset.googleapis.com/mcp",
+      "file": "cloudasset-googleapis-com-e11a3d44d0aa.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:44.502Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:clouderrorreporting-googleapis-com-55467f6aa2d6",
+      "domain": "clouderrorreporting.googleapis.com",
+      "mcpUrl": "https://clouderrorreporting.googleapis.com/mcp",
+      "file": "clouderrorreporting-googleapis-com-55467f6aa2d6.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:44.515Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:cloudflare-com-b919b9e50de1",
@@ -112,6 +442,226 @@
       "fetchedAt": "2026-08-17T12:23:21.210Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:cloudresourcemanager-googleapis-com-b338459b9d6b",
+      "domain": "cloudresourcemanager.googleapis.com",
+      "mcpUrl": "https://cloudresourcemanager.googleapis.com/mcp",
+      "file": "cloudresourcemanager-googleapis-com-b338459b9d6b.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:44.555Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:cloudsupport-googleapis-com-3925d82de396",
+      "domain": "cloudsupport.googleapis.com",
+      "mcpUrl": "https://cloudsupport.googleapis.com/mcp",
+      "file": "cloudsupport-googleapis-com-3925d82de396.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:44.567Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:cloudtrace-googleapis-com-3f3db57e9b3b",
+      "domain": "cloudtrace.googleapis.com",
+      "mcpUrl": "https://cloudtrace.googleapis.com/mcp",
+      "file": "cloudtrace-googleapis-com-3f3db57e9b3b.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:44.583Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:cobaltpf-com-98c8608406ec",
+      "domain": "cobaltpf.com",
+      "mcpUrl": "https://api.cobaltpf.com/api/mcp",
+      "file": "cobaltpf-com-98c8608406ec.png",
+      "sourceUrl": "https://integrations.sh/logo/cobaltpf.com",
+      "sha256": "78885bcdc7679c922ce6a089f134d5e66f0d30bb91e9e2bb42eb5f939f41f1a8",
+      "contentType": "image/png",
+      "sizeBytes": 1544,
+      "fetchedAt": "2026-11-02T12:26:44.605Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:cockroachlabs-com-3ed51766d6eb",
+      "domain": "cockroachlabs.com",
+      "mcpUrl": "https://cockroachlabs.cloud/mcp",
+      "file": "cockroachlabs-com-3ed51766d6eb.jpg",
+      "sourceUrl": "https://integrations.sh/logo/cockroachlabs.com",
+      "sha256": "8b94f3e6b3b2ad9e6e056b6ec77284bd638614bb4b8c70fbc6ff449c8f0a9361",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1076,
+      "fetchedAt": "2026-11-02T12:26:44.631Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:compute-googleapis-com-60bdc18bd5a1",
+      "domain": "compute.googleapis.com",
+      "mcpUrl": "https://compute.googleapis.com/mcp",
+      "file": "compute-googleapis-com-60bdc18bd5a1.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:44.646Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:contactcenterinsights-googleapis-com-75e0b70d02f0",
+      "domain": "contactcenterinsights.googleapis.com",
+      "mcpUrl": "https://contactcenterinsights.googleapis.com/mcp",
+      "file": "contactcenterinsights-googleapis-com-75e0b70d02f0.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:44.660Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:container-googleapis-com-fcfc181f4120",
+      "domain": "container.googleapis.com",
+      "mcpUrl": "https://container.googleapis.com/mcp",
+      "file": "container-googleapis-com-fcfc181f4120.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:44.675Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:crewai-com-5ea1aebf4a6f",
+      "domain": "crewai.com",
+      "mcpUrl": "https://crewai.com/mcp",
+      "file": "crewai-com-5ea1aebf4a6f.png",
+      "sourceUrl": "https://integrations.sh/logo/crewai.com",
+      "sha256": "4e8a73ef464e1f31fa86b450be3bf75a0d2f59a0ed6c74bb96e686980df3c896",
+      "contentType": "image/png",
+      "sizeBytes": 2130,
+      "fetchedAt": "2026-11-02T12:26:44.700Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:dataflow-googleapis-com-a0dc2e8dc0c2",
+      "domain": "dataflow.googleapis.com",
+      "mcpUrl": "https://dataflow.googleapis.com/mcp",
+      "file": "dataflow-googleapis-com-a0dc2e8dc0c2.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googledataflow",
+      "sha256": "9000bf7ff8de069ca02c6d20d4a76d109ec8b4d1dcc648d1b37c5f090d83d219",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 1198,
+      "fetchedAt": "2026-11-02T12:26:44.722Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:dataforseo-com-4dcbc643c2b2",
+      "domain": "dataforseo.com",
+      "mcpUrl": "https://mcp.dataforseo.com/mcp",
+      "file": "dataforseo-com-4dcbc643c2b2.png",
+      "sourceUrl": "https://integrations.sh/logo/dataforseo.com",
+      "sha256": "78a708414b267d8ebf75fe1204290f2618146ef2dd540fb789d776841d43c9e9",
+      "contentType": "image/png",
+      "sizeBytes": 2307,
+      "fetchedAt": "2026-11-02T12:26:44.745Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:dataplex-googleapis-com-7afa98c33ef3",
+      "domain": "dataplex.googleapis.com",
+      "mcpUrl": "https://dataplex.googleapis.com/mcp",
+      "file": "dataplex-googleapis-com-7afa98c33ef3.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:44.760Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:dataproc-googleapis-com-9581a304bab8",
+      "domain": "dataproc.googleapis.com",
+      "mcpUrl": "https://dataproc.googleapis.com/mcp",
+      "file": "dataproc-googleapis-com-9581a304bab8.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googledataproc",
+      "sha256": "f2b0302b0a5a24be7a73a9425ea09b59fd3139905961476f713ea8668cbe8a34",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 1216,
+      "fetchedAt": "2026-11-02T12:26:44.774Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:datastream-googleapis-com-f178e5596955",
+      "domain": "datastream.googleapis.com",
+      "mcpUrl": "https://datastream.googleapis.com/mcp",
+      "file": "datastream-googleapis-com-f178e5596955.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:44.787Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:datocms-com-3d63833e5b3d",
+      "domain": "datocms.com",
+      "mcpUrl": "https://mcp.datocms.com/",
+      "file": "datocms-com-3d63833e5b3d.svg",
+      "sourceUrl": "https://integrations.sh/logo/datocms.com",
+      "sha256": "0f2a684a72121c711d0aaba34dc98796840859c95210d7bcd25427548a2f1e36",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 2145,
+      "fetchedAt": "2026-11-02T12:26:44.812Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:decolar-com-532e550156d7",
+      "domain": "decolar.com",
+      "mcpUrl": "https://apis.despegar.com/api-b2b-flights-mcp/mcp",
+      "file": "decolar-com-532e550156d7.png",
+      "sourceUrl": "https://integrations.sh/logo/decolar.com",
+      "sha256": "a4320ff74429d3ec8424736fb16dedcecafc333e8c2c5b1261bbd97763bb79a6",
+      "contentType": "image/png",
+      "sizeBytes": 1260,
+      "fetchedAt": "2026-11-02T12:26:44.925Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:descope-com-63c1075f5b93",
+      "domain": "descope.com",
+      "mcpUrl": "https://mcp.descope.com/",
+      "file": "descope-com-63c1075f5b93.jpg",
+      "sourceUrl": "https://integrations.sh/logo/descope.com",
+      "sha256": "6340cd7d16a46a6f369edfb5bf4b29589d822055b4e4718b50d25d7810ebcca2",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1929,
+      "fetchedAt": "2026-11-02T12:26:44.950Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:dialogflow-googleapis-com-1ab4b263f745",
+      "domain": "dialogflow.googleapis.com",
+      "mcpUrl": "https://dialogflow.googleapis.com/mcp",
+      "file": "dialogflow-googleapis-com-1ab4b263f745.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/dialogflow",
+      "sha256": "fa7e564420f7b15a8ef5d62eb80a4a297d198fe5955a7d6c0e701898e692161a",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 498,
+      "fetchedAt": "2026-11-02T12:26:44.965Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:docsie-io-296b233432b9",
+      "domain": "docsie.io",
+      "mcpUrl": "https://app.docsie.io/mcp",
+      "file": "docsie-io-296b233432b9.png",
+      "sourceUrl": "https://integrations.sh/logo/docsie.io",
+      "sha256": "4dcc950151843f6c2ab83a04149b6d462c1e4b1982a9ad21edfc4b66507f7add",
+      "contentType": "image/png",
+      "sizeBytes": 544,
+      "fetchedAt": "2026-11-02T12:26:44.991Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:domotz-com-5f3e310ad729",
+      "domain": "domotz.com",
+      "mcpUrl": "https://mcp.domotz.com/mcp",
+      "file": "domotz-com-5f3e310ad729.png",
+      "sourceUrl": "https://integrations.sh/logo/domotz.com",
+      "sha256": "24d106342613fd6ef1ef70e406f44beda4594ce1836ef50a5c021e1d5f63dff4",
+      "contentType": "image/png",
+      "sizeBytes": 2709,
+      "fetchedAt": "2026-11-02T12:26:45.013Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:dropbox-com-dd40aebef204",
       "domain": "dropbox.com",
       "mcpUrl": "https://mcp.dropbox.com/chatgpt_app_mcp",
@@ -121,6 +671,138 @@
       "contentType": "image/jpeg",
       "sizeBytes": 1303,
       "fetchedAt": "2026-08-17T12:23:21.963Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:e2b-dev-49f025a12cde",
+      "domain": "e2b.dev",
+      "mcpUrl": "https://e2b.dev/mcp",
+      "file": "e2b-dev-49f025a12cde.png",
+      "sourceUrl": "https://integrations.sh/logo/e2b.dev",
+      "sha256": "c25eabbb564cb3011be6ff9c3cc80984c1dc389263983c8ccd53b671b5f7e834",
+      "contentType": "image/png",
+      "sizeBytes": 1721,
+      "fetchedAt": "2026-11-02T12:26:45.118Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:envoy-com-a97e212a9437",
+      "domain": "envoy.com",
+      "mcpUrl": "https://mcp.envoy.com/mcp",
+      "file": "envoy-com-a97e212a9437.png",
+      "sourceUrl": "https://integrations.sh/logo/envoy.com",
+      "sha256": "c2c276dc778f4fa9f7159afb0401cb200a201262db710262be93a5e5ccd9b8d3",
+      "contentType": "image/png",
+      "sizeBytes": 327,
+      "fetchedAt": "2026-11-02T12:26:45.143Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:eodhd-com-e0311af3723c",
+      "domain": "eodhd.com",
+      "mcpUrl": "https://mcp.eodhd.com/v2/mcp",
+      "file": "eodhd-com-e0311af3723c.png",
+      "sourceUrl": "https://integrations.sh/logo/eodhd.com",
+      "sha256": "0808a02081c478390c78f582b87a35425ccd14ece64d062eb41461c874731278",
+      "contentType": "image/png",
+      "sizeBytes": 3909,
+      "fetchedAt": "2026-11-02T12:26:45.168Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:faces-app-c39c48a2fbc3",
+      "domain": "faces.app",
+      "mcpUrl": "https://mcp.faces.app/mcp",
+      "file": "faces-app-c39c48a2fbc3.png",
+      "sourceUrl": "https://integrations.sh/logo/faces.app",
+      "sha256": "c9d193fa880e8f5c214139f7f3791e192428091400c9c327f5f91f3de957205e",
+      "contentType": "image/png",
+      "sizeBytes": 1246,
+      "fetchedAt": "2026-11-02T12:26:45.190Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:fal-ai-ef52d96ecfd6",
+      "domain": "fal.ai",
+      "mcpUrl": "https://mcp.fal.ai/mcp",
+      "file": "fal-ai-ef52d96ecfd6.png",
+      "sourceUrl": "https://integrations.sh/logo/fal.ai",
+      "sha256": "7bf49f3132dd9b9ebc5024ff58fed2c1a19b8407746d6765947b990473f4c0b0",
+      "contentType": "image/png",
+      "sizeBytes": 1695,
+      "fetchedAt": "2026-11-02T12:26:45.218Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:file-googleapis-com-8c7e891a0968",
+      "domain": "file.googleapis.com",
+      "mcpUrl": "https://file.googleapis.com/mcp",
+      "file": "file-googleapis-com-8c7e891a0968.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:45.232Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:financialmodelingprep-com-e83cfbfb5059",
+      "domain": "financialmodelingprep.com",
+      "mcpUrl": "https://financialmodelingprep.com/mcp",
+      "file": "financialmodelingprep-com-e83cfbfb5059.png",
+      "sourceUrl": "https://integrations.sh/logo/financialmodelingprep.com",
+      "sha256": "e1001a281e36f8779d4a63823c6cc2892bd1401558835aaaf2be7a99af98e5bf",
+      "contentType": "image/png",
+      "sizeBytes": 2169,
+      "fetchedAt": "2026-11-02T12:26:45.254Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:firestore-googleapis-com-81d455a433db",
+      "domain": "firestore.googleapis.com",
+      "mcpUrl": "https://firestore.googleapis.com/mcp",
+      "file": "firestore-googleapis-com-81d455a433db.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:45.269Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:flagsmith-com-18cba378dfd4",
+      "domain": "flagsmith.com",
+      "mcpUrl": "https://mcp.flagsmith.com/",
+      "file": "flagsmith-com-18cba378dfd4.png",
+      "sourceUrl": "https://integrations.sh/logo/flagsmith.com",
+      "sha256": "30dd737d42e40404166a9d8a2a4ce7cc88b721e751bf24c2e011aeb5c8255f83",
+      "contentType": "image/png",
+      "sizeBytes": 1303,
+      "fetchedAt": "2026-11-02T12:26:45.292Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:flarehawk-com-e2a52151c328",
+      "domain": "flarehawk.com",
+      "mcpUrl": "https://app.flarehawk.com/mcp",
+      "file": "flarehawk-com-e2a52151c328.png",
+      "sourceUrl": "https://integrations.sh/logo/flarehawk.com",
+      "sha256": "b723fa22409a3d584e80e5305ddaffbab2c59047a7cdcefb9115423bbb79735c",
+      "contentType": "image/png",
+      "sizeBytes": 1753,
+      "fetchedAt": "2026-11-02T12:26:45.318Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:framagit-org-23f24b1a503f",
+      "domain": "framagit.org",
+      "mcpUrl": "https://framagit.org/api/v4/mcp",
+      "file": "framagit-org-23f24b1a503f.jpg",
+      "sourceUrl": "https://integrations.sh/logo/framagit.org",
+      "sha256": "7770524ed2fd2cc6c8f1ab31e2088455acf15d070bc48cc3c21c4023ada7a9d4",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1409,
+      "fetchedAt": "2026-11-02T12:26:45.345Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:frankfurter-dev-2c751b4a2424",
+      "domain": "frankfurter.dev",
+      "mcpUrl": "https://mcp.frankfurter.dev/",
+      "file": "frankfurter-dev-2c751b4a2424.jpg",
+      "sourceUrl": "https://integrations.sh/logo/frankfurter.dev",
+      "sha256": "11f1fa5c44461d061d8dcc626605cc16be489ddfcf5e2fb245a9fc9953037ddd",
+      "contentType": "image/jpeg",
+      "sizeBytes": 921,
+      "fetchedAt": "2026-11-02T12:26:45.369Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:front-com-96ac210c4196",
@@ -134,6 +816,127 @@
       "fetchedAt": "2026-08-17T12:23:23.554Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:fullstory-com-1fb406e7d745",
+      "domain": "fullstory.com",
+      "mcpUrl": "https://api.fullstory.com/mcp/fullstory",
+      "file": "fullstory-com-1fb406e7d745.jpg",
+      "sourceUrl": "https://integrations.sh/logo/fullstory.com",
+      "sha256": "774b357e2953483c443cde9a67349e61bb731d04a6e30a7a8ec235b78b5a80c4",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1129,
+      "fetchedAt": "2026-11-02T12:26:45.422Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:getperseuss-com-763a8c539041",
+      "domain": "getperseuss.com",
+      "mcpUrl": "https://www.getperseuss.com/_api/mcp",
+      "file": "getperseuss-com-763a8c539041.png",
+      "sourceUrl": "https://integrations.sh/logo/getperseuss.com",
+      "sha256": "78de7ffca4779dc914182e8b160cd5744f357cbdc3ec3cba525d0f251de71690",
+      "contentType": "image/png",
+      "sizeBytes": 782,
+      "fetchedAt": "2026-11-02T12:26:45.445Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:glama-ai-17cf30399bfd",
+      "domain": "glama.ai",
+      "mcpUrl": "https://mcp-test.glama.ai/mcp",
+      "file": "glama-ai-17cf30399bfd.png",
+      "sourceUrl": "https://integrations.sh/logo/glama.ai",
+      "sha256": "72d20c7b19288952928f8b14f8a41a46dce09c68186ff2d3e4b4ef5d3185b837",
+      "contentType": "image/png",
+      "sizeBytes": 790,
+      "fetchedAt": "2026-11-02T12:26:45.487Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:glean-com-32b91bc69b01",
+      "domain": "glean.com",
+      "mcpUrl": "https://developers.glean.com/mcp",
+      "file": "glean-com-32b91bc69b01.png",
+      "sourceUrl": "https://integrations.sh/logo/glean.com",
+      "sha256": "d55f64c0aaa9b24ca787653b43bc8ad69c82dfaaa4fbd949b34c99505db4a42c",
+      "contentType": "image/png",
+      "sizeBytes": 1342,
+      "fetchedAt": "2026-11-02T12:26:45.513Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:gogs-io-81c460b3bd32",
+      "domain": "gogs.io",
+      "mcpUrl": "https://gogs.io/mcp",
+      "file": "gogs-io-81c460b3bd32.png",
+      "sourceUrl": "https://integrations.sh/logo/gogs.io",
+      "sha256": "18e04c5d44d431ce5b738099ffe1b9d4653cda35c3afb600106732c6f9a9c63c",
+      "contentType": "image/png",
+      "sizeBytes": 2946,
+      "fetchedAt": "2026-11-02T12:26:45.540Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:gohighlevel-com-1b74afe1d8bf",
+      "domain": "gohighlevel.com",
+      "mcpUrl": "https://services.leadconnectorhq.com/mcp",
+      "file": "gohighlevel-com-1b74afe1d8bf.jpg",
+      "sourceUrl": "https://integrations.sh/logo/gohighlevel.com",
+      "sha256": "e3fddf69c602b8aad87c4f5c7c421b6dc29a70402156ab0f52417fba02f7dfaf",
+      "contentType": "image/jpeg",
+      "sizeBytes": 2518,
+      "fetchedAt": "2026-11-02T12:26:45.572Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:gorgias-com-79e25fcad4ba",
+      "domain": "gorgias.com",
+      "mcpUrl": "https://mcp.gorgias.com/mcp",
+      "file": "gorgias-com-79e25fcad4ba.jpg",
+      "sourceUrl": "https://integrations.sh/logo/gorgias.com",
+      "sha256": "76224e620504f1b94866359f901c6180e73898a499e2fd5374b7523152a69021",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1018,
+      "fetchedAt": "2026-11-02T12:26:45.605Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:groundcover-com-33c3fe41230d",
+      "domain": "groundcover.com",
+      "mcpUrl": "https://mcp.groundcover.com/api/mcp",
+      "file": "groundcover-com-33c3fe41230d.png",
+      "sourceUrl": "https://integrations.sh/logo/groundcover.com",
+      "sha256": "db97c735a8a150c84abce84c43acaf82bda7f1c44906803237b3c40c7bbd4f93",
+      "contentType": "image/png",
+      "sizeBytes": 1509,
+      "fetchedAt": "2026-11-02T12:26:45.632Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:heffl-com-905fd36471b1",
+      "domain": "heffl.com",
+      "mcpUrl": "https://api.heffl.com/api/mcp",
+      "file": "heffl-com-905fd36471b1.svg",
+      "sourceUrl": "https://integrations.sh/logo/heffl.com",
+      "sha256": "5261eecce3c50acc0382fa35cfdb02f71dbe7c5b57f0a0aac625fd20df5bf806",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 5562,
+      "fetchedAt": "2026-11-02T12:26:45.656Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:hercules-app-201472ad8235",
+      "domain": "hercules.app",
+      "mcpUrl": "https://hercules.app/mcp",
+      "file": "hercules-app-201472ad8235.svg",
+      "sourceUrl": "https://integrations.sh/logo/hercules.app",
+      "sha256": "7bf5536d46f5f3310152637d511f95753f5fe1fcfdce049e33b2c61cda70529e",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 6096,
+      "fetchedAt": "2026-11-02T12:26:45.681Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:homegraph-googleapis-com-b5fb82599f94",
+      "domain": "homegraph.googleapis.com",
+      "mcpUrl": "https://homegraph.googleapis.com/mcp",
+      "file": "homegraph-googleapis-com-b5fb82599f94.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlehome",
+      "sha256": "0c0f51d930a08b7f00d415d62f21410f3b031a76f92c40ceaedef6815db212e5",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 388,
+      "fetchedAt": "2026-11-02T12:26:45.700Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:hubspot-com-5fed89a78d64",
       "domain": "hubspot.com",
       "mcpUrl": "https://mcp.hubspot.com/anthropic",
@@ -145,6 +948,28 @@
       "fetchedAt": "2026-08-17T12:23:24.273Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:incident-io-1d5e63d83a7c",
+      "domain": "incident.io",
+      "mcpUrl": "https://mcp.incident.io/mcp",
+      "file": "incident-io-1d5e63d83a7c.png",
+      "sourceUrl": "https://integrations.sh/logo/incident.io",
+      "sha256": "b6344790c6e5a21273e61598d516d1d7d2dc0527883493ea3651783bf331075f",
+      "contentType": "image/png",
+      "sizeBytes": 1302,
+      "fetchedAt": "2026-11-02T12:26:45.758Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:inline-chat-82d2ee65c8c0",
+      "domain": "inline.chat",
+      "mcpUrl": "https://mcp.inline.chat/mcp",
+      "file": "inline-chat-82d2ee65c8c0.jpg",
+      "sourceUrl": "https://integrations.sh/logo/inline.chat",
+      "sha256": "19ff6f1863a70101431292e210aa2f3fcc17d608adbdf05be19fade26d4f5ced",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1026,
+      "fetchedAt": "2026-11-02T12:26:45.781Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:intercom-io-da07368c5542",
       "domain": "intercom.io",
       "mcpUrl": "https://mcp.intercom.com/mcp",
@@ -154,6 +979,17 @@
       "contentType": "image/svg+xml",
       "sizeBytes": 2224,
       "fetchedAt": "2026-08-17T12:23:25.102Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:jaz-ai-e98f78eaea63",
+      "domain": "jaz.ai",
+      "mcpUrl": "https://mcp.jaz.ai/mcp",
+      "file": "jaz-ai-e98f78eaea63.png",
+      "sourceUrl": "https://integrations.sh/logo/jaz.ai",
+      "sha256": "40210d0330cc2469ba13e38318d46b1142865e0c69736ef987da0a13fe0d7325",
+      "contentType": "image/png",
+      "sizeBytes": 934,
+      "fetchedAt": "2026-11-02T12:26:45.828Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:jira-com-a6bbd6ecb3a6",
@@ -178,6 +1014,72 @@
       "fetchedAt": "2026-08-17T12:23:25.826Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:kaggle-com-096ac18291b1",
+      "domain": "kaggle.com",
+      "mcpUrl": "https://www.kaggle.com/mcp",
+      "file": "kaggle-com-096ac18291b1.jpg",
+      "sourceUrl": "https://integrations.sh/logo/kaggle.com",
+      "sha256": "84ecdf5dbc2a04744530561c7b1204a77a07974e6d429b8e55ea6a5e23947e8a",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1471,
+      "fetchedAt": "2026-11-02T12:26:45.898Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:kernel-sh-02d6c863d79b",
+      "domain": "kernel.sh",
+      "mcpUrl": "https://mcp.onkernel.com/mcp",
+      "file": "kernel-sh-02d6c863d79b.svg",
+      "sourceUrl": "https://integrations.sh/logo/kernel.sh",
+      "sha256": "5fb92ac41c1acb8caee9cc400177d8010e4186679ffa8e726b522ee3793a5ca0",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 3943,
+      "fetchedAt": "2026-11-02T12:26:45.924Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:kit-com-40e212c5ebb0",
+      "domain": "kit.com",
+      "mcpUrl": "https://app.kit.com/mcp",
+      "file": "kit-com-40e212c5ebb0.png",
+      "sourceUrl": "https://integrations.sh/logo/kit.com",
+      "sha256": "bc0f0549f2447165c682e8403c10e3cee4fb090f01a41ddf88eaac04037bbf1c",
+      "contentType": "image/png",
+      "sizeBytes": 580,
+      "fetchedAt": "2026-11-02T12:26:45.951Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:komoot-net-b956788c42e7",
+      "domain": "komoot.net",
+      "mcpUrl": "https://gpt.main.komoot.net/mcp",
+      "file": "komoot-net-b956788c42e7.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/komoot",
+      "sha256": "ff6acb960a5af77c5942fc7ad11a71ec507187ae6899119c0770fef29714d8b7",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 464,
+      "fetchedAt": "2026-11-02T12:26:45.967Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:langfuse-com-5f20c371eb7b",
+      "domain": "langfuse.com",
+      "mcpUrl": "https://langfuse.com/api/mcp",
+      "file": "langfuse-com-5f20c371eb7b.jpg",
+      "sourceUrl": "https://integrations.sh/logo/langfuse.com",
+      "sha256": "e852211da4ebecd07d7598467bce4c1c053e2bb6e1c152f276ee93825e9a2c61",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1837,
+      "fetchedAt": "2026-11-02T12:26:45.997Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:lemlist-com-6356e5a20822",
+      "domain": "lemlist.com",
+      "mcpUrl": "https://app.lemlist.com/mcp",
+      "file": "lemlist-com-6356e5a20822.png",
+      "sourceUrl": "https://integrations.sh/logo/lemlist.com",
+      "sha256": "30fdc9c75b7371bde98e6d8824d650ecc0d26a76ab0a76db1de6aa9f3ec4fd8c",
+      "contentType": "image/png",
+      "sizeBytes": 498,
+      "fetchedAt": "2026-11-02T12:26:46.021Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:linear-app-4b4a9f349c60",
       "domain": "linear.app",
       "mcpUrl": "https://mcp.linear.app/mcp",
@@ -187,6 +1089,149 @@
       "contentType": "image/png",
       "sizeBytes": 2048,
       "fetchedAt": "2026-08-17T12:23:25.873Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:llamaindex-ai-5bf03a74d6e4",
+      "domain": "llamaindex.ai",
+      "mcpUrl": "https://developers.llamaindex.ai/mcp",
+      "file": "llamaindex-ai-5bf03a74d6e4.svg",
+      "sourceUrl": "https://integrations.sh/logo/llamaindex.ai",
+      "sha256": "e4d4a244ffcc6af06d4231f2c916f9594ad1ac5aa0fc567fada8f1d90abe8c6c",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 59814,
+      "fetchedAt": "2026-11-02T12:26:46.071Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:lobehub-com-545aee8e0012",
+      "domain": "lobehub.com",
+      "mcpUrl": "https://lobehub.com/api/mcp",
+      "file": "lobehub-com-545aee8e0012.jpg",
+      "sourceUrl": "https://integrations.sh/logo/lobehub.com",
+      "sha256": "b27ecba17c091e5af1ccc635b563f73f86024134b1eb46698cd2cbeb43165b19",
+      "contentType": "image/jpeg",
+      "sizeBytes": 2176,
+      "fetchedAt": "2026-11-02T12:26:46.094Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:logging-googleapis-com-ce1a00ef9de3",
+      "domain": "logging.googleapis.com",
+      "mcpUrl": "https://logging.googleapis.com/mcp",
+      "file": "logging-googleapis-com-ce1a00ef9de3.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:46.108Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:logrocket-com-188708a606ab",
+      "domain": "logrocket.com",
+      "mcpUrl": "https://mcp.logrocket.com/mcp",
+      "file": "logrocket-com-188708a606ab.png",
+      "sourceUrl": "https://integrations.sh/logo/logrocket.com",
+      "sha256": "7b51267548563b73c6e4827bfd012dabf9de3b55344e37bd73580d31f62e4c03",
+      "contentType": "image/png",
+      "sizeBytes": 1467,
+      "fetchedAt": "2026-11-02T12:26:46.246Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:lucid-co-29cfe14328eb",
+      "domain": "lucid.co",
+      "mcpUrl": "https://lucid-developer-docs.readme.io/mcp",
+      "file": "lucid-co-29cfe14328eb.jpg",
+      "sourceUrl": "https://integrations.sh/logo/lucid.co",
+      "sha256": "ac5b1e15844b111b4987b163418092d0c2d63a641aa81a5e96746a75e24f36a0",
+      "contentType": "image/jpeg",
+      "sizeBytes": 634,
+      "fetchedAt": "2026-11-02T12:26:46.267Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:mailersend-com-a83e01b27db4",
+      "domain": "mailersend.com",
+      "mcpUrl": "https://mcp.mailersend.com/mcp",
+      "file": "mailersend-com-a83e01b27db4.png",
+      "sourceUrl": "https://integrations.sh/logo/mailersend.com",
+      "sha256": "ae2516a56187b208e42cd4022484e1bf430334f031c94ffd3bd54b4d02d02c97",
+      "contentType": "image/png",
+      "sizeBytes": 1258,
+      "fetchedAt": "2026-11-02T12:26:46.290Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:massive-com-2f540d34a753",
+      "domain": "massive.com",
+      "mcpUrl": "https://mcp.massive.com/",
+      "file": "massive-com-2f540d34a753.png",
+      "sourceUrl": "https://integrations.sh/logo/massive.com",
+      "sha256": "9da7a550ff26f16c8da0a867ff4a3cfb57301fd473e2cf782c7484f9b6c5a323",
+      "contentType": "image/png",
+      "sizeBytes": 4065,
+      "fetchedAt": "2026-11-02T12:26:46.311Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:meetgeek-ai-d863c80ebfd3",
+      "domain": "meetgeek.ai",
+      "mcpUrl": "https://mcp.meetgeek.ai/mcp",
+      "file": "meetgeek-ai-d863c80ebfd3.jpg",
+      "sourceUrl": "https://integrations.sh/logo/meetgeek.ai",
+      "sha256": "86f1445c0b5a934ebb9b7eb5abd6777e334b898ace343bb5ce42334a3ccdd0a2",
+      "contentType": "image/jpeg",
+      "sizeBytes": 984,
+      "fetchedAt": "2026-11-02T12:26:46.336Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:mem0-ai-f4990681eda8",
+      "domain": "mem0.ai",
+      "mcpUrl": "https://mcp.mem0.ai/mcp",
+      "file": "mem0-ai-f4990681eda8.jpg",
+      "sourceUrl": "https://integrations.sh/logo/mem0.ai",
+      "sha256": "20131a1dba10cb9975017c39a8eedcdce2b649fb1692ce0a9c1a923126e2526a",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1351,
+      "fetchedAt": "2026-11-02T12:26:46.363Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:merge-dev-231761b345a9",
+      "domain": "merge.dev",
+      "mcpUrl": "https://ah-api.merge.dev/mcp",
+      "file": "merge-dev-231761b345a9.jpg",
+      "sourceUrl": "https://integrations.sh/logo/merge.dev",
+      "sha256": "66bb749593c96fe66c08bc0601d7a37d67b6f8dc2e04af102b2ca93972ccb423",
+      "contentType": "image/jpeg",
+      "sizeBytes": 800,
+      "fetchedAt": "2026-11-02T12:26:46.388Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:migma-ai-0bcaf38bf696",
+      "domain": "migma.ai",
+      "mcpUrl": "https://migma.ai/mcp",
+      "file": "migma-ai-0bcaf38bf696.png",
+      "sourceUrl": "https://integrations.sh/logo/migma.ai",
+      "sha256": "885446f79707ea5f1daf2ce7d056845fe7d14b861c1e2ac24c6176f737187eb5",
+      "contentType": "image/png",
+      "sizeBytes": 296,
+      "fetchedAt": "2026-11-02T12:26:46.413Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:mintlify-com-99251da7efc9",
+      "domain": "mintlify.com",
+      "mcpUrl": "https://mintlify.com/mcp",
+      "file": "mintlify-com-99251da7efc9.png",
+      "sourceUrl": "https://integrations.sh/logo/mintlify.com",
+      "sha256": "9997c42e63bcec2a7dbf3bb53086ce38eb348abc6a51851a7008cb003cefed3d",
+      "contentType": "image/png",
+      "sizeBytes": 3455,
+      "fetchedAt": "2026-11-02T12:26:46.437Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:mollie-com-6595d51a4c3d",
+      "domain": "mollie.com",
+      "mcpUrl": "https://mcp.mollie.com/mcp",
+      "file": "mollie-com-6595d51a4c3d.jpg",
+      "sourceUrl": "https://integrations.sh/logo/mollie.com",
+      "sha256": "f4c622a89336ecc78e136c0f1901d580149b65554f3b4a77b4eec28b967d5656",
+      "contentType": "image/jpeg",
+      "sizeBytes": 684,
+      "fetchedAt": "2026-11-02T12:26:46.466Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:monday-com-904a88cfa351",
@@ -200,6 +1245,61 @@
       "fetchedAt": "2026-08-17T12:23:26.538Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:mux-com-8afc788ad0f1",
+      "domain": "mux.com",
+      "mcpUrl": "https://mcp.mux.com/",
+      "file": "mux-com-8afc788ad0f1.jpg",
+      "sourceUrl": "https://integrations.sh/logo/mux.com",
+      "sha256": "15dc10cf2ab3d56e52661c24de29895256633b6d646ad5b14e074a75f749d143",
+      "contentType": "image/jpeg",
+      "sizeBytes": 673,
+      "fetchedAt": "2026-11-02T12:26:46.515Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:natural-co-6fb6b24dd666",
+      "domain": "natural.co",
+      "mcpUrl": "https://mcp.natural.co/",
+      "file": "natural-co-6fb6b24dd666.png",
+      "sourceUrl": "https://integrations.sh/logo/natural.co",
+      "sha256": "0cfe7fc4499bd7a0017c8341ec5ef7951b5f1b18106eb25d030b126986b94537",
+      "contentType": "image/png",
+      "sizeBytes": 662,
+      "fetchedAt": "2026-11-02T12:26:46.540Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:netlify-mcp-netlify-app-9a903ebfa7ca",
+      "domain": "netlify-mcp.netlify.app",
+      "mcpUrl": "https://netlify-mcp.netlify.app/mcp",
+      "file": "netlify-mcp-netlify-app-9a903ebfa7ca.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/netlify",
+      "sha256": "f2d591c3a629c6ff7fa122646710526ed711584890dc1aeb9e864c2746f973f1",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 671,
+      "fetchedAt": "2026-11-02T12:26:46.558Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:networkmanagement-googleapis-com-0bf610aab67e",
+      "domain": "networkmanagement.googleapis.com",
+      "mcpUrl": "https://networkmanagement.googleapis.com/mcp",
+      "file": "networkmanagement-googleapis-com-0bf610aab67e.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:46.578Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:newrelic-com-0c6e7f229b29",
+      "domain": "newrelic.com",
+      "mcpUrl": "https://mcp.newrelic.com/mcp",
+      "file": "newrelic-com-0c6e7f229b29.png",
+      "sourceUrl": "https://integrations.sh/logo/newrelic.com",
+      "sha256": "e2a1676eb078588d6d5fa9deac80b91092b3bec23fb370f59aca4f10430590d9",
+      "contentType": "image/png",
+      "sizeBytes": 1494,
+      "fetchedAt": "2026-11-02T12:26:46.605Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:notion-com-3b56ae2f8166",
       "domain": "notion.com",
       "mcpUrl": "https://mcp.notion.com/mcp",
@@ -209,6 +1309,61 @@
       "contentType": "image/png",
       "sizeBytes": 1013,
       "fetchedAt": "2026-08-17T12:23:27.228Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:nuxt-com-f7d3957d102e",
+      "domain": "nuxt.com",
+      "mcpUrl": "https://nuxt.com/mcp",
+      "file": "nuxt-com-f7d3957d102e.png",
+      "sourceUrl": "https://integrations.sh/logo/nuxt.com",
+      "sha256": "6adc2ccc881c7c79004486bf588500f79c01d3b7d5248ab50a504b5a013408b6",
+      "contentType": "image/png",
+      "sizeBytes": 2975,
+      "fetchedAt": "2026-11-02T12:26:46.656Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:oneuptime-com-6adbc5c21c23",
+      "domain": "oneuptime.com",
+      "mcpUrl": "https://oneuptime.com/mcp",
+      "file": "oneuptime-com-6adbc5c21c23.svg",
+      "sourceUrl": "https://integrations.sh/logo/oneuptime.com",
+      "sha256": "723484c91e2a70acc7d74881eb1bea319bf9924631af62b682f03c589e2df6c0",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 1577,
+      "fetchedAt": "2026-11-02T12:26:46.688Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:openlens-com-830c6e1dc445",
+      "domain": "openlens.com",
+      "mcpUrl": "https://openlens.com/mcp",
+      "file": "openlens-com-830c6e1dc445.png",
+      "sourceUrl": "https://integrations.sh/logo/openlens.com",
+      "sha256": "6e7c16264900a9588212bdebc480c98b594267a565bff29091cf2c81e461c825",
+      "contentType": "image/png",
+      "sizeBytes": 1320,
+      "fetchedAt": "2026-11-02T12:26:46.713Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:openrouter-ai-78a8e8a21de8",
+      "domain": "openrouter.ai",
+      "mcpUrl": "https://mcp.openrouter.ai/mcp",
+      "file": "openrouter-ai-78a8e8a21de8.jpg",
+      "sourceUrl": "https://integrations.sh/logo/openrouter.ai",
+      "sha256": "02d52c21c4ae2e7ab1e3e8a91ea76b8e43a10e0626818dd1e8957f33fa9eead5",
+      "contentType": "image/jpeg",
+      "sizeBytes": 828,
+      "fetchedAt": "2026-11-02T12:26:46.758Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:orgpolicy-googleapis-com-a3b8f6632a8c",
+      "domain": "orgpolicy.googleapis.com",
+      "mcpUrl": "https://orgpolicy.googleapis.com/mcp",
+      "file": "orgpolicy-googleapis-com-a3b8f6632a8c.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:46.773Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:otter-ai-267868cd7ecd",
@@ -222,6 +1377,17 @@
       "fetchedAt": "2026-08-17T12:23:28.037Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:paddle-com-eb53a258e727",
+      "domain": "paddle.com",
+      "mcpUrl": "https://paddlehq.mcp.kapa.ai/",
+      "file": "paddle-com-eb53a258e727.jpg",
+      "sourceUrl": "https://integrations.sh/logo/paddle.com",
+      "sha256": "21a108e627e56cc7fa79e3cce76ae33d8c7cb8ce97a7d18f12d7d68279166281",
+      "contentType": "image/jpeg",
+      "sizeBytes": 737,
+      "fetchedAt": "2026-11-02T12:26:46.821Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:pagerduty-com-92b0294f2c3f",
       "domain": "pagerduty.com",
       "mcpUrl": "https://mcp.pagerduty.com/mcp",
@@ -231,6 +1397,17 @@
       "contentType": "image/png",
       "sizeBytes": 934,
       "fetchedAt": "2026-08-17T12:23:28.722Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:pandadoc-com-ea6529d73f4a",
+      "domain": "pandadoc.com",
+      "mcpUrl": "https://mcp.pandadoc.com/v1/mcp",
+      "file": "pandadoc-com-ea6529d73f4a.jpg",
+      "sourceUrl": "https://integrations.sh/logo/pandadoc.com",
+      "sha256": "aaaaef19fff427833357c26702581ef730dcbc5b4528a62e11bf5e5b4b565170",
+      "contentType": "image/jpeg",
+      "sizeBytes": 709,
+      "fetchedAt": "2026-11-02T12:26:46.875Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:paypal-com-06db64cb4158",
@@ -244,6 +1421,72 @@
       "fetchedAt": "2026-08-17T12:23:29.377Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:people-googleapis-com-90977e7380ce",
+      "domain": "people.googleapis.com",
+      "mcpUrl": "https://people.googleapis.com/mcp/v1",
+      "file": "people-googleapis-com-90977e7380ce.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/google",
+      "sha256": "147b64b183daad84440103815845150903f6175357419b0ccf2e5a6b622e62fa",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 472,
+      "fetchedAt": "2026-11-02T12:26:46.929Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:perplexity-ai-8a36e710caac",
+      "domain": "perplexity.ai",
+      "mcpUrl": "https://www.perplexity.ai/rest/computer/mcp",
+      "file": "perplexity-ai-8a36e710caac.png",
+      "sourceUrl": "https://integrations.sh/logo/perplexity.ai",
+      "sha256": "414824192767eb3b697b32db66344f2299b066a669d12bfec69ab55f396093cb",
+      "contentType": "image/png",
+      "sizeBytes": 2726,
+      "fetchedAt": "2026-11-02T12:26:46.955Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:plain-com-b9e0cd9642ce",
+      "domain": "plain.com",
+      "mcpUrl": "https://mcp.plain.com/mcp",
+      "file": "plain-com-b9e0cd9642ce.jpg",
+      "sourceUrl": "https://integrations.sh/logo/plain.com",
+      "sha256": "9282634f17e08a290553d23a88a3c9e6fea2e93ded53683c6335824505f5e311",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1030,
+      "fetchedAt": "2026-11-02T12:26:46.988Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:playdeveloperreporting-googleapis-com-a53157a3f80b",
+      "domain": "playdeveloperreporting.googleapis.com",
+      "mcpUrl": "https://playdeveloperreporting.googleapis.com/mcp",
+      "file": "playdeveloperreporting-googleapis-com-a53157a3f80b.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googleplay",
+      "sha256": "b9144b1db526e2bcf8fd9b87e8ee543eec8e839b0b14e1c10149fe8a5657dba1",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 454,
+      "fetchedAt": "2026-11-02T12:26:47.006Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:polar-sh-576398b7c7af",
+      "domain": "polar.sh",
+      "mcpUrl": "https://mcp.polar.sh/mcp/polar-mcp",
+      "file": "polar-sh-576398b7c7af.jpg",
+      "sourceUrl": "https://integrations.sh/logo/polar.sh",
+      "sha256": "77c98198dce738b79dd69761f41c0b9044cbf28ba5d3f2e02a542ac2944d0b26",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1789,
+      "fetchedAt": "2026-11-02T12:26:47.034Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:policytroubleshooter-googleapis-com-e0264b6ce2d8",
+      "domain": "policytroubleshooter.googleapis.com",
+      "mcpUrl": "https://policytroubleshooter.googleapis.com/mcp",
+      "file": "policytroubleshooter-googleapis-com-e0264b6ce2d8.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:47.048Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:posthog-com-bc08ccdbe582",
       "domain": "posthog.com",
       "mcpUrl": "https://mcp.posthog.com/mcp",
@@ -253,6 +1496,237 @@
       "contentType": "image/jpeg",
       "sizeBytes": 1460,
       "fetchedAt": "2026-08-17T12:23:30.018Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:prisma-io-540ab3104d62",
+      "domain": "prisma.io",
+      "mcpUrl": "https://mcp.prisma.io/mcp",
+      "file": "prisma-io-540ab3104d62.jpg",
+      "sourceUrl": "https://integrations.sh/logo/prisma.io",
+      "sha256": "19cc90b2bc96038fb0b2795ab3fb78f9be18ac75c7ffbfa916a425f91280b0d3",
+      "contentType": "image/jpeg",
+      "sizeBytes": 822,
+      "fetchedAt": "2026-11-02T12:26:47.096Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:prismic-io-b3108c8b0fe3",
+      "domain": "prismic.io",
+      "mcpUrl": "https://mcp.prismic.io/mcp",
+      "file": "prismic-io-b3108c8b0fe3.svg",
+      "sourceUrl": "https://integrations.sh/logo/prismic.io",
+      "sha256": "6e91165fc8d169507ff923910ce20401e288b2a4879e74394866daffb4b3d7ed",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 2870,
+      "fetchedAt": "2026-11-02T12:26:47.121Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:productboard-com-5452d287fc85",
+      "domain": "productboard.com",
+      "mcpUrl": "https://mcp.productboard.com/",
+      "file": "productboard-com-5452d287fc85.jpg",
+      "sourceUrl": "https://integrations.sh/logo/productboard.com",
+      "sha256": "138f8ebbb11ec8d4e6030d9205b85c7f16ace979fa76f9deab63a57262efe06a",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1040,
+      "fetchedAt": "2026-11-02T12:26:47.146Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:pubnub-com-de12e61e80f3",
+      "domain": "pubnub.com",
+      "mcpUrl": "https://mcp.pubnub.com/",
+      "file": "pubnub-com-de12e61e80f3.jpg",
+      "sourceUrl": "https://integrations.sh/logo/pubnub.com",
+      "sha256": "2a033fabd82d56a62efa55495e1e1a6ca4de6a2152fb6b0fe16c986894be4aca",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1200,
+      "fetchedAt": "2026-11-02T12:26:47.169Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:pubsub-googleapis-com-327ac269666f",
+      "domain": "pubsub.googleapis.com",
+      "mcpUrl": "https://pubsub.googleapis.com/mcp",
+      "file": "pubsub-googleapis-com-327ac269666f.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlepubsub",
+      "sha256": "992a927d19b88dc0f9c5a86cc4d22ddba91ebe7c9e1839064e6f1670eb8744d2",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 1592,
+      "fetchedAt": "2026-11-02T12:26:47.185Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:pumadb-ai-1006ddbeab47",
+      "domain": "pumadb.ai",
+      "mcpUrl": "https://api.pumadb.ai/mcp",
+      "file": "pumadb-ai-1006ddbeab47.jpg",
+      "sourceUrl": "https://integrations.sh/logo/pumadb.ai",
+      "sha256": "a9bb9b9894e6faa417eca743bb3ee2d169db23f2bfacfd1a14f14c3299344b2a",
+      "contentType": "image/jpeg",
+      "sizeBytes": 3052,
+      "fetchedAt": "2026-11-02T12:26:47.209Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:qovery-com-301be0d2e32b",
+      "domain": "qovery.com",
+      "mcpUrl": "https://mcp.qovery.com/mcp",
+      "file": "qovery-com-301be0d2e32b.png",
+      "sourceUrl": "https://integrations.sh/logo/qovery.com",
+      "sha256": "c9eac41e563eec836ce480eda99ebca04ea47d3b6af19b4d7d78520fff312176",
+      "contentType": "image/png",
+      "sizeBytes": 1393,
+      "fetchedAt": "2026-11-02T12:26:47.231Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:quiver-ai-7c6dcc5b6c81",
+      "domain": "quiver.ai",
+      "mcpUrl": "https://app.quiver.ai/mcp",
+      "file": "quiver-ai-7c6dcc5b6c81.png",
+      "sourceUrl": "https://integrations.sh/logo/quiver.ai",
+      "sha256": "986bc2c7e885a14ab9f964b8b2ce29cfd27c12d6b179f7e8c5d7cb4ef53c6860",
+      "contentType": "image/png",
+      "sizeBytes": 1550,
+      "fetchedAt": "2026-11-02T12:26:47.277Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:recommender-googleapis-com-8fb4c6ddda22",
+      "domain": "recommender.googleapis.com",
+      "mcpUrl": "https://recommender.googleapis.com/mcp",
+      "file": "recommender-googleapis-com-8fb4c6ddda22.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:47.291Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:redis-googleapis-com-04ee9f872b08",
+      "domain": "redis.googleapis.com",
+      "mcpUrl": "https://redis.googleapis.com/mcp",
+      "file": "redis-googleapis-com-04ee9f872b08.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:47.306Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:redocly-com-45b4adec3b1e",
+      "domain": "redocly.com",
+      "mcpUrl": "https://redocly.com/mcp",
+      "file": "redocly-com-45b4adec3b1e.png",
+      "sourceUrl": "https://integrations.sh/logo/redocly.com",
+      "sha256": "bd69f0ee3243f7770ac7db48dd161f5180bd4a82f1916c4f790c719f7a6b3abb",
+      "contentType": "image/png",
+      "sizeBytes": 2861,
+      "fetchedAt": "2026-11-02T12:26:47.329Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:redoxengine-com-451795ffa01f",
+      "domain": "redoxengine.com",
+      "mcpUrl": "https://api.redoxengine.com/mcp",
+      "file": "redoxengine-com-451795ffa01f.jpg",
+      "sourceUrl": "https://integrations.sh/logo/redoxengine.com",
+      "sha256": "dd74ee646432d851b98a1ba2583da48bba0f4d00012d1d645b763d5842c0b7bb",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1009,
+      "fetchedAt": "2026-11-02T12:26:47.353Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:reducto-ai-f9c9ab5e0ef5",
+      "domain": "reducto.ai",
+      "mcpUrl": "https://docs.reducto.ai/mcp",
+      "file": "reducto-ai-f9c9ab5e0ef5.jpg",
+      "sourceUrl": "https://integrations.sh/logo/reducto.ai",
+      "sha256": "942f05c655bd54bf4db2fa0e54ce9818ba2ebcbeeb4e7ee405d4b0aa5f5c3c33",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1426,
+      "fetchedAt": "2026-11-02T12:26:47.380Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:remote-com-7941b70a50d4",
+      "domain": "remote.com",
+      "mcpUrl": "https://mcp.remote.com/mcp",
+      "file": "remote-com-7941b70a50d4.png",
+      "sourceUrl": "https://integrations.sh/logo/remote.com",
+      "sha256": "767eba8f1227d2419f8df25453fee50e892846881ae628c6eadf032aa9c576a8",
+      "contentType": "image/png",
+      "sizeBytes": 1061,
+      "fetchedAt": "2026-11-02T12:26:47.405Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:researchsolutions-com-4c9b5f9ddcaf",
+      "domain": "researchsolutions.com",
+      "mcpUrl": "https://mcp.articlegalaxy.com/ag/mcp",
+      "file": "researchsolutions-com-4c9b5f9ddcaf.svg",
+      "sourceUrl": "https://integrations.sh/logo/researchsolutions.com",
+      "sha256": "246921ea42e447c37809f35b7f4cc3968bdc4c4981a523e7395b184d2885c29b",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 2089,
+      "fetchedAt": "2026-11-02T12:26:47.428Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:resend-com-d3733059afa6",
+      "domain": "resend.com",
+      "mcpUrl": "https://mcp.resend.com/",
+      "file": "resend-com-d3733059afa6.jpg",
+      "sourceUrl": "https://integrations.sh/logo/resend.com",
+      "sha256": "24be7f97647d20d487d3466285e811e194c6dc93afb7fc5c5e88b12f4ac3562b",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1668,
+      "fetchedAt": "2026-11-02T12:26:47.453Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:rootly-com-ced2876f288b",
+      "domain": "rootly.com",
+      "mcpUrl": "https://mcp.rootly.com/mcp",
+      "file": "rootly-com-ced2876f288b.png",
+      "sourceUrl": "https://integrations.sh/logo/rootly.com",
+      "sha256": "929c0830bca5c66dd1103bf51fb9fbe5383afe862585e7e1e363653c87ed97c9",
+      "contentType": "image/png",
+      "sizeBytes": 1633,
+      "fetchedAt": "2026-11-02T12:26:47.476Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:run-googleapis-com-e113fda4940a",
+      "domain": "run.googleapis.com",
+      "mcpUrl": "https://run.googleapis.com/mcp",
+      "file": "run-googleapis-com-e113fda4940a.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:47.499Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:scalar-com-8e3d4c7a8a4b",
+      "domain": "scalar.com",
+      "mcpUrl": "https://scalar.com/mcp",
+      "file": "scalar-com-8e3d4c7a8a4b.png",
+      "sourceUrl": "https://integrations.sh/logo/scalar.com",
+      "sha256": "babca1f6198798409cb283baf7496fef62dcbe98551b36977c2750a1651d0663",
+      "contentType": "image/png",
+      "sizeBytes": 2700,
+      "fetchedAt": "2026-11-02T12:26:47.526Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:searchconsole-googleapis-com-3e3dfe26964c",
+      "domain": "searchconsole.googleapis.com",
+      "mcpUrl": "https://searchconsole.googleapis.com/mcp",
+      "file": "searchconsole-googleapis-com-3e3dfe26964c.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlesearchconsole",
+      "sha256": "a5a26ad81a74be748fe6f417b85c79cddaf4d61a88b3bf5d27aaea36315f11c2",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 1083,
+      "fetchedAt": "2026-11-02T12:26:47.555Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:semaphoreci-com-ea0dadb8c877",
+      "domain": "semaphoreci.com",
+      "mcpUrl": "https://mcp.semaphoreci.com/mcp",
+      "file": "semaphoreci-com-ea0dadb8c877.png",
+      "sourceUrl": "https://integrations.sh/logo/semaphoreci.com",
+      "sha256": "d5c5af883b212c0fdf42370f7f64dc3a262787140980303c1997937496e69d1b",
+      "contentType": "image/png",
+      "sizeBytes": 1509,
+      "fetchedAt": "2026-11-02T12:26:47.581Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:semrush-com-4a80242645fd",
@@ -277,6 +1751,50 @@
       "fetchedAt": "2026-08-17T12:23:31.452Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:shortcut-com-ed3ab6ee592f",
+      "domain": "shortcut.com",
+      "mcpUrl": "https://mcp.shortcut.com/mcp",
+      "file": "shortcut-com-ed3ab6ee592f.png",
+      "sourceUrl": "https://integrations.sh/logo/shortcut.com",
+      "sha256": "bd8b2bc8c6a0e1a663697f87917caaae246cfd2310cae952d2caf01121ed206a",
+      "contentType": "image/png",
+      "sizeBytes": 1878,
+      "fetchedAt": "2026-11-02T12:26:47.654Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:sigmacomputing-com-272162c7906c",
+      "domain": "sigmacomputing.com",
+      "mcpUrl": "https://help.sigmacomputing.com/mcp",
+      "file": "sigmacomputing-com-272162c7906c.jpg",
+      "sourceUrl": "https://integrations.sh/logo/sigmacomputing.com",
+      "sha256": "6b8474aec43a5f96734506407d77b431ff44a17681a4084f9c97a56d662680cb",
+      "contentType": "image/jpeg",
+      "sizeBytes": 909,
+      "fetchedAt": "2026-11-02T12:26:47.678Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:signoz-io-d778cd52533d",
+      "domain": "signoz.io",
+      "mcpUrl": "https://mcp.us.signoz.cloud/mcp",
+      "file": "signoz-io-d778cd52533d.jpg",
+      "sourceUrl": "https://integrations.sh/logo/signoz.io",
+      "sha256": "b97da91bc8397c03ce5404c1825076f12b88f2fcd2894105427d86e78f58cec3",
+      "contentType": "image/jpeg",
+      "sizeBytes": 2112,
+      "fetchedAt": "2026-11-02T12:26:47.702Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:skipcalls-com-2e73749c2910",
+      "domain": "skipcalls.com",
+      "mcpUrl": "https://be.skipcalls.com/mcp",
+      "file": "skipcalls-com-2e73749c2910.png",
+      "sourceUrl": "https://integrations.sh/logo/skipcalls.com",
+      "sha256": "d7832373fcb32684643a1c9daecfec86032db3c73776348ab055fe93e87edef2",
+      "contentType": "image/png",
+      "sizeBytes": 1676,
+      "fetchedAt": "2026-11-02T12:26:47.728Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:slack-com-5a15dccc0dc0",
       "domain": "slack.com",
       "mcpUrl": "https://mcp.slack.com/mcp",
@@ -286,6 +1804,83 @@
       "contentType": "image/jpeg",
       "sizeBytes": 1444,
       "fetchedAt": "2026-08-17T12:23:31.592Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:slidesgpt-com-3ee5b3d3c8eb",
+      "domain": "slidesgpt.com",
+      "mcpUrl": "https://mcp.slidesgpt.com/mcp",
+      "file": "slidesgpt-com-3ee5b3d3c8eb.png",
+      "sourceUrl": "https://integrations.sh/logo/slidesgpt.com",
+      "sha256": "3246fa1cba39a97c4f795d13cf53392d9e55ac60569d2837624a7b558bb0ab2c",
+      "contentType": "image/png",
+      "sizeBytes": 998,
+      "fetchedAt": "2026-11-02T12:26:47.777Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:smartbear-com-91f2d5d78361",
+      "domain": "smartbear.com",
+      "mcpUrl": "https://bugsnag.mcp.smartbear.com/mcp",
+      "file": "smartbear-com-91f2d5d78361.jpg",
+      "sourceUrl": "https://integrations.sh/logo/smartbear.com",
+      "sha256": "45d5aab9f72e15fbb2086e18cc7fdb65bfdeea4bc40399f21d612f43295bb557",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1243,
+      "fetchedAt": "2026-11-02T12:26:47.805Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:sourcegraph-com-02b98691fe56",
+      "domain": "sourcegraph.com",
+      "mcpUrl": "https://sourcegraph.com/.api/mcp",
+      "file": "sourcegraph-com-02b98691fe56.jpg",
+      "sourceUrl": "https://integrations.sh/logo/sourcegraph.com",
+      "sha256": "0d1f9afde2a209febf088f3c12369828746b9738f1566529babebf8bba908f1e",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1182,
+      "fetchedAt": "2026-11-02T12:26:47.831Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:spanner-googleapis-com-4e77d311457e",
+      "domain": "spanner.googleapis.com",
+      "mcpUrl": "https://spanner.googleapis.com/mcp",
+      "file": "spanner-googleapis-com-4e77d311457e.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloudspanner",
+      "sha256": "4b0deca24beb89f399a4da6648f6ad75e07d9ed4a3765f3daf67eb5032af0c74",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 644,
+      "fetchedAt": "2026-11-02T12:26:47.855Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:spreedly-com-a64d4f4de321",
+      "domain": "spreedly.com",
+      "mcpUrl": "https://developer.spreedly.com/mcp",
+      "file": "spreedly-com-a64d4f4de321.png",
+      "sourceUrl": "https://integrations.sh/logo/spreedly.com",
+      "sha256": "896e665f0287838fa50685b6e46614ad3815595cc911f16517d8a4a08059f4c3",
+      "contentType": "image/png",
+      "sizeBytes": 1548,
+      "fetchedAt": "2026-11-02T12:26:47.885Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:sqladmin-googleapis-com-7cad1653e1ea",
+      "domain": "sqladmin.googleapis.com",
+      "mcpUrl": "https://sqladmin.googleapis.com/mcp",
+      "file": "sqladmin-googleapis-com-7cad1653e1ea.svg",
+      "sourceUrl": "https://cdn.simpleicons.org/googlecloud",
+      "sha256": "eb848405c6a1ed56510e7cc88ffe6e2e12cd8331be4b0c8c31048d0b0e6d53a9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 698,
+      "fetchedAt": "2026-11-02T12:26:47.899Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:strapi-io-f1d0fb8a3cf6",
+      "domain": "strapi.io",
+      "mcpUrl": "https://strapi-docs.mcp.kapa.ai/",
+      "file": "strapi-io-f1d0fb8a3cf6.jpg",
+      "sourceUrl": "https://integrations.sh/logo/strapi.io",
+      "sha256": "c67b43b050a4ec02cd81c177da3009889b60e643f8a8e6aacbbabb77608e7e61",
+      "contentType": "image/jpeg",
+      "sizeBytes": 691,
+      "fetchedAt": "2026-11-02T12:26:47.927Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:stripe-com-fc4362cd0a16",
@@ -299,6 +1894,17 @@
       "fetchedAt": "2026-08-17T12:23:32.257Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:substack-com-4aae8f195596",
+      "domain": "substack.com",
+      "mcpUrl": "https://mcp.substack.com/api/v1/mcp",
+      "file": "substack-com-4aae8f195596.png",
+      "sourceUrl": "https://integrations.sh/logo/substack.com",
+      "sha256": "510a8b0965e795169b34439c4076d147de2a6f2d02baff9fe9d8802db7befb4a",
+      "contentType": "image/png",
+      "sizeBytes": 1122,
+      "fetchedAt": "2026-11-02T12:26:47.979Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:supabase-com-34ed9dcf1390",
       "domain": "supabase.com",
       "mcpUrl": "https://mcp.supabase.com/mcp",
@@ -308,6 +1914,149 @@
       "contentType": "image/jpeg",
       "sizeBytes": 782,
       "fetchedAt": "2026-08-17T12:23:32.335Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:synapse-org-712097e99aa4",
+      "domain": "synapse.org",
+      "mcpUrl": "https://mcp.synapse.org/mcp",
+      "file": "synapse-org-712097e99aa4.png",
+      "sourceUrl": "https://integrations.sh/logo/synapse.org",
+      "sha256": "c44da5f715fa8d0a185e84789b2777bd34ca530d38980ade7a2998071ba59edb",
+      "contentType": "image/png",
+      "sizeBytes": 2018,
+      "fetchedAt": "2026-11-02T12:26:48.032Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:tally-so-08530f2534b6",
+      "domain": "tally.so",
+      "mcpUrl": "https://api.tally.so/mcp",
+      "file": "tally-so-08530f2534b6.jpg",
+      "sourceUrl": "https://integrations.sh/logo/tally.so",
+      "sha256": "ec6b82aca4ed38a0beb4c7092754f92547bd58f974cec00c95e1653e74d89e92",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1233,
+      "fetchedAt": "2026-11-02T12:26:48.060Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:tigrisdata-com-add53f8b67fb",
+      "domain": "tigrisdata.com",
+      "mcpUrl": "https://mcp.storage.dev/mcp",
+      "file": "tigrisdata-com-add53f8b67fb.jpg",
+      "sourceUrl": "https://integrations.sh/logo/tigrisdata.com",
+      "sha256": "10bafe669cdfe36e2460332654ddd43a2fd9bf22eca7657e800f9e006476d34c",
+      "contentType": "image/jpeg",
+      "sizeBytes": 968,
+      "fetchedAt": "2026-11-02T12:26:48.098Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:tray-ai-8e430c909957",
+      "domain": "tray.ai",
+      "mcpUrl": "https://api.tray.io/mcp",
+      "file": "tray-ai-8e430c909957.jpg",
+      "sourceUrl": "https://integrations.sh/logo/tray.ai",
+      "sha256": "65924e6aff901faea1b24f78a17ebacfb347751cdad2dbd86ac493d9d188d7e8",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1407,
+      "fetchedAt": "2026-11-02T12:26:48.121Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:trykopi-ai-966815e5ba16",
+      "domain": "trykopi.ai",
+      "mcpUrl": "https://www.trykopi.ai/mcp",
+      "file": "trykopi-ai-966815e5ba16.png",
+      "sourceUrl": "https://integrations.sh/logo/trykopi.ai",
+      "sha256": "c279c37442562edf9861339e0387c01af8b9feaf849df2256ca58a5f67836b40",
+      "contentType": "image/png",
+      "sizeBytes": 2885,
+      "fetchedAt": "2026-11-02T12:26:48.146Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:tuist-dev-29911082cf7a",
+      "domain": "tuist.dev",
+      "mcpUrl": "https://tuist.dev/mcp",
+      "file": "tuist-dev-29911082cf7a.svg",
+      "sourceUrl": "https://integrations.sh/logo/tuist.dev",
+      "sha256": "b073ab705867f651172773fe35fb9c8c80d52627efb6c303b870a37be6d588c0",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 3429,
+      "fetchedAt": "2026-11-02T12:26:48.173Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:turso-tech-e569b265a104",
+      "domain": "turso.tech",
+      "mcpUrl": "https://mcp.turso.ai/mcp",
+      "file": "turso-tech-e569b265a104.png",
+      "sourceUrl": "https://integrations.sh/logo/turso.tech",
+      "sha256": "0c0540c3190eac79973f122aad7295058bdcadac9b519f1fe2310e2b03ed0eee",
+      "contentType": "image/png",
+      "sizeBytes": 1256,
+      "fetchedAt": "2026-11-02T12:26:48.199Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:ubersuggest-com-d1d2ee525c3a",
+      "domain": "ubersuggest.com",
+      "mcpUrl": "https://ubersuggest-mcp.neilpatelapi.com/mcp",
+      "file": "ubersuggest-com-d1d2ee525c3a.svg",
+      "sourceUrl": "https://integrations.sh/logo/ubersuggest.com",
+      "sha256": "ed3d8b640b6d557f160b4bb2d877dd3097491f22dedf0d083a14dfb722ff54e9",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 2820,
+      "fetchedAt": "2026-11-02T12:26:48.227Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:ui-nuxt-com-f440c8ce75c8",
+      "domain": "ui.nuxt.com",
+      "mcpUrl": "https://ui.nuxt.com/mcp",
+      "file": "ui-nuxt-com-f440c8ce75c8.png",
+      "sourceUrl": "https://integrations.sh/logo/nuxt.com",
+      "sha256": "6adc2ccc881c7c79004486bf588500f79c01d3b7d5248ab50a504b5a013408b6",
+      "contentType": "image/png",
+      "sizeBytes": 2975,
+      "fetchedAt": "2026-11-02T12:26:48.249Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:upsun-com-ecec96cbc2f0",
+      "domain": "upsun.com",
+      "mcpUrl": "https://mcp.upsun.com/mcp",
+      "file": "upsun-com-ecec96cbc2f0.png",
+      "sourceUrl": "https://integrations.sh/logo/upsun.com",
+      "sha256": "79237fca3a4353c471703b9b4849266e9b2c65af784a0bf8ffb12f9f54c7d9e7",
+      "contentType": "image/png",
+      "sizeBytes": 1225,
+      "fetchedAt": "2026-11-02T12:26:48.277Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:uptimerobot-com-8d4235045896",
+      "domain": "uptimerobot.com",
+      "mcpUrl": "https://mcp.uptimerobot.com/mcp",
+      "file": "uptimerobot-com-8d4235045896.png",
+      "sourceUrl": "https://integrations.sh/logo/uptimerobot.com",
+      "sha256": "0688b247131da17c6233b9e4eaf644c3791a7a4d9ee27c2888720245956435b3",
+      "contentType": "image/png",
+      "sizeBytes": 1573,
+      "fetchedAt": "2026-11-02T12:26:48.301Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:usenotra-com-eec2f8e2964c",
+      "domain": "usenotra.com",
+      "mcpUrl": "https://mcp.usenotra.com/mcp",
+      "file": "usenotra-com-eec2f8e2964c.svg",
+      "sourceUrl": "https://integrations.sh/logo/usenotra.com",
+      "sha256": "48c473b00f37fb77fdcca6245c93ff128543111c9d21f7669bbd4a634c817c55",
+      "contentType": "image/svg+xml",
+      "sizeBytes": 655,
+      "fetchedAt": "2026-11-02T12:26:48.325Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:vectorize-io-c19b9d7dfd39",
+      "domain": "vectorize.io",
+      "mcpUrl": "https://api.hindsight.vectorize.io/mcp",
+      "file": "vectorize-io-c19b9d7dfd39.png",
+      "sourceUrl": "https://integrations.sh/logo/vectorize.io",
+      "sha256": "dd7b2a63b1e61a3704e04ce402a5d6c8d4e72301f191aff60c31869b69e46197",
+      "contentType": "image/png",
+      "sizeBytes": 2611,
+      "fetchedAt": "2026-11-02T12:26:48.348Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:vercel-com-0e641ddf14a9",
@@ -321,6 +2070,17 @@
       "fetchedAt": "2026-08-17T12:23:32.407Z"
     },
     {
+      "capabilityId": "mcp:integrations-sh:webex-com-51ecd1ddb8bf",
+      "domain": "webex.com",
+      "mcpUrl": "https://mcp.webexapis.com/mcp/vidcast",
+      "file": "webex-com-51ecd1ddb8bf.jpg",
+      "sourceUrl": "https://integrations.sh/logo/webex.com",
+      "sha256": "f03084f624b4fb901be8802a8d01401741668393a3a620fafe0f367085fdd7aa",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1092,
+      "fetchedAt": "2026-11-02T12:26:48.395Z"
+    },
+    {
       "capabilityId": "mcp:integrations-sh:webflow-com-b13d99c9b924",
       "domain": "webflow.com",
       "mcpUrl": "https://mcp.webflow.com/mcp",
@@ -330,6 +2090,28 @@
       "contentType": "image/jpeg",
       "sizeBytes": 1063,
       "fetchedAt": "2026-08-17T12:23:33.168Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:workos-com-af6798c5fbc3",
+      "domain": "workos.com",
+      "mcpUrl": "https://mcp.workos.com/mcp",
+      "file": "workos-com-af6798c5fbc3.jpg",
+      "sourceUrl": "https://integrations.sh/logo/workos.com",
+      "sha256": "e5a260091d32083430dc57899915200c97ce6532b39a116b2d2c9d9da1058766",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1191,
+      "fetchedAt": "2026-11-02T12:26:48.445Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:x-com-daedbbac09b9",
+      "domain": "x.com",
+      "mcpUrl": "https://api.x.com/mcp",
+      "file": "x-com-daedbbac09b9.jpg",
+      "sourceUrl": "https://integrations.sh/logo/x.com",
+      "sha256": "d0500aad0247492165647be76622130b73cece13f6b145a78a17bf70d5df943b",
+      "contentType": "image/jpeg",
+      "sizeBytes": 1081,
+      "fetchedAt": "2026-11-02T12:26:48.467Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:zapier-com-1d786017a15a",

@@ -17,6 +17,7 @@ import { createObjectStorage, type ObjectStorage } from "../packages/storage/src
 import {
   CURATED_CATALOG,
   canonicalMcpUrl,
+  catalogIdentityEntriesByMcpUrl,
   curatedCatalogEntriesByMcpUrl,
   curatedCatalogFingerprintInput,
   type CuratedCatalog,
@@ -48,7 +49,7 @@ const MIT_ATTRIBUTION =
 
 // Bump deliberately whenever normalization or import semantics can change
 // persisted output without changing the reviewed snapshot bytes.
-export const CATALOG_IMPORT_SEMANTIC_VERSION = 4;
+export const CATALOG_IMPORT_SEMANTIC_VERSION = 5;
 
 export const deadDemoDomains = new Set([
   "auto-calculator.onrender.com",
@@ -155,9 +156,9 @@ export type NormalizedCatalogSnapshot = {
   }>;
   quarantined: Array<{ row: CatalogIntegrationRow; reason: string }>;
   /**
-   * Curated overlay entries whose MCP URL matched no surviving snapshot row.
-   * A dead entry means a reviewed contract silently applies to nothing, so it
-   * is reported like a skip rather than dropped.
+   * Curated overlay entries and identities whose MCP URL matched no surviving
+   * snapshot row. A dead entry means a reviewed contract silently applies to
+   * nothing, so it is reported like a skip rather than dropped.
    */
   unmatchedCurated: string[];
   /** Requirement entries whose mcpUrl matches no importable row (reported, not fatal). */
@@ -342,6 +343,8 @@ export function normalizeCatalogSnapshot(
       }
     }
     const official = curatedCatalogEntriesByMcpUrl.get(mcpUrl);
+    // Display identity only: never curation, tier, auth or tool policy.
+    const identity = catalogIdentityEntriesByMcpUrl.get(mcpUrl);
     const oauthClientRequirement = oauthClientRequirementsEntriesByMcpUrl.get(mcpUrl);
     const authKind = official?.authKind ?? normalizeAuthKind(candidate.authKind);
     if (authKind === "unknown") {
@@ -354,15 +357,17 @@ export function normalizeCatalogSnapshot(
     const logoSourceUrl =
       official?.logoSourceUrl !== undefined
         ? official.logoSourceUrl
-        : candidate.logoSourceUrl === null
-          ? null
-          : (safeCatalogUrl(candidate.logoAsset) ??
-            safeCatalogUrl(candidate.logoSourceUrl) ??
-            `https://integrations.sh/logo/${domain}`);
+        : identity?.logoSourceUrl !== undefined
+          ? identity.logoSourceUrl
+          : candidate.logoSourceUrl === null
+            ? null
+            : (safeCatalogUrl(candidate.logoAsset) ??
+              safeCatalogUrl(candidate.logoSourceUrl) ??
+              `https://integrations.sh/logo/${domain}`);
     const registryIsLatest = official?.registryIsLatest ?? candidate.registryIsLatest;
     const row: CatalogIntegrationRow = {
       domain,
-      name: official?.name ?? stringValue(candidate.name) ?? domain,
+      name: official?.name ?? identity?.name ?? stringValue(candidate.name) ?? domain,
       ...optionalString("description", official?.description ?? stringValue(candidate.description)),
       ...(official ? { curated: true } : {}),
       ...optionalString("category", official?.category),
@@ -406,7 +411,7 @@ export function normalizeCatalogSnapshot(
       logoSourceUrl,
       ...optionalString(
         "homepageUrl",
-        official?.homepageUrl ?? safeCatalogUrl(candidate.homepageUrl),
+        official?.homepageUrl ?? identity?.homepageUrl ?? safeCatalogUrl(candidate.homepageUrl),
       ),
       ...optionalString("installUrl", official?.installUrl ?? safeCatalogUrl(candidate.installUrl)),
       ...optionalString(
@@ -468,7 +473,12 @@ export function normalizeCatalogSnapshot(
       continue;
     }
     seen.add(key);
-    const domainNameKey = `${row.domain}\n${normalizeNameForDedupe(row.name)}`;
+    // An identity is display-only: dedupe junk clusters by the name the row
+    // would have without it, so naming one alias never splits its cluster.
+    const dedupeName = identity?.name
+      ? (official?.name ?? stringValue(candidate.name) ?? domain)
+      : row.name;
+    const domainNameKey = `${row.domain}\n${normalizeNameForDedupe(dedupeName)}`;
     const existing = candidatesByDomainName.get(domainNameKey);
     if (!existing) {
       candidatesByDomainName.set(domainNameKey, row);
@@ -512,7 +522,10 @@ export function normalizeCatalogSnapshot(
   );
 
   const matchedCurated = new Set(rows.map((row) => row.mcpUrl));
-  const unmatchedCurated = [...curatedCatalogEntriesByMcpUrl.keys()]
+  const unmatchedCurated = [
+    ...curatedCatalogEntriesByMcpUrl.keys(),
+    ...catalogIdentityEntriesByMcpUrl.keys(),
+  ]
     .filter((mcpUrl) => !matchedCurated.has(mcpUrl))
     .sort();
   const unmatchedOAuthClientRequirements = [...oauthClientRequirementsEntriesByMcpUrl.keys()]

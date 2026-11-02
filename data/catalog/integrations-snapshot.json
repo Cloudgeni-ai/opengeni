@@ -56,6 +56,369 @@
       }
     ]
   },
+  "logoScreen": {
+    "screenedAt": "2026-11-02T12:23:26.068Z",
+    "checked": 642,
+    "placeholderRows": [
+      {
+        "domain": "abhibus-com-s-account.workers.dev",
+        "mcpUrl": "https://abhibus-mcp-production.abhibus-com-s-account.workers.dev/mcp"
+      },
+      {
+        "domain": "accessapproval.googleapis.com",
+        "mcpUrl": "https://accessapproval.googleapis.com/mcp"
+      },
+      {
+        "domain": "agreezone.replit.app",
+        "mcpUrl": "https://agreezone.replit.app/mcp"
+      },
+      {
+        "domain": "allapp.net",
+        "mcpUrl": "https://notify.allapp.net/mcp"
+      },
+      {
+        "domain": "analyticsadmin.googleapis.com",
+        "mcpUrl": "https://analyticsadmin.googleapis.com/mcp"
+      },
+      {
+        "domain": "androidmanagement.googleapis.com",
+        "mcpUrl": "https://androidmanagement.googleapis.com/mcp"
+      },
+      {
+        "domain": "apigee.googleapis.com",
+        "mcpUrl": "https://apigee.googleapis.com/mcp"
+      },
+      {
+        "domain": "automotion-mcp-production-6f08e98a6e4b.herokuapp.com",
+        "mcpUrl": "https://automotion-mcp-production-6f08e98a6e4b.herokuapp.com/mcp"
+      },
+      {
+        "domain": "barcelo-mcp.com",
+        "mcpUrl": "https://barcelo-mcp.com/mcp"
+      },
+      {
+        "domain": "beerfinder.workers.dev",
+        "mcpUrl": "https://na-beer-finder.beerfinder.workers.dev/mcp"
+      },
+      {
+        "domain": "bettermg.com",
+        "mcpUrl": "https://prod.bettermg.com/api/mortgage/mcp"
+      },
+      {
+        "domain": "bigquery.googleapis.com",
+        "mcpUrl": "https://bigquery.googleapis.com/mcp"
+      },
+      {
+        "domain": "bigquerydatatransfer.googleapis.com",
+        "mcpUrl": "https://bigquerydatatransfer.googleapis.com/mcp"
+      },
+      {
+        "domain": "bigtableadmin.googleapis.com",
+        "mcpUrl": "https://bigtableadmin.googleapis.com/mcp"
+      },
+      {
+        "domain": "billingbudgets.googleapis.com",
+        "mcpUrl": "https://billingbudgets.googleapis.com/mcp"
+      },
+      {
+        "domain": "book-direct.co",
+        "mcpUrl": "https://app.book-direct.co/mcp"
+      },
+      {
+        "domain": "botpress.sh",
+        "mcpUrl": "https://botgpt.botpress.sh/mcp"
+      },
+      {
+        "domain": "bpcs-ad-broker.de",
+        "mcpUrl": "https://bpcs-gptapp.bpcs-ad-broker.de/mcp"
+      },
+      {
+        "domain": "calorieappguidemcp-production.up.railway.app",
+        "mcpUrl": "https://calorieappguidemcp-production.up.railway.app/mcp"
+      },
+      {
+        "domain": "cfdomains.com",
+        "mcpUrl": "https://bbnmcp.cfdomains.com/mcp"
+      },
+      {
+        "domain": "cloudasset.googleapis.com",
+        "mcpUrl": "https://cloudasset.googleapis.com/mcp"
+      },
+      {
+        "domain": "clouderrorreporting.googleapis.com",
+        "mcpUrl": "https://clouderrorreporting.googleapis.com/mcp"
+      },
+      {
+        "domain": "cloudresourcemanager.googleapis.com",
+        "mcpUrl": "https://cloudresourcemanager.googleapis.com/mcp"
+      },
+      {
+        "domain": "cloudsupport.googleapis.com",
+        "mcpUrl": "https://cloudsupport.googleapis.com/mcp"
+      },
+      {
+        "domain": "cloudtrace.googleapis.com",
+        "mcpUrl": "https://cloudtrace.googleapis.com/mcp"
+      },
+      {
+        "domain": "compute.googleapis.com",
+        "mcpUrl": "https://compute.googleapis.com/mcp"
+      },
+      {
+        "domain": "contactcenterinsights.googleapis.com",
+        "mcpUrl": "https://contactcenterinsights.googleapis.com/mcp"
+      },
+      {
+        "domain": "container.googleapis.com",
+        "mcpUrl": "https://container.googleapis.com/mcp"
+      },
+      {
+        "domain": "cowboy-model-finder-mcp-app-8b3709a7529a.herokuapp.com",
+        "mcpUrl": "https://cowboy-model-finder-mcp-app-8b3709a7529a.herokuapp.com/mcp"
+      },
+      {
+        "domain": "dataflow.googleapis.com",
+        "mcpUrl": "https://dataflow.googleapis.com/mcp"
+      },
+      {
+        "domain": "dataplex.googleapis.com",
+        "mcpUrl": "https://dataplex.googleapis.com/mcp"
+      },
+      {
+        "domain": "dataproc.googleapis.com",
+        "mcpUrl": "https://dataproc.googleapis.com/mcp"
+      },
+      {
+        "domain": "datastream.googleapis.com",
+        "mcpUrl": "https://datastream.googleapis.com/mcp"
+      },
+      {
+        "domain": "dialogflow.googleapis.com",
+        "mcpUrl": "https://dialogflow.googleapis.com/mcp"
+      },
+      {
+        "domain": "enzoreader.com",
+        "mcpUrl": "https://chatgpt.enzoreader.com/mcp"
+      },
+      {
+        "domain": "fgdsp698b0.execute-api.eu-west-1.amazonaws.com",
+        "mcpUrl": "https://fgdsp698b0.execute-api.eu-west-1.amazonaws.com/mcp"
+      },
+      {
+        "domain": "file.googleapis.com",
+        "mcpUrl": "https://file.googleapis.com/mcp"
+      },
+      {
+        "domain": "firestore.googleapis.com",
+        "mcpUrl": "https://firestore.googleapis.com/mcp"
+      },
+      {
+        "domain": "homegraph.googleapis.com",
+        "mcpUrl": "https://homegraph.googleapis.com/mcp"
+      },
+      {
+        "domain": "idoctor.md",
+        "mcpUrl": "https://kokiko.idoctor.md/mcp"
+      },
+      {
+        "domain": "insighttimer-api.net",
+        "mcpUrl": "https://chatgpt-api.insighttimer-api.net/mcp"
+      },
+      {
+        "domain": "introvoke.com",
+        "mcpUrl": "https://api.introvoke.com/api/mcp"
+      },
+      {
+        "domain": "itsdunzo.com",
+        "mcpUrl": "https://api.itsdunzo.com/mcp"
+      },
+      {
+        "domain": "jars.lt",
+        "mcpUrl": "https://api.jars.lt/mcp"
+      },
+      {
+        "domain": "komoot.net",
+        "mcpUrl": "https://gpt.main.komoot.net/mcp"
+      },
+      {
+        "domain": "leyware-mcp.vercel.app",
+        "mcpUrl": "https://leyware-mcp.vercel.app/mcp"
+      },
+      {
+        "domain": "listingforgeai.it",
+        "mcpUrl": "https://services.listingforgeai.it/api/mcp"
+      },
+      {
+        "domain": "logging.googleapis.com",
+        "mcpUrl": "https://logging.googleapis.com/mcp"
+      },
+      {
+        "domain": "lovelymango-zzaim-mcp.hf.space",
+        "mcpUrl": "https://lovelymango-zzaim-mcp.hf.space/mcp"
+      },
+      {
+        "domain": "mcp-detprm6tzq-uc.a.run.app",
+        "mcpUrl": "https://mcp-detprm6tzq-uc.a.run.app/"
+      },
+      {
+        "domain": "mcp.adobeaemcloud.com",
+        "mcpUrl": "https://mcp.adobeaemcloud.com/adobe/mcp/aem"
+      },
+      {
+        "domain": "migrosone.com",
+        "mcpUrl": "https://mcp.migrosone.com/mcp"
+      },
+      {
+        "domain": "my-mcp-server-flame.vercel.app",
+        "mcpUrl": "https://my-mcp-server-flame.vercel.app/mcp"
+      },
+      {
+        "domain": "netlify-mcp.netlify.app",
+        "mcpUrl": "https://netlify-mcp.netlify.app/mcp"
+      },
+      {
+        "domain": "networkmanagement.googleapis.com",
+        "mcpUrl": "https://networkmanagement.googleapis.com/mcp"
+      },
+      {
+        "domain": "newsifytrends.com",
+        "mcpUrl": "https://mcp.newsifytrends.com/mcp"
+      },
+      {
+        "domain": "oaimcp-production.up.railway.app",
+        "mcpUrl": "https://oaimcp-production.up.railway.app/mcp"
+      },
+      {
+        "domain": "olutely.com",
+        "mcpUrl": "https://affirmations.widgets.widget.olutely.com/affirmations/mcp"
+      },
+      {
+        "domain": "olx.io",
+        "mcpUrl": "https://chatgpt-imovirtual.genai.olx.io/"
+      },
+      {
+        "domain": "openai-mcp-696419881849.us-central1.run.app",
+        "mcpUrl": "https://openai-mcp-696419881849.us-central1.run.app/mcp"
+      },
+      {
+        "domain": "orgpolicy.googleapis.com",
+        "mcpUrl": "https://orgpolicy.googleapis.com/mcp"
+      },
+      {
+        "domain": "people.googleapis.com",
+        "mcpUrl": "https://people.googleapis.com/mcp/v1"
+      },
+      {
+        "domain": "pixelesq.workers.dev",
+        "mcpUrl": "https://pixelesq-mcp.pixelesq.workers.dev/mcp"
+      },
+      {
+        "domain": "playdeveloperreporting.googleapis.com",
+        "mcpUrl": "https://playdeveloperreporting.googleapis.com/mcp"
+      },
+      {
+        "domain": "playdigital.com.ar",
+        "mcpUrl": "https://benefits-mcp.playdigital.com.ar/mcp"
+      },
+      {
+        "domain": "policytroubleshooter.googleapis.com",
+        "mcpUrl": "https://policytroubleshooter.googleapis.com/mcp"
+      },
+      {
+        "domain": "priority-guard.com",
+        "mcpUrl": "https://pg.priority-guard.com/mcp"
+      },
+      {
+        "domain": "proofx-mcp.fly.dev",
+        "mcpUrl": "https://proofx-mcp.fly.dev/mcp"
+      },
+      {
+        "domain": "pubsub.googleapis.com",
+        "mcpUrl": "https://pubsub.googleapis.com/mcp"
+      },
+      {
+        "domain": "quotecraft-ai-zeta.vercel.app",
+        "mcpUrl": "https://quotecraft-ai-zeta.vercel.app/mcp"
+      },
+      {
+        "domain": "ray-arceneaux-ai-agentic.replit.app",
+        "mcpUrl": "https://ray-arceneaux-ai-agentic.replit.app/mcp"
+      },
+      {
+        "domain": "rbi.digital",
+        "mcpUrl": "https://th-chatgpt.rbi.digital/api/mcp"
+      },
+      {
+        "domain": "rbictg.com",
+        "mcpUrl": "https://use1-prod-bk-chatgpt-app.rbictg.com/api/mcp"
+      },
+      {
+        "domain": "recommender.googleapis.com",
+        "mcpUrl": "https://recommender.googleapis.com/mcp"
+      },
+      {
+        "domain": "redis.googleapis.com",
+        "mcpUrl": "https://redis.googleapis.com/mcp"
+      },
+      {
+        "domain": "run.googleapis.com",
+        "mcpUrl": "https://run.googleapis.com/mcp"
+      },
+      {
+        "domain": "runready.dev",
+        "mcpUrl": "https://runready.dev/mcp"
+      },
+      {
+        "domain": "searchconsole.googleapis.com",
+        "mcpUrl": "https://searchconsole.googleapis.com/mcp"
+      },
+      {
+        "domain": "sftapi.com",
+        "mcpUrl": "https://softonic-mcp-server-v1.sft.product-europe.sftapi.com/mcp/demo"
+      },
+      {
+        "domain": "soulfamily.ai",
+        "mcpUrl": "https://soulfamily.ai/mcp"
+      },
+      {
+        "domain": "spanner.googleapis.com",
+        "mcpUrl": "https://spanner.googleapis.com/mcp"
+      },
+      {
+        "domain": "sqladmin.googleapis.com",
+        "mcpUrl": "https://sqladmin.googleapis.com/mcp"
+      },
+      {
+        "domain": "stytch.dev",
+        "mcpUrl": "https://mcp.stytch.dev/mcp"
+      },
+      {
+        "domain": "taxheaven-chatgpt-app.vercel.app",
+        "mcpUrl": "https://taxheaven-chatgpt-app.vercel.app/mcp"
+      },
+      {
+        "domain": "tuio-mcp-demo.vercel.app",
+        "mcpUrl": "https://tuio-mcp-demo.vercel.app/mcp"
+      },
+      {
+        "domain": "tusalario.app",
+        "mcpUrl": "https://tusalario.app/mcp"
+      },
+      {
+        "domain": "upplai-mcp-server-production.up.railway.app",
+        "mcpUrl": "https://upplai-mcp-server-production.up.railway.app/mcp"
+      },
+      {
+        "domain": "wepromise.tech",
+        "mcpUrl": "https://mcp.purchase.production.wepromise.tech/mcp"
+      },
+      {
+        "domain": "youversionapi.com",
+        "mcpUrl": "https://openai-mcp.youversionapi.com/mcp"
+      }
+    ],
+    "unreachable": 0
+  },
   "importRows": [
     {
       "domain": "2u.com",
@@ -134,7 +497,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/abhibus-com-s-account.workers.dev",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -151,7 +514,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/accessapproval.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -317,7 +680,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/agreezone.replit.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -538,7 +901,7 @@
       ],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/allapp.net",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -743,7 +1106,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/analyticsadmin.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -760,7 +1123,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/androidmanagement.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -876,7 +1239,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/apigee.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -1092,7 +1455,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/automotion-mcp-production-6f08e98a6e4b.herokuapp.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -1361,7 +1724,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/barcelo-mcp.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -1420,7 +1783,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/beerfinder.workers.dev",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -1496,7 +1859,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/bettermg.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -1563,7 +1926,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/bigquery.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -1580,7 +1943,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/bigquerydatatransfer.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -1597,7 +1960,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/bigtableadmin.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -1614,7 +1977,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/billingbudgets.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -1804,7 +2167,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/book-direct.co",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -1829,7 +2192,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/botpress.sh",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -1898,7 +2261,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/bpcs-ad-broker.de",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -2119,7 +2482,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/calorieappguidemcp-production.up.railway.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -2449,7 +2812,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/cfdomains.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -2745,7 +3108,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/cloudasset.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -2762,7 +3125,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/clouderrorreporting.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -2808,7 +3171,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/cloudresourcemanager.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -2825,7 +3188,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/cloudsupport.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -2842,7 +3205,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/cloudtrace.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -3010,7 +3373,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/compute.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -3128,7 +3491,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/contactcenterinsights.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -3145,7 +3508,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/container.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -3258,7 +3621,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/cowboy-model-finder-mcp-app-8b3709a7529a.herokuapp.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -3451,7 +3814,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/dataflow.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -3493,7 +3856,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/dataplex.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -3510,7 +3873,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/dataproc.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -3552,7 +3915,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/datastream.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -3719,7 +4082,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/dialogflow.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -4132,7 +4495,7 @@
       ],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/enzoreader.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -4568,7 +4931,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/fgdsp698b0.execute-api.eu-west-1.amazonaws.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -4585,7 +4948,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/file.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -4684,7 +5047,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/firestore.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -5895,7 +6258,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/homegraph.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -5967,7 +6330,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/idoctor.md",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -6109,7 +6472,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/insighttimer-api.net",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -6171,7 +6534,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/introvoke.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -6213,7 +6576,7 @@
       ],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/itsdunzo.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -6270,7 +6633,7 @@
       ],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/jars.lt",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -6724,7 +7087,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/komoot.net",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -7018,7 +7381,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/leyware-mcp.vercel.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -7171,7 +7534,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/listingforgeai.it",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -7281,7 +7644,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/logging.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -7381,7 +7744,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/lovelymango-zzaim-mcp.hf.space",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -7857,7 +8220,7 @@
       ],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/mcp-detprm6tzq-uc.a.run.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -7882,7 +8245,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/mcp.adobeaemcloud.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -8249,7 +8612,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/migrosone.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -8357,7 +8720,9 @@
       "mcpUrl": "https://api.mobbin.com/mcp",
       "transport": "streamable-http",
       "authKind": "oauth2",
-      "scopesHint": ["openid"],
+      "scopesHint": [
+        "openid"
+      ],
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "official:mcp-registry:com.mobbin/mobbin@1.0.1",
@@ -8792,7 +9157,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/my-mcp-server-flame.vercel.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -8960,7 +9325,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/netlify-mcp.netlify.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -8977,7 +9342,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/networkmanagement.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -9061,7 +9426,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/newsifytrends.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -9209,7 +9574,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/oaimcp-production.up.railway.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -9260,7 +9625,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/olutely.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -9277,7 +9642,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/olx.io",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -9386,7 +9751,7 @@
       ],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/openai-mcp-696419881849.us-central1.run.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -9504,7 +9869,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/orgpolicy.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -9953,7 +10318,7 @@
       ],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/people.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -10020,7 +10385,7 @@
       ],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/pixelesq.workers.dev",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -10062,7 +10427,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/playdeveloperreporting.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -10079,7 +10444,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/playdigital.com.ar",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -10146,7 +10511,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/policytroubleshooter.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -10274,7 +10639,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/priority-guard.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -10449,7 +10814,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/proofx-mcp.fly.dev",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -10541,7 +10906,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/pubsub.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -10750,7 +11115,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/quotecraft-ai-zeta.vercel.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -10809,7 +11174,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/ray-arceneaux-ai-agentic.replit.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -10851,7 +11216,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/rbi.digital",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -10868,7 +11233,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/rbictg.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -10952,7 +11317,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/recommender.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -10969,7 +11334,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/redis.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -11269,7 +11634,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/run.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -11286,7 +11651,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/runready.dev",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -11487,7 +11852,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/searchconsole.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -11733,7 +12098,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/sftapi.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -12241,7 +12606,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/soulfamily.ai",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -12300,7 +12665,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/spanner.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -12443,7 +12808,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/sqladmin.googleapis.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -12754,7 +13119,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/stytch.dev",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -13133,7 +13498,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/taxheaven-chatgpt-app.vercel.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -13493,7 +13858,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/tuio-mcp-demo.vercel.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -13577,7 +13942,7 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/tusalario.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -13686,7 +14051,7 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/upplai-mcp-server-production.up.railway.app",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "auth_challenge",
@@ -14203,7 +14568,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/wepromise.tech",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_json_rpc",
@@ -14443,7 +14808,7 @@
       "credentialFacts": [],
       "tier": "community",
       "provenance": "discovered",
-      "logoSourceUrl": "https://integrations.sh/logo/youversionapi.com",
+      "logoSourceUrl": null,
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
@@ -14671,7 +15036,11 @@
         "update_event",
         "delete_event"
       ],
-      "requireApproval": ["create_event", "update_event", "delete_event"],
+      "requireApproval": [
+        "create_event",
+        "update_event",
+        "delete_event"
+      ],
       "connectionOwnership": "personal_only",
       "credentialFacts": [
         {
