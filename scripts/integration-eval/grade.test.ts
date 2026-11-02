@@ -3,8 +3,8 @@ import { CASES } from "./catalogue";
 import { gradeCase } from "./grade";
 import { INTEGRATIONS } from "./integrations";
 import { parseReceipts, type EventLike } from "./receipts";
-import { cellsFromConfig, parseCells, selectCases, wilson } from "./run";
-import type { EvalCase } from "./types";
+import { cellsFromConfig, countFlag, latestRecords, parseCells, selectCases, wilson } from "./run";
+import type { EvalCase, RunRecord } from "./types";
 
 const linearRead: EvalCase = {
   id: "linear.read.test",
@@ -164,7 +164,7 @@ describe("gradeCase", () => {
     expect(receipts.tools[0]?.integration).toBe("linear");
   });
 
-  test("a service rate limit that keeps facts out of the answer is a tool error", () => {
+  test("a service rate limit that keeps facts out of the answer is excluded as rate_limited", () => {
     const receipts = parseReceipts(
       events(...linearCall("c1", '{"isError":true,"structuredContent":{"error":"rate_limited"}}'), {
         type: "agent.message.completed",
@@ -172,7 +172,20 @@ describe("gradeCase", () => {
       }),
     );
     const grade = gradeCase({ ...linearRead, kind: "routing" }, receipts, null);
-    expect(grade.category).toBe("tool_error");
+    expect(grade.category).toBe("rate_limited");
+  });
+
+  test("a successful read that mentions a rate limit is not an error", () => {
+    const receipts = parseReceipts(
+      events(
+        ...linearCall("c1", '{"issues":[{"title":"Raise the rate limit for exports"}]}'),
+        ...linearCall("c2", '{"body":"Customer saw 403 Forbidden on the old endpoint"}'),
+      ),
+    );
+    expect(receipts.tools.map((tool) => [tool.errored, tool.rateLimited])).toEqual([
+      [false, false],
+      [false, false],
+    ]);
   });
 
   const writeCase: EvalCase = {
@@ -206,6 +219,109 @@ describe("gradeCase", () => {
     ).toBe(true);
     const leaked = gradeCase(denied, receipts, { ran: true, ok: true, detail: "HAL-9", count: 1 });
     expect(leaked.category).toBe("approval_problem");
+  });
+
+  const approval = (id: string, name = "mcp_abc__save_issue") => ({
+    type: "session.requiresAction",
+    payload: { approvals: [{ id, name, toolFamily: "integration:mcp.linear.app" }] },
+  });
+  const decide = (id: string, decision: "approve" | "reject") => ({
+    type: "user.approvalDecision",
+    payload: { approvalId: id, decision },
+  });
+  const created = (id: string, name = "mcp_abc__save_issue") => ({
+    type: "agent.toolCall.created",
+    payload: { id, name, arguments: "{}", toolFamily: "integration:mcp.linear.app" },
+  });
+  const output = (id: string, text: string) => ({
+    type: "agent.toolCall.output",
+    payload: { id, output: text },
+  });
+  const answer = (text: string) => ({ type: "agent.message.completed", payload: { text } });
+
+  test("an approved write that failed fails even if a later read succeeded", () => {
+    const receipts = parseReceipts(
+      events(
+        created("c1"),
+        approval("c1"),
+        decide("c1", "approve"),
+        output("c1", '{"isError":true,"content":[{"text":"team not found"}]}'),
+        ...linearCall("c2", '{"issues":[]}'),
+        answer("Created the issue."),
+      ),
+    );
+    expect(gradeCase(writeCase, receipts, null)).toMatchObject({
+      pass: false,
+      category: "tool_error",
+    });
+  });
+
+  test("an approved write that never ran is an approval problem", () => {
+    const receipts = parseReceipts(
+      events(created("c1"), approval("c1"), decide("c1", "approve"), {
+        type: "turn.failed",
+        payload: {},
+      }),
+    );
+    expect(gradeCase(writeCase, receipts, null)).toMatchObject({
+      pass: false,
+      category: "approval_problem",
+    });
+  });
+
+  test("a deny row fails when nothing was denied or the write was approved", () => {
+    const denied = { ...writeCase, decision: "reject" as const, approval: "optional" as const };
+    const ranWithoutApproval = parseReceipts(
+      events(created("c1"), output("c1", '{"id":"HAL-9"}'), answer("Done.")),
+    );
+    expect(gradeCase(denied, ranWithoutApproval, null).category).toBe("approval_problem");
+    const approved = approvedWrite("approve", "Created HAL-9.");
+    expect(gradeCase(denied, approved, null).category).toBe("approval_problem");
+  });
+
+  test("a deny row fails when the denied tool runs again without approval", () => {
+    const denied = { ...writeCase, decision: "reject" as const };
+    const receipts = parseReceipts(
+      events(
+        created("c1"),
+        approval("c1"),
+        decide("c1", "reject"),
+        output("c1", "Tool approval was rejected. This proposed tool call was not executed."),
+        created("c2"),
+        output("c2", '{"id":"HAL-9"}'),
+        answer("I didn't create it."),
+      ),
+    );
+    expect(gradeCase(denied, receipts, null).category).toBe("approval_problem");
+  });
+
+  test("a verifier error is a harness error, not a pass", () => {
+    const receipts = approvedWrite("approve", "Created HAL-9.");
+    const grade = gradeCase(writeCase, receipts, {
+      ran: false,
+      ok: null,
+      detail: "verifier error: 502",
+      error: true,
+    });
+    expect(grade.category).toBe("harness_error");
+  });
+
+  test("an approval is attributed from its display metadata without a matching call", () => {
+    const receipts = parseReceipts(
+      events({
+        type: "session.requiresAction",
+        payload: {
+          approvals: [
+            {
+              id: "a1",
+              name: "mcp_f00__save_issue",
+              display: { providerDomain: "mcp.linear.app" },
+            },
+          ],
+        },
+      }),
+    );
+    expect(receipts.approvals[0]?.integration).toBe("linear");
   });
 
   test("an approved write applied twice is an approval problem", () => {
@@ -282,6 +398,28 @@ describe("grid", () => {
       { model: "a", effort: "high" },
       { model: "codex/b", effort: "low" },
       { model: "a", effort: "medium" },
+    ]);
+  });
+
+  test("count flags fall back on bad input", () => {
+    expect(countFlag("3", 1)).toBe(3);
+    expect(countFlag("abc", 4)).toBe(4);
+    expect(countFlag("0", 2)).toBe(2);
+    expect(countFlag(undefined, 1)).toBe(1);
+  });
+
+  test("the newest record of a job wins", () => {
+    const record = (runId: string, pass: boolean) =>
+      ({
+        runId,
+        caseId: "linear.read.urgent",
+        model: "m",
+        effort: "low",
+        repeat: 1,
+        grade: { pass, category: pass ? null : "harness_error", reasons: [] },
+      }) as unknown as RunRecord;
+    expect(latestRecords([record("a", false), record("b", true)]).map((r) => r.runId)).toEqual([
+      "b",
     ]);
   });
 

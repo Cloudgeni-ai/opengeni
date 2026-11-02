@@ -43,8 +43,34 @@ const ERROR_TEXT = [
   /"isError"\s*:\s*true/,
   /^\s*(?:error|failed)\b[:\s]/i,
   /\b(?:mcp_call_failed|mcp_connect_failed|account_reconnect_required|connection_unavailable)\b/,
-  /\b(?:401 unauthorized|403 forbidden|invalid[_ ]token|token (?:has )?expired)\b/i,
 ];
+
+const AUTH_ERROR =
+  /\b(?:401 unauthorized|403 forbidden|invalid[_ ]token|token (?:has )?expired)\b/i;
+
+/**
+ * Auth failures count only in an error-shaped output: plain text, or a
+ * top-level `error`/`message`/`detail` field. A ticket or message body that
+ * quotes "403 forbidden" doesn't turn a successful read into an error.
+ */
+function authErrorShaped(output: string): boolean {
+  const parsed = parseJson(output);
+  if (typeof parsed === "string") return AUTH_ERROR.test(parsed.slice(0, 300));
+  const fields = record(parsed);
+  return [fields.error, fields.message, fields.detail].some((value) =>
+    AUTH_ERROR.test((text(value) ?? "").slice(0, 300)),
+  );
+}
+
+const RATE_LIMIT_TEXT = /\b(?:rate[_ -]?limit(?:ed)?|ratelimited|too many requests)\b/i;
+
+/**
+ * Whether an errored tool output says the service rate-limited the call. A
+ * successful read whose content mentions a rate limit is not one.
+ */
+export function outputRateLimited(errored: boolean, output: string | null): boolean {
+  return errored && output !== null && RATE_LIMIT_TEXT.test(output.slice(0, 4000));
+}
 
 /** Whether a tool output reports a failure. Conservative: unknown shapes count as success. */
 export function outputErrored(payload: Record<string, unknown>, output: string | null): boolean {
@@ -52,7 +78,8 @@ export function outputErrored(payload: Record<string, unknown>, output: string |
   const status = typeof payload.status === "string" ? payload.status.toLowerCase() : null;
   if (status === "failed" || status === "error") return true;
   if (output === null) return false;
-  return ERROR_TEXT.some((pattern) => pattern.test(output.slice(0, 4000)));
+  const head = output.slice(0, 4000);
+  return ERROR_TEXT.some((pattern) => pattern.test(head)) || authErrorShaped(output);
 }
 
 const ACCOUNT_DESCRIPTION =
@@ -130,10 +157,20 @@ export function parseReceipts(events: readonly EventLike[]): Receipts {
           const approvalId = typeof approval.id === "string" ? approval.id : null;
           if (!approvalId || approvalById.has(approvalId)) continue;
           const name = typeof approval.name === "string" ? approval.name : "tool";
+          // Approvals carry the connector's display metadata; it names the
+          // integration even when no matching tool call was recorded.
+          const display = record(approval.display);
           const receipt: ApprovalReceipt = {
             approvalId,
             name,
-            integration: null,
+            integration:
+              (typeof display.providerDomain === "string"
+                ? integrationForFamily(`integration:${display.providerDomain}`)
+                : null) ??
+              integrationForLabel(
+                typeof display.serverLabel === "string" ? display.serverLabel : null,
+              ) ??
+              integrationForLabel(typeof display.connector === "string" ? display.connector : null),
             decision: null,
             sequence: event.sequence,
           };
@@ -231,6 +268,7 @@ export function parseReceipts(events: readonly EventLike[]): Receipts {
           labelled.get(shortToolName(path)) ?? integrationForLabel(path.replace(/[._/]/g, " "));
       }
     }
+    const errored = outputPayload ? outputErrored(outputPayload, output) : false;
     tools.push({
       callId,
       name,
@@ -239,7 +277,9 @@ export function parseReceipts(events: readonly EventLike[]): Receipts {
       integration,
       arguments: args,
       output,
-      errored: outputPayload ? outputErrored(outputPayload, output) : false,
+      errored,
+      completed: outputPayload !== undefined,
+      rateLimited: outputRateLimited(errored, output),
       sequence: event.sequence,
     });
   }
@@ -249,7 +289,10 @@ export function parseReceipts(events: readonly EventLike[]): Receipts {
       (tool) => tool.callId === approval.approvalId || tool.effectiveName === approval.name,
     );
     approval.integration =
-      matching?.integration ?? labelled.get(approval.name) ?? integrationForToolName(approval.name);
+      approval.integration ??
+      matching?.integration ??
+      labelled.get(approval.name) ??
+      integrationForToolName(approval.name);
   }
 
   return {

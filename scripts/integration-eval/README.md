@@ -11,14 +11,21 @@ receipts (forensic session events), not from the answer text alone.
 |---|---|
 | `not_connected` | Run in a workspace with nothing connected. The agent shows that integration's connect card (`tool.auth_needed`) and does not invent data. |
 | `read` | A tool of that integration ran without error, and the answer contains the seeded fixture facts. |
-| `write` | An approval was requested for that integration, the harness approved it, the approved call succeeded, and the service-side verifier finds the object. |
-| `identity` | The agent reports the connected account correctly. |
+| `write` (approve) | An approval was requested for that integration and the harness approved it. The approved call itself ran (it has an output) without error, the change applied once, and the service-side verifier finds the object. |
+| `write` (deny, `decision: "reject"`) | An approval was requested and the harness rejected it. The denied tool did not run again without approval, the service has no matching object, and the answer doesn't claim the write happened. |
+| `identity` | The agent reports the connected account correctly. These rows check the answer text (account and workspace names); a tool call is not required, because the account label is often already in the agent's context. |
 | `routing` | Ambiguous request; the right integration's tools ran and the answer has the expected facts. |
 
 Failures are categorised as `wrong_tool`, `no_tool`, `missing_card`,
-`approval_problem`, `tool_error`, `hallucinated_result`, `incomplete_answer`
-or `harness_error` (the run failed for reasons that are not a product verdict;
-excluded from pass rates).
+`approval_problem`, `tool_error`, `hallucinated_result`, `incomplete_answer`,
+`timeout` (the agent was still working at the run deadline; the harness
+cancels the chat), `rate_limited` (the service's own rate limit failed the row)
+or `harness_error` (an API, verifier or event-history failure). `rate_limited`
+and `harness_error` are not product verdicts and are excluded from pass rates.
+
+The harness answers approvals through the API, so nobody clicks anything. It
+gives the row's decision only to approvals of the row's integration, and
+rejects any other approval so a run never writes outside its fixtures.
 
 ## Setup
 
@@ -34,9 +41,8 @@ excluded from pass rates).
    writes run without approval under the default policy, and write rows
    check the approval round trip. Mark a row `approval: "optional"` to accept
    either.
-4. Test accounts for each service, seeded with the synthetic "Halcyon" fixtures
-   that the catalogue's expected answers name (see the comment at the top of
-   `catalogue.ts`). Use test accounts and synthetic data only.
+4. Test accounts for each service, seeded with the fixtures below. Use test
+   accounts and synthetic data only.
 5. An API key for the organization.
 
 ```sh
@@ -47,6 +53,28 @@ export OPENGENI_EVAL_EMPTY_WORKSPACE_ID=...
 # Optional service verifiers for write rows; see verify.ts for the names.
 export VERIFY_LINEAR_API_KEY=...
 ```
+
+## Fixtures
+
+Everything is fictional: the company Halcyon Labs, customers Bluefin
+Logistics, Copperleaf Dental and Marlow & Finch, people Ada Quill, Ravi Tern
+and Mina Sorrel, and the "Kestrel" failover project. Seed each service once;
+the expected answers in `catalogue.ts` name these facts.
+
+| Service | Seed |
+|---|---|
+| Linear | Team "Halcyon" (key HAL): "Checkout times out for Bluefin Logistics" (Urgent, In Progress); "Add CSV export to invoices" (Medium, Todo); "Rotate Halcyon staging API keys" (High, Backlog); "Copperleaf Dental onboarding checklist" (Low, Done). |
+| Atlassian | Jira project "Kestrel Ops" (KOPS): "Database failover drill for Kestrel" (High, In Progress), "Renew Kestrel TLS certificates" (Medium, To Do), "Kestrel backup restore test" (Low, Done). Confluence page "Kestrel on-call rota": week 45 Ravi Tern, week 46 Mina Sorrel, week 47 Ada Quill. |
+| Slack | Channels `#halcyon-launch` ("Launch moved to 1 December, pricing page owner is Ada") and `#halcyon-support` ("Bluefin reports checkout timeouts since Friday"). Write rows post to the channel in `VERIFY_SLACK_CHANNEL_ID`. |
+| Gmail | An email from Ada Quill about the "Halcyon launch checklist". |
+| Apollo | Contact Mina Sorrel, Head of Platform at Halcyon Labs (`mina.sorrel@halcyon-labs.example`). No enrichment rows; enrichment uses credits. |
+| Microsoft 365 | Email "Kestrel failover drill moved" (drill moves to Thursday 14:00); OneDrive file "Kestrel runbook" ("Recovery time objective: 15 minutes"); SharePoint document "Kestrel vendor contacts" naming Marlow & Finch as the backup vendor. |
+| Google Drive | Document "Halcyon pricing 2026" listing Pro at 49 USD a month. |
+| Others (Notion, Asana, Stripe test mode, GitHub, HubSpot, Sentry, Airtable) | The object each row's prompt names, with the facts its expected answer checks (see `catalogue.ts`). |
+
+Write rows put the run's short id in the object's title (`Halcyon eval <id>`),
+so the verifiers find it, and reruns never collide. Clean those objects up now
+and then; nothing reads them back.
 
 ## Running
 
@@ -74,7 +102,8 @@ bun run eval:integrations run --out results/codex --cases core --repeats 2 \
 integrations the deployment cannot test. `--dry-run` lists the runs.
 
 Results append to `DIR/results.jsonl`. Running the same command again skips
-rows that already have a record, so an interrupted grid resumes. The report
+rows that already have a record, so an interrupted grid resumes; rows recorded
+as `harness_error` are retried, and the newest record of a row wins. The report
 writes `matrix.csv` (integration × model × effort with failing chat links),
 `runs.csv` (one line per chat) and `summary.md` (pass rate per cell with a
 Wilson 95% interval). Each run's parsed receipts are kept in `DIR/receipts/`.
@@ -85,7 +114,13 @@ Rerun the same rows, with the same models and efforts, into a new directory:
 
 ```sh
 bun run eval:integrations run --rerun results/grid/results.jsonl --failed-only --out results/grid-fix-1
+bun run eval:integrations run --rerun results/grid/results.jsonl --failed-only --cases slack --out results/slack-fix
 ```
+
+`--cases` and `--skip-integrations` narrow a rerun. `regrade --out DIR`
+fetches the recorded chats' events again and regrades them with the current
+grader, without new chats (useful after changing the grader or a catalogue
+row).
 
 ## Sizing
 

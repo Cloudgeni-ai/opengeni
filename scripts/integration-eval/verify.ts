@@ -48,7 +48,7 @@ async function poll(
     await sleep(4_000 * (attempt + 1));
   }
   return lastError
-    ? { ran: false, ok: null, detail: `verifier error: ${lastError}` }
+    ? { ran: false, ok: null, detail: `verifier error: ${lastError}`, error: true }
     : { ran: true, ok: false, detail: `${what} not found` };
 }
 
@@ -112,8 +112,9 @@ const VERIFIERS: Record<string, Verifier> = {
         },
         body: JSON.stringify({ query: run, filter: { property: "object", value: "page" } }),
       })) as { results?: { id: string; url?: string }[] };
-      const page = body.results?.[0];
-      return page ? (page.url ?? page.id) : null;
+      const pages = body.results ?? [];
+      const page = pages[0];
+      return page ? { detail: page.url ?? page.id, count: pages.length } : null;
     }, "Notion page");
   },
 
@@ -121,12 +122,20 @@ const VERIFIERS: Record<string, Verifier> = {
     const gap = need(env, "VERIFY_ASANA_TOKEN", "VERIFY_ASANA_PROJECT_GID");
     if (gap) return skipped(gap);
     return poll(async () => {
-      const body = (await json(
-        `https://app.asana.com/api/1.0/projects/${env.VERIFY_ASANA_PROJECT_GID}/tasks?opt_fields=name&limit=100`,
-        { headers: { authorization: `Bearer ${env.VERIFY_ASANA_TOKEN}` } },
-      )) as { data?: { gid: string; name: string }[] };
-      const task = body.data?.find((item) => item.name.includes(run));
-      return task ? `${task.gid} ${task.name}` : null;
+      // Page through the whole project: new tasks can sit past the first 100.
+      const matches: { gid: string; name: string }[] = [];
+      let offset: string | undefined;
+      for (let page = 0; page < 50; page += 1) {
+        const body = (await json(
+          `https://app.asana.com/api/1.0/projects/${env.VERIFY_ASANA_PROJECT_GID}/tasks?opt_fields=name&limit=100${offset ? `&offset=${offset}` : ""}`,
+          { headers: { authorization: `Bearer ${env.VERIFY_ASANA_TOKEN}` } },
+        )) as { data?: { gid: string; name: string }[]; next_page?: { offset?: string } | null };
+        matches.push(...(body.data ?? []).filter((item) => item.name.includes(run)));
+        offset = body.next_page?.offset;
+        if (!offset) break;
+      }
+      const task = matches[0];
+      return task ? { detail: `${task.gid} ${task.name}`, count: matches.length } : null;
     }, "Asana task");
   },
 
@@ -143,8 +152,11 @@ const VERIFIERS: Record<string, Verifier> = {
       const body = (await json("https://api.stripe.com/v1/customers?limit=50", {
         headers: { authorization: `Bearer ${env.VERIFY_STRIPE_SECRET_KEY}` },
       })) as { data?: { id: string; name?: string | null }[] };
-      const customer = body.data?.find((item) => (item.name ?? "").includes(run));
-      return customer ? `${customer.id} ${customer.name}` : null;
+      const customers = (body.data ?? []).filter((item) => (item.name ?? "").includes(run));
+      const customer = customers[0];
+      return customer
+        ? { detail: `${customer.id} ${customer.name}`, count: customers.length }
+        : null;
     }, "Stripe customer");
   },
 
@@ -175,8 +187,9 @@ const VERIFIERS: Record<string, Verifier> = {
           },
         },
       )) as { number: number; title: string }[];
-      const issue = body.find((item) => item.title.includes(run));
-      return issue ? `#${issue.number} ${issue.title}` : null;
+      const issues = body.filter((item) => item.title.includes(run));
+      const issue = issues[0];
+      return issue ? { detail: `#${issue.number} ${issue.title}`, count: issues.length } : null;
     }, "GitHub issue");
   },
 
@@ -200,12 +213,16 @@ const VERIFIERS: Record<string, Verifier> = {
           ],
         }),
       })) as { results?: { id: string }[] };
-      const contact = body.results?.[0];
-      return contact ? `contact ${contact.id}` : null;
+      const contacts = body.results ?? [];
+      const contact = contacts[0];
+      return contact ? { detail: `contact ${contact.id}`, count: contacts.length } : null;
     }, "HubSpot contact");
   },
 
-  /** Checks the issue is resolved, then reopens it so the row can run again. */
+  /**
+   * Checks the issue is resolved, then reopens it so the row can run again.
+   * Not scoped to a run marker, so the runner caps Sentry rows at one at a time.
+   */
   sentry_payment_issue_resolved: async (_run, env) => {
     const gap = need(env, "VERIFY_SENTRY_TOKEN", "VERIFY_SENTRY_ORG", "VERIFY_SENTRY_PROJECT");
     if (gap) return skipped(gap);
@@ -253,8 +270,9 @@ const VERIFIERS: Record<string, Verifier> = {
         `https://api.airtable.com/v0/${env.VERIFY_AIRTABLE_BASE_ID}/Accounts?filterByFormula=${formula}`,
         { headers: { authorization: `Bearer ${env.VERIFY_AIRTABLE_TOKEN}` } },
       )) as { records?: { id: string }[] };
-      const row = body.records?.[0];
-      return row ? `record ${row.id}` : null;
+      const rows = body.records ?? [];
+      const row = rows[0];
+      return row ? { detail: `record ${row.id}`, count: rows.length } : null;
     }, "Airtable record");
   },
 };
@@ -274,6 +292,9 @@ export async function verify(
   try {
     return await verifier(run, env);
   } catch (error) {
-    return skipped(`verifier error: ${error instanceof Error ? error.message : String(error)}`);
+    return {
+      ...skipped(`verifier error: ${error instanceof Error ? error.message : String(error)}`),
+      error: true,
+    };
   }
 }

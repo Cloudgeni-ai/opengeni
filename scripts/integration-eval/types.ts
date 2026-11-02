@@ -23,6 +23,10 @@ export type FailureCategory =
   | "hallucinated_result"
   /** Right tool and no error, but the answer misses the expected facts. */
   | "incomplete_answer"
+  /** The agent was still working at the run deadline (looping or stalled). A product verdict. */
+  | "timeout"
+  /** The service's own rate limit, not the agent, failed the row. Excluded from pass rates. */
+  | "rate_limited"
   /** The run itself failed (API error, timeout, model refusal to start). Not a product verdict. */
   | "harness_error";
 
@@ -114,6 +118,10 @@ export type ToolReceipt = {
   output: string | null;
   /** The output reports an error (MCP error result, auth failure, exception). */
   errored: boolean;
+  /** An output event exists. A call without one never finished (turn failed or was cancelled). */
+  completed: boolean;
+  /** The output says the service rate-limited the call. */
+  rateLimited: boolean;
   sequence: number;
 };
 

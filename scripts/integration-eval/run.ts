@@ -22,9 +22,16 @@
  * Results append to DIR/results.jsonl; a rerun of the same DIR skips rows that
  * already have a record, so an interrupted grid resumes where it stopped.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
-import { authFromEnv, OpengeniApi, type SessionEvent } from "./api";
+import { authFromEnv, HttpFailure, OpengeniApi, type SessionEvent } from "./api";
 import { CASES, DEFAULT_SCOPE } from "./catalogue";
 import { gradeCase, type Verification } from "./grade";
 import { INTEGRATIONS } from "./integrations";
@@ -56,6 +63,17 @@ function args(argv: string[]): { command: string; flags: Map<string, string> } {
   }
   return { command, flags };
 }
+
+/** A positive whole-number flag, or the default when it is missing or not a number. */
+export function countFlag(value: string | undefined, fallback: number): number {
+  const parsed = Math.floor(Number(value));
+  if (value !== undefined && !(Number.isFinite(parsed) && parsed >= 1))
+    console.warn(`ignoring "${value}"; using ${fallback}`);
+  return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
+}
+
+/** Categories that are not a product verdict and stay out of pass rates. */
+export const EXCLUDED_CATEGORIES: ReadonlySet<string> = new Set(["harness_error", "rate_limited"]);
 
 function env(name: string): string {
   const value = process.env[name];
@@ -170,6 +188,17 @@ function readRecords(file: string): RunRecord[] {
 const jobKey = (caseId: string, model: string, effort: string, repeat: number) =>
   `${caseId}|${model}|${effort}|${repeat}`;
 
+/** The newest record per job: a resumed run appends retries of earlier harness errors. */
+export function latestRecords(records: readonly RunRecord[]): RunRecord[] {
+  const latest = new Map<string, RunRecord>();
+  for (const record of records) {
+    const key = jobKey(record.caseId, record.model, record.effort, record.repeat);
+    latest.delete(key);
+    latest.set(key, record);
+  }
+  return [...latest.values()];
+}
+
 function runMarker(): string {
   return Math.random().toString(36).slice(2, 8);
 }
@@ -179,8 +208,10 @@ async function driveSession(
   api: OpengeniApi,
   workspaceId: string,
   sessionId: string,
-  decision: "approve" | "reject" = "approve",
-): Promise<{ events: SessionEvent[]; timedOut: boolean }> {
+  testCase: EvalCase,
+): Promise<{ events: SessionEvent[]; timedOut: boolean; complete: boolean }> {
+  const decision = testCase.decision ?? "approve";
+  let complete = true;
   const events: SessionEvent[] = [];
   const decided = new Set<string>();
   let cursor = 0;
@@ -191,15 +222,22 @@ async function driveSession(
     const page = await api.events(workspaceId, sessionId, cursor);
     events.push(...page.events);
     cursor = page.cursor;
+    complete &&= page.complete;
 
     const receipts = parseReceipts(events);
     for (const approval of receipts.approvals) {
       if (approval.decision !== null || decided.has(approval.approvalId)) continue;
-      decided.add(approval.approvalId);
+      // Only the row's own integration gets the row's decision. Anything else
+      // (another service, an unattributed tool) is rejected, so a run never
+      // writes outside the configured test fixtures; the grader reports it.
+      const choice = approval.integration === testCase.integration ? decision : "reject";
       try {
-        await api.decideApproval(workspaceId, sessionId, approval.approvalId, decision);
+        await api.decideApproval(workspaceId, sessionId, approval.approvalId, choice);
+        decided.add(approval.approvalId);
       } catch (error) {
-        console.warn(`approval ${approval.approvalId} failed: ${String(error)}`);
+        // Already decided (409) counts as done; anything else retries next poll.
+        if (error instanceof HttpFailure && error.status === 409) decided.add(approval.approvalId);
+        else console.warn(`approval ${approval.approvalId} failed, will retry: ${String(error)}`);
       }
     }
 
@@ -232,10 +270,16 @@ async function driveSession(
       !["running", "queued", "requires_action"].includes(snapshot.status);
     if (ended && resting && page.events.length === 0) {
       stableIdlePolls += 1;
-      if (stableIdlePolls >= 2) return { events, timedOut: false };
+      if (stableIdlePolls >= 2) return { events, timedOut: false, complete };
     } else stableIdlePolls = 0;
   }
-  return { events, timedOut: true };
+  // Stop the chat so it can't keep spending or write after the service check.
+  try {
+    await api.cancelSession(workspaceId, sessionId, "integration eval run deadline");
+  } catch (error) {
+    console.warn(`cancel ${sessionId} failed: ${String(error)}`);
+  }
+  return { events, timedOut: true, complete };
 }
 
 type GradedFields = Pick<
@@ -250,13 +294,18 @@ function gradeEvents(
   timedOut: boolean,
   verification: Verification | null,
   receiptsFile: string,
+  complete = true,
 ): GradedFields {
   mkdirSync(join(receiptsFile, ".."), { recursive: true });
   const receipts = parseReceipts(events);
   writeFileSync(receiptsFile, JSON.stringify(receipts, null, 2));
-  let grade: Grade = timedOut
-    ? { pass: false, category: "harness_error", reasons: ["run timed out"] }
-    : gradeCase(testCase, receipts, verification);
+  // A run still going at the deadline is the agent's verdict (looping or
+  // stalled), not the harness's; an event history cut short is the harness's.
+  let grade: Grade = !complete
+    ? { pass: false, category: "harness_error", reasons: ["session events were cut short"] }
+    : timedOut
+      ? { pass: false, category: "timeout", reasons: ["agent still active at the run deadline"] }
+      : gradeCase(testCase, receipts, verification);
   if (
     !timedOut &&
     receipts.tools.length === 0 &&
@@ -335,11 +384,11 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
     });
     base.sessionId = session.id;
     base.chatUrl = `${appUrl}/workspaces/${workspaceId}/sessions/${session.id}`;
-    const { events, timedOut } = await driveSession(
+    const { events, timedOut, complete } = await driveSession(
       api,
       workspaceId,
       session.id,
-      testCase.decision ?? "approve",
+      testCase,
     );
     const verification = testCase.kind === "write" ? await verify(testCase.verify, marker) : null;
     const graded = gradeEvents(
@@ -348,6 +397,7 @@ async function runJob(api: OpengeniApi, job: Job, outDir: string): Promise<RunRe
       timedOut,
       verification,
       join(outDir, "receipts", `${marker}.json`),
+      complete,
     );
     const finished = Date.now();
     return {
@@ -388,8 +438,20 @@ async function runAll(flags: Map<string, string>) {
   let jobs: Job[];
   const rerun = flags.get("rerun");
   if (rerun) {
-    const previous = readRecords(rerun).filter(
-      (record) => flags.get("failed-only") !== "true" || !record.grade.pass,
+    // --cases and --skip-integrations narrow a rerun too.
+    const casesFlag = flags.get("cases");
+    const allowed = casesFlag
+      ? new Set(
+          selectCases(casesFlag, skip, (flags.get("include") ?? "").split(",").filter(Boolean)).map(
+            (testCase) => testCase.id,
+          ),
+        )
+      : null;
+    const previous = latestRecords(readRecords(rerun)).filter(
+      (record) =>
+        (allowed === null || allowed.has(record.caseId)) &&
+        !skip.includes(record.integration) &&
+        (flags.get("failed-only") !== "true" || !record.grade.pass),
     );
     jobs = previous.flatMap((record) => {
       const testCase = CASES.find((item) => item.id === record.caseId);
@@ -407,16 +469,17 @@ async function runAll(flags: Map<string, string>) {
     const include = (flags.get("include") ?? "").split(",").filter(Boolean);
     const cases = selectCases(flags.get("cases"), skip, include);
     const cells = parseCells(flags.get("cells"), api.clientConfig);
-    const repeats = Number(flags.get("repeats") ?? 1);
+    const repeats = countFlag(flags.get("repeats"), 1);
     jobs = [];
     for (let repeat = 1; repeat <= repeats; repeat += 1) {
       for (const cell of cells) for (const testCase of cases) jobs.push({ testCase, cell, repeat });
     }
   }
+  // Harness errors are retried on resume; their newer record replaces the old one.
   const done = new Set(
-    readRecords(resultsFile).map((record) =>
-      jobKey(record.caseId, record.model, record.effort, record.repeat),
-    ),
+    latestRecords(readRecords(resultsFile))
+      .filter((record) => record.grade.category !== "harness_error")
+      .map((record) => jobKey(record.caseId, record.model, record.effort, record.repeat)),
   );
   const pending = jobs.filter(
     (job) => !done.has(jobKey(job.testCase.id, job.cell.model, job.cell.effort, job.repeat)),
@@ -443,18 +506,20 @@ async function runAll(flags: Map<string, string>) {
     return;
   }
 
-  const concurrency = Math.max(1, Number(flags.get("concurrency") ?? 4));
+  const concurrency = countFlag(flags.get("concurrency"), 4);
   // `--integration-concurrency slack=1,linear=2` caps parallel chats that
   // reach one service (its API rate limits), apart from not_connected rows.
-  const caps = new Map(
-    (flags.get("integration-concurrency") ?? "")
+  // Sentry's service check isn't scoped to a run marker, so its rows run one at a time.
+  const caps = new Map<string, number>([
+    ["sentry", 1],
+    ...(flags.get("integration-concurrency") ?? "")
       .split(",")
       .filter(Boolean)
       .map((part) => {
         const [name = "", limit = "1"] = part.split("=");
-        return [name, Math.max(1, Number(limit) || 1)] as const;
+        return [name, countFlag(limit, 1)] as const;
       }),
-  );
+  ]);
   const running = new Map<string, number>();
   const capped = (job: Job) =>
     job.testCase.kind === "not_connected" ? null : (job.testCase.integration as string);
@@ -507,17 +572,18 @@ async function regradeAll(flags: Map<string, string>) {
   const api = await new OpengeniApi(env("OPENGENI_EVAL_API_URL"), authFromEnv()).init();
   const updated: RunRecord[] = [];
   let changed = 0;
-  for (const record of readRecords(resultsFile)) {
+  for (const record of latestRecords(readRecords(resultsFile))) {
     const testCase = CASES.find((item) => item.id === record.caseId);
-    if (!testCase || !record.sessionId || record.error) {
+    // A run that failed mid-drive still has a chat to grade if it got a session.
+    if (!testCase || !record.sessionId) {
       updated.push(record);
       continue;
     }
     try {
-      const { events } = await api.events(record.workspaceId, record.sessionId, 0);
+      const { events, complete } = await api.events(record.workspaceId, record.sessionId, 0);
       // A run that timed out may have finished since; grade it if a turn ended.
       const timedOut =
-        record.grade.reasons.includes("run timed out") &&
+        record.grade.reasons.some((reason) => /timed out|run deadline/.test(reason)) &&
         !events.some((event) => /^turn\.(completed|failed|cancelled)$/.test(event.type));
       const graded = gradeEvents(
         testCase,
@@ -525,15 +591,19 @@ async function regradeAll(flags: Map<string, string>) {
         timedOut,
         record.verification,
         join(outDir, "receipts", `${record.runId}.json`),
+        complete,
       );
       if (graded.grade.pass !== record.grade.pass) changed += 1;
-      updated.push({ ...record, ...graded });
+      updated.push({ ...record, ...graded, error: graded.grade.pass ? null : record.error });
     } catch (error) {
       console.warn(`regrade ${record.runId} failed: ${String(error)}`);
       updated.push(record);
     }
   }
-  writeFileSync(resultsFile, updated.map((record) => `${JSON.stringify(record)}\n`).join(""));
+  // Write beside the file, then rename, so an interrupted regrade can't truncate it.
+  const temporary = `${resultsFile}.tmp`;
+  writeFileSync(temporary, updated.map((record) => `${JSON.stringify(record)}\n`).join(""));
+  renameSync(temporary, resultsFile);
   console.log(`regraded ${updated.length} runs; ${changed} changed verdict`);
   writeReport(outDir);
 }
@@ -544,7 +614,8 @@ function tally(records: readonly RunRecord[]): Tally {
   return {
     runs: records.length,
     pass: records.filter((record) => record.grade.pass).length,
-    harness: records.filter((record) => record.grade.category === "harness_error").length,
+    harness: records.filter((record) => EXCLUDED_CATEGORIES.has(record.grade.category ?? ""))
+      .length,
   };
 }
 
@@ -569,7 +640,7 @@ const csv = (value: unknown) => {
 };
 
 export function writeReport(outDir: string) {
-  const records = readRecords(join(outDir, "results.jsonl"));
+  const records = latestRecords(readRecords(join(outDir, "results.jsonl")));
   const groups = new Map<string, RunRecord[]>();
   for (const record of records) {
     const key = `${record.integration}|${record.model}|${record.effort}`;
@@ -583,7 +654,7 @@ export function writeReport(outDir: string) {
       "runs",
       "pass",
       "fail",
-      "harness_errors",
+      "excluded_runs",
       "pass_rate",
       "failure_categories",
       "failing_chats",
@@ -671,7 +742,12 @@ export function writeReport(outDir: string) {
     const key = `${record.model}@${record.effort}`;
     byModel.set(key, [...(byModel.get(key) ?? []), record]);
   }
-  lines.push("| Cell | Runs | Pass rate (95% CI) | Harness errors |", "|---|---|---|---|");
+  lines.push(
+    "Excluded runs (harness errors and service rate limits) don't count toward pass rates.",
+    "",
+    "| Cell | Runs | Pass rate (95% CI) | Excluded |",
+    "|---|---|---|---|",
+  );
   for (const [key, group] of [...byModel.entries()].sort()) {
     const counts = tally(group);
     const graded = counts.runs - counts.harness;

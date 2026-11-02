@@ -110,7 +110,7 @@ export const CASES: readonly EvalCase[] = [
     kind: "identity",
     core: true,
     prompt: "Which Linear workspace and user are you connected to?",
-    expectAnswer: [i("halcyon|it-linear")],
+    expectAnswer: [i("halcyon")],
   },
 
   // ── Atlassian (Jira + Confluence, v2 MCP with ?tools=all) ─────────────────
@@ -172,7 +172,7 @@ export const CASES: readonly EvalCase[] = [
     integration: "atlassian",
     kind: "identity",
     prompt: "Which Atlassian site and account are you using for Jira?",
-    expectAnswer: [i("atlassian\\.net|it-atlassian")],
+    expectAnswer: [i("atlassian\\.net")],
   },
 
   // ── Notion ────────────────────────────────────────────────────────────────

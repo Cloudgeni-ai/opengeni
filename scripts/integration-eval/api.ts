@@ -188,14 +188,20 @@ export class OpengeniApi {
     return this.get<SessionSnapshot>(`/v1/workspaces/${workspaceId}/sessions/${sessionId}`);
   }
 
-  /** Forensic events after `after`, following the has-more headers. */
+  /**
+   * Forensic events after `after`, following the has-more headers. `complete`
+   * is false when paging stopped before the end; grading such a history could
+   * miss outputs. `exact` is false when the server trimmed some payloads.
+   */
   async events(
     workspaceId: string,
     sessionId: string,
     after = 0,
-  ): Promise<{ events: SessionEvent[]; cursor: number }> {
+  ): Promise<{ events: SessionEvent[]; cursor: number; complete: boolean; exact: boolean }> {
     const out: SessionEvent[] = [];
     let cursor = after;
+    let complete = false;
+    let exact = true;
     for (let page = 0; page < 100; page += 1) {
       const { body, headers } = await this.call(
         "GET",
@@ -207,9 +213,22 @@ export class OpengeniApi {
       out.push(...batch);
       const next = Number(headers.get("x-opengeni-next-after") ?? cursor);
       cursor = Math.max(cursor, next, ...batch.map((event) => event.sequence));
-      if (headers.get("x-opengeni-has-more") !== "true") break;
+      if (headers.get("x-opengeni-forensic-exact") === "false") exact = false;
+      if (headers.get("x-opengeni-has-more") !== "true") {
+        complete = true;
+        break;
+      }
     }
-    return { events: out, cursor };
+    return { events: out, cursor, complete, exact };
+  }
+
+  /** Stop a chat and its queued work (used at the run deadline). */
+  cancelSession(workspaceId: string, sessionId: string, reason: string) {
+    return this.post(`/v1/workspaces/${workspaceId}/sessions/${sessionId}/control`, {
+      action: "cancel",
+      clientEventId: `eval-cancel-${sessionId}`,
+      reason,
+    });
   }
 
   decideApproval(
