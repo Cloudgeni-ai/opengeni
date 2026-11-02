@@ -113,6 +113,18 @@ describe("worker prompt tool availability", () => {
     expect(below.unavailable).not.toContain("session_create");
     expect(below).not.toHaveProperty("childSessionsImpossible");
     expect(instructions({ agentPromptToolAvailability: below })).toBe(instructions());
+    // Learning Off adds refused tools without dropping the depth fact.
+    const exhaustedLearningOff = promptToolAvailabilityForTurn({
+      agentConfig,
+      selectedFirstPartyMcpTools: selectionFor(null),
+      firstPartyPermissions: null,
+      nestedAgentDepth: 2,
+      effectiveMaxNestedAgentDepth: 2,
+      learning: { knowledge: "off", instructions: "off", skills: "off" },
+    })!;
+    expect(exhaustedLearningOff.childSessionsImpossible).toBe(true);
+    expect(exhaustedLearningOff.unavailable).toContain("session_create");
+    expect(exhaustedLearningOff.unavailable).toContain("knowledge_save");
   });
 
   test("learning Off omits only that category's authoring clauses; other modes change nothing", () => {
