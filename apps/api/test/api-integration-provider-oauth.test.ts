@@ -1704,7 +1704,8 @@ describe("API Integration provider OAuth", () => {
     const previousEnabled = settings.microsoftTeamsToolsEnabled;
     const previousWorkspaces = settings.microsoftTeamsAllowedWorkspaceIds;
     try {
-      settings.microsoftTeamsToolsEnabled = true;
+      // Offered to this workspace only.
+      settings.microsoftTeamsToolsEnabled = false;
       settings.microsoftTeamsAllowedWorkspaceIds = [workspace.workspaceId];
       const setup = await beginBuiltIn(
         fixture,
