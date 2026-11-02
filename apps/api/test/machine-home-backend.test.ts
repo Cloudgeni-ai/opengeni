@@ -1446,4 +1446,48 @@ describe("create-time sandbox backend gate", () => {
       }),
     ).rejects.toMatchObject({ status: 422 });
   }, 60_000);
+
+  test("a keyed retry that finishes its pending shell keeps the backend that row passed with", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    const withCompute = testSettings({
+      ...settings,
+      computeApiUrl: "https://compute.example",
+      computeApiKey: "test-compute-key",
+    });
+    const request = {
+      initialMessage: "use compute",
+      sandboxBackend: "compute" as const,
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const created = await createSessionForRequest(
+      deps(bus, withCompute),
+      grant(accountId, workspaceId),
+      workspaceId,
+      request,
+    );
+    // Model a create that inserted its keyed shell but crashed before the
+    // session.created event: the retry finds a pending shell, not a session.
+    await admin`
+      delete from session_events
+      where workspace_id = ${workspaceId} and session_id = ${created.id}`;
+    const before = await sessionCount(workspaceId);
+    const retried = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      request,
+    );
+    expect(retried.id).toBe(created.id);
+    expect(retried.sandboxBackend).toBe("compute");
+    expect(await sessionCount(workspaceId)).toBe(before);
+    // A fresh create naming an unserved backend is still refused.
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        ...request,
+        idempotencyKey: crypto.randomUUID(),
+        sandboxBackend: "local",
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+  }, 60_000);
 });

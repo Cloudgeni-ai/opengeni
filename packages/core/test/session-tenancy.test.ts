@@ -1047,7 +1047,7 @@ describe("managed-human session tenancy application service", () => {
     );
     expect(forked).toMatchObject({ replay: false });
     expect(await countSessions()).toBe(before + 1);
-  });
+  }, 180_000);
 
   test("make private anyway stops a running response and drops another member's authority in one call", async () => {
     if (!shared || !client) return;

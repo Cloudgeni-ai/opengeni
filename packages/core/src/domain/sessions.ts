@@ -3019,10 +3019,14 @@ async function createSessionForRequestInFileScope(
   // unserved value (for example `local` on a cloud deployment) would run the
   // box as processes on the worker host. Checked after keyed replay so a
   // retry of an already-initialized create still returns its session, and
-  // before anything is inserted. Inherited/shared placements and the
-  // server-chosen defaults below never read the caller's value unchecked.
+  // before anything is inserted. A retry that finds its pending keyed shell
+  // already storing the same backend passed this check when that row was
+  // inserted, so it finishes that row rather than failing on a later config
+  // change. Inherited/shared placements and the server-chosen defaults below
+  // never read the caller's value unchecked.
   if (
     payload.sandboxBackend !== undefined &&
+    retainedKeyedShellExecution?.sandboxBackend !== payload.sandboxBackend &&
     !sandboxBackendServed(unresolvedDeps.settings, payload.sandboxBackend)
   ) {
     throw new HTTPException(422, {
