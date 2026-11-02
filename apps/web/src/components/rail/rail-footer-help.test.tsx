@@ -53,7 +53,7 @@ describe("rail footer account menu", () => {
     }
   });
 
-  test("lists Invitations, with its own separator, only while some are pending", async () => {
+  test("lists Invitations only while some are pending, with My things in the account group", async () => {
     const pendingUnmount = await renderOpenAccountMenu({
       managed: true,
       analytics: false,
@@ -64,7 +64,8 @@ describe("rail footer account menu", () => {
       const sequence = menuSequence();
       expectNoAdjacentSeparators(sequence);
       expect(sequence[2]).toBe("Invitations2");
-      expect(sequence[3]).toBe("|");
+      expect(sequence[3]).toBe("My things");
+      expect(sequence[4]).toBe("|");
     } finally {
       await pendingUnmount();
     }
@@ -78,7 +79,9 @@ describe("rail footer account menu", () => {
       const sequence = menuSequence();
       expectNoAdjacentSeparators(sequence);
       expect(sequence.join("|")).not.toContain("Invitations");
-      expect(sequence[2]).toContain("Appearance");
+      expect(sequence[2]).toBe("My things");
+      expect(sequence[3]).toBe("|");
+      expect(sequence[4]).toContain("Appearance");
     } finally {
       await idleUnmount();
     }

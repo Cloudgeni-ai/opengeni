@@ -32,6 +32,7 @@ import {
 import { AccountTrigger } from "@/components/rail/account-trigger";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { AccountUsageMenuItem } from "@opengeni/react/app/components/usage/usage-entry";
+import { MyThingsMenuItem } from "@/components/my-things-menu-item";
 import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
 import {
   accountMenuAriaLabel,
@@ -280,6 +281,10 @@ export function BrowserAccountMenu({
             disabled={busy}
           />
           {newOrganization.item}
+          <MyThingsMenuItem
+            workspaceId={rail.workspaceId}
+            className="forced-colors:text-[CanvasText]!"
+          />
           <DropdownMenuSeparator />
           <AccountUsageMenuItem workspaceId={rail.workspaceId} />
           <AppearanceSubmenu />

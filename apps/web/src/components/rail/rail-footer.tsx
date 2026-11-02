@@ -11,6 +11,7 @@ import { AppearanceSubmenu } from "@/components/appearance-menu";
 import { DesktopAppSubmenu, ExcelAddinMenuItem } from "@/components/desktop-app-menu";
 import { DesktopAccountMenuItems, hasDesktopAccounts } from "@/components/desktop/desktop-rail";
 import { HelpMenu } from "@/components/help-menu";
+import { MyThingsMenuItem } from "@/components/my-things-menu-item";
 import {
   accountMenuAriaLabel,
   OrganizationInvitationsDialog,
@@ -159,9 +160,8 @@ export function RailFooter() {
                   <OrganizationInvitationsMenuItem controller={organizationInvitations} />
                 ) : null}
                 {newOrganization.item}
-                {(managed && organizationInvitations.pendingCount > 0) || newOrganization.item ? (
-                  <DropdownMenuSeparator />
-                ) : null}
+                {managed ? <MyThingsMenuItem workspaceId={rail.workspaceId} /> : null}
+                {managed || newOrganization.item ? <DropdownMenuSeparator /> : null}
                 <AppearanceSubmenu />
                 <HelpMenu
                   documentationUrl={context.clientConfig.documentationUrl}
