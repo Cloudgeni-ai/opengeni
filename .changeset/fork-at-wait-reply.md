@@ -1,6 +1,6 @@
 ---
 "@opengeni/db": patch
-"@opengeni/api": patch
+"@opengeni/api-router": patch
 "@opengeni/react": patch
 ---
 
