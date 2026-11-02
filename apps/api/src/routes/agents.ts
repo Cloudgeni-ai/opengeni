@@ -128,24 +128,29 @@ function deterministicUuid(value: string): string {
 }
 
 /** Cursor of a chat list: the last chat's start and id. */
-function encodeChatCursor(chat: { createdAt: Date; sessionId: string }): string {
-  return Buffer.from(`${chat.createdAt.toISOString()}|${chat.sessionId}`).toString("base64url");
+function encodeChatCursor(chat: { cursorAt: string; sessionId: string }): string {
+  return Buffer.from(`${chat.cursorAt}|${chat.sessionId}`).toString("base64url");
 }
 
 function decodeChatCursor(
   value: string | undefined,
-): { createdAt: Date; sessionId: string } | null {
+): { createdAt: string; sessionId: string } | null {
   if (!value) return null;
   const [at, sessionId] = Buffer.from(value, "base64url").toString("utf8").split("|");
-  const createdAt = new Date(at ?? "");
-  if (Number.isNaN(createdAt.getTime()) || !z.string().uuid().safeParse(sessionId).success) {
+  // Microseconds are kept, so chats made in the same millisecond page correctly.
+  if (
+    !at ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$/u.test(at) ||
+    Number.isNaN(new Date(at).getTime()) ||
+    !z.string().uuid().safeParse(sessionId).success
+  ) {
     throw new ApiHttpError(422, {
       code: "validation_failed",
       message: "cursor is not one this list returned",
       retryable: false,
     });
   }
-  return { createdAt, sessionId: sessionId! };
+  return { createdAt: at, sessionId: sessionId! };
 }
 
 function limitParam(value: string | undefined, fallback: number): number {
@@ -467,6 +472,13 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw privateOwnerError(error);
     });
     if (outcome.kind === "not_found") throw notFound();
+    if (outcome.kind === "requires_workspace_visibility") {
+      throw agentError(
+        409,
+        "agent_slack_requires_workspace_visibility",
+        "This agent is available in Slack, so it stays shared with the workspace. Turn Slack off first.",
+      );
+    }
     if (outcome.kind === "version_conflict") {
       throw agentError(
         409,
@@ -670,6 +682,13 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       actorSubjectId: context.grant.subjectId,
     });
     if (outcome.kind === "not_found") throw notFound();
+    if (outcome.kind === "requires_workspace_visibility") {
+      throw agentError(
+        409,
+        "agent_slack_requires_workspace_visibility",
+        "Share this agent with the workspace to make it available in Slack.",
+      );
+    }
     if (outcome.kind === "name_taken") {
       throw agentError(
         409,

@@ -203,7 +203,8 @@ describe("agents data layer (restricted runtime role)", () => {
       name: "Release helper",
       name_key: "releasehelper",
       instructions: "Be brief.",
-      version: agent.version,
+      // Turning Slack on is a change of the agent.
+      version: agent.version + 1,
       avatar: { kind: "letters", letters: "RH" },
     });
     // No duplicate revision from the Slack agent trigger.
@@ -358,13 +359,22 @@ describe("agents data layer (restricted runtime role)", () => {
     expect(await legacySlackRow(created.id)).toBeNull();
   }, 120_000);
 
-  test("a chat's agent: sessions.agent_id, or an older Slack chat's metadata", async () => {
+  test("a chat's agent: sessions.agent_id, or an older Slack chat's interaction", async () => {
     const org = await organization();
     const { agent } = await createAgent(app.db, org.homeScope, agentInput(org));
+    await putAgentSlackInstall(app.db, org.homeScope, {
+      agentId: agent.id,
+      connectionId: org.connectionId,
+      slackTeamId: "T0AGENTS",
+      installWorkspaceId: org.install,
+      actorSubjectId: org.owner,
+    });
     const older = crypto.randomUUID();
+    const forged = crypto.randomUUID();
     const plain = crypto.randomUUID();
     for (const [id, metadata] of [
       [older, { slackAgent: { id: agent.id, name: agent.name } }],
+      [forged, { slackAgent: { id: agent.id, name: agent.name } }],
       [plain, {}],
     ] as const) {
       await withWorkspaceSessionActivityRls(app.db, org.home, (tx) =>
@@ -375,9 +385,22 @@ describe("agents data layer (restricted runtime role)", () => {
             jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null))`),
       );
     }
+    // The older Slack chat names its agent through its interaction.
+    await shared.admin`insert into slack_interactions
+      (account_id, workspace_id, connection_id, slack_team_id, slack_channel_id, slack_thread_ts,
+       route_key, triggering_provider_event_id, owning_subject_id, visibility, session_id,
+       session_reservation_id, slack_agent_id)
+      values (${org.accountId}, ${org.home}, ${org.connectionId}, 'T0AGENTS', 'C0AGENTS', '1.1',
+        ${crypto.randomUUID()}, ${crypto.randomUUID()}, ${org.owner}, 'workspace', ${older},
+        ${older}, ${agent.id})`;
     expect(
       await getSessionAgent(app.db, { workspaceId: org.home, sessionId: older }),
     ).toMatchObject({ agentChat: true, agent: { id: agent.id } });
+    // Metadata a caller set on create never names the agent.
+    expect(await getSessionAgent(app.db, { workspaceId: org.home, sessionId: forged })).toEqual({
+      agentChat: true,
+      agent: null,
+    });
     expect(await getSessionAgent(app.db, { workspaceId: org.home, sessionId: plain })).toEqual({
       agentChat: false,
       agent: null,
@@ -388,5 +411,99 @@ describe("agents data layer (restricted runtime role)", () => {
       agentChat: true,
       agent: null,
     });
+  }, 120_000);
+
+  test("an agent in Slack stays shared, checked under its row lock", async () => {
+    const org = await organization();
+    const { agent: mine } = await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { visibility: "private", ownerSubjectId: org.owner, name: "Diary" }),
+    );
+    // The route's own check could be stale; the write refuses anyway.
+    expect(
+      await putAgentSlackInstall(app.db, org.homeScope, {
+        agentId: mine.id,
+        connectionId: org.connectionId,
+        slackTeamId: "T0AGENTS",
+        installWorkspaceId: org.install,
+        actorSubjectId: org.owner,
+      }),
+    ).toEqual({ kind: "requires_workspace_visibility" });
+    expect(await legacySlackRow(mine.id)).toBeNull();
+
+    const { agent } = await createAgent(app.db, org.homeScope, agentInput(org));
+    const saved = await putAgentSlackInstall(app.db, org.homeScope, {
+      agentId: agent.id,
+      connectionId: org.connectionId,
+      slackTeamId: "T0AGENTS",
+      installWorkspaceId: org.install,
+      actorSubjectId: org.owner,
+    });
+    // Turning Slack on changes the agent: a stale edit conflicts.
+    expect(saved).toMatchObject({ kind: "saved", agent: { version: agent.version + 1 } });
+    expect(
+      await updateAgent(app.db, org.homeScope, {
+        agentId: agent.id,
+        expectedVersion: agent.version,
+        actorSubjectId: org.owner,
+        patch: { description: "Stale" },
+      }),
+    ).toMatchObject({ kind: "version_conflict" });
+    expect(
+      await updateAgent(app.db, org.homeScope, {
+        agentId: agent.id,
+        expectedVersion: null,
+        actorSubjectId: org.owner,
+        patch: { visibility: "private", ownerSubjectId: org.owner },
+      }),
+    ).toEqual({ kind: "requires_workspace_visibility" });
+    expect((await getAgent(app.db, org.homeScope, agent.id))?.visibility).toBe("workspace");
+  }, 120_000);
+
+  test("the legacy Slack API accepts either version during the rollout", async () => {
+    const org = await organization();
+    const created = await insertSlackAgent(app.db, org.installScope, {
+      connectionId: org.connectionId,
+      slackTeamId: "T0AGENTS",
+      targetAccountId: org.accountId,
+      targetWorkspaceId: org.home,
+      name: "Data team",
+      nameKey: "data-team",
+      description: "",
+      avatar: { kind: "emoji", emoji: "📊", hue: 120 },
+      instructions: "Cite the dashboard.",
+      createdBySubjectId: org.owner,
+    });
+    if (created === "name_taken") throw new Error("unexpected name clash");
+    // As after the backfill: the legacy row is ahead of the agent.
+    await shared.admin`update slack_agents set version = 7 where id = ${created.id}`;
+    const shown = await getSlackAgent(app.db, { accountId: org.accountId, agentId: created.id });
+    expect(shown?.version).toBe(7);
+    const updated = await updateSlackAgent(app.db, org.installScope, {
+      agentId: created.id,
+      expectedVersion: 7,
+      actorSubjectId: org.owner,
+      patch: { description: "From an older page" },
+    });
+    if (!updated || typeof updated === "string") throw new Error(`update failed: ${updated}`);
+    expect(updated.version).toBe(8);
+    expect(await legacySlackRow(created.id)).toMatchObject({ version: 8 });
+    expect((await getAgent(app.db, org.homeScope, created.id))?.version).toBe(8);
+    expect(
+      await updateSlackAgent(app.db, org.installScope, {
+        agentId: created.id,
+        expectedVersion: 7,
+        patch: { description: "Stale" },
+      }),
+    ).toBe("version_conflict");
+    // Only open changed: one version step, no new revision.
+    const opened = await updateSlackAgent(app.db, org.installScope, {
+      agentId: created.id,
+      expectedVersion: 8,
+      patch: { open: true },
+    });
+    if (!opened || typeof opened === "string") throw new Error(`open failed: ${opened}`);
+    expect(opened).toMatchObject({ open: true, version: 9 });
   }, 120_000);
 });

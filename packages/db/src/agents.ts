@@ -544,7 +544,9 @@ export type UpdateAgentOutcome =
   | { kind: "not_found" }
   | { kind: "version_conflict"; current: AgentRecord }
   /** The new name clashes with another agent in a Slack installation it is in. */
-  | { kind: "slack_name_taken"; connectionId: string };
+  | { kind: "slack_name_taken"; connectionId: string }
+  /** The change would make an agent that is in Slack Only me. */
+  | { kind: "requires_workspace_visibility" };
 
 async function lockAgent(
   tx: Database,
@@ -625,8 +627,13 @@ export async function updateAgent(
       if (input.expectedVersion !== null && current.version !== input.expectedVersion) {
         return { kind: "version_conflict" as const, current };
       }
-      await markDualWrite(tx);
       const { patch } = input;
+      const installs = await installsOf(tx, home, current.id);
+      // Checked under the row lock: an agent in Slack is always shared.
+      if (patch.visibility === "private" && installs.length > 0) {
+        return { kind: "requires_workspace_visibility" as const };
+      }
+      await markDualWrite(tx);
       const name = patch.name ?? current.name;
       const instructions = patch.instructions ?? current.content?.instructions ?? "";
       const firstMessage = patch.firstMessage ?? current.content?.firstMessage ?? "";
@@ -659,7 +666,6 @@ export async function updateAgent(
             ${nextRevision}::integer, ${name}, ${patch.description ?? current.description},
             ${instructions}, ${firstMessage}, ${input.actorSubjectId})`);
       }
-      const installs = await installsOf(tx, home, current.id);
       if (
         patch.name !== undefined &&
         slackAgentNameKey(patch.name) !== slackAgentNameKey(current.name)
@@ -713,6 +719,44 @@ class SlackNameClash extends Error {
   constructor(readonly connectionId: string) {
     super("Slack name clash");
   }
+}
+
+/**
+ * For the legacy Slack agents API during the rollout: lock the agent and
+ * return the version that API shows, the greater of the agent's and its
+ * legacy row's (the backfill did not copy legacy versions), raising the
+ * agent's to match so versions only move forward. Null when not found.
+ * Call inside the caller's transaction.
+ */
+export async function lockAgentLegacySlackVersion(
+  tx: Database,
+  home: AgentHome,
+  input: { agentId: string; connectionId: string; installWorkspaceId: string },
+): Promise<{ agentVersion: number; version: number } | null> {
+  const agent = await lockAgent(tx, home, input.agentId);
+  if (!agent) return null;
+  const legacy = await withRlsContext(
+    tx,
+    { accountId: home.accountId, workspaceId: input.installWorkspaceId },
+    async (scoped) =>
+      (
+        await rawRows<{ version: number }>(
+          scoped,
+          sql`select version from slack_agents
+            where id = ${input.agentId}::uuid
+              and workspace_id = ${input.installWorkspaceId}::uuid
+              and connection_id = ${input.connectionId}::uuid
+            for update`,
+        )
+      )[0]?.version ?? null,
+  );
+  const version = Math.max(agent.version, Number(legacy ?? 0));
+  if (version > agent.version) {
+    await markDualWrite(tx);
+    await tx.execute(sql`update agents set version = ${version}::integer
+      where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
+  }
+  return { agentVersion: agent.version, version };
 }
 
 /** Remember the agent's Memory collection once it exists. Version-free and idempotent. */
@@ -783,7 +827,9 @@ export type PutAgentSlackInstallOutcome =
   | { kind: "version_conflict"; install: AgentSlackInstallRecord }
   | { kind: "name_taken" }
   /** The agent is already available in another Slack installation. */
-  | { kind: "single_install"; connectionId: string };
+  | { kind: "single_install"; connectionId: string }
+  /** An Only me agent cannot be in Slack. */
+  | { kind: "requires_workspace_visibility" };
 
 /**
  * Make an agent available in one Slack installation, or change its open
@@ -809,6 +855,11 @@ export async function putAgentSlackInstall(
     return await withRlsContext(db, home, async (tx) => {
       const agent = await lockAgent(tx, home, input.agentId);
       if (!agent) return { kind: "not_found" as const };
+      // Checked under the row lock, so a concurrent change to Only me cannot
+      // slip in between the caller's check and this write.
+      if (agent.visibility !== "workspace") {
+        return { kind: "requires_workspace_visibility" as const };
+      }
       await markDualWrite(tx);
       const installs = await installsOf(tx, home, agent.id);
       const existing = installs.find((install) => install.connectionId === input.connectionId);
@@ -842,6 +893,10 @@ export async function putAgentSlackInstall(
         values (${agent.id}::uuid, ${home.accountId}::uuid, ${home.workspaceId}::uuid,
           ${input.connectionId}::uuid, ${input.slackTeamId}, ${nameKey}, ${input.open ?? false},
           ${input.actorSubjectId})`);
+      // Turning Slack on changes the agent, so a stale edit of it conflicts.
+      await tx.execute(sql`update agents set version = version + 1, updated_at = now()
+        where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
+      const enabled = (await getAgent(tx, home, agent.id)) ?? agent;
       await withRlsContext(
         tx,
         { accountId: home.accountId, workspaceId: input.installWorkspaceId },
@@ -857,14 +912,14 @@ export async function putAgentSlackInstall(
               ${agent.content?.instructions ?? ""},
               ${agent.memoryEnabled ? agent.memoryCollectionId : null}::uuid,
               ${input.open ?? false},
-              ${agent.createdBySubjectId ?? input.actorSubjectId}, ${agent.version}::integer)`);
+              ${agent.createdBySubjectId ?? input.actorSubjectId}, ${enabled.version}::integer)`);
         },
       );
       const saved = (await installsOf(tx, home, agent.id)).find(
         (install) => install.connectionId === input.connectionId,
       );
       if (!saved) throw new Error("Agent Slack availability insert returned no row");
-      return { kind: "saved" as const, install: saved, agent, created: true };
+      return { kind: "saved" as const, install: saved, agent: enabled, created: true };
     });
   } catch (error) {
     const constraint = uniqueViolation(error);
@@ -915,6 +970,8 @@ export type AgentChatRecord = {
     initiatingSlackUserId: string | null;
   } | null;
   createdAt: Date;
+  /** `created_at` to the microsecond, for a keyset cursor. */
+  cursorAt: string;
   updatedAt: Date;
 };
 
@@ -934,8 +991,8 @@ export async function listAgentChats(
     filter: "yours" | "everyone";
     sharedOnly?: boolean;
     excludeSessionId?: string | null;
-    /** Keyset cursor: chats created before this one. */
-    before?: { createdAt: Date; sessionId: string } | null;
+    /** Keyset cursor: chats created before this one (`cursorAt` of the last chat read). */
+    before?: { createdAt: string; sessionId: string } | null;
     limit: number;
   },
 ): Promise<AgentChatRecord[]> {
@@ -950,6 +1007,7 @@ export async function listAgentChats(
       created_by_subject_id: string | null;
       owner_subject_id: string | null;
       created_at: Date | string;
+      created_at_exact: string;
       updated_at: Date | string;
       connection_id: string | null;
       slack_channel_id: string | null;
@@ -971,6 +1029,7 @@ export async function listAgentChats(
         )
         select s.id::text as id, s.title, s.visibility, s.created_by_subject_id,
           s.owner_subject_id, s.created_at, s.updated_at,
+          to_char(s.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as created_at_exact,
           si.connection_id::text as connection_id, si.slack_channel_id, si.slack_thread_ts,
           si.initiating_slack_user_id, dm.owning_subject_id is not null as slack_private
         from bound b
@@ -995,6 +1054,8 @@ export async function listAgentChats(
         ) dm on true
         where s.archived_at is null
           and s.parent_session_id is null
+          -- A Site viewer's chat belongs to the Site's audience, not the workspace.
+          and s.site_access_root_id is null
           and ${
             input.sharedOnly || viewer === null
               ? sql`s.visibility = 'workspace_shared' and dm.owning_subject_id is null`
@@ -1011,7 +1072,7 @@ export async function listAgentChats(
           ${input.excludeSessionId ? sql`and s.id <> ${input.excludeSessionId}::uuid` : sql``}
           ${
             input.before
-              ? sql`and (s.created_at, s.id) < (${input.before.createdAt.toISOString()}::timestamptz, ${input.before.sessionId}::uuid)`
+              ? sql`and (s.created_at, s.id) < (${input.before.createdAt}::timestamptz, ${input.before.sessionId}::uuid)`
               : sql``
           }
         order by s.created_at desc, s.id desc
@@ -1033,6 +1094,7 @@ export async function listAgentChats(
             }
           : null,
       createdAt: date(row.created_at),
+      cursorAt: row.created_at_exact,
       updatedAt: date(row.updated_at),
     }));
   });
@@ -1040,8 +1102,8 @@ export async function listAgentChats(
 
 /**
  * The agent a chat was started with: `sessions.agent_id`, or for a chat an
- * older release started in Slack, the agent its metadata names. Null for an
- * ordinary chat.
+ * older release started in Slack, the agent its Slack interaction names.
+ * Null for an ordinary chat.
  */
 export async function getSessionAgentId(
   db: Database,
@@ -1050,22 +1112,41 @@ export async function getSessionAgentId(
   return (await readSessionAgentRef(db, input))?.agentId ?? null;
 }
 
+/**
+ * SQL for a chat's agent id: its binding, else (for a chat an older release
+ * started in Slack) its Slack interaction's agent. Never the free-form
+ * metadata a caller can set on create.
+ */
+function sessionAgentIdSql(session: SQL): SQL {
+  return sql`coalesce(${session}.agent_id, (
+    select i.slack_agent_id from slack_interactions i
+    where i.workspace_id = ${session}.workspace_id and i.session_id = ${session}.id
+      and i.slack_agent_id is not null
+    order by i.created_at, i.id limit 1))`;
+}
+
 async function readSessionAgentRef(
   db: Database,
   input: { workspaceId: string; sessionId: string },
-): Promise<{ accountId: string; agentId: string } | null> {
+): Promise<{ accountId: string; agentId: string | null; agentChat: boolean } | null> {
   return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
-    const [row] = await rawRows<{ account_id: string; agent_id: string | null }>(
+    const [row] = await rawRows<{
+      account_id: string;
+      agent_id: string | null;
+      named: boolean;
+    }>(
       tx,
       sql`select s.account_id::text as account_id,
-          coalesce(s.agent_id::text, s.metadata -> 'slackAgent' ->> 'id') as agent_id
+          ${sessionAgentIdSql(sql.raw("s"))}::text as agent_id,
+          (s.metadata -> 'slackAgent') is not null as named
         from sessions s
         where s.workspace_id = ${input.workspaceId}::uuid and s.id = ${input.sessionId}::uuid`,
     );
-    const agentId = row?.agent_id ?? null;
-    return row && agentId && /^[0-9a-f-]{36}$/iu.test(agentId)
-      ? { accountId: row.account_id, agentId }
-      : null;
+    if (!row) return null;
+    // The metadata only says an older release started it for an agent (so a
+    // chat whose agent is gone posts as Opengeni); it never names the agent.
+    if (!row.agent_id && !row.named) return null;
+    return { accountId: row.account_id, agentId: row.agent_id, agentChat: true };
   });
 }
 
@@ -1186,7 +1267,9 @@ function projectionQuery(where: SQL): SQL {
       a.account_id::text as agent_account_id, a.workspace_id::text as agent_workspace_id,
       a.name, a.description, a.avatar, a.memory_enabled,
       a.memory_collection_id::text as memory_collection_id,
-      a.created_by_subject_id as agent_created_by_subject_id, a.version as agent_version,
+      a.created_by_subject_id as agent_created_by_subject_id,
+      -- The legacy API's version during the rollout (see lockAgentLegacySlackVersion).
+      greatest(a.version, coalesce(s.version, 0)) as agent_version,
       a.created_at as agent_created_at, a.updated_at as agent_updated_at,
       r.instructions
     from agent_slack_installs i
@@ -1281,10 +1364,12 @@ export async function getSessionAgent(
   if (!ref) return { agentChat: false, agent: null };
   return {
     agentChat: true,
-    agent: await getAgent(
-      db,
-      { accountId: ref.accountId, workspaceId: input.workspaceId },
-      ref.agentId,
-    ),
+    agent: ref.agentId
+      ? await getAgent(
+          db,
+          { accountId: ref.accountId, workspaceId: input.workspaceId },
+          ref.agentId,
+        )
+      : null,
   };
 }

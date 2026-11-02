@@ -120,7 +120,7 @@ person who saved it. Routes:
 | `POST /v1/workspaces/:workspaceId/bot-templates` | `sessions:create`; a `sourceSessionId` must be a chat in the workspace the caller can open |
 | `PATCH` and `DELETE /v1/workspaces/:workspaceId/bot-templates/:templateId` | `sessions:create`, and whoever saved it or a workspace admin |
 
-A workspace keeps at most 200 templates.
+A workspace keeps at most 500 agents, templates included (they share the limit with app and Slack agents).
 
 In the web app, **Bot templates** sits in the sidebar's More section, next to
 Automations; once a workspace has templates, the new-chat page also shows them

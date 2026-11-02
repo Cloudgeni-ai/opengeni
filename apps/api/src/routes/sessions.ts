@@ -239,6 +239,7 @@ import {
   setSessionChannel,
   ChannelNotFoundError,
   SessionAgentNotFoundError,
+  getAgent,
   ChannelAudienceMismatchError,
   setSessionAttention,
   setSessionPin,
@@ -908,6 +909,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           if (context) (payload as Record<string, unknown>).modelContext = context;
         }
       }
+      // A chat with an Only me agent is Only me unless the caller chose;
+      // choosing shared is refused when the chat is bound.
+      await defaultAgentChatVisibility(deps, grant, workspaceId, payload);
       // Checked before anything is created: an avatar the chat could not show
       // refuses the request instead of leaving a half-made chat.
       if (requestedProfile?.avatar) {
@@ -7035,6 +7039,24 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 }
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
+/** An Only me agent's chat defaults to Only me (see sessionAgentBinding). */
+async function defaultAgentChatVisibility(
+  deps: SessionRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  payload: unknown,
+): Promise<void> {
+  if (!payload || typeof payload !== "object") return;
+  const request = payload as Record<string, unknown>;
+  if (typeof request["agentId"] !== "string" || request["visibility"] !== undefined) return;
+  const agent = await getAgent(
+    deps.db,
+    { accountId: grant.accountId, workspaceId },
+    request["agentId"],
+  ).catch(() => null);
+  if (agent?.visibility === "private") request["visibility"] = "private";
+}
+
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
   if (error instanceof SessionUsageLimitHttpError) {
     // a create-time usage limit the caller may not set (agents and
@@ -7092,7 +7114,14 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
       {
         code: "SESSION_CREATE_REJECTED",
         message: error.message,
-        details: { code: "agent_not_found" },
+        details: {
+          code:
+            error.reason === "requires_private_chat"
+              ? "agent_requires_private_chat"
+              : error.reason === "child_chat"
+                ? "agent_child_chat"
+                : "agent_not_found",
+        },
       },
       422,
     );

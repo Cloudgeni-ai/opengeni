@@ -391,5 +391,11 @@ export const AGENT_ERROR_CODES = [
   "agent_slack_personal_workspace",
   /** The workspace keeps the most agents it can. */
   "agent_limit_reached",
+  /** `POST /sessions`: the agent does not exist here or is someone else's Only me agent. */
+  "agent_not_found",
+  /** `POST /sessions`: an Only me agent's chats are Only me. */
+  "agent_requires_private_chat",
+  /** `POST /sessions`: a chat started from another chat cannot start an agent. */
+  "agent_child_chat",
 ] as const;
 export type AgentErrorCode = (typeof AGENT_ERROR_CODES)[number];

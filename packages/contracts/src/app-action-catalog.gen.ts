@@ -924,6 +924,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
+    "id": "createAgent",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agents",
+    "request": [
+      "CreateAgentRequest"
+    ],
+    "response": [
+      "Agent",
+      "AgentResponse"
+    ]
+  },
+  {
     "id": "createApiKey",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/api-keys",
@@ -1756,6 +1768,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [],
     "permission": "account:admin"
+  },
+  {
+    "id": "deleteAgent",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId",
+    "request": [],
+    "response": [
+      "DeleteAgentResponse"
+    ]
+  },
+  {
+    "id": "deleteAgentSlackAvailability",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/slack/:connectionId",
+    "request": [],
+    "response": [
+      "AgentSlackAvailabilityResponse"
+    ]
   },
   {
     "id": "deleteApiKey",
@@ -3133,6 +3163,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AccessContext"
+    ]
+  },
+  {
+    "id": "getAgent",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId",
+    "request": [],
+    "response": [
+      "Agent",
+      "AgentResponse"
     ]
   },
   {
@@ -4992,6 +5032,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "documents:search"
   },
   {
+    "id": "listAgentChats",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/chats",
+    "request": [
+      "AgentChatsFilter"
+    ],
+    "query": [
+      "cursor",
+      "filter",
+      "limit"
+    ],
+    "response": [
+      "ListAgentChatsResponse"
+    ]
+  },
+  {
     "id": "listAgentInstructionReviews",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/agent-learning/instructions/reviews",
@@ -5013,6 +5069,55 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentLearningOverrideRecord"
+    ]
+  },
+  {
+    "id": "listAgentRevisions",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/revisions",
+    "request": [],
+    "query": [
+      "cursor",
+      "limit"
+    ],
+    "response": [
+      "ListAgentRevisionsResponse"
+    ]
+  },
+  {
+    "id": "listAgents",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents",
+    "request": [
+      "AgentListFilter"
+    ],
+    "query": [
+      "filter"
+    ],
+    "response": [
+      "AgentSummary",
+      "ListAgentsResponse"
+    ]
+  },
+  {
+    "id": "listAgentSlackChannels",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/slack/:connectionId/channels",
+    "request": [],
+    "query": [
+      "cursor"
+    ],
+    "response": [
+      "AgentSlackChannelListResponse"
+    ]
+  },
+  {
+    "id": "listAgentSlackInstalls",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/slack",
+    "request": [],
+    "response": [
+      "ListAgentSlackInstallsResponse"
     ]
   },
   {
@@ -7509,6 +7614,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "account:admin"
   },
   {
+    "id": "postAgentSlackIntro",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/slack/:connectionId/intro",
+    "request": [
+      "AgentSlackIntroRequest"
+    ],
+    "response": [
+      "AgentSlackIntroResponse"
+    ]
+  },
+  {
     "id": "postOpenGeniSlackAgentIntro",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/agents/:agentId/intro",
@@ -7945,6 +8061,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [],
     "permission": "workspace:admin"
+  },
+  {
+    "id": "putAgentSlackAvailability",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/slack/:connectionId",
+    "request": [
+      "PutAgentSlackAvailabilityRequest"
+    ],
+    "response": [
+      "AgentSlackAvailabilityResponse"
+    ]
   },
   {
     "id": "putOrganizationCredentialProvider",
@@ -9650,6 +9777,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [],
     "permission": "github:manage"
+  },
+  {
+    "id": "updateAgent",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId",
+    "request": [
+      "UpdateAgentRequest"
+    ],
+    "response": [
+      "Agent",
+      "AgentResponse"
+    ]
   },
   {
     "id": "updateArtifactPin",

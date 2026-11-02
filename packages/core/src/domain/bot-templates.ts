@@ -143,9 +143,12 @@ export async function listBotTemplatesForViewer(
   viewer: BotTemplateViewer,
 ): Promise<WorkspaceBotTemplate[]> {
   const home = await homeOf(db, workspaceId);
-  return (await listAgents(db, home, { viewerSubjectId: viewer.subjectId, withContent: true })).map(
-    (agent) => forViewer(viewer, agent),
-  );
+  // The old gallery opens a template as composer text, in a chat not bound to
+  // the agent, so it lists only agents with a First message (or made as
+  // templates); the others' Instructions would silently not apply.
+  return (await listAgents(db, home, { viewerSubjectId: viewer.subjectId, withContent: true }))
+    .filter((agent) => agent.origin === "bot_template" || Boolean(agent.content?.firstMessage))
+    .map((agent) => forViewer(viewer, agent));
 }
 
 export async function getBotTemplateForViewer(
@@ -238,7 +241,7 @@ export async function updateBotTemplateForViewer(input: {
   }
   if (changesVisibility && agent.memoryEnabled) {
     throw new HTTPException(409, {
-      message: "This agent remembers across chats. Change who can use it on the Agents page.",
+      message: "This agent remembers across chats. Turn Memory off to change who can use it.",
     });
   }
   const outcome = await updateAgent(db, home, {
@@ -268,6 +271,11 @@ export async function updateBotTemplateForViewer(input: {
   if (outcome.kind === "slack_name_taken") {
     throw new HTTPException(409, {
       message: "Another agent in Slack already has this name.",
+    });
+  }
+  if (outcome.kind === "requires_workspace_visibility") {
+    throw new HTTPException(409, {
+      message: "This agent is available in Slack, so it stays shared with the workspace.",
     });
   }
   if (outcome.kind !== "updated") {

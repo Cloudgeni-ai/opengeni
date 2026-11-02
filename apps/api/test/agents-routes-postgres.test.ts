@@ -313,8 +313,13 @@ describe("agents through the API (real PostgreSQL)", () => {
     const [synced] = await shared.admin<{ setup_instructions: string }[]>`
       select setup_instructions from bot_templates where id = ${id}`;
     expect(synced?.setup_instructions).toBe("Ask how they deploy.");
-    // Every agent shows as a template; its setup text is the First message.
-    await call(alice, "POST", agents, { name: "Plain agent", instructions: "Be brief." });
+    // Agents with a First message show as templates (it is their setup text);
+    // one with only Instructions would open unbound, so it is not listed.
+    const plain = await call(alice, "POST", agents, {
+      name: "Plain agent",
+      instructions: "Be brief.",
+    });
+    await call(alice, "POST", agents, { name: "Greeter", firstMessage: "Say hello." });
     expect(
       (await call(alice, "GET", templates)).json.templates.map((row: any) => [
         row.name,
@@ -322,8 +327,12 @@ describe("agents through the API (real PostgreSQL)", () => {
       ]),
     ).toEqual([
       ["SRE bot", "Ask how they deploy."],
-      ["Plain agent", ""],
+      ["Greeter", "Say hello."],
     ]);
+    // It is still reachable by id.
+    expect(
+      (await call(alice, "GET", `${templates}/${plain.json.agent.id}`)).json.template,
+    ).toMatchObject({ name: "Plain agent", setupInstructions: "" });
     expect((await call(alice, "DELETE", `${templates}/${id}`)).status).toBe(200);
     expect(await shared.admin`select id from agents where id = ${id}`).toHaveLength(0);
     expect(await shared.admin`select id from bot_templates where id = ${id}`).toHaveLength(0);
@@ -376,6 +385,24 @@ describe("agents through the API (real PostgreSQL)", () => {
       agentId: mine.id,
     });
     expect(foreign.status).toBe(422);
+    // An Only me agent's chat is Only me: the default (this fixture's people
+    // are not managed-account users, so the Only me create itself is refused,
+    // which shows the default applied), and a shared one is refused.
+    const diary = await call(alice, "POST", sessions, {
+      initialMessage: "Dear diary",
+      model: "scripted-model",
+      agentId: mine.id,
+    });
+    expect(diary.status).toBe(403);
+    expect(diary.json.message).toContain("Only-me");
+    const sharedDiary = await call(alice, "POST", sessions, {
+      initialMessage: "Dear everyone",
+      model: "scripted-model",
+      agentId: mine.id,
+      visibility: "workspace",
+    });
+    expect(sharedDiary.status).toBe(422);
+    expect(sharedDiary.json.details).toMatchObject({ code: "agent_requires_private_chat" });
 
     // Alice's Only me chat with the shared agent: listed only to her.
     const privateChat = await createSession(client.db, {

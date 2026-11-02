@@ -118,7 +118,7 @@ path is the agent's home.
 | --- | --- |
 | `GET /agents?filter=all\|yours`, `GET /agents/:id` | `sessions:read`; Only me agents only for their owner |
 | `POST /agents` | `sessions:create`; Only me needs a person who is a member of the organization |
-| `PATCH /agents/:id` (`expectedVersion` required), `DELETE /agents/:id` | `sessions:create`, and whoever made it or a workspace admin |
+| `PATCH /agents/:id` (`expectedVersion` required), `DELETE /agents/:id` | `sessions:create`, and whoever made it or a workspace admin (a workspace API key without a person counts as an admin, as for bot templates) |
 | `GET /agents/:id/revisions?cursor&limit` | `sessions:read` |
 | `GET /agents/:id/chats?filter=yours\|everyone&cursor&limit` | `sessions:read`; Only me chats and Slack DMs only for their owner |
 | `GET /agents/:id/slack` | `sessions:read` |
@@ -130,7 +130,8 @@ path is the agent's home.
   messages); refusals carry `error.details.code` from `AGENT_ERROR_CODES`.
 - Every change to Instructions or the First message adds a revision recording
   who made it; name and description changes are stored with the next one.
-  Every change bumps `version`.
+  Every change bumps `version`, including turning Slack on or off; recording
+  the Memory collection once it exists does not.
 - Slack needs a shared (`workspace`) agent outside a personal workspace. The
   Slack name rules are checked only when Slack is turned on (and on a rename
   while it is on). On a clash the agent already in Slack keeps its name and the
@@ -138,6 +139,16 @@ path is the agent's home.
 - For now an agent is available in at most one Slack installation
   (`agent_slack_single_install`), because `slack_agents.id` is the agent's id
   and `slack_channel_routes` still points at `slack_agents`.
+- Turning Slack off deletes the legacy row, and with it the agent's channel
+  routes, intro records and update settings in that installation; its older
+  Slack threads lose their link to the agent
+  (`slack_interactions.slack_agent_id` is set to null), so they no longer
+  resolve to it if Slack is turned on again.
+- The visibility rule is checked again under the agent's row lock, so an
+  agent can never be Only me and in Slack at once.
+- `PUT /agents/:id/slack/:connectionId` takes the availability's own
+  `expectedVersion`; a conflict reports that version as
+  `details.currentVersion`.
 - Memory (`memoryEnabled`) creates the collection when switched on: workspace
   scope for a shared agent, the owner's personal scope for an Only me one. It
   is best effort and may wait for review under Review-first.
@@ -156,13 +167,20 @@ stand aside:
   collection, `version` mirrored). Turning Slack off deletes that row, not the
   agent.
 
+The backfill started agents at version 1, so during the rollout the legacy
+Slack agents API shows the greater of the agent's and its legacy row's
+version, accepts either, and raises the agent's version to match before a
+write.
+
 Older pods keep reading and writing the legacy rows during a rolling deploy,
 and the triggers carry their writes over.
 
 ### Chats bound to an agent
 
 `POST /sessions` takes `agentId` (an agent the caller can see; Only me agents
-only for their owner; never for child chats). The chat gets
+only for their owner and only in Only me chats, which is the default when
+`visibility` is omitted, otherwise `agent_requires_private_chat`; never for
+child chats, `agent_child_chat`). The chat gets
 `sessions.agent_id` and `agent_prompt_revision` = the agent's current
 revision, so its Instructions reach the model through the worker's agent layer
 ([run lifecycle](run-lifecycle.md#agent-instructions)). The First message is
@@ -170,7 +188,9 @@ only prefilled by the app, never sent. Slack agent chats are bound the same
 way and no longer copy the agent's Instructions into `sessions.instructions`;
 the Slack-specific text (how the chat was reached, the other agents, handoff)
 stays there. Post identity and an agent's chat list use `sessions.agent_id`,
-falling back to `metadata.slackAgent` for older chats.
+falling back to the chat's Slack interaction (`slack_interactions.slack_agent_id`)
+for older chats; caller-set metadata never names the agent. A chat list never
+includes Site viewers' chats.
 
 ### Compatibility
 
@@ -178,8 +198,11 @@ falling back to `metadata.slackAgent` for older chats.
 `bot_template_save` and `slack_agent_*`, `?botTemplateId=` links and
 `slack-agent:<id>` principals keep working on top of `agents`:
 
-- Bot templates list every agent the reader can see, with the First message as
-  `setupInstructions`. A new template is an agent with empty Instructions.
+- Bot templates list the agents the reader can see that have a First message
+  (or were made as templates), with the First message as `setupInstructions`;
+  the old gallery opens a template in a chat not bound to the agent, so other
+  agents' Instructions would not apply. Get, change and delete by id work for
+  every agent. A new template is an agent with empty Instructions.
 - Slack agents are the agents available in that installation. Deleting one
   through the old endpoint deletes the agent.
 

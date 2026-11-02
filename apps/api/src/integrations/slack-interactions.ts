@@ -3542,6 +3542,13 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       );
     session = await createSlackSession(boundAgent?.id ?? null).catch(async (error: unknown) => {
       if (boundAgent && error instanceof SessionAgentNotFoundError) {
+        // The agent went away between routing and create: answer as a plain
+        // chat, without its Instructions.
+        console.warn("[slack-interactions] bound agent unavailable; starting a plain chat", {
+          interactionId: interaction.id,
+          agentId: boundAgent.id,
+          reason: error.reason,
+        });
         return await createSlackSession(null);
       }
       throw error;

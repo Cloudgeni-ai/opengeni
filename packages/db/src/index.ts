@@ -32626,31 +32626,45 @@ async function siteHomeChannelId(
 /** The agent a new chat starts with is gone, or not one its creator can see. */
 export class SessionAgentNotFoundError extends Error {
   readonly name = "SessionAgentNotFoundError";
-  constructor(readonly agentId: string) {
-    super("That agent is not available in this workspace.");
+  constructor(
+    readonly agentId: string,
+    readonly reason: "not_found" | "child_chat" | "requires_private_chat" = "not_found",
+  ) {
+    super(
+      reason === "child_chat"
+        ? "A chat started from another chat follows its parent; start the agent in a new chat."
+        : reason === "requires_private_chat"
+          ? "This agent is Only me, so its chats are Only me too. Start this chat as Only me."
+          : "That agent is not available in this workspace.",
+    );
   }
 }
 
 /**
  * The agent and revision a new chat binds to, read in the chat's workspace.
- * Only me agents count only for their owner; a child session never binds.
+ * Only me agents count only for their owner, in their Only me chats; a child
+ * session never binds.
  */
 async function sessionAgentBinding(
   tx: Database,
-  input: Pick<SessionCreateInput, "workspaceId" | "parentSessionId" | "subjectId">,
+  input: Pick<SessionCreateInput, "workspaceId" | "parentSessionId" | "subjectId" | "visibility">,
   agentId: string,
 ): Promise<{ agentId: string; revision: number }> {
-  if (input.parentSessionId) throw new SessionAgentNotFoundError(agentId);
+  if (input.parentSessionId) throw new SessionAgentNotFoundError(agentId, "child_chat");
   const subjectId = input.subjectId ?? null;
-  const [row] = await rawRows<{ id: string; current_revision: number }>(
+  const [row] = await rawRows<{ id: string; current_revision: number; visibility: string }>(
     tx,
-    sql`select a.id::text as id, a.current_revision
+    sql`select a.id::text as id, a.current_revision, a.visibility
       from agents a
       where a.workspace_id = ${input.workspaceId}::uuid and a.id = ${agentId}::uuid
         and (a.visibility = 'workspace'
           ${subjectId ? sql`or a.owner_subject_id = ${subjectId}` : sql``})`,
   );
   if (!row) throw new SessionAgentNotFoundError(agentId);
+  // Others in a shared chat would run on the owner's private Instructions.
+  if (row.visibility !== "workspace" && input.visibility !== "user_private") {
+    throw new SessionAgentNotFoundError(agentId, "requires_private_chat");
+  }
   return { agentId: row.id, revision: Number(row.current_revision) };
 }
 

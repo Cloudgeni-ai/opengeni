@@ -1,6 +1,7 @@
 import {
   SessionAvatar,
   slackAgentHandle,
+  slackAgentNameKey,
   type Agent,
   type AgentChat,
   type AgentRevision,
@@ -104,7 +105,12 @@ function slackAvailability(
     connectionId: install.connectionId,
     slackTeamId: install.slackTeamId,
     slackTeamName: teamNames.get(install.connectionId) ?? null,
-    handle: slackAgentHandle(agent.name),
+    // Slack routes by the installation's name key; an older name stored under
+    // another key is reached by that key.
+    handle:
+      slackAgentNameKey(agent.name) === install.nameKey
+        ? slackAgentHandle(agent.name)
+        : install.nameKey,
     open: install.open,
     enabledBySubjectId: install.enabledBySubjectId,
     version: install.version,

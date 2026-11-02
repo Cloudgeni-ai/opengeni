@@ -24,6 +24,7 @@ import {
   listOrganizationSlackAgentProjections,
   listSlackAgentProjectionsForConnection,
   putAgentSlackInstall,
+  lockAgentLegacySlackVersion,
   setAgentMemoryCollection,
   updateAgent,
   type SlackAgentProjection,
@@ -170,22 +171,35 @@ export async function updateSlackAgent(
   const { patch } = input;
   try {
     return await withRlsContext(db, target, async (tx) => {
-      const updated = await updateAgent(tx, target, {
+      const versions = await lockAgentLegacySlackVersion(tx, target, {
         agentId: current.id,
-        expectedVersion: input.expectedVersion,
-        actorSubjectId: input.actorSubjectId ?? null,
-        patch: {
-          ...(patch.name !== undefined ? { name: patch.name } : {}),
-          ...(patch.description !== undefined ? { description: patch.description } : {}),
-          ...(patch.avatar !== undefined ? { avatar: patch.avatar } : {}),
-          ...(patch.instructions !== undefined ? { instructions: patch.instructions } : {}),
-        },
+        connectionId: current.connectionId,
+        installWorkspaceId: home.workspaceId,
       });
-      if (updated.kind === "slack_name_taken") throw new SlackAgentWriteAbort("name_taken");
-      if (updated.kind === "version_conflict") {
+      if (!versions) throw new SlackAgentWriteAbort("not_found");
+      // A page loaded from either API during the rollout may send its version.
+      if (
+        input.expectedVersion !== versions.version &&
+        input.expectedVersion !== versions.agentVersion
+      ) {
         throw new SlackAgentWriteAbort("version_conflict");
       }
-      if (updated.kind === "not_found") throw new SlackAgentWriteAbort("not_found");
+      const fields = {
+        ...(patch.name !== undefined ? { name: patch.name } : {}),
+        ...(patch.description !== undefined ? { description: patch.description } : {}),
+        ...(patch.avatar !== undefined ? { avatar: patch.avatar } : {}),
+        ...(patch.instructions !== undefined ? { instructions: patch.instructions } : {}),
+      };
+      if (Object.keys(fields).length > 0) {
+        const updated = await updateAgent(tx, target, {
+          agentId: current.id,
+          expectedVersion: null,
+          actorSubjectId: input.actorSubjectId ?? null,
+          patch: fields,
+        });
+        if (updated.kind === "slack_name_taken") throw new SlackAgentWriteAbort("name_taken");
+        if (updated.kind !== "updated") throw new SlackAgentWriteAbort("not_found");
+      }
       if (patch.open !== undefined) {
         const saved = await putAgentSlackInstall(tx, target, {
           agentId: current.id,
