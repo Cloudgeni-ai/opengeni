@@ -4100,7 +4100,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 1103 and 1060 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1107's, 1172's, 1218's and 1211's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 1103 and 1060 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1107's, 1172's, 1218's, 1211's and 1224's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4139,6 +4139,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
     "event_source_feeds",
     "sandboxes",
     "enrollments",
+    "rigs",
     "session_background_commands",
     "browser_sessions",
     "browser_session_associations",
@@ -4232,6 +4233,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "list_organization_vaults_v1(uuid, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
+      "list_organization_compute_v1(uuid, uuid, text)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4248,6 +4250,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "list_organization_vaults_v1(uuid, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
+      "list_organization_compute_v1(uuid, uuid, text)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4315,6 +4318,7 @@ describe("runtime definers: 0947, 0950, 1149 and 1210 grant what 0937, 0946, 110
       "list_organization_vaults_v1(uuid, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
+      "list_organization_compute_v1(uuid, uuid, text)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

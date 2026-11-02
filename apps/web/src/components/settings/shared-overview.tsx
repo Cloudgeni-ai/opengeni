@@ -5,14 +5,18 @@ import { Section, SectionStack } from "@opengeni/react/ui/section";
 import { SettingNavRow } from "@opengeni/react/ui/setting-row";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 
-import { availableValue, type AvailableLocation } from "./available-here-model";
+import { KIND_LABELS, type AvailableLocation } from "./available-here-model";
 import {
-  EVERYWHERE_KINDS,
+  SHARED_KINDS,
+  coverageDescription,
+  emptyGroupSentence,
+  knowledgeDescription,
   loadSharedOverview,
+  reachDescription,
   sharedFailedSentence,
-  vaultDescription,
-  vaultOpen,
-  vaultsDescription,
+  sharedOpen,
+  skillsDescription,
+  type SharedCompute,
   type SharedOverviewClient,
   type SharedOverviewResult,
   type SharedPlace,
@@ -65,11 +69,23 @@ function EmptyRow({ children }: { children: string }) {
   return <p className="m-0 py-3 text-sm leading-5 text-fg-muted">{children}</p>;
 }
 
+/** Where a machine's or sandbox environment's row opens, given the workspace it opens in. */
+function computeDestination(
+  item: SharedCompute,
+  workspaceId: string | undefined,
+): SharedOverviewDestination {
+  const elsewhere = workspaceId ? { workspaceId } : {};
+  return item.kind === "machine"
+    ? { page: "machines", ...elsewhere }
+    : { page: "rig", rigId: item.id, ...elsewhere };
+}
+
 /**
  * Organization settings › Shared: everything the organization shares with
  * its workspaces and where each works. Models and their payers have their own
- * page; machines, rigs, Skills and Knowledge work everywhere; each vault works
- * where its "Available in" says. Each row opens the thing's own page.
+ * page; each machine, sandbox environment, vault, Skill and Knowledge entry
+ * works only where its "Available in" says. Each row opens the thing's own
+ * page, in a workspace where it works.
  */
 export function SharedOverview({
   client,
@@ -104,20 +120,19 @@ export function SharedOverview({
       />
     </Section>
   ) : null;
-  const everywhereTitle = "In every workspace";
-  const everywhereDescription = `${organizationName}'s machines, rigs, Skills and Knowledge work in every workspace, Personal workspaces included. Organization owners and admins manage them.`;
+  const computeTitle = "Machines and sandbox environments";
 
   if (state.status === "loading") {
     return (
       <SectionStack>
         {models}
-        <LoadingRows title={everywhereTitle} />
+        <LoadingRows title={computeTitle} />
         {developer}
       </SectionStack>
     );
   }
   // Nothing loaded at all: one notice, not a list of every kind.
-  if (state.failed.length === EVERYWHERE_KINDS.length + 1) {
+  if (state.failed.length === SHARED_KINDS.length) {
     return (
       <SectionStack>
         {models}
@@ -136,8 +151,11 @@ export function SharedOverview({
     );
   }
 
+  const computeFailed = state.failed.includes("machine") && state.failed.includes("rig");
   const vaultsFailed = state.failed.includes("vault");
-  const everywhereFailed = EVERYWHERE_KINDS.every((kind) => state.failed.includes(kind));
+  const skillsFailed = state.failed.includes("skills");
+  const knowledgeFailed = state.failed.includes("knowledge");
+  const here = place.personal ? "your Personal workspace" : place.workspaceName;
   return (
     <SectionStack>
       {models}
@@ -152,30 +170,52 @@ export function SharedOverview({
           </Notice>
         </div>
       ) : null}
-      {everywhereFailed ? null : (
-        <Section title={everywhereTitle} description={everywhereDescription}>
-          {state.everywhere.map((thing) => (
-            <SettingNavRow
-              key={thing.key}
-              label={thing.name}
-              value={availableValue(thing) || undefined}
-              onOpen={() => onOpen(thing.open)}
-            />
-          ))}
-          {state.everywhere.length === 0 ? (
-            <EmptyRow>{`None yet. Machines, rigs, Skills and Knowledge that ${organizationName} adds show up here.`}</EmptyRow>
+      {computeFailed ? null : (
+        <Section
+          title={computeTitle}
+          description={coverageDescription(state.computeCoverage, place)}
+        >
+          {state.compute.map((item) => {
+            const open = sharedOpen(item.reach, place);
+            return (
+              <SettingNavRow
+                key={item.key}
+                label={item.name}
+                description={reachDescription(item.reach, place)}
+                value={KIND_LABELS[item.kind]}
+                disabled={!open}
+                onOpen={() => {
+                  if (!open) return;
+                  onOpen(
+                    computeDestination(
+                      item,
+                      open.workspaceId === place.workspaceId ? undefined : open.workspaceId,
+                    ),
+                  );
+                }}
+              />
+            );
+          })}
+          {state.compute.length === 0 ? (
+            <EmptyRow>
+              {emptyGroupSentence(
+                state.computeCoverage,
+                place,
+                `${organizationName} has no machines or sandbox environments yet.`,
+              )}
+            </EmptyRow>
           ) : null}
         </Section>
       )}
       {vaultsFailed ? null : (
-        <Section title="Vaults" description={vaultsDescription(state.vaultCoverage, place)}>
+        <Section title="Vaults" description={coverageDescription(state.vaultCoverage, place)}>
           {state.vaults.map((vault) => {
-            const open = vaultOpen(vault, place);
+            const open = sharedOpen(vault.availability, place);
             return (
               <SettingNavRow
                 key={vault.id}
                 label={vault.name}
-                description={vaultDescription(vault, place)}
+                description={reachDescription(vault.availability, place)}
                 value={vault.state ?? undefined}
                 disabled={!open}
                 onOpen={() => {
@@ -193,9 +233,42 @@ export function SharedOverview({
           })}
           {state.vaults.length === 0 ? (
             <EmptyRow>
-              {state.vaultCoverage === "all"
-                ? `${organizationName} has no vaults yet.`
-                : `None work in ${place.personal ? "your Personal workspace" : place.workspaceName}.`}
+              {emptyGroupSentence(
+                state.vaultCoverage,
+                place,
+                `${organizationName} has no vaults yet.`,
+              )}
+            </EmptyRow>
+          ) : null}
+        </Section>
+      )}
+      {skillsFailed && knowledgeFailed ? null : (
+        <Section
+          title="Skills and Knowledge"
+          description="Each works only where its Available in says. Organization owners and admins manage them."
+        >
+          {state.skills ? (
+            <SettingNavRow
+              label="Skills"
+              description={skillsDescription(state.skills, place)}
+              value={String(state.skills.count)}
+              onOpen={() => onOpen({ page: "plugins", section: "skills" })}
+            />
+          ) : null}
+          {state.knowledgeHere ? (
+            <SettingNavRow
+              label="Knowledge"
+              description={knowledgeDescription(place)}
+              onOpen={() => onOpen({ page: "knowledge", scope: "organization" })}
+            />
+          ) : null}
+          {!state.skills && !state.knowledgeHere ? (
+            <EmptyRow>
+              {skillsFailed
+                ? `None of ${organizationName}'s Knowledge works in ${here}.`
+                : knowledgeFailed
+                  ? `None of ${organizationName}'s Skills work in ${here}.`
+                  : `None of ${organizationName}'s Skills or Knowledge work in ${here}.`}
             </EmptyRow>
           ) : null}
         </Section>

@@ -6,8 +6,9 @@ import { WorkspaceReachFields } from "@opengeni/react/app/components/workspace-r
    "Available in" (S6): which workspaces can use a vault, with the shared
    control. An organization vault: all of the organization's workspaces (new
    ones too) or a selection, plus whether members' Personal workspaces may use
-   it; organization owners and admins manage it. An Only-me vault: every workspace its
-   owner uses or a selection; their Personal workspace always has it.
+   it; organization owners and admins manage it. An Only-me vault: every
+   workspace its owner uses or a selection; their Personal workspace always
+   has it.
    -------------------------------------------------------------------------- */
 
 export type AvailabilityWorkspace = { id: string; name: string };

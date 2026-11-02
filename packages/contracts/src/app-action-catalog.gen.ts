@@ -5653,6 +5653,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listOrganizationMachines",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/organization-machines",
+    "request": [],
+    "response": [
+      "ListOrganizationMachinesResponse"
+    ],
+    "permission": "enrollments:read"
+  },
+  {
     "id": "listOrganizationMcpConnections",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/mcp-connections",
@@ -5688,6 +5698,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "OrganizationProviderCustomModelsResponse"
     ]
+  },
+  {
+    "id": "listOrganizationRigs",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/organization-rigs",
+    "request": [],
+    "response": [
+      "ListOrganizationRigsResponse"
+    ],
+    "permission": "rigs:use"
   },
   {
     "id": "listOrganizationServiceAccounts",

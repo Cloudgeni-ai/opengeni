@@ -1950,6 +1950,15 @@ machine, a person makes this change, directly or through an agent they gave
 their full access. Each change records a `connected_machine.reach.changed`
 audit event with the previous and new reach.
 
+`GET /v1/workspaces/:ws/organization-machines` lists every organization
+machine wherever it works, as `{ machines: [{ id, name, sandboxId, reach }],
+complete }` (`id` is the enrollment), for Organization settings › Shared. It
+needs `enrollments:read` and an organization owner or admin, from a person or
+an agent acting as them; an agent acting as itself gets `403` and sees only
+what works in its workspace. Until a later release grants the
+organization-wide read (migration 1224 adds it), it answers the organization
+machines that work in this workspace with `complete: false`.
+
 ### Where your own machine works
 
 An **Only me** machine runs its owner's own messages, and only in the

@@ -1,9 +1,20 @@
 // Where an organization machine or rig works: the shared parts of
-// PUT .../machines/:enrollmentId/reach and PUT .../rigs/:rigId/reach.
+// PUT .../machines/:enrollmentId/reach and PUT .../rigs/:rigId/reach, and of
+// GET .../organization-machines and GET .../organization-rigs, which list
+// every one wherever it works.
 
-import type { OrganizationComputeReachResponse } from "@opengeni/contracts";
+import type {
+  OrganizationComputeReach,
+  OrganizationComputeReachResponse,
+  OrganizationComputeSummary,
+} from "@opengeni/contracts";
 import type { OrganizationComputeReachUpdate } from "@opengeni/db";
-import { grantHasAgentAttemptAuthority } from "@opengeni/core";
+import {
+  authorizationHoldsOrganizationAdministration,
+  grantHasAgentAttemptAuthority,
+  MissingPermissionRefusal,
+  type AccessGrantAuthorization,
+} from "@opengeni/core";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "./api-error";
@@ -39,6 +50,54 @@ export function requireOrganizationCompute(
         ? `this ${what} belongs to its workspace and works only there; only an organization ${what} works in chosen workspaces`
         : `this ${what} is Only me and works wherever its owner uses it; only an organization ${what} works in chosen workspaces`,
   });
+}
+
+/**
+ * Every organization machine or rig, wherever it works, is listed to the
+ * people who decide where each works: organization owners and admins, in the
+ * app, through the API, or through an agent acting as them. An agent acting as
+ * itself only ever sees what reaches its workspace.
+ */
+export function requireOrganizationComputeLister(
+  authorization: AccessGrantAuthorization,
+  what: "machine" | "sandbox environment",
+): void {
+  if (!authorizationHoldsOrganizationAdministration(authorization)) {
+    throw new MissingPermissionRefusal("account:admin");
+  }
+  if (grantHasAgentAttemptAuthority(authorization.grant)) {
+    throw new HTTPException(403, {
+      message: `only a person, or an agent acting as them, lists every organization ${what}`,
+    });
+  }
+}
+
+/**
+ * The organization ones among a workspace's list, for a server whose
+ * organization-wide list is not granted yet (migration 1224): the ones that
+ * work in that workspace.
+ */
+export function organizationComputeHere(
+  items: readonly {
+    id: string;
+    name: string;
+    scope: string;
+    sandboxId?: string | null | undefined;
+    reach?: OrganizationComputeReach | null | undefined;
+  }[],
+): OrganizationComputeSummary[] {
+  return items.flatMap((item) =>
+    item.scope === "organization" && item.reach
+      ? [
+          {
+            id: item.id,
+            name: item.name,
+            ...(item.sandboxId !== undefined ? { sandboxId: item.sandboxId } : {}),
+            reach: item.reach,
+          },
+        ]
+      : [],
+  );
 }
 
 export function organizationComputeReachResponse(

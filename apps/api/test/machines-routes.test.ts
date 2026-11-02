@@ -2,7 +2,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import postgres from "postgres";
 import { testSettings } from "@opengeni/testing/settings";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import {
   AgentEvent,
   AgentUpdateStage,
@@ -1391,6 +1395,53 @@ describe("Where an organization machine works", () => {
     expect(narrowed.status).toBe(200);
     // It no longer works in the target workspace, so it is not found there.
     expect((await putReach(machine, reachAdmin, onlyHome)).status).toBe(404);
+
+    // Organization owners still find it in the list of every organization
+    // machine, from the target workspace, with where it works.
+    const listEverywhere = async (permissions: Permission[]) => {
+      const response = await appFor(new MemoryEventBus()).request(
+        `/v1/workspaces/${machine.targetWorkspaceId}/organization-machines`,
+        {
+          headers: {
+            authorization: `Bearer ${await bearer(
+              machine.accountId,
+              machine.targetWorkspaceId,
+              permissions,
+            )}`,
+          },
+        },
+      );
+      return {
+        status: response.status,
+        body: (await response.json()) as {
+          machines?: Array<{ id: string }>;
+          complete?: boolean;
+        },
+      };
+    };
+    expect((await listEverywhere(["enrollments:read", "enrollments:manage"])).status).toBe(403);
+    // Until the list is granted: only the ones that work here.
+    const before = await listEverywhere(["enrollments:read", "account:admin"]);
+    expect(before.status).toBe(200);
+    expect(before.body).toEqual({ machines: [], complete: false });
+    await grantDeferredRuntimeAccess(admin);
+    const after = await listEverywhere(["enrollments:read", "account:admin"]);
+    expect(after.status).toBe(200);
+    expect(after.body).toEqual({
+      machines: [
+        {
+          id: machine.enrollmentId,
+          name: "organization machine",
+          sandboxId: machine.sandboxId,
+          reach: {
+            homeWorkspaceId: machine.originWorkspaceId,
+            allowedWorkspaceIds: [],
+            allowPersonalWorkspaces: false,
+          },
+        },
+      ],
+      complete: true,
+    });
   }, 90_000);
 
   test("only an organization machine works in chosen workspaces", async () => {

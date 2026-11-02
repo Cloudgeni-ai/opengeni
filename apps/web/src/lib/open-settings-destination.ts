@@ -6,8 +6,8 @@ import type { SharedOverviewDestination } from "@/components/settings/shared-ove
 /**
  * Opens a row of Workspace settings › Available here or Organization settings
  * › Shared: the thing's own page in the workspace the page is anchored on (a
- * vault that works only elsewhere opens in that workspace), or the
- * organization's Models or Developer page.
+ * machine, sandbox environment or vault that works only elsewhere opens in
+ * that workspace), or the organization's Models or Developer page.
  */
 export function openSettingsDestination(
   navigate: ReturnType<typeof useNavigate>,
@@ -37,12 +37,15 @@ export function openSettingsDestination(
       });
       return;
     case "machines":
-      void navigate({ to: "/workspaces/$workspaceId/machines", params: { workspaceId } });
+      void navigate({
+        to: "/workspaces/$workspaceId/machines",
+        params: { workspaceId: destination.workspaceId ?? workspaceId },
+      });
       return;
     case "rig":
       void navigate({
         to: "/workspaces/$workspaceId/rigs/$rigId",
-        params: { workspaceId, rigId: destination.rigId },
+        params: { workspaceId: destination.workspaceId ?? workspaceId, rigId: destination.rigId },
       });
       return;
     case "vault":

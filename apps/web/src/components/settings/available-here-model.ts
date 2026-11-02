@@ -38,9 +38,12 @@ export type AvailableKind = "connector" | "machine" | "rig" | "vault" | "skills"
 /** Where a thing is managed: its own page. */
 export type AvailableLocation =
   | { page: "plugins"; section?: "skills" | undefined }
-  | { page: "machines" }
-  | { page: "rig"; rigId: string }
-  /** In the workspace the page is anchored on, or in `workspaceId` when it works only elsewhere. */
+  /**
+   * Machines, a sandbox environment and a vault open in the workspace the page
+   * is anchored on, or in `workspaceId` when they work only elsewhere.
+   */
+  | { page: "machines"; workspaceId?: string | undefined }
+  | { page: "rig"; rigId: string; workspaceId?: string | undefined }
   | { page: "vault"; vaultId: string; workspaceId?: string | undefined }
   /** No scope: every scope's Knowledge (a Personal workspace's own and yours). */
   | { page: "knowledge"; scope?: "organization" | "workspace" | "personal" | undefined };
@@ -240,23 +243,37 @@ async function vaults(client: AvailableHereClient, workspaceId: string) {
 /** Pages through the Skills list; a workspace rarely has more than a few pages. */
 const SKILL_PAGES = 20;
 
-async function skills(client: AvailableHereClient, workspaceId: string) {
-  const counts = new Map<AvailableOwner, number>();
+export type ListedSkill = Awaited<
+  ReturnType<AvailableHereClient["listWorkspaceSkills"]>
+>["skills"][number];
+
+/** Every Skill the workspace's Skills list holds for the viewer, page by page. */
+export async function listAllSkills(
+  client: Pick<AvailableHereClient, "listWorkspaceSkills">,
+  workspaceId: string,
+): Promise<ListedSkill[]> {
+  const all: ListedSkill[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < SKILL_PAGES; page += 1) {
     const listed = await client.listWorkspaceSkills(workspaceId, {
       limit: 100,
       ...(cursor ? { cursor } : {}),
     });
-    for (const skill of listed.skills) {
-      // People's Skills list also holds organization Skills that don't work
-      // here, so their managers can change that; agents here never use them.
-      if (skill.status !== "active" || skill.availableHere === false) continue;
-      const owner = ownerOfScope(skill.scope);
-      counts.set(owner, (counts.get(owner) ?? 0) + 1);
-    }
+    all.push(...listed.skills);
     if (!listed.nextCursor) break;
     cursor = listed.nextCursor;
+  }
+  return all;
+}
+
+async function skills(client: AvailableHereClient, workspaceId: string) {
+  const counts = new Map<AvailableOwner, number>();
+  for (const skill of await listAllSkills(client, workspaceId)) {
+    // People's Skills list also holds organization Skills that don't work
+    // here, so their managers can change that; agents here never use them.
+    if (skill.status !== "active" || skill.availableHere === false) continue;
+    const owner = ownerOfScope(skill.scope);
+    counts.set(owner, (counts.get(owner) ?? 0) + 1);
   }
   return [...counts].map(
     ([owner, count]): AvailableThing => ({
@@ -307,9 +324,8 @@ async function knowledge(
 }
 
 /**
- * Each kind's loader. Organization settings › Shared reuses them for the
- * organization's own things, which reach every workspace, so one workspace's
- * lists hold them all.
+ * Each kind's loader. Organization settings › Shared reuses the Knowledge one
+ * to say whether the organization's Knowledge works in its workspace.
  */
 export const AVAILABLE_LOADERS: Readonly<
   Record<
@@ -385,7 +401,7 @@ const KIND_ORDER = new Map(AVAILABLE_KINDS.map((kind, index) => [kind, index]));
 export const KIND_LABELS: Readonly<Record<AvailableKind, string>> = {
   connector: "Connector",
   machine: "Machine",
-  rig: "Rig",
+  rig: "Sandbox environment",
   vault: "Vault",
   skills: "Skills",
   knowledge: "Knowledge",

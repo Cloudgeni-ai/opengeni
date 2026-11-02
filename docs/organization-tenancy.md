@@ -262,19 +262,27 @@ one's owner; the page links there for people who may open it.
 
 Organization settings › Shared, for organization owners and admins, shows
 everything the organization shares with its workspaces and where each works.
-Model plans and keys link to Organization settings › Models. The
-organization's machines, rigs, Skills and Knowledge work in every workspace,
-Personal workspaces included, so the page reads them from the lists of the
-workspace it is opened from, kept to what the organization owns. Organization
-vaults work only where their "Available in" says, so the page reads
-`GET /v1/workspaces/:workspaceId/organization-vaults`, which lists every
-organization vault wherever it works (account administrators only), and says
-for each one where it works and where it opens: in this workspace when it works
-here, else in the first workspace by name that it works in and the viewer can
-open, else nowhere. An admin who isn't an owner, or a server that has not
-granted the list yet, gets the organization vaults that work in the current
-workspace, and the page says so. The page links to Developer (webhooks and the
-credential provider) for people who manage the organization's API keys.
+Model plans and keys link to Organization settings › Models. Each organization
+machine, sandbox environment, vault, Skill and Knowledge entry works only where
+its "Available in" says, and a workspace's own lists hold only what works
+there, so the page reads the organization-wide lists:
+`GET /v1/workspaces/:workspaceId/organization-machines`,
+`GET /v1/workspaces/:workspaceId/organization-rigs` and
+`GET /v1/workspaces/:workspaceId/organization-vaults` each list every
+organization one wherever it works, with its reach (organization owners and
+admins only). For each it says where it works (a machine or sandbox environment
+always works in the workspace it came from) and where it opens: in this
+workspace when it works here, else in the first workspace by name that it
+works in and the viewer can open, else nowhere. A caller those lists refuse
+(anyone but an organization owner or admin, or an agent acting as itself), or
+a server that has not granted a list yet (`complete: false`), gets the
+organization ones that work in the current workspace, and the page says so.
+The Skills row counts the organization's Skills and says how many don't work
+here (the Skills list already holds those for the people who manage them).
+Knowledge has no organization-wide list: the row appears when the
+organization's Knowledge works here, and each entry's page says where it
+works. The page links to Developer (webhooks and the credential provider) for
+people who manage the organization's API keys.
 
 ## Slice B: managed-human lifecycle provisioning and first runtime projection
 
