@@ -450,6 +450,7 @@ import {
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
 import {
   handOffSlackAgentChat,
+  suggestSlackAgentForChat,
   listSlackAgentChatsForSession,
 } from "../integrations/slack-interactions";
 import {
@@ -2935,16 +2936,35 @@ function registerSlackBotTools(
     "slack_agent_handoff",
     {
       description:
-        "Pass the Slack request this chat is answering on to another Slack agent that fits it better. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
+        "Pass the Slack request this chat is answering on to another Slack agent the person asked for by name. Name the agent; the chat's own Slack thread and requester are used, never a destination you choose. Only works when the message names that agent (one typo allowed for longer names; a last word like team may be left out); otherwise answer yourself and use slack_agent_suggest. The receiving agent starts a new chat in its own workspace and answers in the same thread. At most one hand-off per message, never to yourself and never back to the agent that passed it to you. If the requester cannot use that agent they are told privately and nothing is passed on. After status passed_on, make your entire final response exactly NO_REPLY.",
       inputSchema: {
         agent: z4.string().min(1).max(120),
         note: z4.string().max(1000).optional(),
+        reason: z4
+          .string()
+          .max(500)
+          .optional()
+          .describe("Why you hand off, in a few words. Logged only; nobody sees it."),
       },
     },
-    async ({ agent, note }) => {
+    async ({ agent, note, reason }) => {
       if (!sessionId) throw new Error("Passing a request on requires a chat started from Slack");
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-      return json(await handOffSlackAgentChat(deps, { grant, sessionId, agent, note }));
+      return json(await handOffSlackAgentChat(deps, { grant, sessionId, agent, note, reason }));
+    },
+  );
+
+  server.registerTool(
+    "slack_agent_suggest",
+    {
+      description:
+        'After answering a Slack request yourself, suggest a Slack agent that handles requests like it when the person did not ask for one. Name the agent. Opengeni then posts one line under your answer ("<Agent> handles questions like this.") with a button that sends the same message to that agent. Only agents the person can use are shown, and only one suggestion per answer. Do not mention the suggestion in your answer.',
+      inputSchema: { agent: z4.string().min(1).max(120) },
+    },
+    async ({ agent }) => {
+      if (!sessionId) throw new Error("Suggesting an agent requires a chat started from Slack");
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      return json(await suggestSlackAgentForChat(deps, { grant, sessionId, agent }));
     },
   );
 
