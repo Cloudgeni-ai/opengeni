@@ -557,7 +557,12 @@ export function presentFailure(
     return typeof value === "string" && value.trim() ? value : null;
   };
   const message = text("error") ?? text("message");
-  const detail = text("lastRetryableError") ?? text("detail");
+  // Sandbox service failures record the service's own text (for example
+  // "compute control service POST /v1/sandboxes: …") only for diagnostics.
+  const detail =
+    typeof payload.code === "string" && AUTHORED_ONLY_FAILURE_CODES.has(payload.code)
+      ? null
+      : (text("lastRetryableError") ?? text("detail"));
   const safetyRefusal =
     payload.code === "provider_safety_refusal" ||
     [message, detail].some(
@@ -602,6 +607,13 @@ export function presentFailure(
 }
 
 const capacityRecoveryExhausted = (t: OpenGeniText) => t("lib.format.capacityRecoveryExhausted");
+
+/** Server failure codes whose `error` is complete person-facing copy; never append `detail`. */
+const AUTHORED_ONLY_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "sandbox_capacity_unavailable",
+  "sandbox_service_unavailable",
+  "sandbox_service_refused",
+]);
 
 /** Server failure codes whose recorded text is operator English, not end-user copy. */
 const CODED_FAILURE_TEXT: Readonly<Record<string, ((t: OpenGeniText) => string) | undefined>> = {

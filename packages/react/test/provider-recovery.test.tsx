@@ -347,3 +347,42 @@ test("a sandbox capacity wait and its spent budget name the sandbox, never the m
     expect(turnFailureClass(summary)).toBe("sandbox");
   }
 });
+
+test("a sandbox failure that stops shows only its authored copy, never the service text", () => {
+  const blamesModel = (text: string) => /\bmodel\b|\bprovider\b|claude/i.test(text);
+  const cases = [
+    {
+      code: "sandbox_service_refused",
+      error:
+        "The sandbox service refused to provide a sandbox for this turn. This turn stopped without retrying.",
+      detail: "compute control service POST /v1/sandboxes: a valid X-API-Key is needed",
+    },
+    {
+      code: "sandbox_service_unavailable",
+      error: "The sandbox service is temporarily unavailable. This turn stopped without retrying.",
+      detail: "compute control service POST /v1/sandboxes/sbx/wake: busy",
+    },
+    {
+      code: "sandbox_capacity_unavailable",
+      error: "No sandbox capacity is available right now. This turn stopped without retrying.",
+      // Even model-credential-looking service text must not reach the person.
+      detail: "compute control service POST /v1/sandboxes: invalid api key",
+    },
+  ];
+  for (const { code, error, detail } of cases) {
+    const payload = { error, code, detail, retryable: false };
+    expect(parseProviderRecovery(payload)).toBeNull();
+    const presented = presentFailure(englishText, payload);
+    expect(presented.reason).toBe(error);
+    expect(presented.diagnostic).toBe(false);
+    const timeline = buildTimeline(englishText, [event("turn.failed", payload)]);
+    expect(timeline.find((item) => item.kind === "notice")).toMatchObject({ text: error });
+
+    const summary = summarizeSessionFailure([event("turn.failed", payload)], "failed");
+    const banner = failedSessionCopy(summary, false, false, true);
+    expect(banner.reason).toBe(error);
+    expect(banner.reason).not.toContain("compute control service");
+    expect(blamesModel(banner.reason)).toBe(false);
+    expect(turnFailureClass(summary)).toBe("sandbox");
+  }
+});

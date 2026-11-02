@@ -11,7 +11,11 @@ import {
   providerRecoveryResult,
   withModelRoutePresentation,
 } from "../src/activities/agent-turn/errors";
-import { SandboxProvisionStageError } from "../src/sandbox-resume";
+import { SandboxProviderError } from "@openai/agents-core/sandbox";
+import { RoutingMutationOutcomeUnknownError } from "../../../packages/runtime/src/sandbox/routing/routing-session";
+// The worker never depends on E2B itself; use the runtime's own copy so the
+// class is the one the E2B sandbox client throws.
+import { ServiceBusyError } from "../../../packages/runtime/node_modules/e2b";
 
 // The staging failure: compute-control answered a sandbox create with
 // 503 {code: "no_capacity"}. That is the sandbox fleet being full, never the
@@ -78,10 +82,9 @@ describe("a sandbox capacity failure is never the chat model's provider", () => 
     });
   });
 
-  test("cause wrappers (provision stage, SDK rethrows) keep the sandbox code", async () => {
+  test("cause wrappers (SDK rethrows, parallel tools) keep the sandbox code", async () => {
     const source = await noCapacityFromControlService();
     for (const error of [
-      new SandboxProvisionStageError("create", source),
       new Error("sandbox establish failed", { cause: source }),
       thrownByTool(new Error("lazy sandbox", { cause: source })),
       new AggregateError([source], "Failed to run function tools"),
@@ -169,16 +172,95 @@ describe("a sandbox capacity failure is never the chat model's provider", () => 
       new ComputeControlError({
         kind: "unauthorized",
         status: 401,
-        message: "compute control service POST /v1/sandboxes: invalid api key",
+        // compute-control's own 401 text.
+        message: "compute control service POST /v1/sandboxes: a valid X-API-Key is needed",
       }),
     );
     const failure = agentRunFailurePayload(error);
     expect(failure).toMatchObject({
-      code: "sandbox_service_unavailable",
+      code: "sandbox_service_refused",
       retryable: false,
-      error: "This turn couldn't get a sandbox. Automatic retries stopped.",
+      error:
+        "The sandbox service refused to provide a sandbox for this turn. This turn stopped without retrying.",
     });
-    expect(failure.detail).toContain("invalid api key");
+    expect(failure.detail).toContain("a valid X-API-Key is needed");
+    expect(blamesModel(failure.error)).toBe(false);
+  });
+
+  test("an uncertain sandbox mutation beside or around it keeps the turn terminal", async () => {
+    const capacity = await noCapacityFromControlService();
+    const busy = new ComputeControlError({
+      kind: "busy",
+      status: 409,
+      message: "compute control service POST /v1/sandboxes/sbx/wake: busy",
+    });
+    const cases = [
+      // The routing layer could not prove whether its launch happened.
+      thrownByTool(
+        new RoutingMutationOutcomeUnknownError("execCommand", "launch did not return", {
+          cause: busy,
+        }),
+      ),
+      thrownByTool(
+        new RoutingMutationOutcomeUnknownError("execCommand", "launch did not return", {
+          cause: capacity,
+        }),
+      ),
+      // A parallel tool's uncertain outcome beside a capacity refusal.
+      new AggregateError(
+        [capacity, new RoutingMutationOutcomeUnknownError("execCommand", "release unresolved")],
+        "Failed to run function tools",
+      ),
+    ];
+    for (const error of cases) {
+      const failure = agentRunFailurePayload(error);
+      expect(failure.code).toMatch(/^sandbox_(capacity|service)_unavailable$/);
+      expect(failure.retryable).toBe(false);
+      expect(failure.error).toEndWith("This turn stopped without retrying.");
+      expect(blamesModel(failure.error)).toBe(false);
+    }
+  });
+
+  test("E2B's typed no-capacity error is sandbox capacity, through the SDK wrapper", () => {
+    // The agents SDK E2B client wraps every provider failure this way.
+    const busy = new ServiceBusyError("no capacity to place a sandbox right now");
+    const wrapped = Object.assign(
+      new SandboxProviderError("e2b failed to create sandbox", {
+        provider: "e2b",
+        operation: "create sandbox",
+        status: 503,
+        retryable: true,
+      }),
+      { cause: busy },
+    );
+    for (const error of [wrapped, thrownByTool(wrapped)]) {
+      expect(agentRunFailurePayload(error)).toMatchObject({
+        code: "sandbox_capacity_unavailable",
+        retryable: true,
+        error:
+          "No sandbox capacity is available right now. The same turn will retry after a short delay.",
+      });
+    }
+  });
+
+  test("any sandbox provider SDK's HTTP failure is the sandbox service, not the model", () => {
+    for (const status of [429, 500, 503]) {
+      const cause = Object.assign(new Error(`daytona ${status}`), { status });
+      const error = Object.assign(
+        new SandboxProviderError("daytona failed to start sandbox", {
+          provider: "daytona",
+          operation: "start sandbox",
+          status,
+        }),
+        { cause },
+      );
+      const failure = agentRunFailurePayload(error);
+      expect(failure.code).toBe("sandbox_service_unavailable");
+      // Retry authority is the provider classifier's, unchanged.
+      expect(failure.retryable).toBe(true);
+      expect(failure).not.toHaveProperty("providerCondition");
+      expect(blamesModel(failure.error)).toBe(false);
+    }
   });
 
   test("the chat model's own 503 is still the model provider", () => {

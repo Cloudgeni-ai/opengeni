@@ -1765,19 +1765,28 @@ treat the reason as an ordinary recovery and exhaust at five.
 
 **A full sandbox fleet is not a model outage.** The compute control service's
 typed `ComputeControlError` (for example `503 no_capacity`, "no host can take
-it now", while creating or waking a sandbox) is classified before any model
-provider rule, at any wrapper depth: `cause` chains, the agents SDK's
-`ToolCallError.error` when a lazily provisioned sandbox fails inside a tool
-call, and `AggregateError` members. `no_capacity` records
-`sandbox_capacity_unavailable`; every other control service kind records
-`sandbox_service_unavailable`. Retry authority is the error's own `retryable`
-flag (its kind). Capacity retries wait the 60 s backpressure delay plus
-positive jitter; service failures use the connectivity backoff. Both use the
-ordinary five-retry budget, carry no model route or provider condition, and
-their live and exhausted copy name the sandbox, never the model or provider.
-Before, the 503 read as a model provider 5xx (`provider_unavailable`, "<model>
-is temporarily unavailable at the provider"), and the tool-wrapped form failed
-the turn with no code.
+it now", while creating or waking a sandbox) and E2B's typed
+`ServiceBusyError` ("no capacity to place a sandbox right now") are classified
+before any model provider rule, at any wrapper depth: `cause` chains, the
+agents SDK's `ToolCallError.error` when a lazily provisioned sandbox fails
+inside a tool call, and `AggregateError` members. Capacity records
+`sandbox_capacity_unavailable`; other retryable control service kinds record
+`sandbox_service_unavailable`; non-retryable kinds (unauthorized, invalid,
+not found, request mismatch) record `sandbox_service_refused`. Retry authority
+is the error's own `retryable` flag (its kind), and an uncertain mutation
+outcome anywhere in the same graph (the veto set used by every other same-turn
+recovery) keeps the turn terminal. Capacity retries wait the 60 s backpressure
+delay plus positive jitter; service failures use the connectivity backoff.
+Both use the ordinary five-retry budget, carry no model route or provider
+condition, and their live and exhausted copy name the sandbox, never the model
+or provider. Any other sandbox provider SDK failure wrapped as
+`SandboxProviderError` that the provider rules would label
+`provider_unavailable`, `provider_rate_limited` or `provider_quota_exhausted`
+is relabelled `sandbox_service_unavailable` with the same retry authority.
+Clients show only the authored copy for these codes; the service's own text
+stays in `detail` for diagnostics. Before, the 503 read as a model provider
+5xx (`provider_unavailable`, "<model> is temporarily unavailable at the
+provider"), and the tool-wrapped form failed the turn with no code.
 
 The DB-only checkpoint-outage wire preserves the exact next overload count and
 bounded delay (including Retry-After); it cannot promote another cause to the
