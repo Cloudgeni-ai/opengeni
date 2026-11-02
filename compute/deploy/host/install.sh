@@ -44,7 +44,8 @@
 #   - installs the systemd units and the certificate's daily timer, gets
 #     the host its certificate from the control service if it has none
 #     current (compute-host-certificate), then starts the setup and the
-#     guard if they are not running, and restarts the agent
+#     guard if they are not running, and restarts the agent unless it runs
+#     all of this already (agent-inputs)
 #   - on a machine the host shares (COMPUTE_MACHINE=shared in host.env,
 #     ADR 26), installs the guard's settings for it: systemd's watchdog of
 #     the guard's service instead of the machine's, and the stop hook that
@@ -117,7 +118,7 @@ if [ ! -x "$release/compute-host" ] || ! cmp -s "$here/compute-host" "$release/c
   rm -rf "$release.part"
   install -d -m 755 "$release.part" "$release.part/guest"
   install -m 755 "$here/compute-host" "$here/check-host" "$here/host-setup" \
-    "$here/compute-host-certificate" "$release.part/"
+    "$here/compute-host-certificate" "$here/agent-inputs" "$release.part/"
   install -m 644 "$here/pins.env" "$here/VERSION" "$here/SHA256SUMS" "$release.part/"
   install -m 755 "$here"/guest/* "$release.part/guest/"
   rm -rf "$release"
@@ -314,7 +315,15 @@ if [ -n "$start" ]; then
       fi
     fi
   fi
-  systemctl restart compute-host.service
+  # An agent already running all of this, as the one systemd started at
+  # boot before a startup script installed again, is left running: a
+  # restart would only stop its lease renewals and cut short the wakes it
+  # started (see agent-inputs).
+  if /opt/compute/current/agent-inputs current; then
+    log "the agent runs release $version as installed already"
+  else
+    systemctl restart compute-host.service
+  fi
   for _ in $(seq 60); do
     if /opt/compute/current/compute-host status >/dev/null 2>&1; then
       log "the agent of release $version is up"

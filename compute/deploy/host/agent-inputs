@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# What the compute host agent starts with, so that install.sh restarts it
+# only when that changed:
+#
+#   agent-inputs started   run by compute-host.service before each start:
+#                          records what this start uses in
+#                          /run/compute-host.inputs
+#   agent-inputs current   exits 0 when compute-host.service runs, and its
+#                          start recorded what an agent would start with
+#                          now
+#
+# What it starts with: the release /opt/compute/current names and that
+# release's files (its SHA256SUMS), /etc/compute/installed.env, host.env
+# and ca.pem, the base image (base.ref), and the agent's unit with its
+# drop-ins. Its certificate is not: compute-host-certificate restarts the
+# agent when it switches one in.
+#
+# At boot systemd starts the agent before a startup script that installs
+# again (on Google Cloud, host-startup.sh at every boot). Restarting an
+# agent that already runs all of it only stops its lease renewals for the
+# restart, and cuts short the wakes it started since it registered: a VMM
+# still restoring does not answer the restarted agent, which then cannot
+# take its sandbox back at once. The record is under /run, so it never
+# outlives the boot, and a start that could not record anything leaves
+# none: anything unknown counts as changed.
+#
+# COMPUTE_ETC, COMPUTE_OPT, COMPUTE_VAR and COMPUTE_RUN (tests) stand for
+# /etc/compute, /opt/compute, /var/lib/compute and /run.
+set -euo pipefail
+
+etc=${COMPUTE_ETC:-/etc/compute}
+opt=${COMPUTE_OPT:-/opt/compute}
+var=${COMPUTE_VAR:-/var/lib/compute}
+record=${COMPUTE_RUN:-/run}/compute-host.inputs
+
+# The digest of what the agent starts with; fails if a part is missing or
+# unreadable, but for ca.pem, which a host outside a fleet does without.
+# Each part is chained with &&: a command substitution does not inherit
+# set -e, so a failed part would otherwise go unnoticed.
+digest() {
+  local release parts
+  release=$(readlink -e "$opt/current") || return 1
+  parts=$(
+    echo "release $release" &&
+      cat "$release/SHA256SUMS" &&
+      echo "installed.env" &&
+      cat "$etc/installed.env" &&
+      echo "host.env" &&
+      cat "$etc/host.env" &&
+      echo "ca.pem" &&
+      { [ ! -e "$etc/ca.pem" ] || cat "$etc/ca.pem"; } &&
+      echo "base.ref" &&
+      cat "$var/base.ref" &&
+      echo "unit" &&
+      systemctl cat compute-host.service
+  ) || return 1
+  printf '%s\n' "$parts" | sha256sum | cut -d' ' -f1
+}
+
+case "${1:-}" in
+  started)
+    rm -f "$record"
+    now=$(digest) || exit 1
+    echo "$now" >"$record.part"
+    mv "$record.part" "$record"
+    ;;
+  current)
+    systemctl is-active -q compute-host.service || exit 1
+    recorded=$(cat "$record" 2>/dev/null) || exit 1
+    now=$(digest 2>/dev/null) || exit 1
+    [ -n "$recorded" ] && [ "$recorded" = "$now" ]
+    ;;
+  *)
+    echo "usage: agent-inputs started|current" >&2
+    exit 2
+    ;;
+esac

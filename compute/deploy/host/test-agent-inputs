@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Tests agent-inputs against a stand-in host (directories for /etc/compute,
+# /opt/compute, /var/lib/compute and /run, and a systemctl shim), on Linux:
+#
+#   compute/deploy/host/test-agent-inputs
+#
+# - an agent whose start recorded what it would start with now is current,
+#   so install.sh leaves it running, as the one systemd starts at boot
+#   before the startup script installs the same release again;
+# - it is not current once anything it starts with changed (the release
+#   current names, a file of that release, installed.env, host.env, ca.pem,
+#   the base image, the unit), when it does not run, when its start
+#   recorded nothing, or when a part cannot be read;
+# - a start that cannot read every part records nothing, and never fails
+#   for it in a way that matters: the unit runs it with "-".
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="$here/agent-inputs"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+failures=0
+ok() { echo "ok: $*"; }
+bad() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
+
+export COMPUTE_ETC=$work/etc COMPUTE_OPT=$work/opt COMPUTE_VAR=$work/var COMPUTE_RUN=$work/run
+mkdir -p "$work/bin" "$COMPUTE_ETC" "$COMPUTE_OPT/releases/a" "$COMPUTE_OPT/releases/b" \
+  "$COMPUTE_VAR" "$COMPUTE_RUN"
+# systemctl: compute-host.service is active while $work/active exists, and
+# its unit (with drop-ins) is $work/unit.
+cat >"$work/bin/systemctl" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  is-active) [ -e "$work/active" ] ;;
+  cat) cat "$work/unit" ;;
+  *) echo "systemctl shim: unexpected \$*" >&2; exit 2 ;;
+esac
+EOF
+chmod 755 "$work/bin/systemctl"
+export PATH=$work/bin:$PATH
+
+for release in a b; do
+  echo "sums of release $release" >"$COMPUTE_OPT/releases/$release/SHA256SUMS"
+done
+ln -sfn "$COMPUTE_OPT/releases/a" "$COMPUTE_OPT/current"
+echo "COMPUTE_VERSION=a" >"$COMPUTE_ETC/installed.env"
+echo "COMPUTE_NAME=host-1" >"$COMPUTE_ETC/host.env"
+echo "authority" >"$COMPUTE_ETC/ca.pem"
+echo "image guest-sha256:1" >"$COMPUTE_VAR/base.ref"
+echo "[Service]" >"$work/unit"
+touch "$work/active"
+
+current() { "$script" current; }
+# Starts the agent as the unit does, from the state as it is now.
+start() { "$script" started; }
+
+start
+if current; then ok "an agent started with what it would start with now is current"; else bad "not current right after its start"; fi
+
+rm "$work/active"
+if current; then bad "current while the agent does not run"; else ok "an agent that does not run is not current"; fi
+touch "$work/active"
+
+# Each change, then a start that takes it in, which is current again.
+changes=(
+  "the release current names|ln -sfn $COMPUTE_OPT/releases/b $COMPUTE_OPT/current"
+  "a file of the release|echo changed >>$COMPUTE_OPT/releases/b/SHA256SUMS"
+  "installed.env|echo COMPUTE_KERNEL=k2 >>$COMPUTE_ETC/installed.env"
+  "host.env|echo COMPUTE_HOST_ARGS=--x >>$COMPUTE_ETC/host.env"
+  "ca.pem|echo renewed >>$COMPUTE_ETC/ca.pem"
+  "the base image|echo 'image guest-sha256:2' >$COMPUTE_VAR/base.ref"
+  "the unit|echo 'ExecStartPre=-x' >>$work/unit"
+)
+for change in "${changes[@]}"; do
+  what=${change%%|*}
+  bash -c "${change#*|}"
+  if current; then bad "current after a change of $what"; else ok "a change of $what is not current"; fi
+  start
+  if current; then ok "started again after a change of $what, it is current"; else bad "not current after starting again with $what"; fi
+done
+
+rm "$COMPUTE_ETC/ca.pem"
+if current; then bad "current after ca.pem went"; else ok "ca.pem gone is a change"; fi
+start
+if current; then ok "a host without ca.pem records and is current"; else bad "not current without ca.pem"; fi
+
+rm "$COMPUTE_RUN/compute-host.inputs"
+if current; then bad "current with nothing recorded"; else ok "a start that recorded nothing is not current"; fi
+start
+
+# A part that cannot be read: nothing is current, and a start records
+# nothing (rather than a digest of what it could read).
+mv "$COMPUTE_ETC/installed.env" "$work/installed.env"
+if current; then bad "current with installed.env unreadable"; else ok "an unreadable part is not current"; fi
+if start 2>/dev/null; then bad "a start recorded without installed.env"; else ok "a start without installed.env fails"; fi
+if [ -e "$COMPUTE_RUN/compute-host.inputs" ]; then bad "a record was left without installed.env"; else ok "and leaves no record"; fi
+mv "$work/installed.env" "$COMPUTE_ETC/installed.env"
+if current; then bad "current although the last start recorded nothing"; else ok "still not current until a start records"; fi
+start
+if current; then ok "recorded again, current"; else bad "not current after recording again"; fi
+
+if [ "$failures" -gt 0 ]; then
+  echo "$failures failed" >&2
+  exit 1
+fi
+echo "all passed"
