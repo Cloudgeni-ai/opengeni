@@ -11,6 +11,7 @@ import {
 } from "@opengeni/contracts";
 import {
   AgentLimitError,
+  AgentPrivateOwnerError,
   createAgent,
   deleteAgent,
   getAgent,
@@ -192,6 +193,9 @@ export async function createBotTemplateForViewer(input: {
     if (error instanceof AgentLimitError) {
       throw new HTTPException(409, { message: error.message });
     }
+    if (error instanceof AgentPrivateOwnerError) {
+      throw new HTTPException(422, { message: error.message });
+    }
     throw error;
   }
 }
@@ -254,6 +258,11 @@ export async function updateBotTemplateForViewer(input: {
           }
         : {}),
     },
+  }).catch((error: unknown) => {
+    if (error instanceof AgentPrivateOwnerError) {
+      throw new HTTPException(422, { message: error.message });
+    }
+    throw error;
   });
   if (outcome.kind === "slack_name_taken") {
     throw new HTTPException(409, {

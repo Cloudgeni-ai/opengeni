@@ -35,6 +35,7 @@ import {
 } from "@opengeni/contracts";
 import {
   AgentLimitError,
+  AgentPrivateOwnerError,
   availableSlackBotConnectionMetadata,
   createAgent,
   deleteAgent,
@@ -105,6 +106,13 @@ function agentError(
     retryable: false,
     details: { code, ...extra },
   });
+}
+
+/** An Only me agent whose owner the organization does not know as a member. */
+function privateOwnerError(error: unknown): unknown {
+  return error instanceof AgentPrivateOwnerError
+    ? new ApiHttpError(422, { code: "validation_failed", message: error.message, retryable: false })
+    : error;
 }
 
 function notFound(): ApiHttpError {
@@ -364,7 +372,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (error instanceof AgentLimitError) {
         throw agentError(409, "agent_limit_reached", error.message);
       }
-      throw error;
+      throw privateOwnerError(error);
     }
     const agent = await ensureAgentMemory(deps, context, created);
     return c.json(await agentBody(context, agent), 201);
@@ -445,6 +453,8 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
             }
           : {}),
       },
+    }).catch((error: unknown) => {
+      throw privateOwnerError(error);
     });
     if (outcome.kind === "not_found") throw notFound();
     if (outcome.kind === "version_conflict") {

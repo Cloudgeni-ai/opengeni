@@ -421,6 +421,25 @@ export class AgentLimitError extends Error {
   }
 }
 
+/**
+ * An Only me agent's owner must be someone the database knows as a member of
+ * the organization (the private-agent policy reads memberships), like an Only
+ * me chat's.
+ */
+export class AgentPrivateOwnerError extends Error {
+  readonly name = "AgentPrivateOwnerError";
+  constructor() {
+    super("Only a member of the organization can keep an agent to themselves.");
+  }
+}
+
+function privateOwnerRefusal(error: unknown, visibility: AgentVisibilityValue | undefined): never {
+  if (visibility === "private" && nestedPostgresSqlState(error) === "42501") {
+    throw new AgentPrivateOwnerError();
+  }
+  throw error;
+}
+
 async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgentInput) {
   const [row] = await rawRows<AgentRow>(
     tx,
@@ -505,7 +524,7 @@ export async function createAgent(
     }
     await markDualWrite(tx);
     return { agent: await insertAgentRows(tx, home, input), created: true };
-  });
+  }).catch((error: unknown) => privateOwnerRefusal(error, input.visibility));
 }
 
 export type AgentPatch = {
@@ -573,7 +592,9 @@ async function syncLegacySlackRows(
             instructions = ${agent.content?.instructions ?? ""},
             knowledge_collection_id = ${agent.memoryEnabled ? agent.memoryCollectionId : null}::uuid,
             open = ${install.open},
-            version = version + 1,
+            -- The legacy version mirrors the agent's, so a version read from
+            -- either API is accepted by the other during the rollout.
+            version = ${agent.version}::integer,
             updated_at = now()
           where id = ${agent.id}::uuid
             and workspace_id = ${install.installWorkspaceId}::uuid
@@ -685,7 +706,7 @@ export async function updateAgent(
     if (isSlackNameClash(uniqueViolation(error))) {
       return { kind: "slack_name_taken", connectionId: "" };
     }
-    throw error;
+    return privateOwnerRefusal(error, input.patch.visibility);
   }
 }
 
@@ -829,7 +850,7 @@ export async function putAgentSlackInstall(
           await scoped.execute(sql`insert into slack_agents (id, account_id, workspace_id,
               connection_id, slack_team_id, target_account_id, target_workspace_id, name, name_key,
               description, avatar, instructions, knowledge_collection_id, open,
-              created_by_subject_id)
+              created_by_subject_id, version)
             values (${agent.id}::uuid, ${home.accountId}::uuid, ${input.installWorkspaceId}::uuid,
               ${input.connectionId}::uuid, ${input.slackTeamId}, ${home.accountId}::uuid,
               ${home.workspaceId}::uuid, ${agent.name}, ${nameKey}, ${agent.description},
@@ -837,7 +858,7 @@ export async function putAgentSlackInstall(
               ${agent.content?.instructions ?? ""},
               ${agent.memoryEnabled ? agent.memoryCollectionId : null}::uuid,
               ${input.open ?? false},
-              ${agent.createdBySubjectId ?? input.actorSubjectId})`);
+              ${agent.createdBySubjectId ?? input.actorSubjectId}, ${agent.version}::integer)`);
         },
       );
       const saved = (await installsOf(tx, home, agent.id)).find(
