@@ -133,54 +133,26 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function assertSdkJsonCompatible(value: unknown): void {
-  if (value == null) return;
-  const valueType = typeof value;
-  if (valueType === "string" || valueType === "boolean") return;
-  if (valueType === "number") {
-    if (!Number.isFinite(value)) {
-      throw new UserError("customDataExtractor must return JSON-compatible data.");
-    }
-    return;
-  }
-  if (
-    valueType === "undefined" ||
-    valueType === "function" ||
-    valueType === "symbol" ||
-    valueType === "bigint"
-  ) {
-    throw new UserError("customDataExtractor must return JSON-compatible data.");
-  }
-  if (Array.isArray(value)) {
-    value.forEach((entry) => assertSdkJsonCompatible(entry));
-    return;
-  }
-  if (!isPlainRecord(value)) {
-    throw new UserError("customDataExtractor must return JSON-compatible data.");
-  }
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string") {
-      throw new UserError("customDataExtractor must return JSON-compatible data.");
-    }
-    assertSdkJsonCompatible(value[key]);
-  }
-}
-
 function normalizeSdkToolOutputCustomData(value: unknown): Record<string, unknown> | undefined {
   if (value == null) return undefined;
   if (!isPlainRecord(value)) {
     throw new UserError("customDataExtractor must return an object or null.");
   }
-  if (Reflect.ownKeys(value).some((key) => typeof key !== "string")) {
-    throw new UserError("customDataExtractor must return an object with string keys.");
-  }
-  if (Object.keys(value).length === 0) return undefined;
-  assertSdkJsonCompatible(value);
-  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  // A value JSON cannot carry (a symbol key, a function, a bigint, a cycle, a
+  // class instance) is converted and logged instead of failing the tool call.
+  const safe = normalizeProtocolJsonValue(value, "$.customData") as Record<string, unknown>;
+  if (Object.keys(safe).length === 0) return undefined;
+  // The SDK's own JSON copy of custom data, so both paths store the same form.
+  return JSON.parse(JSON.stringify(safe)) as Record<string, unknown>;
 }
 
 function normalizeMcpResult(value: unknown): AttemptToolResultValue {
-  return normalizeProtocolJsonValue(AttemptToolResult.parse(value), "$.mcpResult");
+  // Convert what JSON cannot carry before the schema sees it, so a server's
+  // bigint, Date or symbol-keyed mark never fails the tool call.
+  return normalizeProtocolJsonValue(
+    AttemptToolResult.parse(normalizeProtocolJsonValue(value, "$.mcpResult")),
+    "$.mcpResult",
+  );
 }
 
 /**

@@ -1,3 +1,9 @@
+import {
+  summarizeJsonSafeAdjustments,
+  toJsonSafeValue,
+  type JsonSafeAdjustment,
+} from "@opengeni/contracts/json-safe";
+
 const JSON_STRING_PREFIX = "opengeni_lossless_json_string_v2_81f06e15:";
 const JSON_KEY_PREFIX = "opengeni_lossless_json_key_v2_7ca6071d:";
 const TEXT_PREFIX = "opengeni_lossless_text_v2_c4100a62:";
@@ -59,10 +65,27 @@ type TransformResult = { value: unknown; changed: boolean };
 /**
  * Preserve JSON structure and SQL-queryable control keys. Only strings that
  * PostgreSQL cannot represent (or that collide with this unshipped v2 tag) are
- * encoded. Non-JSON graph values are rejected instead of silently rewritten.
+ * encoded. A value JSON cannot carry (a symbol key, a function, a bigint, a
+ * cycle, a class instance, ...) never fails the write: the value is first
+ * converted as `JSON.stringify` would (see `toJsonSafeValue`), the change is
+ * logged with its path, and the converted value is stored.
  */
 export function toPostgresLosslessJson(value: unknown): unknown {
-  return encodeJsonValue(value, new Set<object>(), 0).value;
+  try {
+    return encodeJsonValue(value, new Set<object>(), 0).value;
+  } catch {
+    // A value outside JSON (or a hostile proxy) gets here. An encoded-key
+    // collision, which conversion cannot change, is raised again below.
+    const adjustments: JsonSafeAdjustment[] = [];
+    const safe = toJsonSafeValue(value, {
+      onAdjustment: (adjustment) => adjustments.push(adjustment),
+    });
+    // Paths and kinds only: never the values, which may be private.
+    if (adjustments.length > 0) {
+      console.warn("Canonical JSON value adjusted", summarizeJsonSafeAdjustments(adjustments));
+    }
+    return encodeJsonValue(safe, new Set<object>(), 0).value;
+  }
 }
 
 /**

@@ -41,15 +41,14 @@ export class HistoryPrefixGuard {
 }
 
 /**
- * An item's identity leaves out symbol-keyed properties at any depth.
- * Provider projection marks some turn-input items with request-local symbol
- * keys (for example how a Claude web search is projected for another
- * transport). They are never stored or sent, so they are not part of the
- * item's durable identity. Every other non-JSON value is still rejected.
- * Marks are only ever placed at the top level today; leaving out nested ones
- * is defensive. History persistence still rejects a nested mark.
+ * An item's identity is its stored JSON form. Provider projection marks some
+ * turn-input items with request-local symbol keys (for example how a Claude
+ * web search is projected for another transport); they are never stored or
+ * sent, so they are not part of the item's durable identity. Any other value
+ * JSON cannot carry is converted exactly as history persistence converts and
+ * logs it, so the identity matches the stored row without a second log line.
  */
-const REQUEST_MARKS_OMITTED = { omitSymbolKeys: true } as const;
+const REQUEST_MARKS_OMITTED = { onAdjustment: () => undefined } as const;
 
 function sorted(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sorted);
