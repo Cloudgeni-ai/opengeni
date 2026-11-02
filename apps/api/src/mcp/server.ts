@@ -3362,14 +3362,14 @@ function registerGoalTools(
   sessionId: string,
   json: (value: unknown) => { content: Array<{ type: "text"; text: string }> },
 ): void {
+  // Each tool's description states its byte limits and the normal-spacing,
+  // ledger-not-answer rule once; the schema enforces the limit per field.
   const boundedGoalToolString = (maxBytes: number, field: string, purpose: string) =>
     z4
       .string()
       .min(1)
       .max(maxBytes)
-      .describe(
-        `${purpose} At most ${maxBytes} UTF-8 bytes (ASCII characters count as one byte). Use normal spaces and sentences; summarize if needed, never squeeze words together. This is a ledger field, not the final answer.`,
-      )
+      .describe(purpose)
       .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
         message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
       });
@@ -3391,7 +3391,7 @@ function registerGoalTools(
   const progressNoteSchema = boundedGoalToolString(
     SESSION_GOAL_PROGRESS_MAX_BYTES,
     "goal progress note",
-    "A short human-readable status of concrete progress toward the unchanged goal. Keep only useful milestones; do not pack a deliverable, command transcript, or continuation instructions here.",
+    "A short human-readable status of concrete progress toward the unchanged goal.",
   );
   const inputWaitReasonSchema = boundedGoalToolString(
     2 * 1024,
@@ -3404,7 +3404,7 @@ function registerGoalTools(
     "goal_set",
     {
       description:
-        "Create a goal for a long-running objective that needs several turns or continued autonomous work, when this session has none or its goal is completed; answer a short or single-step request directly without a goal. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. Keep normal spaces; summarize, never compress words or put the deliverable in ledger text. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal for a long-running objective that needs several turns or continued autonomous work, when this session has none or its goal is completed; answer a short or single-step request directly without a goal. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. These are ledger fields, not the final answer: keep normal spaces and sentences, and summarize instead of squeezing words. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       // `maxAutoContinuations` is deliberately not agent-facing: the ceiling is
       // API/scheduled-task pacing configuration, and an agent that set its own
       // cap used to silence its orchestration for hours. Continuation pacing is
@@ -3476,7 +3476,7 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Maintain your operational goal as user direction or meaningful new evidence clarifies the intended outcome. text and successCriteria each allow 8192 UTF-8 bytes; rationale allows 2048 UTF-8 bytes for a short human-readable explanation. Use normal spaces and summarize instead of squeezing words. Changes apply directly unless the user explicitly configured review_changes; refinement, adaptation, and replacement are audit classifications, not approval gates under the default policy. Use the exact expected objective revision. Updating a goal grants no additional authority and cannot change root constraints. Progress notes belong in goal_progress (8192 UTF-8 bytes), not a semantic goal rewrite; deliver the answer in your final reply.",
+        "Maintain your operational goal as user direction or meaningful new evidence clarifies the intended outcome. text and successCriteria each allow 8192 UTF-8 bytes; rationale allows 2048 UTF-8 bytes for a short human-readable explanation. These are ledger fields, not the final answer: use normal spaces and summarize instead of squeezing words. Changes apply directly unless the user explicitly configured review_changes; refinement, adaptation, and replacement are audit classifications, not approval gates under the default policy. Use the exact expected objective revision. Updating a goal grants no additional authority and cannot change root constraints. Progress notes belong in goal_progress (8192 UTF-8 bytes), not a semantic goal rewrite; deliver the answer in your final reply.",
       inputSchema: {
         text: goalText.optional(),
         successCriteria: successCriteriaSchema.nullable().optional(),
@@ -3637,19 +3637,25 @@ function registerGoalTools(
     "goal_complete",
     {
       description:
-        "Mark the session goal as completed with a short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable and is not shown as your final chat reply; do not squeeze a report into it or remove spaces to fit. After this tool succeeds, reply to the user with the requested deliverable, or its summary and retained artifact link. Completion stops automatic goal continuations, not the current turn or its final reply. Every persisted report requirement must have a matching reportDeliveries entry containing a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection. Missing, stale, inaccessible or summary-only proof fails; inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
+        "Mark the session goal as completed with short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable; do not squeeze a report into it or remove spaces to fit. Put your final answer to the user in reply (the requested deliverable, or its summary and retained artifact link): it is shown exactly as written and the turn ends after this tool batch, so call this tool on its own after you have seen your last results. Without reply, reply to the user after this tool succeeds. Completion stops automatic goal continuations. Every persisted report requirement must have a matching reportDeliveries entry with a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection; missing, stale, inaccessible or summary-only proof fails, so inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
       inputSchema: {
         evidence: z4
           .string()
           .min(1)
           .max(8192)
+          .describe("Short ledger proof; not the final answer."),
+        // Read by the runtime, which ends the turn with it as the final
+        // answer once the completion succeeds; the ledger never stores it.
+        reply: z4
+          .string()
+          .nullish()
           .describe(
-            "Short ledger proof, at most 8192 characters; not the final answer. Keep normal spaces. Deliver the answer in your final user-facing reply.",
+            "Your final answer, shown verbatim (Markdown, tables and artifact images work); do not also write it before this call.",
           ),
         reportDeliveries: SessionGoalReportDeliveries.optional(),
       },
     },
-    async ({ evidence, reportDeliveries }) => {
+    async ({ evidence, reply, reportDeliveries }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
@@ -3705,8 +3711,9 @@ function registerGoalTools(
           ...delivery,
           artifactReference: `[Open report](/workspaces/${grant.workspaceId}/artifacts/editable/${delivery.artifactId})`,
         })),
-        handoff:
-          "Now reply to the user with the requested deliverable, or its summary and retained artifact link. The evidence is only ledger proof; this receipt does not deliver your final answer.",
+        handoff: reply?.trim()
+          ? "Your reply is this turn's final answer; the turn ends after this tool batch."
+          : "Now reply to the user with the requested deliverable, or its summary and retained artifact link. The evidence is only ledger proof; this receipt does not deliver your final answer.",
       });
     },
   );

@@ -11,7 +11,16 @@ const GOAL_OWNERSHIP =
   "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.";
 
 const GOAL_COMPLETION_HANDOFF =
-  "Goal completion records short ledger proof, not the user-facing deliverable. After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link. Never use evidence as the final reply. A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.";
+  "Goal completion records short ledger proof, not the user-facing deliverable. Put the requested answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends the turn, so call goal_complete on its own once you have seen your last results. Without a reply, finish the same turn with that answer after goal_complete succeeds. Never use evidence as the final reply. A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.";
+
+/**
+ * An unattended API session that gives its task as the first message gets a
+ * goal standing for that message (see `unattendedRequestGoal` in core). It
+ * needs no restating; only unattended sessions can have it. The legacy CORE
+ * carries the same sentence after the unattended guidance.
+ */
+export const UNATTENDED_REQUEST_GOAL_NOTE =
+  "A goal to complete the request in this session's first message stands for that whole request; work on it without restating it through goal_update.";
 
 const GOAL_COMPLETION_CALL =
   "Saying or verifying that the work is done does not complete the goal: call opengeni__goal_complete by its exact name, and search for a goal tool only when its input schema is not in context.";
@@ -71,6 +80,9 @@ export const goalsModule: AgentPromptModule = {
     return blocks(
       "# Goals",
       goalOwnership(context),
+      context.resources.unattended === true &&
+        toolAvailable(context, "goal_update") &&
+        UNATTENDED_REQUEST_GOAL_NOTE,
       complete && GOAL_COMPLETION_HANDOFF,
       complete ? GOAL_COMPLETION_CALL : GOAL_COMPLETION_UNAVAILABLE,
       toolAvailable(context, "goal_pause") && GOAL_PAUSE_JUDGMENT,

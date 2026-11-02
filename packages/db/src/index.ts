@@ -33368,6 +33368,8 @@ export async function getInitializedSessionCreateReplay(
     deferInitialTurn?: boolean;
     /** Resolved agent configuration of the retry; omitted skips the comparison. */
     agentConfig?: ResolvedAgentConfig | null;
+    /** The retry's `unattended: true`; a keyed replay must agree with the winner. */
+    unattended?: boolean;
   },
 ): Promise<InitializedSessionCreateReplay | null> {
   return await withWorkspaceSubjectSessionActivityRls(

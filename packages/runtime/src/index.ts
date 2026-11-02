@@ -435,6 +435,7 @@ import {
   composeModularAgentInstructions,
   resolveAgentIdentity,
   rigInstructions,
+  UNATTENDED_REQUEST_GOAL_NOTE,
   UNATTENDED_SESSION_GUIDANCE,
   workspaceEnvironmentInstructions,
   type AgentPromptExperiments,
@@ -455,6 +456,7 @@ export {
   identityFromLegacyTemplate,
   resolveAgentIdentity,
   rigInstructions,
+  UNATTENDED_REQUEST_GOAL_NOTE,
   UNATTENDED_SESSION_GUIDANCE,
   workspaceEnvironmentInstructions,
   type AgentPromptContext,
@@ -532,6 +534,7 @@ import {
 } from "./input-wait-yield";
 export {
   InputWaitYield,
+  modelResponseClientToolCallCount,
   modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   waitForInputReply,
@@ -2746,7 +2749,7 @@ export function coreInstructions(
     ...(rig ? rigInstructions(rig) : []),
     // Unattended sessions (frozen at create): inside the non-bypassable CORE
     // for the same reason. Absent for interactive sessions.
-    ...(session?.unattended ? [UNATTENDED_SESSION_GUIDANCE] : []),
+    ...(session?.unattended ? [UNATTENDED_SESSION_GUIDANCE, UNATTENDED_REQUEST_GOAL_NOTE] : []),
   ];
 }
 
@@ -9935,9 +9938,16 @@ export class PrefixedMcpServer implements MCPServer {
     // A wait that would end a person's turn without a visible reply is refused
     // before admission, so the model answers first and nothing remote changes.
     // Its optional `reply` is the verbatim answer, recorded once it is accepted.
-    const waitRequest =
-      unprefixed === "wait_for_input" ? { reply: waitForInputReply(args) } : undefined;
-    if (unprefixed === "wait_for_input") {
+    // A `goal_complete` carrying a `reply` ends the turn the same way, with that
+    // reply as its final answer; the guard may refuse it before admission too.
+    const finalReply = unprefixed === "goal_complete" ? waitForInputReply(args) : null;
+    const waitRequest: InputWaitRequest | undefined =
+      unprefixed === "wait_for_input"
+        ? { reply: waitForInputReply(args) }
+        : finalReply !== null
+          ? { reply: finalReply, kind: "goal_complete" }
+          : undefined;
+    if (waitRequest) {
       const refusal = await this.inputWaitYield?.replyRefusal(waitRequest);
       if (refusal) {
         return boundedMcpToolResult({
@@ -9948,8 +9958,14 @@ export class PrefixedMcpServer implements MCPServer {
     }
     // Admission must precede the physical remote call, not merely observe its
     // result: model dispatch and terminal settlement drain this reservation.
+    // A sealed gate refuses a wait, but never blocks a goal completion: that
+    // completion then runs without ending the turn.
     const completeWait =
-      unprefixed === "wait_for_input" ? this.inputWaitYield?.beginWait(waitRequest) : undefined;
+      unprefixed === "wait_for_input"
+        ? this.inputWaitYield?.beginWait(waitRequest)
+        : waitRequest
+          ? this.beginFinalReply(waitRequest)
+          : undefined;
     try {
       this.runMcpCredentials?.assertAvailable(this.registryId);
       const physicalCall = async (callArgs: Record<string, unknown>) => {
@@ -10024,8 +10040,8 @@ export class PrefixedMcpServer implements MCPServer {
       recordOutcome(
         result.isError === true && !exchange?.requested ? "provider_declared_error" : "success",
       );
-      if (unprefixed === "wait_for_input" && result.isError !== true) {
-        completeWait?.(true);
+      if (completeWait && result.isError !== true) {
+        completeWait(true);
       }
       return result;
     } catch (error) {
@@ -10127,6 +10143,14 @@ export class PrefixedMcpServer implements MCPServer {
       if (operationId) {
         this.connectorAttachmentAuthority?.releaseOperation(operationId);
       }
+    }
+  }
+
+  private beginFinalReply(request: InputWaitRequest): ((success: boolean) => void) | undefined {
+    try {
+      return this.inputWaitYield?.beginWait(request);
+    } catch {
+      return undefined;
     }
   }
 

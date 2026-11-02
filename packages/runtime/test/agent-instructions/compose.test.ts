@@ -129,7 +129,8 @@ describe("modular composer: module selection (AC12)", () => {
     const disabled = compose({ ...allAgentCapabilities(), goals: false }, NO_RESOURCES).composed;
     for (const sentence of [
       "Goal completion records short ledger proof, not the user-facing deliverable.",
-      "After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link.",
+      "Put the requested answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends the turn, so call goal_complete on its own once you have seen your last results.",
+      "Without a reply, finish the same turn with that answer after goal_complete succeeds.",
       "Never use evidence as the final reply.",
       "A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
     ]) {

@@ -16,6 +16,7 @@ export {
 } from "./identity";
 export { workspaceEnvironmentInstructions } from "./legacy-environment";
 export { rigInstructions } from "./modules/rig";
+export { UNATTENDED_REQUEST_GOAL_NOTE } from "./modules/goals";
 export { UNATTENDED_SESSION_GUIDANCE } from "./modules/unattended";
 export {
   deriveAgentPromptToolAvailability,

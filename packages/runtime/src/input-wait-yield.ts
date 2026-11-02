@@ -16,11 +16,15 @@ type StreamScope = {
 /**
  * One `wait_for_input` call as the gate sees it. `reply` is the call's
  * optional verbatim message for the person (see `waitForInputReply`).
+ * `kind: "goal_complete"` marks a `goal_complete` call carrying a `reply`:
+ * that reply is the turn's final answer, so the turn ends at the same tool
+ * boundary with it as the final output instead of waiting.
  */
-export type InputWaitRequest = { reply: string | null };
+export type InputWaitRequest = { reply: string | null; kind?: "goal_complete" };
 
 /**
- * The verbatim reply a `wait_for_input` call carries, or null when it has none.
+ * The verbatim reply a `wait_for_input` or `goal_complete` call carries, or
+ * null when it has none.
  *
  * Text a model writes before a tool call may come back only as a summary (Claude
  * Opus 5.5 and Sonnet 5.5 return a longer note before a tool call as a signed
@@ -43,6 +47,7 @@ export function waitForInputReply(args: unknown): string | null {
 export class InputWaitYield {
   private accepted = false;
   private acceptedReply: string | null = null;
+  private acceptedFinalReply = false;
   private didYield = false;
   private terminal = false;
   private readonly pending = new Set<Promise<void>>();
@@ -83,6 +88,18 @@ export class InputWaitYield {
   /** The verbatim reply of the accepted wait, or null when it carried none. */
   get reply(): string | null {
     return this.acceptedReply;
+  }
+  /**
+   * The final answer the turn ended with when an accepted `goal_complete`
+   * carried a `reply` (not a wait), or null. The turn settles like an
+   * ordinary answered turn whose final output is this text.
+   */
+  get finalReply(): string | null {
+    return this.acceptedFinalReply ? this.acceptedReply : null;
+  }
+
+  private finalOutput(): string {
+    return this.acceptedFinalReply ? (this.acceptedReply ?? "") : "";
   }
 
   /** Explicit SDK invocation boundary. A prior stream must have settled first.
@@ -144,7 +161,10 @@ export class InputWaitYield {
       if (success) {
         // The first accepted wait ends the turn; a later one cannot replace
         // the reply that wait already carried.
-        if (!this.accepted) this.acceptedReply = request.reply;
+        if (!this.accepted) {
+          this.acceptedReply = request.reply;
+          this.acceptedFinalReply = request.kind === "goal_complete" && request.reply !== null;
+        }
         this.accepted = true;
       }
       this.pending.delete(pending);
@@ -288,7 +308,11 @@ export class InputWaitYield {
     }
     scope.phase = "settled";
     this.didYield = true;
-    return { isFinalOutput: true as const, isInterrupted: undefined, finalOutput: "" };
+    return {
+      isFinalOutput: true as const,
+      isInterrupted: undefined,
+      finalOutput: this.finalOutput(),
+    };
   }
 
   private errorHandlers(scope: StreamScope): RunErrorHandlers<any, any> {
@@ -321,7 +345,7 @@ export class InputWaitYield {
         )
           return;
         this.didYield = true;
-        return { finalOutput: "", includeInHistory: false };
+        return { finalOutput: this.finalOutput(), includeInHistory: false };
       },
     };
   }
@@ -394,4 +418,29 @@ export function modelResponseHasProgressUpdate(response: unknown): boolean {
       ?.anthropic;
     return anthropic?.progressUpdate === true;
   });
+}
+
+/** Provider-executed calls whose results the model already saw in its response. */
+const HOSTED_CALL_TYPES = new Set([
+  "hosted_tool_call",
+  "web_search_call",
+  "file_search_call",
+  "code_interpreter_call",
+  "image_generation_call",
+  "mcp_call",
+]);
+
+/**
+ * How many tool calls the model response that asked for tools makes whose
+ * results the runtime returns to the model afterwards. A `goal_complete` with
+ * a `reply` ends the turn after this batch, so the results of any sibling call
+ * would never reach the model.
+ */
+export function modelResponseClientToolCallCount(response: unknown): number {
+  const output = (response as { output?: unknown } | null | undefined)?.output;
+  if (!Array.isArray(output)) return 0;
+  return output.filter((item) => {
+    const type = (item as { type?: unknown } | null)?.type;
+    return typeof type === "string" && type.endsWith("_call") && !HOSTED_CALL_TYPES.has(type);
+  }).length;
 }

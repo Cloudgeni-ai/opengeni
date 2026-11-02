@@ -17,6 +17,7 @@ import {
 import { requireExplicitPermissionDelegation } from "../access";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
+import { unattendedRequestGoal } from "./unattended-request-goal";
 import {
   getSessionEvent,
   getSessionRetryReceiptInTransaction,
@@ -2898,7 +2899,7 @@ async function createSessionForRequestInFileScope(
     instructions: payload.instructions,
     workspaceSettings: workspace.settings,
     parent: parentSession,
-    goal: payload.goal !== undefined,
+    goal: payload.goal != null,
   });
   const agentConfig = agentResolution.config;
   if (agentResolution.instructions !== undefined) {
@@ -2965,6 +2966,9 @@ async function createSessionForRequestInFileScope(
             initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
             deferInitialTurn: payload.startMode === "realtime",
             agentConfig,
+            // The replay compares whether anyone answers the agent, so it
+            // needs the retry's own setting.
+            ...(payload.unattended === true ? { unattended: true } : {}),
           }),
       );
       if (initializedReplay) {
@@ -3161,7 +3165,18 @@ async function createSessionForRequestInFileScope(
     };
     settings = effectiveCatalogSettings;
   }
-  let effectiveGoal = payload.goal;
+  // A headless single request gets its goal here, from the create itself,
+  // instead of a model call. It is dropped below, never rejected, when the
+  // session cannot carry a goal.
+  const automaticGoal = unattendedRequestGoal({
+    unattended: payload.unattended,
+    goal: payload.goal,
+    initialMessage: payload.initialMessage,
+    hasParent: parentSession !== null,
+    creator: agentConfigCreator,
+    agentConfig,
+  });
+  let effectiveGoal = payload.goal ?? automaticGoal;
   if (parentSession && payload.goal) {
     try {
       effectiveGoal = resolveChildGoalFromAcceptedSnapshot(
@@ -3708,10 +3723,12 @@ async function createSessionForRequestInFileScope(
     firstPartyMcpPermissions &&
     !firstPartyMcpPermissions.includes("goals:manage")
   ) {
-    throw new HTTPException(422, {
-      message:
-        "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
-    });
+    if (effectiveGoal === automaticGoal) effectiveGoal = undefined;
+    else
+      throw new HTTPException(422, {
+        message:
+          "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
+      });
   }
   // Tool visibility is independent from permission authority. A child that
   // omits the field inherits the parent's exact effective selection; a
@@ -3809,7 +3826,9 @@ async function createSessionForRequestInFileScope(
     const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
     );
-    if (missingGoalTools.length > 0) {
+    if (missingGoalTools.length > 0 && effectiveGoal === automaticGoal) {
+      effectiveGoal = undefined;
+    } else if (missingGoalTools.length > 0) {
       throw new HTTPException(422, {
         message: `goal-bearing sessions require first-party MCP tools: ${missingGoalTools.join(", ")}`,
       });

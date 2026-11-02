@@ -4125,7 +4125,13 @@ export type CreateSessionRequest = {
   // The rig to bind this session to (M3). Its active version is frozen onto the
   // session at create. Omitted ⇒ the workspace default rig when set, else rig-less.
   rigId?: string | undefined;
-  goal?: GoalSpec | undefined;
+  /**
+   * The session goal. When omitted on a top-level `unattended: true` create
+   * with an `initialMessage`, Opengeni sets a goal that stands for that
+   * message, so the run keeps going until the agent completes or pauses it.
+   * `null` creates the session without a goal.
+   */
+  goal?: GoalSpec | null | undefined;
   clientEventId?: string | undefined;
   // Workspace-scoped CREATE idempotency key: forward a STABLE value to make a
   // double-submit/retry of the same logical create collapse to one session.

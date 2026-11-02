@@ -117,6 +117,49 @@ export function inputWaitReplyMessage(input: {
  */
 export const WAIT_REPLY_MESSAGE_ID = "wait_for_input:reply";
 
+/**
+ * Message id prefix of the final answer a `goal_complete` call's `reply`
+ * becomes, followed by the accepting attempt's id. That reply is the turn's
+ * final output, published once with the turn's completion.
+ */
+export const GOAL_COMPLETE_REPLY_MESSAGE_ID = "goal_complete:reply";
+
+/** The agent message a goal completion's `reply` becomes as the turn's answer. */
+export function goalCompleteReplyMessage(
+  text: string,
+  attemptId: string,
+): { text: string; messageId: string; phase: "final_answer" } {
+  return {
+    text,
+    messageId: `${GOAL_COMPLETE_REPLY_MESSAGE_ID}:${attemptId}`,
+    phase: "final_answer",
+  };
+}
+
+/**
+ * Tool error the model receives when it passes a final `reply` to
+ * `goal_complete` in the same response as other tool calls. The reply ends
+ * the turn after that batch, so their results would never reach the model:
+ * a failed check or commit would go unseen behind a completed goal. Nothing
+ * is completed; the model sees those results and completes on its own.
+ */
+export const GOAL_COMPLETE_SIBLING_REFUSAL =
+  "goal_complete was not run: its reply ends the turn after this batch, so you would not see the results of the other calls you made with it. Check those results, then call goal_complete again on its own.";
+
+/**
+ * Why a `goal_complete` carrying a `reply` must not end this turn yet, or
+ * null. Refused at most `MAX_INPUT_WAIT_REPLY_REFUSALS` times per attempt,
+ * like a wait, so a model that keeps batching them still finishes.
+ */
+export function goalCompleteReplyRefusal(input: {
+  refusalsSoFar: number;
+  /** Client-executed tool calls in the response that asked for this one. */
+  toolCallCount: number;
+}): string | null {
+  if (input.refusalsSoFar >= MAX_INPUT_WAIT_REPLY_REFUSALS) return null;
+  return input.toolCallCount > 1 ? GOAL_COMPLETE_SIBLING_REFUSAL : null;
+}
+
 /** How far back to look past rejected-late or duplicate completions. */
 const DURABLE_MESSAGE_LOOKBACK = 16;
 

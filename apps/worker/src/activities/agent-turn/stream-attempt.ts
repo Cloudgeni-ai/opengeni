@@ -56,6 +56,7 @@ import {
   type AnthropicRequestSizeError,
   ANTHROPIC_REQUEST_MAX_BYTES,
   compactionProviderRejection,
+  modelResponseClientToolCallCount,
   modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   ModelStepHandover,
@@ -205,6 +206,8 @@ import {
   requireAgentStreamFinalOutput,
 } from "./quiescence";
 import {
+  goalCompleteReplyMessage,
+  goalCompleteReplyRefusal,
   inputWaitReply,
   inputWaitReplyMessage,
   inputWaitReplyRefusal,
@@ -843,6 +846,8 @@ export async function runTurnStreamAttempt(
   let latestAssistantMessageText: string | null = null;
   // Waits refused because they would leave a person's message unanswered.
   let inputWaitReplyRefusals = 0;
+  // Goal completions with a reply refused because sibling results would go unseen.
+  let goalCompleteReplyRefusals = 0;
   // The accepted wait's verbatim reply was handled once (published, or found
   // to repeat the latest message), across every stream of this activity.
   let waitReplyPublished = false;
@@ -1294,6 +1299,16 @@ export async function runTurnStreamAttempt(
       eventing.stream = await withProviderRequestContext(runStreamOnce);
       const stream = eventing.stream;
       eventing.inputWaitReplyGuard = async (request) => {
+        if (request.kind === "goal_complete") {
+          const refusal = goalCompleteReplyRefusal({
+            refusalsSoFar: goalCompleteReplyRefusals,
+            toolCallCount: modelResponseClientToolCallCount(
+              (stream.state as { _lastTurnResponse?: unknown })._lastTurnResponse,
+            ),
+          });
+          if (refusal) goalCompleteReplyRefusals += 1;
+          return refusal;
+        }
         const refusal = await inputWaitReplyRefusal({
           turn,
           refusalsSoFar: inputWaitReplyRefusals,
@@ -1883,7 +1898,10 @@ export async function runTurnStreamAttempt(
             // own text, so an approval pause or a retried activity cannot lose
             // it. Settlement and later activities then find it as the turn's
             // latest message and do not publish it again.
-            const acceptedReply = eventing.preparedTools?.inputWaitYield?.reply ?? null;
+            // A goal completion's reply is the turn's final output instead:
+            // settlement publishes it once, with the turn's completion.
+            const gate = eventing.preparedTools?.inputWaitYield;
+            const acceptedReply = gate?.finalReply === null ? (gate?.reply ?? null) : null;
             if (acceptedReply !== null && !waitReplyPublished) {
               waitReplyPublished = true;
               const message = inputWaitReplyMessage({
@@ -2451,13 +2469,22 @@ export async function runTurnStreamAttempt(
       control.activityStatus = "idle";
       return claimedResult({ status: "idle" });
     }
-    const inputWaitYielded = eventing.preparedTools?.inputWaitYield?.yielded === true;
-    const streamFinalOutput = String(
-      requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
-    );
+    // A goal completion that carried a reply ends the turn at the tool
+    // boundary like a wait, but that reply is the turn's final answer: it
+    // settles exactly like an answered turn, never as a wait.
+    const completionReply =
+      eventing.preparedTools?.inputWaitYield?.yielded === true
+        ? (eventing.preparedTools.inputWaitYield.finalReply ?? null)
+        : null;
+    const inputWaitYielded =
+      eventing.preparedTools?.inputWaitYield?.yielded === true && completionReply === null;
+    const streamFinalOutput =
+      completionReply ??
+      String(requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded));
     // A copied web-search record is not a reply: treat it as empty so the
     // turn asks for a real answer instead of publishing the copy.
-    const suppressedEcho = isHostedSearchEvidenceEchoText(streamFinalOutput);
+    const suppressedEcho =
+      completionReply === null && isHostedSearchEvidenceEchoText(streamFinalOutput);
     const finalOutput = suppressedEcho ? "" : streamFinalOutput;
     const durableReplyFacts =
       !inputWaitYielded && finalOutput.trim().length === 0
@@ -2559,7 +2586,15 @@ export async function runTurnStreamAttempt(
         events: [
           ...(inputWaitYielded || finalOutputAlreadyCompleted
             ? []
-            : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
+            : [
+                {
+                  type: "agent.message.completed" as const,
+                  payload:
+                    completionReply === null
+                      ? { text: finalOutput }
+                      : goalCompleteReplyMessage(finalOutput, input.attemptId),
+                },
+              ]),
           ...(waitReplyMessage
             ? [{ type: "agent.message.completed" as const, payload: waitReplyMessage }]
             : []),

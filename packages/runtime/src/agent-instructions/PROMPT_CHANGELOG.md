@@ -1,5 +1,30 @@
 # Modular prompt changelog
 
+Goal completion can carry the final answer. `goal_complete` gains an optional
+`reply`: once the completion succeeds, the runtime ends the turn at that tool
+batch with the reply as its final answer, shown exactly as written, the way
+`wait_for_input` ends a turn with its `reply`. Completion plus answer is one
+model call instead of two. A `reply` passed together with other tool calls in
+one response is refused before anything is completed (at most twice per
+attempt), so the model sees those results first. The goals module's handoff
+paragraph now says so (about 200 bytes more). Unattended sessions, which an
+API create now gives a goal standing for their first message when it names
+none, also get one sentence (about 150 bytes) saying that goal needs no
+restating: "A goal to complete the request in this session's first message
+stands for that whole request; work on it without restating it through
+goal_update." The goals module renders it when goal_update is available; the
+legacy CORE carries it after the unattended guidance, so the `unattended`
+legacy lock changes and no other legacy case does. Interactive sessions do not
+get that sentence. The goal tool schemas drop the spacing and ledger
+boilerplate each text field repeated; each tool description states that rule
+once, and the schemas still enforce the byte limits.
+
+```diff
+- After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link.
++ Put the requested answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends the turn, so call goal_complete on its own once you have seen your last results.
++ Without a reply, finish the same turn with that answer after goal_complete succeeds.
+```
+
 The agent knows both GitHub identities. When personal GitHub sign-in is
 enabled on the deployment (new `personalGitHub` resource fact) and
 `github_connect_link` is available, the admin module adds one sentence (about

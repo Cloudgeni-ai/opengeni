@@ -923,18 +923,19 @@ function requestSearchResultSources(body: Json): ClaudeCiteSource[] {
  * With native web search, Anthropic tells Claude to mark quotes with citation
  * tags (a `cite` tag whose `index="N-M"` names search result N, sentence M),
  * and turns them into structured citations only in ordinary answer text. A
- * `wait_for_input` call's `reply` is shown verbatim as the turn's answer, so
- * its tags would reach the person as raw markup. They become the quoted text,
- * linked to the search result the index names among the results this request
- * and response hold, or plain text when it names none. Only that reply is
- * changed: other tool arguments, such as file edits, keep their exact text.
+ * `wait_for_input` or `goal_complete` call's `reply` is shown verbatim as the
+ * turn's answer, so its tags would reach the person as raw markup. They become
+ * the quoted text, linked to the search result the index names among the
+ * results this request and response hold, or plain text when it names none.
+ * Only that reply is changed: other tool arguments, such as file edits, keep
+ * their exact text.
  */
 function withLinkedReplyCitations(
   toolName: string,
   input: Json,
   searchResults: () => readonly ClaudeCiteSource[],
 ): Json {
-  if (!/(?:^|__)wait_for_input$/u.test(toolName)) return input;
+  if (!/(?:^|__)(?:wait_for_input|goal_complete)$/u.test(toolName)) return input;
   const reply = input.reply;
   if (typeof reply !== "string" || !hasClaudeCiteTag(reply)) return input;
   const sources = searchResults();
