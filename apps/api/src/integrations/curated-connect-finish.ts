@@ -265,7 +265,8 @@ export function unfinishedCuratedSetup(attempt: ConnectAttempt): boolean {
     curatedConnectFinishEligible(attempt) &&
     attempt.credentialsCommitted &&
     attempt.account !== undefined &&
-    (attempt.state === "connected_but_incomplete" || attempt.state === "preview")
+    // Expired: the person never came back before the attempt's short deadline.
+    ["connected_but_incomplete", "preview", "expired"].includes(attempt.state)
   );
 }
 

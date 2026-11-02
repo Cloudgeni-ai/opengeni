@@ -1609,9 +1609,15 @@ describe("API Integration provider OAuth", () => {
     fixture.setSourceAvailable(true);
     expect(await setup.read()).toMatchObject({ state: "connected_but_incomplete" });
     const expiresAt = new Date(Date.now() - 60_000).toISOString();
-    await shared!.admin`update connect_attempts set expires_at = ${expiresAt}::timestamptz,
-      projection = jsonb_set(projection, '{expiresAt}', to_jsonb(${expiresAt}::text))
-      where id = ${setup.attempt.id}::uuid`;
+    // Time passes (the origin guard keeps the deadline fixed for the app).
+    await shared!.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`update connect_attempts set expires_at = ${expiresAt}::timestamptz,
+        projection = jsonb_set(projection, '{expiresAt}', to_jsonb(${expiresAt}::text))
+        where id = ${setup.attempt.id}::uuid`;
+    });
+    // Reading it now (as a reopened app would) marks it expired.
+    expect(await setup.read()).toMatchObject({ state: "expired", credentialsCommitted: true });
     expect(await setup.installedFor()).toBeUndefined();
     const finish = (authorization = setup.headers.authorization) =>
       setup.app.request(`${setup.base}/finish`, {
@@ -1634,7 +1640,7 @@ describe("API Integration provider OAuth", () => {
     expect(completed).toHaveLength(1);
     expect(completed[0]).toMatchObject({
       id: setup.attempt.id,
-      revision: 3,
+      revision: 4,
       state: "complete",
       integrationInstalled: true,
       installationTarget: { instanceKey: "account-left-behind", displayName: "OneDrive" },

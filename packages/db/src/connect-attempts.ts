@@ -290,8 +290,9 @@ export const UNFINISHED_CONNECT_SETUP_WINDOW_MS = 7 * 24 * 60 * 60_000;
 /**
  * The actor's setups that saved an account but never installed its
  * integration (someone closed the app before the last step), newest first.
- * Unlike the pending list this ignores the attempt's short expiry: the saved
- * account outlives it, and finishing needs no provider round trip.
+ * Unlike the pending list this includes attempts past their short expiry
+ * (still open, or already marked expired): the saved account outlives the
+ * attempt, and finishing needs no provider round trip.
  */
 export async function listUnfinishedConnectSetups(
   db: Database,
@@ -305,7 +306,7 @@ export async function listUnfinishedConnectSetups(
       where workspace_id = ${scope.workspaceId}::uuid and account_id = ${scope.accountId}::uuid
         and subject_id = ${scope.subjectId} and operation_id is null
         and created_at > now() - make_interval(secs => ${UNFINISHED_CONNECT_SETUP_WINDOW_MS / 1000})
-        and projection->>'state' in ('connected_but_incomplete','preview')
+        and projection->>'state' in ('connected_but_incomplete','preview','expired')
         and projection->>'credentialsCommitted' = 'true'
         and coalesce(projection->>'integrationInstalled', 'false') <> 'true'
       order by created_at desc, id desc limit ${limit}`,
@@ -342,7 +343,7 @@ export async function completeUnfinishedConnectSetup(
     if (
       row.operation_id !== null ||
       current.revision !== input.expectedRevision ||
-      !["connected_but_incomplete", "preview"].includes(current.state) ||
+      !["connected_but_incomplete", "preview", "expired"].includes(current.state) ||
       !current.credentialsCommitted ||
       current.integrationInstalled
     )
