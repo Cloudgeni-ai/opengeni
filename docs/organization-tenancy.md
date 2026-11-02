@@ -428,6 +428,36 @@ release would not use. Such a workspace reaches nobody: the 1159 guard refuses
 every row but the named owner's, and provisioning refuses a Personal workspace
 that already holds any other row.
 
+### Model account settings in Personal (migration 1233)
+
+Personal works like a shared workspace whose only member is its owner: the
+verified owner, acting as themselves, may change the model account settings the
+organization has not locked (rotation, primary and fallback order, switching
+models, personal subscriptions, a provider's source), exactly as a shared
+workspace's administrators can. Locked settings still win: the policy's
+`WITH CHECK` still requires an empty lock list on a workspace row, and the lock
+guard and resolver are unchanged.
+
+Migration `1233_personal_workspace_owner_model_account_settings.sql` gives the
+`subscription_settings_manager` policy a third arm for a row of the context
+organization and workspace. It holds only when that workspace carries the
+context subject's Personal identity, the subject has its 1231 owner row there,
+and the transaction declared `opengeni.personal_workspace_owner_settings` as that
+same subject. The API declares it (`declarePersonalWorkspaceOwnerSettings`) only
+after `workspaceSettingsAuthorized` verified the owner acting as themselves, so a
+delegated bearer, agent or API key that merely names the owner's subject is
+refused by the database as well as by the route. Local (`dev`) and
+`external_user:` Personal workspaces have no owner row and keep refusing these
+settings with `personal_workspace`.
+
+The organization administrator arm no longer reaches another person's Personal
+row from inside a workspace context. With no workspace context (the
+organization's own routes, and the lock-change trigger that clears workspace
+overrides) it still reaches every row of the organization, so a new lock still
+replaces Personal workspaces' changes. Shared workspace rows, and every Personal
+row without the declaration, are decided as before; the previous release never
+declares the setting, so the new arm is inert for it.
+
 ### Session ownership at the mint (migration 0302)
 
 Because that workspace has no membership row, migration 0225's session write
@@ -455,7 +485,8 @@ request boundary preserves ordinary workspace-admin behavior and otherwise
 requires a verified canonical managed cookie, exact authenticated subject, and
 a live active-organization membership pointing to the requested Personal
 workspace. It covers preferences, custom models/model policy, runtime control,
-and instruction/Skill autonomy, including its revision lifecycle. The returned
+instruction/Skill autonomy, including its revision lifecycle, and model account
+settings that the organization has not locked (migration 1233). The returned
 grant is unchanged: no `workspace:admin`, `members:manage`, or `api_keys:manage`
 is added. Workspace deletion and access-management routes do not use this
 exception. The web's matching owner affordance uses the current server-issued

@@ -12,7 +12,12 @@
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import * as z from "zod/v4";
-import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  workspaceSettingsAuthorized,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   deliverSubscriptionCoreWake,
   disconnectSubscriptionCoreConnection,
@@ -267,7 +272,13 @@ export async function coreWorkspaceSettings(
   rotationEnabled: boolean,
 ) {
   const { deps, core, displayName } = ctx;
-  const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+  const authorization = await requireAccessGrantAuthorization(
+    c,
+    deps,
+    workspaceId,
+    "workspace:read",
+  );
+  const grant = authorization.grant;
   const projection = await core.workspaceProjection(deps.db, {
     accountId: grant.accountId,
     workspaceId,
@@ -300,6 +311,9 @@ export async function coreWorkspaceSettings(
     workspaceId,
     subjectId: authority.subjectId,
     rotationEnabled,
+    // The Personal workspace's own settings row: its owner acting as themselves (1233).
+    personalWorkspaceOwnerVerified:
+      scope === "user" && (await workspaceSettingsAuthorized(deps, authorization, workspaceId)),
   });
   if (!written) throw new HTTPException(409, { message: `${displayName} settings changed` });
   await deliverPoolCoreWake(deps, core, written.wake);

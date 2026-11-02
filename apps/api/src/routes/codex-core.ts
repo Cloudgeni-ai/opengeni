@@ -251,6 +251,7 @@ export async function coreCodexSetSource(
     workspaceId: string;
     subjectId: string;
     mode: "automatic" | "workspace" | "organization" | "disabled";
+    personalWorkspaceOwnerVerified?: boolean;
   },
 ) {
   let result: Awaited<ReturnType<typeof setSubscriptionCoreWorkspaceCodexSource>>;
@@ -451,7 +452,13 @@ export async function coreCodexClearApps(
   return result.kind === "conflict" ? c.json(response, 409) : c.json(response);
 }
 
-type Admin = { accountId: string; workspaceId: string | null; subjectId: string };
+type Admin = {
+  accountId: string;
+  workspaceId: string | null;
+  subjectId: string;
+  /** The request verified a Personal workspace's owner acting as themselves (1233). */
+  personalWorkspaceOwnerVerified?: boolean;
+};
 
 export async function coreCodexActivate(
   c: Context,

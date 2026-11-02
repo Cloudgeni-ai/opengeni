@@ -278,6 +278,8 @@ describe("PATCH /codex/settings — rotation settings", () => {
       accountId: ACCOUNT,
       workspaceId: WS,
       subjectId: "tester",
+      // A delegated bearer is never the verified Personal owner (migration 1233).
+      personalWorkspaceOwnerVerified: false,
       rotationEnabled: true,
     });
   });

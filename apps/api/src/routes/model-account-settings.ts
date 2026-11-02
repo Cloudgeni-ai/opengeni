@@ -8,8 +8,9 @@ import {
 } from "@opengeni/contracts";
 import {
   MissingPermissionRefusal,
-  requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireWorkspaceSettingsGrant,
+  workspaceSettingsAuthorized,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -216,7 +217,13 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
   app.get(workspacePath, async (c) => {
     c.header("cache-control", "private, no-store");
     const workspaceId = parseId(c.req.param("workspaceId"), "workspace");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const grant = authorization.grant;
     try {
       return c.json(
         WorkspaceModelAccountSettings.parse({
@@ -224,6 +231,12 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
             accountId: grant.accountId,
             workspaceId,
             subjectId: grant.subjectId,
+            // In a Personal workspace `canEdit` is its owner's, acting as themselves.
+            personalWorkspaceOwnerVerified: await workspaceSettingsAuthorized(
+              deps,
+              authorization,
+              workspaceId,
+            ),
           })),
           ...availability,
         }),
@@ -235,8 +248,9 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
 
   app.patch(workspacePath, async (c) => {
     const workspaceId = parseId(c.req.param("workspaceId"), "workspace");
-    // The owner of a Personal workspace may ask too; it then follows the
-    // organization's settings, a plain 409 rather than an admin refusal.
+    // The owner of a Personal workspace, acting as themselves, changes its
+    // unlocked settings (1233). A Personal workspace without an owner row
+    // (a local one) follows the organization's settings: a plain 409.
     const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = UpdateWorkspaceModelAccountSettingsRequest.safeParse(await jsonBody(c));
     if (!parsed.success) {
@@ -251,6 +265,7 @@ export function registerModelAccountSettingsRoutes(app: Hono, deps: ApiRouteDeps
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
+        personalWorkspaceOwnerVerified: true,
         patch,
         ...(expectedVersion === undefined ? {} : { expectedVersion }),
       });
