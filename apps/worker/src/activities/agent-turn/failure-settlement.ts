@@ -1,4 +1,5 @@
 import { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "./provider-recovery-policy";
+import { unsupportedProtocolValueFailure } from "./protocol-value-failure";
 import { recordSessionUsageLimitEvent } from "@opengeni/core";
 import { reportSessionPersistenceFailure } from "./persistence-diagnostic";
 import { shouldFallbackModelSocket } from "./persistent-transport-recovery";
@@ -25,6 +26,7 @@ import {
   isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
   toolCallCommandNotStartedCallIds,
+  UnsupportedProtocolJsonValueError,
 } from "@opengeni/runtime";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 
@@ -1096,6 +1098,70 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     control.turnMetricOutcome = "failed";
     control.activityStatus = "idle";
     control.activityError = error;
+    return claimedResult({ status: "idle" });
+  }
+  // A protocol JSON boundary refused a value this turn prepared. Retrying the
+  // same turn refuses it again, so end the turn with a typed failure and keep
+  // the session usable for the next message instead of failing it.
+  //
+  // An unknown core request outcome or a failed lease checkpoint keeps its
+  // own terminal handling. After a model request started, this turn's items
+  // must be durably saved before the session takes another message; when they
+  // cannot be (the same value may be refused again while saving), the generic
+  // path below fails the session instead of continuing on a history that lost
+  // completed work. The goal does not continue into the same refusal: it waits
+  // for new input.
+  const protocolValueFailure = unsupportedProtocolValueFailure(
+    findInCauseChain(error, UnsupportedProtocolJsonValueError),
+  );
+  let protocolValueHistorySaved = false;
+  if (
+    protocolValueFailure &&
+    !coreRequestOutcomeUnknown &&
+    !coreLeaseCheckpointFailed &&
+    eventing.publish &&
+    attempt.turnId &&
+    eventing.turnStartedPublished
+  ) {
+    await flushRuntimeBatcher();
+    const requireDurable = attempt.modelRequestStarted || coreUnknownRecoveryFailure !== null;
+    try {
+      await historySink.reconcileConversationTruth(requireDurable ? { requireDurable } : undefined);
+      protocolValueHistorySaved = true;
+    } catch (saveError) {
+      console.error(
+        "protocol value failure could not save turn history",
+        safeErrorDiagnostic(saveError),
+      );
+    }
+  }
+  if (protocolValueFailure && protocolValueHistorySaved && attempt.turnId) {
+    if (
+      !(await eventing.settle!({
+        events: [
+          {
+            type: "turn.failed",
+            payload: { ...protocolValueFailure, recovery: "user_message" },
+          },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+        turnStatus: "failed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        suppressGoalContinuation: true,
+      }))
+    ) {
+      return claimedResult({ status: "cancelled" });
+    }
+    control.turnMetricOutcome = "failed";
+    control.activityStatus = "idle";
+    control.activityError = error;
+    await deliverFailedChildTurnToParent(
+      { db, bus, settings, observability, wakeSessionWorkflow },
+      input.workspaceId,
+      input.sessionId,
+      attempt.turnId,
+    );
     return claimedResult({ status: "idle" });
   }
   // Budget/limit exhaustion between model calls is account state, not an
