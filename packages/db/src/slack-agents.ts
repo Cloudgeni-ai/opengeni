@@ -510,3 +510,161 @@ export async function setSlackBotUserUpdatesMuted(
     return updated.length > 0;
   });
 }
+
+/** Record that an agent's intro was posted in a channel. Idempotent. */
+export async function recordSlackAgentIntroPost(
+  db: Database,
+  home: SlackAgentHome,
+  input: {
+    connectionId: string;
+    slackAgentId: string;
+    slackChannelId: string;
+    postedBySubjectId: string;
+  },
+): Promise<void> {
+  await withRlsContext(db, home, async (scopedDb) => {
+    await scopedDb
+      .insert(schema.slackAgentIntroPosts)
+      .values({
+        accountId: home.accountId,
+        workspaceId: home.workspaceId,
+        connectionId: input.connectionId,
+        slackAgentId: input.slackAgentId,
+        slackChannelId: input.slackChannelId,
+        postedBySubjectId: input.postedBySubjectId,
+      })
+      .onConflictDoUpdate({
+        target: [schema.slackAgentIntroPosts.slackAgentId, schema.slackAgentIntroPosts.slackChannelId],
+        set: { postedBySubjectId: input.postedBySubjectId, updatedAt: sql`now()` },
+      });
+  });
+}
+
+/** The channels an agent's intro was posted in. */
+export async function listSlackAgentIntroChannelIds(
+  db: Database,
+  home: SlackAgentHome,
+  input: { slackAgentId: string },
+): Promise<string[]> {
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ slackChannelId: schema.slackAgentIntroPosts.slackChannelId })
+      .from(schema.slackAgentIntroPosts)
+      .where(
+        and(
+          eq(schema.slackAgentIntroPosts.workspaceId, home.workspaceId),
+          eq(schema.slackAgentIntroPosts.slackAgentId, input.slackAgentId),
+        ),
+      );
+    return rows.map((row) => row.slackChannelId);
+  });
+}
+
+export type SlackAgentSuggestionRecord = {
+  id: string;
+  connectionId: string;
+  slackAgentId: string;
+  interactionId: string;
+  turnId: string;
+  providerEventId: string;
+  slackTeamId: string;
+  slackUserId: string;
+  slackChannelId: string;
+  slackThreadTs: string;
+  createdAt: Date;
+};
+
+function mapSuggestion(
+  row: typeof schema.slackAgentSuggestions.$inferSelect,
+): SlackAgentSuggestionRecord {
+  return {
+    id: row.id,
+    connectionId: row.connectionId,
+    slackAgentId: row.slackAgentId,
+    interactionId: row.interactionId,
+    turnId: row.turnId,
+    providerEventId: row.providerEventId,
+    slackTeamId: row.slackTeamId,
+    slackUserId: row.slackUserId,
+    slackChannelId: row.slackChannelId,
+    slackThreadTs: row.slackThreadTs,
+    createdAt: row.createdAt,
+  };
+}
+
+/**
+ * Record a chat's suggestion to ask an agent, once per turn: the first
+ * suggestion of a turn wins and a retried call returns it.
+ */
+export async function recordSlackAgentSuggestion(
+  db: Database,
+  home: SlackAgentHome,
+  input: Omit<SlackAgentSuggestionRecord, "id" | "createdAt">,
+): Promise<SlackAgentSuggestionRecord> {
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const [inserted] = await scopedDb
+      .insert(schema.slackAgentSuggestions)
+      .values({ accountId: home.accountId, workspaceId: home.workspaceId, ...input })
+      .onConflictDoNothing({
+        target: [schema.slackAgentSuggestions.interactionId, schema.slackAgentSuggestions.turnId],
+      })
+      .returning();
+    if (inserted) return mapSuggestion(inserted);
+    const [existing] = await scopedDb
+      .select()
+      .from(schema.slackAgentSuggestions)
+      .where(
+        and(
+          eq(schema.slackAgentSuggestions.workspaceId, home.workspaceId),
+          eq(schema.slackAgentSuggestions.interactionId, input.interactionId),
+          eq(schema.slackAgentSuggestions.turnId, input.turnId),
+        ),
+      )
+      .limit(1);
+    if (!existing) throw new Error("Slack agent suggestion write returned no row");
+    return mapSuggestion(existing);
+  });
+}
+
+/** A turn's suggestion, if its chat made one. */
+export async function getSlackAgentSuggestionForTurn(
+  db: Database,
+  home: SlackAgentHome,
+  input: { interactionId: string; turnId: string },
+): Promise<SlackAgentSuggestionRecord | null> {
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackAgentSuggestions)
+      .where(
+        and(
+          eq(schema.slackAgentSuggestions.workspaceId, home.workspaceId),
+          eq(schema.slackAgentSuggestions.interactionId, input.interactionId),
+          eq(schema.slackAgentSuggestions.turnId, input.turnId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSuggestion(row) : null;
+  });
+}
+
+/** One suggestion by id, for its button. */
+export async function getSlackAgentSuggestion(
+  db: Database,
+  home: SlackAgentHome,
+  input: { suggestionId: string },
+): Promise<SlackAgentSuggestionRecord | null> {
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackAgentSuggestions)
+      .where(
+        and(
+          eq(schema.slackAgentSuggestions.workspaceId, home.workspaceId),
+          eq(schema.slackAgentSuggestions.id, input.suggestionId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSuggestion(row) : null;
+  });
+}

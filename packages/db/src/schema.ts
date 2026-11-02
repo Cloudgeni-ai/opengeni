@@ -2645,6 +2645,8 @@ export const slackAgentUpdateSettings = pgTable(
       .references(() => connections.id, { onDelete: "cascade" }),
     updatesEnabled: boolean("updates_enabled").notNull().default(false),
     channelPostsOnly: boolean("channel_posts_only").notNull().default(false),
+    /** Where new agents are introduced by default (1230). */
+    announcementChannelId: text("announcement_channel_id"),
     updatesEnabledAt: timestamp("updates_enabled_at", { withTimezone: true }),
     updatedBySubjectId: text("updated_by_subject_id"),
     sweepHolder: uuid("sweep_holder"),
@@ -2665,6 +2667,90 @@ export const slackAgentUpdateSettings = pgTable(
     bounded: check(
       "slack_agent_update_settings_bounds_check",
       sql`(${table.updatedBySubjectId} is null or octet_length(${table.updatedBySubjectId}) between 1 and 1024) and ${table.version} > 0`,
+    ),
+  }),
+);
+
+/** Channels a Slack agent's intro was posted in (1230). HOME-owned. */
+export const slackAgentIntroPosts = pgTable(
+  "slack_agent_intro_posts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackAgentId: uuid("slack_agent_id")
+      .notNull()
+      .references(() => slackAgents.id, { onDelete: "cascade" }),
+    slackChannelId: text("slack_channel_id").notNull(),
+    postedBySubjectId: text("posted_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    agentChannel: unique("slack_agent_intro_posts_agent_channel_uq").on(
+      table.slackAgentId,
+      table.slackChannelId,
+    ),
+    workspaceAccount: foreignKey({
+      name: "slack_agent_intro_posts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    bounded: check(
+      "slack_agent_intro_posts_bounds_check",
+      sql`octet_length(${table.slackChannelId}) between 1 and 64 and octet_length(${table.postedBySubjectId}) between 1 and 1024`,
+    ),
+  }),
+);
+
+/**
+ * A Slack chat suggested asking an agent after answering one Slack message
+ * (1230). HOME-owned. Delivery posts it after the answer; its button re-sends
+ * that message to the agent for whoever clicks it.
+ */
+export const slackAgentSuggestions = pgTable(
+  "slack_agent_suggestions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackAgentId: uuid("slack_agent_id")
+      .notNull()
+      .references(() => slackAgents.id, { onDelete: "cascade" }),
+    interactionId: uuid("interaction_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    providerEventId: text("provider_event_id").notNull(),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackUserId: text("slack_user_id").notNull(),
+    slackChannelId: text("slack_channel_id").notNull(),
+    slackThreadTs: text("slack_thread_ts").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    turn: unique("slack_agent_suggestions_turn_uq").on(table.interactionId, table.turnId),
+    workspaceAccount: foreignKey({
+      name: "slack_agent_suggestions_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    agent: index("slack_agent_suggestions_agent_idx").on(table.slackAgentId),
+    bounded: check(
+      "slack_agent_suggestions_bounds_check",
+      sql`octet_length(${table.providerEventId}) between 1 and 512 and octet_length(${table.slackTeamId}) between 1 and 64 and octet_length(${table.slackUserId}) between 1 and 64 and octet_length(${table.slackChannelId}) between 1 and 64 and octet_length(${table.slackThreadTs}) between 1 and 64`,
     ),
   }),
 );

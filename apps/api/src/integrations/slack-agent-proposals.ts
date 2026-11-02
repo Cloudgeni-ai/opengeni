@@ -52,7 +52,7 @@ const CARD_INSTRUCTIONS_MAX_CHARS = 2_500;
 
 /** What the chat is told about `slack_agent_propose`, including how to get an icon. */
 export const SLACK_AGENT_PROPOSE_TOOL_DESCRIPTION = [
-  'Propose a new Slack agent when someone in Slack asks to create one: a named teammate people call with "@Opengeni +name" that always works in one shared workspace and has its own Memory.',
+  'Propose a new Slack agent when someone in Slack asks to create one: a named teammate people ask with "@Opengeni" and its name that always works in one shared workspace and has its own Memory.',
   "This posts a card in this chat's own Slack thread showing the name, icon, description, workspace and instructions, with Create and Cancel. Nothing is created until a current admin of that workspace presses Create, so never say it was created.",
   "name: what people type after +; letters, numbers, spaces and hyphens. description: one line about what it does. instructions: how it should work, written to the agent, at most 2500 characters. workspace: the shared workspace it works in, by name; omit it for this chat's workspace.",
   'An icon is required. If you have an image-generation tool, generate one (a flat icon filling the whole square: one bold symbol for its job on a solid, strong colour, with no frame, faces, fine detail or text), publish it to the workspace, and pass {kind:"image",artifactId}; the image must be in the agent\'s workspace. Otherwise ask the person which emoji to use and pass {kind:"emoji",emoji,hue} with hue 0-359; {kind:"icon",icon,hue} also works.',
@@ -129,7 +129,7 @@ export function buildSlackAgentProposalCard(view: SlackAgentProposalCardView): {
         elements: [
           {
             type: "mrkdwn",
-            text: `Works in *${workspace}* · Called with ${slackAgentCallText(view, view.botUserId)} · An admin of ${workspace} can create it`,
+            text: `Works in *${workspace}* · Ask it with ${slackAgentCallText(view, view.botUserId)} · An admin of ${workspace} can create it`,
           },
         ],
       },

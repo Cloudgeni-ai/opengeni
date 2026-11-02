@@ -10,7 +10,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   SESSION_SLACK_AGENT_METADATA_KEY,
-  slackAgentHandle,
+  slackAgentCallText,
   slackAgentNameKey,
   McpElicitationApprovalRequest,
   resolveWorkspaceSessionToolDefaults,
@@ -100,6 +100,9 @@ import {
   recordSlackInteractionInbound,
   retireSlackInteractionRoute,
   touchSlackAgentUserState,
+  recordSlackAgentSuggestion,
+  getSlackAgentSuggestionForTurn,
+  getSlackAgentSuggestion,
   claimSlackAgentOpenNotice,
   type SlackAgentRecord,
   listSlackThreadMessagesSinceLastInvocation,
@@ -194,16 +197,21 @@ import {
   resolveSlackWorkspaceRoute,
   slackRouteChoicesForPersonalWorkspaces,
   slackAgentAddressForEntry,
+  slackAgentAddressMayMoveThread,
   slackRoutedRequestText,
   splitSlackLeadingMention,
   type SlackRouteResolution,
   type SlackRouteTenancy,
   type SlackRoutingAgent,
 } from "./slack-routing";
+import { slackTextNamesAgent } from "./slack-agent-address";
 import {
+  buildSlackAgentSuggestionAskedMessage,
+  buildSlackAgentSuggestionMessage,
   loadSlackAgentsForConnection,
   NO_SLACK_AGENTS,
   renderSlackAgentStartLine,
+  SLACK_AGENT_SUGGESTION_ASK_ACTION_ID,
   slackAgentHintLine,
   slackAgentSessionInstructions,
   slackNoAccessToAgentText,
@@ -435,6 +443,7 @@ export const SLACK_TASK_FIRST_PARTY_MCP_TOOLS = [
  */
 export const SLACK_AGENT_FIRST_PARTY_MCP_TOOLS: readonly FirstPartyMcpToolName[] = [
   "slack_agent_handoff",
+  "slack_agent_suggest",
   "slack_agent_chats",
   "slack_agent_propose",
 ];
@@ -1575,7 +1584,7 @@ async function publishSlackAppHome(
       id: agent.id,
       name: agent.name,
       description: agent.description,
-      call: `@Opengeni +${slackAgentHandle(agent.name)}`,
+      call: slackAgentCallText(agent.name),
       iconUrl:
         deps.settings.publicBaseUrl && deps.settings.slackSigningSecret
           ? sessionAvatarImageUrl(deps.settings.publicBaseUrl, deps.settings.slackSigningSecret, {
@@ -1878,7 +1887,9 @@ async function resolveSlackRouteForEntry(
     !deps.settings.slackWorkspaceRoutingEnabled ||
     (options.threadTenancy &&
       (agents.length === 0 ||
-        (!slackAgentAddressForEntry(entry, agents, options.botUserId) &&
+        (!slackAgentAddressMayMoveThread(
+          slackAgentAddressForEntry(entry, agents, options.botUserId),
+        ) &&
           !(
             entry.targetSlackAgentId &&
             !entry.handoffFromSlackAgentId &&
@@ -2281,7 +2292,17 @@ async function slackStartMessageLineForAgentEntry(
     sessionUrl,
     agentName: agent.name,
     handedOffByName: handedOffBy?.name ?? null,
-    hint: showHint ? slackAgentHintLine(agent, context.botUserId) : null,
+    hint: showHint
+      ? slackAgentHintLine(agent, context.botUserId, {
+          // The channel's "Who answers" chose this agent: a workspace prefix
+          // still reaches Opengeni itself there. Not for an open agent, whose
+          // workspace the person may not be able to use.
+          plainOpengeniWorkspace:
+            context.source === "channel" && !agent.open
+              ? (context.agents.labels.get(agent.targetWorkspaceId) ?? null)
+              : null,
+        })
+      : null,
   });
 }
 
@@ -3274,6 +3295,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
             ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${slackAgentSessionInstructions({
                 loaded: slackAgents,
                 agent: routedAgent,
+                source: resolution.source,
                 handedOffBy:
                   slackAgents.records.find(
                     (agent) => agent.id === interaction.handoffFromSlackAgentId,
@@ -3373,6 +3395,7 @@ export type SlackAgentHandoffResult =
   | { status: "refused"; message: string };
 
 const MAX_SLACK_HANDOFF_NOTE_CHARS = 1_000;
+const MAX_SLACK_HANDOFF_REASON_CHARS = 500;
 
 /**
  * Pass the request a Slack-started chat is answering on to another Slack
@@ -3387,13 +3410,35 @@ const MAX_SLACK_HANDOFF_NOTE_CHARS = 1_000;
  * chat to the thread.
  *
  * At most one hop per message, never to itself and never back to the agent
- * that passed it on.
+ * that passed it on. The message must ask for the agent by name (one typo
+ * allowed), so a chat never moves a request the person meant for it; when an
+ * agent merely fits, the chat answers and may suggest it instead.
  */
 export async function handOffSlackAgentChat(
   deps: ApiRouteDeps,
-  input: { grant: AccessGrant; sessionId: string; agent: string; note?: string | undefined },
+  input: {
+    grant: AccessGrant;
+    sessionId: string;
+    agent: string;
+    note?: string | undefined;
+    /** Why the chat hands off. Logged only; never shown or passed on. */
+    reason?: string | undefined;
+  },
 ): Promise<SlackAgentHandoffResult> {
-  const refuse = (message: string): SlackAgentHandoffResult => ({ status: "refused", message });
+  const log = (outcome: string, extra: Record<string, unknown> = {}) =>
+    console.info("[slack-agent-handoff]", {
+      sessionId: input.sessionId,
+      agent: input.agent.slice(0, 120),
+      outcome,
+      ...(input.reason?.trim()
+        ? { reason: input.reason.trim().slice(0, MAX_SLACK_HANDOFF_REASON_CHARS) }
+        : {}),
+      ...extra,
+    });
+  const refuse = (message: string, why = "refused"): SlackAgentHandoffResult => {
+    log(why);
+    return { status: "refused", message };
+  };
   const interaction = await getSlackInteractionForSession(deps.db, {
     accountId: input.grant.accountId,
     workspaceId: input.grant.workspaceId,
@@ -3447,11 +3492,14 @@ export async function handOffSlackAgentChat(
     connectionId: interaction.connectionId,
     providerEventId: handoffEventId,
   });
-  const passedOn = (name: string): SlackAgentHandoffResult => ({
-    status: "passed_on",
-    agent: name,
-    message: `Passed on to ${name}. Make your entire final response exactly NO_REPLY.`,
-  });
+  const passedOn = (name: string): SlackAgentHandoffResult => {
+    log("passed_on", { to: name });
+    return {
+      status: "passed_on",
+      agent: name,
+      message: `Passed on to ${name}. Make your entire final response exactly NO_REPLY.`,
+    };
+  };
   const loaded = await loadSlackAgentsForConnection(deps, home, interaction.connectionId);
   if (queued) {
     if (queued.handoffFromInteractionId === interaction.id) {
@@ -3490,6 +3538,15 @@ export async function handOffSlackAgentChat(
     providerEventId: inbound,
   });
   if (!original) return refuse("The Slack message to pass on is no longer available.");
+  // The person has to ask for the agent: its name (or `+name`) somewhere in
+  // the message being answered, allowing one typo. A request that only fits
+  // the agent's description stays with this chat.
+  if (!slackTextNamesAgent(original.text, target)) {
+    return refuse(
+      `The message doesn't ask for ${target.name}. Answer it yourself; you may suggest the agent.`,
+      "not_named",
+    );
+  }
   // The person who sent that message, never someone who wrote later.
   const askerSlackUserId = original.slackUserId;
   const link = await getSlackBotUserLink(
@@ -3569,6 +3626,233 @@ export async function handOffSlackAgentChat(
     handoffFromSlackAgentId: interaction.slackAgentId,
   });
   return passedOn(target.name);
+}
+
+export type SlackAgentSuggestionResult =
+  | { status: "suggested"; agent: string; message: string }
+  | { status: "refused"; message: string };
+
+/**
+ * Suggest another Slack agent after this chat answers, for the
+ * `slack_agent_suggest` tool. Nothing moves: the chat answers as usual, and
+ * delivery then posts one server-owned line with an "Ask <Agent>" button under
+ * the answer. Only an agent the asker can use is suggested, and only for a
+ * Slack message the current turn answers; one suggestion per turn.
+ */
+export async function suggestSlackAgentForChat(
+  deps: ApiRouteDeps,
+  input: { grant: AccessGrant; sessionId: string; agent: string },
+): Promise<SlackAgentSuggestionResult> {
+  const refuse = (message: string): SlackAgentSuggestionResult => ({ status: "refused", message });
+  const interaction = await getSlackInteractionForSession(deps.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    sessionId: input.sessionId,
+  });
+  if (!interaction) return refuse("Only a chat started from Slack can suggest an agent.");
+  if (isOpenSlackAgentSubject(interaction.owningSubjectId)) {
+    return refuse("This chat cannot suggest agents. Answer the request yourself.");
+  }
+  const installation = await resolveSlackInstallationRoute(deps.db, interaction.slackTeamId);
+  if (
+    !installation ||
+    installation.accountId !== interaction.accountId ||
+    installation.connectionId !== interaction.connectionId
+  ) {
+    return refuse("This chat's Slack installation changed. Answer the request yourself.");
+  }
+  const home = { accountId: installation.accountId, workspaceId: installation.workspaceId };
+  // The suggestion follows this turn's answer, so it needs the turn and the
+  // Slack message the turn answers.
+  const turnId =
+    typeof input.grant.metadata?.["turnId"] === "string"
+      ? (input.grant.metadata["turnId"] as string)
+      : null;
+  const turnEvent = turnId
+    ? await getSlackProviderEventIdForTurn(deps.db, {
+        workspaceId: input.grant.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+      })
+    : { turnFound: false, providerEventId: null };
+  if (!turnId || !turnEvent.providerEventId) {
+    return refuse("Only an answer to a Slack message can suggest an agent.");
+  }
+  // Only a chat that owns an ordinary thread posts there; a private task moved
+  // to someone's DM keeps its privacy.
+  if (interaction.routeKey !== slackRouteKey(interaction.slackChannelId, interaction.slackThreadTs)) {
+    return refuse("This chat cannot suggest agents. Answer the request yourself.");
+  }
+  const loaded = await loadSlackAgentsForConnection(deps, home, interaction.connectionId);
+  const key = slackAgentNameKey(input.agent.trim().replace(/^\+/u, ""));
+  const target = loaded.records.find((agent) => agent.nameKey === key);
+  if (!target) return refuse(slackUnknownAgentText(input.agent.trim(), loaded.records));
+  if (target.id === interaction.slackAgentId) {
+    return refuse(`You are ${target.name}. Answer the request yourself.`);
+  }
+  const original = await getSlackInteractionInboxByProviderEvent(deps.db, home, {
+    connectionId: interaction.connectionId,
+    providerEventId: turnEvent.providerEventId,
+  });
+  if (!original) return refuse("The Slack message is no longer available.");
+  // Never offer an agent the person who asked cannot use.
+  if (!target.open) {
+    const link = await getSlackBotUserLink(
+      deps.db,
+      home.workspaceId,
+      interaction.connectionId,
+      original.slackUserId,
+    );
+    const askerGrant = link
+      ? await resolveSlackTargetAuthority(deps.db, {
+          subjectId: link.subjectId,
+          targetAccountId: target.targetAccountId,
+          targetWorkspaceId: target.targetWorkspaceId,
+        })
+      : null;
+    if (!askerGrant || !hasPermission(askerGrant.permissions, "sessions:create")) {
+      return refuse(
+        `The person who asked cannot use ${target.name}, so it is not suggested. Answer the request yourself.`,
+      );
+    }
+  }
+  const suggestion = await recordSlackAgentSuggestion(deps.db, home, {
+    connectionId: interaction.connectionId,
+    slackAgentId: target.id,
+    interactionId: interaction.id,
+    turnId,
+    providerEventId: turnEvent.providerEventId,
+    slackTeamId: interaction.slackTeamId,
+    slackUserId: original.slackUserId,
+    slackChannelId: interaction.slackChannelId,
+    slackThreadTs: interaction.slackThreadTs,
+  });
+  const suggested =
+    loaded.records.find((agent) => agent.id === suggestion.slackAgentId)?.name ?? target.name;
+  return {
+    status: "suggested",
+    agent: suggested,
+    message: `Opengeni shows "${suggested} handles questions like this." with a button under your answer. Answer the request yourself and don't mention the suggestion.`,
+  };
+}
+
+/**
+ * Post a turn's suggestion right after its answer. A deterministic operation
+ * id makes a repaired delivery post it once. Nothing is posted when the turn
+ * made no suggestion or the agent was deleted since.
+ */
+async function postSlackAgentSuggestionAfterAnswer(
+  deps: ApiRouteDeps,
+  client: OpenGeniSlackBotClient,
+  interaction: SlackInteraction,
+  home: SlackRouteTenancy,
+  turnId: string | null | undefined,
+): Promise<void> {
+  if (!turnId || !deps.settings.slackWorkspaceRoutingEnabled) return;
+  const suggestion = await getSlackAgentSuggestionForTurn(deps.db, home, {
+    interactionId: interaction.id,
+    turnId,
+  });
+  if (
+    !suggestion ||
+    suggestion.connectionId !== interaction.connectionId ||
+    suggestion.slackChannelId !== interaction.slackChannelId ||
+    suggestion.slackThreadTs !== interaction.slackThreadTs
+  ) {
+    return;
+  }
+  const loaded = await loadSlackAgentsForConnection(deps, home, interaction.connectionId);
+  const agent = loaded.records.find((candidate) => candidate.id === suggestion.slackAgentId);
+  if (!agent) return;
+  const message = buildSlackAgentSuggestionMessage({
+    agentName: agent.name,
+    suggestionId: suggestion.id,
+  });
+  await client.postMessage({
+    operationId: deterministicUuid(`slack-agent-suggestion:${suggestion.id}`),
+    channelId: interaction.slackChannelId,
+    threadTimestamp: interaction.slackThreadTs,
+    text: message.text,
+    blocks: message.blocks,
+  });
+}
+
+/**
+ * A click on "Ask <Agent>" under a suggestion: the answered message is sent
+ * again, to that agent, as the person who clicked, in the same thread. It goes
+ * through the same inbox and routing as the Ask form, so the agent's access is
+ * checked for that person and the thread moves to the agent. The button
+ * carries only the suggestion id; everything else is read from the stored
+ * suggestion and the click must come from the suggestion's own message.
+ */
+async function handleSlackAgentSuggestionAction(
+  deps: ApiRouteDeps,
+  home: SlackRouteTenancy,
+  entry: SlackInteractionInboxEntry,
+  suggestionId: string,
+): Promise<void> {
+  if (!deps.settings.slackWorkspaceRoutingEnabled) return;
+  const suggestion = await getSlackAgentSuggestion(deps.db, home, { suggestionId });
+  if (
+    !suggestion ||
+    suggestion.connectionId !== entry.connectionId ||
+    suggestion.slackTeamId !== entry.slackTeamId ||
+    suggestion.slackChannelId !== entry.slackChannelId
+  ) {
+    return;
+  }
+  const posted = await getSlackBotPostOperation(
+    deps.db,
+    home.workspaceId,
+    entry.connectionId,
+    deterministicUuid(`slack-agent-suggestion:${suggestion.id}`),
+  );
+  if (posted?.slackMessageTimestamp !== entry.slackMessageTs) return;
+  const loaded = await loadSlackAgentsForConnection(deps, home, entry.connectionId);
+  const agent = loaded.records.find((candidate) => candidate.id === suggestion.slackAgentId);
+  if (!agent) return;
+  const original = await getSlackInteractionInboxByProviderEvent(deps.db, home, {
+    connectionId: entry.connectionId,
+    providerEventId: suggestion.providerEventId,
+  });
+  if (!original) return;
+  const providerEventId = `suggest:${suggestion.id}:${entry.slackUserId}`.slice(0, 255);
+  await enqueueSlackInteractionInbox(deps.db, {
+    accountId: home.accountId,
+    workspaceId: home.workspaceId,
+    connectionId: entry.connectionId,
+    providerEventId,
+    providerMessageId: providerEventId,
+    slackTeamId: entry.slackTeamId,
+    slackUserId: entry.slackUserId,
+    slackChannelId: suggestion.slackChannelId,
+    slackMessageTs: suggestion.slackThreadTs,
+    slackThreadTs: suggestion.slackThreadTs,
+    triggerKind: slackChannelIsDirectMessage(suggestion.slackChannelId) ? "dm" : "app_mention",
+    text: boundedSlackInboxText(original.text),
+    hasFiles: false,
+    targetSlackAgentId: agent.id,
+  });
+  const client = await createOpenGeniSlackBotInteractionClient(deps, {
+    ...home,
+    connectionId: entry.connectionId,
+    subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
+  });
+  const asked = buildSlackAgentSuggestionAskedMessage({
+    agentName: agent.name,
+    slackUserId: entry.slackUserId,
+  });
+  // Best effort: the request is already queued, and the button only re-sends
+  // the same message, so a lost update costs nothing but a stale button.
+  await client
+    .updateMessage({
+      operationId: deterministicUuid(`slack-agent-suggestion-asked:${suggestion.id}`),
+      channelId: entry.slackChannelId,
+      timestamp: entry.slackMessageTs,
+      text: asked.text,
+      blocks: asked.blocks,
+    })
+    .catch(() => undefined);
 }
 
 /**
@@ -5301,6 +5585,11 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
     actionId === SLACK_AGENT_PROPOSAL_CANCEL_ACTION_ID
   ) {
     await handleSlackAgentProposalAction(deps, home, entry, actionId, handleId);
+    return;
+  }
+  // A suggestion's button is checked against its stored suggestion, not a handle.
+  if (actionId === SLACK_AGENT_SUGGESTION_ASK_ACTION_ID) {
+    await handleSlackAgentSuggestionAction(deps, home, entry, handleId);
     return;
   }
   // A handle lives in the workspace that owns its session, which is not the
@@ -7199,6 +7488,16 @@ async function deliverSlackSessionEvents(
           );
         });
       }
+      // A chat's suggestion of another agent follows its answer. It is extra:
+      // a failure here never holds back the answer's delivery.
+      await postSlackAgentSuggestionAfterAnswer(deps, client, interaction, home, event.turnId).catch(
+        (error: unknown) => {
+          console.warn("[slack-agent-suggestion] could not post the suggestion", {
+            interactionId: interaction.id,
+            error: error instanceof Error ? error.name : "unknown",
+          });
+        },
+      );
       terminal = "completed";
     } else if (event.type === "turn.failed") {
       await withSlackPreviousContinuationCopy(
@@ -7471,6 +7770,7 @@ const SLACK_BLOCK_ACTION_IDS = new Set([
   "opengeni.route.cancel",
   "opengeni.agent_proposal.create",
   "opengeni.agent_proposal.cancel",
+  SLACK_AGENT_SUGGESTION_ASK_ACTION_ID,
 ]);
 
 export function normalizedBlockActionInteraction(
@@ -7738,7 +8038,7 @@ async function slackInfoAgentLines(
     "*Agents you can ask*",
     ...agents.map(
       (agent) =>
-        `• *${escapeSlackMrkdwn(agent.name)}:* ${escapeSlackMrkdwn(agent.description)} \`@Opengeni +${slackAgentHandle(agent.name)}\``,
+        `• *${escapeSlackMrkdwn(agent.name)}:* ${escapeSlackMrkdwn(agent.description)} \`${escapeSlackMrkdwn(slackAgentCallText(agent.name))}\``,
     ),
   ];
 }

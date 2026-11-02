@@ -6,12 +6,16 @@
  * message, an instruction or a query result, which is what keeps it exactly as
  * it was before agents existed.
  */
-import { slackAgentHandle } from "@opengeni/contracts";
+import {
+  slackAgentCallText as slackAgentCallFor,
+  slackAgentDescriptionSentence,
+} from "@opengeni/contracts";
 import { getWorkspace, listSlackAgentsForConnection, type SlackAgentRecord } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
 
 import type { SlackRoutingAgent } from "./slack-agent-address";
 import { escapeSlackMrkdwn } from "./slack-app-home";
+import type { SlackMessageBlock } from "./slack-bot";
 
 export type LoadedSlackAgents = {
   records: SlackAgentRecord[];
@@ -61,13 +65,17 @@ export function slackRoutingAgent(
   };
 }
 
-/** How people call an agent in Slack, for example `@Opengeni +data-team`. */
+/**
+ * How people ask an agent in Slack, for example `@Opengeni Data team`, as
+ * mrkdwn with the app's real mention when its user id is known.
+ */
 export function slackAgentCallText(
   agent: Pick<SlackAgentRecord, "name">,
   botUserId: string | null,
 ): string {
-  const mention = botUserId ? `<@${botUserId}>` : "@Opengeni";
-  return `${mention} +${slackAgentHandle(agent.name)}`;
+  const mention =
+    botUserId && /^[UWB][A-Z0-9]{1,63}$/u.test(botUserId) ? `<@${botUserId}>` : "@Opengeni";
+  return slackAgentCallFor(escapeSlackMrkdwn(agent.name), mention);
 }
 
 /** Agents listed by name in a chat's instructions. */
@@ -77,22 +85,60 @@ function workspaceName(loaded: LoadedSlackAgents, workspaceId: string): string {
   return loaded.labels.get(workspaceId) ?? "its workspace";
 }
 
+/** How a chat was reached: by an agent's name, or without one. */
+export type SlackAgentChatSource =
+  | "agent_name"
+  | "channel"
+  | "handoff"
+  | "thread"
+  | "prefix"
+  | "dm_route"
+  | "dm_personal"
+  | "sole_candidate"
+  | "installation";
+
+/**
+ * The hand-off rule every chat in an installation with agents gets. The
+ * server enforces its core too: a hand-off needs the message to name the
+ * agent (see `handOffSlackAgentChat`).
+ */
+function slackAgentHandoffRule(input: {
+  self: string;
+  source: SlackAgentChatSource | null;
+}): string {
+  const how =
+    input.source === "channel"
+      ? `This channel's settings sent the message to ${input.self}; the person did not name an agent.`
+      : input.source === null || input.source === "agent_name" || input.source === "handoff"
+        ? null
+        : `The person asked ${input.self} without naming an agent.`;
+  return [
+    ...(how ? [how] : []),
+    "Answer yourself by default.",
+    'Call slack_agent_handoff only when the person asks for one of the Slack agents below by name, team or role, even misspelled (for example "ask the data team"); then make your entire final response exactly NO_REPLY.',
+    "Never hand off greetings, tests, small talk, questions about Opengeni or its agents, or messages that merely contain a word that is also an agent's name.",
+    "When a request fits an agent the person did not ask for, answer it yourself, then call slack_agent_suggest with that agent's name: Opengeni shows the person a button to ask it. Do not write that suggestion in your answer.",
+  ].join(" ");
+}
+
 /**
  * What every chat started from Slack in an installation with agents is told:
- * who it is, which agents exist, and how to keep context. Composed after the
- * ordinary Slack instructions.
+ * who it is, how it was reached, which agents exist, and how to keep context.
+ * Composed after the ordinary Slack instructions.
  */
 export function slackAgentSessionInstructions(input: {
   loaded: LoadedSlackAgents;
   agent: SlackAgentRecord | null;
   handedOffBy: SlackAgentRecord | null;
+  /** How the chat was reached; null when unknown. */
+  source?: SlackAgentChatSource | null;
 }): string {
   const { loaded, agent } = input;
   const lines: string[] = [];
   if (agent) {
-    const handle = slackAgentHandle(agent.name);
+    const description = slackAgentDescriptionSentence(agent.description);
     lines.push(
-      `You are ${agent.name}, a Slack agent: ${agent.description} People call you in Slack with "+${handle}" after mentioning Opengeni, and your Slack messages are posted under the name ${agent.name}. Several people may talk to you at once in separate chats; together they are one teammate, so keep your answers consistent with your other chats.`,
+      `You are ${agent.name}, a Slack agent.${description ? ` ${description}` : ""} People ask you in Slack with "${slackAgentCallFor(agent.name)}", and your Slack messages are posted under the name ${agent.name}. Several people may talk to you at once in separate chats; together they are one teammate, so keep your answers consistent with your other chats.`,
     );
     const adminInstructions = agent.instructions.trim();
     if (adminInstructions.length > 0) {
@@ -117,12 +163,12 @@ export function slackAgentSessionInstructions(input: {
     const listed = others.slice(0, MAX_LISTED_AGENTS);
     lines.push(
       [
-        `If a request clearly belongs to one of the Slack agents below rather than to you, call slack_agent_handoff with its name and then make your entire final response exactly NO_REPLY. Hand off only when you are confident; otherwise answer yourself, or tell the person they can call an agent with "@Opengeni +name".`,
-        "Slack agents people can call in this Slack workspace (name, what it does, where it works):",
-        ...listed.map(
-          (other) =>
-            `- ${other.name} (+${slackAgentHandle(other.name)}): ${other.description} Works in ${workspaceName(loaded, other.targetWorkspaceId)}.`,
-        ),
+        slackAgentHandoffRule({ self: agent?.name ?? "Opengeni", source: input.source ?? null }),
+        "Slack agents people can ask in this Slack workspace (name, what it does, where it works):",
+        ...listed.map((other) => {
+          const description = slackAgentDescriptionSentence(other.description);
+          return `- ${other.name}:${description ? ` ${description}` : ""} Works in ${workspaceName(loaded, other.targetWorkspaceId)}.`;
+        }),
         ...(others.length > listed.length ? [`- and ${others.length - listed.length} more.`] : []),
       ].join("\n"),
     );
@@ -140,9 +186,7 @@ export function slackUnknownAgentText(
 ): string {
   const named = requested.trim().length > 0 ? ` called ${requested.trim()}` : "";
   const available =
-    usable.length > 0
-      ? ` Available: ${usable.map((agent) => `+${slackAgentHandle(agent.name)}`).join(", ")}.`
-      : "";
+    usable.length > 0 ? ` Available: ${usable.map((agent) => agent.name).join(", ")}.` : "";
   return `No agent${named}.${available} No chat was started.`;
 }
 
@@ -176,10 +220,83 @@ export function renderSlackAgentStartLine(input: {
   return `<${input.sessionUrl}|${name} is on it>${passed}${hint}`;
 }
 
-/** "<Agent> · next time: `@Opengeni +name`", shown once per person per agent. */
+/**
+ * The one-time line under "<Agent> is on it", shown once per person and agent
+ * when they reached it without typing its name:
+ *
+ * > _Data team: Answers questions about metrics. Next time, ask directly with @Opengeni Data team._
+ *
+ * When the channel's settings sent the message to the agent, it also says how
+ * to ask Opengeni itself there: the `in <workspace>:` prefix comes before the
+ * channel's setting.
+ */
 export function slackAgentHintLine(
-  agent: Pick<SlackAgentRecord, "name">,
+  agent: Pick<SlackAgentRecord, "name" | "description">,
   botUserId: string | null,
+  options: { plainOpengeniWorkspace?: string | null } = {},
 ): string {
-  return `_${escapeSlackMrkdwn(agent.name)} · next time: ${slackAgentCallText(agent, botUserId)}_`;
+  const description = slackAgentDescriptionSentence(agent.description);
+  const plain = options.plainOpengeniWorkspace?.trim()
+    ? ` To ask Opengeni itself here, start with \`in ${escapeSlackMrkdwn(options.plainOpengeniWorkspace.trim())}:\``
+    : "";
+  return `_${escapeSlackMrkdwn(agent.name)}:${description ? ` ${escapeSlackMrkdwn(description)}` : ""} Next time, ask directly with ${slackAgentCallText(agent, botUserId)}.${plain}_`;
+}
+
+/** The button under a suggestion: re-sends the answered message to the agent. */
+export const SLACK_AGENT_SUGGESTION_ASK_ACTION_ID = "opengeni.agent_suggestion.ask";
+
+/**
+ * The line a chat shows after its answer when a request fits an agent the
+ * person did not ask for:
+ *
+ * > Data team handles questions like this. [Ask Data team]
+ *
+ * Copy and the button are the server's; the chat only names the agent.
+ */
+export function buildSlackAgentSuggestionMessage(input: {
+  agentName: string;
+  suggestionId: string;
+}): { text: string; blocks: SlackMessageBlock[] } {
+  const text = `${input.agentName} handles questions like this.`;
+  return {
+    text,
+    blocks: [
+      {
+        type: "section",
+        block_id: "opengeni_agent_suggestion",
+        text: { type: "mrkdwn", text: escapeSlackMrkdwn(text) },
+      },
+      {
+        type: "actions",
+        block_id: "opengeni_agent_suggestion_actions",
+        elements: [
+          {
+            type: "button",
+            action_id: SLACK_AGENT_SUGGESTION_ASK_ACTION_ID,
+            value: input.suggestionId,
+            text: {
+              type: "plain_text",
+              text: [...`Ask ${input.agentName}`].slice(0, 75).join(""),
+              emoji: true,
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** The suggestion once someone asked the agent: the button is gone. */
+export function buildSlackAgentSuggestionAskedMessage(input: {
+  agentName: string;
+  slackUserId: string;
+}): { text: string; blocks: SlackMessageBlock[] } {
+  const asker = /^[UWB][A-Z0-9]{1,63}$/u.test(input.slackUserId)
+    ? `<@${input.slackUserId}>`
+    : "Someone";
+  const text = `${asker} asked ${escapeSlackMrkdwn(input.agentName)}.`;
+  return {
+    text,
+    blocks: [{ type: "context", elements: [{ type: "mrkdwn", text }] }],
+  };
 }

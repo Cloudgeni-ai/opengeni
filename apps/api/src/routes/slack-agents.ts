@@ -12,7 +12,11 @@ import { createHash } from "node:crypto";
 import {
   CreateSlackAgentRequest,
   slackAgentHandle,
+  slackAgentIntroLines,
+  slackAgentMessageMrkdwn,
   slackAgentNameKey,
+  slackAgentNameProblem,
+  slackAgentNameProblemText,
   SlackAgentChannelListResponse,
   SlackAgentIntroRequest,
   SlackAgentIntroResponse,
@@ -23,12 +27,15 @@ import {
 } from "@opengeni/contracts";
 import {
   deleteSlackAgent,
+  findSlackBotUserLinkForSubject,
   getAgentLearningSettings,
   getSlackAgent,
   getWorkspace,
   getWorkspaceGrant,
   listOrganizationSlackAgents,
+  listSlackAgentIntroChannelIds,
   listSlackInstallationBindings,
+  recordSlackAgentIntroPost,
   updateSlackAgent,
   type SlackAgentRecord,
 } from "@opengeni/db";
@@ -52,7 +59,6 @@ import {
   createOpenGeniSlackBotInteractionClient,
   SlackBotProviderError,
 } from "../integrations/slack-bot";
-import { escapeSlackMrkdwn } from "../integrations/slack-app-home";
 import { createSlackAgent } from "../integrations/slack-agent-create";
 
 const SLACK_AGENT_ADMIN_SUBJECT_ID = "service:slack-interaction";
@@ -279,6 +285,19 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (payload.open === true && !agent.open) {
       await requireOrganizationAdmin(c, agent.targetWorkspaceId);
     }
+    // Every name rule applies to a new name; an unchanged one (even one that
+    // predates the stricter rules) can still be saved.
+    if (payload.name !== undefined && slackAgentNameKey(payload.name) !== agent.nameKey) {
+      const problem = slackAgentNameProblem(payload.name);
+      if (problem) {
+        throw new ApiHttpError(422, {
+          code: "validation_failed",
+          message: slackAgentNameProblemText(payload.name, problem),
+          retryable: false,
+          details: { code: "slack_agent_name_invalid", problem },
+        });
+      }
+    }
     const updated = await updateSlackAgent(
       deps.db,
       { accountId: agent.accountId, workspaceId: agent.workspaceId },
@@ -374,12 +393,20 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     c.header("cache-control", "private, no-store");
     const cursor = z.string().max(1_024).safeParse(c.req.query("cursor"));
     const result = await introChannels(grant, agent, cursor.success ? cursor.data || null : null);
+    const introduced = new Set(
+      await listSlackAgentIntroChannelIds(
+        deps.db,
+        { accountId: agent.accountId, workspaceId: agent.workspaceId },
+        { slackAgentId: agent.id },
+      ),
+    );
     return c.json(
       SlackAgentChannelListResponse.parse({
         channels: result.channels.slice(0, 200).map((channel) => ({
           id: channel.id,
           name: channel.name || null,
           isPrivate: channel.isPrivate,
+          introduced: introduced.has(channel.id),
         })),
         nextCursor: result.nextCursor,
       }),
@@ -410,7 +437,14 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       connectionId: agent.connectionId,
       subjectId: SLACK_AGENT_ADMIN_SUBJECT_ID,
     });
-    const text = slackAgentIntroText(agent, binding?.botUserId ?? null);
+    const addedBy = await findSlackBotUserLinkForSubject(deps.db, home, {
+      connectionId: agent.connectionId,
+      subjectId: grant.subjectId,
+    }).catch(() => null);
+    const text = slackAgentIntroText(agent, {
+      botUserId: binding?.botUserId ?? null,
+      addedBySlackUserId: addedBy?.slackUserId ?? null,
+    });
     const identity = client.postIdentity(agent.targetWorkspaceId, {
       title: agent.name,
       avatar: agent.avatar,
@@ -423,10 +457,10 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       try {
         await client.postMessage({
-          // One intro per channel per version of the agent, so a retried
-          // request never posts twice.
+          // One intro per channel per version of the agent and admin, so a
+          // retried request never posts twice.
           operationId: deterministicUuid(
-            `slack-agent-intro:${agent.id}:${agent.version}:${channelId}`,
+            `slack-agent-intro:v2:${agent.id}:${agent.version}:${channelId}:${grant.subjectId}`,
           ),
           channelId,
           text,
@@ -436,25 +470,63 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
         results.push({ channelId, status: "posted" });
       } catch (error) {
-        results.push({
-          channelId,
-          status:
-            error instanceof SlackBotProviderError &&
-            (error.code === "not_in_channel" || error.code === "channel_not_found")
-              ? "not_in_channel"
-              : "failed",
-        });
+        results.push({ channelId, status: slackAgentIntroFailureStatus(error) });
+        continue;
       }
+      await recordSlackAgentIntroPost(deps.db, home, {
+        connectionId: agent.connectionId,
+        slackAgentId: agent.id,
+        slackChannelId: channelId,
+        postedBySubjectId: grant.subjectId,
+      }).catch((error: unknown) => {
+        console.warn("[slack-agent-intro] could not record the post", {
+          agentId: agent.id,
+          error: error instanceof Error ? error.name : "unknown",
+        });
+      });
     }
     return c.json(SlackAgentIntroResponse.parse({ results }));
   });
 }
 
-/** The intro an agent posts in a channel an admin picked, under its own name. */
+/** Slack refuses these posts for reasons a retry won't change. */
+const RESTRICTED_INTRO_ERRORS = new Set([
+  "restricted_action",
+  "restricted_action_read_only_channel",
+  "restricted_action_thread_only_channel",
+  "restricted_action_non_threadable_channel",
+  "is_archived",
+  "slack_connect_unsupported",
+  "ekm_access_denied",
+  "team_access_not_granted",
+]);
+
+export function slackAgentIntroFailureStatus(error: unknown): SlackAgentIntroResponse["results"][number]["status"] {
+  if (!(error instanceof SlackBotProviderError)) return "failed";
+  if (error.code === "not_in_channel" || error.code === "channel_not_found") {
+    return "not_in_channel";
+  }
+  if (RESTRICTED_INTRO_ERRORS.has(error.code)) return "restricted";
+  return "failed";
+}
+
+/**
+ * The intro an agent posts in a channel an admin picked, under its own name.
+ * The same lines feed the form's preview. "Added by" names the admin only when
+ * their Slack account is known.
+ */
 export function slackAgentIntroText(
   agent: Pick<SlackAgentRecord, "name" | "description">,
-  botUserId: string | null,
+  options: { botUserId: string | null; addedBySlackUserId: string | null },
 ): string {
-  const mention = botUserId ? `<@${botUserId}>` : "@Opengeni";
-  return `Hi, I'm *${escapeSlackMrkdwn(agent.name)}*. ${escapeSlackMrkdwn(agent.description)}\nAsk me with ${mention} +${slackAgentHandle(agent.name)}`;
+  return slackAgentMessageMrkdwn(
+    slackAgentIntroLines({
+      name: agent.name,
+      description: agent.description,
+      addedBy: options.addedBySlackUserId
+        ? { slackUserId: options.addedBySlackUserId, name: "admin" }
+        : null,
+    }),
+    { botUserId: options.botUserId },
+  );
 }

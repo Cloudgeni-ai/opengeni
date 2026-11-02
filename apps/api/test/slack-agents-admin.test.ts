@@ -10,11 +10,18 @@ import {
   signDelegatedAccessToken,
   type Permission,
 } from "@opengeni/contracts";
-import { createConnection, createDb, type DbClient } from "@opengeni/db";
+import {
+  createConnection,
+  createDb,
+  listSlackAgentIntroChannelIds,
+  recordSlackAgentIntroPost,
+  type DbClient,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
-import { slackAgentIntroText } from "../src/routes/slack-agents";
+import { SlackBotProviderError } from "../src/integrations/slack-bot";
+import { slackAgentIntroFailureStatus, slackAgentIntroText } from "../src/routes/slack-agents";
 
 const DELEGATION_SECRET = "slack-agents-admin-delegation-secret";
 const encryptionKey = randomBytes(32).toString("base64");
@@ -290,11 +297,100 @@ describe("Slack agents administration", () => {
     expect(JSON.stringify(await response.json())).toContain("slack_bot_unavailable");
   }, 90_000);
 
-  test("the intro names the agent and how to call it", () => {
+  test("the intro names the agent, how to ask it and who added it", () => {
     expect(
-      slackAgentIntroText({ name: "Data Team", description: "Answers revenue questions." }, "UBOT"),
-    ).toBe("Hi, I'm *Data Team*. Answers revenue questions.\nAsk me with <@UBOT> +data-team");
+      slackAgentIntroText(
+        { name: "Data Team", description: "Answers revenue questions." },
+        { botUserId: "UBOT", addedBySlackUserId: "UADMIN" },
+      ),
+    ).toBe(
+      "Hi, I'm *Data Team*, an Opengeni agent. Answers revenue questions.\nAsk me in any channel: <@UBOT> Data Team, then your question.\n_Added by <@UADMIN>_",
+    );
   });
+
+  test("a channel Slack won't let the app post in is reported as restricted, not failed", () => {
+    for (const code of [
+      "restricted_action",
+      "restricted_action_read_only_channel",
+      "is_archived",
+      "slack_connect_unsupported",
+    ]) {
+      expect(slackAgentIntroFailureStatus(new SlackBotProviderError(code))).toBe("restricted");
+    }
+    expect(slackAgentIntroFailureStatus(new SlackBotProviderError("not_in_channel"))).toBe(
+      "not_in_channel",
+    );
+    expect(slackAgentIntroFailureStatus(new SlackBotProviderError("http_500"))).toBe("failed");
+    expect(slackAgentIntroFailureStatus(new Error("boom"))).toBe("failed");
+  });
+
+  test("a new name meets every rule; an unchanged older name still saves", async () => {
+    if (!available) return;
+    const install = await installation(`names-${Date.now()}`);
+    const scope = { accountId: install.accountId, workspaceId: install.home };
+    const admin = await headers(scope, "user:slack-agents-names", ["workspace:admin"]);
+    const base = `/v1/workspaces/${install.home}/integrations/slack/agents`;
+    const create = (name: string) =>
+      app().request(base, {
+        method: "POST",
+        headers: admin,
+        body: JSON.stringify({
+          connectionId: install.connectionId,
+          name,
+          description: "Runs our checks.",
+          avatar,
+        }),
+      });
+    // Names that start ordinary sentences, or are too short, are refused.
+    for (const name of ["Test", "hi", "Q", "42"]) {
+      expect((await create(name)).status).toBe(400);
+    }
+    const created = await create("Checks team");
+    expect(created.status).toBe(201);
+    const { agent } = (await created.json()) as { agent: { id: string; version: number } };
+    // An agent named before the stricter rules: its name is stored as is.
+    await shared!.admin`update slack_agents set name = 'Test', name_key = 'test' where id = ${agent.id}`;
+    const unchanged = await app().request(`${base}/${agent.id}`, {
+      method: "PATCH",
+      headers: admin,
+      body: JSON.stringify({
+        expectedVersion: agent.version,
+        name: "Test",
+        description: "Runs our test suite.",
+      }),
+    });
+    expect(unchanged.status).toBe(200);
+    const { agent: saved } = (await unchanged.json()) as { agent: { version: number } };
+    const renamed = await app().request(`${base}/${agent.id}`, {
+      method: "PATCH",
+      headers: admin,
+      body: JSON.stringify({ expectedVersion: saved.version, name: "Hello" }),
+    });
+    expect(renamed.status).toBe(422);
+    expect(JSON.stringify(await renamed.json())).toContain(
+      'Messages starting with \\"Hello\\" would go to this agent.',
+    );
+    const good = await app().request(`${base}/${agent.id}`, {
+      method: "PATCH",
+      headers: admin,
+      body: JSON.stringify({ expectedVersion: saved.version, name: "Test runner" }),
+    });
+    expect(good.status).toBe(200);
+
+    // Channels with this agent's intro are remembered once each.
+    const home = { accountId: install.accountId, workspaceId: install.home };
+    for (const channel of ["C1", "C2", "C1"]) {
+      await recordSlackAgentIntroPost(client.db, home, {
+        connectionId: install.connectionId,
+        slackAgentId: agent.id,
+        slackChannelId: channel,
+        postedBySubjectId: "user:slack-agents-names",
+      });
+    }
+    expect(
+      (await listSlackAgentIntroChannelIds(client.db, home, { slackAgentId: agent.id })).sort(),
+    ).toEqual(["C1", "C2"]);
+  }, 90_000);
 
   test("only an organization admin opens an agent to anyone in Slack", async () => {
     if (!available) return;

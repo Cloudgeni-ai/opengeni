@@ -4418,6 +4418,7 @@ export type FirstPartyMcpToolName =
   | "slack_bot_prepare_message"
   | "slack_bot_send_prepared_message"
   | "slack_agent_handoff"
+  | "slack_agent_suggest"
   | "slack_agent_chats"
   | "slack_agent_propose"
   | "fiken_companies_list"

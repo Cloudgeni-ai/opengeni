@@ -50,8 +50,97 @@ export function slackAgentHandle(name: string): string {
     .replace(/[\s-]+/gu, "-");
 }
 
-/** Why a name cannot be used, or null when it can. */
-export function slackAgentNameProblem(name: string): "empty" | "reserved" | "invalid" | null {
+/**
+ * Words people start ordinary sentences with. A bare name routes a message
+ * that starts with it, so an agent called one of these would catch messages
+ * meant for Opengeni. Compared by name key.
+ */
+export const SLACK_AGENT_SENTENCE_STARTERS: readonly string[] = [
+  "a",
+  "an",
+  "and",
+  "any",
+  "anyone",
+  "are",
+  "but",
+  "can",
+  "could",
+  "did",
+  "do",
+  "does",
+  "fyi",
+  "hello",
+  "hey",
+  "hi",
+  "how",
+  "i",
+  "im",
+  "is",
+  "it",
+  "just",
+  "no",
+  "ok",
+  "okay",
+  "please",
+  "pls",
+  "should",
+  "so",
+  "test",
+  "testing",
+  "thank",
+  "thanks",
+  "thankyou",
+  "thx",
+  "that",
+  "the",
+  "this",
+  "was",
+  "we",
+  "what",
+  "when",
+  "where",
+  "which",
+  "who",
+  "why",
+  "will",
+  "would",
+  "yes",
+  "yo",
+  "you",
+];
+
+export type SlackAgentNameProblem =
+  | "empty"
+  | "reserved"
+  | "invalid"
+  /** Fewer than two letters, including names with no letters at all. */
+  | "too_short"
+  /** A word people start ordinary sentences with, such as "Hi" or "Test". */
+  | "sentence_starter";
+
+/**
+ * Why a name cannot be used for a new or renamed agent, or null when it can.
+ * An existing agent keeps its name: callers check only a name that changed.
+ */
+export function slackAgentNameProblem(name: string): SlackAgentNameProblem | null {
+  const problem = slackAgentNameFormatProblem(name);
+  if (problem) return problem;
+  const trimmed = name.trim();
+  if ((trimmed.match(/\p{L}/gu)?.length ?? 0) < 2) return "too_short";
+  if (SLACK_AGENT_SENTENCE_STARTERS.includes(slackAgentNameKey(trimmed))) {
+    return "sentence_starter";
+  }
+  return null;
+}
+
+/**
+ * The rules every stored name already meets: not empty, not reserved, and
+ * made of characters a name can be typed with. Saving an agent whose name did
+ * not change checks only these.
+ */
+export function slackAgentNameFormatProblem(
+  name: string,
+): "empty" | "reserved" | "invalid" | null {
   const trimmed = name.trim();
   const key = slackAgentNameKey(trimmed);
   if (key.length === 0) return "empty";
@@ -65,26 +154,200 @@ export function slackAgentNameProblem(name: string): "empty" | "reserved" | "inv
   return null;
 }
 
-const SlackAgentName = /* @__PURE__ */ defineSchema(() =>
-  z
+/** What a name problem means, in the words the form and the API both use. */
+export function slackAgentNameProblemText(name: string, problem: SlackAgentNameProblem): string {
+  const shown = name.trim();
+  switch (problem) {
+    case "empty":
+      return "Give it a name.";
+    case "reserved":
+      return `"${shown}" already means something in Slack. Choose another name.`;
+    case "invalid":
+      return "Use letters, numbers, spaces and hyphens, starting with a letter or number.";
+    case "too_short":
+      return "Use at least two letters.";
+    case "sentence_starter":
+      return `Messages starting with "${shown}" would go to this agent. Choose another name.`;
+  }
+}
+
+/**
+ * A warning, not an error: a one-word name catches every message that starts
+ * with that word after `@Opengeni`. Null for longer names.
+ */
+export function slackAgentNameWarning(name: string): string | null {
+  const trimmed = name.trim().replace(/\s+/gu, " ");
+  if (slackAgentNameFormatProblem(trimmed) || trimmed.split(/[\s-]+/u).length > 1) return null;
+  const example = /team$/iu.test(trimmed) ? `${trimmed} desk` : `${trimmed} team`;
+  return `Messages starting with "${trimmed} …" go to this agent. Two words, like "${example}", are safer.`;
+}
+
+/** How Slack shows a mention of the Opengeni app when its user id is unknown. */
+export const SLACK_OPENGENI_MENTION = "@Opengeni";
+
+/**
+ * How people ask an agent in Slack: `@Opengeni Data team`, with the name as
+ * the admin wrote it. Pass the app's real mention (`<@U123>`) for Slack
+ * messages. `+name` still works, but is never shown.
+ */
+export function slackAgentCallText(name: string, mention: string = SLACK_OPENGENI_MENTION): string {
+  return `${mention} ${name.trim().replace(/\s+/gu, " ")}`;
+}
+
+/**
+ * A description as one sentence: trimmed, capitalized and ending in a full
+ * stop unless it already ends a sentence. Admins write verb phrases such as
+ * "answers questions about metrics", so they read well after another sentence.
+ */
+export function slackAgentDescriptionSentence(description: string): string {
+  const text = description.replace(/\s+/gu, " ").trim();
+  if (text.length === 0) return "";
+  const [first = "", ...rest] = [...text];
+  const capitalized = `${first.toLocaleUpperCase()}${rest.join("")}`;
+  return /[.!?…]["'”’)\]]*$/u.test(capitalized) ? capitalized : `${capitalized}.`;
+}
+
+/** A piece of a Slack message line, rendered as mrkdwn by the API and as text by the preview. */
+export type SlackAgentMessageSegment =
+  | { kind: "text"; text: string }
+  | { kind: "bold"; text: string }
+  /** A mention of the Opengeni app. */
+  | { kind: "opengeni" }
+  /** A mention of a person, by Slack user id; the name is for previews. */
+  | { kind: "person"; slackUserId: string | null; name: string };
+
+export type SlackAgentMessageLine = {
+  italic?: boolean;
+  segments: SlackAgentMessageSegment[];
+};
+
+/**
+ * The intro an agent posts, under its own name, in channels an admin picks:
+ *
+ * > Hi, I'm *Data team*, an Opengeni agent. Answers questions about metrics.
+ * > Ask me in any channel: @Opengeni Data team, then your question.
+ * > _Added by @Bendik_
+ *
+ * The same lines feed the post and the form's preview.
+ */
+export function slackAgentIntroLines(input: {
+  name: string;
+  description: string;
+  /** Who posts it. Omitted when their Slack account is unknown. */
+  addedBy?: { slackUserId: string | null; name: string } | null;
+}): SlackAgentMessageLine[] {
+  const name = input.name.trim().replace(/\s+/gu, " ");
+  const description = slackAgentDescriptionSentence(input.description);
+  const lines: SlackAgentMessageLine[] = [
+    {
+      segments: [
+        { kind: "text", text: "Hi, I'm " },
+        { kind: "bold", text: name },
+        { kind: "text", text: `, an Opengeni agent.${description ? ` ${description}` : ""}` },
+      ],
+    },
+    {
+      segments: [
+        { kind: "text", text: "Ask me in any channel: " },
+        { kind: "opengeni" },
+        { kind: "text", text: ` ${name}, then your question.` },
+      ],
+    },
+  ];
+  if (input.addedBy) {
+    lines.push({
+      italic: true,
+      segments: [
+        { kind: "text", text: "Added by " },
+        { kind: "person", slackUserId: input.addedBy.slackUserId, name: input.addedBy.name },
+      ],
+    });
+  }
+  return lines;
+}
+
+/** Slack's three escaped characters in message text. */
+export function escapeSlackText(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+const SLACK_USER_ID = /^[UWB][A-Z0-9]{1,63}$/u;
+
+/** Message lines as Slack mrkdwn, with real mentions where the ids are known. */
+export function slackAgentMessageMrkdwn(
+  lines: readonly SlackAgentMessageLine[],
+  options: { botUserId: string | null },
+): string {
+  return lines
+    .map((line) => {
+      const text = line.segments
+        .map((segment) => {
+          switch (segment.kind) {
+            case "text":
+              return escapeSlackText(segment.text);
+            case "bold":
+              return `*${escapeSlackText(segment.text)}*`;
+            case "opengeni":
+              return options.botUserId && SLACK_USER_ID.test(options.botUserId)
+                ? `<@${options.botUserId}>`
+                : SLACK_OPENGENI_MENTION;
+            case "person":
+              return segment.slackUserId && SLACK_USER_ID.test(segment.slackUserId)
+                ? `<@${segment.slackUserId}>`
+                : `@${escapeSlackText(segment.name)}`;
+          }
+        })
+        .join("");
+      return line.italic ? `_${text}_` : text;
+    })
+    .join("\n");
+}
+
+/** Message lines as plain text, for notifications and previews. */
+export function slackAgentMessagePlainText(lines: readonly SlackAgentMessageLine[]): string {
+  return lines
+    .map((line) =>
+      line.segments
+        .map((segment) => {
+          switch (segment.kind) {
+            case "text":
+            case "bold":
+              return segment.text;
+            case "opengeni":
+              return SLACK_OPENGENI_MENTION;
+            case "person":
+              return `@${segment.name}`;
+          }
+        })
+        .join(""),
+    )
+    .join("\n");
+}
+
+function slackAgentNameSchema(check: (name: string) => SlackAgentNameProblem | null) {
+  return z
     .string()
     .trim()
     .min(1)
     .max(SLACK_AGENT_NAME_MAX_LENGTH)
     .superRefine((value, context) => {
-      const problem = slackAgentNameProblem(value);
-      if (problem === "reserved") {
-        context.addIssue({
-          code: "custom",
-          message: `"${value}" already means something in Slack. Choose another name.`,
-        });
-      } else if (problem) {
-        context.addIssue({
-          code: "custom",
-          message: "Use letters, numbers, spaces and hyphens, starting with a letter or number.",
-        });
+      const problem = check(value);
+      if (problem) {
+        context.addIssue({ code: "custom", message: slackAgentNameProblemText(value, problem) });
       }
-    }),
+    });
+}
+/** A new agent's name: every rule. */
+const SlackAgentName = /* @__PURE__ */ defineSchema(() =>
+  slackAgentNameSchema(slackAgentNameProblem),
+);
+/**
+ * A name in an edit. Only the format rules here, so an agent whose name
+ * predates the stricter rules can still be saved; the API checks every rule
+ * when the name actually changes.
+ */
+const SlackAgentNameEdit = /* @__PURE__ */ defineSchema(() =>
+  slackAgentNameSchema(slackAgentNameFormatProblem),
 );
 const SlackAgentDescription = /* @__PURE__ */ defineSchema(() =>
   z.string().trim().min(1).max(SLACK_AGENT_DESCRIPTION_MAX_LENGTH),
@@ -103,7 +366,10 @@ export const SlackAgent = /* @__PURE__ */ defineSchema(() =>
     targetWorkspaceId: z.string().uuid(),
     targetWorkspaceName: z.string().nullable(),
     name: z.string(),
-    /** What people type after `+`, for example `data-team`. */
+    /**
+     * What people may type after `+`, for example `data-team`. Still accepted,
+     * but people are shown {@link slackAgentCallText} instead.
+     */
     handle: z.string(),
     description: z.string(),
     avatar: SessionAvatar,
@@ -156,7 +422,7 @@ export const UpdateSlackAgentRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       expectedVersion: z.number().int().positive(),
-      name: SlackAgentName.optional(),
+      name: SlackAgentNameEdit.optional(),
       description: SlackAgentDescription.optional(),
       avatar: SessionAvatar.optional(),
       instructions: SlackAgentInstructions.optional(),
@@ -196,6 +462,8 @@ export const SlackAgentChannelListResponse = /* @__PURE__ */ defineSchema(() =>
           id: z.string().min(1).max(64),
           name: z.string().min(1).max(256).nullable(),
           isPrivate: z.boolean(),
+          /** This agent's intro was already posted here. */
+          introduced: z.boolean().default(false),
         }),
       )
       .max(200),
@@ -222,8 +490,12 @@ export const SlackAgentIntroResponse = /* @__PURE__ */ defineSchema(() =>
     results: z.array(
       z.object({
         channelId: z.string(),
-        /** `not_in_channel`: add the Opengeni app to the channel first. */
-        status: z.enum(["posted", "not_in_channel", "failed"]),
+        /**
+         * `not_in_channel`: add the Opengeni app to the channel first.
+         * `restricted`: Slack lets only some people post there (for example
+         * admins in an announcement channel), so retrying won't help.
+         */
+        status: z.enum(["posted", "not_in_channel", "restricted", "failed"]),
       }),
     ),
   }),
