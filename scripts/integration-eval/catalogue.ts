@@ -9,6 +9,12 @@ import type { EvalCase, IntegrationId } from "./types";
  * `{RUN}` in a prompt is replaced with the run's short id so a write can be
  * found again in the service by its verifier.
  *
+ * Microsoft 365 test tenant fixtures: an email "Kestrel failover drill moved"
+ * saying the drill moves to Thursday 14:00; a OneDrive file "Kestrel runbook"
+ * with "Recovery time objective: 15 minutes"; a SharePoint document "Kestrel
+ * vendor contacts" naming Marlow & Finch as the backup vendor. Google Drive:
+ * a document "Halcyon pricing 2026" listing Pro at 49 USD a month.
+ *
  * Kinds: not_connected (run in a workspace with no connections; expects the
  * connect card), read, write (expects an approval; the harness approves and
  * verifies), identity, routing. `core` rows form the model × effort grid.
@@ -29,6 +35,22 @@ function notConnected(
     ...(row.core ? { core: true } : {}),
   }));
 }
+
+/**
+ * Integrations the current programme tests. `--cases core` selects core rows
+ * in this scope; other rows stay in the catalogue for later and run when named.
+ */
+export const DEFAULT_SCOPE: readonly IntegrationId[] = [
+  "linear",
+  "atlassian",
+  "gmail",
+  "slack",
+  "outlook_mail",
+  "onedrive",
+  "sharepoint",
+  "apollo",
+  "google_drive",
+];
 
 export const CASES: readonly EvalCase[] = [
   // ── Linear ───────────────────────────────────────────────────────────────
@@ -76,6 +98,7 @@ export const CASES: readonly EvalCase[] = [
     id: "linear.identity.account",
     integration: "linear",
     kind: "identity",
+    core: true,
     prompt: "Which Linear workspace and user are you connected to?",
     expectAnswer: [i("halcyon|it-linear")],
   },
@@ -102,6 +125,7 @@ export const CASES: readonly EvalCase[] = [
     id: "atlassian.read.confluence-rota",
     integration: "atlassian",
     kind: "read",
+    core: true,
     prompt:
       'According to the "Kestrel on-call rota" page in Confluence, who is on call in week 46?',
     expectAnswer: [i("mina sorrel")],
@@ -392,7 +416,9 @@ export const CASES: readonly EvalCase[] = [
     id: "apollo.read.people",
     integration: "apollo",
     kind: "read",
-    prompt: "Use Apollo to find the head of engineering at Stripe.",
+    core: true,
+    prompt: "Use Apollo to find who leads engineering at Stripe.",
+    note: "Reads Apollo's own people database; graded on the Apollo tool receipt.",
   },
 
   // ── PostHog ───────────────────────────────────────────────────────────────
@@ -498,6 +524,7 @@ export const CASES: readonly EvalCase[] = [
     id: "gmail.write.draft",
     integration: "gmail",
     kind: "write",
+    core: true,
     prompt:
       'Create a Gmail draft to ada.quill@example.com with subject "Halcyon eval {RUN}" and body "Thanks, looks good." Don\'t send it.',
     verify: "receipts_only",
@@ -513,26 +540,69 @@ export const CASES: readonly EvalCase[] = [
     expectAnswer: [i("halcyon launch review|launch review")],
   },
 
-  // ── Microsoft 365 (test tenant account) ───────────────────────────────────
-  ...notConnected("outlook_mail", [
-    { slug: "inbox", prompt: "Check my Outlook inbox for anything from Ravi." },
+  // ── Google Drive (off in production until Google verification; staging) ──
+  ...notConnected("google_drive", [
+    { slug: "pricing", prompt: "Find the Halcyon pricing sheet in my Google Drive.", core: true },
   ]),
   {
-    id: "outlook_mail.read.ravi",
+    id: "google_drive.read.pricing",
+    integration: "google_drive",
+    kind: "read",
+    core: true,
+    prompt: "In my Google Drive, what does the Halcyon pricing 2026 document say Pro costs?",
+    expectAnswer: [i("\\b49\\b")],
+  },
+
+  // ── Microsoft 365 (test tenant account) ───────────────────────────────────
+  ...notConnected("outlook_mail", [
+    {
+      slug: "inbox",
+      prompt: "Check my Outlook inbox for anything about the Kestrel failover drill.",
+      core: true,
+    },
+  ]),
+  {
+    id: "outlook_mail.read.drill",
     integration: "outlook_mail",
     kind: "read",
-    prompt: "In my Outlook mail, what did Ravi Tern write about the Kestrel failover drill?",
-    expectAnswer: [i("failover")],
+    core: true,
+    prompt: "In my Outlook mail, when was the Kestrel failover drill moved to?",
+    expectAnswer: [i("thursday")],
+  },
+  {
+    id: "outlook_mail.write.draft",
+    integration: "outlook_mail",
+    kind: "write",
+    core: true,
+    prompt:
+      'Create an Outlook draft to ravi.tern@example.com with subject "Halcyon eval {RUN}" and body "Drill notes received." Don\'t send it.',
+    verify: "receipts_only",
   },
   ...notConnected("outlook_calendar", [
     { slug: "meetings", prompt: "What meetings do I have in Outlook Calendar this week?" },
   ]),
   ...notConnected("onedrive", [
-    { slug: "files", prompt: "Find the Kestrel runbook in my OneDrive." },
+    { slug: "files", prompt: "Find the Kestrel runbook in my OneDrive.", core: true },
   ]),
+  {
+    id: "onedrive.read.runbook",
+    integration: "onedrive",
+    kind: "read",
+    core: true,
+    prompt: "Open the Kestrel runbook in my OneDrive. What recovery time objective does it set?",
+    expectAnswer: [i("15 ?min")],
+  },
   ...notConnected("sharepoint", [
-    { slug: "sites", prompt: "Search our SharePoint for the Kestrel handbook." },
+    { slug: "sites", prompt: "Search our SharePoint for the Kestrel vendor contacts.", core: true },
   ]),
+  {
+    id: "sharepoint.read.vendors",
+    integration: "sharepoint",
+    kind: "read",
+    core: true,
+    prompt: "On our SharePoint, who is the backup vendor in the Kestrel vendor contacts document?",
+    expectAnswer: [i("marlow")],
+  },
 
   // ── Choosing between integrations ─────────────────────────────────────────
   {
@@ -562,6 +632,33 @@ export const CASES: readonly EvalCase[] = [
     prompt: "What did the team say about Bluefin's checkout timeouts in chat?",
     expectAnswer: [i("bluefin")],
     forbidIntegrations: ["gmail"],
+  },
+  {
+    id: "routing.gmail-vs-outlook.drill",
+    integration: "outlook_mail",
+    kind: "routing",
+    core: true,
+    prompt: "Did I get an email saying when the Kestrel failover drill was moved to?",
+    expectAnswer: [i("thursday")],
+    note: "Only the Microsoft mailbox has this email; Gmail has the Halcyon checklist.",
+  },
+  {
+    id: "routing.onedrive-vs-sharepoint.runbook",
+    integration: "onedrive",
+    kind: "routing",
+    core: true,
+    prompt: "What recovery time objective does my Kestrel runbook file set?",
+    expectAnswer: [i("15 ?min")],
+    forbidIntegrations: ["atlassian"],
+  },
+  {
+    id: "routing.sharepoint-vs-confluence.vendor",
+    integration: "sharepoint",
+    kind: "routing",
+    core: true,
+    prompt: "Who do we list as the Kestrel backup vendor in our shared documents?",
+    expectAnswer: [i("marlow")],
+    forbidIntegrations: ["atlassian"],
   },
   {
     id: "routing.notion-vs-confluence.rota",

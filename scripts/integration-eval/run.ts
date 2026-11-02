@@ -11,7 +11,9 @@
  *       [--skip-integrations a,b] [--rerun DIR/results.jsonl [--failed-only]]
  *   bun scripts/integration-eval/run.ts report --out DIR
  *
- * Environment: OPENGENI_EVAL_API_URL, OPENGENI_EVAL_API_KEY,
+ * Environment: OPENGENI_EVAL_API_URL, and OPENGENI_EVAL_API_KEY (billed as
+ * API use) or OPENGENI_EVAL_LOGIN_EMAIL and OPENGENI_EVAL_LOGIN_PASSWORD (a
+ * signed-in test person, billed as app use),
  * OPENGENI_EVAL_CONNECTED_WORKSPACE_ID (integrations connected),
  * OPENGENI_EVAL_EMPTY_WORKSPACE_ID (nothing connected; for not_connected rows),
  * optional OPENGENI_EVAL_APP_URL for chat links, and VERIFY_* (see verify.ts).
@@ -21,8 +23,8 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { OpengeniApi, type SessionEvent } from "./api";
-import { CASES } from "./catalogue";
+import { authFromEnv, OpengeniApi, type SessionEvent } from "./api";
+import { CASES, DEFAULT_SCOPE } from "./catalogue";
 import { gradeCase } from "./grade";
 import { INTEGRATIONS } from "./integrations";
 import { parseReceipts } from "./receipts";
@@ -58,16 +60,29 @@ function env(name: string): string {
   return value;
 }
 
+/**
+ * `core` is the grid set: core rows of integrations in DEFAULT_SCOPE. `scope`
+ * is every row in that scope and `all` every row. Integrations with a skip
+ * reason (disabled on the deployment) are dropped unless named in `include`.
+ */
 export function selectCases(
   selector: string | undefined,
   skip: readonly string[] = [],
+  include: readonly string[] = [],
 ): EvalCase[] {
   const skipped = new Set([
     ...skip,
-    ...INTEGRATIONS.filter((spec) => spec.skipReason).map((spec) => spec.id),
+    ...INTEGRATIONS.filter((spec) => spec.skipReason && !include.includes(spec.id)).map(
+      (spec) => spec.id,
+    ),
   ]);
   const all = CASES.filter((testCase) => !skipped.has(testCase.integration));
-  if (!selector || selector === "core") return all.filter((testCase) => testCase.core);
+  if (!selector || selector === "core") {
+    return all.filter((testCase) => testCase.core && DEFAULT_SCOPE.includes(testCase.integration));
+  }
+  if (selector === "scope") {
+    return all.filter((testCase) => DEFAULT_SCOPE.includes(testCase.integration));
+  }
   if (selector === "all") return all;
   const parts = selector
     .split(",")
@@ -294,10 +309,7 @@ async function runAll(flags: Map<string, string>) {
     join("integration-eval-results", new Date().toISOString().replace(/[:.]/g, "-"));
   mkdirSync(outDir, { recursive: true });
   const resultsFile = join(outDir, "results.jsonl");
-  const api = await new OpengeniApi(
-    env("OPENGENI_EVAL_API_URL"),
-    env("OPENGENI_EVAL_API_KEY"),
-  ).init();
+  const api = await new OpengeniApi(env("OPENGENI_EVAL_API_URL"), authFromEnv()).init();
   const skip = (flags.get("skip-integrations") ?? "").split(",").filter(Boolean);
 
   let jobs: Job[];
@@ -319,7 +331,8 @@ async function runAll(flags: Map<string, string>) {
         : [];
     });
   } else {
-    const cases = selectCases(flags.get("cases"), skip);
+    const include = (flags.get("include") ?? "").split(",").filter(Boolean);
+    const cases = selectCases(flags.get("cases"), skip, include);
     const cells = parseCells(flags.get("cells"), api.clientConfig);
     const repeats = Number(flags.get("repeats") ?? 1);
     jobs = [];
@@ -525,16 +538,14 @@ export function writeReport(outDir: string) {
 async function main() {
   const { command, flags } = args(process.argv.slice(2));
   if (command === "list") {
-    for (const testCase of selectCases(flags.get("cases") ?? "all")) {
+    const include = (flags.get("include") ?? "").split(",").filter(Boolean);
+    for (const testCase of selectCases(flags.get("cases") ?? "all", [], include)) {
       console.log(`${testCase.id}\t${testCase.kind}${testCase.core ? "\tcore" : ""}`);
     }
     return;
   }
   if (command === "models") {
-    const api = await new OpengeniApi(
-      env("OPENGENI_EVAL_API_URL"),
-      env("OPENGENI_EVAL_API_KEY"),
-    ).init();
+    const api = await new OpengeniApi(env("OPENGENI_EVAL_API_URL"), authFromEnv()).init();
     for (const cell of cellsFromConfig(api.clientConfig))
       console.log(`${cell.model}@${cell.effort}`);
     return;

@@ -36,13 +36,32 @@ export type HumanInputRequest = { id: string; status: string; allowSkip?: boolea
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * How the harness authenticates. An API key bills chats as API use (paid
+ * from credits only). A signed-in person bills them as app use (plan credit
+ * first), the same as chatting in the web app.
+ */
+export type EvalAuth = { apiKey: string } | { email: string; password: string };
+
+export function authFromEnv(env: Record<string, string | undefined> = process.env): EvalAuth {
+  if (env.OPENGENI_EVAL_LOGIN_EMAIL && env.OPENGENI_EVAL_LOGIN_PASSWORD) {
+    return { email: env.OPENGENI_EVAL_LOGIN_EMAIL, password: env.OPENGENI_EVAL_LOGIN_PASSWORD };
+  }
+  if (env.OPENGENI_EVAL_API_KEY) return { apiKey: env.OPENGENI_EVAL_API_KEY };
+  throw new Error(
+    "set OPENGENI_EVAL_API_KEY, or OPENGENI_EVAL_LOGIN_EMAIL and OPENGENI_EVAL_LOGIN_PASSWORD",
+  );
+}
+
 export class OpengeniApi {
   private contract = "";
+  private cookies = new Map<string, string>();
   clientConfig: Record<string, unknown> = {};
+  readonly baseUrl: string;
 
   constructor(
-    readonly baseUrl: string,
-    private readonly apiKey: string,
+    baseUrl: string,
+    private readonly auth: EvalAuth,
   ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
   }
@@ -51,7 +70,43 @@ export class OpengeniApi {
     const { body } = await this.call("GET", "/v1/config/client");
     this.clientConfig = (body ?? {}) as Record<string, unknown>;
     this.contract = String(this.clientConfig.apiContractRevision ?? "");
+    if ("email" in this.auth) await this.signIn();
     return this;
+  }
+
+  /** Email and password sign-in; keeps the session cookies for later calls. */
+  private async signIn(): Promise<void> {
+    if (!("email" in this.auth)) return;
+    const response = await fetch(`${this.baseUrl}/v1/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: this.baseUrl },
+      body: JSON.stringify({ email: this.auth.email, password: this.auth.password }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      throw new HttpFailure(
+        "POST",
+        "/v1/auth/sign-in/email",
+        response.status,
+        await response.text(),
+      );
+    }
+    for (const cookie of response.headers.getSetCookie()) {
+      const [pair = ""] = cookie.split(";");
+      const separator = pair.indexOf("=");
+      if (separator > 0)
+        this.cookies.set(pair.slice(0, separator).trim(), pair.slice(separator + 1).trim());
+    }
+    if (this.cookies.size === 0) throw new Error("sign-in returned no session cookie");
+  }
+
+  private authHeaders(): Record<string, string> {
+    if ("apiKey" in this.auth) return { authorization: `Bearer ${this.auth.apiKey}` };
+    if (this.cookies.size === 0) return {};
+    return {
+      cookie: [...this.cookies.entries()].map(([name, value]) => `${name}=${value}`).join("; "),
+      origin: this.baseUrl,
+    };
   }
 
   async call(
@@ -60,14 +115,12 @@ export class OpengeniApi {
     body?: unknown,
     attempts = 5,
   ): Promise<{ body: unknown; headers: Headers }> {
-    const headers: Record<string, string> = {
-      accept: "application/json",
-      authorization: `Bearer ${this.apiKey}`,
-    };
-    if (this.contract) headers["x-opengeni-api-contract"] = this.contract;
-    if (body !== undefined) headers["content-type"] = "application/json";
     let lastError: unknown = null;
+    let signedInAgain = false;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const headers: Record<string, string> = { accept: "application/json", ...this.authHeaders() };
+      if (this.contract) headers["x-opengeni-api-contract"] = this.contract;
+      if (body !== undefined) headers["content-type"] = "application/json";
       try {
         const response = await fetch(this.baseUrl + path, {
           method,
@@ -80,6 +133,12 @@ export class OpengeniApi {
           return { body: raw ? JSON.parse(raw) : null, headers: response.headers };
         }
         const failure = new HttpFailure(method, path, response.status, raw);
+        // A long grid can outlive a web session: sign in again once.
+        if (response.status === 401 && "email" in this.auth && !signedInAgain) {
+          signedInAgain = true;
+          await this.signIn();
+          continue;
+        }
         // POSTs here are idempotent (create keys, approval ids), so they retry too.
         if (response.status === 429 || response.status >= 500) {
           lastError = failure;
