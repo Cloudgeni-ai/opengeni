@@ -67,12 +67,13 @@ export type SlackUserLinkAccessMutationInput = {
 export async function slackUserLinkAccessRequestTeam(
   db: Database,
   input: { workspaceId: string; requestId: string },
-): Promise<{ slackTeamId: string; connectionId: string } | null> {
+): Promise<{ slackTeamId: string; connectionId: string; slackUserId: string } | null> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
         slackTeamId: schema.slackUserLinkAccessRequests.slackTeamId,
         connectionId: schema.slackUserLinkAccessRequests.connectionId,
+        slackUserId: schema.slackUserLinkAccessRequests.slackUserId,
       })
       .from(schema.slackUserLinkAccessRequests)
       .where(
@@ -411,8 +412,9 @@ export async function approveSlackUserLinkAccessRequest(
  * already grants sessions:create (or workspace:admin). This is used both for
  * ordinary already-authorized links and after a separate canonical member grant.
  *
- * One more case completes it: an active, full member of the organization
- * linking a Slack identity that is not linked yet, from a link for the
+ * With `linkAsOrganizationMember` (the person confirmed it), one more case
+ * completes it: an active, full member of the organization linking a Slack
+ * identity that is not linked yet, from a link for the
  * installation's own workspace (`identityHome`). That only records who the
  * Slack person is; it grants no workspace membership or permission, and the
  * request stays an ordinary completed link. A link for another (routed)
@@ -427,6 +429,12 @@ export async function completeSlackUserLinkAccessIfGranted(
     subjectId: string;
     /** The installation's tenancy, when it differs from the routed request's. */
     identityHome?: SlackIdentityHome;
+    /**
+     * The person confirmed linking as an organization member, at this
+     * version of the request. Never implied: opening a link alone must not
+     * link an account someone else sent them.
+     */
+    linkAsOrganizationMember?: { expectedVersion: number };
   },
   now = new Date(),
 ): Promise<SlackUserLinkAccessRequest | null> {
@@ -450,9 +458,16 @@ export async function completeSlackUserLinkAccessIfGranted(
       if (row.status === "completed" || !isActiveStatus(row.status)) {
         return mapRequest(row);
       }
+      if (
+        input.linkAsOrganizationMember &&
+        input.linkAsOrganizationMember.expectedVersion !== row.version
+      ) {
+        throw new SlackUserLinkAccessPersistenceError("version_conflict");
+      }
       const via = (await membershipAllowsSlackLink(database, row))
         ? ("workspace_membership" as const)
-        : row.status === "prepared" &&
+        : input.linkAsOrganizationMember &&
+            row.status === "prepared" &&
             (await organizationMembershipLinksSlackIdentity(database, row, input.identityHome))
           ? ("organization_membership" as const)
           : null;
@@ -490,6 +505,41 @@ export async function completeSlackUserLinkAccessIfGranted(
       );
       return mapRequest(updated);
     });
+  });
+}
+
+/**
+ * Whether the person may link this request's Slack identity as an active,
+ * full member of the organization, once they confirm it
+ * (`completeSlackUserLinkAccessIfGranted` with `linkAsOrganizationMember`).
+ */
+export async function slackUserLinkOrganizationMemberMayLink(
+  db: Database,
+  input: {
+    workspaceId: string;
+    requestId: string;
+    subjectId: string;
+    identityHome: SlackIdentityHome;
+  },
+  now = new Date(),
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const database = scopedDb as unknown as Database;
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackUserLinkAccessRequests)
+      .where(
+        and(
+          eq(schema.slackUserLinkAccessRequests.workspaceId, input.workspaceId),
+          eq(schema.slackUserLinkAccessRequests.id, input.requestId),
+          eq(schema.slackUserLinkAccessRequests.subjectId, input.subjectId),
+        ),
+      )
+      .limit(1);
+    if (!row || row.status !== "prepared" || row.expiresAt.getTime() <= now.getTime()) {
+      return false;
+    }
+    return await organizationMembershipLinksSlackIdentity(database, row, input.identityHome);
   });
 }
 
@@ -664,8 +714,10 @@ export function workspaceMembershipPermissionsAllowSlackLink(value: unknown): bo
 /**
  * Whether an organization member may link this Slack identity without any
  * workspace access: the link names the installation's own workspace, the
- * identity is not linked to anyone yet, and the subject is an active, full
- * member of the request's organization (read live).
+ * identity is not linked yet, and the subject is an active, full member of
+ * the request's organization (read live). A linked person following a link
+ * wants workspace access, not a second link, so their request stays an
+ * access request.
  */
 async function organizationMembershipLinksSlackIdentity(
   database: Database,

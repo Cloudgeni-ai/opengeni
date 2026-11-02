@@ -134,6 +134,7 @@ import {
   listPendingSlackUserLinkAccessRequests,
   listSlackInstallationBindings,
   slackUserLinkAccessRequestTeam,
+  slackUserLinkOrganizationMemberMayLink,
   rekeySlackInteractionRoute,
   reopenSlackInteractionDelivery,
   reserveSlackInteractionActionHandles,
@@ -700,6 +701,59 @@ async function resolveSlackLinkTargetInstallation(
   };
 }
 
+type SlackLinkTargetInstallation = NonNullable<
+  Awaited<ReturnType<typeof resolveSlackLinkTargetInstallation>>
+>;
+
+/**
+ * What the person linking is offered when they may link this Slack account as
+ * a member of the organization, without workspace access: a confirmation
+ * naming the Slack account, so a link someone else sent them can't link the
+ * sender's account to them unnoticed. Null otherwise.
+ */
+async function slackOrganizationMemberLinkOffer(
+  deps: ApiRouteDeps,
+  installation: SlackLinkTargetInstallation,
+  input: {
+    workspaceId: string;
+    requestId: string;
+    status: string;
+    subjectId: string;
+    slackUserId: string;
+  },
+): Promise<{ slackAccountLabel: string | null } | null> {
+  if (input.status !== "prepared") return null;
+  const mayLink = await slackUserLinkOrganizationMemberMayLink(deps.db, {
+    workspaceId: input.workspaceId,
+    requestId: input.requestId,
+    subjectId: input.subjectId,
+    identityHome: installation.identityHome,
+  });
+  if (!mayLink) return null;
+  // Best effort: without a name the confirmation still asks.
+  const name = await createOpenGeniSlackBotInteractionClient(deps, {
+    ...installation.identityHome,
+    connectionId: installation.connectionId,
+    subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
+  })
+    .then((client) => client.userDisplayNames([input.slackUserId]))
+    .then((result) => result.names.find((entry) => entry.id === input.slackUserId)?.name ?? null)
+    .catch(() => null);
+  return { slackAccountLabel: name ? `@${name}`.slice(0, 256) : null };
+}
+
+/** The installation a stored link request belongs to, from its own Slack team. */
+async function slackLinkRequestInstallation(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  requestId: string,
+): Promise<{ installation: SlackLinkTargetInstallation; slackUserId: string } | null> {
+  const team = await slackUserLinkAccessRequestTeam(deps.db, { workspaceId, requestId });
+  if (!team) return null;
+  const installation = await resolveSlackLinkTargetInstallation(deps, team, workspaceId);
+  return installation ? { installation, slackUserId: team.slackUserId } : null;
+}
+
 export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/integrations/slack/events", async (c) => {
     const signed = await readSignedSlackRequest(c, deps);
@@ -956,10 +1010,18 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
         identityHome: installation.identityHome,
       });
       if (!completed) throw freshSlackLinkRequired();
+      const organizationMemberLink = await slackOrganizationMemberLinkOffer(deps, installation, {
+        workspaceId,
+        requestId: completed.id,
+        status: completed.status,
+        subjectId: context.subjectId,
+        slackUserId: link.slackUserId,
+      });
       return c.json(
         SlackUserLinkAccessRequest.parse({
           ...completed,
           workspaceDisplayName: installation.workspaceName,
+          organizationMemberLink,
         }),
         201,
       );
@@ -982,10 +1044,64 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
         });
         if (!current) throw freshSlackLinkRequired();
         const workspace = await getWorkspace(deps.db, workspaceId);
+        const stored =
+          current.status === "prepared"
+            ? await slackLinkRequestInstallation(deps, workspaceId, requestId)
+            : null;
+        const organizationMemberLink = stored
+          ? await slackOrganizationMemberLinkOffer(deps, stored.installation, {
+              workspaceId,
+              requestId,
+              status: current.status,
+              subjectId: context.subjectId,
+              slackUserId: stored.slackUserId,
+            })
+          : null;
         return c.json(
           SlackUserLinkAccessRequest.parse({
             ...current,
             workspaceDisplayName: workspace?.name ?? null,
+            organizationMemberLink,
+          }),
+        );
+      } catch (error) {
+        throw slackLinkAccessHttpError(error);
+      }
+    },
+  );
+
+  /**
+   * Link the Slack account as a member of the organization, without workspace
+   * access, after the person confirmed which account it is. Grants nothing
+   * else; anyone else keeps the access request.
+   */
+  app.post(
+    "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/link",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const context = await requireManagedSlackLinkHuman(c, deps);
+      const payload = await parseRequestJson(c, SlackUserLinkAccessMutationRequest);
+      const requestId = c.req.param("requestId");
+      try {
+        const stored = await slackLinkRequestInstallation(deps, workspaceId, requestId);
+        if (!stored) throw freshSlackLinkRequired();
+        const linked = await completeSlackUserLinkAccessIfGranted(deps.db, {
+          workspaceId,
+          requestId,
+          subjectId: context.subjectId,
+          identityHome: stored.installation.identityHome,
+          linkAsOrganizationMember: { expectedVersion: payload.expectedVersion },
+        });
+        if (!linked) throw freshSlackLinkRequired();
+        if (linked.status !== "completed") {
+          throw new HTTPException(403, {
+            message: "Only members of this organization can link without workspace access.",
+          });
+        }
+        return c.json(
+          SlackUserLinkAccessRequest.parse({
+            ...linked,
+            workspaceDisplayName: stored.installation.workspaceName,
           }),
         );
       } catch (error) {
@@ -1951,19 +2067,6 @@ async function resolveSlackRouteForEntry(
 }
 
 /**
- * Tell the person exactly why nothing started, in their own bot DM.
- *
- * Every branch ends with "No session was created." because the one thing a
- * refusal must never do is leave someone believing work is under way.
- *
- * Only `no_access_to_route` mints an access-request link, and it mints one for
- * the workspace they actually need rather than the installation's. The other
- * two branches deliberately do not: a prefix naming something they cannot
- * reach, and an empty candidate list, both describe a workspace Opengeni has
- * not established it will confirm to this person, so they point at an
- * administrator instead.
- */
-/**
  * The Opengeni person behind a message to an open agent, or why there is
  * none: the Slack account must be linked to someone who is an active, full
  * member of the installation's organization. Read live, never cached; the
@@ -2025,6 +2128,19 @@ async function postOpenSlackAgentPersonRefusal(
   });
 }
 
+/**
+ * Tell the person exactly why nothing started, in their own bot DM.
+ *
+ * Every branch ends with "No session was created." because the one thing a
+ * refusal must never do is leave someone believing work is under way.
+ *
+ * Only `no_access_to_route` mints an access-request link, and it mints one for
+ * the workspace they actually need rather than the installation's. The other
+ * two branches deliberately do not: a prefix naming something they cannot
+ * reach, and an empty candidate list, both describe a workspace Opengeni has
+ * not established it will confirm to this person, so they point at an
+ * administrator instead.
+ */
 async function postSlackRouteRefusal(
   deps: ApiRouteDeps,
   client: OpenGeniSlackBotClient,
@@ -3689,7 +3805,8 @@ export async function handOffSlackAgentChat(
           slackTeamId: interaction.slackTeamId,
           slackUserId: askerSlackUserId,
         },
-        original.createdAt.getTime(),
+        // Minted now: the turn handing off may have run past the link's life.
+        Date.now(),
       ),
     });
     return refuse(
@@ -3720,7 +3837,7 @@ export async function handOffSlackAgentChat(
               slackTeamId: interaction.slackTeamId,
               slackUserId: askerSlackUserId,
             },
-            original.createdAt.getTime(),
+            Date.now(),
           ),
         ),
       ),

@@ -7404,6 +7404,13 @@ export type SlackUserLinkAccessRequest = {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Set for the person linking when they may link this Slack account as a
+   * member of the organization, without workspace access, once they confirm
+   * it (`linkSlackUserAsOrganizationMember`). The label names the Slack
+   * account when Slack says who it is.
+   */
+  organizationMemberLink?: { slackAccountLabel: string | null } | null | undefined;
 };
 
 export type PrepareSlackUserLinkAccessRequest = {

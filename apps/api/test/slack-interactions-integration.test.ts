@@ -3189,6 +3189,134 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     ).toBeNull();
   });
 
+  test("an organization member links a Slack account without workspace access only after confirming which one", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const memberId = `slack-org-member-${crypto.randomUUID()}`;
+    const outsiderId = `slack-org-outsider-${crypto.randomUUID()}`;
+    for (const userId of [memberId, outsiderId]) {
+      await shared!.admin`
+        insert into auth_users (id, name, email, email_verified)
+        values (${userId}, 'Slack linker', ${`${userId}@example.test`}, true)`;
+      await shared!.admin`
+        insert into auth_identities (id, user_id, provider_id, account_id)
+        values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})`;
+      const identity = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+      await shared!.admin`
+        insert into auth_sessions (
+          id, user_id, token, expires_at, identity_id, identity_revision, auth_revision
+        ) values (
+          ${`session-${userId}`}, ${userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+          ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
+        )`;
+    }
+    await activeOrganizationMember(value.owner.accountId, `user:${memberId}`);
+    Reflect.set(value.deps, "managedAuth", {
+      api: {
+        getSession: async ({ headers }: { headers: Headers }) => {
+          const userId = headers.get("x-test-managed-user");
+          return {
+            headers: new Headers(),
+            response: userId
+              ? {
+                  session: {
+                    id: `session-${userId}`,
+                    userId,
+                    expiresAt: new Date(Date.now() + 60_000),
+                  },
+                  user: { id: userId, email: `${userId}@example.test`, name: "Slack linker" },
+                }
+              : null,
+          };
+        },
+      },
+    });
+    const basePath = `/v1/workspaces/${value.owner.workspaceId}/integrations/slack/user-link-intents`;
+    const as = (userId: string) => ({
+      "content-type": "application/json",
+      "x-test-managed-user": userId,
+    });
+    const prepare = async (userId: string, slackUserId: string) => {
+      const response = await value.app.request(basePath, {
+        method: "POST",
+        headers: as(userId),
+        body: JSON.stringify({
+          linkToken: createSlackUserLinkToken(signingMaterial, {
+            workspaceId: value.owner.workspaceId,
+            connectionId: value.connectionId,
+            slackTeamId: value.teamId,
+            slackUserId,
+          }),
+        }),
+      });
+      expect(response.status).toBe(201);
+      return (await response.json()) as {
+        id: string;
+        status: string;
+        version: number;
+        organizationMemberLink?: { slackAccountLabel: string | null } | null;
+      };
+    };
+    const link = (userId: string, requestId: string, expectedVersion: number) =>
+      value.app.request(`${basePath}/${requestId}/link`, {
+        method: "POST",
+        headers: as(userId),
+        body: JSON.stringify({ expectedVersion, idempotencyKey: crypto.randomUUID() }),
+      });
+
+    // Opening the link links nothing; it offers the link, naming the account.
+    const prepared = await prepare(memberId, "U0SAM");
+    expect(prepared).toMatchObject({
+      status: "prepared",
+      version: 1,
+      organizationMemberLink: { slackAccountLabel: "@Sam Lee" },
+    });
+    expect(
+      await getSlackBotUserLink(client.db, value.owner.workspaceId, value.connectionId, "U0SAM"),
+    ).toBeNull();
+    const polled = await value.app.request(`${basePath}/${prepared.id}`, {
+      headers: as(memberId),
+    });
+    expect(await polled.json()).toMatchObject({
+      status: "prepared",
+      organizationMemberLink: { slackAccountLabel: "@Sam Lee" },
+    });
+
+    // A stale confirmation changes nothing.
+    expect((await link(memberId, prepared.id, 2)).status).toBe(409);
+    const linked = await link(memberId, prepared.id, 1);
+    expect(linked.status).toBe(200);
+    expect(await linked.json()).toMatchObject({ status: "completed", version: 2 });
+    expect(
+      await getSlackBotUserLink(client.db, value.owner.workspaceId, value.connectionId, "U0SAM"),
+    ).toMatchObject({ subjectId: `user:${memberId}` });
+    // It grants no workspace access.
+    expect(
+      await getWorkspaceGrant(client.db, `user:${memberId}`, value.owner.workspaceId),
+    ).toBeNull();
+    // A retry reports the same link.
+    expect(await (await link(memberId, prepared.id, 1)).json()).toMatchObject({
+      status: "completed",
+      version: 2,
+    });
+
+    // Someone outside the organization is not offered it and can't force it.
+    const outsiderSlackUserId = `U_OUTSIDER_${crypto.randomUUID()}`;
+    const outsider = await prepare(outsiderId, outsiderSlackUserId);
+    expect(outsider).toMatchObject({ status: "prepared", organizationMemberLink: null });
+    expect((await link(outsiderId, outsider.id, 1)).status).toBe(403);
+    expect(
+      await getSlackBotUserLink(
+        client.db,
+        value.owner.workspaceId,
+        value.connectionId,
+        outsiderSlackUserId,
+      ),
+    ).toBeNull();
+    // Nor can anyone confirm another person's request.
+    expect((await link(memberId, outsider.id, 1)).status).toBe(400);
+  });
+
   test("reaction ingress filters disabled, legacy-scope, wrong-emoji, and disallowed-channel events before content fetch", async () => {
     if (!available) return;
     const enabledScopes = [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES];

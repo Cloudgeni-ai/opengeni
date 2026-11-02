@@ -7705,6 +7705,22 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Link the Slack account as a member of the organization, without workspace
+   * access, once the person confirmed it (offered as `organizationMemberLink`).
+   */
+  async linkSlackUserAsOrganizationMember(
+    workspaceId: string,
+    requestId: string,
+    request: SlackUserLinkAccessMutationRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}/link`,
+      request,
+    );
+  }
+
   async cancelSlackUserLinkAccess(
     workspaceId: string,
     requestId: string,

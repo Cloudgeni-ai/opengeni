@@ -253,4 +253,63 @@ describe("workspace shell authority", () => {
     expect(rendered.container.querySelector("main")).toBeNull();
     await act(async () => rendered.root.unmount());
   });
+
+  test("an organization member confirms which Slack account to link before anything is linked", async () => {
+    const request = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId,
+      workspaceDisplayName: "Operations",
+      subjectLabel: "Ada",
+      status: "prepared" as const,
+      version: 1,
+      expiresAt: "2026-08-20T09:00:00.000Z",
+      requestedAt: null,
+      decidedAt: null,
+      completedAt: null,
+      createdAt: "2026-08-20T08:00:00.000Z",
+      updatedAt: "2026-08-20T08:00:00.000Z",
+      organizationMemberLink: { slackAccountLabel: "@ada" },
+    };
+    const { context } = testContext({
+      workspaces: [],
+      slackWorkspaceId: workspaceId,
+      prepareSlack: async () => request,
+    });
+    const linkCalls: unknown[] = [];
+    Reflect.set(context, "client", {
+      linkSlackUserAsOrganizationMember: async (...args: unknown[]) => {
+        linkCalls.push(args);
+        return {
+          ...request,
+          status: "completed",
+          version: 2,
+          completedAt: "2026-08-20T08:01:00.000Z",
+          organizationMemberLink: null,
+        };
+      },
+    });
+    const rendered = await renderShell(context, () => undefined, { routed: true });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    const text = rendered.container.textContent ?? "";
+    expect(text).toContain("Link your Slack account");
+    expect(text).toContain("Link @ada in Slack to your Opengeni account.");
+    expect(text).not.toContain("Request access");
+    expect(linkCalls).toHaveLength(0);
+    const linkButton = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Link",
+    );
+    expect(linkButton).toBeDefined();
+    await act(async () => {
+      linkButton!.click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(linkCalls).toEqual([
+      [workspaceId, request.id, { expectedVersion: 1, idempotencyKey: expect.any(String) }],
+    ]);
+    expect(rendered.container.textContent).toContain("Slack account linked");
+    await act(async () => rendered.root.unmount());
+  });
 });

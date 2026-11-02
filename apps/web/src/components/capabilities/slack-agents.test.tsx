@@ -769,8 +769,7 @@ describe("Slack agent form", () => {
 
   const OPEN_DISCLOSURE =
     "People in your organization can ask Data team after linking their Slack account, even without access to the Platform workspace. Its answers can use anything it can read there (Knowledge, files, chats, shared connections). What people tell it is visible to that workspace's members.";
-  const NARROWED_NOTICE =
-    "Changed: only organization members who linked their Slack account can use it now. Everyone else is asked to link or told why not.";
+  const NARROWED_NOTICE = "Changed: only linked organization members can use it now.";
 
   function openSwitch(host: HTMLElement) {
     const label = [...host.querySelectorAll("label")].find(

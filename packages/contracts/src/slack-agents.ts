@@ -452,7 +452,7 @@ export function slackAgentOpenDisclosure(agentName: string, workspaceName: strin
  * anyone in the Slack workspace.
  */
 export const SLACK_AGENT_OPEN_NARROWED_NOTICE =
-  "Changed: only organization members who linked their Slack account can use it now. Everyone else is asked to link or told why not.";
+  "Changed: only linked organization members can use it now.";
 
 export const SlackAgentResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ agent: SlackAgent }),
