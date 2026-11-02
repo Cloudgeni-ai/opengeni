@@ -33,7 +33,13 @@ function transport(pending: ConnectAttempt[]) {
       async (_workspaceId: string, _input: Parameters<ConnectTransport["begin"]>[1]) => attempt,
     ),
     get: mock(async (_workspaceId: string, id: string) => ({ ...attempt, id })),
-    advance: mock(async () => attempt),
+    advance: mock(
+      async (
+        _workspaceId: string,
+        _id: string,
+        _input: Parameters<ConnectTransport["advance"]>[2],
+      ) => attempt,
+    ),
     cancel: mock(async () => ({ ...attempt, state: "cancelled" as const })),
     disconnect: mock(async () => {}),
   } satisfies ConnectTransport;
