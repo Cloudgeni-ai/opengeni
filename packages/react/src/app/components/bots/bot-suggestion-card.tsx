@@ -12,11 +12,7 @@ import {
 } from "../../lib/bot-suggestions";
 import { useNavigate } from "../../lib/navigation";
 import { toast } from "../../lib/toast";
-import {
-  SessionAvatar,
-  sessionAvatarFallbackHue,
-  sessionAvatarInitials,
-} from "../session/session-avatar";
+import { SessionAvatar, sessionAvatarFallbackHue } from "../session/session-avatar";
 import { BotTemplateDialog } from "./bot-template-dialog";
 
 /**
@@ -48,9 +44,11 @@ export function BotSuggestionCard(props: { session: Session; events: readonly Se
   if (suggestion.kind === "create" && isBot && !suggestion.setupInstructions) return null;
   if (suggestion.kind === "reuse" && suggestion.sessionId === session.id) return null;
 
+  // The card shows and applies the same avatar. An avatar is what makes a chat a
+  // bot, so accepting a suggestion without one still has to give it one.
   const avatar: SessionAvatarValue = suggestion.avatar ?? {
-    kind: "letters",
-    letters: sessionAvatarInitials(suggestion.name),
+    kind: "icon",
+    icon: "bot",
     hue: sessionAvatarFallbackHue(suggestion.name),
   };
   const dismiss = () => {
@@ -65,7 +63,7 @@ export function BotSuggestionCard(props: { session: Session; events: readonly Se
       const updated = await context.updateSessionProfile(session.workspaceId, session.id, {
         title: suggestion.name,
         description: suggestion.description,
-        ...(suggestion.avatar ? { avatar: suggestion.avatar } : {}),
+        avatar,
       });
       if (!updated) return;
       // A bot is a long-lived chat: keep it out of the idle-session archive.

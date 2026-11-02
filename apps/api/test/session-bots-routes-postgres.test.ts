@@ -928,4 +928,96 @@ describe("bots through the API (real PostgreSQL)", () => {
       name: "Secret payroll template",
     });
   }, 180_000);
+
+  test("a private Slack task is never named as a bot in a shared chat", async () => {
+    if (!shared) return;
+    const workspace = await freshWorkspace("bots private slack");
+    const person = [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+    ] as Permission[];
+    const owner = "user:bots-slack-owner";
+    const other = "user:bots-slack-other";
+    const ownerAuth = await bearer(workspace, owner, person);
+    const otherAuth = await bearer(workspace, other, person);
+    const base = `/v1/workspaces/${workspace.workspaceId}/sessions`;
+    const task = await call(ownerAuth, "POST", base, {
+      initialMessage: "Handle the layoffs thread",
+      model: "scripted-model",
+      profile: {
+        title: "Secret Slack bot",
+        description: "Private Slack work",
+        avatar: { kind: "icon", icon: "bot", hue: 10 },
+      },
+    });
+    expect(task.status).toBe(202);
+    const taskId = task.json.id as string;
+    const [connection] = await shared.admin<{ id: string }[]>`
+      insert into connections (
+        account_id, workspace_id, provider_domain, kind, status, credential_encrypted
+      ) values (
+        ${workspace.accountId}, ${workspace.workspaceId}, 'slack.com', 'app_install', 'active', 'sealed'
+      )
+      returning id`;
+    await shared.admin`
+      insert into slack_interactions (
+        account_id, workspace_id, connection_id, slack_team_id, slack_channel_id,
+        slack_thread_ts, route_key, triggering_provider_event_id, owning_subject_id,
+        visibility, session_reservation_id, session_id
+      ) values (
+        ${workspace.accountId}, ${workspace.workspaceId}, ${connection!.id}, 'T1', 'D1', '1.1',
+        ${`route-${crypto.randomUUID()}`}, ${`evt-${crypto.randomUUID()}`},
+        ${owner}, 'private', ${taskId}, ${taskId}
+      )`;
+    const publicBot = await call(ownerAuth, "POST", base, {
+      initialMessage: "Watch production",
+      model: "scripted-model",
+      profile: { title: "Public bot", avatar: { kind: "icon", icon: "bot", hue: 20 } },
+    });
+    expect(publicBot.status).toBe(202);
+    const chatFor = async (auth: string, subjectId: string) => {
+      const created = await call(auth, "POST", base, {
+        initialMessage: "Check this invoice",
+        model: "scripted-model",
+      });
+      const id = created.json.id as string;
+      for (const text of ["Same check again", "And again"]) {
+        await call(auth, "POST", `${base}/${id}/events`, {
+          type: "user.message",
+          payload: { text },
+        });
+      }
+      return buildOpenGeniMcpServer(deps, {
+        ...agentGrant(workspace, id),
+        subjectId,
+        metadata: { delegated: true, sessionId: id, firstPartyMcpTools: ["bot_suggest"] },
+      });
+    };
+    const suggest = (server: unknown, request: Record<string, unknown>) =>
+      callTool(server, "bot_suggest", {
+        similarRequestsInARow: 3,
+        reason: "Repeated.",
+        ...request,
+      });
+
+    // Another member's name-taken list leaves it out.
+    const taken = await suggest(await chatFor(otherAuth, other), {
+      kind: "create",
+      name: "public BOT",
+    });
+    expect(taken.body).toMatchObject({ code: "name_taken" });
+    expect(taken.body.bots.map((bot: { name: string }) => bot.name)).toEqual(["Public bot"]);
+    expect(JSON.stringify(taken.body)).not.toContain("Secret Slack");
+
+    // Even its owner can't put it on a shared chat, by list or by id.
+    const ownerServer = await chatFor(ownerAuth, owner);
+    const ownerTaken = await suggest(ownerServer, { kind: "create", name: "public BOT" });
+    expect(JSON.stringify(ownerTaken.body)).not.toContain("Secret Slack");
+    expect((await suggest(ownerServer, { kind: "reuse", sessionId: taskId })).body).toMatchObject({
+      status: "not_suggested",
+      code: "not_a_bot",
+    });
+  }, 180_000);
 });

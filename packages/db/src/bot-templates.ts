@@ -252,6 +252,37 @@ export async function claimSessionBotSuggestion(
   });
 }
 
+/**
+ * Whether everyone in the workspace may read this chat's name: not Only me, and
+ * not part of a private Slack task, whose row can still read as shared.
+ */
+export async function sessionVisibleToWholeWorkspace(
+  db: Database,
+  input: { workspaceId: string; sessionId: string },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
+    const [row] = await scoped
+      .select({ id: schema.sessions.id })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+          eq(schema.sessions.visibility, "workspace_shared"),
+          sql`not exists (
+            select 1
+            from ${schema.slackInteractions} private_slack_interaction
+            where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+              and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
+              and private_slack_interaction.visibility = 'private'
+          )`,
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
+  });
+}
+
 /** A bot chat as a suggestion or mention sees it. */
 export interface WorkspaceBotSession {
   id: string;
@@ -292,6 +323,16 @@ export async function listWorkspaceBotSessions(
           isNotNull(schema.sessions.title),
           isNull(schema.sessions.contentArchiveState),
           input.sharedOnly ? eq(schema.sessions.visibility, "workspace_shared") : undefined,
+          // A private Slack task's row can read as shared; only its interaction
+          // says otherwise. See getSessionForSubject.
+          sql`not exists (
+            select 1
+            from ${schema.slackInteractions} private_slack_interaction
+            where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+              and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
+              and private_slack_interaction.visibility = 'private'
+              ${input.sharedOnly ? sql`` : sql`and private_slack_interaction.owning_subject_id <> ${input.subjectId}`}
+          )`,
           or(isNotNull(schema.sessions.avatar), isNotNull(schema.sessions.description)),
         ),
       )

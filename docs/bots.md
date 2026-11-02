@@ -145,7 +145,7 @@ never comes back. It offers one of two things:
   declined with the existing ones listed, so the agent can suggest reusing one.
 
 Everyone who can open a chat can read its card and the tool's result, so a shared
-chat may only name shared bots and templates, never its person's own Only me ones;
+chat may only name shared bots and templates, never its person's own Only me ones or a private Slack task;
 an Only me chat may also name that person's. The stored suggestion is written once
 (`bot_suggestion IS NULL` in the update), so concurrent calls leave one card.
 

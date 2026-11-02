@@ -25,6 +25,7 @@ import {
   getSessionVisibility,
   listBotTemplates,
   listWorkspaceBotSessions,
+  sessionVisibleToWholeWorkspace,
   storedSessionAvatar,
 } from "@opengeni/db";
 import { randomUUID } from "node:crypto";
@@ -308,8 +309,10 @@ function registerBotSuggestTool(input: {
           );
           const hiddenFromChat =
             sharedChat &&
-            (await getSessionVisibility(deps.db, grant.workspaceId, request.sessionId)) !==
-              "workspace_shared";
+            !(await sessionVisibleToWholeWorkspace(deps.db, {
+              workspaceId: grant.workspaceId,
+              sessionId: request.sessionId,
+            }));
           if (!bot || hiddenFromChat || !bot.title || (!bot.avatar && !bot.description)) {
             return notSuggested("not_a_bot", "That chat is not a bot this person can open.");
           }
