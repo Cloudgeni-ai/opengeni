@@ -201,7 +201,9 @@ describe("notifying another member of the workspace", () => {
       createdBySubjectId: null,
     });
     const sent = await notify({ title: "Ready", key: "ready" });
-    expect(sent).toMatchObject({ ok: true, delivered: true, deliveredVia: "integration" });
+    // Handed to the integration: neither claimed as delivered nor as failed.
+    expect(sent).toMatchObject({ ok: true, handedToIntegration: true });
+    expect(sent).not.toHaveProperty("delivered");
     expect(sent).not.toHaveProperty("undeliveredReason");
   });
 

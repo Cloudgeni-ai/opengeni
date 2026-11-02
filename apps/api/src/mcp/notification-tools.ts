@@ -307,15 +307,16 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
       return json({
         ok: true,
         key: resolvedKey,
-        delivered: target !== null || handedToIntegration,
+        // Handed off is not proof a person got it, and not a failure either.
         ...(handedToIntegration
           ? {
-              deliveredVia: "integration",
-              note: "No person owns this session, so it was handed to the integration that delivers this workspace's notifications.",
+              handedToIntegration: true,
+              note: "No person owns this session, so Opengeni notified no one itself. The notification was handed to the integration that delivers this workspace's notifications; don't retry it or report it as failed.",
             }
-          : target === null
-            ? { undeliveredReason: "no_human_recipient" }
-            : {}),
+          : {
+              delivered: target !== null,
+              ...(target === null ? { undeliveredReason: "no_human_recipient" } : {}),
+            }),
         ...(member ? { recipient: member.label } : {}),
         updatedInPlace: Boolean(existing),
       });
