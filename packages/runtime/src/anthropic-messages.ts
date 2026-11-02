@@ -307,30 +307,39 @@ function contentBlocks(
 ): Json[] {
   if (typeof value === "string") return value ? [{ type: "text", text: value }] : [];
   const blocks = Array.isArray(value) ? value : [value];
-  return blocks.map((entry) => {
+  return blocks.flatMap((entry): Json[] => {
     const block = object(entry);
     // History recorded while progress updates became assistant messages keeps
     // Claude's own signed thinking block on the message. It goes back exactly
     // as received, never as the summary text it was shown as.
     const signed = options.assistant ? block.providerData?.anthropic?.block : undefined;
-    if (signed?.type === "thinking") return structuredClone(object(signed));
+    if (signed?.type === "thinking") return [structuredClone(object(signed))];
     if (["text", "input_text", "output_text", "refusal"].includes(block.type)) {
+      const blockText = text(block.text ?? block.refusal, "text");
+      // Claude rejects an empty text block. Other providers can record one (a
+      // reply with no words), and it says nothing, so it is left out. A request
+      // that held one was always refused, so no cached prefix changes.
+      if (!blockText) return [];
       // Claude's own cited text is replayed with its citations exactly while
       // the cited searches are still native in this request.
       const citations = block.providerData?.anthropic?.citations;
-      return {
-        type: "text",
-        text: text(block.text ?? block.refusal, "text"),
-        ...(options.citations && Array.isArray(citations) && citations.length
-          ? { citations: structuredClone(citations) }
-          : {}),
-      };
+      return [
+        {
+          type: "text",
+          text: blockText,
+          ...(options.citations && Array.isArray(citations) && citations.length
+            ? { citations: structuredClone(citations) }
+            : {}),
+        },
+      ];
     }
     if (["image", "input_image"].includes(block.type)) {
-      return {
-        type: "image",
-        source: imageSource(block.image ?? block.imageUrl ?? block.image_url),
-      };
+      return [
+        {
+          type: "image",
+          source: imageSource(block.image ?? block.imageUrl ?? block.image_url),
+        },
+      ];
     }
     throw new AnthropicProtocolError(`Unsupported Claude content block: ${block.type}`);
   });

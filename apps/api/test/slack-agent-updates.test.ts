@@ -909,8 +909,9 @@ describe("update messages with PostgreSQL", () => {
     const before = await f.person("before");
     await f.setSwitch(true);
     const newcomer = await f.person("newcomer");
-    // Any time, not only at 10:00: they are in Slack right now.
-    const now = new Date();
+    // Any time, not only at 10:00: they are in Slack right now. A fixed
+    // afternoon keeps the daily 10:00 update for others out of this count.
+    const now = weekdayAt(15);
     expect((await f.sweep(now)).sent).toBe(1);
     expect(f.slack.posts).toHaveLength(1);
     expect(f.slack.posts[0]!.channel).toBe(newcomer.channel);

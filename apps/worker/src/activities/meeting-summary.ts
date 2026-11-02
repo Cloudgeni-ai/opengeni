@@ -82,7 +82,8 @@ export function meetingSummaryModel(input: {
 /**
  * Start the summary for one completed transcript version, at most once: the
  * session is keyed by the version. Re-running a transcript starts another
- * only while the meeting still has no notes.
+ * while the meeting has no notes, or to write again the notes an earlier
+ * summary wrote that nobody has touched since.
  */
 export async function startMeetingSummary(
   service: ControlActivityServices,
@@ -192,6 +193,7 @@ export async function startMeetingSummary(
     initialMessage: meetingSummaryPrompt({
       recordingId: recording.id,
       title: recording.title,
+      replacesRevision: candidate.replacesRevision,
       titleSource: recording.titleSource,
     }),
     surface: "system",

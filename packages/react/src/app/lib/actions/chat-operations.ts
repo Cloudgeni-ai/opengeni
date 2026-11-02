@@ -11,6 +11,7 @@ import { usePage } from "../navigation";
 import { applySessionArchiveProjection } from "../session-pagination";
 import { notifySessionListChanged } from "../session-list-invalidation";
 import { toast } from "../toast";
+import { copyLink as copyLinkWithToast } from "../copy-link";
 import { errorMessage } from "@opengeni/contracts/values";
 
 export type ChatOperations = {
@@ -26,36 +27,6 @@ export type ChatOperations = {
 
 export function chatPath(chat: Pick<SessionListRow, "id" | "workspaceId">): string {
   return `/workspaces/${encodeURIComponent(chat.workspaceId)}/sessions/${encodeURIComponent(chat.id)}`;
-}
-
-async function writeClipboard(text: string): Promise<void> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  // Older embeds without the async clipboard: a hidden textarea and execCommand.
-  const area = document.createElement("textarea");
-  area.value = text;
-  area.setAttribute("readonly", "");
-  area.style.position = "fixed";
-  area.style.opacity = "0";
-  document.body.append(area);
-  area.select();
-  const copied = document.execCommand("copy");
-  area.remove();
-  if (!copied) throw new Error("The browser blocked copying.");
-}
-
-/** Copies a link and says so, or says why it couldn't. */
-export async function copyLinkWithToast(url: string): Promise<void> {
-  try {
-    await writeClipboard(url);
-    toast.success("Link copied");
-  } catch (error) {
-    toast.error("Couldn't copy the link.", {
-      description: errorMessage(error),
-    });
-  }
 }
 
 export function useChatOperations(): ChatOperations {

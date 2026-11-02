@@ -55,7 +55,8 @@ import {
   type Chord,
   type ChordPlatform,
 } from "./chords";
-import { copyLinkWithToast, useChatOperations } from "./chat-operations";
+import { copyLink } from "../copy-link";
+import { useChatOperations } from "./chat-operations";
 import {
   FORK_CURRENT_CHAT_EVENT,
   OPEN_COMMAND_MENU_EVENT,
@@ -262,7 +263,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
         });
       },
       link,
-      copyLink: (recordingId) => copyLinkWithToast(link(recordingId)),
+      copyLink: (recordingId) => copyLink(link(recordingId)),
       list: async (options) => {
         const { signal, ...rest } = options;
         const answer = await recordingsClient.listRecordings(workspaceId, {

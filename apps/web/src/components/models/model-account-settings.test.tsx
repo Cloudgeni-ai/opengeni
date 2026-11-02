@@ -453,6 +453,10 @@ test("the default rules say which workspaces use each one", async () => {
     expect(text).toContain("Used by every workspace");
     expect(text).toContain("Not used by any workspace · Design has its own (Off)");
     expect(view.container.textContent).toContain("3 of 4 rules");
+    // People change the unlocked rules in their Personal workspace too.
+    expect(text).toContain(
+      "Rules a workspace’s admins, and each person in their Personal workspace, can set differently.",
+    );
     const row = [...view.container.querySelectorAll("button")].find((candidate) =>
       candidate.textContent?.includes("What workspaces can change"),
     );

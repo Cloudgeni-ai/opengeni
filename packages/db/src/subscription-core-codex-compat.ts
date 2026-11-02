@@ -428,6 +428,8 @@ export async function setSubscriptionCoreWorkspaceCodexSource(
     workspaceId: string;
     subjectId: string;
     mode: WorkspaceCodexSubscriptionMode;
+    /** The request verified the Personal workspace's owner acting as themselves (1233). */
+    personalWorkspaceOwnerVerified?: boolean | undefined;
   },
 ): Promise<{ source: WorkspaceCodexSubscriptionSource; wake: SubscriptionCoreCodexWake }> {
   const changed = await setSubscriptionCoreWorkspaceSource(db, SUBSCRIPTION_CORE_CODEX, {
