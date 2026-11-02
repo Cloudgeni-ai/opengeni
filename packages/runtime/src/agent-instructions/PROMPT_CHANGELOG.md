@@ -203,10 +203,12 @@ text changes. `tool_search` used to skip its integration catalog lookup
 whenever any installed tool matched strongly, so "posts on Slack" (matching a
 Slack bot tool) or "Linear issues" (matching meeting search) got no Connect
 card. It now skips the lookup only when a strong match is the named
-integration's own tool, and also recognises an integration's name with
-different spacing or case, a small near miss of a long name, or its vendor
-domain word. The `notConnected` text is unchanged, and it appears on more
-searches than before.
+integration's own tool (waiting at most 300 ms for the catalog beside strong
+matches, and naming only distinctive mentions there), and also recognises an
+integration's name with different spacing or case, a near spelling, or its
+vendor domain word. Catalog search ranks entries a query names first. The
+`notConnected` text is unchanged, and it appears on more searches than
+before.
 
 The agent knows both GitHub identities. When personal GitHub sign-in is
 enabled on the deployment (new `personalGitHub` resource fact) and

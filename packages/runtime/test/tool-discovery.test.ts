@@ -1339,7 +1339,7 @@ describe("searches that name an integration the person can connect", () => {
     });
     expect(await lookup("x".repeat(600))).toEqual([]);
     expect(calls[0]!.name).toBe(CATALOG);
-    expect(calls[0]!.args).toEqual({ query: "x".repeat(500), limit: 10 });
+    expect(calls[0]!.args).toEqual({ query: "x".repeat(500), limit: 5 });
     expect(calls[0]!.signal).toBeDefined();
   });
 
@@ -1736,7 +1736,7 @@ describe("searches that name an integration their strong matches do not belong t
   const WISPR_FLOW = { capabilityId: "mcp:wispr-flow", name: "Wispr Flow" };
   const notice = (integration: { capabilityId: string; name: string }) =>
     `Not connected yet: ${integration.name} (capabilityId ${JSON.stringify(integration.capabilityId)}). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.`;
-  const pool = (withLinear: boolean) => [
+  const pool = (withLinear: boolean, extra: readonly ReturnType<typeof candidate>[] = []) => [
     candidate(
       SLACK_BOT,
       "List public and bot-visible private Slack channels through the workspace-shared Slack bot. isMember identifies channels the bot may read/post in; the bot never joins channels automatically.",
@@ -1760,6 +1760,7 @@ describe("searches that name an integration their strong matches do not belong t
       CARD,
       "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction.",
     ),
+    ...extra,
   ];
   const LINEAR_ACCOUNT: ConnectedToolAccount = {
     source: "linear",
@@ -1772,6 +1773,7 @@ describe("searches that name an integration their strong matches do not belong t
     options: {
       lookup?: ConnectableIntegrationLookup;
       withLinear?: boolean;
+      extra?: readonly ReturnType<typeof candidate>[];
       servers?: ReadonlyMap<string, string>;
       accounts?: ReadonlyMap<string, ConnectedToolAccount>;
     } = {},
@@ -1793,7 +1795,7 @@ describe("searches that name an integration their strong matches do not belong t
       options.lookup,
       options.accounts ? () => options.accounts! : undefined,
     );
-    runtime.refresh(pool(options.withLinear ?? false));
+    runtime.refresh(pool(options.withLinear ?? false, options.extra));
     return runtime;
   };
   const recording = (matches: readonly ConnectableIntegration[]) => {
@@ -1806,8 +1808,11 @@ describe("searches that name an integration their strong matches do not belong t
   };
   const loaded = (result: { tools?: { name?: unknown }[] }) =>
     result.tools?.map((t) => t.name) ?? [];
-  const strongly = (query: string, withLinear = false) =>
-    names(new ToolSearchIndex(pool(withLinear)).strongMatches(query));
+  const strongly = (
+    query: string,
+    withLinear = false,
+    extra: readonly ReturnType<typeof candidate>[] = [],
+  ) => names(new ToolSearchIndex(pool(withLinear, extra)).strongMatches(query));
 
   // Each matches one first-party tool strongly in this pool, as the original
   // queries did in a full one.
@@ -1879,6 +1884,7 @@ describe("searches that name an integration their strong matches do not belong t
       ["use wisprflow to transcribe", WISPR_FLOW],
       ["send it to WisprFlow", WISPR_FLOW],
       ["send it to wipsr flow", WISPR_FLOW],
+      ["dictate with Whisprflow", WISPR_FLOW],
       ["add the new lead to hub spot", HUBSPOT],
       ["update the deal in HUBSPOT", HUBSPOT],
       ["find my jira tickets", ATLASSIAN],
@@ -1930,6 +1936,154 @@ describe("searches that name an integration their strong matches do not belong t
     expect(queries).toEqual([query]);
     expect(loaded(result)).not.toContain(CARD);
     expect(JSON.parse(result.output).notConnected).toBeUndefined();
+  });
+
+  test("compound words and subdomain words name nothing", () => {
+    for (const [query, integration] of [
+      [
+        "summarise the issues linked in this PR",
+        { capabilityId: "mcp:linkedin", name: "LinkedIn" },
+      ],
+      ["fix the typos on the last pass", { capabilityId: "mcp:lastpass", name: "LastPass" }],
+      ["plan my work day", { capabilityId: "mcp:workday", name: "Workday" }],
+      ["add one note per meeting", { capabilityId: "mcp:onenote", name: "OneNote" }],
+      ["follow up work from the retro", { capabilityId: "mcp:upwork", name: "Upwork" }],
+      [
+        "read the docs for this API",
+        {
+          capabilityId: "mcp:synthflow",
+          name: "Voice Agents",
+          providerDomain: "docs.synthflow.ai",
+        },
+      ],
+      [
+        "ask the developers about the release",
+        {
+          capabilityId: "mcp:intercom",
+          name: "Help Desk",
+          providerDomain: "developers.intercom.com",
+        },
+      ],
+    ] as const)
+      expect(connectableIntegrationsNamedIn(query, [integration])).toEqual([]);
+  });
+
+  test("swapped neighbouring letters name the integration", () => {
+    const NOTION = { capabilityId: "mcp:notion", name: "Notion", providerDomain: "notion.com" };
+    for (const [query, integration] of [
+      ["update the deal in hubsopt", HUBSPOT],
+      ["post it in slakc", SLACK],
+      ["open the page in notoin", NOTION],
+    ] as const)
+      expect(connectableIntegrationsNamedIn(query, [LINEAR, integration])).toEqual([integration]);
+  });
+
+  test("beside strong matches an ordinary word that is a name adds no card", async () => {
+    const entry = (name: string, providerDomain: string) => ({
+      capabilityId: `mcp:${providerDomain}`,
+      name,
+      providerDomain,
+    });
+    for (const [query, integration] of [
+      ["search recorded meetings where we said close the ticket", entry("Close", "close.com")],
+      ["search recorded meetings about linear regression on the data", LINEAR],
+      ["search recorded meetings where the box is empty", entry("Box", "box.com")],
+      ["search recorded meetings about front page news", entry("Front", "front.com")],
+      ["search recorded meetings about the new lead from hub spot", HUBSPOT],
+    ] as const) {
+      expect(strongly(query)).toContain(MEETINGS);
+      const { queries, lookup } = recording([integration]);
+      const result = await runtimeWith("generic_dispatch", { lookup }).prepareSearch({ query });
+      expect(queries).toEqual([query]);
+      expect(loaded(result)).not.toContain(CARD);
+      expect(JSON.parse(result.output).notConnected).toBeUndefined();
+    }
+  });
+
+  test("a sibling on the same vendor domain is not the strong match's own integration", async () => {
+    const TEAMS_SEND = "mcp__teams__send_message";
+    const microsoft = (capabilityId: string, name: string) => ({
+      capabilityId,
+      name,
+      providerDomain: "microsoft.com",
+    });
+    const TEAMS = microsoft("mcp:microsoft-teams", "Microsoft Teams");
+    const EXCEL = microsoft("mcp:microsoft-excel", "Microsoft Excel");
+    const ONEDRIVE = microsoft("mcp:microsoft-onedrive", "Microsoft OneDrive");
+    const extra = [candidate(TEAMS_SEND, "Send a message to a Microsoft Teams channel.")];
+    const accounts = new Map<string, ConnectedToolAccount>([
+      [
+        TEAMS_SEND,
+        {
+          source: "microsoft-teams",
+          label: "Microsoft Teams",
+          connector: "Microsoft Teams",
+          providerDomain: "microsoft.com",
+        },
+      ],
+    ]);
+    const query = "send the Microsoft Excel totals as a message to the Teams channel";
+    expect(strongly(query, false, extra)).toContain(TEAMS_SEND);
+    const { queries, lookup } = recording([TEAMS, EXCEL, ONEDRIVE]);
+    const result = await runtimeWith("generic_dispatch", { lookup, extra, accounts }).prepareSearch(
+      { query },
+    );
+    expect(queries).toEqual([query]);
+    expect(loaded(result)[0]).toBe(TEAMS_SEND);
+    expect(loaded(result).at(-1)).toBe(CARD);
+    expect(JSON.parse(result.output).notConnected).toBe(notice(EXCEL));
+  });
+
+  test("a connected earlier version of the named integration adds no card", async () => {
+    // Atlassian (v1) is connected; the current Atlassian entry is not.
+    const JIRA_SEARCH = "mcp__atlassian_v1__search_issues";
+    const extra = [candidate(JIRA_SEARCH, "Search Jira issues in Atlassian projects with JQL.")];
+    const accounts = new Map<string, ConnectedToolAccount>([
+      [
+        JIRA_SEARCH,
+        {
+          source: "atlassian-v1",
+          label: "Atlassian (v1)",
+          connector: "Atlassian (v1)",
+          providerDomain: "jira.com",
+        },
+      ],
+    ]);
+    for (const [query, looksUp] of [
+      // The connected integration is named (by its vendor's word): no lookup.
+      ["search Jira issues for the release", false],
+      // Not named as the connected one, so the catalog is read, but the
+      // current entry belongs to the same vendor and name.
+      ["search issues in the Atlassian sprint", true],
+    ] as const) {
+      expect(strongly(query, false, extra)).toContain(JIRA_SEARCH);
+      const { queries, lookup } = recording([ATLASSIAN]);
+      const result = await runtimeWith("generic_dispatch", {
+        lookup,
+        extra,
+        accounts,
+      }).prepareSearch({ query });
+      expect(queries).toEqual(looksUp ? [query] : []);
+      expect(loaded(result)).not.toContain(CARD);
+      expect(JSON.parse(result.output).notConnected).toBeUndefined();
+    }
+  });
+
+  test("beside strong matches the search waits for the catalog only briefly", async () => {
+    let lookupSignal: AbortSignal | undefined;
+    // A catalog read that never answers, and ignores its signal.
+    const lookup: ConnectableIntegrationLookup = (_query, signal) => {
+      lookupSignal = signal;
+      return new Promise(() => undefined);
+    };
+    const startedAt = performance.now();
+    const result = await runtimeWith("generic_dispatch", { lookup }).prepareSearch({
+      query: LINEAR_QUERY,
+    });
+    expect(performance.now() - startedAt).toBeLessThan(1_500);
+    expect(lookupSignal?.aborted).toBe(true);
+    expect(loaded(result)[0]).toBe(MEETINGS);
+    expect(loaded(result)).not.toContain(CARD);
   });
 });
 

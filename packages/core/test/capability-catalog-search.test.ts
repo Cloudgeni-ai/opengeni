@@ -4,7 +4,10 @@ import {
   CapabilityCatalogItem,
   type CapabilityCatalogItem as CatalogItem,
 } from "@opengeni/contracts";
+import { connectableIntegrationsNamedIn } from "@opengeni/runtime";
+import sharedCatalog from "../../../data/catalog/integrations-snapshot.json";
 import {
+  capabilityCatalogSearchProviderDomain,
   excelAddinCatalogItem,
   integrationDefinitionIdFromCapabilityId,
   nativeConnectionCapabilityRecommendations,
@@ -420,5 +423,85 @@ describe("agent capability catalog search", () => {
         "Whisprflow",
       ]);
     });
+  });
+
+  describe("sentences that name an integration, ranked over the shared catalog", () => {
+    // The shared catalog as the importer stores it, plus a workspace's custom
+    // MCP whose name is a near spelling of the vendor's brand (Wispr Flow is
+    // not in the shared catalog).
+    const shared = sharedCatalog.importRows.map((row, index) =>
+      item({
+        id: `mcp:integrations-sh:${row.domain.replace(/[^a-z0-9]+/g, "-")}-${index}`,
+        name: row.name,
+        source: "registry",
+        description: row.description ?? null,
+        category: row.category ?? "integrations",
+        tags: ["mcp", "integration", row.tier, row.authKind],
+        providerDomain: row.domain,
+        mcpUrl: row.mcpUrl,
+        authKind: row.authKind as CatalogItem["authKind"],
+        tier: row.tier as CatalogItem["tier"],
+        metadata: { mcpProbe: row.probe },
+      }),
+    );
+    const catalog = [
+      ...shared,
+      item({
+        id: "mcp:whisprflow-12vcsia",
+        name: "Whisprflow",
+        endpointUrl: "https://api.wisprflow.ai/connect/mcp",
+      }),
+    ];
+    // Tool search reads the catalog's five best matches, then names only the
+    // entries the query names (distinctively, beside strong installed matches).
+    const named = (query: string, distinctive = false) =>
+      connectableIntegrationsNamedIn(
+        query,
+        searchCapabilityCatalogItems(catalog, query, 5).map(({ item: entry }) => ({
+          capabilityId: entry.id,
+          name: entry.name,
+          providerDomain: capabilityCatalogSearchProviderDomain(entry) ?? undefined,
+        })),
+        distinctive,
+      ).map((integration) => integration.name);
+
+    test("the shared catalog is loaded", () => {
+      expect(shared.length).toBeGreaterThan(500);
+    });
+
+    for (const [query, expected] of [
+      ["dictate this note with whisperflow", ["Whisprflow"]],
+      ["use whisperflow", ["Whisprflow"]],
+      ["transcribe the call with whisper flow", ["Whisprflow"]],
+      ["Summarise today's posts in #halcyon-launch on Slack", ["Slack"]],
+      ["Search Linear issues from recorded meetings", ["Linear"]],
+      ["update the deal in hubsopt", ["HubSpot"]],
+      ["find my jira tickets", ["Atlassian", "Atlassian (v1)"]],
+    ] as const) {
+      test(`ranks the entry ${JSON.stringify(query)} names first and names it`, () => {
+        expect(searchCapabilityCatalogItems(catalog, query, 5)[0]?.item.name).toBe(expected[0]);
+        expect(named(query)).toEqual([...expected]);
+        expect(named(query, true)).toEqual([...expected]);
+      });
+    }
+
+    test("names a name written as its parts unless strong matches need more", () => {
+      const query = "add the new lead to hub spot";
+      expect(named(query)).toEqual(["HubSpot"]);
+      expect(named(query, true)).toEqual([]);
+    });
+
+    for (const [query, name] of [
+      ["close the ticket", "Close"],
+      ["linear regression on the data", "Linear"],
+      ["the box is empty", "Box"],
+      ["front page news", "Front"],
+    ] as const) {
+      test(`an ordinary word does not name ${name} beside strong matches`, () => {
+        expect(named(query, true)).toEqual([]);
+        // Without strong matches the whole name as a word still names it.
+        expect(named(query)).toContain(name);
+      });
+    }
   });
 });

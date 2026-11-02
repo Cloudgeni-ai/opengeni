@@ -54,6 +54,13 @@ import {
   streamPreemptibleModelRequest,
 } from "./model-request-capture";
 import { isRecord } from "@opengeni/contracts/values";
+import {
+  integrationMentionsIn,
+  integrationNameWords,
+  integrationVendorWord,
+  isDistinctiveIntegrationMention,
+  registrableHostDomain,
+} from "@opengeni/capabilities";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -250,104 +257,24 @@ export type ConnectableIntegrationLookup = (
   signal?: AbortSignal,
 ) => Promise<readonly ConnectableIntegration[]>;
 
-function searchWords(text: string): string[] {
-  return text
-    .normalize("NFKC")
-    .toLowerCase()
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter(Boolean);
-}
-
-/** Whether every letter of `short` appears in `long`, in order. */
-function isSubsequence(short: readonly string[], long: readonly string[]): boolean {
-  let index = 0;
-  for (const letter of long) if (letter === short[index]) index += 1;
-  return index === short.length;
-}
-
 /**
- * Whether a query word is a near miss of a name of eight or more letters
- * (both without spaces): it starts with the same letter, and either adds up to
- * one letter (two from nine letters: "whisperflow" for "wisprflow"), drops one
- * letter from inside the name, or swaps two neighbouring letters. A replaced
- * letter is never a near miss ("automation" is not AutoMotion, "conference"
- * not Confluence), nor is the name's start or end alone ("context" is not
- * Context7, "grammar" not Grammarly). Shorter names must be spelled exactly
- * (spacing and case aside): most sit one letter from a common word ("Gmail"
- * and "email", "Stripe" and "strike", "Discord" and "discard").
- */
-function isNearMiss(word: string, name: string): boolean {
-  const w = Array.from(word);
-  const n = Array.from(name);
-  const extra = n.length >= 9 ? 2 : n.length === 8 ? 1 : 0;
-  if (!extra || w[0] !== n[0]) return false;
-  if (w.length > n.length) return w.length - n.length <= extra && isSubsequence(n, w);
-  if (w.length < n.length)
-    return (
-      n.length - w.length === 1 &&
-      !name.startsWith(word) &&
-      !name.endsWith(word) &&
-      isSubsequence(w, n)
-    );
-  const differ = w.flatMap((letter, index) => (letter === n[index] ? [] : [index]));
-  return (
-    differ.length === 2 &&
-    differ[1] === differ[0]! + 1 &&
-    w[differ[0]!] === n[differ[1]!] &&
-    w[differ[1]!] === n[differ[0]!]
-  );
-}
-
-/** Vendor-domain labels that say nothing about the vendor. */
-const GENERIC_DOMAIN_LABELS = new Set(["www", "api", "mcp", "app"]);
-
-/**
- * The vendor's own word in a provider domain ("jira" in jira.com, "wisprflow"
- * in api.wisprflow.ai), when it is one word of four or more letters.
- */
-function providerDomainWord(providerDomain: string | undefined): string | undefined {
-  const labels = (providerDomain ?? "").toLowerCase().split(".").filter(Boolean);
-  if (labels.length < 2) return undefined;
-  const label = labels.slice(0, -1).find((part) => !GENERIC_DOMAIN_LABELS.has(part));
-  const words = label ? searchWords(label) : [];
-  return words.length === 1 && words[0]!.length >= 4 ? words[0] : undefined;
-}
-
-/**
- * Whether the query words name an integration: its whole name as words
- * ("Gmail", "Google Calendar"); its name with different spacing or case
- * ("hub spot", "wisprflow" for "Wispr Flow"); a near miss of a long name
- * (see isNearMiss: "whisperflow", "whisper flow"); or the vendor's own word
- * in its provider domain ("jira" for Atlassian at jira.com). A one-word name
- * the ranker reads as an operation ("Send", "Make") names nothing: the query
- * means the verb.
+ * Whether the query names an integration (see integrationMentionsIn). A
+ * one-word name the ranker reads as an operation ("Send", "Make") names
+ * nothing: the query means the verb. With `distinctive`, only a mention that
+ * cannot be an ordinary word counts (see isDistinctiveIntegrationMention).
  */
 function integrationNamedIn(
-  queryWords: readonly string[],
+  query: string,
   integration: { name: string; providerDomain?: string | undefined },
+  distinctive = false,
 ): boolean {
-  const nameWords = searchWords(integration.name);
-  if (!nameWords.length || isOperationWord(integration.name)) return false;
-  if (` ${queryWords.join(" ")} `.includes(` ${nameWords.join(" ")} `)) return true;
-  const compact = nameWords.join("");
-  const domainWord = providerDomainWord(integration.providerDomain);
-  if (
-    domainWord &&
-    domainWord !== compact &&
-    !nameWords.includes(domainWord) &&
-    !isOperationWord(domainWord) &&
-    queryWords.includes(domainWord)
-  )
-    return true;
-  if (Array.from(compact).length < 4) return false;
-  const widest = Math.min(nameWords.length + 1, 4);
-  for (let start = 0; start < queryWords.length; start += 1) {
-    for (let width = 1; width <= widest && start + width <= queryWords.length; width += 1) {
-      const window = queryWords.slice(start, start + width).join("");
-      if (window === compact || isNearMiss(window, compact)) return true;
-    }
-  }
-  return false;
+  if (isOperationWord(integration.name)) return false;
+  const vendorWord = integrationVendorWord(integration.providerDomain);
+  return integrationMentionsIn(query, integration).some(
+    (mention) =>
+      !(mention.kind === "domain" && vendorWord && isOperationWord(vendorWord)) &&
+      (!distinctive || isDistinctiveIntegrationMention(mention, integration.name)),
+  );
 }
 
 /** The integration an installed tool belongs to, as far as the tool says. */
@@ -356,33 +283,39 @@ type IntegrationOwner = { serverId?: string; name: string; providerDomain?: stri
 /**
  * Whether a catalog integration is the one an installed tool belongs to: the
  * same capability as its server, the same name (spacing and case aside), or
- * the same vendor domain.
+ * the same vendor domain with names that agree ("Atlassian (v1)" and
+ * "Atlassian"; not Microsoft Teams and Microsoft Excel).
  */
 function ownsIntegration(owner: IntegrationOwner, integration: ConnectableIntegration): boolean {
   if (owner.serverId === integration.capabilityId) return true;
-  const compact = (text: string) => searchWords(text).join("");
-  if (compact(owner.name) && compact(owner.name) === compact(integration.name)) return true;
-  const domain = (text: string | undefined) => (text ?? "").toLowerCase().replace(/^www\./, "");
+  const ownerName = integrationNameWords(owner.name).join("");
+  const name = integrationNameWords(integration.name).join("");
+  if (!ownerName || !name) return false;
+  if (ownerName === name) return true;
+  const domain = (text: string | undefined) => (text ? registrableHostDomain(text) : null);
+  const ownerDomain = domain(owner.providerDomain);
   return (
-    Boolean(owner.providerDomain) &&
-    domain(owner.providerDomain) === domain(integration.providerDomain)
+    ownerDomain !== null &&
+    ownerDomain === domain(integration.providerDomain) &&
+    (ownerName.startsWith(name) || name.startsWith(ownerName))
   );
 }
 
 /**
- * The catalog matches the query actually names (see integrationNamedIn),
- * never a description hit or a loose spelling resemblance. At most three, in
- * catalog order.
+ * The catalog matches the query names (see integrationNamedIn), at most
+ * three, in catalog order. With `distinctive`, only distinctive mentions
+ * count: the search already matched installed tools strongly, so an ordinary
+ * word that happens to be a name ("close the ticket") must not add a card.
  */
 export function connectableIntegrationsNamedIn(
   query: string,
   matches: readonly ConnectableIntegration[],
+  distinctive = false,
 ): ConnectableIntegration[] {
-  const words = searchWords(query);
   const named: ConnectableIntegration[] = [];
   for (const match of matches) {
     if (
-      integrationNamedIn(words, match) &&
+      integrationNamedIn(query, match, distinctive) &&
       !named.some((n) => n.capabilityId === match.capabilityId)
     )
       named.push(match);
@@ -523,13 +456,35 @@ export function connectableIntegrationsFromCatalogResult(
 
 /** Bounded so a slow catalog read never holds a search result back for long. */
 const CONNECTABLE_LOOKUP_TIMEOUT_MS = 2_000;
+/** How long a search that strongly matched installed tools waits for the catalog. */
+const BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS = 300;
+
+/** The promise's result, or a rejection once the signal aborts, whichever comes first. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  promise.catch(() => undefined);
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
 /**
- * Only the catalog's best matches may be named. A search query is a sentence,
- * and catalog ranking counts its ordinary words too, so a near spelling
- * ("whisperflow") or a vendor-domain word ("jira") can rank below several
- * description hits; whether the query names a match is decided by its words.
+ * Only the catalog's best matches may be named. The catalog ranks entries a
+ * query names above entries that only share its words, so the few it names
+ * come first; a little room past three keeps ordinary-word names ("Box") from
+ * displacing one the query names distinctively.
  */
-const CONNECTABLE_LOOKUP_LIMIT = 10;
+const CONNECTABLE_LOOKUP_LIMIT = 5;
 
 /**
  * Looks a search query up with the harness control server's catalog search,
@@ -1208,17 +1163,16 @@ export class LazyToolRuntime {
     // strongly match without belonging to the named integration (a Slack bot
     // tool for "posts on Slack", meetings_search for "Linear issues") do not
     // stop the lookup; a strong match that is the named integration's own
-    // tool does. The catalog read runs alongside ranking and any decision
-    // model; only the companions wait for it.
+    // tool does. Beside strong matches only a distinctive mention names an
+    // integration, and the search waits for the catalog only briefly. The
+    // catalog read runs alongside ranking and any decision model; only the
+    // companions wait for it.
     const setup = integrationSetupToolNames(pool);
     const owners = this.integrationOwners(strong);
-    const queryWords = searchWords(query);
     const lookup: Promise<ConnectableIntegration[]> =
-      named.length ||
-      setup.length < 2 ||
-      owners.some((owner) => integrationNamedIn(queryWords, owner))
+      named.length || setup.length < 2 || owners.some((owner) => integrationNamedIn(query, owner))
         ? Promise.resolve([])
-        : this.connectableIntegrations(query, owners, signal);
+        : this.connectableIntegrations(query, owners, strong.length > 0, signal);
     // Rejects only on cancellation, which the search itself observes.
     lookup.catch(() => undefined);
     const setupFor = async (chosen: readonly string[]) =>
@@ -1428,15 +1382,28 @@ export class LazyToolRuntime {
   private async connectableIntegrations(
     query: string,
     owners: readonly IntegrationOwner[],
+    besideStrongMatches: boolean,
     signal?: AbortSignal,
   ): Promise<ConnectableIntegration[]> {
     if (!this.connectableLookup) return [];
+    // A search that strongly matched installed tools is otherwise ready at
+    // once, so it waits for the catalog only briefly, whether or not the
+    // lookup observes its signal.
+    const bounded = besideStrongMatches
+      ? signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS)])
+        : AbortSignal.timeout(BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS)
+      : signal;
     try {
+      const lookup = this.connectableLookup(query, bounded);
+      const matches =
+        bounded && bounded !== signal ? await untilAborted(lookup, bounded) : await lookup;
       return connectableIntegrationsNamedIn(
         query,
-        (await this.connectableLookup(query, signal)).filter(
+        matches.filter(
           (integration) => !owners.some((owner) => ownsIntegration(owner, integration)),
         ),
+        besideStrongMatches,
       );
     } catch {
       // Cancellation belongs to the owning turn; any other failure only means
