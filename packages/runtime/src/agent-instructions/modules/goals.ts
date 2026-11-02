@@ -29,7 +29,7 @@ const GOAL_COMPLETION_UNAVAILABLE =
   "Saying or verifying that the work is done does not complete the goal, and this session has no goal-completion tool: report the outcome instead of claiming the goal is complete.";
 
 const GOAL_PAUSE_JUDGMENT =
-  "A definitive missing permission or required human decision can justify an immediate goal pause with evidence and the change needed to resume. Work already in flight or a meaningful timed recheck calls for the available waiting mechanism, not a goal pause.";
+  "A definitive missing permission or required human decision can justify an immediate goal pause with evidence and the change needed to resume. Before pausing because the task seems infeasible, data seems missing or a result cannot be verified, try the plausible in-scope alternatives and name the ones you tried in the rationale. Work already in flight or a meaningful timed recheck calls for the available waiting mechanism, not a goal pause.";
 
 const GOAL_TOOLS = [
   "goal_set",

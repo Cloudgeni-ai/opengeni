@@ -215,7 +215,10 @@ A goal is `active`, `paused`, or `completed`.
   remain deliverable. The marker records missing answer delivery, not success
   of the requested output.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
-  replaced.
+  replaced. A missing permission or required human decision justifies an
+  immediate pause. Before pausing because the task seems infeasible, data
+  seems missing or a result cannot be verified, the agent tries the plausible
+  in-scope alternatives and names the ones it tried in the rationale.
 - `goal_resume {}` reactivates any paused goal regardless of pause actor or
   reason, preserves its objective, resets continuation counters, and arms its
   durable wake. Already-active calls succeed unchanged. Existing sessions with

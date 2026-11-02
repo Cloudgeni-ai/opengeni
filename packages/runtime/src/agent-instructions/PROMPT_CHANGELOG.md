@@ -19,10 +19,20 @@ get that sentence. The goal tool schemas drop the spacing and ledger
 boilerplate each text field repeated; each tool description states that rule
 once, and the schemas still enforce the byte limits.
 
+Goal pauses name what was tried. The goals module's pause sentence gains one
+sentence (about 200 bytes): before pausing because the task seems infeasible,
+data seems missing or a result cannot be verified, try the plausible in-scope
+alternatives and name the ones you tried in the rationale. A definitive
+missing permission or required human decision still justifies an immediate
+pause. The `goal_pause` tool description and the goal continuation's blocked
+audit say the same, and `wait_for_input`'s description is shortened without
+dropping any rule.
+
 ```diff
 - After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link.
 + Put the requested answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends the turn, so call goal_complete on its own once you have seen your last results.
 + Without a reply, finish the same turn with that answer after goal_complete succeeds.
++ Before pausing because the task seems infeasible, data seems missing or a result cannot be verified, try the plausible in-scope alternatives and name the ones you tried in the rationale.
 ```
 
 The agent knows both GitHub identities. When personal GitHub sign-in is
