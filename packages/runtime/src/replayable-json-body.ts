@@ -3,6 +3,11 @@ import type { APIPromise } from "openai/core/api-promise";
 import { types as utilTypes } from "node:util";
 import { hasResponsesTurn, markResponsesPrefixReady } from "@opengeni/network/responses-websocket";
 import {
+  createJsonSafeSummary,
+  createJsonSafeWarning,
+  toJsonSafeValue,
+} from "@opengeni/contracts/json-safe";
+import {
   rethrowModelTransportAdmissionRefusal,
   sdkModelTransportAdmissionFetch,
 } from "./model-preparation-diagnostics";
@@ -320,7 +325,8 @@ function jsonValueFragments(
     return null;
   }
   if (typeof value === "bigint") {
-    throw new TypeError("Do not know how to serialize a BigInt");
+    // JSON.stringify would throw; the request carries the converted value.
+    return [JSON.stringify(convertedRequestValue(value, key))];
   }
   if (typeof value === "string") {
     return jsonStringFragments(value);
@@ -331,7 +337,10 @@ function jsonValueFragments(
 
   const rawJson = JSON as typeof JSON & { isRawJSON?: (candidate: unknown) => boolean };
   if (rawJson.isRawJSON?.(value)) return [JSON.stringify(value)];
-  if (ancestors.has(value)) throw new TypeError("cyclic object value");
+  if (ancestors.has(value)) {
+    warnModelRequestAdjusted({ key: "[*]" }, { count: 1, kinds: { cycle: 1 }, paths: [] });
+    return ["null"];
+  }
   return Array.isArray(value)
     ? jsonArrayFragments(value, ancestors, depth)
     : jsonObjectFragments(value as Record<string, unknown>, ancestors, depth);
@@ -386,13 +395,32 @@ function* jsonObjectFragments(
 function nativeJsonPropertyFragments(source: unknown, key: string): Iterable<string> | null {
   const holder = Object.create(null) as Record<string, unknown>;
   holder[key] = source;
-  const serialized = JSON.stringify(holder);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(holder);
+  } catch {
+    // A bigint, a cycle or a throwing toJSON in this item. The rest of the
+    // request keeps native output; this item carries its converted value.
+    holder[key] = convertedRequestValue(source, key);
+    serialized = JSON.stringify(holder);
+  }
   if (serialized === "{}") return null;
   const prefix = `{${JSON.stringify(key)}:`;
   if (!serialized.startsWith(prefix) || !serialized.endsWith("}")) {
     throw new TypeError("Model request body is not JSON serializable");
   }
   return boundedNativeJsonFragments(serialized.slice(prefix.length, -1));
+}
+
+const warnModelRequestAdjusted = createJsonSafeWarning("Model request value adjusted");
+
+/** A value the native serializer refused, converted as `toJsonSafeValue` does and logged. */
+function convertedRequestValue(value: unknown, key: string): unknown {
+  const summary = createJsonSafeSummary();
+  const converted = toJsonSafeValue(value, { onAdjustment: summary.onAdjustment });
+  const adjusted = summary.result();
+  if (adjusted) warnModelRequestAdjusted({ key: /^\d+$/.test(key) ? "[n]" : "[*]" }, adjusted);
+  return converted;
 }
 
 function* boundedNativeJsonFragments(serialized: string): Generator<string> {

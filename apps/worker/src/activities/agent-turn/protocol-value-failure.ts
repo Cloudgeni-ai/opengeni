@@ -30,9 +30,12 @@ export function unsupportedProtocolValueFailure(rejection: Error | null): {
   };
 }
 
-/** `JSON.stringify` refusals in JavaScriptCore (Bun) and V8. */
+/**
+ * `JSON.stringify` refusals in JavaScriptCore (Bun) and V8, and the model
+ * request serializer's own refusals.
+ */
 const JSON_STRINGIFY_REFUSAL =
-  /^(?:JSON\.stringify cannot serialize (?:BigInt|cyclic structures)\.|Do not know how to serialize a BigInt|Converting circular structure to JSON)/;
+  /^(?:JSON\.stringify cannot serialize (?:BigInt|cyclic structures)\.|Do not know how to serialize a BigInt|Converting circular structure to JSON|cyclic object value|Model request body is not JSON serializable)/;
 
 /**
  * A `JSON.stringify` refusal, or a refusal by the database's canonical JSON

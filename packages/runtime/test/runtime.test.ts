@@ -9070,9 +9070,14 @@ describe("runtime event normalization", () => {
       },
       [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { retained: true },
     });
-    await expect(runOnce("normalized-invalid")).rejects.toThrow(
-      "customDataExtractor must return an object or null.",
-    );
+    // An extractor that returns a non-object loses its custom data; the tool
+    // call and the run still succeed.
+    const invalid = await runOnce("normalized-invalid");
+    expect(invalid?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+        content: [{ type: "text", text: "content" }],
+      },
+    });
   });
 
   test("a prefixed inner extractor mirrors the SDK sparse-array JSON boundary", async () => {

@@ -906,12 +906,9 @@ describe("turn exact-content boundaries", () => {
         arguments: "{}",
         providerData: { values: ["ok", null] },
       });
-      expect(warn).toHaveBeenCalledWith("Protocol JSON value adjusted", {
-        rootPath: '$["item"]["rawItem"]',
-        count: 1,
-        kinds: { undefined: 1 },
-        paths: ['$["item"]["rawItem"]["providerData"]["values"][1]'],
-      });
+      // An undefined element becomes null exactly as JSON.stringify does, so
+      // nothing JSON can carry is lost and nothing is logged.
+      expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
     }

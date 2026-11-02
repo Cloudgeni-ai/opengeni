@@ -1,5 +1,6 @@
 import {
-  summarizeJsonSafeAdjustments,
+  createJsonSafeSummary,
+  createJsonSafeWarning,
   toJsonSafeValue,
   type JsonSafeAdjustment,
 } from "@opengeni/contracts/json-safe";
@@ -36,9 +37,11 @@ export class UnsupportedProtocolJsonValueError extends TypeError {
  *
  * A value that JSON cannot carry never fails the caller: it is converted or
  * dropped as `JSON.stringify` would (see `toJsonSafeValue`), and each change
- * is logged with its path. Absent optional properties (`undefined`) are
- * omitted silently, as on every JSON wire. Inputs are never mutated;
- * already-valid graphs retain their references.
+ * is logged with its kind and a redacted path, never the value, at most once a
+ * minute for the same root and kinds. Changes that lose nothing JSON carries
+ * (an absent optional property, `-0`, a request-local symbol-keyed mark) are
+ * not logged. Inputs are never mutated; already-valid graphs retain their
+ * references.
  */
 export function normalizeProtocolJsonValue<T>(
   value: T,
@@ -48,17 +51,11 @@ export function normalizeProtocolJsonValue<T>(
   if (options.onAdjustment) {
     return toJsonSafeValue(value, { rootPath, onAdjustment: options.onAdjustment });
   }
-  const adjustments: JsonSafeAdjustment[] = [];
-  const normalized = toJsonSafeValue(value, {
-    rootPath,
-    onAdjustment: (adjustment) => adjustments.push(adjustment),
-  });
-  if (adjustments.length > 0) {
-    // Paths and kinds only: never the values, which may be private.
-    console.warn("Protocol JSON value adjusted", {
-      rootPath,
-      ...summarizeJsonSafeAdjustments(adjustments),
-    });
-  }
+  const summary = createJsonSafeSummary();
+  const normalized = toJsonSafeValue(value, { rootPath, onAdjustment: summary.onAdjustment });
+  const adjusted = summary.result();
+  if (adjusted) warnProtocolJsonAdjusted({ rootPath }, adjusted);
   return normalized;
 }
+
+const warnProtocolJsonAdjusted = createJsonSafeWarning("Protocol JSON value adjusted");

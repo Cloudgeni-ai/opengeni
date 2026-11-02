@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { toJsonSafeValue } from "@opengeni/contracts/json-safe";
 import { fingerprint, hostileGraph, isStrictJson } from "../../contracts/test/hostile-values";
+import { estimateSerializedValueTokens } from "../src/context-compaction";
+import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
+import { functionCallResultItem } from "../src/open-suffix";
 import { normalizeSdkEvent, serializeApprovals } from "../src/run-events";
 import { sandboxStateEntryFromRunState } from "../src/sandbox";
 
@@ -77,6 +80,67 @@ describe("runtime protocol JSON boundaries with hostile values", () => {
       expect(entry).not.toBeNull();
       expect(isStrictJson(entry)).toBe(true);
     }
+  });
+
+  test("a resumed tool result becomes model text", () => {
+    for (const seed of seeds) {
+      const graph = hostileGraph(seed);
+      const item = functionCallResultItem({ callId: "c", name: "tool", output: graph.value });
+      const text = (item.output as { text: string }).text;
+      expect(typeof text).toBe("string");
+      // The native serializer's text where it succeeds, the converted value's otherwise.
+      expect(() => JSON.parse(text)).not.toThrow();
+    }
+    const cyclic: Record<string, unknown> = { big: 2n };
+    cyclic.self = cyclic;
+    const item = functionCallResultItem({ callId: "c", name: "tool", output: cyclic });
+    expect(JSON.parse((item.output as { text: string }).text)).toEqual({ big: 2, self: null });
+  });
+
+  test("token estimates of values JSON cannot carry", () => {
+    for (const seed of seeds) {
+      const estimate = estimateSerializedValueTokens(hostileGraph(seed).value);
+      expect(Number.isFinite(estimate)).toBe(true);
+    }
+    const cyclic: Record<string, unknown> = { big: 2n };
+    cyclic.self = cyclic;
+    expect(estimateSerializedValueTokens(cyclic)).toBeGreaterThan(0);
+    expect(Number.isFinite(estimateSerializedValueTokens(undefined))).toBe(true);
+  });
+
+  test("an MCP tool result", async () => {
+    for (const seed of seeds) {
+      const graph = hostileGraph(seed);
+      const bridge = new McpResultCustomDataBridge();
+      const result = await bridge.captureResult(null, async () => ({
+        content: [{ type: "text", text: "ok", extra: graph.value }],
+        structuredContent: { value: graph.value },
+        _meta: { [Symbol("mark")]: true, at: new Date(0) },
+      }));
+      expect(isStrictJson(result)).toBe(true);
+    }
+    // A value the schema refuses even after conversion is kept as text.
+    class Stringly {
+      toJSON() {
+        return "not an object";
+      }
+    }
+    const bridge = new McpResultCustomDataBridge();
+    const result = await bridge.captureResult(null, async () => ({
+      content: [{ type: "text", text: "ok" }],
+      structuredContent: new Stringly(),
+    }));
+    expect(result).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            content: [{ type: "text", text: "ok" }],
+            structuredContent: "not an object",
+          }),
+        },
+      ],
+    });
   });
 
   test("the adjustment log names paths and kinds, never values", () => {

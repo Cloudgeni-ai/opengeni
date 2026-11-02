@@ -40,6 +40,7 @@ import {
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
+import { toJsonSafeValue } from "@opengeni/contracts/json-safe";
 import {
   isHostedSearchEvidenceRecord,
   projectHostedSearchEvidence,
@@ -1033,11 +1034,16 @@ export function estimateSerializedValueTokens(value: unknown): number {
 }
 
 function materializedJson(value: unknown): string {
-  const serialized = JSON.stringify(value);
-  if (serialized === undefined) {
-    throw new TypeError("value has no JSON representation");
+  // A token estimate must never fail a turn: a value the native serializer
+  // refuses (bigint, cycle, throwing toJSON) is estimated from its converted
+  // JSON-safe form instead.
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    serialized = JSON.stringify(toJsonSafeValue(value));
   }
-  return serialized;
+  return serialized ?? "null";
 }
 
 export type CompleteModelInputFootprint = {

@@ -217,16 +217,28 @@ describe("lossless PostgreSQL content boundaries", () => {
         [arrayWithExtraProperty, ["safe\u0000value"], "array_property"],
         [arrayWithHiddenProperty, ["safe"], "array_property"],
         [{ [Symbol("mark")]: 1, kept: 1 }, { kept: 1 }, "symbol_key"],
+        [
+          Object.defineProperty([1, 2], 0, { value: 1, enumerable: false }),
+          [1, 2],
+          "array_property",
+        ],
       ];
-      for (const [value, expected, kind] of cases) {
+      const loggedKinds = new Set<string>();
+      for (const [value, expected] of cases) {
         warn.mockClear();
         const encoded = toPostgresLosslessJson(value);
         // The stored form still carries PostgreSQL-unsafe strings losslessly.
         expect(fromPostgresLosslessJson(encoded, LOSSLESS_CONTENT_CODEC_VERSION)).toEqual(expected);
-        expect(warn).toHaveBeenCalledTimes(1);
-        const [message, summary] = warn.mock.calls[0]! as [string, { kinds: object }];
-        expect(message).toBe("Canonical JSON value adjusted");
-        expect(Object.keys(summary.kinds)).toContain(kind);
+        for (const [message, summary] of warn.mock.calls as Array<[string, { kinds: object }]>) {
+          expect(message).toBe("Canonical JSON value adjusted");
+          for (const kind of Object.keys(summary.kinds)) loggedKinds.add(kind);
+        }
+      }
+      // Each lossy change is logged (repeats of the same kinds are rate
+      // limited); a request-local symbol-keyed mark alone is not.
+      for (const [, , kind] of cases) {
+        if (kind === "symbol_key") expect(loggedKinds.has(kind)).toBe(false);
+        else expect(loggedKinds.has(kind)).toBe(true);
       }
       expect(getter).not.toHaveBeenCalled();
     } finally {

@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { runInNewContext } from "node:vm";
 import {
+  createJsonSafeSummary,
+  createJsonSafeWarning,
   JSON_SAFE_MAX_DEPTH,
+  redactPath,
   summarizeJsonSafeAdjustments,
   toJsonSafeValue,
   type JsonSafeAdjustment,
@@ -196,6 +199,96 @@ describe("toJsonSafeValue", () => {
       kinds: { "error:Error": 4, bigint: 3 },
       paths: ["$[0]", "$[1]", "$[2]", "$[3]", "$[4]"],
     });
+  });
+
+  test("a non-enumerable array element is kept and marks the array changed", () => {
+    const array = Object.defineProperty([1, 2], 0, { value: 1, enumerable: false });
+    const { result } = convert({ array });
+    expect(result).toEqual({ array: [1, 2] });
+    expect((result as { array: unknown }).array).not.toBe(array);
+    expect(
+      Object.getOwnPropertyDescriptor((result as { array: unknown[] }).array, 0)?.enumerable,
+    ).toBe(true);
+  });
+
+  test("a proxy whose traps fail on a later read is converted once, without throwing", () => {
+    let reads = 0;
+    const stateful = new Proxy(
+      { a: 1 },
+      {
+        ownKeys(target) {
+          reads += 1;
+          if (reads > 1) throw new Error("trap");
+          return Reflect.ownKeys(target);
+        },
+      },
+    );
+    const first = toJsonSafeValue({ stateful }, { copy: true });
+    expect(JSON.parse(JSON.stringify(first))).toEqual(first);
+    // The second read fails; it still converts instead of throwing.
+    expect(toJsonSafeValue({ stateful } as unknown, { copy: true })).toEqual({ stateful: null });
+  });
+
+  test("Errors, Maps and Sets from another realm keep their content", () => {
+    const { result } = convert({
+      error: runInNewContext('Object.assign(new Error("foreign"), { code: "E_F" })'),
+      map: runInNewContext('new Map([["k", 1]])'),
+      set: runInNewContext("new Set([1, 2])"),
+    });
+    const converted = result as { error: Record<string, unknown>; map: unknown; set: unknown };
+    expect(converted.error.message).toBe("foreign");
+    expect(converted.error.code).toBe("E_F");
+    expect(converted.map).toEqual(toJsonSafeValue(new Map([["k", 1]])));
+    expect(converted.set).toEqual(toJsonSafeValue(new Set([1, 2])));
+  });
+
+  test("a deep graph of shared references converts in linear time", () => {
+    let node: Record<string, unknown> = { leaf: () => "function" };
+    for (let level = 0; level < 30; level += 1) node = { left: node, right: node };
+    const summary = createJsonSafeSummary();
+    const started = performance.now();
+    const result = toJsonSafeValue(node, { onAdjustment: summary.onAdjustment });
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(summary.result()?.count).toBe(1);
+    // Sharing is kept (walking the result as a tree would take 2^30 steps).
+    let current = result as Record<string, unknown>;
+    for (let level = 0; level < 30; level += 1) {
+      expect(current.left).toBe(current.right);
+      current = current.left as Record<string, unknown>;
+    }
+    expect(current).toEqual({});
+  });
+
+  test("logged paths keep identifier keys and indices and hide other keys", () => {
+    expect(redactPath('$["alice@example.com"]["ssn"][3]')).toBe('$[*]["ssn"][3]');
+    const summary = createJsonSafeSummary();
+    toJsonSafeValue({ "file name.txt": { size: 1n } }, { onAdjustment: summary.onAdjustment });
+    expect(summary.result()).toEqual({
+      count: 1,
+      kinds: { bigint: 1 },
+      paths: ['$[*]["size"]'],
+    });
+  });
+
+  test("quiet adjustments alone produce no summary", () => {
+    const summary = createJsonSafeSummary();
+    toJsonSafeValue(
+      { a: undefined, b: -0, [Symbol("mark")]: true },
+      { onAdjustment: summary.onAdjustment },
+    );
+    expect(summary.result()).toBeNull();
+  });
+
+  test("warnings are rate limited per context and kinds", () => {
+    const lines: object[] = [];
+    const warn = createJsonSafeWarning("adjusted", {
+      warn: (_message, detail) => lines.push(detail),
+    });
+    const summary = { count: 1, kinds: { bigint: 1 }, paths: ["$"] };
+    warn({ rootPath: "$" }, summary);
+    warn({ rootPath: "$" }, summary);
+    warn({ rootPath: "$.other" }, summary);
+    expect(lines.length).toBe(2);
   });
 });
 

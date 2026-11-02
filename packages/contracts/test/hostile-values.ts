@@ -85,6 +85,10 @@ export function hostileGraph(seed: number, maxDepth = 6): HostileGraph {
         },
       }),
       () => runInNewContext('({ foreign: { realm: [1, "two"] } })'),
+      () => runInNewContext('new Error("foreign error")'),
+      () => runInNewContext('new Map([["foreign", 1]])'),
+      () => runInNewContext("new Set([1, 2])"),
+      () => Object.defineProperty([1, 2], 0, { value: "hidden element", enumerable: false }),
       () => Object.assign(Object.create(null), { bare: true }),
     ])();
 
