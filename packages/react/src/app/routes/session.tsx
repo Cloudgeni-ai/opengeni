@@ -1117,14 +1117,15 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
   const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
-  // The account whose card in this chat opened the reconnect: once it is done,
-  // the agent continues the request that stopped, as after a first setup.
-  const reconnectCardConnection = useRef<string | null>(null);
+  // The account whose card in this chat opened each reconnect: once it is
+  // done, the agent continues the request that stopped, as after a first
+  // setup. Kept per request, since a reconnect can finish after its dialog
+  // closed and another one opened.
+  const reconnectCardConnections = useRef(new WeakMap<NativeConnectRequest, string>());
   // Workspace GitHub App setup from the follow-up repository menu uses this
   // route-level Connect dialog: the menu closes when GitHub's authorization
   // popup takes focus, which would unmount a dialog hosted inside it.
   const connectGitHubApp = useCallback(() => {
-    reconnectCardConnection.current = null;
     setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href()));
   }, [page, reconnectTransport, workspaceId]);
   const connectPersonalGitHub = context.connectPersonalGitHub;
@@ -1153,8 +1154,7 @@ export function SessionRoute({
           item.connectionId,
         );
         if (account) {
-          reconnectCardConnection.current = item.connectionId;
-          setReconnectRequest({
+          const request: NativeConnectRequest = {
             scope: { workspaceId, transport: reconnectTransport },
             providerId: account.providerId,
             ownership: account.ownership,
@@ -1170,7 +1170,9 @@ export function SessionRoute({
             displayName: account.label,
             returnUrl: page.href(),
             idempotencyKey: crypto.randomUUID(),
-          });
+          };
+          reconnectCardConnections.current.set(request, item.connectionId);
+          setReconnectRequest(request);
           return;
         }
       }
@@ -1574,7 +1576,8 @@ export function SessionRoute({
             request={reconnectRequest}
             onClose={() => setReconnectRequest(null)}
             onComplete={() => {
-              setReconnectRequest(null);
+              // Setup can finish after its dialog closed: leave a newer one open.
+              setReconnectRequest((current) => (current === reconnectRequest ? null : current));
               if (reconnectRequest.providerId === "github-app") {
                 toast.success("GitHub connected");
                 void context.refreshGitHub(workspaceId, undefined, {
@@ -1587,8 +1590,7 @@ export function SessionRoute({
               // server checks the account now has what its card asked for,
               // wakes the agent at most once per card, and not at all once
               // the person has written since. Never fails the finished setup.
-              const connectionId = reconnectCardConnection.current;
-              reconnectCardConnection.current = null;
+              const connectionId = reconnectCardConnections.current.get(reconnectRequest);
               if (connectionId)
                 void Promise.resolve()
                   .then(() =>
