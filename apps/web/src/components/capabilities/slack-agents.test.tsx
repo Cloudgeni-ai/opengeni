@@ -765,22 +765,26 @@ describe("Slack agent form", () => {
   });
 
   const OPEN_DISCLOSURE =
-    "Anyone in Slack can ask Data team. Its answers can use anything it can read in the Platform workspace (Knowledge, files, chats, shared connections). What people tell it is visible to that workspace's members.";
+    "People in your organization can ask Data team after linking their Slack account, even without access to the Platform workspace. Its answers can use anything it can read there (Knowledge, files, chats, shared connections). What people tell it is visible to that workspace's members.";
+  const NARROWED_NOTICE =
+    "Changed: only organization members who linked their Slack account can use it now. Everyone else is asked to link or told why not.";
 
   function openSwitch(host: HTMLElement) {
     const label = [...host.querySelectorAll("label")].find(
-      (candidate) => candidate.textContent === "Anyone in Slack can use this agent",
+      (candidate) => candidate.textContent === "Organization members can use this agent in Slack",
     );
     if (!label) throw new Error("Missing open switch");
     return host.querySelector<HTMLElement>(`#${CSS.escape(label.htmlFor)}`)!;
   }
 
-  test("an organization admin opens an agent to anyone in Slack, seeing what that means", async () => {
+  test("an organization admin opens an agent to the organization in Slack, seeing what that means", async () => {
     const existing = agent();
     const updateOpenGeniSlackAgent = mock(async () => ({ agent: { ...existing, open: true } }));
     setContext({ updateOpenGeniSlackAgent }, true);
     const view = await render(<SlackAgentFormPage {...form({ agent: existing })} />);
     expect(view.host.textContent).toContain(OPEN_DISCLOSURE);
+    // The change notice is for agents that are open now.
+    expect(view.host.textContent).not.toContain(NARROWED_NOTICE);
     const control = openSwitch(view.host);
     expect(
       control.hasAttribute("disabled") || control.getAttribute("aria-disabled") === "true",
@@ -809,6 +813,8 @@ describe("Slack agent form", () => {
     setContext({ updateOpenGeniSlackAgent });
     const view = await render(<SlackAgentFormPage {...form({ agent: existing })} />);
     expect(view.host.textContent).toContain(OPEN_DISCLOSURE);
+    // An open agent says who can use it now.
+    expect(view.host.textContent).toContain(NARROWED_NOTICE);
     await act(async () => openSwitch(view.host).click());
     await submit(view.host);
     expect(updateOpenGeniSlackAgent).toHaveBeenCalledWith(WORKSPACE_ID, existing.id, {

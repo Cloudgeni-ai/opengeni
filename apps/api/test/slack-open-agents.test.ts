@@ -9,10 +9,13 @@ import {
   OPEN_SLACK_AGENT_GRANT_PERMISSIONS,
   openSlackAgentGrant,
   openSlackAgentIdFromSubject,
+  openSlackAgentPersonRefusal,
   openSlackAgentRefusal,
   openSlackAgentSessionOptions,
   openSlackAgentSubjectId,
   renderSlackOpenAgentStartLine,
+  slackOpenAgentLinkRequiredText,
+  slackOpenAgentOrganizationMembersOnlyText,
   type OpenSlackAgentAskerFacts,
 } from "../src/integrations/slack-open-agents";
 import {
@@ -81,6 +84,29 @@ describe("who may ask an open agent", () => {
   });
 });
 
+describe("who Opengeni lets ask an open agent", () => {
+  test("a linked account of an active, full member of the organization", () => {
+    expect(
+      openSlackAgentPersonRefusal({ linkedSubjectId: "user:ada", organizationMember: true }),
+    ).toBeNull();
+  });
+
+  test("an unlinked Slack account is asked to link, whatever else is true", () => {
+    expect(
+      openSlackAgentPersonRefusal({ linkedSubjectId: null, organizationMember: true }),
+    ).toBe("not_linked");
+    expect(
+      openSlackAgentPersonRefusal({ linkedSubjectId: null, organizationMember: false }),
+    ).toBe("not_linked");
+  });
+
+  test("a linked person who isn't an active, full member is refused", () => {
+    expect(
+      openSlackAgentPersonRefusal({ linkedSubjectId: "user:ada", organizationMember: false }),
+    ).toBe("not_organization_member");
+  });
+});
+
 describe("an open chat's grant", () => {
   const agent = {
     id: "0b6f8a8e-3f43-4d8e-8f4d-5d1a2c7d9e10",
@@ -93,6 +119,7 @@ describe("an open chat's grant", () => {
     slackUserId: "U-ASKER",
     slackChannelId: "C-1",
     providerEventId: "Ev1",
+    opengeniSubjectId: "user:ada",
   });
 
   test("is the agent's service principal, recording who asked", () => {
@@ -101,14 +128,20 @@ describe("an open chat's grant", () => {
       principalKind: "service",
       permissionMode: "explicit",
       serviceInitiator: { kind: "service", subjectId: `slack-agent:${agent.id}` },
-      serviceInitiatorContext: { slackUserId: "U-ASKER", slackTeamId: TEAM },
+      serviceInitiatorContext: {
+        slackUserId: "U-ASKER",
+        slackTeamId: TEAM,
+        opengeniSubjectId: "user:ada",
+      },
     });
+    // The person is context only: the grant names the agent, never them.
+    expect(grant.subjectId).not.toBe("user:ada");
     expect(openSlackAgentIdFromSubject(grant.subjectId)).toBe(agent.id);
     expect(openSlackAgentIdFromSubject("user:someone")).toBeNull();
     expect(openSlackAgentSubjectId(agent.id)).toBe(grant.subjectId);
   });
 
-  test("can never use a personal connection", () => {
+  test("can never use a personal connection, even though it names the asker", () => {
     expect(personalConnectionDelegationSourceForGrant(grant)).toEqual({ kind: "none" });
   });
 
@@ -134,9 +167,20 @@ describe("an open chat's grant", () => {
 describe("copy", () => {
   test("the switch's disclosure", () => {
     expect(slackAgentOpenDisclosure("Front Desk", "Support")).toBe(
-      "Anyone in Slack can ask Front Desk. Its answers can use anything it can read in the Support workspace (Knowledge, files, chats, shared connections). What people tell it is visible to that workspace's members.",
+      "People in your organization can ask Front Desk after linking their Slack account, even without access to the Support workspace. Its answers can use anything it can read there (Knowledge, files, chats, shared connections). What people tell it is visible to that workspace's members.",
     );
-    expect(slackAgentOpenDisclosure("Front Desk", " ")).toContain("can read in its workspace (");
+    expect(slackAgentOpenDisclosure("Front Desk", " ")).toContain(
+      "even without access to its workspace.",
+    );
+  });
+
+  test("the replies to people it can't take: one action each", () => {
+    expect(slackOpenAgentLinkRequiredText("Front Desk", "https://app.example.test/link")).toBe(
+      "To ask Front Desk, link your Slack account to Opengeni: https://app.example.test/link. No chat was started.",
+    );
+    expect(slackOpenAgentOrganizationMembersOnlyText("Front Desk")).toBe(
+      "Front Desk only answers members of this Opengeni organization. No chat was started.",
+    );
   });
 
   test("the first message has no link, and the notice only once", () => {

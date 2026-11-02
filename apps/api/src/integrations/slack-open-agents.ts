@@ -1,17 +1,28 @@
 /**
- * Open Slack agents: an agent an organization admin opened to anyone in Slack.
+ * Open Slack agents: an agent an organization admin opened to the
+ * organization's people in Slack.
  *
  * Members of the agent's workspace keep using it as themselves, exactly as
- * before. Anyone else in the Slack workspace (never a guest, an external
- * Slack Connect user or a bot) gets a chat that runs as the agent itself: a
- * server-minted service principal `slack-agent:<agentId>` in the agent's
- * workspace. That principal is nobody's identity, so:
+ * before. Anyone else may ask it only when, on every message:
+ *
+ * - Slack says they are a full member of the installation's own team (never a
+ *   guest, an external Slack Connect user, a bot or a deleted user), in a
+ *   conversation only that team can see (not shared, externally shared or a
+ *   group DM);
+ * - their Slack account is linked to Opengeni (`slack_bot_user_links`); and
+ * - the linked person is an active, full member of the installation's
+ *   Opengeni organization.
+ *
+ * They get a chat that runs as the agent itself: a server-minted service
+ * principal `slack-agent:<agentId>` in the agent's workspace. That principal
+ * is nobody's identity, so:
  *
  * - Personal connections are unreachable: a service grant is never a
  *   personal-connection delegation source
  *   (`personalConnectionDelegationSourceForGrant` returns `none`), so the chat
  *   freezes no personal delegation and no turn names a person whose accounts
  *   could be used. Only workspace-owned and workspace-shared connections apply.
+ *   The linked person's Opengeni id is recorded as context only.
  * - It holds a small, fixed permission set and tool list: reads of the
  *   workspace's Knowledge, files, artifacts and shared connections, and its
  *   own chat. No secrets, no schedules, no Knowledge or instruction writes, no
@@ -139,6 +150,11 @@ export type OpenSlackAgentAsker = {
   slackUserId: string;
   slackChannelId: string;
   providerEventId: string;
+  /**
+   * The Opengeni person the Slack account is linked to. Recorded as context
+   * only: the chat never acts as them or uses their connections.
+   */
+  opengeniSubjectId: string;
 };
 
 /**
@@ -167,6 +183,7 @@ export function openSlackAgentGrant(
       slackUserId: asker.slackUserId,
       slackChannelId: asker.slackChannelId,
       slackEventId: asker.providerEventId.slice(0, 256),
+      opengeniSubjectId: asker.opengeniSubjectId.slice(0, 1024),
     },
   };
 }
@@ -225,6 +242,23 @@ export function openSlackAgentRefusal(
   return null;
 }
 
+/** Why a person Slack lets ask cannot ask as far as Opengeni knows them, or null. */
+export type OpenSlackAgentPersonRefusal = "not_linked" | "not_organization_member";
+
+/**
+ * The Opengeni half of who may ask an open agent: the Slack account is linked
+ * to someone who is an active, full member of the installation's organization
+ * (both read live by the caller on every message).
+ */
+export function openSlackAgentPersonRefusal(input: {
+  linkedSubjectId: string | null;
+  organizationMember: boolean;
+}): OpenSlackAgentPersonRefusal | null {
+  if (!input.linkedSubjectId) return "not_linked";
+  if (!input.organizationMember) return "not_organization_member";
+  return null;
+}
+
 /** Slack trigger kinds that can start or continue an open agent's chat. */
 export const OPEN_SLACK_AGENT_TRIGGER_KINDS: ReadonlySet<string> = new Set([
   "app_mention",
@@ -256,6 +290,16 @@ export function slackOpenAgentNoticeText(agentName: string, workspaceName: strin
   return `_What you tell ${escapeSlackMrkdwn(agentName)} is visible to ${where}._`;
 }
 
+/** The private reply to someone whose Slack account isn't linked to Opengeni. */
+export function slackOpenAgentLinkRequiredText(agentName: string, linkUrl: string): string {
+  return `To ask ${agentName}, link your Slack account to Opengeni: ${linkUrl}. No chat was started.`;
+}
+
+/** The private reply to a linked person who isn't an active member of the organization. */
+export function slackOpenAgentOrganizationMembersOnlyText(agentName: string): string {
+  return `${agentName} only answers members of this Opengeni organization. No chat was started.`;
+}
+
 /** The private reply to a guest, an external user or a bot. */
 export function slackOpenAgentNotEligibleText(agentName: string): string {
   return `${agentName} doesn't take requests from guests or people outside this Slack workspace. No chat was started.`;
@@ -277,7 +321,7 @@ export function slackOpenAgentMembersOnlyThreadText(
 
 /** The private reply in an open chat whose agent is no longer open, or gone. */
 export function slackOpenAgentClosedThreadText(agentName: string | null): string {
-  return `${agentName ?? "This agent"} no longer answers everyone in Slack, so this chat can't continue. Start a new message to ask again.`;
+  return `${agentName ?? "This agent"} no longer answers people outside its workspace, so this chat can't continue. Start a new message to ask again.`;
 }
 
 /**
@@ -291,7 +335,7 @@ export function slackOpenAgentMentionOnlyThreadText(agentName: string): string {
 /** What an open chat's agent is told, after its ordinary agent instructions. */
 export function slackOpenAgentSessionInstructions(workspaceName: string | null): string {
   const workspace = workspaceName ? `the ${workspaceName} workspace` : "this workspace";
-  return `People outside ${workspace} can ask you in Slack. In this chat you act as yourself, not as the person asking: you can read what ${workspace} shares (its Knowledge, files and shared connections), never anyone's personal accounts, and nobody can approve actions or answer questions during the chat. Do what you can; for anything that needs approval or a member's access, say what is left and that a member of ${workspace} can help. Never reveal credentials. What people tell you here is visible to the workspace's members.`;
+  return `Members of the organization outside ${workspace} can ask you in Slack. In this chat you act as yourself, not as the person asking: you can read what ${workspace} shares (its Knowledge, files and shared connections), never anyone's personal accounts, and nobody can approve actions or answer questions during the chat. Do what you can; for anything that needs approval or a member's access, say what is left and that a member of ${workspace} can help. Never reveal credentials. What people tell you here is visible to the workspace's members.`;
 }
 
 /** The whole agent part of an open chat's instructions. */

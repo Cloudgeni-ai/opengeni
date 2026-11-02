@@ -15,6 +15,7 @@ import {
   type ComponentProps,
   type ReactNode,
 } from "react";
+import { CircleCheckIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/common";
@@ -111,6 +112,24 @@ export function SlackLinkAccessRequiredDescription({ workspaceName }: { workspac
     <>
       You need access to <strong>{workspaceName}</strong> to connect your Slack account.
     </>
+  );
+}
+
+/**
+ * A Slack account linked by an organization member who has no access to the
+ * link's workspace. Linking gave them nothing else, so there is no workspace
+ * to open here: Slack is where they continue.
+ */
+export function SlackLinkedPanel({ action }: { action: ReactNode }) {
+  return (
+    <section className="grid flex-1 place-items-center px-4 text-center">
+      <div role="status" className="w-full max-w-md rounded-lg border border-border bg-surface p-5">
+        <CircleCheckIcon aria-hidden className="mx-auto mb-3 size-5 text-status-idle" />
+        <h1 className="text-base font-semibold">Slack account linked</h1>
+        <p className="mt-2 text-sm leading-5 text-fg-muted">You can go back to Slack.</p>
+        <div className="mt-4 flex justify-center">{action}</div>
+      </div>
+    </section>
   );
 }
 
@@ -447,6 +466,16 @@ export function WorkspaceShellRouteContent({
         >
           {!slackAccessRequest && !slackAccessError ? (
             <LoadingPanel label="Checking Slack access" />
+          ) : slackAccessRequest?.status === "completed" && !slackAccessError ? (
+            <SlackLinkedPanel
+              action={
+                <Button asChild type="button" variant="outline">
+                  <Link to="/" onClick={context.clearSlackLinkContinuation}>
+                    Open Opengeni
+                  </Link>
+                </Button>
+              }
+            />
           ) : activePendingState ? (
             <ProblemPanel
               title={

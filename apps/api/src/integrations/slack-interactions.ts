@@ -124,6 +124,7 @@ import {
   getWorkspace,
   getWorkspaceGrant,
   getOrganizationPrivacyPreferences,
+  namedSubjectIsActiveOrganizationMember,
   namedSubjectPersonalWorkspaceId,
   resolveSlackTargetAuthority,
   listSlackInteractionProgressDeliveryEvidence,
@@ -226,13 +227,17 @@ import {
   openSlackAgentGrant,
   openSlackAgentIdFromSubject,
   openSlackAgentInstructions,
+  openSlackAgentPersonRefusal,
   openSlackAgentRefusal,
   openSlackAgentSessionOptions,
+  type OpenSlackAgentPersonRefusal,
   renderSlackOpenAgentStartLine,
   slackOpenAgentClosedThreadText,
+  slackOpenAgentLinkRequiredText,
   slackOpenAgentMentionOnlyThreadText,
   slackOpenAgentMembersOnlyThreadText,
   slackOpenAgentNotEligibleText,
+  slackOpenAgentOrganizationMembersOnlyText,
   slackOpenAgentSharedConversationText,
 } from "./slack-open-agents";
 import {
@@ -1958,6 +1963,68 @@ async function resolveSlackRouteForEntry(
  * not established it will confirm to this person, so they point at an
  * administrator instead.
  */
+/**
+ * The Opengeni person behind a message to an open agent, or why there is
+ * none: the Slack account must be linked to someone who is an active, full
+ * member of the installation's organization. Read live, never cached; the
+ * agent works in that same organization (table CHECK), and a mismatch fails
+ * closed.
+ */
+async function openSlackAgentAskerPerson(
+  deps: ApiRouteDeps,
+  home: SlackRouteTenancy,
+  agent: Pick<SlackAgentRecord, "targetAccountId">,
+  link: { subjectId: string } | null,
+): Promise<{ subjectId: string } | { refusal: OpenSlackAgentPersonRefusal }> {
+  const organizationMember =
+    link !== null &&
+    agent.targetAccountId === home.accountId &&
+    (await namedSubjectIsActiveOrganizationMember(deps.db, {
+      accountId: home.accountId,
+      subjectId: link.subjectId,
+    }));
+  const refusal = openSlackAgentPersonRefusal({
+    linkedSubjectId: link?.subjectId ?? null,
+    organizationMember,
+  });
+  if (refusal || !link) return { refusal: refusal ?? "not_linked" };
+  return { subjectId: link.subjectId };
+}
+
+/** The one private reply for a person an open agent can't take: link, or why not. */
+function openSlackAgentPersonRefusalText(
+  deps: ApiRouteDeps,
+  agent: Pick<SlackAgentRecord, "name">,
+  refusal: OpenSlackAgentPersonRefusal,
+  linkFor: Pick<
+    SlackInteractionInboxEntry,
+    "workspaceId" | "connectionId" | "slackTeamId" | "slackUserId"
+  >,
+  mintedAtMs: number,
+): string {
+  return boundedOutput(
+    refusal === "not_linked"
+      ? slackOpenAgentLinkRequiredText(agent.name, linkUrl(deps, linkFor, mintedAtMs))
+      : slackOpenAgentOrganizationMembersOnlyText(agent.name),
+  );
+}
+
+async function postOpenSlackAgentPersonRefusal(
+  deps: ApiRouteDeps,
+  client: OpenGeniSlackBotClient,
+  entry: SlackInteractionInboxEntry,
+  agent: Pick<SlackAgentRecord, "name">,
+  refusal: OpenSlackAgentPersonRefusal,
+): Promise<void> {
+  await client.postMessage({
+    operationId: deterministicUuid(`slack-open-agent-person-refused:${entry.id}`),
+    userId: entry.slackUserId,
+    // The link token is minted for the installation's own workspace, where
+    // the identity link lives and an organization member can link it.
+    text: openSlackAgentPersonRefusalText(deps, agent, refusal, entry, entry.createdAt.getTime()),
+  });
+}
+
 async function postSlackRouteRefusal(
   deps: ApiRouteDeps,
   client: OpenGeniSlackBotClient,
@@ -3010,11 +3077,20 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       });
       return;
     }
+    // Slack says who they are in Slack; Opengeni also has to know them: a
+    // linked account of an active, full member of the installation's
+    // organization, read live on every message.
+    const person = await openSlackAgentAskerPerson(deps, home, openAgent, link);
+    if ("refusal" in person) {
+      await postOpenSlackAgentPersonRefusal(deps, client, entry, openAgent, person.refusal);
+      return;
+    }
     grant = openSlackAgentGrant(openAgent, {
       slackTeamId: entry.slackTeamId,
       slackUserId: entry.slackUserId,
       slackChannelId: entry.slackChannelId,
       providerEventId: entry.providerEventId,
+      opengeniSubjectId: person.subjectId,
     });
   }
   if (
@@ -3582,9 +3658,47 @@ export async function handOffSlackAgentChat(
       })
     : null;
   const routingAgent = slackRoutingAgent(target, loaded.labels.get(target.targetWorkspaceId));
-  // An open agent takes anyone; the queued message is checked like any other
-  // (guests, external users and shared conversations are refused there).
-  if (!target.open && (!askerGrant || !hasPermission(askerGrant.permissions, "sessions:create"))) {
+  const askerIsMember = Boolean(
+    askerGrant && hasPermission(askerGrant.permissions, "sessions:create"),
+  );
+  // An open agent also takes a linked member of the organization; the queued
+  // message is checked again like any other (guests, external users and
+  // shared conversations are refused there).
+  const openPerson =
+    target.open && !askerIsMember
+      ? await openSlackAgentAskerPerson(deps, home, target, link)
+      : null;
+  if (openPerson && "refusal" in openPerson) {
+    const client = await createOpenGeniSlackBotInteractionClient(deps, {
+      ...home,
+      connectionId: interaction.connectionId,
+      subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
+    });
+    await client.postMessage({
+      operationId: deterministicUuid(
+        `slack-agent-handoff-open-refused:${interaction.id}:${inbound}:${target.id}`,
+      ),
+      userId: askerSlackUserId,
+      text: openSlackAgentPersonRefusalText(
+        deps,
+        target,
+        openPerson.refusal,
+        {
+          workspaceId: home.workspaceId,
+          connectionId: interaction.connectionId,
+          slackTeamId: interaction.slackTeamId,
+          slackUserId: askerSlackUserId,
+        },
+        original.createdAt.getTime(),
+      ),
+    });
+    return refuse(
+      openPerson.refusal === "not_linked"
+        ? `The person who asked cannot use ${target.name} until they link their Slack account, and was told so privately with a link. Answer what you can yourself.`
+        : `The person who asked cannot use ${target.name}, and was told so privately. Answer what you can yourself.`,
+    );
+  }
+  if (!target.open && !askerIsMember) {
     const client = await createOpenGeniSlackBotInteractionClient(deps, {
       ...home,
       connectionId: interaction.connectionId,
@@ -3748,7 +3862,8 @@ export async function suggestSlackAgentForChat(
  * member, the agent's workspace is one their Slack messages may route to
  * (Personal workspaces count only while the organization allows them) and
  * they may start chats there; otherwise only an open agent, and only for a
- * full member of the Slack team in a conversation only that team can see.
+ * linked, active member of the organization who is a full member of the
+ * Slack team, in a conversation only that team can see.
  */
 async function slackAgentUsableBy(
   deps: ApiRouteDeps,
@@ -3790,6 +3905,8 @@ async function slackAgentUsableBy(
     }
   }
   if (!agent.open) return false;
+  const person = await openSlackAgentAskerPerson(deps, home, agent, link);
+  if ("refusal" in person) return false;
   const client = await createOpenGeniSlackBotInteractionClient(deps, {
     ...home,
     connectionId: interaction.connectionId,

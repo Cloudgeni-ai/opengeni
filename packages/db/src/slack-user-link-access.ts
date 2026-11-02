@@ -9,7 +9,10 @@ import {
 import { and, asc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 
 import { type Database, withWorkspaceRls } from "./database";
-import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
+import {
+  namedSubjectIsActiveOrganizationMember,
+  namedSubjectPersonalWorkspaceId,
+} from "./slack-routing-personal-workspace";
 import { membershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
@@ -407,6 +410,14 @@ export async function approveSlackUserLinkAccessRequest(
  * Complete a prepared/pending link only when the subject's live membership
  * already grants sessions:create (or workspace:admin). This is used both for
  * ordinary already-authorized links and after a separate canonical member grant.
+ *
+ * One more case completes it: an active, full member of the organization
+ * linking a Slack identity that is not linked yet, from a link for the
+ * installation's own workspace (`identityHome`). That only records who the
+ * Slack person is; it grants no workspace membership or permission, and the
+ * request stays an ordinary completed link. A link for another (routed)
+ * workspace, or for an identity that is already linked, is an access request
+ * and keeps the ordinary path.
  */
 export async function completeSlackUserLinkAccessIfGranted(
   db: Database,
@@ -439,7 +450,13 @@ export async function completeSlackUserLinkAccessIfGranted(
       if (row.status === "completed" || !isActiveStatus(row.status)) {
         return mapRequest(row);
       }
-      if (!(await membershipAllowsSlackLink(database, row))) {
+      const via = (await membershipAllowsSlackLink(database, row))
+        ? ("workspace_membership" as const)
+        : row.status === "prepared" &&
+            (await organizationMembershipLinksSlackIdentity(database, row, input.identityHome))
+          ? ("organization_membership" as const)
+          : null;
+      if (!via) {
         return mapRequest(row);
       }
       await withSlackIdentityHomeScope(database, row, input.identityHome, async () => {
@@ -464,7 +481,13 @@ export async function completeSlackUserLinkAccessIfGranted(
         )
         .returning();
       if (!updated) throw new SlackUserLinkAccessPersistenceError("version_conflict");
-      await insertAudit(database, updated, input.subjectId, "slack.user_link.completed");
+      await insertAudit(
+        database,
+        updated,
+        input.subjectId,
+        "slack.user_link.completed",
+        via === "organization_membership" ? { via } : {},
+      );
       return mapRequest(updated);
     });
   });
@@ -636,6 +659,42 @@ async function membershipAllowsSlackLink(database: Database, row: RequestRow) {
 export function workspaceMembershipPermissionsAllowSlackLink(value: unknown): boolean {
   const permissions = normalizeWorkspaceMembershipPermissions(value);
   return permissions.includes("sessions:create") || permissions.includes("workspace:admin");
+}
+
+/**
+ * Whether an organization member may link this Slack identity without any
+ * workspace access: the link names the installation's own workspace, the
+ * identity is not linked to anyone yet, and the subject is an active, full
+ * member of the request's organization (read live).
+ */
+async function organizationMembershipLinksSlackIdentity(
+  database: Database,
+  row: RequestRow,
+  home: SlackIdentityHome | undefined,
+): Promise<boolean> {
+  if (
+    !home ||
+    home.accountId !== row.accountId ||
+    home.workspaceId !== row.workspaceId ||
+    !row.subjectId.startsWith("user:")
+  ) {
+    return false;
+  }
+  const [existing] = await database
+    .select({ id: schema.slackBotUserLinks.id })
+    .from(schema.slackBotUserLinks)
+    .where(
+      and(
+        eq(schema.slackBotUserLinks.connectionId, row.connectionId),
+        eq(schema.slackBotUserLinks.slackUserId, row.slackUserId),
+      ),
+    )
+    .limit(1);
+  if (existing) return false;
+  return await namedSubjectIsActiveOrganizationMember(database, {
+    accountId: row.accountId,
+    subjectId: row.subjectId,
+  });
 }
 
 async function assertSlackIdentityAvailable(database: Database, row: RequestRow) {
