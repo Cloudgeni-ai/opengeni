@@ -1443,8 +1443,8 @@ export async function getSessionAgentMemoryState(
       // A Slack DM is private through its interaction, not its session row
       // (docs/slack-bot.md); its workers share the root's interaction.
       sql`select s.account_id::text as account_id,
-          coalesce(s.agent_id::text, s.metadata -> 'slackAgent' ->> 'id',
-            r.agent_id::text, r.metadata -> 'slackAgent' ->> 'id') as agent_id,
+          coalesce(${sessionAgentIdSql(sql.raw("s"))},
+            ${sessionAgentIdSql(sql.raw("r"))})::text as agent_id,
           s.visibility, s.owner_subject_id, s.memory_scope,
           (select p.owning_subject_id from slack_interactions p
             where p.workspace_id = s.workspace_id

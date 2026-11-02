@@ -47,7 +47,10 @@ afterAll(async () => {
 const settings = testSettings({ sandboxBackend: "none", mcpServers: [] });
 
 /** A workspace, its person, and a shared agent with Memory on and its collection. */
-async function workspaceWithAgent(db: ReturnType<typeof createDb>["db"]) {
+async function workspaceWithAgent(
+  db: ReturnType<typeof createDb>["db"],
+  options: { onlyMe?: boolean } = {},
+) {
   // An organization member, so their private chats can be created.
   const userId = `agent-memory-${crypto.randomUUID()}`;
   const subjectId = `user:${userId}`;
@@ -77,10 +80,11 @@ async function workspaceWithAgent(db: ReturnType<typeof createDb>["db"]) {
       review: true,
     },
   };
+  const scope = options.onlyMe ? ("personal" as const) : ("workspace" as const);
   const collection = (await saveKnowledgeEntry(db, human, {
     operationId: crypto.randomUUID(),
     expectedVersion: 0,
-    scope: "workspace",
+    scope,
     entry: {
       kind: "group",
       title: "Release desk",
@@ -93,7 +97,7 @@ async function workspaceWithAgent(db: ReturnType<typeof createDb>["db"]) {
   const remembered = (await saveKnowledgeEntry(db, human, {
     operationId: crypto.randomUUID(),
     expectedVersion: 0,
-    scope: "workspace",
+    scope,
     entry: {
       kind: "fact",
       title: "Release day",
@@ -104,8 +108,8 @@ async function workspaceWithAgent(db: ReturnType<typeof createDb>["db"]) {
     },
   })) as { entryId: string; version: number };
   const { agent } = await createAgent(db, home, {
-    visibility: "workspace",
-    ownerSubjectId: null,
+    visibility: options.onlyMe ? "private" : "workspace",
+    ownerSubjectId: options.onlyMe ? subjectId : null,
     name: "Release desk",
     description: "",
     avatar: null,
@@ -298,6 +302,26 @@ describe("an agent's Memory (real PostgreSQL)", () => {
     } finally {
       await dm.close();
       await sharedChat.close();
+    }
+  }, 180_000);
+
+  test("an Only me agent: personal Memory, written from its owner's Only me chats", async () => {
+    if (!app) return;
+    const fixture = await workspaceWithAgent(app.db, { onlyMe: true });
+    // Its chats are Only me; a shared one cannot be bound to it.
+    await expect(agentChat(app.db, fixture, { private: false })).rejects.toMatchObject({
+      reason: "requires_private_chat",
+    });
+    const own = await agentChat(app.db, fixture, { private: true });
+    try {
+      const saved = await own.callTool(saveFact("Prefers mornings", [fixture.collectionId]));
+      expect(saved.isError, JSON.stringify(saved.content)).toBeFalsy();
+      const [row] = await shared!.admin<{ scope: string }[]>`
+        select scope from knowledge_entries
+        where id = ${(JSON.parse((saved.content as Array<{ text: string }>)[0]!.text) as { entryId: string }).entryId}`;
+      expect(row?.scope).toBe("personal");
+    } finally {
+      await own.close();
     }
   }, 180_000);
 
