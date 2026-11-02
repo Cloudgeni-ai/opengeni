@@ -325,6 +325,19 @@ describe("scheduled sandbox backend", () => {
     expect(lookup).not.toHaveBeenCalled();
   });
 
+  test("a reusable schedule whose chat exists keeps that chat's placement", async () => {
+    await expect(
+      validateScheduledTaskMachineTarget({
+        settings: cloud,
+        db: {} as never,
+        grant: manageOnly,
+        runMode: "reusable_session",
+        reusableSessionId: targetSessionId,
+        agentConfig: { ...baseConfig, sandboxBackend: "local" },
+      }),
+    ).resolves.toBeNull();
+  });
+
   test("keeps served backends and the omitted default", async () => {
     for (const agentConfig of [
       baseConfig,

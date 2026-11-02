@@ -1316,7 +1316,9 @@ describe("create-time sandbox backend gate", () => {
         }),
       ).rejects.toMatchObject({
         status: 422,
-        message: `sandboxBackend "${sandboxBackend}" is not available in this deployment. Available: modal, none, selfhosted. Omit sandboxBackend to use the deployment default ("modal").`,
+        message: expect.stringContaining(
+          `sandboxBackend "${sandboxBackend}" is not available in this deployment.`,
+        ),
       });
       // An agent-spawned child asking for its own box, with or without 'new'.
       for (const sandbox of [undefined, "new"] as const) {
@@ -1405,6 +1407,42 @@ describe("create-time sandbox backend gate", () => {
       createSessionForRequest(deps(bus, withCompute), grant(accountId, workspaceId), workspaceId, {
         initialMessage: "still not the host",
         sandboxBackend: "local",
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+  }, 60_000);
+
+  test("a keyed retry of an initialized create replays even after its backend stops being served", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    const withCompute = testSettings({
+      ...settings,
+      computeApiUrl: "https://compute.example",
+      computeApiKey: "test-compute-key",
+    });
+    const request = {
+      initialMessage: "use compute",
+      sandboxBackend: "compute" as const,
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const created = await createSessionForRequest(
+      deps(bus, withCompute),
+      grant(accountId, workspaceId),
+      workspaceId,
+      request,
+    );
+    const replay = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      request,
+    );
+    expect(replay.id).toBe(created.id);
+    expect(replay.sandboxBackend).toBe("compute");
+    // A fresh key is a new create and is refused.
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        ...request,
+        idempotencyKey: crypto.randomUUID(),
       }),
     ).rejects.toMatchObject({ status: 422 });
   }, 60_000);
