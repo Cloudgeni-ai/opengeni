@@ -366,6 +366,13 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       ticket: () => client.createOfficeWorkbookTicket(workspaceId),
       baseUrl: apiBaseUrl,
       describe,
+      // As the person: agents open chat files here and save copies of the
+      // workbook to their chat, with the audience the API chose for it.
+      files: {
+        download: async (artifact) =>
+          (await client.downloadRetainedArtifact(workspaceId, artifact)).bytes,
+        upload: async (file) => await client.uploadFile(workspaceId, file),
+      },
       onState: (state) => {
         setLink(state);
         if (state.status === "signed_out") onSignedOut();
