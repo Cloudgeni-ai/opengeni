@@ -12,7 +12,7 @@
  * `slack_agents` row (owned by the Slack installation's own workspace, and
  * the target of `slack_channel_routes`) for every Slack availability. The
  * transaction sets `opengeni.agents_dual_write` so the legacy sync triggers of
- * migration 1234 stay out of the way. Because `slack_agents.id` is the agent
+ * the agents migration stay out of the way. Because `slack_agents.id` is the agent
  * id, an agent is available in at most one Slack installation until the
  * contract step.
  *
