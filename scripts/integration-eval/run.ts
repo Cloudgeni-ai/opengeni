@@ -410,8 +410,19 @@ async function runAll(flags: Map<string, string>) {
   const pending = jobs.filter(
     (job) => !done.has(jobKey(job.testCase.id, job.cell.model, job.cell.effort, job.repeat)),
   );
-  // Interleave cells so a partial grid still covers every model.
+  // Interleave cells and integrations so a partial grid still covers every
+  // model, and a capped service's rows spread across the run.
   pending.sort((a, b) => a.repeat - b.repeat || a.testCase.id.localeCompare(b.testCase.id));
+  const seen = new Map<string, number>();
+  const order = new Map(
+    pending.map((job) => {
+      const key = `${job.repeat}:${job.testCase.integration}`;
+      const index = seen.get(key) ?? 0;
+      seen.set(key, index + 1);
+      return [job, index] as const;
+    }),
+  );
+  pending.sort((a, b) => a.repeat - b.repeat || order.get(a)! - order.get(b)!);
   console.log(
     `${pending.length} runs to do (${jobs.length - pending.length} already recorded) -> ${resultsFile}`,
   );
