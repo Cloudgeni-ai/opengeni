@@ -4,6 +4,7 @@
 // transaction (and the legacy sync triggers staying out of the way), Slack
 // availability in one installation, name clashes, and the Slack projections.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { sql } from "drizzle-orm";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
@@ -23,6 +24,7 @@ import {
   putAgentSlackInstall,
   updateAgent,
   updateSlackAgent,
+  withWorkspaceSessionActivityRls,
   type CreateAgentInput,
 } from "../src/index";
 
@@ -124,7 +126,11 @@ describe("agents data layer (restricted runtime role)", () => {
     const { agent } = await createAgent(
       app.db,
       org.homeScope,
-      agentInput(org, { origin: "bot_template", firstMessage: "Plan it.", legacyBotTemplate: true }),
+      agentInput(org, {
+        origin: "bot_template",
+        firstMessage: "Plan it.",
+        legacyBotTemplate: true,
+      }),
     );
     expect(await revisionCount(agent.id)).toBe(1);
     const [template] = await shared.admin<{ setup_instructions: string }[]>`
@@ -188,14 +194,14 @@ describe("agents data layer (restricted runtime role)", () => {
     expect(saved).toMatchObject({
       kind: "saved",
       created: true,
-      install: { nameKey: "release-helper", open: false, installWorkspaceId: org.install },
+      install: { nameKey: "releasehelper", open: false, installWorkspaceId: org.install },
     });
     // The legacy row lives in the installation's workspace and targets the home.
     expect(await legacySlackRow(agent.id)).toMatchObject({
       workspace_id: org.install,
       target_workspace_id: org.home,
       name: "Release helper",
-      name_key: "release-helper",
+      name_key: "releasehelper",
       instructions: "Be brief.",
       version: agent.version,
       avatar: { kind: "letters", letters: "RH" },
@@ -260,7 +266,7 @@ describe("agents data layer (restricted runtime role)", () => {
     const current = await getAgent(app.db, org.homeScope, agent.id);
     expect(await legacySlackRow(agent.id)).toMatchObject({
       name: "Release lead",
-      name_key: "release-lead",
+      name_key: "releaselead",
       instructions: "Be very brief.",
       open: true,
       version: current!.version,
@@ -361,14 +367,17 @@ describe("agents data layer (restricted runtime role)", () => {
       [older, { slackAgent: { id: agent.id, name: agent.name } }],
       [plain, {}],
     ] as const) {
-      await shared.admin`insert into sessions (id, account_id, workspace_id, status, initial_message,
-          resources, metadata, model, reasoning_effort, sandbox_backend)
-        values (${id}, ${org.accountId}, ${org.home}, 'idle', 'hello', '[]'::jsonb,
-          ${shared.admin.json(metadata as never)}, 'scripted-model', 'medium', 'none')`;
+      await withWorkspaceSessionActivityRls(app.db, org.home, (tx) =>
+        tx.execute(sql`insert into sessions (id, account_id, workspace_id, status, initial_message,
+            metadata, model, reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, tool_policy)
+          values (${id}, ${org.accountId}, ${org.home}, 'idle', 'hello',
+            ${JSON.stringify(metadata)}::jsonb, 'scripted-model', 'medium', 'standard', 'modal', ${id},
+            jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null))`),
+      );
     }
-    expect(await getSessionAgent(app.db, { workspaceId: org.home, sessionId: older })).toMatchObject(
-      { agentChat: true, agent: { id: agent.id } },
-    );
+    expect(
+      await getSessionAgent(app.db, { workspaceId: org.home, sessionId: older }),
+    ).toMatchObject({ agentChat: true, agent: { id: agent.id } });
     expect(await getSessionAgent(app.db, { workspaceId: org.home, sessionId: plain })).toEqual({
       agentChat: false,
       agent: null,

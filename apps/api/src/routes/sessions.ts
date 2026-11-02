@@ -7089,7 +7089,11 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
   }
   if (error instanceof SessionAgentNotFoundError) {
     return c.json(
-      { code: "SESSION_CREATE_REJECTED", message: error.message, details: { code: "agent_not_found" } },
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: { code: "agent_not_found" },
+      },
       422,
     );
   }

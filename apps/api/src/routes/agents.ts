@@ -132,7 +132,9 @@ function encodeChatCursor(chat: { createdAt: Date; sessionId: string }): string 
   return Buffer.from(`${chat.createdAt.toISOString()}|${chat.sessionId}`).toString("base64url");
 }
 
-function decodeChatCursor(value: string | undefined): { createdAt: Date; sessionId: string } | null {
+function decodeChatCursor(
+  value: string | undefined,
+): { createdAt: Date; sessionId: string } | null {
   if (!value) return null;
   const [at, sessionId] = Buffer.from(value, "base64url").toString("utf8").split("|");
   const createdAt = new Date(at ?? "");
@@ -271,7 +273,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
   ): Promise<Map<string, string | null>> {
     const names = new Map<string, string | null>();
     const homes = new Set(
-      installs.flatMap((install) => (install.installWorkspaceId ? [install.installWorkspaceId] : [])),
+      installs.flatMap((install) =>
+        install.installWorkspaceId ? [install.installWorkspaceId] : [],
+      ),
     );
     for (const workspaceId of homes) {
       const bindings = await listSlackInstallationBindings(db, { accountId, workspaceId }).catch(
@@ -333,7 +337,8 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (request.visibility === "private" && viewer.subjectId === null) {
       throw new ApiHttpError(422, {
         code: "validation_failed",
-        message: "Only a person can keep an agent to themselves. Share it with the workspace instead.",
+        message:
+          "Only a person can keep an agent to themselves. Share it with the workspace instead.",
         retryable: false,
       });
     }
@@ -413,9 +418,14 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       const problem = slackAgentNameProblem(request.name);
       if (problem) {
-        throw agentError(422, "agent_slack_name_invalid", slackAgentNameProblemText(request.name, problem), {
-          problem,
-        });
+        throw agentError(
+          422,
+          "agent_slack_name_invalid",
+          slackAgentNameProblemText(request.name, problem),
+          {
+            problem,
+          },
+        );
       }
     }
     if (request.avatar !== undefined || changesVisibility) {
@@ -458,9 +468,14 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     if (outcome.kind === "not_found") throw notFound();
     if (outcome.kind === "version_conflict") {
-      throw agentError(409, "agent_version_conflict", "This agent changed. Refresh and try again.", {
-        currentVersion: outcome.current.version,
-      });
+      throw agentError(
+        409,
+        "agent_version_conflict",
+        "This agent changed. Refresh and try again.",
+        {
+          currentVersion: outcome.current.version,
+        },
+      );
     }
     if (outcome.kind === "slack_name_taken") {
       throw agentError(
@@ -498,7 +513,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       ListAgentRevisionsResponse.parse({
         revisions: page.map(agentRevisionView),
         nextCursor:
-          revisions.length > limit && page.length > 0 ? String(page[page.length - 1]!.revision) : null,
+          revisions.length > limit && page.length > 0
+            ? String(page[page.length - 1]!.revision)
+            : null,
       }),
     );
   });
@@ -544,7 +561,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
           accountId: context.home.accountId,
           workspaceId: connection.workspaceId,
         }).catch(() => [])
-      ).find((candidate) => candidate.connectionId === connection.id && candidate.state === "active");
+      ).find(
+        (candidate) => candidate.connectionId === connection.id && candidate.state === "active",
+      );
       if (!binding) continue;
       const install = installs.find((candidate) => candidate.connectionId === connection.id);
       rows.push({
@@ -626,9 +645,14 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!existing) {
       const problem = slackAgentNameProblem(agent.name);
       if (problem) {
-        throw agentError(422, "agent_slack_name_invalid", slackAgentNameProblemText(agent.name, problem), {
-          problem,
-        });
+        throw agentError(
+          422,
+          "agent_slack_name_invalid",
+          slackAgentNameProblemText(agent.name, problem),
+          {
+            problem,
+          },
+        );
       }
     }
     if (request.open === true && !existing?.open) {
@@ -640,7 +664,9 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
       slackTeamId: installation.binding.slackTeamId,
       installWorkspaceId: installation.home.workspaceId,
       ...(request.open !== undefined ? { open: request.open } : {}),
-      ...(request.expectedVersion !== undefined ? { expectedVersion: request.expectedVersion } : {}),
+      ...(request.expectedVersion !== undefined
+        ? { expectedVersion: request.expectedVersion }
+        : {}),
       actorSubjectId: context.grant.subjectId,
     });
     if (outcome.kind === "not_found") throw notFound();
@@ -668,7 +694,11 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       AgentSlackAvailabilityResponse.parse({
         agent: agentView(outcome.agent, view),
-        availability: agentSlackAvailabilityView(outcome.agent, outcome.install, view.slackTeamNames),
+        availability: agentSlackAvailabilityView(
+          outcome.agent,
+          outcome.install,
+          view.slackTeamNames,
+        ),
       }),
       outcome.created ? 201 : 200,
     );

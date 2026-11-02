@@ -154,9 +154,7 @@ function mapAgent(row: AgentRow, withContent: boolean): AgentRecord {
     version: Number(row.version),
     createdAt: date(row.created_at),
     updatedAt: date(row.updated_at),
-    hasFirstMessage: content
-      ? content.firstMessage.length > 0
-      : row.has_first_message === true,
+    hasFirstMessage: content ? content.firstMessage.length > 0 : row.has_first_message === true,
     content,
   };
 }
@@ -662,7 +660,10 @@ export async function updateAgent(
             ${instructions}, ${firstMessage}, ${input.actorSubjectId})`);
       }
       const installs = await installsOf(tx, home, current.id);
-      if (patch.name !== undefined && slackAgentNameKey(patch.name) !== slackAgentNameKey(current.name)) {
+      if (
+        patch.name !== undefined &&
+        slackAgentNameKey(patch.name) !== slackAgentNameKey(current.name)
+      ) {
         for (const install of installs) {
           try {
             await tx.execute(sql`update agent_slack_installs set
@@ -689,9 +690,7 @@ export async function updateAgent(
             setup_instructions = ${firstMessage},
             visibility = ${updated.visibility},
             created_by_subject_id = ${
-              updated.visibility === "private"
-                ? updated.ownerSubjectId
-                : sql`created_by_subject_id`
+              updated.visibility === "private" ? updated.ownerSubjectId : sql`created_by_subject_id`
             },
             updated_at = now()
           where id = ${updated.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);

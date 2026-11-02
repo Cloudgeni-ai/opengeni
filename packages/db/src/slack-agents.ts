@@ -29,7 +29,6 @@ import {
   type SlackAgentProjection,
 } from "./agents";
 import { withRlsContext, type Database } from "./database";
-import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 
 export type SlackAgentHome = { accountId: string; workspaceId: string };

@@ -76,8 +76,11 @@ The agent then sets itself up with its ordinary tools (installing Skills,
 offering plugins and connections, creating schedules and event triggers,
 choosing a machine) and the chat simply continues as the bot.
 
-Bot templates are being merged with Slack agents into [agents](agents.md);
-every template is already mirrored into the `agents` tables.
+Bot templates are being merged with Slack agents into [agents](agents.md).
+The routes below are a compatibility layer over `agents`: they list every
+agent the reader can see, a template's setup instructions are the agent's
+First message, and a new template is an agent with empty Instructions (the
+legacy `bot_templates` row is still written for older releases).
 
 Setup instructions can be exact ("install these Skills and create this
 schedule") so the agent sets itself up without asking, or open-ended ("ask how
@@ -103,10 +106,10 @@ Templates are stored per workspace (`bot_templates`, visibility in migration
 shared with the workspace, so everyone can start bots from it, or **Only me**,
 so only whoever saved it can see, find or use it. A template the agent saves
 from an Only me chat is Only me; one saved from a shared chat is shared. People
-choose in the template dialog and can change it later. A shared template is
-shared work, like a shared Skill or Site: anyone who may start chats in the
-workspace (`sessions:create`) may change or delete it, but only whoever saved
-it or a workspace admin may make it Only me; each template's
+choose in the template dialog and can change it later. Like any agent, a
+template can be changed or deleted only by whoever saved it or a workspace
+admin, and only they may make it Only me (not while it is available in Slack);
+each template's
 `viewerCanMakePrivate` says whether the reader may, and the Edit dialog offers
 Only me only then. An Only me template belongs to the
 person who saved it. Routes:
@@ -115,7 +118,7 @@ person who saved it. Routes:
 | --- | --- |
 | `GET /v1/workspaces/:workspaceId/bot-templates` and `/:templateId` | `sessions:read` |
 | `POST /v1/workspaces/:workspaceId/bot-templates` | `sessions:create`; a `sourceSessionId` must be a chat in the workspace the caller can open |
-| `PATCH` and `DELETE /v1/workspaces/:workspaceId/bot-templates/:templateId` | `sessions:create`, and manage access |
+| `PATCH` and `DELETE /v1/workspaces/:workspaceId/bot-templates/:templateId` | `sessions:create`, and whoever saved it or a workspace admin |
 
 A workspace keeps at most 200 templates.
 

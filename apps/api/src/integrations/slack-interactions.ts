@@ -3469,74 +3469,77 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     const boundAgent = openAgent ?? routedAgent;
     const createSlackSession = async (agentId: string | null) =>
       createSessionForRequest(
-      await withCatalogSettings(deps, grant),
-      grant,
-      interaction.workspaceId,
-      {
-        ...defaults,
-        requestedSessionId: interaction.sessionReservationId,
-        ...(agentId ? { agentId } : {}),
-        initialMessage: prepared.entry.text,
-        ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
-        instructions: openAgent
-          ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${openSlackAgentInstructions(
-              openAgent,
-              slackAgents.labels.get(openAgent.targetWorkspaceId) ?? null,
-            )}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
-          : slackAgents.records.length > 0
-            ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${slackAgentSessionInstructions({
-                loaded: slackAgents,
-                agent: routedAgent,
-                source: resolution.source,
-                handedOffBy:
-                  slackAgents.records.find(
-                    (agent) => agent.id === interaction.handoffFromSlackAgentId,
-                  ) ?? null,
-              })}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
-            : SLACK_SESSION_INSTRUCTIONS,
-        ...(routedAgent
-          ? {
-              metadata: {
-                [SESSION_SLACK_AGENT_METADATA_KEY]: { id: routedAgent.id, name: routedAgent.name },
-              },
-              profile: { avatar: routedAgent.avatar },
-            }
-          : {}),
-        // The session follows the workspace's built-in defaults, including
-        // tools added later, with the Slack read tools guaranteed on top. Only
-        // a retried create of a shell that pinned an exact list replays it.
-        firstPartyMcpTools:
-          defaults.firstPartyMcpTools !== undefined
-            ? allowedFirstPartyMcpToolsForSession(deps.settings, defaults.firstPartyMcpTools)
-            : undefined,
-        resources: [...defaults.resources, ...preparedAttachments.resources],
-        ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
-        ...(openAgent ? openSlackAgentSessionOptions(deps.settings) : {}),
-        idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
-        clientEventId: `slack:${entry.providerEventId}`,
-      },
-      undefined,
-      {
-        surface: "slack",
-        ...(defaults.firstPartyMcpTools === undefined && !openAgent
-          ? {
-              firstPartyMcpToolAdditions:
-                slackAgents.records.length > 0
-                  ? [
-                      ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
-                      ...SLACK_AGENT_FIRST_PARTY_MCP_TOOLS,
-                    ]
-                  : deps.settings.slackWorkspaceRoutingEnabled &&
-                      slackRequestMentionsAgents(entry.text)
+        await withCatalogSettings(deps, grant),
+        grant,
+        interaction.workspaceId,
+        {
+          ...defaults,
+          requestedSessionId: interaction.sessionReservationId,
+          ...(agentId ? { agentId } : {}),
+          initialMessage: prepared.entry.text,
+          ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
+          instructions: openAgent
+            ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${openSlackAgentInstructions(
+                openAgent,
+                slackAgents.labels.get(openAgent.targetWorkspaceId) ?? null,
+              )}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
+            : slackAgents.records.length > 0
+              ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${slackAgentSessionInstructions({
+                  loaded: slackAgents,
+                  agent: routedAgent,
+                  source: resolution.source,
+                  handedOffBy:
+                    slackAgents.records.find(
+                      (agent) => agent.id === interaction.handoffFromSlackAgentId,
+                    ) ?? null,
+                })}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
+              : SLACK_SESSION_INSTRUCTIONS,
+          ...(routedAgent
+            ? {
+                metadata: {
+                  [SESSION_SLACK_AGENT_METADATA_KEY]: {
+                    id: routedAgent.id,
+                    name: routedAgent.name,
+                  },
+                },
+                profile: { avatar: routedAgent.avatar },
+              }
+            : {}),
+          // The session follows the workspace's built-in defaults, including
+          // tools added later, with the Slack read tools guaranteed on top. Only
+          // a retried create of a shell that pinned an exact list replays it.
+          firstPartyMcpTools:
+            defaults.firstPartyMcpTools !== undefined
+              ? allowedFirstPartyMcpToolsForSession(deps.settings, defaults.firstPartyMcpTools)
+              : undefined,
+          resources: [...defaults.resources, ...preparedAttachments.resources],
+          ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
+          ...(openAgent ? openSlackAgentSessionOptions(deps.settings) : {}),
+          idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
+          clientEventId: `slack:${entry.providerEventId}`,
+        },
+        undefined,
+        {
+          surface: "slack",
+          ...(defaults.firstPartyMcpTools === undefined && !openAgent
+            ? {
+                firstPartyMcpToolAdditions:
+                  slackAgents.records.length > 0
                     ? [
                         ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
-                        ...SLACK_AGENT_PROPOSE_FIRST_PARTY_MCP_TOOLS,
+                        ...SLACK_AGENT_FIRST_PARTY_MCP_TOOLS,
                       ]
-                    : SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
-            }
-          : {}),
-      },
-    );
+                    : deps.settings.slackWorkspaceRoutingEnabled &&
+                        slackRequestMentionsAgents(entry.text)
+                      ? [
+                          ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
+                          ...SLACK_AGENT_PROPOSE_FIRST_PARTY_MCP_TOOLS,
+                        ]
+                      : SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
+              }
+            : {}),
+        },
+      );
     session = await createSlackSession(boundAgent?.id ?? null).catch(async (error: unknown) => {
       if (boundAgent && error instanceof SessionAgentNotFoundError) {
         return await createSlackSession(null);

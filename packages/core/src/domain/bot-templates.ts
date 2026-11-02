@@ -143,9 +143,9 @@ export async function listBotTemplatesForViewer(
   viewer: BotTemplateViewer,
 ): Promise<WorkspaceBotTemplate[]> {
   const home = await homeOf(db, workspaceId);
-  return (
-    await listAgents(db, home, { viewerSubjectId: viewer.subjectId, withContent: true })
-  ).map((agent) => forViewer(viewer, agent));
+  return (await listAgents(db, home, { viewerSubjectId: viewer.subjectId, withContent: true })).map(
+    (agent) => forViewer(viewer, agent),
+  );
 }
 
 export async function getBotTemplateForViewer(
@@ -230,7 +230,8 @@ export async function updateBotTemplateForViewer(input: {
         message: "This agent is available in Slack, so it stays shared with the workspace.",
       });
     }
-    const problem = inSlack && request.name !== undefined ? slackAgentNameProblem(request.name) : null;
+    const problem =
+      inSlack && request.name !== undefined ? slackAgentNameProblem(request.name) : null;
     if (problem && request.name !== undefined) {
       throw new HTTPException(422, { message: slackAgentNameProblemText(request.name, problem) });
     }

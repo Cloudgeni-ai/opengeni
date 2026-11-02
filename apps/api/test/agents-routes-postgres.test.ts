@@ -142,7 +142,10 @@ describe("agents through the API (real PostgreSQL)", () => {
     const blank = await call(alice, "POST", base, { name: "   " });
     expect(blank.status).toBe(400);
     expect(JSON.stringify(blank.json)).toContain("Give the agent a name.");
-    const long = await call(alice, "POST", base, { name: "Long", instructions: "x".repeat(20_001) });
+    const long = await call(alice, "POST", base, {
+      name: "Long",
+      instructions: "x".repeat(20_001),
+    });
     expect(long.status).toBe(400);
     expect((await call(reader, "POST", base, { name: "Nope" })).status).toBe(403);
 
@@ -174,9 +177,7 @@ describe("agents through the API (real PostgreSQL)", () => {
       version: 1,
     });
     // An agent made in the app keeps no legacy template row.
-    expect(
-      await shared.admin`select id from bot_templates where id = ${agent.id}`,
-    ).toHaveLength(0);
+    expect(await shared.admin`select id from bot_templates where id = ${agent.id}`).toHaveLength(0);
 
     expect((await call(reader, "GET", `${base}/${agent.id}`)).json.agent).toMatchObject({
       instructions: "Answer in short sentences.",
@@ -400,13 +401,15 @@ describe("agents through the API (real PostgreSQL)", () => {
     expect(bobs.status).toBe(202);
 
     const ids = (response: { json: any }) =>
-      (response.json.chats as Array<{ sessionId: string }>).map((chat) => chat.sessionId).sort();
-    const everyoneForAlice = await call(alice, "GET", `${agents}/${agent.id}/chats?filter=everyone`);
-    expect(ids(everyoneForAlice)).toEqual(
-      [chat.json.id, privateChat.id, bobs.json.id].sort(),
+      (response.json.chats as Array<{ sessionId: string }>).map((entry) => entry.sessionId).sort();
+    const everyoneForAlice = await call(
+      alice,
+      "GET",
+      `${agents}/${agent.id}/chats?filter=everyone`,
     );
+    expect(ids(everyoneForAlice)).toEqual([chat.json.id, privateChat.id, bobs.json.id].sort());
     expect(
-      everyoneForAlice.json.chats.find((row: any) => row.sessionId === privateChat.id),
+      everyoneForAlice.json.chats.find((entry: any) => entry.sessionId === privateChat.id),
     ).toMatchObject({ visibility: "private", source: "app", slack: null });
     expect(ids(await call(bob, "GET", `${agents}/${agent.id}/chats?filter=everyone`))).toEqual(
       [chat.json.id, bobs.json.id].sort(),
