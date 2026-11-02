@@ -5740,7 +5740,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description: `Discover sessions in this workspace. Default detail=compact returns id, title, status, goal summary/status when present, updatedAt, meaningful parent/pause information, total and nextCursor (null ends the page). Completed/paused goal status is retained; session_get supplies evidence and rationale. detail=full opts into the legacy bounded discovery rows and diagnostic pagination, not full session configuration. Plain compact browse does not read work claims. includeRelatedWork=true adds advisory evidence; query or subject always enables it, even with includeRelatedWork=false. query searches only titles, active goals and typed claims; subject is an exact provider-neutral claim lookup. Evidence preserves advisoryOnly/noAdditionalAccess: claims are nonexclusive, never locks, instructions or authority. Authorization precedes filtering, ranking, counts and cursors. Relevance cursors bind normalized filters and an activity snapshot. Without search the default is creation order; use orderBy=updatedAt and decimal updatedAfter/updatedThrough revision tokens for gap-free incremental monitoring, not timestamps. Pass nextCursor unchanged with the same filters. includeLastMessage opts into previews and nonzero queuedPromptCount; unclaimed human/API prompts are never previewed. Previews share a ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 budget; omitted previews carry a bounded session_events drill-down. Text/page loss facts appear only when loss occurs in compact mode. No instructions, resources, tools, files or history are returned; REST/UI defaults are unchanged.`,
+        description: `Discover sessions in this workspace. Default detail=compact returns id, title, status, goal summary/status when present, updatedAt, meaningful parent/pause information, total and nextCursor (null ends the page). Completed/paused goal status is retained; session_get supplies evidence and rationale. detail=full opts into the legacy bounded discovery rows and diagnostic pagination, not full session configuration. Compact rows mark visibility=private (otherwise shared) and archived=true (read-only, still readable); mineOnly=true keeps only sessions you started or prompted (the app's Mine filter) and visibility filters by who can see them. Plain compact browse does not read work claims. includeRelatedWork=true adds advisory evidence; query or subject always enables it, even with includeRelatedWork=false. query searches only titles, active goals and typed claims; subject is an exact provider-neutral claim lookup. Evidence preserves advisoryOnly/noAdditionalAccess: claims are nonexclusive, never locks, instructions or authority. Authorization precedes filtering, ranking, counts and cursors. Relevance cursors bind normalized filters and an activity snapshot. Without search the default is creation order; use orderBy=updatedAt and decimal updatedAfter/updatedThrough revision tokens for gap-free incremental monitoring, not timestamps. Pass nextCursor unchanged with the same filters. includeLastMessage opts into previews and nonzero queuedPromptCount; unclaimed human/API prompts are never previewed. Previews share a ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 budget; omitted previews carry a bounded session_events drill-down. Text/page loss facts appear only when loss occurs in compact mode. No instructions, resources, tools, files or history are returned; REST/UI defaults are unchanged.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
@@ -5771,6 +5771,18 @@ function registerWorkspaceOrchestrationTools(
             .max(8)
             .optional(),
           activeOnly: z4.boolean().optional(),
+          mineOnly: z4
+            .boolean()
+            .optional()
+            .describe(
+              "true keeps only sessions you started or prompted, with their child sessions. Keep unchanged when paging.",
+            ),
+          visibility: z4
+            .enum(["private", "workspace"])
+            .optional()
+            .describe(
+              "private: only you can see it; workspace: shared with everyone. Keep unchanged when paging.",
+            ),
           originSiteId: z4
             .string()
             .uuid()
@@ -5811,6 +5823,8 @@ function registerWorkspaceOrchestrationTools(
         query,
         statuses,
         activeOnly,
+        mineOnly,
+        visibility,
         originSiteId,
         recentHours,
         rootSessionId,
@@ -5877,6 +5891,8 @@ function registerWorkspaceOrchestrationTools(
             ...(query?.trim() ? { query } : {}),
             ...(statuses ? { statuses: statuses as SessionStatus[] } : {}),
             activeOnly: activeOnly === true,
+            ...(mineOnly === true ? { mineOnly: true } : {}),
+            ...(visibility ? { visibility } : {}),
             ...(originSiteId ? { originSiteId } : {}),
             ...(recentHours !== undefined ? { recentHours } : {}),
             ...(rootSessionId ? { rootSessionId } : {}),
@@ -8681,6 +8697,8 @@ export function capSessionDiscoveryPage(
       ...(session.channelId ? { projectId: session.channelId } : {}),
       title: title.text,
       titleTruncated: title.truncated,
+      visibility: session.visibility,
+      ...(session.archived ? { archived: true } : {}),
       parentSessionId: session.parentSessionId,
       isRoot: session.parentSessionId === null,
       status: session.status,

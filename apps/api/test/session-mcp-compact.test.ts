@@ -37,6 +37,8 @@ function page(count = 1): Page {
       id: uuid(i + 1),
       title: `Task ${i + 1}`,
       titleOriginalChars: 6,
+      visibility: "workspace",
+      archived: false,
       status: "idle",
       parentSessionId: null,
       rootSessionId: uuid(i + 1),
@@ -129,6 +131,27 @@ describe("compact-by-default MCP allowlists and byte regressions", () => {
       expect(bytes(compact)).toBeLessThan(bytes(capSessionDiscoveryPage(source, false)) * 0.25);
       expect(capSessionDiscoveryCompactPage(source)).toEqual(compact);
     }
+  });
+
+  test("private and archived rows say so; shared, live rows stay minimal", () => {
+    const source = page(3);
+    source.sessions[1]!.visibility = "private";
+    source.sessions[2]!.archived = true;
+    const compact = capSessionDiscoveryCompactPage(source);
+    expect(compact.sessions[0]).not.toHaveProperty("visibility");
+    expect(compact.sessions[0]).not.toHaveProperty("archived");
+    expect(compact.sessions[1]).toMatchObject({ visibility: "private" });
+    expect(compact.sessions[1]).not.toHaveProperty("archived");
+    expect(compact.sessions[2]).toMatchObject({ archived: true });
+    expect(compact.sessions[2]).not.toHaveProperty("visibility");
+    const full = capSessionDiscoveryPage(source, false);
+    expect(full.sessions.map((row) => row.visibility)).toEqual([
+      "workspace",
+      "private",
+      "workspace",
+    ]);
+    expect(full.sessions[2]).toMatchObject({ archived: true });
+    expect(full.sessions[0]).not.toHaveProperty("archived");
   });
 
   test("closed allowlist ignores new/diagnostic/configuration properties", () => {
