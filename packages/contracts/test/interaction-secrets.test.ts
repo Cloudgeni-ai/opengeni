@@ -345,13 +345,20 @@ describe("redactInteractionSecretValues", () => {
   });
 
   test("an address keeps its host and port but not a typed value elsewhere in it", () => {
-    const secrets = { cvc: "731", pan: "4000000000000002", password: PASSWORD };
+    const secrets = {
+      cvc: "731",
+      pan: "4000000000000002",
+      password: PASSWORD,
+      atPassword: "fake@pass-word-9",
+    };
     const result = redactInteractionSecretValues(
       {
         url: "http://127.0.0.1:731/pay/731?card=4000000000000002#731",
         devServer: "http://localhost:4000",
         host: "https://731.example.test/",
         userInfo: `https://user:${PASSWORD}@example.test/`,
+        atUserInfo: "https://user:fake@pass-word-9@example.test",
+        ipv6: "http://[::1]:731/731",
         text: "Opened http://127.0.0.1:731/ for 731",
       },
       secrets,
@@ -361,10 +368,12 @@ describe("redactInteractionSecretValues", () => {
       devServer: "http://localhost:4000",
       host: "https://731.example.test/",
       userInfo: `https://user:${INTERACTION_REDACTED_SECRET}@example.test/`,
+      atUserInfo: `https://user:${INTERACTION_REDACTED_SECRET}@example.test`,
+      ipv6: `http://[::1]:731/${INTERACTION_REDACTED_SECRET}`,
       // Only a text that is a whole address keeps its host.
       text: `Opened http://127.0.0.1:${INTERACTION_REDACTED_SECRET}/ for ${INTERACTION_REDACTED_SECRET}`,
     });
-    for (const url of [result.url, result.devServer, result.host, result.userInfo])
+    for (const url of [result.url, result.devServer, result.host, result.userInfo, result.ipv6])
       expect(() => new URL(url)).not.toThrow();
   });
 });

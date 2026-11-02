@@ -536,8 +536,10 @@ function digitBefore(text: string, start: number): boolean {
   return !(start >= 3 && text[start - 3] === "%" && isHexDigit(text[start - 2]));
 }
 
-/** An absolute address: scheme, optional user info, host and port, then the rest. */
-const ABSOLUTE_URL = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)(?:([^/?#@\s]*)@)?([^/?#@\s]*)([^\s]*)$/u;
+/** An absolute address: scheme, optional user info (up to the authority's
+ * last `@`, so a password containing one is all user info), host and port,
+ * then the rest. */
+const ABSOLUTE_URL = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)(?:([^/?#\s]*)@)?([^/?#@\s]*)([^\s]*)$/u;
 
 /** Mask one text with compiled entries. */
 export function maskSecretValuesInText(text: string, masks: CompiledSecretValueMasks): string {
@@ -558,8 +560,7 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
   for (const { pattern, label } of masks.formattedNumbers) {
     const kept = keptRanges(text, masks.pattern);
     text = text.replace(pattern, (match, at: number, whole: string) =>
-      overlapsKept(at, at + match.length, kept) ||
-      touchesOtherDigits(whole, at, at + match.length)
+      overlapsKept(at, at + match.length, kept) || touchesOtherDigits(whole, at, at + match.length)
         ? match
         : label,
     );
