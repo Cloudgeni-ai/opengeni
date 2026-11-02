@@ -8681,15 +8681,17 @@ export type OrganizationComputeSummary = {
 };
 
 /** GET .../organization-machines: every organization machine, wherever it
- * works, for organization owners. `complete` is false while the server can
- * only list the ones that work in the requested workspace. */
+ * works, for organization owners and admins. `complete` is always true;
+ * servers before migration 1272 could list only the ones that work in the
+ * requested workspace and sent false. */
 export type ListOrganizationMachinesResponse = {
   machines: OrganizationComputeSummary[];
   complete: boolean;
 };
 
 /** GET .../organization-rigs: every organization sandbox environment,
- * wherever it works, for organization owners. `complete` as for machines. */
+ * wherever it works, for organization owners and admins. `complete` as for
+ * machines. */
 export type ListOrganizationRigsResponse = {
   rigs: OrganizationComputeSummary[];
   complete: boolean;

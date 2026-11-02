@@ -12368,9 +12368,9 @@ export type OrganizationComputeSummary = z.infer<typeof OrganizationComputeSumma
 
 /**
  * GET /v1/workspaces/:workspaceId/organization-machines: every organization
- * machine, wherever it works, for organization owners. `complete` is false
- * while the server can only list the ones that work in the requested
- * workspace.
+ * machine, wherever it works, for organization owners and admins. `complete`
+ * is always true; servers before migration 1272 could list only the ones that
+ * work in the requested workspace and sent false.
  */
 export const ListOrganizationMachinesResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ machines: z.array(OrganizationComputeSummary), complete: primitives.boolean }),
@@ -12379,7 +12379,7 @@ export type ListOrganizationMachinesResponse = z.infer<typeof ListOrganizationMa
 
 /**
  * GET /v1/workspaces/:workspaceId/organization-rigs: every organization
- * sandbox environment, wherever it works, for organization owners.
+ * sandbox environment, wherever it works, for organization owners and admins.
  * `complete` as for machines.
  */
 export const ListOrganizationRigsResponse = /* @__PURE__ */ defineSchema(() =>

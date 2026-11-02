@@ -23865,29 +23865,19 @@ export type OrganizationComputeSummaryRow = {
   reach: OrganizationComputeReach;
 };
 
-const LIST_ORGANIZATION_COMPUTE = "opengeni_private.list_organization_compute_v1(uuid, uuid, text)";
-
 /**
  * Every active organization machine or rig in the account, wherever it works
  * (migration 1224), for the people who decide where they work; the caller
- * checks account:admin and refuses agent runs. Null while the routine's
- * runtime EXECUTE is withheld (runtime-posture
- * DEFERRED_RUNTIME_PRIVATE_ROUTINES). The grant is checked in its own
- * statement, because EXECUTE is checked when a statement starts.
+ * checks organization administration (the owner or an admin) and refuses
+ * agent runs.
  */
 export async function listOrganizationCompute(
   db: Database,
   access: RigAccessContext,
   kind: "machine" | "rig",
-): Promise<OrganizationComputeSummaryRow[] | null> {
+): Promise<OrganizationComputeSummaryRow[]> {
   return await withRlsContext(db, access, async (scopedDb) => {
     await setSubjectRlsContext(scopedDb, access.subjectId);
-    const [grant] = await rawRows<{ granted: boolean | null }>(
-      scopedDb,
-      sql`select coalesce(has_function_privilege(
-          to_regprocedure(${LIST_ORGANIZATION_COMPUTE})::oid, 'EXECUTE'), false) as granted`,
-    );
-    if (grant?.granted !== true) return null;
     const rows = await rawRows<{
       value: {
         id: string;
