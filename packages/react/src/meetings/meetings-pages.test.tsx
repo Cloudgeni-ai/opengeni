@@ -1459,6 +1459,50 @@ describe("Meeting page", () => {
     }
   });
 
+  test("a wrong speaker count is fixed by telling it how many people spoke", async () => {
+    const fixture = createMeetingsFixture();
+    const asked: unknown[] = [];
+    const client = {
+      ...fixture.client,
+      createRecordingTranscript: async (
+        workspaceId: string,
+        id: string,
+        request: { transcription?: unknown },
+      ) => {
+        asked.push(request.transcription);
+        return await fixture.client.createRecordingTranscript(workspaceId, id);
+      },
+    } as typeof fixture.client;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Wrong number of speakers?");
+      const wrong = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Wrong number of speakers?",
+      )!;
+      await act(async () => wrong.click());
+      await waitForText(document.body, "Number of speakers");
+      const field = document.body.querySelector<HTMLInputElement>('input[inputmode="numeric"]')!;
+      await typeInto(field, "4");
+      const submit = [...document.body.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Transcribe",
+      )!;
+      await act(async () => submit.click());
+      await waitFor(() => asked.length === 1);
+      expect(asked[0]).toMatchObject({ speakers: 4 });
+      expect(asked[0]).not.toHaveProperty("maxSpeakers");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   /** The fixture's failed meeting, refused for credits on the deployment's model. */
   async function creditRefusal(withSubscription: boolean) {
     const fixture = createMeetingsFixture();

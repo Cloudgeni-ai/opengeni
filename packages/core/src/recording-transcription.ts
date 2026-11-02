@@ -224,7 +224,12 @@ export type RecordingDiarizer = {
   id: string;
   diarize(
     audio: RecordingTranscriptionAudio,
-    options: { maxSpeakers?: number | undefined; signal?: AbortSignal | undefined },
+    options: {
+      maxSpeakers?: number | undefined;
+      /** Exactly this many speakers, when known. */
+      speakers?: number | undefined;
+      signal?: AbortSignal | undefined;
+    },
   ): Promise<RecordingDiarizerResult>;
 };
 

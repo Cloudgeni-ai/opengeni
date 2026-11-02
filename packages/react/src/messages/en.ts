@@ -2531,13 +2531,14 @@ export const englishMessages = {
   "meetings.detailPage.itSStillBeingRecorded":
     "It's still being recorded on another device. The transcript appears here when it's done.",
   "meetings.detailPage.language": "Language",
-  "meetings.detailPage.leaveEmptyToLetThe": "Leave empty if you're not sure.",
+  "meetings.detailPage.leaveEmptyToLetThe":
+    "How many people talk in the meeting. Leave empty if you're not sure.",
   "meetings.detailPage.leftUnnamed": "Left unnamed",
   "meetings.detailPage.listeningWhatSSaidShows": "Listening…",
   "meetings.detailPage.loadingMeeting": "Loading meeting",
   "meetings.detailPage.makesANewVersionFrom":
     "Makes a new transcript from the audio. Speaker names carry over; corrected words don't.",
-  "meetings.detailPage.maximumNumberOfSpeakers": "Maximum number of speakers",
+  "meetings.detailPage.numberOfSpeakers": "Number of speakers",
   "meetings.detailPage.me": "Me",
   "meetings.detailPage.meetings": "Meetings",
   "meetings.detailPage.model": "Model",
@@ -2600,6 +2601,7 @@ export const englishMessages = {
   "meetings.detailPage.show": "Show",
   "meetings.detailPage.speakers": "Speakers",
   "meetings.detailPage.speakersToReview": "Speakers to review",
+  "meetings.detailPage.wrongNumberOfSpeakers": "Wrong number of speakers?",
   "meetings.detailPage.starting": "Starting…",
   "meetings.detailPage.suggestedFromTheirVoice": "Suggested by voice",
   "meetings.detailPage.suggestionDismissed": "Suggestion dismissed",
