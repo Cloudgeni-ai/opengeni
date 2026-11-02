@@ -58,7 +58,8 @@ export function WindowBarTitleBoundary({
  * Claims the window bar for `title`. With `fallback`, the claim yields to any
  * other header with a title, as headers in a `WindowBarTitleBoundary fallback`
  * do: a page that stays mounted under a page it opens keeps naming the bar
- * only until that page names it.
+ * only until that page names it. Inside a fallback boundary every claim is a
+ * fallback already, so there the first one keeps the bar.
  */
 export function useWindowBarTitle(title: ReactNode, fallback = false): boolean {
   const windowBar = useContext(PageHeaderWindowBarContext);

@@ -179,7 +179,8 @@ export function SlackAgentFormPage({
   const [pickerOpen, setPickerOpen] = useState(false);
   const avatar = sessionAvatarFromDraft(draft, name, null);
   const connection = connections.find((row) => row.id === connectionId) ?? connections[0] ?? null;
-  const loadFailed = !agent && connectionsLoaded && Boolean(connectionsError);
+  // Only when no bot arrived: with one, creating works and the Slack page behind says the rest.
+  const loadFailed = !agent && !connection && connectionsLoaded && Boolean(connectionsError);
   const agentWorkspaceName = agent ? (agent.targetWorkspaceName ?? workspaceName) : workspaceName;
   const handle = name.trim() ? slackAgentHandle(name) : null;
   // Opening an agent to anyone in Slack is an organization admin's call; any

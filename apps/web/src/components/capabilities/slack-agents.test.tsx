@@ -572,6 +572,18 @@ describe("Slack agent form", () => {
     await view.unmount();
   });
 
+  test("a load that failed elsewhere says nothing when a bot is here to create with", async () => {
+    setContext({});
+    const view = await render(
+      <SlackAgentFormPage
+        {...form({ connectionsError: "Some connections could not be checked." })}
+      />,
+    );
+    expect(view.host.textContent).not.toContain("Couldn't load");
+    expect(buttonNamed(view.host, "Create agent").disabled).toBe(false);
+    await view.unmount();
+  });
+
   test("keeps the page gutter, like the other Capabilities pages", async () => {
     setContext({});
     const view = await render(<SlackAgentFormPage {...form()} />);
