@@ -1326,6 +1326,28 @@ export class OpenGeniSlackBotClient {
     });
   }
 
+  /**
+   * Names for people a message mentions, so the request reads "@Sam" rather
+   * than "<@U0123>": the Slack display name, else the real name, else the
+   * username. Best effort: someone Slack doesn't return is left out.
+   */
+  async userDisplayNames(userIds: readonly string[]) {
+    return await this.withAudit("users.list", async (headers) => {
+      const names: { id: string; name: string }[] = [];
+      for (const userId of userIds) {
+        try {
+          const payload = await this.call(headers, "users.info", { user: userId });
+          const user = projectUser(payload.user);
+          const name = user?.displayName || user?.realName || user?.name;
+          if (user?.id === userId && name) names.push({ id: userId, name });
+        } catch {
+          // Shown as written.
+        }
+      }
+      return { names };
+    });
+  }
+
   async channelHistory(input: {
     channelId: string;
     limit?: number;

@@ -192,6 +192,7 @@ import {
 } from "./slack-bot";
 import { slackMrkdwnFromMarkdown, slackMrkdwnKeepingClaudeCiteTags } from "./slack-mrkdwn";
 import { sessionAvatarImageUrl } from "./session-avatar-image";
+import { slackMentionedUserIds, slackReadableRequestText } from "./slack-request-text";
 import {
   isSlackDirectMessageConversation,
   resolveSlackWorkspaceRoute,
@@ -3181,6 +3182,19 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     preparedModelContext = prepared.modelContext;
     preparedAttachments = prepared.attachments;
   }
+  // The chat shows the request as the person wrote it to Opengeni: without
+  // the leading mention, and with the people it mentions by name.
+  const readable = slackReadableRequestText(
+    preparedEntry.text,
+    installation.botUserId,
+    await slackMentionedUserNames(client, preparedEntry.text, installation.botUserId),
+  );
+  preparedEntry = { ...preparedEntry, text: readable.text };
+  if (readable.modelContext) {
+    preparedModelContext = [preparedModelContext, readable.modelContext]
+      .filter(Boolean)
+      .join("\n\n");
+  }
 
   if (existing?.sessionId) {
     const remounted = await remountSlackReactionTaskForSession(
@@ -4271,6 +4285,18 @@ function slackOtherDeploymentModelContext(
   text: string,
 ): string | null {
   return otherDeploymentLinkContext(text, deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl);
+}
+
+/** Names for the people a message mentions; empty when there are none or Slack can't say. */
+async function slackMentionedUserNames(
+  client: OpenGeniSlackBotClient,
+  text: string,
+  botUserId: string | null,
+): Promise<Map<string, string>> {
+  const ids = slackMentionedUserIds(text, botUserId);
+  if (ids.length === 0) return new Map();
+  const result = await client.userDisplayNames(ids).catch(() => null);
+  return new Map((result?.names ?? []).map((entry) => [entry.id, entry.name]));
 }
 
 function slackInvocationPreparedMessage(

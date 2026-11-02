@@ -217,6 +217,9 @@ type SlackPrivateFileFixture = {
   bytes: Uint8Array;
 };
 
+/** People the fake Slack knows by name; everyone else has no profile. */
+const SLACK_TEST_DISPLAY_NAMES = new Map([["U0SAM", "Sam Lee"]]);
+
 function fakeSlack(
   deniedChannels: Set<string> = new Set(),
   options: {
@@ -459,6 +462,9 @@ function fakeSlack(
           is_external: external,
           is_restricted: guest,
           is_ultra_restricted: false,
+          ...(SLACK_TEST_DISPLAY_NAMES.has(userId)
+            ? { profile: { display_name: SLACK_TEST_DISPLAY_NAMES.get(userId) } }
+            : {}),
         },
       });
     }
@@ -5730,6 +5736,41 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(inbox).toEqual({ status: "failed", last_error_code: "http_402" });
   });
 
+  test("a chat started from a mention shows the request without the mention, with people by name", async () => {
+    if (!available) return;
+    const value = await fixture();
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_READABLE_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_TEAM",
+            ts: "1720000100.000001",
+            text: `<@${value.botUserId}> do you work? cc <@U0SAM> and <@U0NOBODY>`,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions where id = ${route!.session_id}`;
+    expect(session!.initial_message).toBe("do you work? cc @Sam Lee and <@U0NOBODY>");
+    const [message] = await shared!.admin<{ text: string; model_context: string | null }[]>`
+      select event.payload ->> 'text' as text, event.payload ->> 'modelContext' as model_context
+      from session_events event
+      where event.workspace_id = ${value.owner.workspaceId}
+        and event.session_id = ${route!.session_id}
+        and event.type = 'user.message'
+      order by event.sequence asc
+      limit 1`;
+    expect(message!.text).toBe("do you work? cc @Sam Lee and <@U0NOBODY>");
+    expect(message!.model_context).toContain("@Sam Lee is <@U0SAM>");
+  });
+
   test("channel mentions adopt existing threads; only a mention continues, with untagged messages as context", async () => {
     if (!available) return;
     const value = await fixture({ linkOther: true });
@@ -5783,7 +5824,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         and event.type = 'user.message'
       order by event.sequence asc
       limit 1`;
-    expect(initialMessage!.text).toBe(`<@${value.botUserId}> Can check this out?`);
+    expect(initialMessage!.text).toBe("Can check this out?");
     expect(initialMessage!.model_context).toContain(
       "Do we support Google Drive integration in Opengeni currently?",
     );
@@ -5850,7 +5891,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     const afterSecondMention = await userMessages();
     expect(afterSecondMention).toHaveLength(2);
     const continued = afterSecondMention[1]!;
-    expect(continued.text).toBe(`<@${value.botUserId}> Continue as another authorized participant`);
+    expect(continued.text).toBe("Continue as another authorized participant");
     expect(continued.model_context).toContain("since Opengeni was last invoked (oldest to newest)");
     const davlet = continued.model_context!.indexOf(
       `1720000000.000003 ${value.ownerSlackUserId}: <@U_DAVLET> Did you create this integration?`,
@@ -6218,7 +6259,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         and event.type = 'user.message'
       order by event.sequence asc
       limit 1`;
-    expect(initialMessage!.text).toBe(`<@${value.botUserId}> Can you answer this question?`);
+    expect(initialMessage!.text).toBe("Can you answer this question?");
     expect(initialMessage!.model_context).toContain(
       "What deployment is currently running in production?",
     );
@@ -6357,7 +6398,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(session!.resources.map((resource) => resource.mountPath)).toEqual([
       "attachments/slack/01-incident.png",
     ]);
-    expect(session!.initial_message).toBe(`<@${value.botUserId}> Read this screenshot.`);
+    expect(session!.initial_message).toBe("Read this screenshot.");
     expect(session!.initial_model_context).toContain("Surrounding thread history was omitted");
     expect(session!.initial_model_context).not.toContain("Optional old context");
     expect(objectStore.objects.size).toBe(1);
@@ -9211,7 +9252,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(allowedSession!.resources.map((resource) => resource.mountPath)).toEqual([
       "attachments/slack/01-partner-incident.png",
     ]);
-    expect(allowedSession!.initial_message).toBe(`<@${allowed.botUserId}> investigate privately`);
+    expect(allowedSession!.initial_message).toBe("investigate privately");
     expect(allowedSession!.initial_model_context).toContain("Imported invocation attachments");
     expect(allowed.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(1);
     expect(objectStore.objects.size).toBe(1);
