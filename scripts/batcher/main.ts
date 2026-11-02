@@ -7,9 +7,9 @@ import { DEFAULT_SETTINGS, type Settings } from "./model";
 import { run } from "./pass";
 
 function settings(env: Record<string, string | undefined>): Settings {
-  const seconds = (name: string, fallback: number) => {
+  const milliseconds = (name: string, fallbackMs: number) => {
     const value = env[name];
-    if (value === undefined || value === "") return fallback;
+    if (value === undefined || value === "") return fallbackMs;
     const parsed = Number(value);
     if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${name} must be a number`);
     return parsed * 1000;
@@ -17,12 +17,9 @@ function settings(env: Record<string, string | undefined>): Settings {
   const maxBatch = Number(env.BATCHER_MAX_BATCH || DEFAULT_SETTINGS.maxBatch);
   if (!Number.isSafeInteger(maxBatch) || maxBatch < 1) throw new Error("BATCHER_MAX_BATCH");
   return {
-    windowMs: seconds("BATCHER_WINDOW_SECONDS", DEFAULT_SETTINGS.windowMs / 1000),
+    windowMs: milliseconds("BATCHER_WINDOW_SECONDS", DEFAULT_SETTINGS.windowMs),
     maxBatch,
-    startTimeoutMs: seconds(
-      "BATCHER_START_TIMEOUT_SECONDS",
-      DEFAULT_SETTINGS.startTimeoutMs / 1000,
-    ),
+    startTimeoutMs: milliseconds("BATCHER_START_TIMEOUT_SECONDS", DEFAULT_SETTINGS.startTimeoutMs),
   };
 }
 
