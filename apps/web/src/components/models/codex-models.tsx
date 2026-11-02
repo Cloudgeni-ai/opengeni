@@ -259,6 +259,7 @@ export function CodexSettingRows({
   organizationSharing = null,
   onConnectForWorkspace,
   showRotation = true,
+  canChangeSettings = codex.canManage,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
@@ -268,6 +269,12 @@ export function CodexSettingRows({
   onConnectForWorkspace?: (() => void) | undefined;
   /** The shared account-rules section owns rotation after core settings load. */
   showRotation?: boolean;
+  /**
+   * Turn Codex on or off and pick how accounts share work here. Defaults to
+   * `codex.canManage`; a Personal workspace passes whether its owner may
+   * change its settings.
+   */
+  canChangeSettings?: boolean | undefined;
 }) {
   const [turningOff, setTurningOff] = useState(false);
   const { accounts } = codex;
@@ -278,7 +285,7 @@ export function CodexSettingRows({
           label="Codex is off in this workspace"
           description="New chats and automations here can't use Codex models. Accounts stay connected."
           control={
-            codex.canManage ? (
+            canChangeSettings ? (
               <RowButton
                 disabled={codex.busy}
                 onClick={() =>
@@ -295,7 +302,7 @@ export function CodexSettingRows({
   }
   // Only the pool in use matters, and only this workspace's own pool is set here.
   const showPick =
-    showRotation && codex.canManage && codex.workspaceManaged && accounts.length >= 2;
+    showRotation && canChangeSettings && codex.workspaceManaged && accounts.length >= 2;
   return (
     <>
       <SettingRowGroup>
@@ -323,7 +330,7 @@ export function CodexSettingRows({
           />
         ) : null}
         <CodexAppsRow codex={codex} places={places} onConnectForWorkspace={onConnectForWorkspace} />
-        {codex.canManage ? (
+        {canChangeSettings ? (
           <SettingDangerRow
             label="Turn off Codex"
             description="New chats and automations here stop using Codex models. Accounts stay connected."

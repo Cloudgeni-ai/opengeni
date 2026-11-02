@@ -236,9 +236,11 @@ import {
   hasPermission,
   requireAccessContext,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireCanonicalLocalAccountAdministrator,
   resolveAccountAdminAuthorizationStamp,
   resolveCatalogSettings,
+  workspaceSettingsAuthorized,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
@@ -765,6 +767,35 @@ type CodexConnectState = {
 
 const CODEX_DEVICE_EXPIRY_SECONDS = 15 * 60; // the device code expires 15 min after start (spec §1.1)
 
+/**
+ * A workspace's Codex settings writer, after the route's `connections:write`
+ * check (as before); the database decides who changes the workspace's settings
+ * row. In a Personal workspace that is its owner acting as themselves (1233),
+ * which only `workspaceSettingsAuthorized` establishes: a delegated bearer
+ * naming the owner holds `connections:write` too.
+ */
+async function codexWorkspaceSettingsWriter(
+  deps: ApiRouteDeps,
+  authorization: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>,
+  workspaceId: string,
+): Promise<{
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  personalWorkspaceOwnerVerified: boolean;
+}> {
+  return {
+    accountId: authorization.grant.accountId,
+    workspaceId,
+    subjectId: authorization.grant.subjectId,
+    personalWorkspaceOwnerVerified: await workspaceSettingsAuthorized(
+      deps,
+      authorization,
+      workspaceId,
+    ),
+  };
+}
+
 export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings, githubStateSecret } = deps;
 
@@ -777,18 +808,19 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/workspaces/:workspaceId/codex/source", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const writer = await codexWorkspaceSettingsWriter(deps, authorization, workspaceId);
     const parsed = parseRequestBody(CodexSourceRequest, await c.req.json().catch(() => null), {
       status: 400,
       message: "a valid Codex source mode is required",
     });
 
-    return await coreCodexSetSource(c, deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      mode: parsed.mode,
-    });
+    return await coreCodexSetSource(c, deps, { ...writer, mode: parsed.mode });
   });
 
   app.get("/v1/organizations/:organizationId/codex/accounts", async (c) => {
@@ -1311,14 +1343,15 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Pure pointer flip; in-flight turns pick it up on their next token fetch.
   app.post("/v1/workspaces/:workspaceId/codex/accounts/:accountId/activate", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-
-    return await coreCodexActivate(
+    const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
-      { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-      c.req.param("accountId"),
+      workspaceId,
+      "connections:write",
     );
+    const writer = await codexWorkspaceSettingsWriter(deps, authorization, workspaceId);
+
+    return await coreCodexActivate(c, deps, writer, c.req.param("accountId"));
   });
 
   // Update rotation settings. Connection-management access. Sharded-rotation policy: the strategy picker is GONE —
@@ -1328,7 +1361,13 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // the stored column is historical residue, not authority to restart old binaries.
   app.patch("/v1/workspaces/:workspaceId/codex/settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const writer = await codexWorkspaceSettingsWriter(deps, authorization, workspaceId);
 
     const body = (await c.req.json().catch(() => ({}))) as {
       rotationEnabled?: unknown;
@@ -1350,12 +1389,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
 
-    return await coreCodexSetRotation(
-      c,
-      deps,
-      { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-      patch.rotationEnabled,
-    );
+    return await coreCodexSetRotation(c, deps, writer, patch.rotationEnabled);
   });
 
   // Rename an account (label only in P1).
