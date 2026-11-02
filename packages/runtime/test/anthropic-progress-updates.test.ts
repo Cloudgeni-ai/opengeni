@@ -16,11 +16,11 @@ import { projectHistoryForProvider } from "../src/provider-history-adapter";
 import { AssistantMessagePhaseTracker, normalizeSdkEvent } from "../src/run-events";
 
 // Claude Opus 5.5 and Sonnet 5.5 can write a progress update before a tool
-// call as its own signed `thinking` block. Under display "updates" reasoning
-// comes back empty and only progress updates carry text, but that text is
-// Anthropic's summary, not the words the model wrote. It must stay reasoning:
-// shown as a thought, never as the agent's message or as a visible reply. In
-// production such summaries claimed explanations the model never gave.
+// call as its own signed `thinking` block. Requests ask for summarized
+// thinking, so reasoning and progress updates both come back as Anthropic's
+// summary, not the words the model wrote. It must stay reasoning: shown as a
+// thought, never as the agent's message or as a visible reply. In production
+// such summaries claimed explanations the model never gave.
 
 setTracingDisabled(true);
 const provider: ResolvedModelProvider = {
@@ -165,7 +165,7 @@ const expectedOutput = [
 ];
 
 describe("Claude progress updates before a tool call", () => {
-  test("only models that write progress updates ask for display updates", async () => {
+  test("every model asks for reasoning summaries, so thinking stays readable", async () => {
     expect(anthropicWritesProgressUpdates("claude-opus-5-5")).toBe(true);
     expect(anthropicWritesProgressUpdates("claude-sonnet-5-5")).toBe(true);
     for (const model of ["claude-haiku-5-5", "claude-opus-5", "claude-opus-4-6", "claude-x"])
@@ -182,10 +182,10 @@ describe("Claude progress updates before a tool call", () => {
       }) as typeof fetch);
       await claude.getResponse(request());
     }
-    expect(sent[0]!.body.thinking).toEqual({ type: "adaptive", display: "updates" });
-    expect(sent[0]!.betas).toContain("thinking-display-updates-2026-08-18");
-    expect(sent[1]!.body.thinking).toEqual({ type: "adaptive", display: "summarized" });
-    expect(sent[1]!.betas).not.toContain("thinking-display-updates-2026-08-18");
+    for (const { body, betas } of sent) {
+      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+      expect(betas).not.toContain("thinking-display-updates-2026-08-18");
+    }
   });
 
   test("thinking, thinking, tool_use: the summarized update stays reasoning, not a visible reply", async () => {
@@ -295,12 +295,12 @@ describe("Claude progress updates before a tool call", () => {
     expect(modelResponseHasProgressUpdate(result)).toBe(true);
   });
 
-  test("only display updates marks progress updates; reasoning summaries never are", async () => {
+  test("only models that write progress updates mark them; other summaries never are", async () => {
     const claude = new AnthropicMessagesModel(provider, "claude-opus-5", (async () =>
       Response.json(response(summarizedContent))) as typeof fetch);
     const result = await claude.getResponse(request());
     expect(modelResponseHasProgressUpdate(result)).toBe(false);
-    // Empty reasoning under updates is not an update either.
+    // Empty reasoning is not an update either.
     expect(
       modelResponseHasProgressUpdate({
         output: anthropicResponse(

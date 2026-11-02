@@ -378,11 +378,11 @@ export function modelResponseHasVisibleText(response: unknown): boolean {
 }
 
 /**
- * Whether the model response that asked for tools contains a Claude progress
- * update: a note the model wrote for the person before its tool call that came
- * back only as Anthropic's summary, as reasoning (see
+ * Whether the model response that asked for tools may contain a Claude
+ * progress update: a note the model wrote for the person before its tool call
+ * that came back only as Anthropic's summary, as reasoning (see
  * `anthropicWritesProgressUpdates`). Some or all of what the model meant to
- * say is then not visible as written.
+ * say may then not be visible as written.
  */
 export function modelResponseHasProgressUpdate(response: unknown): boolean {
   const output = (response as { output?: unknown } | null | undefined)?.output;

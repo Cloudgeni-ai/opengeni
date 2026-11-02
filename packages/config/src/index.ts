@@ -13434,11 +13434,11 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       autoCompactTokenLimit?: number;
       prefixBoundThinking?: boolean;
       /**
-       * The model writes its notes for the person between tool calls as
+       * The model may write its notes for the person between tool calls as
        * progress-update `thinking` blocks instead of `text` blocks. Requests
-       * use `thinking.display: "updates"` so those blocks, and only those,
-       * carry readable text (Anthropic's documented way to tell them apart
-       * from reasoning).
+       * ask for summarized thinking, so such a note comes back only as a
+       * summary that cannot be told apart from reasoning; its readable
+       * thinking is treated as a possible progress update.
        */
       progressUpdates?: boolean;
     }>

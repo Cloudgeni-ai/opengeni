@@ -157,13 +157,13 @@ export const INPUT_WAIT_REPLY_REFUSAL =
   "wait_for_input was not registered: this turn answers a person's message and you have not written a visible reply yet. Your reasoning is not shown to them: text inside a thinking or reasoning block does not count, even when it is written as an answer, and neither does a note written before a tool call (they may see only a short summary of it, as reasoning). Call wait_for_input again with your complete answer to their message in its `reply` argument; it is shown to them exactly as written. If an earlier wait is still armed, pass the time remaining on its deadline rather than a fresh timeout.";
 
 /**
- * Tool error when the response that asked to wait holds a Claude progress
- * update and the call carries no `reply`: what the model wrote for the person
- * before the call reached them only as Anthropic's summary, as reasoning, even
- * if a short text block sits beside it.
+ * Tool error when the response that asked to wait may hold a Claude progress
+ * update and the call carries no `reply`: anything the model wrote for the
+ * person before the call reached them only as Anthropic's summary, as
+ * reasoning, even if a short text block sits beside it.
  */
 export const INPUT_WAIT_PROGRESS_UPDATE_REFUSAL =
-  "wait_for_input was not registered: the note you wrote before this call reached the person only as a short summary, not as you wrote it, so they have not seen your answer. Call wait_for_input again with your complete answer to their message in its `reply` argument; it is shown to them exactly as written, so do not write it again before the call. If an earlier wait is still armed, pass the time remaining on its deadline rather than a fresh timeout.";
+  "wait_for_input was not registered: anything you wrote for the person before this call reached them only as a short summary, not as you wrote it, so they have not seen your answer. Call wait_for_input again with your complete answer to their message in its `reply` argument; it is shown to them exactly as written, so do not write it again before the call. If an earlier wait is still armed, pass the time remaining on its deadline rather than a fresh timeout.";
 
 /**
  * Refusals per turn attempt (one worker activity); a resumed or retried

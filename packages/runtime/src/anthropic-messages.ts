@@ -55,27 +55,23 @@ export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
 }
 
-/** Beta header that admits `thinking.display: "updates"`. */
-export const ANTHROPIC_THINKING_DISPLAY_UPDATES_BETA = "thinking-display-updates-2026-08-18";
-
 /**
- * Whether this model writes progress updates between tool calls as their own
- * `thinking` blocks (Claude Opus 5.5, Sonnet 5.5).
+ * Whether this model may write progress updates between tool calls as their
+ * own `thinking` blocks (Claude Opus 5.5, Sonnet 5.5).
  *
- * Such a model is asked for `display: "updates"`: reasoning blocks then come
- * back empty and only progress updates carry text. That text is Anthropic's
- * summary of the update, not the words the model wrote (those stay inside the
- * signed block), and it can claim things the model never said. It is therefore
- * reasoning: shown as a thought, never as the agent's message or reply, and it
- * never counts as a visible reply. Its signed block is replayed unchanged in
- * place like any other thinking block.
+ * Every Claude request asks for `display: "summarized"`, so each thinking
+ * block, reasoning or progress update alike, comes back as Anthropic's
+ * readable summary and is shown as a thought. That text is not the words the
+ * model wrote (those stay inside the signed block) and it can claim things the
+ * model never said. It is therefore reasoning: never the agent's message or
+ * reply, and it never counts as a visible reply. Because a progress update
+ * cannot be told apart from a reasoning summary, readable thinking from these
+ * models is marked as a possible progress update so the wait_for_input guard
+ * asks for the verbatim `reply` argument. Its signed block is replayed
+ * unchanged in place like any other thinking block.
  */
 export function anthropicWritesProgressUpdates(model: string): boolean {
   return claudeNativeModelProfile(model)?.progressUpdates === true;
-}
-
-function anthropicThinkingDisplay(model: string): "updates" | "summarized" {
-  return anthropicWritesProgressUpdates(model) ? "updates" : "summarized";
 }
 
 /**
@@ -806,7 +802,7 @@ export function buildAnthropicRequest(
       throw new AnthropicProtocolError(
         "The selected Claude model does not support this reasoning effort",
       );
-    body.thinking = { type: "adaptive", display: anthropicThinkingDisplay(model) };
+    body.thinking = { type: "adaptive", display: "summarized" };
     body.output_config = {
       effort,
     };
@@ -1069,13 +1065,13 @@ export function anthropicResponse(
           text(block.thinking, "thinking text");
           text(block.signature, "thinking signature");
         } else text(block.data, "redacted thinking data");
-        // Readable thinking text is always Anthropic's summary (of reasoning,
-        // or of a progress update under display "updates"), never words the
-        // model wrote for the person. It stays reasoning so it is never shown
-        // or recorded as the agent's message (anthropicWritesProgressUpdates).
-        // Under "updates" only a progress update carries text: it is marked so
-        // the wait_for_input guard knows a note for the person was not shown
-        // as written and asks for the verbatim `reply` argument instead.
+        // Readable thinking text is always Anthropic's summary (of reasoning
+        // or of a progress update), never words the model wrote for the
+        // person. It stays reasoning so it is never shown or recorded as the
+        // agent's message (anthropicWritesProgressUpdates). From a model that
+        // writes progress updates it is marked, because it may hold a note for
+        // the person that was not shown as written: the wait_for_input guard
+        // then asks for the verbatim `reply` argument instead.
         output.push({
           type: "reasoning",
           id,
@@ -1223,7 +1219,7 @@ export class AnthropicMessagesModel implements Model {
     if (claudeNativeModelProfile(this.model)?.prefixBoundThinking && resetsPrefix) {
       body.thinking = {
         type: "adaptive",
-        display: anthropicThinkingDisplay(this.model),
+        display: "summarized",
         ...body.thinking,
         block_binding: { prefix_mismatch_behavior: "drop_block" },
       };
@@ -1231,11 +1227,6 @@ export class AnthropicMessagesModel implements Model {
       delete body.top_p;
       const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
       betas.add("thinking-binding-controls-2026-08-01");
-      headers.set("anthropic-beta", [...betas].join(","));
-    }
-    if (body.thinking?.display === "updates") {
-      const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
-      betas.add(ANTHROPIC_THINKING_DISPLAY_UPDATES_BETA);
       headers.set("anthropic-beta", [...betas].join(","));
     }
     if ((claudeNativeModelProfile(this.model)?.contextWindowTokens ?? 0) > 200_000) {
