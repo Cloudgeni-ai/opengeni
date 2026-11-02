@@ -42,7 +42,7 @@ export type AgentMemoryAccess = {
   /** List the agent's other shared chats (`slack_agent_chats`). */
   listChats: boolean;
   /** Why the chat cannot write, for the refusal and the guidance. */
-  readOnlyReason: "private_chat" | "memory_off_for_chat" | null;
+  readOnlyReason: "private_chat" | "memory_off_for_chat" | "not_owner_chat" | null;
   /**
    * Save any Knowledge at all. False only in a Slack DM, where a save would be
    * workspace scope whatever the agent's Memory (the old DM leak).
@@ -76,7 +76,7 @@ export function agentMemoryAccess(
       read: false,
       write: false,
       listChats: false,
-      readOnlyReason: "private_chat",
+      readOnlyReason: "not_owner_chat",
       saveKnowledge,
     };
   }
@@ -103,6 +103,8 @@ export function agentMemoryReadOnlyMessage(access: AgentMemoryAccess): string {
   if (!access.saveKnowledge) {
     return "Not saved: this is a private Slack chat, and Knowledge saved from it would reach everyone in the workspace. Answer without saving.";
   }
+  if (access.readOnlyReason === "not_owner_chat")
+    return `Not saved. ${AGENT_MEMORY_NOT_THIS_CHAT_MESSAGE}`;
   if (access.readOnlyReason === "private_chat") {
     return "Not saved: this chat is private, so nothing from it goes into the agent's Memory, which others' chats read. Answer without saving it there.";
   }
@@ -121,7 +123,7 @@ export const AGENT_MEMORY_NOT_THIS_CHAT_MESSAGE =
   "This agent is Only me and this chat is not its owner's Only me chat, so its Memory is not read. Answer from this chat.";
 
 export function agentMemoryUnreadableMessage(access: AgentMemoryAccess): string {
-  return access.readOnlyReason === "private_chat"
+  return access.readOnlyReason === "not_owner_chat"
     ? AGENT_MEMORY_NOT_THIS_CHAT_MESSAGE
     : AGENT_MEMORY_UNREADABLE_MESSAGE;
 }
