@@ -1515,6 +1515,15 @@ const SettingsSchema = z.object({
   azureAuthorityHost: z.string().trim().url().optional(),
   disableOpenaiTracing: EnvBoolean.default(false),
   sandboxBackend: SandboxBackend.default("docker"),
+  /**
+   * The deployment's configured default backend (`OPENGENI_SANDBOX_BACKEND`),
+   * fixed once by getSettings. Per-session code rebinds `sandboxBackend` to a
+   * session's stored backend (`{...settings, sandboxBackend}`); this field
+   * survives that spread, so the host-backend rule can still tell what the
+   * deployment chose. Read it through `deploymentSandboxBackend(settings)`;
+   * hand-built settings without it fall back to `sandboxBackend`.
+   */
+  deploymentSandboxBackend: SandboxBackend.optional(),
   dockerImage: z.string().default("opengeni-sandbox:local"),
   // Explicit deployment contract: the configured base sandbox image contains
   // the verified, self-contained native artifact runtime at its fixed image
@@ -5710,6 +5719,38 @@ export function isHostSandboxBackend(backend: z.infer<typeof SandboxBackend>): b
 }
 
 /**
+ * The deployment's configured default backend, even when `settings` has been
+ * rebound to a session's stored backend for one session's work.
+ */
+export function deploymentSandboxBackend(
+  settings: Pick<Settings, "sandboxBackend" | "deploymentSandboxBackend">,
+): z.infer<typeof SandboxBackend> {
+  return settings.deploymentSandboxBackend ?? settings.sandboxBackend;
+}
+
+/**
+ * Whether a box on `backend` must not be built here: it is a host backend
+ * (`local`, `docker`) that this deployment does not serve, judged by
+ * `sandboxBackendServed` against the deployment's own default rather than a
+ * session's rebound `sandboxBackend`. Remote providers are never refused here;
+ * they keep their own credential validation.
+ */
+export function hostSandboxBackendRefused(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): boolean {
+  if (!HOST_SANDBOX_BACKENDS.has(backend)) return false;
+  const deploymentBackend = deploymentSandboxBackend(settings);
+  return !sandboxBackendServed({ ...settings, sandboxBackend: deploymentBackend }, backend);
+}
+
+/** The user-facing reason a session on a refused host backend gets no box. */
+export const UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE =
+  "This chat is set up to run its sandbox directly on the server, which this deployment " +
+  "does not allow, so no sandbox was started and nothing ran. Start a new chat to use " +
+  "this deployment's sandbox.";
+
+/**
  * Whether this deployment serves NEW sessions on `backend`. The single source
  * of truth for every session-creation path (REST/SDK, `session_create`,
  * scheduled and event-triggered runs):
@@ -6536,6 +6577,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
   const parsed = SettingsSchema.parse(raw);
   const settings = {
     ...parsed,
+    deploymentSandboxBackend: parsed.sandboxBackend,
     sandboxIdleGraceMs:
       raw.sandboxIdleGraceMs === undefined && parsed.sandboxBackend === "modal"
         ? Math.min(60_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))

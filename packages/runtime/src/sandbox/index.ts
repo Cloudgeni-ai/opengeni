@@ -31,9 +31,9 @@ export {
 import type { Settings } from "@opengeni/config";
 import {
   collectSandboxEnvironment,
-  isHostSandboxBackend,
+  deploymentSandboxBackend,
+  hostSandboxBackendRefused,
   parseExposedPorts,
-  sandboxBackendServed,
 } from "@opengeni/config";
 export type { WorkspaceArchiveSpool, VerifiedHostWorkspaceArchive } from "./archive-spool";
 export {
@@ -823,16 +823,19 @@ export function createSandboxClient(
 }
 
 /**
- * Refuse a host-backed box (`local`, `docker`) unless `settings` serves it,
- * which for a host backend means it is the configured default
- * (`sandboxBackendServed`, the same rule session creation applies). A host box
- * runs as processes on this worker or API host, so whether it is allowed is a
- * deployment choice, never a consequence of what happens to be installed on the
- * host image. Remote providers keep their own credential validation.
+ * Refuse a host-backed box (`local`, `docker`) unless the deployment serves it,
+ * which for a host backend means it is the deployment's configured default
+ * (`sandboxBackendServed`, the same rule session creation applies). The
+ * deployment default is read from `settings.deploymentSandboxBackend`, which
+ * survives the per-session `{...settings, sandboxBackend}` rebinds, so a
+ * session's stored backend can never serve itself. A host box runs as
+ * processes on this worker or API host, so whether it is allowed is a
+ * deployment choice, never a consequence of what happens to be installed on
+ * the host image. Remote providers keep their own credential validation.
  */
 export function assertHostSandboxBackendServed(settings: Settings, backend: SandboxBackend): void {
-  if (isHostSandboxBackend(backend) && !sandboxBackendServed(settings, backend)) {
-    throw new SandboxBackendNotServedError(backend, settings.sandboxBackend);
+  if (hostSandboxBackendRefused(settings, backend)) {
+    throw new SandboxBackendNotServedError(backend, deploymentSandboxBackend(settings));
   }
 }
 

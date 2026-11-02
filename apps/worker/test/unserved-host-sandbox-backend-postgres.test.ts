@@ -14,7 +14,7 @@ import {
   initializeSessionStartAtomically,
   listSessionEvents,
 } from "@opengeni/db";
-import type { Settings } from "@opengeni/config";
+import { UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE, type Settings } from "@opengeni/config";
 import type { SandboxBackend } from "@opengeni/contracts";
 import {
   PROVIDER_REGISTRY,
@@ -180,7 +180,6 @@ async function expectRefusedBeforeAnySandboxWork(input: {
   ctx: Ctx;
   session: { id: string; sandboxGroupId: string };
   backend: "local" | "docker";
-  deploymentBackend: SandboxBackend;
   settings: Partial<Settings>;
 }) {
   const scripted = new ScriptedModel([
@@ -217,10 +216,9 @@ async function expectRefusedBeforeAnySandboxWork(input: {
     code: SANDBOX_BACKEND_NOT_SERVED_CODE,
     retryable: false,
   });
-  const message = (failed[0]!.payload as { error: string }).error;
-  expect(message).toContain(`"${input.backend}" sandbox`);
-  expect(message).toContain("no sandbox was started and nothing ran");
-  expect(message).toContain(`("${input.deploymentBackend}")`);
+  expect((failed[0]!.payload as { error: string }).error).toBe(
+    UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE,
+  );
   expect(timeline.some((event) => event.type === "turn.completed")).toBe(false);
   expect(await getSession(app.db, input.ctx.workspaceId, input.session.id)).toMatchObject({
     activeTurnId: null,
@@ -234,7 +232,6 @@ test("a stored local row on a Modal deployment fails visibly before any box or h
     ctx,
     session,
     backend: "local",
-    deploymentBackend: "modal",
     settings: {
       sandboxBackend: "modal",
       modalTokenId: "ak-test",
@@ -250,7 +247,6 @@ test("a stored docker row on an Opengeni compute deployment fails visibly before
     ctx,
     session,
     backend: "docker",
-    deploymentBackend: "compute",
     settings: {
       sandboxBackend: "compute",
       computeApiUrl: "https://compute.invalid",
@@ -269,7 +265,6 @@ test("a shared-box child inheriting its parent's local backend is refused the sa
     ctx,
     session: child,
     backend: "local",
-    deploymentBackend: "modal",
     settings: {
       sandboxBackend: "modal",
       modalTokenId: "ak-test",
@@ -298,6 +293,36 @@ test("the default local backend on a development deployment still runs a turn", 
   expect(result).not.toMatchObject({ status: "failed" });
   expect(built).toContain("local");
   expect(scripted.calls).toBe(1);
+  const timeline = await listSessionEvents(app.db, ctx.workspaceId, session.id, {
+    after: 0,
+    limit: 200,
+  });
+  expect(timeline.some((event) => event.type === "turn.failed")).toBe(false);
+  expect(timeline.some((event) => event.type === "turn.completed")).toBe(true);
+});
+
+test("the default local backend on a development deployment still builds its box eagerly", async () => {
+  const ctx = await fixture();
+  const session = await storedSession(ctx, "local");
+  const scripted = new ScriptedModel([
+    { inputTokens: 100, output: [assistantMessage("eager local turn finished")] },
+  ]);
+  const built: Settings["sandboxBackend"][] = [];
+  const hostBuild = spyOn(PROVIDER_REGISTRY.local, "build");
+  let result: unknown;
+  try {
+    // Eager ownership: the turn builds the deployment's own host box (and runs
+    // its setup) before the first model call.
+    result = await runTurn(ctx, session.id, { sandboxBackend: "local" }, scripted, built);
+    expect(hostBuild).toHaveBeenCalled();
+  } finally {
+    hostBuild.mockRestore();
+  }
+
+  expect(result).not.toMatchObject({ status: "failed" });
+  expect(built).toContain("local");
+  expect(scripted.calls).toBe(1);
+  expect(await leaseCount(session.sandboxGroupId)).toBe(1);
   const timeline = await listSessionEvents(app.db, ctx.workspaceId, session.id, {
     after: 0,
     limit: 200,

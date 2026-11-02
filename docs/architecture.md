@@ -917,12 +917,18 @@ configured; `local` and `docker` run on the host and are served only as the
 default. Every create path applies it (REST/SDK, `session_create`, forks,
 schedule save and run admission) because the worker builds whatever provider
 a session row names. Shared children and existing rows keep their backend,
-except that a host backend the deployment does not serve is refused again on
-the worker: the turn fails at start with `sandbox_backend_not_served`, before
-any box, hook or credential, and `createSandboxClientForBackend` never builds
-a `local` or `docker` client unless it is the default of the settings in hand
-(the worker checks its own settings, since per-turn run settings carry the
-session's backend).
+except that a host backend the deployment does not serve is refused again
+before any box, hook or credential. Session code rebinds settings to the
+session's backend (`{...settings, sandboxBackend}`), so the rule reads
+`Settings.deploymentSandboxBackend`, which `getSettings` fixes once and every
+spread keeps (`hostSandboxBackendRefused`). The worker fails such a turn at
+start with the terminal `sandbox_backend_not_served`; `resolveSessionSandboxRuntime`
+answers every API-direct surface (Channel A terminal, files, browser and
+computer, and viewers) with 409; and `createSandboxClientForBackend` refuses
+the `local` or `docker` client for any other caller, whatever the host image
+contains. A stored host-backend lease that is still draining on such a
+deployment stays draining (fail closed) rather than being stopped through a
+refused client.
 
 A human owner's personal-machine move during a turn is explicit consent for
 that logical turn, independent of the initiating person. The separate turn

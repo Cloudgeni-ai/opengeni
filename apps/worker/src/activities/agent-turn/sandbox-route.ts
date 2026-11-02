@@ -10,7 +10,7 @@ import {
   swapTargetEstablishability,
   type BackendUnresolvableCode,
 } from "@opengeni/runtime";
-import { type Settings } from "@opengeni/config";
+import { deploymentSandboxBackend, type Settings } from "@opengeni/config";
 import { managedSessionGroupBackend } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import {
@@ -28,8 +28,8 @@ import { safeErrorDiagnostic } from "./errors";
  * or Codemode materialization. Session creation already rejects such backends
  * (`sandboxBackendServed`), but rows stored before that gate, and shared-box
  * children that inherit a parent's backend, still name one. `deploymentSettings`
- * must be the worker's own settings: the per-turn run settings carry the
- * session's backend as their `sandboxBackend`, so they would serve anything.
+ * should be the worker's own settings; the deployment default is read from
+ * `deploymentSandboxBackend`, so a session-rebound copy cannot serve itself.
  *
  * The backend checked is the one the turn would build (`selfhosted` falls back
  * to the deployment default; `none` builds nothing). Throws
@@ -39,7 +39,10 @@ export function assertTurnSandboxBackendServed(
   deploymentSettings: Settings,
   sessionBackend: Settings["sandboxBackend"],
 ): void {
-  const built = managedSessionGroupBackend(deploymentSettings.sandboxBackend, sessionBackend);
+  const built = managedSessionGroupBackend(
+    deploymentSandboxBackend(deploymentSettings),
+    sessionBackend,
+  );
   if (built) assertHostSandboxBackendServed(deploymentSettings, built);
 }
 

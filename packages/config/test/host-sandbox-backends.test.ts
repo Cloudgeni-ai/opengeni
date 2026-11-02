@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { SandboxBackend } from "@opengeni/contracts";
 import {
+  deploymentSandboxBackend,
   getSettings,
+  hostSandboxBackendRefused,
   isHostSandboxBackend,
   requiredSandboxEnvForBackend,
   sandboxBackendServed,
@@ -47,5 +49,38 @@ describe("host sandbox backends", () => {
     const local = getSettings({ ...everything, OPENGENI_SANDBOX_BACKEND: "local" });
     expect(sandboxBackendServed(local, "local")).toBe(true);
     expect(sandboxBackendServed(local, "docker")).toBe(false);
+  });
+
+  test("the deployment default survives a per-session rebind", () => {
+    const modal = getSettings({
+      OPENGENI_ENV: "test",
+      OPENGENI_SANDBOX_BACKEND: "modal",
+      OPENGENI_MODAL_APP_NAME: "opengeni",
+      OPENGENI_MODAL_TOKEN_ID: "id",
+      OPENGENI_MODAL_TOKEN_SECRET: "secret",
+    });
+    expect(modal.deploymentSandboxBackend).toBe("modal");
+    for (const backend of ["local", "docker"] as const) {
+      // Session code spreads the session's stored backend into settings.
+      const rebound = { ...modal, sandboxBackend: backend };
+      expect(deploymentSandboxBackend(rebound)).toBe("modal");
+      expect(hostSandboxBackendRefused(rebound, backend)).toBe(true);
+    }
+    expect(hostSandboxBackendRefused({ ...modal, sandboxBackend: "compute" }, "compute")).toBe(
+      false,
+    );
+    const local = getSettings({ OPENGENI_ENV: "test", OPENGENI_SANDBOX_BACKEND: "local" });
+    expect(hostSandboxBackendRefused({ ...local, sandboxBackend: "modal" }, "local")).toBe(false);
+    expect(hostSandboxBackendRefused(local, "docker")).toBe(true);
+  });
+
+  test("hand-built settings without the field fall back to sandboxBackend", () => {
+    const { deploymentSandboxBackend: _omitted, ...handBuilt } = getSettings({
+      OPENGENI_ENV: "test",
+      OPENGENI_SANDBOX_BACKEND: "docker",
+    });
+    expect(deploymentSandboxBackend(handBuilt)).toBe("docker");
+    expect(hostSandboxBackendRefused(handBuilt, "docker")).toBe(false);
+    expect(hostSandboxBackendRefused(handBuilt, "local")).toBe(true);
   });
 });

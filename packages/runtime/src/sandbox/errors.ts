@@ -6,6 +6,7 @@
 // the SDK at create() time.
 
 import type { SandboxBackend } from "@opengeni/contracts";
+import { UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE } from "@opengeni/config";
 
 export class SandboxConfigError extends Error {
   readonly backend: SandboxBackend | string;
@@ -34,10 +35,8 @@ export class SandboxBackendNotServedError extends SandboxConfigError {
     super(backend, "");
     this.name = "SandboxBackendNotServedError";
     this.deploymentBackend = deploymentBackend;
-    this.message =
-      `This chat is set to run on the "${backend}" sandbox, which this deployment does not provide, ` +
-      `so no sandbox was started and nothing ran. Start a new chat to use this deployment's ` +
-      `sandbox ("${deploymentBackend}").`;
+    // Plain words for the person; the backend IDs stay on the error fields.
+    this.message = UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE;
   }
 }
 

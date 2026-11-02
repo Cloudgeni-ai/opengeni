@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { SandboxBackend } from "@opengeni/contracts";
-import { isHostSandboxBackend, type Settings } from "@opengeni/config";
+import {
+  getSettings,
+  isHostSandboxBackend,
+  UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE,
+  type Settings,
+} from "@opengeni/config";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   PROVIDER_REGISTRY,
@@ -142,12 +147,52 @@ describe("host sandbox backends are built only as the configured default", () =>
     }
   });
 
-  test("the refusal tells the person what happened and what to do", () => {
+  test("a session-rebound settings object cannot serve its own host backend", async () => {
+    // API and worker code rebinds settings to a session's stored backend
+    // ({...settings, sandboxBackend: session.sandboxBackend}) before building
+    // that session's box. The deployment default survives the spread.
+    const modal = getSettings({
+      OPENGENI_ENV: "test",
+      OPENGENI_SANDBOX_BACKEND: "modal",
+      OPENGENI_MODAL_APP_NAME: "opengeni",
+      OPENGENI_MODAL_TOKEN_ID: "id",
+      OPENGENI_MODAL_TOKEN_SECRET: "secret",
+    });
+    for (const hostBackend of hostBackends) {
+      const rebound: Settings = { ...modal, sandboxBackend: hostBackend };
+      const build = spyOn(PROVIDER_REGISTRY[hostBackend], "build");
+      try {
+        expect(() => createSandboxClientForBackend(hostBackend, rebound)).toThrow(
+          SandboxBackendNotServedError,
+        );
+        await expect(
+          establishSandboxSessionFromEnvelope(rebound, null, {
+            sessionId: `sess-rebound-${hostBackend}`,
+            recovery: "create-or-restore",
+            backendOverride: hostBackend,
+          }),
+        ).rejects.toBeInstanceOf(SandboxBackendNotServedError);
+        expect(build).not.toHaveBeenCalled();
+      } finally {
+        build.mockRestore();
+      }
+    }
+    const local = getSettings({ OPENGENI_ENV: "test", OPENGENI_SANDBOX_BACKEND: "local" });
+    expect(() =>
+      assertHostSandboxBackendServed({ ...local, sandboxBackend: "modal" }, "local"),
+    ).not.toThrow();
+    expect(() =>
+      assertHostSandboxBackendServed({ ...local, sandboxBackend: "docker" }, "docker"),
+    ).toThrow(SandboxBackendNotServedError);
+  });
+
+  test("the refusal tells the person what happened and what to do, in plain words", () => {
     const error = new SandboxBackendNotServedError("local", "modal");
-    expect(error.message).toBe(
-      'This chat is set to run on the "local" sandbox, which this deployment does not provide, ' +
-        "so no sandbox was started and nothing ran. Start a new chat to use this deployment's " +
-        'sandbox ("modal").',
-    );
+    expect(error.message).toBe(UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE);
+    expect(error.message).toContain("no sandbox was started and nothing ran");
+    expect(error.message).toContain("Start a new chat");
+    expect(error.message).not.toMatch(/"(local|docker|modal)"/);
+    expect(error.backend).toBe("local");
+    expect(error.deploymentBackend).toBe("modal");
   });
 });
