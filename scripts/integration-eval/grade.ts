@@ -253,8 +253,10 @@ export function gradeCase(
   const ok = own.filter((tool) => tool.completed && !tool.errored);
 
   if (testCase.kind === "identity") {
-    if (own.length > 0 && ok.length === 0)
-      return unsuccessfulCalls(testCase, receipts, own, reasons, "every identity tool call failed");
+    // Identity rows don't need a tool call, so a call that never returned
+    // leaves the verdict to the answer; a call that returned an error fails it.
+    if (own.some((tool) => tool.completed) && ok.length === 0)
+      return failedCalls(receipts, testCase, reasons, "every identity tool call failed");
     return answerChecks(testCase, receipts, reasons);
   }
 

@@ -399,9 +399,15 @@ describe("gradeCase", () => {
       pass: false,
       category: "tool_error",
     });
-    expect(
-      gradeCase({ ...linearRead, kind: "identity", expectAnswer: [/halcyon/i] }, withoutFacts),
-    ).toMatchObject({ pass: false, category: "tool_error" });
+    // Identity rows may answer from context; a call that never returned doesn't fail them.
+    const identity: EvalCase = { ...linearRead, kind: "identity", expectAnswer: [/halcyon/i] };
+    const identityAnswer = parseReceipts(
+      events(pending, {
+        type: "agent.message.completed",
+        payload: { text: "You are connected to Halcyon Labs." },
+      }),
+    );
+    expect(gradeCase(identity, identityAnswer)).toMatchObject({ pass: true });
   });
 
   test("an approval from a servedBy sibling counts as the row's own", () => {
