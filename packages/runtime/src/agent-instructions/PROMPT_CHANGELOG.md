@@ -2,25 +2,28 @@
 
 Fixed guidance that rides on every request is shorter where it cannot help:
 
-- The Codemode directive (legacy and modular, about 650 to 475 o200k tokens)
+- The Codemode directive (legacy and modular, about 630 to 500 o200k tokens)
   says the same things more compactly: catalog scope, when to prefer Codemode,
-  which client to run (native client, `ogtool` from PATH, or the pinned
-  package), the list/show/call/declarations commands, the Bun module import,
+  which client to run (native client, a compatible `ogtool` from PATH, or
+  the pinned package), the list/show/call/declarations commands, the Bun module import,
   and the approval-pending and outcome-unknown rules. It drops the misplaced
   "Keep ordinary running commands alive with `command_wait`/`command_read`"
   sentence (command guidance lives in Runtime mechanics) and the
   `environmentCodemodeClient()` method names (`ogtool read` observes the same
-  operation). The legacy locks for the two cases with Codemode change.
-- With Knowledge learning Off, the Knowledge authoring clauses are omitted; with
+  operation from any authorized attempt of the same turn). The legacy locks for the two cases with Codemode change.
+- With Knowledge learning Off, which refuses every Knowledge write, the
+  guidance for the save-only Knowledge tools is omitted; with
   workspace-instruction learning Off, the instruction-change clause is omitted
   (see Tool-availability variants). The learning-mode rule, retrieval and
   grounding stay. Skills learning Off changes nothing: it does not disable
   installed Skills, so the Skill index and reading guidance stay.
 - The `browser_open` description keeps what matters before opening (placement,
   the user's Chrome, headed or headless, storage, screenshots, Code Mode for
-  bulk work). How to work with the open session (act on the outline, the
-  family tools, the Code Mode browser API and the CAPTCHA rule) now follows
-  each `browser_open` result the model reads (`BROWSER_OPEN_RESULT_GUIDANCE`).
+  bulk work with its browser API, the CAPTCHA rule). How to work with the
+  open session (act on the outline, the family tools, the dedicated attached
+  tab) now follows the first `browser_open` result the model reads in an
+  attempt (`BROWSER_OPEN_RESULT_GUIDANCE`); later opens and Code Mode callers
+  get the plain result.
 
 A session that cannot spawn children no longer reads how to delegate to them.
 When the session's nesting depth has reached its frozen maximum, the

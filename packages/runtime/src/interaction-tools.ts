@@ -167,7 +167,7 @@ const BROWSER_AGENT_MAX_NODES = 60;
  * Code Mode for bulk work) stays in the description.
  */
 export const BROWSER_OPEN_RESULT_GUIDANCE =
-  "Act on the outline's elements directly instead of observing again; browser_observe, browser_act, browser_screenshot and browser_tabs work on this session. With initialUrl, only the opened tab is listed and the others are counted. A new attached session opens a dedicated tab. For bulk work in Code Mode: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.";
+  "Act on the outline's elements directly instead of observing again; browser_observe, browser_act, browser_screenshot and browser_tabs work on this session. A new attached session opens a dedicated tab.";
 const BROWSER_AGENT_MAX_NODE_BYTES = 12_000;
 const BROWSER_AGENT_MAX_FIELD_LENGTH = 180;
 const BROWSER_AGENT_MAX_OMITTED_REGIONS = 4;
@@ -1240,6 +1240,7 @@ export function createInteractionAttemptToolDefinitions(
     while (fullFrameSizes.size > 32) fullFrameSizes.delete(fullFrameSizes.keys().next().value!);
   };
   const browserSeen = new Map<string, BrowserTextObservation>();
+  let browserOpenGuidanceShown = false;
   const rememberBrowserReading = (
     context: AttemptToolExecutionContext,
     observation: BrowserTextObservation | undefined,
@@ -1939,7 +1940,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the ${extension.name} extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, do not fall back to a blank managed browser. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task: BrowserSessions persist across tool calls, while shell-launched browser daemons do not survive remote-command cleanup. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library; the result explains how.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the ${extension.name} extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, do not fall back to a blank managed browser. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task: BrowserSessions persist across tool calls, while shell-launched browser daemons do not survive remote-command cleanup. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -1947,9 +1948,12 @@ export function createInteractionAttemptToolDefinitions(
     modelText: (output, context) => {
       rememberBrowserReading(context, output.observation);
       const text = browserOpenText(output);
-      // How to work with the session, shown once it exists instead of in the
-      // description sent with every request (see BROWSER_OPEN_RESULT_GUIDANCE).
-      return context.caller.kind === "model" ? `${text}\n${BROWSER_OPEN_RESULT_GUIDANCE}` : text;
+      // How to work with the session, shown on the first model-read result of
+      // this attempt instead of in the description sent with every request
+      // (see BROWSER_OPEN_RESULT_GUIDANCE). Later opens add nothing to history.
+      if (context.caller.kind !== "model" || browserOpenGuidanceShown) return text;
+      browserOpenGuidanceShown = true;
+      return `${text}\n${BROWSER_OPEN_RESULT_GUIDANCE}`;
     },
     execute: async (value, context) => {
       const chatMove: ChatMoveRecord = { moved: false };

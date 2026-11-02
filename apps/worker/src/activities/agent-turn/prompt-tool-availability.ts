@@ -10,10 +10,11 @@ import type {
 } from "@opengeni/contracts";
 
 /**
- * Tools that author Knowledge. With the turn's effective Knowledge learning
- * mode Off, every call is refused (docs/knowledge.md: the stricter of the
- * chat's and the destination's mode governs), so guidance naming them only
- * describes calls that cannot succeed.
+ * Tools that serve Knowledge authoring. With the turn's effective Knowledge
+ * learning mode Off, every Knowledge write is refused (docs/knowledge.md: the
+ * stricter of the chat's and the destination's mode governs), so guidance for
+ * these save-only tools (including the read-only knowledge_prepare_save step)
+ * only describes saves that cannot succeed.
  */
 const KNOWLEDGE_AUTHORING_TOOLS = [
   "knowledge_save",

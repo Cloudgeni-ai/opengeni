@@ -99,8 +99,9 @@ export type AgentPromptExperiments = {
  * Which tool-specific instruction clauses may render for one attempt. A
  * rendering input only: it never grants, withholds, defers or reorders a tool.
  *
- * `unavailable` lists only tool names proven absent for the attempt (see
- * `deriveAgentPromptToolAvailability`). Every other name — deferred or lazily
+ * `unavailable` lists tool names proven absent for the attempt (see
+ * `deriveAgentPromptToolAvailability`), plus save-only tools whose writes the
+ * turn's frozen learning policy refuses. Every other name — deferred or lazily
  * disclosed, external MCP, provider-hosted, local adapter, or unknown — counts
  * as available, so its guidance stays.
  */
