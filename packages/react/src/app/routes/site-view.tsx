@@ -9,6 +9,7 @@ import {
   ArchiveIcon,
   ArrowLeftIcon,
   CopyIcon,
+  CopyPlusIcon,
   InfoIcon,
   LinkIcon,
   Maximize2Icon,
@@ -215,7 +216,9 @@ export function SiteViewRoute({
   // the bar's row is hidden). The publish form, opened in front of the Site,
   // names the bar once it has loaded; the Site's claim mounted first, so it
   // yields while the form is open.
-  const titleInWindowBar = useWindowBarTitle(artifact?.title ?? null, publishing);
+  const titleInWindowBar = useWindowBarTitle(artifact?.title ?? null, publishing, {
+    copyable: true,
+  });
   // Full screen is the route's so opening the form can leave it first.
   const [fullScreen, setFullScreen] = useState(false);
   const openPublishing = useCallback(() => {
@@ -347,6 +350,7 @@ export function SiteViewRoute({
                     <SiteActionsMenu
                       workspaceId={workspaceId}
                       origin={{ siteId, title: artifact.title }}
+                      hasVersion={Boolean(artifact.currentVersion)}
                     />
                   ) : null}
                 </>
@@ -436,11 +440,13 @@ function SiteTitleMenu({
 function SiteActionsMenu({
   workspaceId,
   origin,
+  hasVersion,
 }: {
   workspaceId: string;
   origin: { siteId: string; title: string };
+  hasVersion: boolean;
 }) {
-  const site = useSiteActions(workspaceId, origin);
+  const site = useSiteActions(workspaceId, origin, { hasVersion });
   const sidebar = useSiteSidebarActions(workspaceId, origin);
   return (
     <span data-site-actions-root="" className="contents">
@@ -471,7 +477,7 @@ function SiteActionsMenu({
           ) : null}
           {site.duplicate ? (
             <DropdownMenuItem disabled={site.duplicate.busy} onSelect={site.duplicate.run}>
-              <CopyIcon aria-hidden="true" />
+              <CopyPlusIcon aria-hidden="true" />
               {site.duplicate.busy ? "Duplicating…" : "Duplicate"}
             </DropdownMenuItem>
           ) : null}

@@ -4,6 +4,7 @@ import {
   ArchiveIcon,
   ChevronRightIcon,
   CopyIcon,
+  CopyPlusIcon,
   EllipsisIcon,
   FolderIcon,
   InfoIcon,
@@ -11,7 +12,7 @@ import {
   PanelsTopLeftIcon,
   PinIcon,
 } from "lucide-react";
-import { OpenPublishedSiteItem, useSiteActions } from "../artifacts/site-actions";
+import { OpenPublishedSiteItem, useSiteActions, type SiteActions } from "../artifacts/site-actions";
 import { RailTrailingMetadata } from "./session-row-content";
 import {
   RAIL_ROW_OVERFLOW_TRIGGER_CLASS,
@@ -113,6 +114,9 @@ export function SiteSessionGroupHeading({
   channels?: readonly Channel[] | undefined;
 }) {
   const actions = useContext(SiteRowActionsContext);
+  // Held by the row, not its menu, so a duplicate still running when the
+  // menu closes stays busy the next time it opens.
+  const site = useSiteActions(workspaceId, origin);
   const move = actions?.move;
   // As for a chat row: listed only when there is a project to choose.
   const moveTargets =
@@ -236,6 +240,7 @@ export function SiteSessionGroupHeading({
               <SiteRowMenuItems
                 menu="dropdown"
                 origin={origin}
+                site={site}
                 workspaceId={workspaceId}
                 pinned={pinned}
                 actions={actions}
@@ -256,6 +261,7 @@ export function SiteSessionGroupHeading({
         <SiteRowMenuItems
           menu="context"
           origin={origin}
+          site={site}
           workspaceId={workspaceId}
           pinned={pinned}
           actions={actions}
@@ -271,12 +277,13 @@ export function SiteSessionGroupHeading({
  * A Site row's menu, the same for right-click and "…": what a chat row
  * offers that fits a Site (Copy link, Copy title, Pin, Archive, Move to
  * project), plus the Site's own: Duplicate, Site details and, once known to
- * be on the web, Open published Site. Renaming has no place here: a Site is
+ * be on the web, Open published Site (last, so nothing moves when it shows). Renaming has no place here: a Site is
  * named by what it publishes.
  */
 function SiteRowMenuItems({
   menu,
   origin,
+  site,
   workspaceId,
   pinned,
   actions,
@@ -285,13 +292,13 @@ function SiteRowMenuItems({
 }: {
   menu: "context" | "dropdown";
   origin: SessionSiteOrigin;
+  site: SiteActions;
   workspaceId: string;
   pinned: boolean;
   actions: SiteRowActions;
   moveTargets: readonly { id: string | null; name: string }[];
   channelId: string | null | undefined;
 }) {
-  const site = useSiteActions(workspaceId, origin);
   const Item = (menu === "context" ? ContextMenuItem : DropdownMenuItem) as typeof DropdownMenuItem;
   const Separator = menu === "context" ? ContextMenuSeparator : DropdownMenuSeparator;
   const Label = menu === "context" ? ContextMenuLabel : DropdownMenuLabel;
@@ -315,7 +322,7 @@ function SiteRowMenuItems({
           disabled={site.duplicate.busy}
           onSelect={site.duplicate.run}
         >
-          <CopyIcon className="size-4" />
+          <CopyPlusIcon className="size-4" />
           {site.duplicate.busy ? "Duplicating…" : "Duplicate"}
         </Item>
       ) : null}
@@ -325,11 +332,12 @@ function SiteRowMenuItems({
           Site details
         </Link>
       </Item>
-      <OpenPublishedSiteItem item={Item} workspaceId={workspaceId} siteId={origin.siteId} />
       <Item onSelect={() => actions.archive(origin)}>
         <ArchiveIcon className="size-4" />
         Archive
       </Item>
+      {/* Last, as it shows once the address has loaded: nothing above moves. */}
+      <OpenPublishedSiteItem item={Item} workspaceId={workspaceId} siteId={origin.siteId} />
       {moveTargets.length > 0 ? (
         <>
           <Separator />

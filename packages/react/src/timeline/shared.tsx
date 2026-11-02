@@ -7,6 +7,8 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type KeyboardEvent,
+  type MouseEvent,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -300,11 +302,10 @@ export function ActivityDisclosure({
       </ShimmerText>
       {/* The right gutter carries at most ONE signal: the media thumbnail, else a
           terse settle chip (hidden once expanded — the body owns the detail);
-          an open step offers Copy there instead. */}
+          an open step keeps it for Copy, which sits beside the row (a button
+          inside the row's own button role would be hidden from AT). */}
       {expanded ? (
-        <span className="ml-auto shrink-0 pl-2">
-          <StepCopyButton titleRef={titleRef} bodyRef={bodyRef} />
-        </span>
+        <span aria-hidden="true" className="ml-auto size-6 shrink-0 pointer-coarse:size-11" />
       ) : media && !open ? (
         <span className="ml-auto flex shrink-0 items-center gap-2 pl-2">{media}</span>
       ) : chip && !open ? (
@@ -319,46 +320,55 @@ export function ActivityDisclosure({
   // settled state regardless of whether the chip slot is occupied by media.
   const dataStatus = cancelled ? "cancelled" : failed ? "failed" : undefined;
 
-  if (!hasBody) {
-    return (
-      <div className={cn(rowClass, "cursor-default")} data-status={dataStatus}>
-        {inner}
-      </div>
-    );
-  }
-
   // Native disclosure (not radix-ui Collapsible): importing `radix-ui` from the
   // timeline registry pulls Popper into the session share-graph and crashes
   // lazy workspace settings (`createPopperScope is not a function`).
+  //
+  // One DOM shape whether or not the row opens, so a row that becomes
+  // expandable (its line got cut off) keeps the same title and note nodes,
+  // which the clipping measurement goes on observing.
   return (
-    <div>
+    <div className="relative">
       <div
-        role="button"
-        tabIndex={0}
-        aria-expanded={open}
-        data-state={open ? "open" : "closed"}
-        onClick={(event) => {
-          // Selecting the row's text to copy it leaves the row as it is.
-          if (hasTextSelectionIn(event.currentTarget)) return;
-          setOpen((prev) => !prev);
-        }}
-        onKeyDown={(event) => {
-          if (event.target !== event.currentTarget) return;
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            setOpen((prev) => !prev);
-          }
-        }}
+        {...(hasBody
+          ? {
+              role: "button",
+              tabIndex: 0,
+              "aria-expanded": open,
+              "data-state": open ? "open" : "closed",
+              onClick: (event: MouseEvent<HTMLDivElement>) => {
+                // Selecting the row's text to copy it leaves the row as it is.
+                if (hasTextSelectionIn(event.currentTarget)) return;
+                setOpen((prev) => !prev);
+              },
+              onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
+                if (event.target !== event.currentTarget) return;
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setOpen((prev) => !prev);
+                }
+              },
+            }
+          : {})}
         data-status={dataStatus}
         className={cn(
           rowClass,
-          "cursor-pointer outline-hidden hover:bg-og-surface-1 hover:text-og-fg",
-          "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-0",
+          hasBody
+            ? [
+                "cursor-pointer outline-hidden hover:bg-og-surface-1 hover:text-og-fg",
+                "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-0",
+              ]
+            : "cursor-default",
         )}
       >
         {inner}
       </div>
-      {open ? (
+      {expanded ? (
+        <span className="absolute right-1.5 top-1.5 pointer-coarse:top-0">
+          <StepCopyButton titleRef={titleRef} bodyRef={bodyRef} />
+        </span>
+      ) : null}
+      {expanded ? (
         <div
           ref={bodyRef}
           className="mb-2 ml-7 mt-1.5 flex flex-col gap-2 overflow-hidden animate-og-expand empty:hidden"

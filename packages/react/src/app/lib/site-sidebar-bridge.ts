@@ -18,16 +18,18 @@ export type SiteSidebarBridge = {
   archive: (origin: SessionSiteOrigin) => void;
 };
 
-let current: SiteSidebarBridge | null = null;
+// Newest last: when two sidebars are mounted (the shell's and an embedded
+// chat's), the newest acts until it unmounts, then the one before it again.
+let registrations: readonly SiteSidebarBridge[] = [];
 const listeners = new Set<() => void>();
 
 /** Publishes the sidebar's actions; returns the matching withdrawal. */
 export function publishSiteSidebarBridge(bridge: SiteSidebarBridge): () => void {
-  current = bridge;
+  registrations = [...registrations, bridge];
   for (const listener of listeners) listener();
   return () => {
-    if (current !== bridge) return;
-    current = null;
+    if (!registrations.includes(bridge)) return;
+    registrations = registrations.filter((registered) => registered !== bridge);
     for (const listener of listeners) listener();
   };
 }
@@ -37,7 +39,7 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-const snapshot = () => current;
+const snapshot = (): SiteSidebarBridge | null => registrations.at(-1) ?? null;
 
 /** The sidebar's Pin and Archive for one Site, or null while there are none. */
 export function useSiteSidebarActions(

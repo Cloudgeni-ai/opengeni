@@ -212,10 +212,22 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
               <Globe2Icon className="size-3.5" />
             </span>
           ) : null}
-          {props.showTitle !== false &&
-            (props.renderTitle ?? identityTitle)(
-              <span className="truncate text-xs font-semibold text-fg">{props.title}</span>,
-            )}
+          {props.showTitle === false ? null : props.renderTitle ? (
+            // Its menu opens in front of full screen, as the controls' do; its
+            // words leave a full-screen toolbar's drag region so they can be
+            // right-clicked.
+            <PortalContainerProvider
+              container={focused && frameElement ? frameElement : inheritedPortal}
+            >
+              {props.renderTitle(
+                <span className="truncate text-xs font-semibold text-fg [-webkit-app-region:no-drag] [app-region:no-drag]">
+                  {props.title}
+                </span>,
+              )}
+            </PortalContainerProvider>
+          ) : (
+            <span className="truncate text-xs font-semibold text-fg">{props.title}</span>
+          )}
           {props.headerControls ? (
             <PortalContainerProvider
               container={focused && frameElement ? frameElement : inheritedPortal}
@@ -402,8 +414,4 @@ function LiveLabel({
       <span className={status ? "max-sm:sr-only" : undefined}>{text}</span>
     </span>
   );
-}
-
-function identityTitle(title: ReactElement): ReactNode {
-  return title;
 }

@@ -1329,3 +1329,14 @@ test("the Site's menu pins and archives through the sidebar's own actions", asyn
     act(() => withdraw());
   }
 });
+
+test("a Site with nothing published yet offers no Duplicate", async () => {
+  permissions = ["sessions:create", "artifacts:publish"];
+  siteDetails = async () => ({
+    artifact: { title: "Opengeni usage", status: "active", currentVersion: null },
+    versions: [],
+    events: [],
+  });
+  const { container } = await render();
+  expect(siteActions(container)).toEqual(["Copy title", "Site details"]);
+});

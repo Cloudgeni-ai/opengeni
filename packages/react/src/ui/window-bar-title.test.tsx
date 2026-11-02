@@ -175,3 +175,40 @@ test("inside the hidden page, dialogs never take the bar and pages outside the b
     expect(view.bar()).toBe("Capabilities");
   });
 });
+
+function CopyableHeader({ title, fallback = false }: { title: string; fallback?: boolean }) {
+  titles.useWindowBarTitle(title, fallback, { copyable: true });
+  return null;
+}
+
+test("only a copyable title (a Site's) leaves the drag region for its Copy title menu", async () => {
+  const copyable = () =>
+    document
+      .querySelector("[data-window-bar-title-text]")
+      ?.className.includes("[-webkit-app-region:no-drag]") ?? null;
+  await mount(
+    <windowBar.WindowBarPageTitle enabled>
+      <Header title="Settings" />
+    </windowBar.WindowBarPageTitle>,
+    async (view) => {
+      expect(view.bar()).toBe("Settings");
+      expect(copyable()).toBe(false);
+      await view.render(
+        <windowBar.WindowBarPageTitle enabled>
+          <CopyableHeader title="Opengeni usage" />
+        </windowBar.WindowBarPageTitle>,
+      );
+      expect(view.bar()).toBe("Opengeni usage");
+      expect(copyable()).toBe(true);
+      // A page opened in front (the publish form) takes the bar, and drags it.
+      await view.render(
+        <windowBar.WindowBarPageTitle enabled>
+          <CopyableHeader title="Opengeni usage" fallback />
+          <Header title="Publish to web" />
+        </windowBar.WindowBarPageTitle>,
+      );
+      expect(view.bar()).toBe("Publish to web");
+      expect(copyable()).toBe(false);
+    },
+  );
+});

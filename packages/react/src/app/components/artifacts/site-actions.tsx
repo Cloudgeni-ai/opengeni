@@ -17,11 +17,21 @@ import { openPublishedSite, publishedSiteLink, useSitePublicationLink } from "./
  * can publish), and its details (versions, sharing, archive). Wired to the
  * same capabilities as the Artifacts page.
  */
-export function useSiteActions(workspaceId: string, origin: SessionSiteOrigin) {
+export function useSiteActions(
+  workspaceId: string,
+  origin: SessionSiteOrigin,
+  {
+    hasVersion = true,
+  }: {
+    /** False for a Site with nothing published yet, which has nothing to copy. */
+    hasVersion?: boolean;
+  } = {},
+) {
   const { accessContext } = useAppContext();
   const copyArtifactLink = useCopyArtifactLink(workspaceId);
   const copies = useDuplicateSite(workspaceId);
-  const canDuplicate = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
+  const canDuplicate =
+    hasVersion && hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
   return {
     copyTitle: () => void copyTitle(origin.title),
     copyLink: () => void copyArtifactLink({ kind: "site", id: origin.siteId }),
@@ -39,6 +49,8 @@ export function useSiteActions(workspaceId: string, origin: SessionSiteOrigin) {
     } as const,
   };
 }
+
+export type SiteActions = ReturnType<typeof useSiteActions>;
 
 type MenuItem = typeof DropdownMenuItem;
 

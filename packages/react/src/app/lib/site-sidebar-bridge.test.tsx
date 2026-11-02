@@ -44,9 +44,14 @@ test("a Site's page gets the sidebar's Pin and Archive only while the sidebar pu
   seen.at(-1)!.archive();
   expect(calls).toEqual(["pin site-1 true", "archive site-1"]);
 
-  // A newer sidebar replaces it; the older one's withdrawal leaves the newer in place.
+  // A newer sidebar takes over; when it goes, the older one acts again.
   const pinned = { ...bridge, pinnedSiteIds: new Set(["site-1"]) };
   let withdrawNewer = () => {};
+  await act(async () => void (withdrawNewer = publishSiteSidebarBridge(pinned)));
+  expect(seen.at(-1)?.pinned).toBe(true);
+  await act(async () => withdrawNewer());
+  expect(seen.at(-1)?.pinned).toBe(false);
+  // The older one's withdrawal leaves a newer one in place.
   await act(async () => void (withdrawNewer = publishSiteSidebarBridge(pinned)));
   await act(async () => withdraw());
   expect(seen.at(-1)?.pinned).toBe(true);

@@ -196,8 +196,8 @@ test("people who can't publish get no Duplicate; a published Site opens on the w
       "Copy title",
       "Pin",
       "Site details",
-      "Open published Site",
       "Archive",
+      "Open published Site",
       "Default",
       "Bugfixes",
     ]);
