@@ -7,12 +7,12 @@
 -- so nothing about the old sync stays visible:
 --
 -- 1. The three SQL routines that read source-sync evidence stop reading it.
---    Their results are unchanged for every database this release can run
---    against: a Google Drive source copy was only ever readable with live
---    sync state, which step 2 removes, so it stays unreadable (it fails
---    closed); a citation needed that same evidence; and preparing a document
---    used a sync obligation only for documents a sync run imported. The next
---    release drops the sync tables themselves.
+--    A Google Drive source copy was only ever readable with live sync state,
+--    which step 2 removes, so it stays unreadable (it fails closed), and a
+--    citation needed that same evidence. Preparing a document used a sync
+--    obligation only for documents a sync run imported; any such document
+--    that remains (production has none) is now prepared like an upload.
+--    The next release drops the sync tables themselves.
 -- 2. Every source task (a `knowledge_source_sync` action, an agent task with
 --    `agentConfig.knowledgeSource`, or a task with sync state) is deleted
 --    with its runs; its sync state, wakes and item outcomes cascade. Its

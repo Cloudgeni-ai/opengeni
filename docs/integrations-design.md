@@ -136,23 +136,13 @@ redirect/error projection rather than sharing one HTTP status: for example,
 Integration Definition OAuth reports `connection_conflict`, while social OAuth
 reports `not_authorized`.
 
-The personal-only `google-drive/install` connector carries no ownership field
-and writes `subject_id = <caller>`, so its start route applies the principal
-fence directly. Historical `atlassian/install` states retain the same owner
-contract, but new native starts are retired.
-
-**Native Atlassian retirement.** Jira/Confluence agent access now uses the existing
-hosted Atlassian MCP connector and its OAuth flow. The native `atlassian` Connect
-provider and native live tools are no longer offered. Native setup, browsing,
-source selection, resume and manual schedule triggers refuse with `410` before
-provider requests. Older native callbacks retain signed-state/owner/replay checks
-and exact return navigation, settling pending attempts as failed without token
-exchange. Existing source schedules show **Sync retired**; future and queued
-runs cannot create new agent sessions, and already accepted attempts cannot fetch
-native content. Historical grants, imported Documents and run history remain;
-disconnect, pause and schedule deletion retain their cleanup semantics. Native
-wire types and old tool names are compatibility-only. Google Drive is unchanged.
-See [Atlassian](atlassian.md) for the exact boundaries.
+**Native Google Drive and Atlassian removal.** Integration Knowledge sync was
+removed, and with it the native Google Drive and Atlassian source connectors:
+their install, OAuth callback, browsing and source routes are gone. Agents reach
+Google Drive and Atlassian through the hosted MCP connectors and their OAuth
+flows. The routes the public SDK still calls answer `410` until its next major;
+the old native tool names are compatibility-only. See [Atlassian](atlassian.md)
+and [Google Drive](google-drive.md).
 
 ## 3. Credential encryption
 

@@ -580,6 +580,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         }
         return scheduledAdmissionRefusalResult(receipt);
       };
+      // Schedules only run agent turns. A Knowledge source sync task can only
+      // be a stray row from a release before its removal; it never runs.
+      if (task.action.kind !== "agent_turn" || task.agentConfig.knowledgeSource) {
+        return await refuseAdmission(
+          "scheduled_authority_unavailable",
+          false,
+          "Knowledge source sync schedules were removed",
+        );
+      }
       if (
         task.action.kind === "agent_turn" &&
         ((taskRevisionAuthority?.subjectId ?? null) !== taskAuthoritySubjectId ||

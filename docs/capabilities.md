@@ -807,12 +807,11 @@ surfaces of their own.
 **Integrations** are built and run by Opengeni: Slack, GitHub, Outlook Mail,
 Outlook Calendar, Outlook Contacts, OneDrive, SharePoint, and Microsoft Teams. These integrations receive
 events, post as Opengeni, or hold their own identity in the other product.
-Previous Google Drive and Atlassian connections retain historical cleanup
-surfaces; their native source setup is retired. Every integration's page renders through the same component
+Google Drive and Atlassian connect only through their hosted MCP servers; the
+removed native source connections are not shown. Every integration's page renders through the same component
 (`apps/web/src/components/capabilities/integration-page.tsx`) fed by one plain view-model
 (`integration-view-model.ts`); one adapter hook per provider
 (`use-slack-integration.tsx`, `use-github-integration.tsx`,
-`use-google-drive-integration.tsx`, `use-atlassian-integration.tsx`,
 `use-outlook-mail-integration.tsx`, `use-outlook-calendar-integration.tsx`,
 `use-outlook-contacts-integration.tsx`, `use-onedrive-integration.tsx`,
 `use-sharepoint-integration.tsx`) maps

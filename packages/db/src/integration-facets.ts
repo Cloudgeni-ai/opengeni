@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { stableJson } from "@opengeni/contracts";
-import { and, asc, eq, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import {
   setSubjectRlsContext,
@@ -22,6 +22,14 @@ import {
 import * as schema from "./schema";
 
 export type IntegrationFacetKind = "inbound_trigger" | "delivery_destination" | "identity_link";
+
+// Only these kinds are listed or configurable. Any other stored definition
+// (such as a removed Knowledge source facet) is hidden rather than an error.
+const INTEGRATION_FACET_KINDS: IntegrationFacetKind[] = [
+  "inbound_trigger",
+  "delivery_destination",
+  "identity_link",
+];
 
 export type IntegrationFacetBindingSummary = {
   id: string;
@@ -244,7 +252,7 @@ export async function listIntegrationInstanceFacets(
       .where(
         and(
           eq(schema.integrationFacetDefinitions.integrationFacetId, context.integrationFacetId),
-          ne(schema.integrationFacetDefinitions.kind, "tools"),
+          inArray(schema.integrationFacetDefinitions.kind, INTEGRATION_FACET_KINDS),
         ),
       )
       .orderBy(
@@ -862,7 +870,7 @@ async function requireFacetDefinition(
       and(
         eq(schema.integrationFacetDefinitions.integrationFacetId, context.integrationFacetId),
         eq(schema.integrationFacetDefinitions.facetKey, facetKey),
-        ne(schema.integrationFacetDefinitions.kind, "tools"),
+        inArray(schema.integrationFacetDefinitions.kind, INTEGRATION_FACET_KINDS),
       ),
     )
     .limit(1);

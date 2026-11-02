@@ -1515,7 +1515,8 @@ describe("API Integration routes", () => {
           capabilities: { connectionRequired: true, sync: "incremental" },
         },
         {
-          // Integration Knowledge sync is retired: still listed, never configurable.
+          // Integration Knowledge sync was removed: a stray stored source facet
+          // is hidden and cannot be configured.
           facetKey: "legacy-source",
           kind: "knowledge_source",
           configSchema: { type: "object", properties: {}, additionalProperties: false },
@@ -1554,7 +1555,8 @@ describe("API Integration routes", () => {
     const base = `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/finance/facets`;
     const listed = await request(base);
     expect(listed.status).toBe(200);
-    expect(await listed.json()).toMatchObject({
+    const listedBody = await listed.json();
+    expect(listedBody).toMatchObject({
       capabilityId: installed.capabilityId,
       instanceKey: "finance",
       connectionId: connection.id,
@@ -1566,12 +1568,13 @@ describe("API Integration routes", () => {
           },
           binding: null,
         },
-        {
-          definition: { facetKey: "legacy-source", kind: "knowledge_source" },
-          binding: null,
-        },
       ],
     });
+    expect(
+      listedBody.facets.map(
+        (facet: { definition: { facetKey: string } }) => facet.definition.facetKey,
+      ),
+    ).toEqual(["inventory-source"]);
     const retired = await request(`${base}/legacy-source`, {
       method: "PUT",
       body: JSON.stringify({
@@ -1580,7 +1583,7 @@ describe("API Integration routes", () => {
         idempotencyKey: crypto.randomUUID(),
       }),
     });
-    expect(retired.status).toBe(410);
+    expect(retired.status).toBe(404);
 
     const configureKey = crypto.randomUUID();
     const configuredResponse = await request(`${base}/inventory-source`, {

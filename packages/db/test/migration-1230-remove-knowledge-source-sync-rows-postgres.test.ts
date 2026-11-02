@@ -15,6 +15,29 @@ const subjectId = "user:retired-knowledge-sync";
 let owned: OwnerMigratedTestDatabase | null = null;
 let ownerSql: postgres.Sql | null = null;
 let prefix: string | null = null;
+let routinesBefore: RoutineMetadata[] = [];
+
+type RoutineMetadata = {
+  name: string;
+  definer: boolean;
+  config: string[] | null;
+  owner: string;
+  acl: string[] | null;
+};
+
+// Signature, owner, grants, SECURITY DEFINER and search path of the three
+// routines 1230 replaces.
+async function rewrittenRoutines(): Promise<RoutineMetadata[]> {
+  return [
+    ...(await owned!.admin<RoutineMetadata[]>`
+      select p.oid::regprocedure::text as name, p.prosecdef as definer, p.proconfig as config,
+        pg_get_userbyid(p.proowner) as owner, p.proacl::text[] as acl
+      from pg_proc p
+      where p.proname in ('google_drive_file_authorized', 'google_drive_document_citation',
+        'knowledge_document_prepare')
+      order by 1`),
+  ];
+}
 
 beforeAll(async () => {
   if (!realDatabase) return;
@@ -28,6 +51,7 @@ beforeAll(async () => {
     }
   }
   await migrate(owned.ownerUrl, undefined, { migrationsDirectory: prefix });
+  routinesBefore = await rewrittenRoutines();
   // The NOSUPERUSER NOBYPASSRLS owner, exactly like production.
   ownerSql = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
 }, 900_000);
@@ -64,7 +88,11 @@ async function fixture<T>(write: (tx: postgres.TransactionSql) => Promise<T>): P
 
 async function task(
   at: Scope,
-  input: { action?: Record<string, unknown>; agentConfig?: Record<string, unknown> },
+  input: {
+    action?: Record<string, unknown>;
+    agentConfig?: Record<string, unknown>;
+    status?: "active" | "paused";
+  },
 ) {
   const temporalScheduleId = `schedule-${crypto.randomUUID()}`;
   const id = await fixture(async (tx) => {
@@ -72,7 +100,8 @@ async function task(
       insert into scheduled_tasks (account_id, workspace_id, name, owner_subject_id, status,
         schedule, temporal_schedule_id, agent_config, action, created_by_subject_id,
         execution_digest, overlap_policy)
-      values (${at.accountId}, ${at.workspaceId}, 'Drive sync', ${subjectId}, 'paused',
+      values (${at.accountId}, ${at.workspaceId}, 'Drive sync', ${subjectId},
+        ${input.status ?? "paused"},
         ${tx.json({ type: "manual" })}, ${temporalScheduleId},
         ${tx.json((input.agentConfig ?? { prompt: "Summarize" }) as postgres.JSONValue)},
         ${tx.json((input.action ?? { kind: "agent_turn" }) as postgres.JSONValue)},
@@ -155,6 +184,26 @@ describe.skipIf(!realDatabase)("1230 removes retired Knowledge sync rows", () =>
           ${agentRun})`;
     });
 
+    // The same, still active: deleting it pauses it, firing the app's
+    // pause triggers.
+    const activeAgent = await task(at, {
+      status: "active",
+      agentConfig: {
+        prompt: "Import",
+        knowledgeSource: { connection: { providerDomain: "googleapis.com" } },
+      },
+    });
+    const activeAgentRun = await run(at, activeAgent.id, "agent_turn");
+    await fixture(async (tx) => {
+      await tx`
+        insert into session_turns (account_id, workspace_id, session_id, trigger_event_id,
+          temporal_workflow_id, status, position, prompt, model, reasoning_effort,
+          sandbox_backend, scheduled_task_run_id)
+        values (${at.accountId}, ${at.workspaceId}, ${crypto.randomUUID()},
+          ${crypto.randomUUID()}, 'workflow', 'completed', 1, 'Import', 'model', 'low', 'modal',
+          ${activeAgentRun})`;
+    });
+
     // A source task its owner already deleted, with its schedule cleanup queued
     // together with a connector cleanup nothing can run any more.
     const hidden = await task(at, {
@@ -231,6 +280,11 @@ describe.skipIf(!realDatabase)("1230 removes retired Knowledge sync rows", () =>
       select status, deleted_at is not null as deleted from scheduled_tasks where id = ${agent.id}`;
     expect(kept).toEqual({ status: "paused", deleted: true });
     expect(await count("scheduled_task_runs", "id", agentRun)).toBe(1);
+    const [keptActive] = await owned!.admin<{ status: string; deleted: boolean }[]>`
+      select status, deleted_at is not null as deleted from scheduled_tasks
+      where id = ${activeAgent.id}`;
+    expect(keptActive).toEqual({ status: "paused", deleted: true });
+    expect(await count("scheduled_task_runs", "id", activeAgentRun)).toBe(1);
     expect(await count("knowledge_source_sync_states", "scheduled_task_id", agent.id)).toBe(0);
     expect(await count("knowledge_source_sync_wakes", "scheduled_task_id", agent.id)).toBe(0);
 
@@ -248,6 +302,11 @@ describe.skipIf(!realDatabase)("1230 removes retired Knowledge sync rows", () =>
       [
         { temporalScheduleId: native.temporalScheduleId, taskId: null, connectorDone: null },
         { temporalScheduleId: agent.temporalScheduleId, taskId: null, connectorDone: null },
+        {
+          temporalScheduleId: activeAgent.temporalScheduleId,
+          taskId: null,
+          connectorDone: null,
+        },
         { temporalScheduleId: hidden.temporalScheduleId, taskId: hidden.id, connectorDone: true },
       ].sort((a, b) => a.temporalScheduleId.localeCompare(b.temporalScheduleId)),
     );
@@ -283,7 +342,7 @@ describe.skipIf(!realDatabase)("1230 removes retired Knowledge sync rows", () =>
     const [again] = await owned!.admin<{ count: number }[]>`
       select count(*)::int as count from temporal_schedule_cleanup_outbox
       where workspace_id = ${at.workspaceId}`;
-    expect(again!.count).toBe(3);
+    expect(again!.count).toBe(4);
   }, 180_000);
 
   test("a Google Drive source copy stays unreadable and has no citation", async () => {
@@ -301,5 +360,21 @@ describe.skipIf(!realDatabase)("1230 removes retired Knowledge sync rows", () =>
         /knowledge_source_sync_|google_drive_object_acl_(evidence|principals)/,
       );
     }
+    expect(routinesBefore).toHaveLength(3);
+    expect(await rewrittenRoutines()).toEqual(routinesBefore);
+
+    // They still run, as the migration owner, and fail closed.
+    const [authorized] = await ownerSql!<{ allowed: boolean }[]>`
+      select google_drive_file_authorized(gen_random_uuid(), gen_random_uuid(), ${subjectId},
+        gen_random_uuid()) as allowed`;
+    expect(authorized!.allowed).toBe(false);
+    const [citation] = await ownerSql!<{ citation: unknown }[]>`
+      select google_drive_document_citation(gen_random_uuid(), gen_random_uuid(), ${subjectId},
+        gen_random_uuid(), gen_random_uuid()) as citation`;
+    expect(citation!.citation).toBeNull();
+    await expect(
+      ownerSql!`select knowledge_document_prepare(gen_random_uuid(), gen_random_uuid(),
+        gen_random_uuid(), '{}'::jsonb)`,
+    ).rejects.toThrow("Invalid document preparation authority");
   });
 });

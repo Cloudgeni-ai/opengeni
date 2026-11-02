@@ -32672,7 +32672,6 @@ async function createSessionInTransaction(
           workspaceId: input.workspaceId,
           runId: input.scheduledSourceRunId,
         });
-        const source = accepted?.task.agentConfig.knowledgeSource;
         // The run must be this exact accepted scheduler occurrence, creating
         // the chat its generated-session binding names.
         const acceptedRun =
@@ -32685,18 +32684,7 @@ async function createSessionInTransaction(
             ? accepted
             : null;
         let scheduledOwner: string | null = null;
-        if (acceptedRun && source) {
-          // A personal-knowledge source run belongs to its connection owner.
-          if (
-            acceptedRun.task.runMode === "new_session_per_run" &&
-            source.destination.kind === "personal" &&
-            source.destination.subjectId === source.initiatingSubjectId &&
-            source.connection.ownerSubjectId === source.initiatingSubjectId &&
-            acceptedRun.causalHumanSubjectId === source.initiatingSubjectId &&
-            acceptedRun.causalHumanAuthority?.subjectId === source.initiatingSubjectId
-          )
-            scheduledOwner = source.initiatingSubjectId;
-        } else if (acceptedRun) {
+        if (acceptedRun) {
           // An Only me schedule's chats belong to its owner, the human its
           // accepted run was admitted for. The capability below re-proves that
           // person may still create Only me chats here.
