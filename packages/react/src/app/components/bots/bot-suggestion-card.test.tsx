@@ -21,6 +21,8 @@ let container: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
   localStorage.clear();
+  updateSessionProfile.mockClear();
+  updateSessionRetention.mockClear();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -53,12 +55,13 @@ function suggestion(overrides: Partial<SessionBotSuggestion>): SessionBotSuggest
   };
 }
 
+const updateSessionProfile = mock(async () => session);
+const updateSessionRetention = mock(async () => session);
+const appContext = { updateSessionProfile, client: { updateSessionRetention } } as never;
+
 async function accept(botSuggestion: SessionBotSuggestion) {
-  const updateSessionProfile = mock(async () => session);
-  const updateSessionRetention = mock(async () => session);
-  const context = { updateSessionProfile, client: { updateSessionRetention } };
   const tree: ReactNode = (
-    <AppContext.Provider value={context as never}>
+    <AppContext.Provider value={appContext}>
       <BotSuggestionCard session={{ ...session, botSuggestion }} events={[]} />
     </AppContext.Provider>
   );
@@ -67,11 +70,10 @@ async function accept(botSuggestion: SessionBotSuggestion) {
     (candidate) => candidate.textContent === "Make it a bot",
   )!;
   await act(async () => button.click());
-  return { updateSessionProfile, updateSessionRetention };
 }
 
 test("accepting a name-only suggestion still makes the chat a bot", async () => {
-  const { updateSessionProfile, updateSessionRetention } = await accept(suggestion({}));
+  await accept(suggestion({}));
   const [workspaceId, sessionId, change] = updateSessionProfile.mock.calls[0] as unknown as [
     string,
     string,
@@ -88,9 +90,7 @@ test("accepting a name-only suggestion still makes the chat a bot", async () => 
 
 test("accepting keeps the avatar and description the agent chose", async () => {
   const avatar = { kind: "emoji", emoji: "🧾", hue: 60 } as const;
-  const { updateSessionProfile } = await accept(
-    suggestion({ avatar, description: "Checks invoices" }),
-  );
+  await accept(suggestion({ avatar, description: "Checks invoices" }));
   expect(updateSessionProfile.mock.calls[0]).toEqual([
     session.workspaceId,
     session.id,
