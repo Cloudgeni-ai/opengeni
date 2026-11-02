@@ -522,6 +522,38 @@ describe("agent capability catalog search", () => {
       });
     }
 
+    test("entries whose names agree with a named one share its boost", () => {
+      const github = [
+        item({
+          id: "api:github-app",
+          name: "GitHub App",
+          source: "built_in",
+          description: "Give Opengeni access to an organization's repositories.",
+          providerDomain: "github.com",
+        }),
+        item({
+          id: "plugin:github",
+          name: "GitHub",
+          tags: ["github"],
+          providerDomain: "github.com",
+        }),
+      ];
+      // "GitHub repositories" names the plugin; the app shares its boost, so
+      // the two keep the order their ordinary scores give them.
+      const results = searchCapabilityCatalogItems(
+        [...catalog, ...github],
+        "GitHub repositories",
+        5,
+      );
+      expect(
+        results
+          .slice(0, 2)
+          .map((result) => result.item.id)
+          .sort(),
+      ).toEqual(["api:github-app", "plugin:github"]);
+      for (const result of results.slice(0, 2)) expect(result.score).toBeGreaterThan(10_000);
+    });
+
     test("an ordinary-word or operation-word name is not ranked as named", () => {
       for (const [query, name] of [
         ["send a message to the channel", "Send"],

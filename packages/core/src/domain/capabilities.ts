@@ -8,6 +8,7 @@ import {
 import { personalWorkspaceOwnerOriginConnections } from "./personal-connection-delegations";
 import {
   integrationMentionMatcher,
+  integrationNamesAgree,
   isDistinctiveIntegrationMention,
   isIntegrationDefinitionEnabled,
   registrableHostDomain,
@@ -3436,15 +3437,24 @@ export function searchCapabilityCatalogItems(
   const compactPhrase = phrase.replaceAll(" ", "");
   const fuzzyTokens = tokens.slice(0, FUZZY_MAX_TOKENS);
   const trusted = items.filter((item) => capabilityCatalogItemIsTrustedForExposure(item));
+  const providerDomains = new Map(
+    trusted.map((item) => [item, capabilityCatalogSearchProviderDomain(item)] as const),
+  );
   // A vendor word names an entry only when its domain is one product's.
   const mentionsOf = integrationMentionMatcher(query, {
     sharedDomains: sharedVendorDomains(
-      trusted.map((item) => ({
-        name: item.name,
-        providerDomain: capabilityCatalogSearchProviderDomain(item),
-      })),
+      trusted.map((item) => ({ name: item.name, providerDomain: providerDomains.get(item) })),
     ),
   });
+  // Entries the query names distinctively ("dictate this note with
+  // whisperflow"); "send a message" does not name Send.
+  const namedNames = trusted.flatMap((item) =>
+    mentionsOf({ name: item.name, providerDomain: providerDomains.get(item) }).some((mention) =>
+      isDistinctiveIntegrationMention(mention, item.name),
+    )
+      ? [item.name]
+      : [],
+  );
   const boundedLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
   const weightedFields = (item: CapabilityCatalogItem) =>
     [
@@ -3512,14 +3522,9 @@ export function searchCapabilityCatalogItems(
       }
       // An entry the query names (its name, a near spelling of it or its
       // vendor's domain word) ranks above entries that only share ordinary
-      // words with a sentence ("dictate this note with whisperflow"). Only
-      // a distinctive mention counts: "send a message" does not name Send.
-      if (
-        mentionsOf({
-          name: item.name,
-          providerDomain: capabilityCatalogSearchProviderDomain(item),
-        }).some((mention) => isDistinctiveIntegrationMention(mention, item.name))
-      ) {
+      // words with a sentence. So do entries whose names agree with a named
+      // one ("GitHub App" when "GitHub" is named), keeping their usual order.
+      if (namedNames.some((name) => integrationNamesAgree(name, item.name))) {
         if (score === 0) matchedOn.add("name");
         score += NAMED_ENTRY_BONUS;
       }
