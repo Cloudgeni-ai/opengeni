@@ -5691,6 +5691,65 @@ export function requiredSandboxEnvForBackend(backend: z.infer<typeof SandboxBack
   return (SANDBOX_REQUIRED_ENV[backend] ?? []).map((entry) => entry.env);
 }
 
+// Backends whose boxes run directly on the worker or API host (in-process
+// processes, or the host's Docker daemon). They carry no credentials, so the
+// credential table cannot tell whether an operator chose them: only the
+// configured default backend may select one.
+const HOST_SANDBOX_BACKENDS: ReadonlySet<z.infer<typeof SandboxBackend>> = new Set([
+  "local",
+  "docker",
+]);
+
+/**
+ * Whether this deployment serves NEW sessions on `backend`. The single source
+ * of truth for every session-creation path (REST/SDK, `session_create`,
+ * scheduled and event-triggered runs):
+ *
+ * - the configured default (`OPENGENI_SANDBOX_BACKEND`) is always served;
+ * - `none` (a boxless session) is always served, it executes nothing;
+ * - `selfhosted` is served when Connected Machines are enabled;
+ * - a provider backend is served when the operator configured its credentials
+ *   (every `SANDBOX_REQUIRED_ENV` entry is set), the same table that boot
+ *   validation requires for the default backend;
+ * - a host backend (`local`, `docker`) is served only as the default.
+ *
+ * Existing sessions and shared-box children keep their stored backend; this
+ * gate only decides what a create request may newly select.
+ */
+export function sandboxBackendServed(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): boolean {
+  if (backend === settings.sandboxBackend || backend === "none") return true;
+  if (backend === "selfhosted") return settings.sandboxSelfhostedEnabled === true;
+  if (HOST_SANDBOX_BACKENDS.has(backend)) return false;
+  const required = SANDBOX_REQUIRED_ENV[backend];
+  if (!required || required.length === 0) return false;
+  return required.every((entry) => {
+    const value = settings[entry.field];
+    return typeof value === "string"
+      ? value.trim().length > 0
+      : value !== undefined && value !== null;
+  });
+}
+
+/** Every backend this deployment serves for new sessions, in enum order. */
+export function servedSandboxBackends(settings: Settings): z.infer<typeof SandboxBackend>[] {
+  return SandboxBackend.options.filter((backend) => sandboxBackendServed(settings, backend));
+}
+
+/** The actionable create-time error for a backend this deployment does not serve. */
+export function unservedSandboxBackendMessage(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend>,
+): string {
+  return (
+    `sandboxBackend "${backend}" is not available in this deployment. ` +
+    `Available: ${servedSandboxBackends(settings).join(", ")}. ` +
+    `Omit sandboxBackend to use the deployment default ("${settings.sandboxBackend}").`
+  );
+}
+
 function objectStorageConfiguredForWorkspaceArchives(settings: Settings): boolean {
   switch (settings.objectStorageBackend) {
     case "azure-blob":

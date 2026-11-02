@@ -33,6 +33,10 @@ const settings = testSettings({
   sandboxBackend: "none",
   sandboxOwnershipEnabled: true,
   environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+  // These creates select `modal` explicitly, which a deployment serves only
+  // when its credentials are configured.
+  modalTokenId: "test-modal-token-id",
+  modalTokenSecret: "test-modal-token-secret",
 });
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
