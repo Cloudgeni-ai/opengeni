@@ -42,7 +42,7 @@ describe("goalContinuationPrompt", () => {
       "in goal_complete's reply: it is shown exactly as written and ends this turn",
     );
     expect(prompt).toContain(
-      "Before pausing because the task seems infeasible, data seems missing or a result cannot be verified",
+      "A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause",
     );
     expect(prompt).toContain("opengeni__goal_complete");
     expect(prompt).toContain("opengeni__goal_pause");

@@ -435,7 +435,6 @@ import {
   composeModularAgentInstructions,
   resolveAgentIdentity,
   rigInstructions,
-  UNATTENDED_REQUEST_GOAL_NOTE,
   UNATTENDED_SESSION_GUIDANCE,
   workspaceEnvironmentInstructions,
   type AgentPromptExperiments,
@@ -456,7 +455,6 @@ export {
   identityFromLegacyTemplate,
   resolveAgentIdentity,
   rigInstructions,
-  UNATTENDED_REQUEST_GOAL_NOTE,
   UNATTENDED_SESSION_GUIDANCE,
   workspaceEnvironmentInstructions,
   type AgentPromptContext,
@@ -527,17 +525,21 @@ export {
   type ManagedCodemodeClientDownload,
 } from "./sandbox/codemode-client";
 import {
+  GOAL_COMPLETE_REPLY_NOT_DELIVERED,
   InputWaitYield,
   waitForInputReply,
+  type InputWaitGuardResult,
   type InputWaitRequest,
   type InputWaitYieldStream,
 } from "./input-wait-yield";
 export {
+  GOAL_COMPLETE_REPLY_NOT_DELIVERED,
   InputWaitYield,
   modelResponseClientToolCallCount,
   modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   waitForInputReply,
+  type InputWaitGuardResult,
   type InputWaitRequest,
 } from "./input-wait-yield";
 import { withModelStepHandover } from "./model-step-handover";
@@ -2749,7 +2751,7 @@ export function coreInstructions(
     ...(rig ? rigInstructions(rig) : []),
     // Unattended sessions (frozen at create): inside the non-bypassable CORE
     // for the same reason. Absent for interactive sessions.
-    ...(session?.unattended ? [UNATTENDED_SESSION_GUIDANCE, UNATTENDED_REQUEST_GOAL_NOTE] : []),
+    ...(session?.unattended ? [UNATTENDED_SESSION_GUIDANCE] : []),
   ];
 }
 
@@ -5491,7 +5493,7 @@ export type PrepareToolsOptions = {
    * wait would end a person's turn without any visible reply. It receives the
    * call's verbatim `reply` argument, if any.
    */
-  inputWaitReplyGuard?: (request: InputWaitRequest) => Promise<string | null>;
+  inputWaitReplyGuard?: (request: InputWaitRequest) => Promise<InputWaitGuardResult>;
   /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
   mcpAccountLabels?: ReadonlyMap<string, McpAccountRouteLabel>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
@@ -9947,8 +9949,19 @@ export class PrefixedMcpServer implements MCPServer {
         : finalReply !== null
           ? { reply: finalReply, kind: "goal_complete" }
           : undefined;
+    // Without a gate (or once the guard keeps the turn) a completion's reply
+    // cannot end the turn; the completion still runs.
+    const finalDecision =
+      waitRequest?.kind === "goal_complete"
+        ? ((await this.inputWaitYield?.finalReplyDecision(waitRequest)) ?? {
+            refusal: null,
+            endTurn: false,
+          })
+        : undefined;
     if (waitRequest) {
-      const refusal = await this.inputWaitYield?.replyRefusal(waitRequest);
+      const refusal = finalDecision
+        ? finalDecision.refusal
+        : await this.inputWaitYield?.replyRefusal(waitRequest);
       if (refusal) {
         return boundedMcpToolResult({
           isError: true,
@@ -9963,7 +9976,7 @@ export class PrefixedMcpServer implements MCPServer {
     const completeWait =
       unprefixed === "wait_for_input"
         ? this.inputWaitYield?.beginWait(waitRequest)
-        : waitRequest
+        : waitRequest && finalDecision?.endTurn
           ? this.beginFinalReply(waitRequest)
           : undefined;
     try {
@@ -10040,8 +10053,17 @@ export class PrefixedMcpServer implements MCPServer {
       recordOutcome(
         result.isError === true && !exchange?.requested ? "provider_declared_error" : "success",
       );
-      if (completeWait && result.isError !== true) {
-        completeWait(true);
+      const delivered = completeWait && result.isError !== true ? completeWait(true) : false;
+      if (finalReply !== null && result.isError !== true && !delivered) {
+        // The completion succeeded but its reply did not end the turn, so the
+        // model must still answer; its receipt alone would not say so.
+        return {
+          ...result,
+          content: [
+            ...(result.content ?? []),
+            { type: "text", text: GOAL_COMPLETE_REPLY_NOT_DELIVERED },
+          ],
+        };
       }
       return result;
     } catch (error) {
@@ -10146,7 +10168,7 @@ export class PrefixedMcpServer implements MCPServer {
     }
   }
 
-  private beginFinalReply(request: InputWaitRequest): ((success: boolean) => void) | undefined {
+  private beginFinalReply(request: InputWaitRequest): ((success: boolean) => boolean) | undefined {
     try {
       return this.inputWaitYield?.beginWait(request);
     } catch {

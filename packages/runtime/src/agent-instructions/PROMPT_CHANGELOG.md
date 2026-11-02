@@ -6,33 +6,32 @@ batch with the reply as its final answer, shown exactly as written, the way
 `wait_for_input` ends a turn with its `reply`. Completion plus answer is one
 model call instead of two. A `reply` passed together with other tool calls in
 one response is refused before anything is completed (at most twice per
-attempt), so the model sees those results first. The goals module's handoff
-paragraph now says so (about 200 bytes more). Unattended sessions, which an
-API create now gives a goal standing for their first message when it names
-none, also get one sentence (about 150 bytes) saying that goal needs no
-restating: "A goal to complete the request in this session's first message
-stands for that whole request; work on it without restating it through
-goal_update." The goals module renders it when goal_update is available; the
-legacy CORE carries it after the unattended guidance, so the `unattended`
-legacy lock changes and no other legacy case does. Interactive sessions do not
-get that sentence. The goal tool schemas drop the spacing and ledger
-boilerplate each text field repeated; each tool description states that rule
-once, and the schemas still enforce the byte limits.
+attempt); after that the completion runs but the reply does not end the turn,
+so the model sees those results first. When a reply does not end the turn,
+its receipt tells the model to answer. The goals module's handoff paragraph
+and the goal continuation say so (about 200 bytes more). The goal an API
+create now gives an unattended request carries its own note that it needs no
+restating, in its success criteria, so the instructions gain no unattended
+sentence and the legacy locks do not change. The goal tool schemas drop the
+spacing and ledger boilerplate each text field repeated; each tool
+description states that rule once, and the schemas still enforce the byte
+limits.
 
-Goal pauses name what was tried. The goals module's pause sentence gains one
-sentence (about 200 bytes): before pausing because the task seems infeasible,
-data seems missing or a result cannot be verified, try the plausible in-scope
-alternatives and name the ones you tried in the rationale. A definitive
-missing permission or required human decision still justifies an immediate
-pause. The `goal_pause` tool description and the goal continuation's blocked
-audit say the same, and `wait_for_input`'s description is shortened without
-dropping any rule.
+Goal pauses name what was tried. The goals module's pause paragraph gains one
+sentence (about 230 bytes): a task that seems infeasible, missing data or a
+result the agent cannot verify is not by itself a reason to pause; it tries
+the plausible in-scope alternatives and, if it still pauses, names the ones it
+tried in the rationale. A definitive missing permission or required human
+decision still justifies an immediate pause. The `goal_pause` tool
+description and the goal continuation's blocked audit say the same, and
+`wait_for_input`'s description is shortened without dropping a rule the
+instructions do not also state.
 
 ```diff
 - After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link.
 + Put the requested answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends the turn, so call goal_complete on its own once you have seen your last results.
 + Without a reply, finish the same turn with that answer after goal_complete succeeds.
-+ Before pausing because the task seems infeasible, data seems missing or a result cannot be verified, try the plausible in-scope alternatives and name the ones you tried in the rationale.
++ A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: try the plausible in-scope alternatives, and if you still pause, name the ones you tried in the rationale.
 ```
 
 The agent knows both GitHub identities. When personal GitHub sign-in is

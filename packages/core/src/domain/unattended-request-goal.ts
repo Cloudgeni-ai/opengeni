@@ -4,12 +4,14 @@ import type { GoalSpec, ResolvedAgentConfig } from "@opengeni/contracts";
  * The goal Opengeni sets for a headless single request. It names the request
  * instead of copying it: the goal is shown with the first message and with
  * every continuation, so a copy would repeat the whole request in the model's
- * input.
+ * input. Compaction keeps that message (goal continuations never crowd it
+ * out). The criteria say the goal needs no restating, so only sessions that
+ * have this goal are told so.
  */
 export const UNATTENDED_REQUEST_GOAL: Readonly<GoalSpec> = Object.freeze({
   text: "Complete the request in this session's first message.",
   successCriteria:
-    "Everything that message asks for is done and checked where practical, and only steps that need a person are left undone.",
+    "Everything that message asks for is done and checked where practical, and only steps that need a person are left undone. This goal already stands for that whole request, so it needs no goal_update to restate it.",
 });
 
 /**

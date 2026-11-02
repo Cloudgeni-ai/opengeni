@@ -147,17 +147,21 @@ export const GOAL_COMPLETE_SIBLING_REFUSAL =
   "goal_complete was not run: its reply ends the turn after this batch, so you would not see the results of the other calls you made with it. Check those results, then call goal_complete again on its own.";
 
 /**
- * Why a `goal_complete` carrying a `reply` must not end this turn yet, or
- * null. Refused at most `MAX_INPUT_WAIT_REPLY_REFUSALS` times per attempt,
- * like a wait, so a model that keeps batching them still finishes.
+ * What happens to a `goal_complete` carrying a `reply`: the refusal the model
+ * gets when other client tool calls share its response (nothing is completed),
+ * at most `MAX_INPUT_WAIT_REPLY_REFUSALS` times per attempt; after that the
+ * completion runs but its reply never ends the turn beside sibling calls, so
+ * the model still sees their results and answers afterwards. Null lets the
+ * reply end the turn.
  */
-export function goalCompleteReplyRefusal(input: {
+export function goalCompleteReplyDecision(input: {
   refusalsSoFar: number;
   /** Client-executed tool calls in the response that asked for this one. */
   toolCallCount: number;
-}): string | null {
-  if (input.refusalsSoFar >= MAX_INPUT_WAIT_REPLY_REFUSALS) return null;
-  return input.toolCallCount > 1 ? GOAL_COMPLETE_SIBLING_REFUSAL : null;
+}): string | { readonly endTurn: false } | null {
+  if (input.toolCallCount <= 1) return null;
+  if (input.refusalsSoFar >= MAX_INPUT_WAIT_REPLY_REFUSALS) return { endTurn: false };
+  return GOAL_COMPLETE_SIBLING_REFUSAL;
 }
 
 /** How far back to look past rejected-late or duplicate completions. */

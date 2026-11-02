@@ -133,7 +133,7 @@ describe("modular composer: module selection (AC12)", () => {
       "Without a reply, finish the same turn with that answer after goal_complete succeeds.",
       "Never use evidence as the final reply.",
       "A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
-      "Before pausing because the task seems infeasible, data seems missing or a result cannot be verified, try the plausible in-scope alternatives and name the ones you tried in the rationale.",
+      "A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: try the plausible in-scope alternatives, and if you still pause, name the ones you tried in the rationale.",
       "A definitive missing permission or required human decision can justify an immediate goal pause with evidence and the change needed to resume.",
     ]) {
       expect(enabled).toContain(sentence);

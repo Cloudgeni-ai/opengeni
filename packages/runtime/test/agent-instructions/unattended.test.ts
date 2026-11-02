@@ -6,7 +6,6 @@ import {
 } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
 import {
-  UNATTENDED_REQUEST_GOAL_NOTE,
   UNATTENDED_SESSION_GUIDANCE,
   buildOpenGeniAgent,
   inspectPersistentAgentInstructions,
@@ -47,11 +46,8 @@ describe("unattended sessions (model-free)", () => {
       expect(interactive).not.toContain(UNATTENDED_SESSION_GUIDANCE);
       expect(composed({ ...options, unattended: false })).toBe(interactive);
       expect(unattended).toContain(UNATTENDED_SESSION_GUIDANCE);
-      // The guidance and the standing-request goal note are the only
-      // additions, inside the non-bypassable CORE.
-      expect(
-        unattended.replace(` ${UNATTENDED_SESSION_GUIDANCE} ${UNATTENDED_REQUEST_GOAL_NOTE}`, ""),
-      ).toBe(interactive);
+      // The guidance is the only addition, inside the non-bypassable CORE.
+      expect(unattended.replace(` ${UNATTENDED_SESSION_GUIDANCE}`, "")).toBe(interactive);
       const core = inspectPersistentAgentInstructions(settings, {
         ...options,
         unattended: true,
@@ -73,27 +69,6 @@ describe("unattended sessions (model-free)", () => {
     expect(modules(unattended).at(-1)).toBe("unattended");
     expect(unattended.composed).toContain(`# Unattended session\n\n${UNATTENDED_SESSION_GUIDANCE}`);
     expect(composed({ ...base, unattended: false })).toBe(interactive.composed);
-  });
-
-  test("modular: the standing-request goal note follows unattended and goal_update", () => {
-    const base = { agentConfig: modularConfig };
-    expect(composed(base)).not.toContain(UNATTENDED_REQUEST_GOAL_NOTE);
-    const unattended = composed({ ...base, unattended: true });
-    expect(unattended).toContain(UNATTENDED_REQUEST_GOAL_NOTE);
-    expect(unattended.indexOf(UNATTENDED_REQUEST_GOAL_NOTE)).toBeGreaterThan(
-      unattended.indexOf("# Goals"),
-    );
-    expect(
-      composed({
-        ...base,
-        unattended: true,
-        agentConfig: {
-          ...modularConfig,
-          capabilities: { ...allAgentCapabilities(), goals: false },
-        },
-      }),
-    ).not.toContain(UNATTENDED_REQUEST_GOAL_NOTE);
-    expect(UNATTENDED_REQUEST_GOAL_NOTE).not.toMatch(/benchmark|test|commit|git\b/iu);
   });
 
   test("modular with no capabilities: only the module is added", () => {

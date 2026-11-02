@@ -11,11 +11,13 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenGeniAgent,
   CompactionNeededError,
+  GOAL_COMPLETE_REPLY_NOT_DELIVERED,
   InputWaitYield,
   modelResponseHasVisibleText,
   prepareAgentTools,
   runAgentStream,
   waitForInputReply,
+  type InputWaitGuardResult,
   type InputWaitRequest,
 } from "../src/index";
 import { normalizeSdkEvent } from "../src/run-events";
@@ -42,7 +44,7 @@ async function fixture(
     deferred?: boolean;
     siblingIsError?: boolean;
     beforeWaitResult?: () => Promise<void>;
-    inputWaitReplyGuard?: (request: InputWaitRequest) => Promise<string | null>;
+    inputWaitReplyGuard?: (request: InputWaitRequest) => Promise<InputWaitGuardResult>;
     /** Also list `goal_complete`, so it can end the turn with its reply. */
     goalComplete?: boolean;
   } = {},
@@ -1605,6 +1607,60 @@ describe("goal_complete with a reply ends the turn with that reply", () => {
     }
   });
 
+  test("a guard that keeps the turn runs the completion and the model still answers", async () => {
+    const f = await fixture({
+      goalComplete: true,
+      inputWaitReplyGuard: async (request) =>
+        request.kind === "goal_complete" ? { endTurn: false } : null,
+    });
+    try {
+      const model = new ScriptedModel([
+        {
+          output: [
+            functionCall("opengeni__sibling", {}, "check"),
+            functionCall("opengeni__goal_complete", { evidence, reply }, "complete"),
+          ],
+        },
+        { outputText: "The parser handles empty input." },
+      ]);
+      const agent = buildOpenGeniAgent(f.settings, [], {
+        model,
+        mcpServers: f.prepared.mcpServers,
+        inputWaitYield: f.prepared.inputWaitYield,
+      });
+      const stream = await runAgentStream(agent, "Fix the parser.", f.settings);
+      await consumeStream(stream);
+      expect(stream.error).toBeNull();
+      expect(model.calls).toBe(2);
+      expect(f.calls).toEqual(["sibling", "goal_complete"]);
+      expect(f.prepared.inputWaitYield?.requested).toBe(false);
+      expect(f.prepared.inputWaitYield?.finalReply).toBeNull();
+      expect(stream.finalOutput).toBe("The parser handles empty input.");
+      const results = stream.history.filter((item) => item.type === "function_call_result");
+      expect(JSON.stringify(results.find((item) => item.callId === "complete"))).toContain(
+        GOAL_COMPLETE_REPLY_NOT_DELIVERED,
+      );
+    } finally {
+      await f.prepared.close();
+    }
+  });
+
+  test("after an accepted wait a completion's reply cannot end the turn", async () => {
+    const gate = new InputWaitYield(async () => "never consulted");
+    gate.beginStream();
+    expect(gate.beginWait({ reply: "Waiting on CI." })(true)).toBe(true);
+    expect(await gate.finalReplyDecision({ reply: "Done.", kind: "goal_complete" })).toEqual({
+      refusal: null,
+      endTurn: false,
+    });
+    const fresh = new InputWaitYield(async () => null);
+    fresh.beginStream();
+    expect(await fresh.finalReplyDecision({ reply: "Done.", kind: "goal_complete" })).toEqual({
+      refusal: null,
+      endTurn: true,
+    });
+  });
+
   test("a wait in the same attempt keeps its own reply and is no final answer", () => {
     const gate = new InputWaitYield();
     gate.beginStream();
@@ -1613,7 +1669,7 @@ describe("goal_complete with a reply ends the turn with that reply", () => {
     expect(gate.finalReply).toBeNull();
     // The first accepted request decides; a later completion cannot turn it
     // into a final answer.
-    gate.beginWait({ reply: "Done.", kind: "goal_complete" })(true);
+    expect(gate.beginWait({ reply: "Done.", kind: "goal_complete" })(true)).toBe(false);
     expect(gate.reply).toBe("Waiting on CI.");
     expect(gate.finalReply).toBeNull();
   });
@@ -1635,6 +1691,8 @@ describe("goal_complete with a reply ends the turn with that reply", () => {
       const server = f.prepared.mcpServers.find((entry) => entry.name.includes("opengeni"))!;
       const result = await server.callTool("opengeni__goal_complete", { evidence, reply });
       expect(JSON.stringify(result)).toContain("canonical wait receipt");
+      // The model is told its reply did not end the turn, so it still answers.
+      expect(JSON.stringify(result)).toContain(GOAL_COMPLETE_REPLY_NOT_DELIVERED);
       expect(f.calls).toEqual(["goal_complete"]);
       expect(gate.requested).toBe(false);
       expect(gate.finalReply).toBeNull();

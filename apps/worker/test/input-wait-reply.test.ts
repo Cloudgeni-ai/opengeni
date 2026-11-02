@@ -9,7 +9,7 @@ import {
   MAX_INPUT_WAIT_REPLY_REFUSALS,
   WAIT_REPLY_MESSAGE_ID,
   goalCompleteReplyMessage,
-  goalCompleteReplyRefusal,
+  goalCompleteReplyDecision,
   inputWaitReply,
   inputWaitReplyMessage,
   inputWaitReplyRefusal,
@@ -287,19 +287,24 @@ describe("a wait's reply argument is the verbatim answer", () => {
 });
 
 describe("a goal completion's reply is the turn's final answer", () => {
-  test("it is refused beside other client tool calls, at most twice per attempt", () => {
-    expect(goalCompleteReplyRefusal({ refusalsSoFar: 0, toolCallCount: 1 })).toBeNull();
-    expect(goalCompleteReplyRefusal({ refusalsSoFar: 0, toolCallCount: 2 })).toBe(
+  test("beside other client tool calls it is refused twice, then never ends the turn", () => {
+    expect(goalCompleteReplyDecision({ refusalsSoFar: 0, toolCallCount: 1 })).toBeNull();
+    expect(goalCompleteReplyDecision({ refusalsSoFar: 0, toolCallCount: 2 })).toBe(
       GOAL_COMPLETE_SIBLING_REFUSAL,
     );
-    expect(goalCompleteReplyRefusal({ refusalsSoFar: 1, toolCallCount: 3 })).toBe(
+    expect(goalCompleteReplyDecision({ refusalsSoFar: 1, toolCallCount: 3 })).toBe(
       GOAL_COMPLETE_SIBLING_REFUSAL,
     );
+    // Refusals run out: the completion runs, but its reply keeps the turn open
+    // so the model sees the sibling results and answers afterwards.
     expect(
-      goalCompleteReplyRefusal({
+      goalCompleteReplyDecision({
         refusalsSoFar: MAX_INPUT_WAIT_REPLY_REFUSALS,
         toolCallCount: 2,
       }),
+    ).toEqual({ endTurn: false });
+    expect(
+      goalCompleteReplyDecision({ refusalsSoFar: MAX_INPUT_WAIT_REPLY_REFUSALS, toolCallCount: 1 }),
     ).toBeNull();
     expect(GOAL_COMPLETE_SIBLING_REFUSAL).toContain("was not run");
   });

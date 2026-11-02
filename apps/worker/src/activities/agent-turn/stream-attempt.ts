@@ -207,7 +207,7 @@ import {
 } from "./quiescence";
 import {
   goalCompleteReplyMessage,
-  goalCompleteReplyRefusal,
+  goalCompleteReplyDecision,
   inputWaitReply,
   inputWaitReplyMessage,
   inputWaitReplyRefusal,
@@ -1300,14 +1300,14 @@ export async function runTurnStreamAttempt(
       const stream = eventing.stream;
       eventing.inputWaitReplyGuard = async (request) => {
         if (request.kind === "goal_complete") {
-          const refusal = goalCompleteReplyRefusal({
+          const decision = goalCompleteReplyDecision({
             refusalsSoFar: goalCompleteReplyRefusals,
             toolCallCount: modelResponseClientToolCallCount(
               (stream.state as { _lastTurnResponse?: unknown })._lastTurnResponse,
             ),
           });
-          if (refusal) goalCompleteReplyRefusals += 1;
-          return refusal;
+          if (typeof decision === "string") goalCompleteReplyRefusals += 1;
+          return decision;
         }
         const refusal = await inputWaitReplyRefusal({
           turn,

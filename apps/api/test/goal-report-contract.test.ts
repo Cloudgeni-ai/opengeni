@@ -114,7 +114,7 @@ describe("goal MCP report field contracts", () => {
     expect(properties.reply?.description).toContain("verbatim");
     expect(json.required).toEqual(["evidence"]);
     const description = registered.goal_complete!.description!;
-    expect(description).toContain("turn ends after this tool batch");
+    expect(description).toContain("ends the turn after this tool batch");
     expect(description).toContain("on its own");
     expect(description).toContain("Without reply, reply to the user after this tool succeeds");
   });

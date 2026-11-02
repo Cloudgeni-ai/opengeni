@@ -23,6 +23,22 @@ type StreamScope = {
 export type InputWaitRequest = { reply: string | null; kind?: "goal_complete" };
 
 /**
+ * What the host's reply guard decides for a request: a refusal message the
+ * model gets as a tool error with nothing run, null to proceed, or (for a
+ * `goal_complete` reply only) `{ endTurn: false }` to run the completion
+ * without ending the turn, for example once sibling-call refusals run out.
+ */
+export type InputWaitGuardResult = string | null | { readonly endTurn: false };
+
+/**
+ * Appended to a successful `goal_complete` receipt whose `reply` did not end
+ * the turn (no turn-ending gate, a sealed gate, an earlier accepted wait, or
+ * sibling calls in the same batch): the model must still answer.
+ */
+export const GOAL_COMPLETE_REPLY_NOT_DELIVERED =
+  "Your reply was not delivered and this turn continues: give that answer as your final reply now.";
+
+/**
  * The verbatim reply a `wait_for_input` or `goal_complete` call carries, or
  * null when it has none.
  *
@@ -62,7 +78,7 @@ export class InputWaitYield {
   private readonly boundaryExit = new MaxTurnsExceededError("Runtime input wait yield");
 
   constructor(
-    private readonly replyGuard?: (request: InputWaitRequest) => Promise<string | null>,
+    private readonly replyGuard?: (request: InputWaitRequest) => Promise<InputWaitGuardResult>,
   ) {}
 
   /** Why a requested wait must not be registered yet, or null to proceed. The
@@ -71,11 +87,32 @@ export class InputWaitYield {
   async replyRefusal(request: InputWaitRequest = { reply: null }): Promise<string | null> {
     if (!this.replyGuard || this.terminal || this.accepted) return null;
     try {
-      return await this.replyGuard(request);
+      const result = await this.replyGuard(request);
+      return typeof result === "string" ? result : null;
     } catch {
       // The guard is a reply-quality check, never an availability gate: when
       // it cannot decide (for example a failed read), the wait proceeds.
       return null;
+    }
+  }
+
+  /**
+   * Whether a `goal_complete` carrying a `reply` is refused (a tool error, and
+   * nothing is completed) or runs, and whether its reply may then end the
+   * turn. An already accepted wait or a closed attempt keeps the turn: the
+   * completion still runs, but its reply is not the final answer.
+   */
+  async finalReplyDecision(
+    request: InputWaitRequest,
+  ): Promise<{ refusal: string | null; endTurn: boolean }> {
+    if (this.terminal || this.accepted) return { refusal: null, endTurn: false };
+    if (!this.replyGuard) return { refusal: null, endTurn: true };
+    try {
+      const result = await this.replyGuard(request);
+      if (typeof result === "string") return { refusal: result, endTurn: false };
+      return { refusal: null, endTurn: result === null };
+    } catch {
+      return { refusal: null, endTurn: true };
     }
   }
 
@@ -143,8 +180,10 @@ export class InputWaitYield {
   /** Acquire synchronously BEFORE invoking the trusted remote mutation. Failed
    * acquisition must not execute it. Completion only changes receipt truth; it
    * cannot reopen a stream or retrospectively select successful finalization.
+   * The returned callback reports whether this request became the accepted
+   * one, whose reply the turn ends with.
    */
-  beginWait(request: InputWaitRequest = { reply: null }): (success: boolean) => void {
+  beginWait(request: InputWaitRequest = { reply: null }): (success: boolean) => boolean {
     if (this.scope.signal?.aborted) this.endStream(this.scope);
     if (this.terminal || this.scope.ended || this.scope.phase !== "open") {
       throw new Error("Input wait was not executed: model dispatch or settlement is sealed");
@@ -156,19 +195,22 @@ export class InputWaitYield {
     this.pending.add(pending);
     let completed = false;
     return (success) => {
-      if (completed) return;
+      if (completed) return false;
       completed = true;
+      let took = false;
       if (success) {
         // The first accepted wait ends the turn; a later one cannot replace
         // the reply that wait already carried.
         if (!this.accepted) {
           this.acceptedReply = request.reply;
           this.acceptedFinalReply = request.kind === "goal_complete" && request.reply !== null;
+          took = true;
         }
         this.accepted = true;
       }
       this.pending.delete(pending);
       release();
+      return took;
     };
   }
 

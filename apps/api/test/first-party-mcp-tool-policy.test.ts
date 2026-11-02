@@ -575,7 +575,7 @@ describe("first-party MCP tool visibility policy", () => {
     );
     expect(registered.goal_pause!.description).toContain("Tool approvals remain human-only");
     expect(registered.goal_pause!.description).toContain(
-      "try the plausible in-scope alternatives first and name the ones you tried in the rationale",
+      "is not by itself a reason to pause: if you still pause after trying those alternatives, name the ones you tried",
     );
     expect(registered.goal_resume!.description).toContain(
       "A user's question alone is not a reason to resume",

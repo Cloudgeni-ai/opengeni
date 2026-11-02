@@ -13,8 +13,7 @@ import { LEGACY_PROMPT_CASES } from "./legacy-cases";
  * variable_set_list / variableSetIds wording, and proceeding past blocked
  * routine, reversible steps, the Skill index reading Skills by name, and
  * answering privacy questions from `privacy_facts`; `unattended` pins the
- * unattended-session CORE paragraph and its standing-request goal note, which
- * no other case carries. Reviewed
+ * unattended-session CORE paragraph, which no other case carries. Reviewed
  * instruction changes update their locks; Modular composition must never
  * change legacy bytes as a side effect.
  */
@@ -57,8 +56,8 @@ const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> 
     layers: "operational_contract,persona_and_core",
   },
   unattended: {
-    chars: 35726,
-    sha256: "6009d6c487264edfaca6904235b2f42fe973bb2d9fd259b36ea674d414c28353",
+    chars: 35579,
+    sha256: "723609f3a1a252e940f01cd753d0a11443adcac80fa11e4418489b4a8dcaa25d",
     layers: "operational_contract,persona_and_core",
   },
 };

@@ -311,7 +311,7 @@ export function goalContinuationPrompt(
     "Blocked audit:",
     "- Base persistence on evidence, not a fixed number of turns or retries. Investigate recoverable failures and try plausible safe alternatives within current authority when they could materially advance the goal; do not exhaust every imaginable alternative or repeat an unchanged failure without a reason to expect progress.",
     "- A definitive missing permission, required human decision, or external prerequisite with no actionable authorized path can justify pausing immediately. State the concrete blocker, relevant evidence or attempted alternatives, and what must change to resume. Tool approvals remain human-only.",
-    "- Before pausing because the task seems infeasible, data seems missing or a result cannot be verified, try the plausible in-scope alternatives and name the ones you tried in the rationale.",
+    "- A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: try the plausible in-scope alternatives, and if you still pause, name the ones you tried in the rationale.",
     "- If progress depends on work already in flight or a meaningful timed recheck, use the available waiting mechanism rather than pausing the goal; continue any independent authorized work first.",
     "- Do not pause merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
     "- When no meaningful authorized progress remains and the blocker requires human input or an external change that cannot be handled by an available wait or monitoring mechanism, call opengeni__goal_pause with the concrete blocker instead of repeatedly reporting it while leaving the goal active.",

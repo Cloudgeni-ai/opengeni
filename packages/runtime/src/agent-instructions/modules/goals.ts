@@ -13,15 +13,6 @@ const GOAL_OWNERSHIP =
 const GOAL_COMPLETION_HANDOFF =
   "Goal completion records short ledger proof, not the user-facing deliverable. Put the requested answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends the turn, so call goal_complete on its own once you have seen your last results. Without a reply, finish the same turn with that answer after goal_complete succeeds. Never use evidence as the final reply. A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.";
 
-/**
- * An unattended API session that gives its task as the first message gets a
- * goal standing for that message (see `unattendedRequestGoal` in core). It
- * needs no restating; only unattended sessions can have it. The legacy CORE
- * carries the same sentence after the unattended guidance.
- */
-export const UNATTENDED_REQUEST_GOAL_NOTE =
-  "A goal to complete the request in this session's first message stands for that whole request; work on it without restating it through goal_update.";
-
 const GOAL_COMPLETION_CALL =
   "Saying or verifying that the work is done does not complete the goal: call opengeni__goal_complete by its exact name, and search for a goal tool only when its input schema is not in context.";
 
@@ -29,7 +20,7 @@ const GOAL_COMPLETION_UNAVAILABLE =
   "Saying or verifying that the work is done does not complete the goal, and this session has no goal-completion tool: report the outcome instead of claiming the goal is complete.";
 
 const GOAL_PAUSE_JUDGMENT =
-  "A definitive missing permission or required human decision can justify an immediate goal pause with evidence and the change needed to resume. Before pausing because the task seems infeasible, data seems missing or a result cannot be verified, try the plausible in-scope alternatives and name the ones you tried in the rationale. Work already in flight or a meaningful timed recheck calls for the available waiting mechanism, not a goal pause.";
+  "A definitive missing permission or required human decision can justify an immediate goal pause with evidence and the change needed to resume. A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: try the plausible in-scope alternatives, and if you still pause, name the ones you tried in the rationale. Work already in flight or a meaningful timed recheck calls for the available waiting mechanism, not a goal pause.";
 
 const GOAL_TOOLS = [
   "goal_set",
@@ -80,9 +71,6 @@ export const goalsModule: AgentPromptModule = {
     return blocks(
       "# Goals",
       goalOwnership(context),
-      context.resources.unattended === true &&
-        toolAvailable(context, "goal_update") &&
-        UNATTENDED_REQUEST_GOAL_NOTE,
       complete && GOAL_COMPLETION_HANDOFF,
       complete ? GOAL_COMPLETION_CALL : GOAL_COMPLETION_UNAVAILABLE,
       toolAvailable(context, "goal_pause") && GOAL_PAUSE_JUDGMENT,

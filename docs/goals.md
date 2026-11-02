@@ -38,11 +38,14 @@ A top-level API create with `unattended: true` and an `initialMessage` that
 names no `goal` gets one from the create itself: "Complete the request in this
 session's first message.", with success criteria that everything that message
 asks for is done and checked where practical, leaving only steps that need a
-person. The goal names the request instead of copying it, because the goal
+person, and that the goal already stands for the whole request, so it needs no
+`goal_update` to restate it. The goal names the request instead of copying it, because the goal
 snapshot travels with the first message and every continuation. It is an
 ordinary `api`-created goal: a `goal.set` event, the first turn's
 `goal_snapshot`, continuation when the agent stops without completing or
-pausing, and `goal_update` for refinement. Because the text is fixed, a keyed
+pausing (within the deployment's continuation and budget limits), and
+`goal_update` for refinement. Compaction keeps that first message: goal
+continuations never crowd it out of the retained messages. Because the text is fixed, a keyed
 create retry resolves the same goal. Interactive sessions, child sessions,
 Slack chats, scheduled and event-started runs, sessions without the `goals`
 capability and creates passing `goal: null` get none. When the resulting
@@ -216,9 +219,10 @@ A goal is `active`, `paused`, or `completed`.
   of the requested output.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
   replaced. A missing permission or required human decision justifies an
-  immediate pause. Before pausing because the task seems infeasible, data
-  seems missing or a result cannot be verified, the agent tries the plausible
-  in-scope alternatives and names the ones it tried in the rationale.
+  immediate pause. A task that seems infeasible, missing data or a result the
+  agent cannot verify is not by itself a reason to pause: the agent tries the
+  plausible in-scope alternatives and, if it still pauses, names the ones it
+  tried in the rationale.
 - `goal_resume {}` reactivates any paused goal regardless of pause actor or
   reason, preserves its objective, resets continuation counters, and arms its
   durable wake. Already-active calls succeed unchanged. Existing sessions with
