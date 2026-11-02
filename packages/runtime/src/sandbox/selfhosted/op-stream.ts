@@ -213,6 +213,8 @@ export type OpStreamOutputReceipt = { exitSeq: string; attachGeneration: string 
 
 export type OpStreamYieldOptions = {
   yieldMs: number;
+  /** Ends the yield window early (a Steer is waiting); the op keeps running. */
+  yieldSignal?: AbortSignal;
   /** Durable ownership transfer. It runs while the exact consumer is still
    * attached; returning a running result is forbidden until this resolves. */
   onYield: () => void | Promise<void>;
@@ -915,6 +917,7 @@ class OpConsumer {
     }, this.ackIntervalMs);
     const liveness = this.watchLiveness(wallMs, runStartedAt);
     let yieldTimer: ReturnType<typeof setTimeout> | undefined;
+    let stopYieldSignal: (() => void) | undefined;
     let adopted = false;
     try {
       if (yieldOptions && yieldOptions.yieldMs > 0) {
@@ -923,6 +926,13 @@ class OpConsumer {
           liveness.wall,
           new Promise<"yield">((resolve) => {
             yieldTimer = setTimeout(() => resolve("yield"), yieldOptions.yieldMs);
+            // An early yield takes the same path as the window ending.
+            const signal = yieldOptions.yieldSignal;
+            if (!signal) return;
+            if (signal.aborted) return resolve("yield");
+            const onYield = () => resolve("yield");
+            signal.addEventListener("abort", onYield, { once: true });
+            stopYieldSignal = () => signal.removeEventListener("abort", onYield);
           }),
         ]);
         if (phase === "yield" && this.exitSeq === undefined) {
@@ -967,6 +977,7 @@ class OpConsumer {
       if (yieldTimer) {
         clearTimeout(yieldTimer);
       }
+      stopYieldSignal?.();
       liveness.stop();
     }
 

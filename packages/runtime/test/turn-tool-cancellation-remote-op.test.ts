@@ -9,12 +9,14 @@ import {
   type FakeOpScript,
 } from "../src/sandbox/selfhosted/op-testing";
 import {
+  SELFHOSTED_BACKGROUND_MAX_YIELD_MS,
   SelfhostedSession,
   type SelfhostedBackgroundCommandAdoption,
   type SelfhostedSessionDeps,
 } from "../src/sandbox/selfhosted/session";
 import { SandboxChannelAService } from "../src/sandbox/channel-a";
 import {
+  COMMAND_FINISH_FLOOR_MS,
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
 } from "../src/sandbox/turn-tool-cancellation";
@@ -706,4 +708,87 @@ describe("remote synchronous command custody", () => {
       expect(rig.runner.runs.get(originalOpId)?.finalAcked).toBe(false);
     },
   );
+});
+
+describe("a Steer during a Connected Machine command's foreground wait", () => {
+  const commandId = "33333333-3333-4333-8333-333333333333";
+  const steerRig = (adopt = true) => {
+    const adoptions: SelfhostedBackgroundCommandAdoption[] = [];
+    const rig = makeRig({
+      defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+      sessionDeps: {
+        execTimeoutMs: 0,
+        ...(adopt
+          ? {
+              adoptBackgroundCommand: async (input: SelfhostedBackgroundCommandAdoption) => {
+                adoptions.push(input);
+                return { commandId };
+              },
+            }
+          : {}),
+      },
+    });
+    // The finish floor raises the short requested wait to the full window.
+    const controller = createTurnToolCancellationController(undefined, {
+      cutPolling: true,
+      finishFloor: true,
+    });
+    const invoke = (callId: string) =>
+      sdkExec(controller, rig.session).invoke(
+        {} as never,
+        JSON.stringify({ cmd: "npm test", tty: false, yield_time_ms: 1000 }),
+        { toolCall: { type: "function_call", callId, name: "exec_command", arguments: "{}" } },
+      );
+    return { rig, controller, invoke, adoptions };
+  };
+
+  test("the floor window on a Connected Machine is the managed finish floor", () => {
+    expect(SELFHOSTED_BACKGROUND_MAX_YIELD_MS).toBe(COMMAND_FINISH_FLOOR_MS);
+  });
+
+  test("returns the background handle at once and leaves the command running", async () => {
+    const { rig, controller, invoke, adoptions } = steerRig();
+    const invocation = invoke("steered_wait");
+    await waitFor(() => rig.runner.starts.length === 1, "the command to start");
+    expect(await remainsPending(invocation)).toBe(true);
+    const steeredAt = performance.now();
+    controller.setForegroundWaitYield(true);
+    const result = await invocation;
+    expect(performance.now() - steeredAt).toBeLessThan(2_000);
+    expect(result).toContain(`command ID ${commandId}`);
+    expect(adoptions.map((adoption) => adoption.opId)).toEqual(["steered_wait:0"]);
+    expect(rig.runner.runs.get("steered_wait:0")?.exit.cancelled).toBe(false);
+    expect(rig.requests.some((request) => request.op?.$case === "opCancel")).toBe(false);
+    await controller.waitForQuiescence();
+    await rig.session.cancelExecCommand("steered_wait:0");
+  });
+
+  test("a command started while a Steer waits does not wait out its window", async () => {
+    const { rig, controller, invoke, adoptions } = steerRig();
+    controller.setForegroundWaitYield(true);
+    const startedAt = performance.now();
+    const result = await invoke("already_steered");
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    expect(result).toContain(`command ID ${commandId}`);
+    expect(adoptions).toHaveLength(1);
+    expect(rig.runner.runs.get("already_steered:0")?.exit.cancelled).toBe(false);
+    await controller.waitForQuiescence();
+    await rig.session.cancelExecCommand("already_steered:0");
+  });
+
+  test("a withdrawn Steer does not end a later wait, and no background command means no early yield", async () => {
+    const { rig, controller, invoke } = steerRig(false);
+    controller.setForegroundWaitYield(true);
+    controller.setForegroundWaitYield(false);
+    const invocation = invoke("not_backgroundable");
+    await waitFor(() => rig.runner.starts.length === 1, "the command to start");
+    controller.setForegroundWaitYield(true);
+    // Without background adoption the command is turn-scoped: the Steer does
+    // not return it early; Pause/cancel still stops it.
+    expect(await remainsPending(invocation)).toBe(true);
+    const drain = controller.waitForQuiescence();
+    await expect(invocation).rejects.toThrow();
+    await drain;
+    expect(rig.runner.runs.get("not_backgroundable:0")?.exit.cancelled).toBe(true);
+  });
 });
