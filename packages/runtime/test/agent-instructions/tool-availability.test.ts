@@ -187,6 +187,7 @@ describe("deriveAgentPromptToolAvailability", () => {
         effectiveMaxNestedAgentDepth: max,
       });
       expect(view.unavailable).toEqual([...baseline, "session_create"].sort());
+      expect(view.childSessionsImpossible).toBe(true);
     }
     for (const depths of [
       { nestedAgentDepth: 0, effectiveMaxNestedAgentDepth: 1 },
@@ -197,6 +198,7 @@ describe("deriveAgentPromptToolAvailability", () => {
     ]) {
       const view = deriveAgentPromptToolAvailability({ ...selection, ...depths });
       expect(view.unavailable).not.toContain("session_create");
+      expect(view).not.toHaveProperty("childSessionsImpossible");
     }
   });
 
@@ -264,15 +266,14 @@ describe("modular prompt: tool-specific clauses", () => {
     expect(composed).toContain("A definitive missing permission or required human decision");
   });
 
-  test("without session_create, spawning guidance drops and session coordination remains", () => {
+  test("without session_create, delegation judgment drops and child integration remains", () => {
     const baseline = compose();
+    // A turn without session_create (for example a scheduled turn with a
+    // narrower selection) may still own children: integration rules stay.
     const composed = compose({ unavailable: ["session_create"] });
     for (const removed of [
       "Create a child worker only for a concrete, bounded subtask",
       "Before spawning, decide what output you need",
-      "After spawning, keep each child id and event cursor.",
-      "call `wait_for_input` right after spawning",
-      "`child_requires_action`",
     ]) {
       expect(baseline).toContain(removed);
       expect(composed).not.toContain(removed);
@@ -284,11 +285,41 @@ describe("modular prompt: tool-specific clauses", () => {
       "Do not repurpose or direct an unrelated existing session unless the user explicitly asks. If no matching session tool is available on this turn, handle what you can in this session and report any required delegation that is unavailable instead of inventing an API.",
       "When supervising work, an accepted message, queued status, or changing timestamp is not proof of execution.",
       "After Send or Steer, use session_message_status",
+      "After spawning, keep each child id and event cursor.",
+      "Do not present delegated work as incorporated until you have consumed the completed result.",
+      "`child_requires_action`",
       "For a short wait on a child or peer session inside the current turn",
     ]) {
       expect(composed).toContain(kept);
     }
     expect(composed.length).toBeLessThan(baseline.length);
+  });
+
+  test("a session that can never have children also drops child integration", () => {
+    const withoutSpawn = compose({ unavailable: ["session_create"] });
+    const leaf = compose({ unavailable: ["session_create"], childSessionsImpossible: true });
+    for (const removed of [
+      "After spawning, keep each child id and event cursor.",
+      "call `wait_for_input` right after spawning",
+      "Do not present delegated work as incorporated until you have consumed the completed result.",
+      "`child_requires_action`",
+    ]) {
+      expect(withoutSpawn).toContain(removed);
+      expect(leaf).not.toContain(removed);
+    }
+    expect(leaf).toContain(
+      "When you are a child session, your final answer is delivered automatically to your parent session.",
+    );
+    expect(leaf).toContain("For a short wait on a child or peer session inside the current turn");
+    // The fact alone, with session_create still available, changes nothing
+    // the derivation can produce; it is only set together with the proof.
+    expect(
+      deriveAgentPromptToolAvailability({
+        selectedFirstPartyTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        nestedAgentDepth: 1,
+        effectiveMaxNestedAgentDepth: 1,
+      }),
+    ).toMatchObject({ childSessionsImpossible: true });
   });
 
   test("knowledge_search allowed but knowledge_save absent keeps retrieval and policy", () => {

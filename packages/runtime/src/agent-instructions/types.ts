@@ -106,6 +106,13 @@ export type AgentPromptExperiments = {
  */
 export type AgentPromptToolAvailability = {
   readonly unavailable: readonly FirstPartyMcpToolName[];
+  /**
+   * The session can never have child sessions: its nesting depth, frozen at
+   * create, has reached its frozen maximum, so no child was or will be
+   * admitted. Omitted when that is not proven (for example `session_create`
+   * merely unselected on a turn of a session that may already have children).
+   */
+  readonly childSessionsImpossible?: true;
 };
 
 /** False only when the attempt proved the named tool absent. */

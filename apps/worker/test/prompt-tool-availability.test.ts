@@ -94,6 +94,27 @@ describe("worker prompt tool availability", () => {
     expect(promptFor(null, null)).toBe(instructions());
   });
 
+  test("the session's frozen nesting depth reaches the view: exhausted hides spawning", () => {
+    const view = (nestedAgentDepth: number, effectiveMaxNestedAgentDepth: number) =>
+      promptToolAvailabilityForTurn({
+        agentConfig,
+        selectedFirstPartyMcpTools: selectionFor(null),
+        firstPartyPermissions: null,
+        nestedAgentDepth,
+        effectiveMaxNestedAgentDepth,
+      })!;
+    const exhausted = view(2, 2);
+    expect(exhausted.unavailable).toContain("session_create");
+    expect(exhausted.childSessionsImpossible).toBe(true);
+    const leaf = instructions({ agentPromptToolAvailability: exhausted });
+    expect(leaf).not.toContain("Create a child worker only for a concrete, bounded subtask");
+    expect(leaf).not.toContain("After spawning, keep each child id and event cursor.");
+    const below = view(1, 2);
+    expect(below.unavailable).not.toContain("session_create");
+    expect(below).not.toHaveProperty("childSessionsImpossible");
+    expect(instructions({ agentPromptToolAvailability: below })).toBe(instructions());
+  });
+
   test("a selection excluding goal and Knowledge functions stops naming them", () => {
     const stored = DEFAULT_FIRST_PARTY_MCP_TOOLS.filter(
       (tool) => !(GOAL_AND_KNOWLEDGE_TOOLS as readonly string[]).includes(tool),

@@ -52,10 +52,10 @@ function shortWaits(context: AgentPromptContext): string {
 /**
  * Session tools: reading history, managing sessions, delegating to children,
  * and joining them. A clause naming a session tool renders unless the attempt
- * proved that tool absent. Delegation judgment and child integration rules
- * render while `session_create` may exist; without it this session cannot
- * spawn (for example at its maximum nesting depth), so only the instruction to
- * handle the work here remains.
+ * proved that tool absent. Delegation judgment renders while `session_create`
+ * may exist. Child integration rules (joining results, answering a child's
+ * question) render unless the session can never have children (at its maximum
+ * nesting depth): a turn without `session_create` may still own children.
  */
 export const subagentsModule: AgentPromptModule = {
   id: "subagents",
@@ -63,6 +63,7 @@ export const subagentsModule: AgentPromptModule = {
   render: (context) => {
     const { goals } = context.capabilities;
     const spawn = toolAvailable(context, "session_create");
+    const children = context.toolAvailability?.childSessionsImpossible !== true;
     const sessionEvents = toolAvailable(context, "session_events");
     const waitForInput = toolAvailable(context, "wait_for_input");
     const pollingTools = toolsAvailable(context, ["session_wait", "session_get"]);
@@ -98,7 +99,7 @@ export const subagentsModule: AgentPromptModule = {
         "If no matching session tool is available on this turn, handle what you can in this session and report any required delegation that is unavailable instead of inventing an API.",
       ),
       "When supervising work, an accepted message, queued status, or changing timestamp is not proof of execution. Keep the accepted update/turn ID and correlate its delivered receipt with the consuming turn and relevant result; an older in-flight turn finishing does not prove your input was consumed. Use the receipt correlation described by the sending tool. Do not repeatedly send unconsumed input: inspect blockers and report a stalled handoff if execution does not begin. Preserve explicit human pauses and approvals.",
-      spawn &&
+      children &&
         sentences(
           "After spawning, keep each child id and event cursor.",
           goals
@@ -119,7 +120,7 @@ export const subagentsModule: AgentPromptModule = {
           "Do not present delegated work as incorporated until you have consumed the completed result.",
           "If a child becomes unnecessary, pause it when authorized instead of letting unused work continue.",
         ),
-      spawn &&
+      children &&
         toolAvailable(context, "session_human_input_respond") &&
         "A child's question to the person may also reach you as a `child_requires_action` update; the first answer wins. Answer it with `session_human_input_respond` as soon as you can from your task context, before the person has to. When it asks for agent work you can do, such as starting a reviewer or worker, do that work and answer. When the person lets you decide a child's question, answer it with your best judgement and say in one sentence what you chose. Leave questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answer a question meant for the person on their behalf.",
       shortWaits(context),

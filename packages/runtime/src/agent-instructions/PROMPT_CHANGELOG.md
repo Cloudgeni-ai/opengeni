@@ -3,17 +3,22 @@
 A session that cannot spawn children no longer reads how to delegate to them.
 When the session's nesting depth has reached its frozen maximum, the
 first-party MCP server already hides `session_create`; the prompt's tool
-availability now proves it absent too (the worker passes the session's
-`nestedAgentDepth` and `effectiveMaxNestedAgentDepth`, both frozen on the
-session, so the prefix stays stable across turns). Without `session_create`,
-Session coordination drops the delegation-judgment sentences, the "After
-spawning" child-integration paragraph and the `child_requires_action`
-paragraph (about 470 o200k tokens). It keeps the child-session delivery rule,
-session management, session links, targets, Send/Steer receipt and supervision
-rules, the "do not repurpose" and "handle what you can in this session"
-sentences, and the short-wait guidance. Sessions that can still spawn render
-byte for byte as before. The bundled `projects` Skill is listed only when
-`project_list` is selected, because it only explains the project tools.
+availability now proves it absent too and records `childSessionsImpossible`
+(the worker passes the session's `nestedAgentDepth` and
+`effectiveMaxNestedAgentDepth`, both frozen on the session, so the prefix stays
+stable across turns). Without `session_create`, Session coordination drops the
+delegation-judgment sentences. When the session can never have children, it
+also drops the "After spawning" child-integration paragraph and the
+`child_requires_action` paragraph (together about 470 o200k tokens for a
+session at its maximum depth). A turn that merely lacks `session_create` (for
+example a scheduled turn with a narrower selection) keeps the integration
+rules, because the session may already own children. Session coordination
+keeps the child-session delivery rule, session management, session links,
+targets, Send/Steer receipt and supervision rules, the "do not repurpose" and
+"handle what you can in this session" sentences, and the short-wait guidance.
+Sessions that can still spawn render byte for byte as before. The bundled
+`projects` Skill is listed only when `project_list` is selected, because it
+only explains the project tools.
 
 The agent knows both GitHub identities. When personal GitHub sign-in is
 enabled on the deployment (new `personalGitHub` resource fact) and
@@ -819,9 +824,10 @@ When a named tool is proven absent, only the clauses naming it change:
   `session_send_message` follow-up clause, the `wait_for_input` long-wait and
   `finalAnswer` sentences, the `session_wait` join and short-wait sentences,
   and the `session_get` contrasts each need their tools.
-  Without `session_create` (including a session at its maximum nesting depth)
-  the delegation-judgment sentences, the "After spawning" paragraph and the
-  `child_requires_action` paragraph are dropped.
+  Without `session_create` the delegation-judgment sentences are dropped; the
+  "After spawning" paragraph and the `child_requires_action` paragraph are
+  dropped only with `childSessionsImpossible` (a session at its maximum
+  nesting depth, which can have no children).
 - Runtime mechanics and base behavior: without `wait_for_input` the in-flight
   and already-waiting sentences and the three base-behavior `wait_for_input`
   clauses are dropped, and `## Waiting` keeps only its tool-neutral sentence

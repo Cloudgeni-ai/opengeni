@@ -23,8 +23,11 @@ export type AgentPromptToolAvailabilityInput = {
   /**
    * The session's nested-agent depth and its frozen maximum. When both are
    * known and the depth is exhausted, the first-party MCP server never
-   * registers `session_create`, so it is proven absent here too. Either value
-   * missing keeps `session_create` as the selection and ceiling decide.
+   * registers `session_create` (apps/api/src/mcp/server.ts
+   * `sessionCreateVisible`, the same comparison), so it is proven absent here
+   * too, and since admission never placed a child below this session, it can
+   * have no children (`childSessionsImpossible`). Either value missing keeps
+   * `session_create` as the selection and ceiling decide.
    */
   nestedAgentDepth?: number | undefined;
   effectiveMaxNestedAgentDepth?: number | undefined;
@@ -77,5 +80,8 @@ export function deriveAgentPromptToolAvailability(
       !ceilingCanAdmit(ceiling, FIRST_PARTY_TOOL_AUTHORIZATION[name]) ||
       (nestingExhausted && name === "session_create"),
   );
-  return { unavailable: [...new Set(unavailable)].sort() };
+  return {
+    unavailable: [...new Set(unavailable)].sort(),
+    ...(nestingExhausted ? { childSessionsImpossible: true as const } : {}),
+  };
 }
