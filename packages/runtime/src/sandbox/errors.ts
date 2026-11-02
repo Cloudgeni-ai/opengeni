@@ -17,6 +17,30 @@ export class SandboxConfigError extends Error {
   }
 }
 
+export const SANDBOX_BACKEND_NOT_SERVED_CODE = "sandbox_backend_not_served";
+
+/**
+ * A box was about to be built on a host backend (`local`, `docker`) that this
+ * deployment does not serve: it is not the configured default. Building it
+ * would run the box as processes on the worker or API host, so nothing is
+ * constructed. A configuration failure: the same answer on every retry, so the
+ * turn fails terminally with this user-facing message.
+ */
+export class SandboxBackendNotServedError extends SandboxConfigError {
+  readonly code = SANDBOX_BACKEND_NOT_SERVED_CODE;
+  readonly deploymentBackend: SandboxBackend | string;
+
+  constructor(backend: SandboxBackend | string, deploymentBackend: SandboxBackend | string) {
+    super(backend, "");
+    this.name = "SandboxBackendNotServedError";
+    this.deploymentBackend = deploymentBackend;
+    this.message =
+      `This chat is set to run on the "${backend}" sandbox, which this deployment does not provide, ` +
+      `so no sandbox was started and nothing ran. Start a new chat to use this deployment's ` +
+      `sandbox ("${deploymentBackend}").`;
+  }
+}
+
 /** A resume-only caller was handed a warm lease without a provider identity it
  * can resume. The lease-aware caller must retire that exact epoch and re-enter
  * admission; silently creating here would bypass the single-spawner guard. */

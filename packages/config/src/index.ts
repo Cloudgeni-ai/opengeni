@@ -5701,6 +5701,15 @@ const HOST_SANDBOX_BACKENDS: ReadonlySet<z.infer<typeof SandboxBackend>> = new S
 ]);
 
 /**
+ * Whether boxes on `backend` run directly on the worker or API host (as host
+ * processes, or in the host's Docker daemon) rather than on a remote provider.
+ * Such a backend is served only as the deployment default.
+ */
+export function isHostSandboxBackend(backend: z.infer<typeof SandboxBackend>): boolean {
+  return HOST_SANDBOX_BACKENDS.has(backend);
+}
+
+/**
  * Whether this deployment serves NEW sessions on `backend`. The single source
  * of truth for every session-creation path (REST/SDK, `session_create`,
  * scheduled and event-triggered runs):
