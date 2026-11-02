@@ -39,6 +39,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const RUN_TIMEOUT_MS = Number(process.env.OPENGENI_EVAL_RUN_TIMEOUT_MS ?? 20 * 60_000);
 const POLL_MS = 4_000;
 const WAKE_GRACE_MS = 30_000;
+const SHORT_WAKE_MS = 5 * 60_000;
 
 function args(argv: string[]): { command: string; flags: Map<string, string> } {
   const [command = "help", ...rest] = argv;
@@ -215,12 +216,16 @@ async function driveSession(
       }
     }
     const ended = events.some((event) => /^turn\.(completed|failed|cancelled)$/.test(event.type));
-    // The agent may end a turn with wait_for_input (for example to retry after
-    // a rate limit); its wake starts another turn, so the chat is not done
-    // until shortly after that deadline.
+    // The agent may end a turn with a short wait_for_input (for example to
+    // retry after a rate limit); its wake starts another turn, so the chat is
+    // not done until shortly after that deadline. A long wait is the agent
+    // waiting for the person (say, to connect an app): the chat is done.
     const inputWait = snapshot.inputWait as { deadlineAt?: string } | null | undefined;
     const wakeAt = inputWait?.deadlineAt ? Date.parse(inputWait.deadlineAt) : Number.NaN;
-    const awaitingWake = Number.isFinite(wakeAt) && Date.now() < wakeAt + WAKE_GRACE_MS;
+    const awaitingWake =
+      Number.isFinite(wakeAt) &&
+      wakeAt - Date.now() <= SHORT_WAKE_MS &&
+      Date.now() < wakeAt + WAKE_GRACE_MS;
     const resting =
       !awaitingWake &&
       !snapshot.activeTurnId &&
@@ -504,13 +509,16 @@ async function regradeAll(flags: Map<string, string>) {
   let changed = 0;
   for (const record of readRecords(resultsFile)) {
     const testCase = CASES.find((item) => item.id === record.caseId);
-    const timedOut = record.grade.reasons.includes("run timed out");
     if (!testCase || !record.sessionId || record.error) {
       updated.push(record);
       continue;
     }
     try {
       const { events } = await api.events(record.workspaceId, record.sessionId, 0);
+      // A run that timed out may have finished since; grade it if a turn ended.
+      const timedOut =
+        record.grade.reasons.includes("run timed out") &&
+        !events.some((event) => /^turn\.(completed|failed|cancelled)$/.test(event.type));
       const graded = gradeEvents(
         testCase,
         events,
