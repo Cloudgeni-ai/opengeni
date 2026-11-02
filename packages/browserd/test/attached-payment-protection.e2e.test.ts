@@ -43,9 +43,13 @@ cc2.addEventListener("input", () => {
 });
 </script></body></html>`;
 
+/** Generated identifiers, timestamps, numbers and the fixture's own origin are
+ * not page content; a random UUID or port may contain the code's digits.
+ * Every other string stays under test. */
+const GENERATED_KEY = /^(id|ref|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
 function contentJson(value: unknown, origin: string): string {
   return JSON.stringify(value, (key, item: unknown) => {
-    if (key === "ref" || key === "observationId" || key === "operationId") return "<generated>";
+    if (GENERATED_KEY.test(key) || typeof item === "number") return "<generated>";
     return typeof item === "string" ? item.replaceAll(origin, "<fixture-origin>") : item;
   });
 }

@@ -317,8 +317,6 @@ const TRUNCATION_MARK = /\.\.\.|\u2026/gu;
 export type CompiledSecretValueMasks = {
   /** Known long numeric values, allowing only digit-grouping separators. */
   readonly formattedNumbers: ReadonlyArray<{ pattern: RegExp; label: string }>;
-  /** Forms made only of ASCII digits: they match only where no other digit touches them. */
-  readonly numericForms: ReadonlySet<string>;
   readonly keepUrlHosts: boolean;
   readonly empty: boolean;
   readonly minChars: number;
@@ -406,7 +404,6 @@ export function compileSecretValueMasks(
     clippable.add(JSON.stringify(entry.value).slice(1, -1));
   }
   const forms = [...labels.keys()].sort((left, right) => right.length - left.length);
-  const numericForms = new Set(forms.filter((form) => /^[0-9]+$/u.test(form)));
   const byPrefix = new Map<string, string[]>();
   const byClippedEnd = new Map<string, ClippedStart[]>();
   const firstPairs = new Set<number>();
@@ -450,7 +447,6 @@ export function compileSecretValueMasks(
         );
   return {
     formattedNumbers,
-    numericForms,
     keepUrlHosts: options.keepUrlHosts === true,
     empty: forms.length === 0,
     minChars,
@@ -513,29 +509,6 @@ function keptRanges(text: string, pattern: RegExp): Array<[number, number]> {
   return kept;
 }
 
-function isAsciiDigit(code: number): boolean {
-  return code >= 48 && code <= 57;
-}
-
-function isHexDigit(character: string | undefined): boolean {
-  return character !== undefined && /^[0-9A-Fa-f]$/u.test(character);
-}
-
-/**
- * Whether another digit touches `text.slice(start, end)`: then a known number
- * there is part of a different, longer number (a port, an ID, a timestamp),
- * not the value itself. A percent escape before it (`%20`) is a separator,
- * not a digit of the number.
- */
-function touchesOtherDigits(text: string, start: number, end: number): boolean {
-  return (end < text.length && isAsciiDigit(text.charCodeAt(end))) || digitBefore(text, start);
-}
-
-function digitBefore(text: string, start: number): boolean {
-  if (start === 0 || !isAsciiDigit(text.charCodeAt(start - 1))) return false;
-  return !(start >= 3 && text[start - 3] === "%" && isHexDigit(text[start - 2]));
-}
-
 /** An absolute address: scheme, optional user info (up to the authority's
  * last `@`, so a password containing one is all user info), host and port,
  * then the rest. */
@@ -559,10 +532,8 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
   }
   for (const { pattern, label } of masks.formattedNumbers) {
     const kept = keptRanges(text, masks.pattern);
-    text = text.replace(pattern, (match, at: number, whole: string) =>
-      overlapsKept(at, at + match.length, kept) || touchesOtherDigits(whole, at, at + match.length)
-        ? match
-        : label,
+    text = text.replace(pattern, (match, at: number) =>
+      overlapsKept(at, at + match.length, kept) ? match : label,
     );
   }
   const size = masks.minChars;
@@ -586,10 +557,7 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
     const candidates = masks.byPrefix.get(text.slice(at, at + size));
     const limit = next < kept.length ? kept[next]![0] : text.length;
     const form = candidates?.find(
-      (candidate) =>
-        at + candidate.length <= limit &&
-        text.startsWith(candidate, at) &&
-        !(masks.numericForms.has(candidate) && touchesOtherDigits(text, at, at + candidate.length)),
+      (candidate) => at + candidate.length <= limit && text.startsWith(candidate, at),
     );
     if (form === undefined) {
       at += 1;
@@ -622,8 +590,6 @@ export function maskSecretValuesInText(text: string, masks: CompiledSecretValueM
     if (!tail) continue;
     const start = cut - tail.length;
     if (overlapsKept(start, cut, keptBefore)) continue;
-    // A clipped number continues past the cut, so only its start can be touched.
-    if (/^[0-9]+$/u.test(out.slice(start, cut)) && digitBefore(out, start)) continue;
     out = out.slice(0, start) + tail.label + out.slice(cut);
     changedFrom = start;
   }

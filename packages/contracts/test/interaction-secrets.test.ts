@@ -314,33 +314,28 @@ describe("redactInteractionSecretValues", () => {
     });
   });
 
-  test("a known card number or security code inside a longer number is a different number", () => {
-    // Synthetic fixtures. Ports, IDs and timestamps that merely contain the
-    // digits stay; the code itself, wherever it stands alone, is still hidden.
+  test("a known card number or security code joined to other digits is still hidden", () => {
+    // Synthetic fixtures. Pages join neighbouring elements without spaces (a
+    // card number beside its expiry), so a known number is masked even where
+    // other digits touch it; only an address's host and port are kept.
     const secrets = { number: "4000000000000002", cvc: "731" };
     expect(
       redactInteractionSecretValues(
         {
-          port: "Listening on 127.0.0.1:47731",
-          order: "Order 1731 shipped at 1793396251203672",
-          pan: "Card 94000000000000002 is not the card",
-          grouped: "Echo: 4000 0000 0000 0002",
-          spaced: "CVC 731, total 731 kr",
+          joined: "40000000000000021227",
+          groupedJoined: "4000 0000 0000 000212/27",
+          cvcJoined: "CVC7311227",
           encoded: "https://example.test/pay?cvc%20731&n=4000%200000%200000%200002",
           clipped: "Card 40000000",
-          clippedInside: "Build 94000",
         },
         secrets,
       ),
     ).toEqual({
-      port: "Listening on 127.0.0.1:47731",
-      order: "Order 1731 shipped at 1793396251203672",
-      pan: "Card 94000000000000002 is not the card",
-      grouped: `Echo: ${INTERACTION_REDACTED_SECRET}`,
-      spaced: `CVC ${INTERACTION_REDACTED_SECRET}, total ${INTERACTION_REDACTED_SECRET} kr`,
+      joined: `${INTERACTION_REDACTED_SECRET}1227`,
+      groupedJoined: `${INTERACTION_REDACTED_SECRET}12/27`,
+      cvcJoined: `CVC${INTERACTION_REDACTED_SECRET}1227`,
       encoded: `https://example.test/pay?cvc%20${INTERACTION_REDACTED_SECRET}&n=${INTERACTION_REDACTED_SECRET}`,
       clipped: `Card ${INTERACTION_REDACTED_SECRET}`,
-      clippedInside: "Build 94000",
     });
   });
 
