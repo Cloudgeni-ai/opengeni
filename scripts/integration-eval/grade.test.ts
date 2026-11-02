@@ -163,6 +163,17 @@ describe("gradeCase", () => {
     );
     expect(receipts.tools[0]?.integration).toBe("linear");
   });
+
+  test("a service rate limit that keeps facts out of the answer is a tool error", () => {
+    const receipts = parseReceipts(
+      events(...linearCall("c1", '{"isError":true,"structuredContent":{"error":"rate_limited"}}'), {
+        type: "agent.message.completed",
+        payload: { text: "Linear is rate limited." },
+      }),
+    );
+    const grade = gradeCase({ ...linearRead, kind: "routing" }, receipts, null);
+    expect(grade.category).toBe("tool_error");
+  });
 });
 
 describe("catalogue", () => {

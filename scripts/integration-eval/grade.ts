@@ -37,10 +37,16 @@ function answerChecks(testCase: EvalCase, receipts: Receipts, reasons: string[])
     return fail("hallucinated_result", [...reasons, `answer matched forbidden ${forbidden}`]);
   const missing = matchesAll(receipts.finalAnswer, testCase.expectAnswer);
   if (missing.length > 0) {
-    return fail("incomplete_answer", [
-      ...reasons,
-      `answer missed ${missing.map(String).join(", ")}`,
-    ]);
+    const missed = `answer missed ${missing.map(String).join(", ")}`;
+    // A service rate limit, not the model, kept the facts out of the answer.
+    const limited = receipts.tools.some(
+      (tool) =>
+        tool.integration === testCase.integration &&
+        tool.errored &&
+        /rate.?limit/i.test(tool.output ?? ""),
+    );
+    if (limited) return fail("tool_error", [...reasons, "rate limited by the service", missed]);
+    return fail("incomplete_answer", [...reasons, missed]);
   }
   return { pass: true, category: null, reasons };
 }
