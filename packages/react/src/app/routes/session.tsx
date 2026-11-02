@@ -3679,7 +3679,8 @@ function SessionChatPane(props: {
         connectionAccounts.loading || connectionAccounts.error
           ? null
           : ownLoginsInUse(
-              connectionAccounts.availableAccountGroups,
+              // Only the connectors this chat uses.
+              connectionAccounts.accountGroups,
               connectionAccounts.accountChoices,
               context.accessContext.subjectId,
             )

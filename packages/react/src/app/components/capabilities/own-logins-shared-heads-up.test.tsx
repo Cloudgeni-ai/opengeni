@@ -148,6 +148,12 @@ test("one account connected twice is one login that holds both connections", () 
 test("accounts that only share a display name never merge", () => {
   const jane = login({ metadata: { name: "Jane Doe", username: "jane" } });
   const work = login({ metadata: { name: "Jane Doe", username: "jane-acme" } });
+  // Merged on the email itself, never on another field shown first.
+  const first = login({ metadata: { email: "unknown", providerEmail: "a@x.example" } });
+  const second = login({ metadata: { email: "unknown", providerEmail: "b@x.example" } });
+  expect(
+    ownLoginsInUse([{ serverId: "x", name: "X", accounts: [first, second] }], {}, "user:me"),
+  ).toHaveLength(2);
   // One email in two Slack teams is two accounts too.
   const teamA = login({ metadata: { email: "me@chat.example", teamName: "A" } });
   const teamB = login({ metadata: { email: "me@chat.example", teamName: "B" } });
@@ -334,6 +340,50 @@ test("the account list decides once a change is done, whoever changed it", async
   await render(null);
   expect(states(menu)).toEqual(["Mail true"]);
   expect(trigger(view.container).textContent).toBe("1 personal connection in this chat");
+  await view.unmount();
+});
+
+test("a row turned off stays in the menu after the list has moved on", async () => {
+  const view = await mount();
+  const mail = used([login()], "Mail");
+  const tracker = used([login()], "Tracker");
+  const render = (logins: OwnLoginInUse[]) =>
+    view.render(<OwnLoginsSharedHeadsUp logins={logins} onChange={async () => {}} />);
+  await render([mail, tracker]);
+  const menu = await openMenu(view.container);
+  await act(async () => switches(menu)[0]!.click());
+  await render([tracker]);
+  await render([{ ...tracker, accounts: [login()] }]);
+  expect(states(menu)).toEqual(["Mail false", "Tracker true"]);
+  await view.unmount();
+});
+
+test("a change that finishes before its list arrives waits for a newer list", async () => {
+  const view = await mount();
+  const mail = used([login()], "Mail");
+  const tracker = used([login()], "Tracker");
+  const finish = new Map<string, () => void>();
+  const render = (logins: OwnLoginInUse[]) =>
+    view.render(
+      <OwnLoginsSharedHeadsUp
+        logins={logins}
+        onChange={(entry) => new Promise<void>((resolve) => finish.set(entry.label, resolve))}
+      />,
+    );
+  await render([mail, tracker]);
+  const menu = await openMenu(view.container);
+  await act(async () => switches(menu)[1]!.click());
+  await act(async () => switches(menu)[0]!.click());
+  // Tracker's list arrives while Mail is still listed; then Mail finishes.
+  await act(async () => finish.get("Tracker")!());
+  await render([mail]);
+  await act(async () => finish.get("Mail")!());
+  expect(states(menu)).toEqual(["Mail false", "Tracker false"]);
+  expect(switches(menu)[0]!.getAttribute("aria-disabled")).toBe("true");
+  expect(trigger(view.container).textContent).toBe("No personal connections in this chat");
+  await render([]);
+  expect(states(menu)).toEqual(["Mail false", "Tracker false"]);
+  expect(switches(menu)[0]!.getAttribute("aria-disabled")).toBeNull();
   await view.unmount();
 });
 

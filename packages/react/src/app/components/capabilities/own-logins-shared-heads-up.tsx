@@ -109,7 +109,7 @@ export function ownLoginsInUse(
       const email = accountEmail(account.metadata ?? {});
       // The team stays part of the account: one email in two Slack teams is two.
       const key = email
-        ? `account\u0000${group.name}\u0000${identity.toLowerCase() || email}`
+        ? `account\u0000${group.name}\u0000${email}\u0000${identity.toLowerCase()}`
         : `connection\u0000${account.id}`;
       const existing = used.find((entry) => entry.key === key);
       if (existing) existing.accounts.push(account);
@@ -178,6 +178,9 @@ export function OwnLoginsSharedHeadsUp({
   for (const login of logins) seen.current.set(login.key, login);
   const current = new Map(logins.map((login) => [login.key, login] as const));
   const inventory = inventoryOf(logins);
+  // The list as shown now, for a change that finishes later.
+  const latestInventory = useRef(inventory);
+  latestInventory.current = inventory;
   // A new list settles every change that is done: from here on it decides.
   const [lastInventory, setLastInventory] = useState(inventory);
   if (lastInventory !== inventory) {
@@ -201,8 +204,11 @@ export function OwnLoginsSharedHeadsUp({
       // As the list has it now; an account off here keeps its last copy.
       login,
       on,
-      // Done but not yet in the list: nothing up to date to act on.
-      busy: override !== undefined && (override.pending || override.on !== Boolean(listed)),
+      // Done but not yet in the list: nothing up to date to act on, unless
+      // the list can't be read now, which may not change soon.
+      busy:
+        override !== undefined &&
+        (override.pending || (incoming !== null && override.on !== Boolean(listed))),
       // On without a standing grant here for every connection, so it can't
       // be turned off from here (only from where it was added).
       locked: on && !override && !!listed && !listed.accounts.every(ownLoginCanStopHere),
@@ -221,7 +227,13 @@ export function OwnLoginsSharedHeadsUp({
       setOverrides((previous) => {
         const next = new Map(previous);
         const override = next.get(login.key);
-        if (override?.pending) next.set(login.key, { ...override, pending: false, inventory });
+        if (override?.pending) {
+          next.set(login.key, {
+            ...override,
+            pending: false,
+            inventory: latestInventory.current,
+          });
+        }
         return next;
       });
     } catch {
