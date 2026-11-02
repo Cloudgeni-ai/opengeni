@@ -54,6 +54,7 @@ export type IntegrationId =
   | "front"
   | "outlook_mail"
   | "outlook_calendar"
+  | "clickup"
   | "onedrive"
   | "sharepoint";
 

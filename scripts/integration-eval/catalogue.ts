@@ -228,13 +228,14 @@ export const CASES: readonly EvalCase[] = [
     { slug: "my-tasks", prompt: "What Asana tasks are due for me this month?", core: true },
   ]),
   {
-    // The connected workspace's Linear and Jira tools match "task" and
-    // "project" strongly; the Asana card must still appear.
-    id: "asana.not_connected.strong-match",
-    integration: "asana",
+    // The connected workspace's Linear and Jira tools match "task" and "list"
+    // strongly; the ClickUp card must still appear. ClickUp is never
+    // connected in either test workspace, so this row can't clash with others.
+    id: "clickup.not_connected.strong-match",
+    integration: "clickup",
     kind: "not_connected",
     workspace: "connected",
-    prompt: "Add a task for the Halcyon launch checklist to our Asana project.",
+    prompt: "Add a task for the Halcyon launch checklist to our ClickUp list.",
   },
   {
     id: "asana.read.due",
@@ -704,6 +705,7 @@ export const CASES: readonly EvalCase[] = [
     expectAnswer: [i("15 ?min")],
     forbidIntegrations: ["atlassian"],
     servedBy: ["sharepoint"],
+    note: "Checks Microsoft Graph over Confluence only. OneDrive and SharePoint tools share one account, so this row does not tell them apart.",
   },
   {
     id: "routing.sharepoint-vs-confluence.vendor",
@@ -714,6 +716,7 @@ export const CASES: readonly EvalCase[] = [
     expectAnswer: [i("marlow")],
     forbidIntegrations: ["atlassian"],
     servedBy: ["onedrive"],
+    note: "Checks Microsoft Graph over Confluence only. OneDrive and SharePoint tools share one account, so this row does not tell them apart.",
   },
   {
     id: "routing.notion-vs-confluence.rota",

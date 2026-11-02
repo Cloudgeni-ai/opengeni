@@ -33,7 +33,7 @@ import {
 import { join } from "node:path";
 import { authFromEnv, HttpFailure, OpengeniApi, type SessionEvent } from "./api";
 import { CASES, DEFAULT_SCOPE } from "./catalogue";
-import { gradeCase, type Verification } from "./grade";
+import { gradeCase, ownIntegration, type Verification } from "./grade";
 import { INTEGRATIONS } from "./integrations";
 import { parseReceipts } from "./receipts";
 import type { EvalCase, Grade, RunRecord } from "./types";
@@ -43,12 +43,14 @@ type Cell = { model: string; effort: string };
 type Job = { testCase: EvalCase; cell: Cell; repeat: number };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const RUN_TIMEOUT_MS = Number(process.env.OPENGENI_EVAL_RUN_TIMEOUT_MS ?? 20 * 60_000);
+const RUN_TIMEOUT_MS = countFlag(process.env.OPENGENI_EVAL_RUN_TIMEOUT_MS, 20 * 60_000);
 const POLL_MS = 4_000;
 /** A chat parked waiting for model capacity this long is abandoned as a harness error. */
-const CAPACITY_GIVE_UP_MS = Number(process.env.OPENGENI_EVAL_CAPACITY_GIVE_UP_MS ?? 5 * 60_000);
+const CAPACITY_GIVE_UP_MS = countFlag(process.env.OPENGENI_EVAL_CAPACITY_GIVE_UP_MS, 5 * 60_000);
 const WAKE_GRACE_MS = 30_000;
 const SHORT_WAKE_MS = 5 * 60_000;
+/** Reason the harness gives when it stops a chat at the run deadline. */
+const DEADLINE_REASON = "integration eval run deadline";
 
 function args(argv: string[]): { command: string; flags: Map<string, string> } {
   const [command = "help", ...rest] = argv;
@@ -225,7 +227,8 @@ async function driveSession(
     const page = await api.events(workspaceId, sessionId, cursor);
     events.push(...page.events);
     cursor = page.cursor;
-    complete &&= page.complete;
+    // A page the server trimmed (`exact` false) is as unreliable as a cut-short one.
+    complete &&= page.complete && page.exact;
 
     const receipts = parseReceipts(events);
     for (const approval of receipts.approvals) {
@@ -233,7 +236,7 @@ async function driveSession(
       // Only the row's own integration gets the row's decision. Anything else
       // (another service, an unattributed tool) is rejected, so a run never
       // writes outside the configured test fixtures; the grader reports it.
-      const choice = approval.integration === testCase.integration ? decision : "reject";
+      const choice = ownIntegration(testCase, approval.integration) ? decision : "reject";
       try {
         await api.decideApproval(workspaceId, sessionId, approval.approvalId, choice);
         decided.add(approval.approvalId);
@@ -255,8 +258,14 @@ async function driveSession(
       try {
         for (const request of await api.pendingHumanInput(workspaceId, sessionId)) {
           if (decided.has(request.id)) continue;
-          decided.add(request.id);
-          await api.skipHumanInput(workspaceId, sessionId, request.id);
+          try {
+            await api.skipHumanInput(workspaceId, sessionId, request.id);
+            decided.add(request.id);
+          } catch (error) {
+            // Already answered (409) counts as done; anything else retries next poll.
+            if (error instanceof HttpFailure && error.status === 409) decided.add(request.id);
+            else throw error;
+          }
         }
       } catch (error) {
         console.warn(`human input handling failed: ${String(error)}`);
@@ -284,11 +293,20 @@ async function driveSession(
   }
   // Stop the chat so it can't keep spending or write after the service check.
   try {
-    await api.cancelSession(workspaceId, sessionId, "integration eval run deadline");
+    await api.cancelSession(workspaceId, sessionId, DEADLINE_REASON);
   } catch (error) {
     console.warn(`cancel ${sessionId} failed: ${String(error)}`);
   }
   return { events, timedOut: true, complete };
+}
+
+/** The harness stopped this chat at the run deadline (its cancel left a reason in the events). */
+export function stoppedAtDeadline(events: readonly SessionEvent[]): boolean {
+  return events.some(
+    (event) =>
+      (event.type === "turn.cancelled" || event.type === "session.status.changed") &&
+      (event.payload as { reason?: string } | null)?.reason === DEADLINE_REASON,
+  );
 }
 
 /** The chat's last status change before the harness stopped it was waiting for model capacity. */
@@ -296,7 +314,7 @@ export function stalledOnCapacity(events: readonly SessionEvent[]): boolean {
   const statuses = events
     .filter((event) => event.type === "session.status.changed")
     .map((event) => (event.payload as { status?: string; reason?: string } | null) ?? {})
-    .filter((payload) => payload.reason !== "integration eval run deadline");
+    .filter((payload) => payload.reason !== DEADLINE_REASON);
   return statuses.at(-1)?.status === "waiting_capacity";
 }
 
@@ -320,7 +338,11 @@ function gradeEvents(
   // A run still going at the deadline is the agent's verdict (looping or
   // stalled), not the harness's; an event history cut short is the harness's.
   let grade: Grade = !complete
-    ? { pass: false, category: "harness_error", reasons: ["session events were cut short"] }
+    ? {
+        pass: false,
+        category: "harness_error",
+        reasons: ["session events were cut short or trimmed"],
+      }
     : timedOut && stalledOnCapacity(events)
       ? {
           pass: false,
@@ -604,15 +626,19 @@ async function regradeAll(flags: Map<string, string>) {
       continue;
     }
     try {
-      const { events, complete } = await api.events(record.workspaceId, record.sessionId, 0);
-      // A run that timed out may have finished since; grade it if a turn ended.
-      // A chat the harness stopped while it waited for model capacity stays a capacity stop.
+      const page = await api.events(record.workspaceId, record.sessionId, 0);
+      const { events } = page;
+      const complete = page.complete && page.exact;
+      // A run the harness stopped at the deadline stays a timeout (or a
+      // capacity stop). Only a run with no deadline cancel in its events, which
+      // a turn ended on its own, is graded again.
       const stopped = record.grade.reasons.some((reason) =>
         /timed out|run deadline|no model capacity/.test(reason),
       );
       const timedOut =
         stopped &&
         (stalledOnCapacity(events) ||
+          stoppedAtDeadline(events) ||
           !events.some((event) => /^turn\.(completed|failed|cancelled)$/.test(event.type)));
       const graded = gradeEvents(
         testCase,

@@ -166,6 +166,13 @@ export const INTEGRATIONS: readonly IntegrationSpec[] = [
     labelWords: ["sharepoint"],
     toolNamePatterns: [/sharepoint/],
   },
+  {
+    // Never connected in either test workspace: only the strong-match card row uses it.
+    id: "clickup",
+    label: "ClickUp",
+    families: ["integration:mcp.clickup.com"],
+    labelWords: ["clickup"],
+  },
 ];
 
 const BY_ID = new Map(INTEGRATIONS.map((spec) => [spec.id, spec]));

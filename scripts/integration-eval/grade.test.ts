@@ -10,6 +10,7 @@ import {
   parseCells,
   selectCases,
   stalledOnCapacity,
+  stoppedAtDeadline,
   wilson,
 } from "./run";
 import type { EvalCase, RunRecord } from "./types";
@@ -378,6 +379,82 @@ describe("gradeCase", () => {
       gradeCase(writeCase, receipts, { ran: true, ok: true, detail: "HAL-9", count: 1 }).pass,
     ).toBe(true);
   });
+
+  test("a read whose only call never returned is not a pass", () => {
+    const pending = linearCall("c1", "")[0]!;
+    const withFacts = parseReceipts(
+      events(pending, {
+        type: "agent.message.completed",
+        payload: { text: "HAL-1 Checkout times out for Bluefin is In Progress." },
+      }),
+    );
+    expect(gradeCase(linearRead, withFacts)).toMatchObject({
+      pass: false,
+      category: "hallucinated_result",
+    });
+    const withoutFacts = parseReceipts(
+      events(pending, { type: "agent.message.completed", payload: { text: "No answer." } }),
+    );
+    expect(gradeCase(linearRead, withoutFacts)).toMatchObject({
+      pass: false,
+      category: "tool_error",
+    });
+    expect(
+      gradeCase({ ...linearRead, kind: "identity", expectAnswer: [/halcyon/i] }, withoutFacts),
+    ).toMatchObject({ pass: false, category: "tool_error" });
+  });
+
+  test("an approval from a servedBy sibling counts as the row's own", () => {
+    const receipts = parseReceipts(
+      events(
+        {
+          type: "agent.toolCall.created",
+          payload: {
+            id: "w1",
+            name: "mcp_f00__drives_putitem",
+            arguments: "{}",
+            display: { connector: "SharePoint", providerDomain: "graph.microsoft.com" },
+          },
+        },
+        {
+          type: "session.requiresAction",
+          payload: {
+            approvals: [
+              {
+                id: "w1",
+                name: "mcp_f00__drives_putitem",
+                display: { connector: "SharePoint", providerDomain: "graph.microsoft.com" },
+              },
+            ],
+          },
+        },
+        { type: "user.approvalDecision", payload: { approvalId: "w1", decision: "approve" } },
+        { type: "agent.toolCall.output", payload: { id: "w1", output: '{"id":"F1"}' } },
+        { type: "agent.message.completed", payload: { text: "Saved the file." } },
+      ),
+    );
+    const oneDriveWrite: EvalCase = {
+      id: "onedrive.write.test",
+      integration: "onedrive",
+      kind: "write",
+      prompt: "?",
+      servedBy: ["sharepoint"],
+    };
+    expect(gradeCase(oneDriveWrite, receipts, null)).toMatchObject({ pass: true });
+  });
+
+  test("a plain-text rate-limit output is an errored, rate-limited call", () => {
+    const receipts = parseReceipts(
+      events(
+        ...linearCall("c1", "Rate limit exceeded. Try again in 60 seconds."),
+        ...linearCall("c2", "Notes: we discussed the rate limit for exports."),
+      ),
+    );
+    expect(receipts.tools.map((tool) => [tool.errored, tool.rateLimited])).toEqual([
+      [true, true],
+      [false, false],
+    ]);
+  });
 });
 
 describe("catalogue", () => {
@@ -482,5 +559,14 @@ describe("grid", () => {
     );
     expect(stalledOnCapacity(stalled)).toBe(true);
     expect(stalledOnCapacity(events(status("waiting_capacity"), status("running")))).toBe(false);
+  });
+
+  test("a chat the harness stopped at the deadline stays stopped on regrade", () => {
+    const stopped = events(
+      { type: "turn.started", payload: {} },
+      { type: "turn.cancelled", payload: { reason: "integration eval run deadline" } },
+    );
+    expect(stoppedAtDeadline(stopped)).toBe(true);
+    expect(stoppedAtDeadline(events({ type: "turn.cancelled", payload: {} }))).toBe(false);
   });
 });

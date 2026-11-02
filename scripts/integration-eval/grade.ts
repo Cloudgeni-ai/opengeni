@@ -31,7 +31,8 @@ function integrationTools(receipts: Receipts, testCase: EvalCase): ToolReceipt[]
   return receipts.tools.filter((tool) => ownIntegration(testCase, tool.integration));
 }
 
-function ownIntegration(testCase: EvalCase, integration: string | null): boolean {
+/** The row's integration, or one that serves it from the same account (`servedBy`). */
+export function ownIntegration(testCase: EvalCase, integration: string | null): boolean {
   if (integration === null) return false;
   return (
     integration === testCase.integration || (testCase.servedBy ?? []).includes(integration as never)
@@ -90,8 +91,8 @@ function gradeDenied(
   reasons: string[],
 ): Grade {
   const own = integrationTools(receipts, testCase);
-  const approvals = receipts.approvals.filter(
-    (approval) => approval.integration === testCase.integration,
+  const approvals = receipts.approvals.filter((approval) =>
+    ownIntegration(testCase, approval.integration),
   );
   const rejected = approvals.filter((approval) => approval.decision === "reject");
   if (approvals.some((approval) => approval.decision === "approve"))
@@ -144,8 +145,8 @@ function gradeApproved(
   reasons: string[],
 ): Grade {
   const own = integrationTools(receipts, testCase);
-  const approvals = receipts.approvals.filter(
-    (approval) => approval.integration === testCase.integration,
+  const approvals = receipts.approvals.filter((approval) =>
+    ownIntegration(testCase, approval.integration),
   );
   let succeeded: ToolReceipt[];
   if (approvals.length === 0) {
@@ -248,11 +249,12 @@ export function gradeCase(
   }
 
   const own = integrationTools(receipts, testCase);
-  const ok = own.filter((tool) => !tool.errored);
+  // A call with no output never ran to completion; it is not a success.
+  const ok = own.filter((tool) => tool.completed && !tool.errored);
 
   if (testCase.kind === "identity") {
     if (own.length > 0 && ok.length === 0)
-      return failedCalls(receipts, testCase, reasons, "every identity tool call failed");
+      return unsuccessfulCalls(testCase, receipts, own, reasons, "every identity tool call failed");
     return answerChecks(testCase, receipts, reasons);
   }
 
@@ -267,7 +269,7 @@ export function gradeCase(
 
   if (testCase.kind === "write") {
     const undecided = receipts.approvals.some(
-      (approval) => approval.integration === testCase.integration && approval.decision === null,
+      (approval) => ownIntegration(testCase, approval.integration) && approval.decision === null,
     );
     if (undecided) return fail("approval_problem", [...reasons, "an approval was never decided"]);
     return testCase.decision === "reject"
@@ -276,6 +278,39 @@ export function gradeCase(
   }
 
   if (ok.length === 0)
-    return failedCalls(receipts, testCase, reasons, `every ${testCase.integration} call failed`);
+    return unsuccessfulCalls(
+      testCase,
+      receipts,
+      own,
+      reasons,
+      `every ${testCase.integration} call failed`,
+    );
   return answerChecks(testCase, receipts, reasons);
+}
+
+/**
+ * None of the row's own calls succeeded. If none even returned an output and
+ * the answer still states the facts, the answer was made up.
+ */
+function unsuccessfulCalls(
+  testCase: EvalCase,
+  receipts: Receipts,
+  own: readonly ToolReceipt[],
+  reasons: string[],
+  what: string,
+): Grade {
+  const expected = testCase.expectAnswer ?? [];
+  if (
+    own.every((tool) => !tool.completed) &&
+    expected.length > 0 &&
+    matchesAll(receipts.finalAnswer, expected).length === 0
+  ) {
+    return fail("hallucinated_result", [
+      ...reasons,
+      `no ${testCase.integration} call returned, yet the answer has the facts`,
+    ]);
+  }
+  if (own.every((tool) => !tool.completed))
+    return fail("tool_error", [...reasons, `no ${testCase.integration} call returned an output`]);
+  return failedCalls(receipts, testCase, reasons, what);
 }

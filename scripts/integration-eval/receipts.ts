@@ -72,6 +72,19 @@ export function outputRateLimited(errored: boolean, output: string | null): bool
   return errored && output !== null && RATE_LIMIT_TEXT.test(output.slice(0, 4000));
 }
 
+const RATE_LIMIT_LEAD =
+  /^\s*(?:error:?\s*)?(?:rate[_ -]?limit(?:ed)?|ratelimited|too many requests)\b/i;
+
+/**
+ * A plain-text output that opens with a rate-limit phrase ("Rate limit
+ * exceeded. Try again in 60 seconds.") is a failed call even without an
+ * error flag. A JSON body, or text that only mentions a rate limit later, is not.
+ */
+function rateLimitShaped(output: string): boolean {
+  const parsed = parseJson(output);
+  return typeof parsed === "string" && RATE_LIMIT_LEAD.test(parsed.slice(0, 200));
+}
+
 /** Whether a tool output reports a failure. Conservative: unknown shapes count as success. */
 export function outputErrored(payload: Record<string, unknown>, output: string | null): boolean {
   if (payload.isError === true || payload.error) return true;
@@ -79,7 +92,11 @@ export function outputErrored(payload: Record<string, unknown>, output: string |
   if (status === "failed" || status === "error") return true;
   if (output === null) return false;
   const head = output.slice(0, 4000);
-  return ERROR_TEXT.some((pattern) => pattern.test(head)) || authErrorShaped(output);
+  return (
+    ERROR_TEXT.some((pattern) => pattern.test(head)) ||
+    authErrorShaped(output) ||
+    rateLimitShaped(output)
+  );
 }
 
 const ACCOUNT_DESCRIPTION =

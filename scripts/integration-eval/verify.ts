@@ -42,6 +42,8 @@ async function poll(
       const found = await find();
       if (typeof found === "string") return { ran: true, ok: true, detail: found };
       if (found) return { ran: true, ok: true, detail: found.detail, count: found.count };
+      // A clean "not found" after an earlier error replaces that error.
+      lastError = "";
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
     }
