@@ -1601,6 +1601,8 @@ async function capturedDictation(
   storage: ReturnType<typeof memoryStorage>,
   seconds = 3,
   options: { language?: string; keyterms?: string[] } = {},
+  /** The provider and model the dictation named, such as a desktop shortcut's own. */
+  named?: { providerId: string; model: string },
 ) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
@@ -1624,6 +1626,7 @@ async function capturedDictation(
     // Asking to share is ignored: a dictation is only ever its owner's.
     visibility: "workspace",
     tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }],
+    ...(named ? { transcription: named } : {}),
   });
   const audio = opusWebm(seconds, 440);
   const [row] = await reserveRecordingChunks(db, {
@@ -1654,8 +1657,8 @@ async function capturedDictation(
     versionId,
     tracks: [{ trackNumber: 0, chunkCount: 1 }],
     transcription: {
-      providerId: "voice-one",
-      model: "voice-input",
+      providerId: named?.providerId ?? "voice-one",
+      model: named?.model ?? "voice-input",
       options,
       creditAttribution: { kind: "human", initiatingHumanSubjectId: actor.subjectId },
     },
@@ -1701,6 +1704,32 @@ function dictationActivities(
 }
 
 describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
+  test("a dictation that named its model is heard by exactly that model, never another", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const named = { providerId: "voice-two", model: "voice-two-english" };
+    const dictation = await capturedDictation(storage, 3, { language: "en" }, named);
+    const calls: TranscriptionRequest[] = [];
+    const run = dictationActivities(storage, async (request) => {
+      calls.push(request);
+      return {
+        text: "Hello",
+        languages: ["en"],
+        providerId: "voice-two",
+        audioSeconds: 3,
+        latencyMs: 5,
+        creditCostMicros: 0,
+      };
+    });
+    expect(await run.transcribeRecordingVersion(dictation.input)).toMatchObject({
+      outcome: "complete",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ ...named, language: "en" });
+    // Not the workspace's preference, and no fallback.
+    expect(calls[0]!.preferredProvider).toBeUndefined();
+  });
+
   test("voice input hears a dictation once per piece, billed to who asked, then it expires", async () => {
     if (!client) return;
     const storage = memoryStorage();

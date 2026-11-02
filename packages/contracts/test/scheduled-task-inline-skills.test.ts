@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   CreateScheduledTaskRequest,
+  INLINE_SKILLS_MAX,
   SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES,
   SessionSkills,
+  UpdateSessionSkillsRequest,
   UpdateScheduledTaskRequest,
 } from "../src/index";
 
@@ -76,12 +78,29 @@ describe("scheduled task inline Skills", () => {
     }
   });
 
-  test("Skills still respect the per-config Skill count", () => {
+  test("a product can bring a large Skill catalogue", () => {
+    const skills = inlineSkills(200, 10);
+    expect(SessionSkills.safeParse(skills).success).toBe(true);
     expect(
       CreateScheduledTaskRequest.safeParse({
         ...generated,
-        agentConfig: { prompt: "Review", skills: inlineSkills(33, 10) },
+        agentConfig: { prompt: "Review", skills },
+      }).success,
+    ).toBe(true);
+    expect(UpdateSessionSkillsRequest.safeParse({ skills, expectedVersion: 1 }).success).toBe(true);
+  });
+
+  test("over the Skill count the request is rejected, never truncated", () => {
+    const skills = inlineSkills(INLINE_SKILLS_MAX + 1, 10);
+    expect(SessionSkills.safeParse(skills).success).toBe(false);
+    expect(
+      CreateScheduledTaskRequest.safeParse({
+        ...generated,
+        agentConfig: { prompt: "Review", skills },
       }).success,
     ).toBe(false);
+    expect(UpdateSessionSkillsRequest.safeParse({ skills, expectedVersion: 1 }).success).toBe(
+      false,
+    );
   });
 });

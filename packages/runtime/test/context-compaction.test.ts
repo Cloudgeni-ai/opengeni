@@ -230,9 +230,12 @@ describe("non-materializing plain JSON length", () => {
     cyclic.self = cyclic;
     expect(() => jsonSerializedLength(cyclic)).toThrow();
     expect(() => jsonSerializedUtf8ByteLength(cyclic)).toThrow();
-    expect(() => estimateSerializedValueTokens(undefined)).toThrow();
-    expect(() => estimateSerializedValueTokens(1n)).toThrow();
-    expect(() => estimateSerializedValueTokens(cyclic)).toThrow();
+    // A token estimate never fails a turn: it falls back to the converted value.
+    expect(estimateSerializedValueTokens(undefined)).toBe(1);
+    expect(estimateSerializedValueTokens(1n)).toBe(1);
+    expect(estimateSerializedValueTokens(cyclic)).toBe(
+      Math.ceil(Buffer.byteLength('{"self":null}', "utf8") / 4),
+    );
   });
 
   test("uses real JSON.stringify semantics for unusual non-persisted values", () => {
@@ -270,7 +273,7 @@ describe("non-materializing plain JSON length", () => {
         Math.ceil(Buffer.byteLength(JSON.stringify(value)!, "utf8") / 4),
       );
     }
-    expect(() => estimateSerializedValueTokens(boxedBigInt)).toThrow();
+    expect(estimateSerializedValueTokens(boxedBigInt)).toBe(1);
   });
 
   test("does not copy a wide persisted object while counting its exact JSON form", () => {

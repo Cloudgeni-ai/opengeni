@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test";
+import { useState } from "react";
 import type { ConnectAttempt, ConnectTransport } from "@opengeni/connect";
 import {
   registerDom,
@@ -32,7 +33,13 @@ function transport(pending: ConnectAttempt[]) {
       async (_workspaceId: string, _input: Parameters<ConnectTransport["begin"]>[1]) => attempt,
     ),
     get: mock(async (_workspaceId: string, id: string) => ({ ...attempt, id })),
-    advance: mock(async () => attempt),
+    advance: mock(
+      async (
+        _workspaceId: string,
+        _id: string,
+        _input: Parameters<ConnectTransport["advance"]>[2],
+      ) => attempt,
+    ),
     cancel: mock(async () => ({ ...attempt, state: "cancelled" as const })),
     disconnect: mock(async () => {}),
   } satisfies ConnectTransport;
@@ -230,6 +237,122 @@ test("resuming a single attempt retains the choice to start another account", as
     expect(api.begin).toHaveBeenCalledTimes(1);
     expect(api.advance).not.toHaveBeenCalled();
     expect(api.cancel).not.toHaveBeenCalled();
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("closing the dialog while a built-in integration finishes setup still completes it", async () => {
+  // The account is saved; the tools are still being added ("Finishing setup…").
+  const connected: ConnectAttempt = {
+    ...attempt,
+    providerId: "microsoft-sharepoint",
+    ownership: "personal",
+    revision: 2,
+    state: "connected_but_incomplete",
+    credentialsCommitted: true,
+    completionRequirement: "integration",
+    nextAction: { type: "none" },
+    installationTarget: { instanceKey: "account-sharepoint", displayName: "SharePoint" },
+    account: {
+      id: "account",
+      providerId: "microsoft-sharepoint",
+      ownership: "personal",
+      label: "Bendik Nyheim",
+      status: "connected",
+    },
+  };
+  const preview: ConnectAttempt = {
+    ...connected,
+    revision: 3,
+    state: "preview",
+    nextAction: {
+      type: "preview",
+      previewId: "preview",
+      contentHash: "hash",
+      operations: [{ id: "listSites", label: "List sites", kind: "read" }],
+    },
+  };
+  const complete: ConnectAttempt = {
+    ...connected,
+    revision: 4,
+    state: "complete",
+    integrationInstalled: true,
+  };
+  // A server: the dialog's in-flight step is applied even though the closed
+  // dialog never reads its answer; a stale revision is refused.
+  let server = connected;
+  let releaseFirst: () => void = () => {};
+  const api = transport([connected]);
+  api.get.mockImplementation(async () => server);
+  api.advance.mockImplementation(async (_workspaceId, _id, input) => {
+    if (input.expectedRevision !== server.revision) throw new Error("409 stale revision");
+    if (input.action.type === "retry") {
+      server = preview;
+      if (input.expectedRevision === 2 && api.advance.mock.calls.length === 1)
+        await new Promise<void>((resolve) => (releaseFirst = resolve));
+      return server;
+    }
+    if (input.action.type === "install") {
+      expect(input.action.operationIds).toEqual(["listSites"]);
+      server = complete;
+      return server;
+    }
+    throw new Error("unexpected step");
+  });
+  const onClose = mock(() => {});
+  const onComplete = mock((_attempt: ConnectAttempt) => {});
+  const request = {
+    scope: { workspaceId: "workspace", transport: api },
+    providerId: "microsoft-sharepoint",
+    ownership: "personal" as const,
+    returnUrl: "http://localhost/capabilities",
+    idempotencyKey: "sharepoint",
+    displayName: "SharePoint",
+    installationTarget: { instanceKey: "account-sharepoint", displayName: "SharePoint" },
+  };
+  // Like every host: closing removes the dialog (and its controller).
+  function Host() {
+    const [open, setOpen] = useState(true);
+    return open ? (
+      <NativeConnectSetup
+        transport={api}
+        workspaceId="workspace"
+        request={request}
+        onClose={() => {
+          onClose();
+          setOpen(false);
+        }}
+        onComplete={onComplete}
+      />
+    ) : null;
+  }
+  const view = await renderComponent(<Host />);
+  try {
+    await flush(20);
+    expect(document.body.textContent).toContain("Finishing setup");
+    expect(api.advance).toHaveBeenCalledTimes(1);
+    // The person presses X mid-finish.
+    const close = Array.from(document.querySelectorAll("button")).find(
+      (node) => node.textContent?.trim() === "Close",
+    );
+    expect(close).toBeDefined();
+    close!.click();
+    await flush(20);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain("Finishing setup");
+    releaseFirst();
+    for (let i = 0; i < 40 && onComplete.mock.calls.length === 0; i++) {
+      await flush(5);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(api.cancel).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete.mock.calls[0]?.[0]).toMatchObject({
+      state: "complete",
+      integrationInstalled: true,
+    });
+    expect(server).toEqual(complete);
   } finally {
     await view.unmount();
   }

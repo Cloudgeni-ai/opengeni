@@ -129,7 +129,10 @@ USER bun
 # Our own CPU speaker models for meeting recordings (apps/worker/speakers):
 # the Rust executable, cross-built natively for the target with xx, and the
 # pinned open models it loads (pyannote segmentation 3.0, MIT; 3D-Speaker
-# CAM++ trained on VoxCeleb, Apache-2.0), both as exported by sherpa-onnx.
+# CAM++ "common advanced", trained on about 200,000 Chinese and English
+# speakers, Apache-2.0), both as exported by sherpa-onnx. On real phone and
+# laptop meetings it tells voices apart far better than the VoxCeleb-only
+# models (docs/recordings.md).
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS speakers-xx
 FROM --platform=$BUILDPLATFORM rust:1.97.1-trixie AS speakers-build
 COPY --from=speakers-xx / /
@@ -152,7 +155,7 @@ RUN --mount=type=cache,id=opengeni-speakers-cargo-registry,target=/usr/local/car
     install -D -m 0755 "target/${rust_target}/release/opengeni-speakers" /out/bin/opengeni-speakers; \
     xx-verify /out/bin/opengeni-speakers
 ADD --checksum=sha256:24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2 /tmp/segmentation.tar.bz2
-ADD --checksum=sha256:357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx /tmp/embedding.onnx
+ADD --checksum=sha256:aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx /tmp/embedding.onnx
 ADD --checksum=sha256:c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 https://raw.githubusercontent.com/modelscope/3D-Speaker/065629c313eaf1a01c65c640c46d77e61e9607b4/LICENSE /tmp/embedding-LICENSE
 # The word aligner: Meta's Omnilingual ASR CTC 300M (Apache-2.0, about 1,600
 # languages) as exported to int8 ONNX by sherpa-onnx, 365 MB.

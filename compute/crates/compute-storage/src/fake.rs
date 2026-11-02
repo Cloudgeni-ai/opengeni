@@ -65,6 +65,8 @@ pub(crate) struct Fake {
     /// Corrupts this many of the next uploads in transit.
     pub(crate) corrupt: Mutex<u32>,
     pub(crate) puts: Mutex<u32>,
+    /// Copies within the bucket, through `object_store`.
+    pub(crate) copies: Mutex<u32>,
     /// Answers this many of the next requests through the XML API with
     /// 503, as Cloud Storage does while it scales up to a client's rate.
     pub(crate) unavailable: Mutex<u32>,
@@ -455,6 +457,7 @@ impl ObjectStore for Bucket {
             .get(from.as_ref())
             .map(|object| object.bytes.clone())
             .ok_or_else(|| not_found(from))?;
+        *self.0.copies.lock().unwrap() += 1;
         self.0.store(&mut objects, to.as_ref(), bytes);
         Ok(())
     }
