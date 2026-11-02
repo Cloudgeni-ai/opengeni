@@ -26,6 +26,7 @@ import {
   isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
   toolCallCommandNotStartedCallIds,
+  UnsupportedProtocolJsonValueError,
 } from "@opengeni/runtime";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 
@@ -1102,10 +1103,39 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // A protocol JSON boundary refused a value this turn prepared. Retrying the
   // same turn refuses it again, so end the turn with a typed failure and keep
   // the session usable for the next message instead of failing it.
-  const protocolValueFailure = unsupportedProtocolValueFailure(error);
-  if (protocolValueFailure && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+  //
+  // An unknown core request outcome or a failed lease checkpoint keeps its
+  // own terminal handling. After a model request started, this turn's items
+  // must be durably saved before the session takes another message; when they
+  // cannot be (the same value may be refused again while saving), the generic
+  // path below fails the session instead of continuing on a history that lost
+  // completed work. The goal does not continue into the same refusal: it waits
+  // for new input.
+  const protocolValueFailure = unsupportedProtocolValueFailure(
+    findInCauseChain(error, UnsupportedProtocolJsonValueError),
+  );
+  let protocolValueHistorySaved = false;
+  if (
+    protocolValueFailure &&
+    !coreRequestOutcomeUnknown &&
+    !coreLeaseCheckpointFailed &&
+    eventing.publish &&
+    attempt.turnId &&
+    eventing.turnStartedPublished
+  ) {
     await flushRuntimeBatcher();
-    await historySink.reconcileConversationTruth();
+    const requireDurable = attempt.modelRequestStarted || coreUnknownRecoveryFailure !== null;
+    try {
+      await historySink.reconcileConversationTruth(requireDurable ? { requireDurable } : undefined);
+      protocolValueHistorySaved = true;
+    } catch (saveError) {
+      console.error(
+        "protocol value failure could not save turn history",
+        safeErrorDiagnostic(saveError),
+      );
+    }
+  }
+  if (protocolValueFailure && protocolValueHistorySaved && attempt.turnId) {
     if (
       !(await eventing.settle!({
         events: [
@@ -1118,6 +1148,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         turnStatus: "failed",
         sessionStatus: "idle",
         activeTurnId: null,
+        suppressGoalContinuation: true,
       }))
     ) {
       return claimedResult({ status: "cancelled" });
